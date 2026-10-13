@@ -1,44 +1,56 @@
 #!/usr/bin/env python3
-"""Compare supervisor-mode tasks with single-session tasks, from extracted harness data.
+"""Compare fixed supervisor-mode tasks with single-session tasks.
 
 The question: has supervisor mode made tasks slower and more expensive than the
-old one-session-per-task way?  Everything here is arithmetic on the CSVs that
-scripts/analysis/extract_usage_data.py writes (usage_rows.csv, sessions.csv,
-tasks.csv, and plan_steps.csv / manifest.json when present).  No model is asked
-to judge or estimate anything, and nothing is fetched from a network.
+old one-session-per-task way?  Everything here is arithmetic on the two CSV
+files that scripts/analysis/extract_usage_data.py writes (tasks.csv and
+sessions.csv).  No model is asked to judge or estimate anything, and nothing is
+fetched from a network.
 
 What it does:
-  1. puts every task in one of five groups (see "Classification");
-  2. sums each task's usage rows over its top-level session and over every
-     sub-agent / fork session descended from it (the parent-id chain, followed
-     transitively);
-  3. writes classified_tasks.csv (one row per task) and subagents.csv (one row
-     per sub-agent session), next to the inputs unless --csv-out-dir says
-     otherwise;
-  4. computes per-group statistics with the `statistics` module and writes a
-     Markdown report (default docs/analysis/supervisor-mode-vs-single-session-2026-10-12.md).
+  1. puts every task in one group (see "Classification");
+  2. finds each task's sub-agents: the sessions of kind subagent or fork that
+     descend from the task's own session through parent_id, transitively;
+  3. totals each task's tokens and cost over its own session and those
+     sub-agents, and writes classified_tasks.csv (one row per task) and
+     subagents.csv (one row per sub-agent session) next to the inputs;
+  4. computes per-group statistics with the `statistics` module and rewrites
+     the Markdown report (default
+     docs/analysis/supervisor-mode-vs-single-session-2026-10-12.md).
 
-Classification, first match wins (cutoffs below, compared as UTC instants):
-  plan-mode       the task carries the Plan-mode flag (the task's `plan` key)
-  unresolved      the task's session record is missing, so its flag, creation
-                  time and sub-agents cannot be verified
-  B               created before supervisor mode existed, or its top-level
-                  session's supervisor flag is off or absent (single-session)
-  excluded-buggy  supervisor flag on, session created before the cache/cost fix
-  A               supervisor flag on, session created at or after the fix
-Only tasks whose state is `done` enter the A/B comparison; the others are
-counted as still in flight.
+Classification (cutoffs below; Unix epoch seconds compared as plain numbers):
+  plan-mode       the task carries the Plan-mode flag (the `plan` column)
+  A               supervisor flag on, task created at or after the cache/cost fix
+  excluded-buggy  supervisor flag on, task created before the fix
+  B               supervisor flag off or absent (single-session, the old way)
+The supervisor flag is the task session's own (`supervisor` in sessions.csv);
+when the session has none, the task's explicit setting (`supervisor` in
+tasks.csv) is used.  Only tasks in state `done` enter any statistic; the others
+are counted as still in flight.
+
+classified_tasks.csv has one row per task: its group and why, whether it is in
+the comparison (done, and in A or B), usage_status, the task totals (total_*),
+the top-level session's own figures (top_*), the sub-agents' combined figures
+(sub_*), and recorded_* (what usage was recorded, a lower bound when the task is
+incomplete).  subagents.csv has one row per sub-agent session.  A figure that is
+not known is written "unknown", never 0.  Both hold ids and are not committed.
+
+Usage that was never recorded is not zero: a session that took model turns yet
+has no tokens and no cost in either source is `missing`, and a task with a
+missing session has `incomplete` usage.  Incomplete tasks stay out of the token
+and cost statistics (their figures are `unknown` in the CSVs) and stay in the
+duration and sub-agent statistics.
 
 Privacy: only ids, flags, enum values, timestamps and numbers are read or
-written.  The Markdown report holds aggregates and methodology, no ids.
+written.  The Markdown report holds aggregates and methodology, no ids; the
+script refuses to write it if anything id- or path-shaped slipped in.
 
 Python 3 standard library only.
 
 Usage:
-    scripts/analysis/compare_supervisor_modes.py
-    scripts/analysis/compare_supervisor_modes.py --in-dir DIR --out FILE
-    scripts/analysis/compare_supervisor_modes.py --methodology-only
-    scripts/analysis/compare_supervisor_modes.py --self-test
+    python3 -I scripts/analysis/compare_supervisor_modes.py
+    python3 -I scripts/analysis/compare_supervisor_modes.py --in-dir DIR --out FILE
+    python3 -I scripts/analysis/compare_supervisor_modes.py --self-test
 
 Exit status: 0 done; 1 the self-test failed; 2 an input is missing or
 unreadable, or a usage error.
@@ -51,10 +63,9 @@ import contextlib
 import csv
 import datetime as dt
 import importlib.util
-import io
-import json
 import math
 import os
+import re
 import statistics
 import sys
 import tempfile
@@ -64,103 +75,97 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_IN_DIR = REPO_ROOT / "scripts" / ".dev" / "usage-analysis"
 DEFAULT_OUT = REPO_ROOT / "docs" / "analysis" / "supervisor-mode-vs-single-session-2026-10-12.md"
-
-UTC = dt.timezone.utc
-EPOCH_MIN = dt.datetime.min.replace(tzinfo=UTC)
+EXTRACTOR = REPO_ROOT / "scripts" / "analysis" / "extract_usage_data.py"
 
 
-def iso_to_utc(iso):
-    """An ISO-8601 instant with a UTC offset, as an aware UTC datetime."""
-    when = dt.datetime.fromisoformat(iso)
+def iso_epoch(text):
+    """An ISO-8601 instant with a UTC offset as Unix epoch seconds (a float)."""
+    when = dt.datetime.fromisoformat(text)
     if when.tzinfo is None:
-        raise ValueError(f"{iso!r} has no UTC offset")
-    return when.astimezone(UTC)
+        raise ValueError(f"{text!r} has no UTC offset")
+    return when.timestamp()
 
 
 # --------------------------------------------------------------------------
-# Classification cutoffs.  Each is an instant with its UTC offset, converted to
-# UTC before any comparison.
+# Cutoffs.  Written with their UTC offset, converted to epoch seconds once.
 
-# 73f987b "Add supervisor mode: ..." -- supervisor mode did not exist before it,
-# so every task created earlier is group B.
+# 73f987b "Add supervisor mode: ..." -- supervisor mode did not exist before it.
 SUPERVISOR_INTRODUCED_ISO = "2026-10-08T15:24:17-04:00"
 
 # 0803841 "Fix supervisor cache cost and planning efficiency", landing 7be8ce2
 # "supervisor: start workers fresh by default, refuse forks of long
 # conversations".  Before it a worker inherited (forked) the whole supervisor
-# conversation: the cache blow-up the user already knows about.
+# conversation: the cache/cost bug the user already knows about.
 SUPERVISOR_FIX_ISO = "2026-10-11T23:55:53-04:00"
 
 # b0a013d "Add Plan mode for tasks: a strong model plans read-only, a medium
-# model works" -- a different mechanism from supervisor mode's plan and
-# sub-agents; its tasks are set aside.
+# model works" -- a different mechanism from supervisor mode.
 PLAN_MODE_INTRODUCED_ISO = "2026-10-11T21:48:45-04:00"
 
-SUPERVISOR_INTRODUCED = iso_to_utc(SUPERVISOR_INTRODUCED_ISO)
-SUPERVISOR_FIX = iso_to_utc(SUPERVISOR_FIX_ISO)
-PLAN_MODE_INTRODUCED = iso_to_utc(PLAN_MODE_INTRODUCED_ISO)
+SUPERVISOR_INTRODUCED = iso_epoch(SUPERVISOR_INTRODUCED_ISO)
+SUPERVISOR_FIX = iso_epoch(SUPERVISOR_FIX_ISO)
+PLAN_MODE_INTRODUCED = iso_epoch(PLAN_MODE_INTRODUCED_ISO)
 
 GROUP_A = "A"
 GROUP_B = "B"
 EXCLUDED_BUGGY = "excluded-buggy"
 PLAN_MODE = "plan-mode"
-UNRESOLVED = "unresolved"
-GROUPS = (GROUP_A, GROUP_B, EXCLUDED_BUGGY, PLAN_MODE, UNRESOLVED)
+GROUPS = (GROUP_A, GROUP_B, EXCLUDED_BUGGY, PLAN_MODE)
 GROUP_TITLES = {
     GROUP_A: "A: fixed supervisor mode",
     GROUP_B: "B: single-session (the old way)",
     EXCLUDED_BUGGY: "Excluded: old buggy supervisor mode",
     PLAN_MODE: "Set aside: Plan mode",
-    UNRESOLVED: "Set aside: session record missing",
 }
 
 WORKER_KINDS = ("subagent", "fork")   # a sub-agent is a session of one of these kinds
-TERMINAL_STATE = "done"               # a task enters the comparison only in this state
-SETTLED_STATES = ("done", "review")   # the agent has finished: done, or waiting for the user
-KNOWN_BILLING = ("api", "subscription", "extra-usage")
+TERMINAL_STATE = "done"               # a task enters a statistic only in this state
 SMALL_N = 30                          # below this a group is called small in the report
+LIST_TASKS_UP_TO = 10                 # a group with at most this many done tasks is listed task by task
+UNKNOWN = "unknown"                   # written to the CSVs for a figure that is not known
+USAGE_FIELDS = ("input", "output", "cache_read", "cache_write", "cost", "list_cost")
+TOKEN_FIELDS = ("input", "output", "cache_read", "cache_write")
+BILLING_VALUES = ("api", "subscription", "extra-usage")
 
-# --------------------------------------------------------------------------
-# Columns the inputs must have (anything else in them is ignored), and the
-# optional ones used when present.  Kept in step with extract_usage_data.py;
-# the self-test checks that each is a column that script writes.
+# Columns read from the inputs.  Anything else in them is ignored.  The
+# self-test checks that each is a column extract_usage_data.py writes.
+TASK_REQUIRED = ("id", "session", "created", "state")
+TASK_OPTIONAL = ("started", "finished", "outcome", "model", "supervisor", "plan")
+SESSION_REQUIRED = ("id", "kind", "parent_id", "created", "updated")
+SESSION_OPTIONAL = ("model", "supervisor", "billing", "turns", "compactions", "forked",
+                    "input", "output", "cache_read", "cache_write", "cost", "list_cost",
+                    "ledger_input", "ledger_output", "ledger_cache_read", "ledger_cache_write",
+                    "ledger_cost", "ledger_list_cost", "ledger_calls")
 
-TASK_REQUIRED = ("task_id", "session_id", "state", "created")
-TASK_OPTIONAL = ("outcome", "started", "finished", "reopened", "supervisor_setting", "plan",
-                 "adopted", "backlog", "session_supervisor", "session_created")
-SESSION_REQUIRED = ("session_id", "kind", "parent_id", "supervisor", "created", "updated")
-SESSION_OPTIONAL = ("seed", "status", "supervisor_judge_pending", "supervisor_write_up",
-                    "has_nodes_file", "compactions")
-USAGE_REQUIRED = ("session", "input", "output", "cache_read", "cache_write", "cost")
-USAGE_OPTIONAL = ("ts", "list_cost", "billing")
-PLAN_STEP_COLUMNS_USED = ("worker_session_id", "previous_session_id")
-
-TASK_OUT_COLUMNS = [
-    "task_id", "top_session_id", "group", "group_reason", "in_comparison", "stage", "state", "outcome",
-    "supervisor_flag", "flag_source", "plan_flag", "adopted", "reopened",
-    "task_created_utc", "task_started_utc", "session_created_utc", "finished_utc",
-    "duration_created_to_finished_s", "duration_started_to_finished_s",
-    "num_subagents", "num_subagents_excl_seeds", "num_seed_sessions", "num_plan_step_workers",
-    "num_other_descendants", "shared_sessions", "descendants_resolved",
-    "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "total_tokens",
-    "cost", "list_cost", "usage_rows", "rows_api", "rows_subscription", "rows_extra_usage",
-    "rows_billing_other", "rows_billing_blank", "rows_list_cost_blank", "rows_priced_at_zero",
-    "tokens_priced_at_zero",
-    "top_input_tokens", "top_output_tokens", "top_cache_read_tokens", "top_cache_write_tokens",
-    "top_total_tokens", "top_cost", "top_list_cost", "top_usage_rows",
-    "top_duration_s", "top_usage_span_s", "top_compactions",
-    "sub_input_tokens", "sub_output_tokens", "sub_cache_read_tokens", "sub_cache_write_tokens",
-    "sub_total_tokens", "sub_cost", "sub_list_cost", "sub_usage_rows", "sub_compactions_total",
-    "other_total_tokens", "other_cost", "other_list_cost", "other_usage_rows",
-]
+_KINDS5 = ("input", "output", "cache_read", "cache_write", "tokens")
+TASK_OUT_COLUMNS = (
+    ["task_id", "top_session_id", "group", "group_reason", "in_comparison", "state", "outcome",
+     "supervisor_flag", "flag_source", "plan_flag", "model",
+     "created", "started", "finished", "duration_s", "work_duration_s",
+     "n_subagents", "n_forked_subagents", "n_other_descendants",
+     "usage_status", "sessions_usage_missing"]
+    + ["total_" + k for k in _KINDS5] + ["total_cost", "total_list_cost",
+                                        "recorded_tokens", "recorded_cost", "recorded_list_cost"]
+    + ["top_" + k for k in _KINDS5] + ["top_cost", "top_list_cost", "top_duration_s", "top_compactions"]
+    + ["sub_" + k for k in _KINDS5] + ["sub_cost", "sub_list_cost", "sub_compactions",
+                                      "sessions_api", "sessions_subscription", "sessions_extra_usage",
+                                      "sessions_billing_none", "sessions_billing_other",
+                                      "workers_created_after_finish"])
 
 SUB_OUT_COLUMNS = [
-    "task_id", "group", "in_comparison", "session_id", "parent_id", "depth", "kind",
-    "is_seed", "is_plan_step_worker", "status", "created_utc",
-    "duration_s", "usage_span_s",
-    "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "total_tokens",
-    "cost", "list_cost", "usage_rows", "compactions",
-]
+    "task_id", "group", "in_comparison", "session_id", "parent_id", "depth", "kind", "forked",
+    "model", "created", "updated", "duration_s", "created_after_task_finished",
+    "updated_after_task_finished", "usage_status",
+    "input", "output", "cache_read", "cache_write", "tokens", "cost", "list_cost",
+    "billing", "turns", "compactions"]
+
+# Columns whose empty value is written as "unknown": the figure exists but is
+# not known (a session whose usage was never recorded, an uncounted compaction).
+UNKNOWN_COLUMNS = frozenset(
+    ["total_" + k for k in _KINDS5] + ["total_cost", "total_list_cost"]
+    + ["top_" + k for k in _KINDS5] + ["top_cost", "top_list_cost", "top_compactions"]
+    + ["sub_" + k for k in _KINDS5] + ["sub_cost", "sub_list_cost", "sub_compactions"]
+    + ["input", "output", "cache_read", "cache_write", "tokens", "cost", "list_cost", "compactions"])
 
 
 class InputError(Exception):
@@ -168,36 +173,13 @@ class InputError(Exception):
 
 
 # --------------------------------------------------------------------------
-# Parsing
+# Reading the CSVs
 
-def parse_ts(value):
-    """Epoch seconds or an ISO-8601 string as an aware UTC datetime; None if neither.
-
-    A string without a UTC offset is read as UTC.
-    """
-    if value is None:
+def to_float(text):
+    """A finite float, or None for blank, "unknown" or unparseable text."""
+    if text is None:
         return None
-    text = str(value).strip()
-    if not text:
-        return None
-    try:
-        return dt.datetime.fromtimestamp(float(text), tz=UTC)
-    except (ValueError, OverflowError, OSError):
-        pass
-    try:
-        when = dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if when.tzinfo is None:
-        when = when.replace(tzinfo=UTC)
-    return when.astimezone(UTC)
-
-
-def to_float(value):
-    """A finite float, or None for blank or unparseable text."""
-    if value is None:
-        return None
-    text = str(value).strip()
+    text = str(text).strip()
     if not text:
         return None
     try:
@@ -207,527 +189,363 @@ def to_float(value):
     return number if math.isfinite(number) else None
 
 
-def to_int(value):
-    number = to_float(value)
+def to_int(text):
+    number = to_float(text)
     return None if number is None else int(round(number))
 
 
-def is_true(value):
-    return str(value).strip().lower() == "true" if value is not None else False
+def to_flag(text):
+    """True for "true", False for "false", None for anything else (absent)."""
+    text = (text or "").strip().lower()
+    return True if text == "true" else False if text == "false" else None
 
 
-def seconds_between(start, end):
-    """Seconds from START to END, or None when either is missing or END is earlier."""
-    if start is None or end is None or end < start:
-        return None
-    return (end - start).total_seconds()
+def clean_id(text):
+    """An id, or None when blank or not a plain token (a placeholder such as <other>)."""
+    text = (text or "").strip()
+    return text if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]*", text) else None
 
 
-def iso_utc(when):
-    return when.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ") if when is not None else None
-
-
-# --------------------------------------------------------------------------
-# Reading the CSVs
-
-@contextlib.contextmanager
-def csv_rows(path, required, label):
-    """Yield (reader, header) for PATH, checking that REQUIRED columns are there."""
+def read_table(path, required, label):
+    """Return (rows, header) of the CSV at PATH, checking the REQUIRED columns."""
     if not path.is_file():
         raise InputError(f"{label}: {path} not found")
-    fh = open(path, newline="", encoding="utf-8")
     try:
-        reader = csv.DictReader(fh)
-        header = reader.fieldnames or []
-        missing = [c for c in required if c not in header]
-        if missing:
-            raise InputError(f"{label}: {path} lacks the column(s) {', '.join(missing)}")
-        yield reader, header
-    finally:
-        fh.close()
+        with open(path, newline="", encoding="utf-8") as handle:
+            reader = csv.DictReader(handle)
+            header = reader.fieldnames or []
+            missing = [c for c in required if c not in header]
+            if missing:
+                raise InputError(f"{label}: {path} lacks the column(s) {', '.join(missing)}")
+            return list(reader), header
+    except OSError as err:
+        raise InputError(f"{label}: cannot read {path}: {err.strerror or err}") from err
 
 
-class Agg:
-    """Usage summed over the rows of one or more sessions."""
+class Usage:
+    """A session's resolved usage: tokens, billed cost, list cost; or missing."""
 
-    __slots__ = ("input", "output", "cache_read", "cache_write", "cost", "list_cost",
-                 "rows", "list_cost_blank", "unpriced_rows", "unpriced_tokens", "billing", "first_ts", "last_ts")
-
-    def __init__(self):
-        self.input = self.output = self.cache_read = self.cache_write = 0
-        self.cost = self.list_cost = 0.0
-        self.rows = self.list_cost_blank = self.unpriced_rows = self.unpriced_tokens = 0
-        self.billing = Counter()
-        self.first_ts = self.last_ts = None
+    __slots__ = ("input", "output", "cache_read", "cache_write", "cost", "list_cost", "missing")
 
     @property
     def tokens(self):
         return self.input + self.output + self.cache_read + self.cache_write
 
-    @property
-    def span(self):
-        """Seconds from the first to the last usage row, None without rows or stamps."""
-        return seconds_between(self.first_ts, self.last_ts)
 
-    def merge(self, other):
-        self.input += other.input
-        self.output += other.output
-        self.cache_read += other.cache_read
-        self.cache_write += other.cache_write
-        self.cost += other.cost
-        self.list_cost += other.list_cost
-        self.rows += other.rows
-        self.list_cost_blank += other.list_cost_blank
-        self.unpriced_rows += other.unpriced_rows
-        self.unpriced_tokens += other.unpriced_tokens
-        self.billing.update(other.billing)
-        for ts in (other.first_ts, other.last_ts):
-            if ts is not None:
-                self.first_ts = ts if self.first_ts is None else min(self.first_ts, ts)
-                self.last_ts = ts if self.last_ts is None else max(self.last_ts, ts)
-        return self
+def read_usage(row, quality):
+    """Resolve a session row's usage from its own record and from the usage ledger.
 
-    def billing_rows(self):
-        """Row counts by billing: api, subscription, extra-usage, other, not recorded."""
-        other = sum(n for key, n in self.billing.items() if key and key not in KNOWN_BILLING)
-        return {
-            "api": self.billing["api"],
-            "subscription": self.billing["subscription"],
-            "extra-usage": self.billing["extra-usage"],
-            "other": other,
-            "blank": self.billing[""],
-        }
-
-
-EMPTY_AGG = Agg()  # never mutated: stands for a session without usage rows
-
-
-def sum_aggs(aggs):
-    total = Agg()
-    for agg in aggs:
-        if agg is not None:
-            total.merge(agg)
-    return total
-
-
-def load_usage(path, quality):
-    """Sum usage_rows.csv per session id.  A row without list_cost counts at its cost."""
-    by_session = {}
-    first = last = None
-    with csv_rows(path, USAGE_REQUIRED, "usage_rows.csv") as (reader, header):
-        quality["usage_has_list_cost_column"] = "list_cost" in header
-        quality["usage_has_billing_column"] = "billing" in header
-        for row in reader:
-            quality["usage_rows"] += 1
-            sid = (row.get("session") or "").strip()
-            agg = by_session.get(sid)
-            if agg is None:
-                agg = by_session[sid] = Agg()
-            tokens = []
-            for key in ("input", "output", "cache_read", "cache_write"):
-                number = to_int(row.get(key))
-                if number is None:
-                    quality["usage_blank_token_fields"] += 1
-                    number = 0
-                tokens.append(number)
-            agg.input += tokens[0]
-            agg.output += tokens[1]
-            agg.cache_read += tokens[2]
-            agg.cache_write += tokens[3]
-            cost = to_float(row.get("cost"))
-            if cost is None:
-                quality["usage_blank_cost_fields"] += 1
-                cost = 0.0
-            list_cost = to_float(row.get("list_cost"))
-            if list_cost is None:
-                # The harness's own rule (harness-usage-list-cost): list price is
-                # the row's list cost, else its cost.
-                quality["usage_rows_list_cost_blank"] += 1
-                agg.list_cost_blank += 1
-                list_cost = cost
-            agg.cost += cost
-            agg.list_cost += list_cost
-            agg.rows += 1
-            if sum(tokens) > 0 and list_cost == 0:
-                # The harness records 0 for a model it has no price for.
-                agg.unpriced_rows += 1
-                agg.unpriced_tokens += sum(tokens)
-                quality["usage_rows_priced_at_zero"] += 1
-            billing = (row.get("billing") or "").strip()
-            agg.billing[billing] += 1
-            when = parse_ts(row.get("ts"))
-            if when is not None:
-                agg.first_ts = when if agg.first_ts is None else min(agg.first_ts, when)
-                agg.last_ts = when if agg.last_ts is None else max(agg.last_ts, when)
-                first = when if first is None else min(first, when)
-                last = when if last is None else max(last, when)
-    quality["usage_first_ts"], quality["usage_last_ts"] = first, last
-    return by_session
+    Per field the larger of the two is used (the ledger is higher for a few old
+    sessions and never lower).  A blank list cost is the cost, as the harness
+    itself reads it (harness-usage-list-cost).  A session that took model turns
+    yet has no tokens and no cost anywhere is `missing`: its usage was never
+    recorded, which is not the same as zero.
+    """
+    usage = Usage()
+    differs = False
+    for key in USAGE_FIELDS:
+        record = to_float(row.get(key))
+        ledger = to_float(row.get("ledger_" + key))
+        if key == "list_cost" and record is None:
+            record = to_float(row.get("cost"))
+        have = [v for v in (record, ledger) if v is not None]
+        value = max(have) if have else 0.0
+        if (key != "list_cost" and record is not None and ledger is not None
+                and abs(record - ledger) > 1e-9 * max(1.0, abs(record))):
+            differs = True
+        setattr(usage, key, int(round(value)) if key in TOKEN_FIELDS else float(value))
+    if differs:
+        quality["ledger_differs"] += 1
+    turns = to_float(row.get("turns"))
+    usage.missing = bool(turns and turns > 0 and usage.tokens == 0
+                         and usage.cost == 0 and usage.list_cost == 0)
+    return usage
 
 
 class Session:
-    __slots__ = ("id", "kind", "parent", "supervisor", "seed", "judge_pending",
-                 "created", "updated", "status", "compactions")
+    __slots__ = ("id", "kind", "parent", "created", "updated", "model", "flag", "forked",
+                 "billing", "usage", "turns", "compactions")
 
 
-def compaction_count(row):
-    """The session's own compactions: blank when its transcript was not scanned.
-
-    A session with no transcript file has none; one whose file exists but was
-    not scanned (blank count) is unknown, and stays out of the statistics.
-    """
-    count = to_int(row.get("compactions"))
-    if count is not None:
-        return count
-    if (row.get("has_nodes_file") or "").strip().lower() == "false":
-        return 0
-    return None
-
-
-def load_sessions(path, quality):
+def load_sessions(rows, quality):
     sessions = {}
-    with csv_rows(path, SESSION_REQUIRED, "sessions.csv") as (reader, header):
-        quality["sessions_have_compactions"] = "compactions" in header
-        for row in reader:
-            sid = (row.get("session_id") or "").strip()
-            if not sid:
-                quality["session_rows_without_id"] += 1
-                continue
-            if sid in sessions:
-                quality["duplicate_session_ids"] += 1
-            s = Session()
-            s.id = sid
-            s.kind = (row.get("kind") or "").strip() or "main"
-            s.parent = (row.get("parent_id") or "").strip() or None
-            s.supervisor = (row.get("supervisor") or "").strip().lower()
-            s.seed = is_true(row.get("seed"))
-            s.judge_pending = is_true(row.get("supervisor_judge_pending"))
-            s.created = parse_ts(row.get("created"))
-            s.updated = parse_ts(row.get("updated"))
-            s.status = (row.get("status") or "").strip()
-            s.compactions = compaction_count(row)
-            sessions[sid] = s
+    for row in rows:
+        sid = clean_id(row.get("id"))
+        if sid is None:
+            quality["session_rows_without_id"] += 1
+            continue
+        if sid in sessions:
+            quality["duplicate_session_ids"] += 1
+            continue
+        s = Session()
+        s.id = sid
+        s.kind = (row.get("kind") or "").strip() or "main"
+        s.parent = clean_id(row.get("parent_id"))
+        s.created = to_float(row.get("created"))
+        s.updated = to_float(row.get("updated"))
+        s.model = (row.get("model") or "").strip()
+        s.flag = to_flag(row.get("supervisor"))
+        s.forked = to_flag(row.get("forked")) is True
+        s.billing = (row.get("billing") or "").strip()
+        s.usage = read_usage(row, quality)
+        s.turns = to_int(row.get("turns"))
+        s.compactions = to_int(row.get("compactions"))
+        sessions[sid] = s
     return sessions
 
 
-def child_index(sessions):
-    """parent id -> ids of the sessions naming it as their parent, oldest first."""
-    children = defaultdict(list)
-    for s in sessions.values():
-        if s.parent:
-            children[s.parent].append(s.id)
-    for ids in children.values():
-        ids.sort(key=lambda i: (sessions[i].created or EPOCH_MIN, i))
-    return children
-
-
 class Task:
-    __slots__ = ("id", "session_id", "state", "outcome", "created", "started", "finished",
-                 "reopened", "adopted", "plan", "setting", "session_flag", "session_created")
+    __slots__ = ("id", "session_id", "created", "started", "finished", "state", "outcome",
+                 "model", "plan", "setting")
 
 
-def load_tasks(path, quality):
-    tasks = []
-    seen = set()
-    with csv_rows(path, TASK_REQUIRED, "tasks.csv") as (reader, _):
-        for row in reader:
-            tid = (row.get("task_id") or "").strip()
-            if not tid:
-                quality["task_rows_without_id"] += 1
-                continue
-            if tid in seen:
-                quality["duplicate_task_ids"] += 1
-                continue
-            seen.add(tid)
-            t = Task()
-            t.id = tid
-            t.session_id = (row.get("session_id") or "").strip()
-            t.state = (row.get("state") or "").strip()
-            t.outcome = (row.get("outcome") or "").strip()
-            t.created = parse_ts(row.get("created"))
-            t.started = parse_ts(row.get("started"))
-            t.finished = parse_ts(row.get("finished"))
-            t.reopened = bool((row.get("reopened") or "").strip())
-            t.adopted = is_true(row.get("adopted"))
-            t.plan = is_true(row.get("plan"))
-            t.setting = (row.get("supervisor_setting") or "").strip().lower()
-            t.session_flag = (row.get("session_supervisor") or "").strip().lower()
-            t.session_created = parse_ts(row.get("session_created"))
-            tasks.append(t)
+def load_tasks(rows):
+    tasks, seen = [], set()
+    for row in rows:
+        tid = clean_id(row.get("id"))
+        if tid is None:
+            raise InputError("tasks.csv: a row has no usable id")
+        if tid in seen:
+            raise InputError(f"tasks.csv: duplicate task id {tid}")
+        seen.add(tid)
+        t = Task()
+        t.id = tid
+        t.session_id = clean_id(row.get("session"))
+        t.created = to_float(row.get("created"))
+        if t.created is None:
+            raise InputError(f"tasks.csv: task {tid} has no created time")
+        t.started = to_float(row.get("started"))
+        t.finished = to_float(row.get("finished"))
+        t.state = (row.get("state") or "").strip()
+        t.outcome = (row.get("outcome") or "").strip()
+        t.model = (row.get("model") or "").strip()
+        t.plan = to_flag(row.get("plan")) is True
+        t.setting = to_flag(row.get("supervisor"))
+        tasks.append(t)
     return tasks
-
-
-def load_plan_workers(path, quality):
-    """Ids of the sessions that plan steps name as a worker (current or earlier attempt)."""
-    workers = set()
-    quality["plan_steps_file"] = path.is_file()
-    if not path.is_file():
-        return workers
-    with csv_rows(path, (), "plan_steps.csv") as (reader, _):
-        for row in reader:
-            for key in PLAN_STEP_COLUMNS_USED:
-                value = (row.get(key) or "").strip()
-                if value:
-                    workers.add(value)
-    return workers
-
-
-def load_manifest(path):
-    """What manifest.json says about the extraction (best effort; it only adds provenance)."""
-    try:
-        with open(path, encoding="utf-8") as fh:
-            data = json.load(fh)
-    except (OSError, ValueError):
-        return {}
-    return data if isinstance(data, dict) else {}
 
 
 # --------------------------------------------------------------------------
 # Classification and aggregation
 
-def decide_group(plan_flag, record_found, created, flag):
-    """Return (group, reason).  FLAG is "true", "false" or "" (no setting)."""
-    if plan_flag:
+def supervisor_flag(task, top):
+    """The flag that governed the task: (True|False|None, "session"|"task"|"none").
+
+    The task session's own flag decides.  The task's explicit setting is the
+    fallback, for a session that carries none.
+    """
+    if top is not None and top.flag is not None:
+        return top.flag, "session"
+    if task.setting is not None:
+        return task.setting, "task"
+    return None, "none"
+
+
+def classify(task, flag):
+    """Return (group, reason) for TASK whose supervisor flag is FLAG."""
+    if task.plan:
         return PLAN_MODE, "plan flag set"
-    if not record_found:
-        return UNRESOLVED, "no session record"
-    if created is None:
-        return UNRESOLVED, "no creation time"
-    if created < SUPERVISOR_INTRODUCED:
-        return GROUP_B, "created before supervisor mode existed"
-    if flag == "true":
-        if created >= SUPERVISOR_FIX:
+    if flag is True:
+        if task.created >= SUPERVISOR_FIX:
             return GROUP_A, "supervisor on, created at or after the fix"
         return EXCLUDED_BUGGY, "supervisor on, created before the fix"
-    if flag == "false":
-        return GROUP_B, "supervisor explicitly off"
-    return GROUP_B, "supervisor setting absent"
+    if flag is False:
+        return GROUP_B, "supervisor off"
+    return GROUP_B, "no supervisor flag"
 
 
-def descendants(top, children):
-    """Sessions descended from TOP through parent ids, as (id, depth), nearest first."""
-    seen = {top}
+def child_index(sessions):
+    """parent id -> the sessions naming it as their parent, oldest first."""
+    children = defaultdict(list)
+    for s in sessions.values():
+        if s.parent:
+            children[s.parent].append(s)
+    for kids in children.values():
+        kids.sort(key=lambda s: (s.created if s.created is not None else 0.0, s.id))
+    return children
+
+
+def descendants(top_id, children):
+    """Sessions descended from TOP_ID through parent ids, as (session, depth), nearest first."""
+    seen = {top_id}
     found = []
-    queue = deque([(top, 0)])
+    queue = deque([(top_id, 0)])
     while queue:
         current, depth = queue.popleft()
         for child in children.get(current, ()):
-            if child in seen:
+            if child.id in seen:
                 continue
-            seen.add(child)
+            seen.add(child.id)
             found.append((child, depth + 1))
-            queue.append((child, depth + 1))
+            queue.append((child.id, depth + 1))
     return found
 
 
-def session_duration(session):
-    """Seconds from a session record's creation to its last update."""
-    return seconds_between(session.created, session.updated) if session else None
+class Totals:
+    """Usage summed over several sessions."""
+
+    def __init__(self):
+        self.input = self.output = self.cache_read = self.cache_write = 0
+        self.cost = self.list_cost = 0.0
+        self.sessions = self.missing = 0
+
+    def add(self, usage):
+        self.sessions += 1
+        self.missing += 1 if usage.missing else 0
+        self.input += usage.input
+        self.output += usage.output
+        self.cache_read += usage.cache_read
+        self.cache_write += usage.cache_write
+        self.cost += usage.cost
+        self.list_cost += usage.list_cost
+
+    @property
+    def tokens(self):
+        return self.input + self.output + self.cache_read + self.cache_write
 
 
-def analyse(tasks, sessions, children, usage, plan_workers, quality):
-    """Classify every task and total its usage.  Return (task rows, sub-agent rows, attribution)."""
+def span(start, end):
+    """Seconds from START to END, None when either is missing or END is earlier."""
+    if start is None or end is None or end < start:
+        return None
+    return end - start
+
+
+def totals_cells(prefix, totals, known):
+    """The token and cost cells of TOTALS under PREFIX; None when not KNOWN."""
+    cells = {f"{prefix}_{k}": (getattr(totals, k) if known else None) for k in TOKEN_FIELDS}
+    cells[f"{prefix}_tokens"] = totals.tokens if known else None
+    cells[f"{prefix}_cost"] = totals.cost if known else None
+    cells[f"{prefix}_list_cost"] = totals.list_cost if known else None
+    return cells
+
+
+def analyse(tasks, sessions, quality):
+    """Classify every task and total its usage.  Return (task rows, sub-agent rows)."""
+    children = child_index(sessions)
     task_rows, sub_rows = [], []
-    owners = defaultdict(set)     # session id -> ids of the tasks whose main sessions include it
-    task_sessions = {}
-    main_ids, other_ids = set(), set()
-    tasks = sorted(tasks, key=lambda t: (t.created or EPOCH_MIN, t.id))
-    top_uses = Counter(t.session_id for t in tasks if t.session_id)
+    for task in sorted(tasks, key=lambda t: (t.created, t.id)):
+        top = sessions.get(task.session_id) if task.session_id else None
+        if top is None:
+            quality["task_without_session"] += 1
+        flag, flag_source = supervisor_flag(task, top)
+        group, reason = classify(task, flag)
+        if flag is True and task.created < SUPERVISOR_INTRODUCED:
+            quality["flag_before_mode_existed"] += 1
+        if task.plan and task.created < PLAN_MODE_INTRODUCED:
+            quality["plan_before_plan_mode_existed"] += 1
+        if top is not None and top.flag is not None and task.setting is not None and top.flag != task.setting:
+            quality["setting_differs_from_flag"] += 1
 
-    for t in tasks:
-        record = sessions.get(t.session_id) if t.session_id else None
-        # The facts the classification rests on come from the top-level session's
-        # record; the task's own copies are only a fallback for what it lacks.
-        if record is not None:
-            created = record.created or t.created
-            flag = record.supervisor if record.supervisor in ("true", "false") else ""
-            flag_source = "session" if flag else "none"
-            if not flag and t.setting in ("true", "false"):
-                flag, flag_source = t.setting, "task-setting"
-        else:
-            created = t.session_created or t.created
-            flag = t.session_flag if t.session_flag in ("true", "false") else ""
-            flag_source = "task-csv" if flag else "none"
-        group, reason = decide_group(t.plan, record is not None, created, flag)
+        found = descendants(top.id, children) if top is not None else []
+        workers = [(s, d) for s, d in found if s.kind in WORKER_KINDS]
+        others = [s for s, _ in found if s.kind not in WORKER_KINDS]
 
-        if flag == "true" and created is not None and created < SUPERVISOR_INTRODUCED:
-            quality["supervisor_on_before_it_existed"] += 1
-        if t.plan and created is not None and created < PLAN_MODE_INTRODUCED:
-            quality["plan_flag_before_plan_mode_existed"] += 1
-        if (record is not None and t.setting in ("true", "false") and record.supervisor in ("true", "false")
-                and t.setting != record.supervisor):
-            quality["task_setting_differs_from_session_flag"] += 1
-        if record is not None and record.judge_pending:
-            quality["supervisor_judge_still_pending"] += 1
-        if t.adopted:
-            quality["adopted_tasks"] += 1
-        if top_uses[t.session_id] > 1:
-            quality["tasks_sharing_a_top_session"] += 1
+        top_totals, sub_totals, all_totals = Totals(), Totals(), Totals()
+        if top is not None:
+            top_totals.add(top.usage)
+            all_totals.add(top.usage)
+        for s, _ in workers:
+            sub_totals.add(s.usage)
+            all_totals.add(s.usage)
+        top_known = top is not None and not top.usage.missing
+        sub_known = sub_totals.missing == 0
+        complete = top_known and sub_known
 
-        workers, others = [], []
-        if record is not None:
-            for sid, depth in descendants(t.session_id, children):
-                s = sessions[sid]
-                (workers if s.kind in WORKER_KINDS else others).append((s, depth))
-        top_agg = usage.get(t.session_id, EMPTY_AGG) if t.session_id else EMPTY_AGG
-        worker_aggs = [usage.get(s.id, EMPTY_AGG) for s, _ in workers]
-        sub_agg = sum_aggs(worker_aggs)
-        other_agg = sum_aggs(usage.get(s.id, EMPTY_AGG) for s, _ in others)
-        total = sum_aggs([top_agg, sub_agg])
-
-        mine = ([t.session_id] if t.session_id else []) + [s.id for s, _ in workers]
-        task_sessions[t.id] = mine
-        for sid in mine:
-            owners[sid].add(t.id)
-        main_ids.update(mine)
-        other_ids.update(s.id for s, _ in others)
-
-        in_comparison = group in (GROUP_A, GROUP_B) and t.state == TERMINAL_STATE
-        stage = "done" if t.state == TERMINAL_STATE else ("review" if t.state == "review" else "in-flight")
-        seeds = sum(1 for s, _ in workers if s.seed)
-        plan_step_workers = sum(1 for s, _ in workers if s.id in plan_workers)
-        billing = total.billing_rows()
-        compactions = [s.compactions for s, _ in workers if s.compactions is not None]
-        task_duration = seconds_between(t.created, t.finished)
-        if t.finished is not None and t.created is not None and t.finished < t.created:
-            quality["tasks_finished_before_created"] += 1
-        if t.state == TERMINAL_STATE and t.finished is None:
-            quality["done_tasks_without_finished_time"] += 1
+        in_comparison = task.state == TERMINAL_STATE and group in (GROUP_A, GROUP_B)
+        known_compactions = [s.compactions for s, _ in workers if s.compactions is not None]
+        sub_compactions = sum(known_compactions) if len(known_compactions) == len(workers) else None
+        billing = Counter()
+        for s in ([top] if top is not None else []) + [s for s, _ in workers]:
+            billing[s.billing if s.billing in BILLING_VALUES else ("other" if s.billing else "")] += 1
+        after_finish = sum(1 for s, _ in workers
+                           if task.finished is not None and s.created is not None and s.created > task.finished)
 
         row = {
-            "task_id": t.id,
-            "top_session_id": t.session_id or None,
+            "task_id": task.id,
+            "top_session_id": top.id if top is not None else None,
             "group": group,
             "group_reason": reason,
             "in_comparison": in_comparison,
-            "stage": stage,
-            "state": t.state or None,
-            "outcome": t.outcome or None,
-            "supervisor_flag": {"true": "on", "false": "off", "": "absent"}[flag],
+            "state": task.state,
+            "outcome": task.outcome,
+            "supervisor_flag": {True: "on", False: "off", None: "absent"}[flag],
             "flag_source": flag_source,
-            "plan_flag": t.plan,
-            "adopted": t.adopted,
-            "reopened": t.reopened,
-            "task_created_utc": iso_utc(t.created),
-            "task_started_utc": iso_utc(t.started),
-            "session_created_utc": iso_utc(created),
-            "finished_utc": iso_utc(t.finished),
-            "duration_created_to_finished_s": task_duration,
-            "duration_started_to_finished_s": seconds_between(t.started, t.finished),
-            "num_subagents": len(workers),
-            "num_subagents_excl_seeds": len(workers) - seeds,
-            "num_seed_sessions": seeds,
-            "num_plan_step_workers": plan_step_workers,
-            "num_other_descendants": len(others),
-            "shared_sessions": 0,   # filled in below, once every task's sessions are known
-            "descendants_resolved": record is not None,
-            "input_tokens": total.input,
-            "output_tokens": total.output,
-            "cache_read_tokens": total.cache_read,
-            "cache_write_tokens": total.cache_write,
-            "total_tokens": total.tokens,
-            "cost": total.cost,
-            "list_cost": total.list_cost,
-            "usage_rows": total.rows,
-            "rows_api": billing["api"],
-            "rows_subscription": billing["subscription"],
-            "rows_extra_usage": billing["extra-usage"],
-            "rows_billing_other": billing["other"],
-            "rows_billing_blank": billing["blank"],
-            "rows_list_cost_blank": total.list_cost_blank,
-            "rows_priced_at_zero": total.unpriced_rows,
-            "tokens_priced_at_zero": total.unpriced_tokens,
-            "top_input_tokens": top_agg.input,
-            "top_output_tokens": top_agg.output,
-            "top_cache_read_tokens": top_agg.cache_read,
-            "top_cache_write_tokens": top_agg.cache_write,
-            "top_total_tokens": top_agg.tokens,
-            "top_cost": top_agg.cost,
-            "top_list_cost": top_agg.list_cost,
-            "top_usage_rows": top_agg.rows,
-            "top_duration_s": session_duration(record),
-            "top_usage_span_s": top_agg.span,
-            "top_compactions": record.compactions if record is not None else None,
-            "sub_input_tokens": sub_agg.input,
-            "sub_output_tokens": sub_agg.output,
-            "sub_cache_read_tokens": sub_agg.cache_read,
-            "sub_cache_write_tokens": sub_agg.cache_write,
-            "sub_total_tokens": sub_agg.tokens,
-            "sub_cost": sub_agg.cost,
-            "sub_list_cost": sub_agg.list_cost,
-            "sub_usage_rows": sub_agg.rows,
-            "sub_compactions_total": sum(compactions) if compactions else (0 if not workers else None),
-            "other_total_tokens": other_agg.tokens,
-            "other_cost": other_agg.cost,
-            "other_list_cost": other_agg.list_cost,
-            "other_usage_rows": other_agg.rows,
+            "plan_flag": task.plan,
+            "model": top.model if top is not None else "",
+            "created": task.created,
+            "started": task.started,
+            "finished": task.finished,
+            "duration_s": span(task.created, task.finished),
+            "work_duration_s": span(task.started, task.finished),
+            "n_subagents": len(workers),
+            "n_forked_subagents": sum(1 for s, _ in workers if s.forked),
+            "n_other_descendants": len(others),
+            "usage_status": "complete" if complete else "incomplete",
+            "sessions_usage_missing": all_totals.missing + (0 if top is not None else 1),
+            "recorded_tokens": all_totals.tokens,
+            "recorded_cost": all_totals.cost,
+            "recorded_list_cost": all_totals.list_cost,
+            "top_duration_s": span(top.created, task.finished) if top is not None else None,
+            "top_compactions": top.compactions if top is not None else None,
+            "sub_compactions": sub_compactions,
+            "sessions_api": billing["api"],
+            "sessions_subscription": billing["subscription"],
+            "sessions_extra_usage": billing["extra-usage"],
+            "sessions_billing_none": billing[""],
+            "sessions_billing_other": billing["other"],
+            "workers_created_after_finish": after_finish,
+            # kept for the statistics, never written to a CSV
+            "_workers": workers,
+            "_others": others,
+            "_top": top,
+            "_task": task,
         }
+        row.update(totals_cells("total", all_totals, complete))
+        row.update(totals_cells("top", top_totals, top_known))
+        row.update(totals_cells("sub", sub_totals, sub_known))
         task_rows.append(row)
 
         for s, depth in workers:
-            agg = usage.get(s.id, EMPTY_AGG)
+            known = not s.usage.missing
             sub_rows.append({
-                "task_id": t.id,
+                "task_id": task.id,
                 "group": group,
                 "in_comparison": in_comparison,
                 "session_id": s.id,
                 "parent_id": s.parent,
                 "depth": depth,
                 "kind": s.kind,
-                "is_seed": s.seed,
-                "is_plan_step_worker": s.id in plan_workers,
-                "status": s.status or None,
-                "created_utc": iso_utc(s.created),
-                "duration_s": session_duration(s),
-                "usage_span_s": agg.span,
-                "input_tokens": agg.input,
-                "output_tokens": agg.output,
-                "cache_read_tokens": agg.cache_read,
-                "cache_write_tokens": agg.cache_write,
-                "total_tokens": agg.tokens,
-                "cost": agg.cost,
-                "list_cost": agg.list_cost,
-                "usage_rows": agg.rows,
+                "forked": s.forked,
+                "model": s.model,
+                "created": s.created,
+                "updated": s.updated,
+                "duration_s": span(s.created, s.updated),
+                "created_after_task_finished": (task.finished is not None and s.created is not None
+                                                and s.created > task.finished),
+                "updated_after_task_finished": (task.finished is not None and s.updated is not None
+                                                and s.updated > task.finished),
+                "usage_status": "recorded" if known else "missing",
+                "input": s.usage.input if known else None,
+                "output": s.usage.output if known else None,
+                "cache_read": s.usage.cache_read if known else None,
+                "cache_write": s.usage.cache_write if known else None,
+                "tokens": s.usage.tokens if known else None,
+                "cost": s.usage.cost if known else None,
+                "list_cost": s.usage.list_cost if known else None,
+                "billing": s.billing,
+                "turns": s.turns,
                 "compactions": s.compactions,
             })
-
-    for row in task_rows:
-        row["shared_sessions"] = sum(1 for sid in task_sessions[row["task_id"]] if len(owners[sid]) > 1)
-    quality["tasks_with_shared_sessions"] = sum(1 for r in task_rows if r["shared_sessions"])
-
-    attribution = attribute_usage(usage, sessions, main_ids, other_ids)
-    quality["subagent_sessions_outside_any_task"] = sum(
-        1 for s in sessions.values() if s.kind in WORKER_KINDS and s.id not in main_ids)
-    return task_rows, sub_rows, attribution
-
-
-def attribute_usage(usage, sessions, main_ids, other_ids):
-    """Where every usage row went: a task's own sessions, its btw/internal ones, or nowhere."""
-    buckets = {
-        "task": ("a task's top-level or sub-agent session", Agg()),
-        "task-other": ("a btw or internal session under a task", Agg()),
-        "no-task": ("a session that belongs to no task", Agg()),
-        "no-record": ("a session id with no session record", Agg()),
-    }
-    for sid, agg in usage.items():
-        if sid in main_ids:
-            key = "task"
-        elif sid in other_ids:
-            key = "task-other"
-        elif sid in sessions:
-            key = "no-task"
-        else:
-            key = "no-record"
-        buckets[key][1].merge(agg)
-    return buckets
+    return task_rows, sub_rows
 
 
 # --------------------------------------------------------------------------
 # CSV output
 
-def csv_cell(value):
+def csv_cell(column, value):
     if value is None:
-        return ""
+        return UNKNOWN if column in UNKNOWN_COLUMNS else ""
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, float):
@@ -745,16 +563,16 @@ def private_umask():
 
 
 def write_csv(path, columns, rows):
-    """Write ROWS (dicts) to PATH atomically, owner-only: the files hold ids."""
+    """Write ROWS (dicts) to PATH atomically and owner-only: the files hold ids."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
     try:
         with private_umask():
-            with open(tmp, "w", newline="", encoding="utf-8") as fh:
-                writer = csv.writer(fh, lineterminator="\n")
+            with open(tmp, "w", newline="", encoding="utf-8") as handle:
+                writer = csv.writer(handle, lineterminator="\n")
                 writer.writerow(columns)
                 for row in rows:
-                    writer.writerow([csv_cell(row.get(c)) for c in columns])
+                    writer.writerow([csv_cell(c, row.get(c)) for c in columns])
         os.replace(tmp, path)
     finally:
         if tmp.exists():
@@ -766,8 +584,8 @@ def write_text(path, text):
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
     try:
-        with open(tmp, "w", encoding="utf-8") as fh:
-            fh.write(text)
+        with open(tmp, "w", encoding="utf-8") as handle:
+            handle.write(text)
         os.replace(tmp, path)
     finally:
         if tmp.exists():
@@ -778,18 +596,16 @@ def write_text(path, text):
 # Statistics
 
 def describe(values):
-    """n, mean, median, sample stdev, min, max and sum of the non-None VALUES."""
+    """n, mean, median, sample stdev and sum of the non-None VALUES."""
     vals = [v for v in values if v is not None]
     n = len(vals)
     if not n:
-        return {"n": 0, "mean": None, "median": None, "stdev": None, "min": None, "max": None, "sum": None}
+        return {"n": 0, "mean": None, "median": None, "stdev": None, "sum": None}
     return {
         "n": n,
         "mean": statistics.fmean(vals),
         "median": statistics.median(vals),
         "stdev": statistics.stdev(vals) if n >= 2 else None,
-        "min": min(vals),
-        "max": max(vals),
         "sum": math.fsum(vals),
     }
 
@@ -803,6 +619,150 @@ def ratio(a, b):
 
 def column(rows, key):
     return [r[key] for r in rows]
+
+
+# The per-task statistics of the report: (label, row key, subset, kind).
+# subset "all" is every done task of the group, "complete" the done tasks
+# whose usage is complete; kind picks the number format.
+TASK_METRICS = [
+    ("Total tokens", "total_tokens", "complete", "tokens"),
+    ("Input tokens", "total_input", "complete", "tokens"),
+    ("Output tokens", "total_output", "complete", "tokens"),
+    ("Cache-read tokens", "total_cache_read", "complete", "tokens"),
+    ("Cache-write tokens", "total_cache_write", "complete", "tokens"),
+    ("Billed cost", "total_cost", "complete", "usd"),
+    ("List cost", "total_list_cost", "complete", "usd"),
+    ("Task duration, created to finished", "duration_s", "all", "dur"),
+    ("Task duration, started to finished", "work_duration_s", "all", "dur"),
+    ("Sub-agents", "n_subagents", "all", "count"),
+]
+TOP_METRICS = [
+    ("Total tokens", "top_tokens", "complete", "tokens"),
+    ("Billed cost", "top_cost", "complete", "usd"),
+    ("List cost", "top_list_cost", "complete", "usd"),
+    ("Duration, session created to task finished", "top_duration_s", "all", "dur"),
+    ("Compactions", "top_compactions", "all", "count"),
+]
+SUB_COMBINED_METRICS = [
+    ("Total tokens", "sub_tokens", "complete", "tokens"),
+    ("Billed cost", "sub_cost", "complete", "usd"),
+    ("List cost", "sub_list_cost", "complete", "usd"),
+    ("Compactions", "sub_compactions", "all", "count"),
+]
+SESSION_METRICS = [
+    ("Total tokens", "tokens", "tokens"),
+    ("Billed cost", "cost", "usd"),
+    ("List cost", "list_cost", "usd"),
+    ("Duration, updated minus created (upper bound)", "duration_s", "dur"),
+    ("Compactions", "compactions", "count"),
+]
+
+
+def group_metrics(rows, specs):
+    """{key: describe(values)} over the done tasks in ROWS, each metric over its own subset."""
+    out = {}
+    for _, key, subset, _ in specs:
+        chosen = [r for r in rows if subset == "all" or r["usage_status"] == "complete"]
+        out[key] = describe(column(chosen, key))
+    return out
+
+
+def compare_groups(task_rows):
+    """Group counts, and statistics for groups A and B, from the classified task rows."""
+    result = {"groups": {}}
+    for g in GROUPS:
+        members = [r for r in task_rows if r["group"] == g]
+        done = [r for r in members if r["state"] == TERMINAL_STATE]
+        complete = [r for r in done if r["usage_status"] == "complete"]
+        states = Counter(r["state"] or "(none)" for r in members if r["state"] != TERMINAL_STATE)
+        result["groups"][g] = {
+            "tasks": len(members),
+            "done": done,
+            "n_done": len(done),
+            "n_complete": len(complete),
+            "n_incomplete": len(done) - len(complete),
+            "in_flight": sum(states.values()),
+            "in_flight_states": states,
+            "total_cost": math.fsum(r["recorded_cost"] for r in done),
+            "total_list_cost": math.fsum(r["recorded_list_cost"] for r in done),
+            "total_cost_complete": math.fsum(r["total_cost"] for r in complete),
+            "total_list_cost_complete": math.fsum(r["total_list_cost"] for r in complete),
+        }
+    for g in (GROUP_A, GROUP_B):
+        info = result["groups"][g]
+        done = info["done"]
+        info["task"] = group_metrics(done, TASK_METRICS)
+        info["top"] = group_metrics(done, TOP_METRICS)
+        info["sub"] = group_metrics(done, SUB_COMBINED_METRICS)
+        info["zero_subagents"] = sum(1 for r in done if r["n_subagents"] == 0)
+        info["top_compactions_unknown"] = sum(1 for r in done if r["top_compactions"] is None)
+        info["billing"] = Counter()
+        for r in done:
+            for key, label in (("sessions_api", "api"), ("sessions_subscription", "subscription"),
+                               ("sessions_extra_usage", "extra-usage"),
+                               ("sessions_billing_none", "not recorded"),
+                               ("sessions_billing_other", "other")):
+                info["billing"][label] += r[key]
+        info["models"] = Counter(r["model"] or "(none)" for r in done)
+        info["created_min"] = min((r["created"] for r in done), default=None)
+        info["created_max"] = max((r["created"] for r in done), default=None)
+        workers = [w for r in done for w, _ in r["_workers"]]
+        info["n_workers"] = len(workers)
+        info["workers_forked"] = sum(1 for w in workers if w.forked)
+        info["workers_after_finish"] = sum(r["workers_created_after_finish"] for r in done)
+        info["other_sessions"] = sum(r["n_other_descendants"] for r in done)
+        info["other_list_cost"] = math.fsum(o.usage.list_cost for r in done for o in r["_others"])
+    return result
+
+
+def add_session_stats(result, sub_rows):
+    """Add the statistics over sub-agent sessions (rows of done A and B tasks) to RESULT."""
+    for g in (GROUP_A, GROUP_B):
+        rows = [r for r in sub_rows if r["group"] == g and r["in_comparison"]]
+        result["groups"][g]["session_rows"] = rows
+        result["groups"][g]["sessions"] = {key: describe(column(rows, key)) for _, key, _ in SESSION_METRICS}
+
+
+def strata_of_b(result):
+    """Descriptive subsets of group B, for context (not a controlled comparison)."""
+    done = result["groups"][GROUP_B]["done"]
+
+    def line(key, label, rows):
+        complete = [r for r in rows if r["usage_status"] == "complete"]
+        cost = describe(column(complete, "total_list_cost"))
+        return {"key": key, "label": label, "n": len(rows), "n_complete": len(complete),
+                "mean": cost["mean"], "median": cost["median"],
+                "duration_median": describe(column(rows, "duration_s"))["median"]}
+
+    strata = [
+        line("all", "all of B", done),
+        line("before", "created before supervisor mode existed",
+             [r for r in done if r["created"] < SUPERVISOR_INTRODUCED]),
+        line("since", "created since", [r for r in done if r["created"] >= SUPERVISOR_INTRODUCED]),
+        line("fix", "created since the fix (group A's period)", [r for r in done if r["created"] >= SUPERVISOR_FIX]),
+        line("zero", "0 sub-agents", [r for r in done if r["n_subagents"] == 0]),
+        line("few", "1 to 4 sub-agents", [r for r in done if 1 <= r["n_subagents"] <= 4]),
+        line("many", "5 or more sub-agents", [r for r in done if r["n_subagents"] >= 5]),
+    ]
+    a_models = sorted({r["model"] for r in result["groups"][GROUP_A]["done"] if r["model"]})
+    if a_models:
+        strata.append(line("a_model", "own session on " + " or ".join(a_models) + " (the model group A used)",
+                           [r for r in done if r["model"] in a_models]))
+    return strata
+
+
+def started_variant(task_rows):
+    """What group A would hold if the fix cutoff were applied to the task's start time.
+
+    Returns (moved, variant): the done tasks the creation-time rule calls
+    excluded-buggy that started at or after the fix, and the done group-A
+    tasks plus those.
+    """
+    moved = [r for r in task_rows
+             if r["group"] == EXCLUDED_BUGGY and r["state"] == TERMINAL_STATE
+             and r["_task"].started is not None and r["_task"].started >= SUPERVISOR_FIX]
+    a_now = [r for r in task_rows if r["group"] == GROUP_A and r["state"] == TERMINAL_STATE]
+    return moved, a_now + moved
 
 
 # --------------------------------------------------------------------------
@@ -837,27 +797,47 @@ def f_dur(x):
 
 
 def f_count(x):
-    """A count or a median/min/max of counts: no decimals when it is whole."""
+    """A count, or a median of counts: no decimals when it is whole."""
     if x is None:
         return NA
     return f"{x:,.0f}" if float(x).is_integer() else f"{x:,.2f}"
 
 
 def f_mean_count(x):
-    """The mean or spread of counts: always two decimals, so a column never looks rounded."""
     return NA if x is None else f"{x:,.2f}"
-
-
-def f_pct(x):
-    return NA if x is None else f"{100 * x:.1f}%"
 
 
 def f_ratio(x):
     return NA if x is None else f"{x:.2f}x"
 
 
-def f_day(when):
-    return NA if when is None else when.strftime("%Y-%m-%d")
+def f_when(epoch):
+    """An epoch instant as UTC text."""
+    if epoch is None:
+        return NA
+    return dt.datetime.fromtimestamp(epoch, dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def f_day(epoch):
+    if epoch is None:
+        return NA
+    return dt.datetime.fromtimestamp(epoch, dt.timezone.utc).strftime("%Y-%m-%d")
+
+
+def f_range(first, last):
+    """Two epoch instants as a UTC date range ("2026-10-01 to 2026-10-11", or one date)."""
+    lo, hi = f_day(first), f_day(last)
+    return lo if lo == hi else f"{lo} to {hi}"
+
+
+FORMATS = {"tokens": f_tokens, "usd": f_usd, "dur": f_dur, "count": f_count}
+
+
+def fmt(kind, value, mean=False):
+    """VALUE as text for KIND; MEAN picks two decimals for a count that is a mean."""
+    if kind == "count" and mean:
+        return f_mean_count(value)
+    return FORMATS[kind](value)
 
 
 def md_table(headers, rows, aligns=None):
@@ -869,1164 +849,958 @@ def md_table(headers, rows, aligns=None):
     return lines
 
 
+def plural(n, one, many=None):
+    return f"{n} {one if n == 1 else (many or one + 's')}"
+
+
 # --------------------------------------------------------------------------
 # The report
 
-PLACEHOLDER_MARK = "<!-- compare_supervisor_modes: placeholder without results -->"
 GENERATED_MARK = "<!-- generated by scripts/analysis/compare_supervisor_modes.py; do not edit by hand -->"
 REPRODUCE = (
-    "python3 scripts/analysis/extract_usage_data.py        # reads the harness state directory (read-only)",
-    "python3 scripts/analysis/compare_supervisor_modes.py  # classifies, computes, rewrites this file",
+    "python3 -I scripts/analysis/extract_usage_data.py --gather-tasks   # task store -> raw/tasks_raw.jsonl",
+    "python3 -I scripts/analysis/extract_usage_data.py --print-gather-recipe",
+    "#   ^ the Elisp an agent runs in the live harness to make raw/sessions_raw.jsonl",
+    "python3 -I scripts/analysis/extract_usage_data.py                  # raw/ -> tasks.csv, sessions.csv",
+    "python3 -I scripts/analysis/compare_supervisor_modes.py            # CSVs -> classified_tasks.csv, subagents.csv, this file",
+)
+
+PRIVATE_PATTERNS = (
+    re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b"),   # a session id
+    re.compile(r"\bt-[0-9a-z]{8}\b"),                                                   # a task id
+    re.compile(r"/home/|/Users/|\.worktrees|\.git/harness"),                            # a path
 )
 
 
-def method_section():
-    """The classification rule, cutoffs and definitions: the same text with or without results."""
+class Context:
+    """Everything the report needs."""
+
+    def __init__(self, task_rows, sub_rows, sessions, result, quality, n_task_rows, n_session_rows):
+        self.task_rows = task_rows
+        self.sub_rows = sub_rows
+        self.sessions = sessions
+        self.result = result
+        self.quality = quality
+        self.n_task_rows = n_task_rows
+        self.n_session_rows = n_session_rows
+        self.groups = result["groups"]
+        self.a = result["groups"][GROUP_A]
+        self.b = result["groups"][GROUP_B]
+        self.snapshot = max((s.updated for s in sessions.values() if s.updated is not None), default=None)
+        self.strata = strata_of_b(result)
+        self.moved, self.a_variant = started_variant(task_rows)
+
+
+def stat_cells(d, kind):
+    return [str(d["n"]), fmt(kind, d["mean"], mean=True), fmt(kind, d["median"]),
+            fmt(kind, d["stdev"], mean=True)]
+
+
+def figure_line(label, key, kind, ta, tb, with_ratios=True):
+    """One bullet of the bottom line: the A and B figure for KEY, with each n."""
+    da, db = ta[key], tb[key]
+    b_text = f"B mean {fmt(kind, db['mean'], mean=True)}, median {fmt(kind, db['median'])} (n={db['n']})"
+    if da["n"] == 0:
+        return f"- **{label}.** No A task has this figure. {b_text}."
+    if da["n"] <= 2:
+        a_text = f"A {fmt(kind, da['mean'], mean=True)} (n={da['n']})"
+    else:
+        a_text = f"A mean {fmt(kind, da['mean'], mean=True)}, median {fmt(kind, da['median'])} (n={da['n']})"
+    text = f"- **{label}.** {a_text}; {b_text}."
+    if with_ratios:
+        text += (f" A is {f_ratio(ratio(da['mean'], db['mean']))} B's mean and "
+                 f"{f_ratio(ratio(da['median'], db['median']))} B's median.")
+    return text
+
+
+def bottom_line(ctx):
+    a, b = ctx.a, ctx.b
+    n_a, n_b = a["n_done"], b["n_done"]
+    out = ["## Bottom line", ""]
+    if n_a == 0:
+        return out + [f"No task has been done under fixed supervisor mode, so there is nothing to compare: "
+                      f"group A has n = 0 done tasks against n = {n_b} for group B (single-session).", ""]
+    small = n_a < SMALL_N
+    out += [f"**{'The data cannot answer the question yet.' if small else 'Result.'}** "
+            f"Group A (fixed supervisor mode) has n = {n_a} done tasks, {a['n_complete']} of them with a complete "
+            f"usage record; group B (single-session) has n = {n_b}, {b['n_complete']} with a complete usage record.", ""]
+    if small:
+        hours = None if ctx.snapshot is None else (ctx.snapshot - SUPERVISOR_FIX) / 3600
+        age = "" if hours is None else \
+            f" The fix landed about {hours:.0f} hours before the newest record in the data was written."
+        out += [f"Caveat: group A has only n = {n_a} done tasks, and this report calls any group under {SMALL_N} "
+                f"small. Its figures describe those tasks one by one; they estimate nothing about supervisor mode "
+                f"in general.{age}", ""]
+    out += ["What the numbers show, A against B, with each group's n beside the figure"
+            + (" (with two values the mean and the median are the same number, so A's is given once):"
+               if n_a == 2 else ":"), ""]
+    ta, tb = a["task"], b["task"]
+    out.append(figure_line("List cost per task (cost at API list prices)", "total_list_cost", "usd", ta, tb))
+    out.append(figure_line("Billed cost per task", "total_cost", "usd", ta, tb, with_ratios=False)
+               + " What was actually charged depends on how each call was paid for (a subscription charges nothing "
+                 "per call), so billed cost is not a like-for-like measure.")
+    out.append(figure_line("Tokens per task", "total_tokens", "tokens", ta, tb))
+    out.append(figure_line("Wall-clock time, created to finished", "duration_s", "dur", ta, tb))
+    out.append(figure_line("Wall-clock time, started to finished", "work_duration_s", "dur", ta, tb))
+    out.append(figure_line("Sub-agents per task", "n_subagents", "count", ta, tb, with_ratios=False)
+               + f" {a['zero_subagents']} of {n_a} A tasks and {b['zero_subagents']} of {n_b} B tasks had none.")
+    for r in a["done"]:
+        if r["usage_status"] == "incomplete" and len(a["done"]) <= LIST_TASKS_UP_TO:
+            k = r["sessions_usage_missing"]
+            out.append(f"- An A task with incomplete usage: {k} of its {r['n_subagents'] + 1} sessions (its own and "
+                       f"its sub-agents') {'has' if k == 1 else 'have'} no usage record. The usage recorded for the rest "
+                       f"is {f_usd(r['recorded_list_cost'])} at list price and {f_tokens(r['recorded_tokens'])} tokens, "
+                       "a lower bound for that task. It is left out of the cost and token figures above.")
+    out.append("")
+    out += ["Why these figures are not a like-for-like comparison:", ""]
+    why = []
+    if a["n_incomplete"] or b["n_incomplete"]:
+        why.append(f"- Usage was never recorded for some sessions: {a['n_incomplete']} of {n_a} A tasks and "
+                   f"{b['n_incomplete']} of {n_b} B tasks have no complete cost or token figure and are left out of "
+                   "the cost and token statistics (they are not counted as zero). Duration and sub-agent figures "
+                   "use every done task.")
+    before = next((x for x in ctx.strata if x["key"] == "before"), None)
+    since = next((x for x in ctx.strata if x["key"] == "since"), None)
+    if before and since and before["median"] is not None and since["median"] is not None:
+        why.append(f"- B is not one population. Its list cost per task has median {f_usd(before['median'])} "
+                   f"(n={before['n_complete']}) for tasks created before supervisor mode existed and "
+                   f"{f_usd(since['median'])} (n={since['n_complete']}) for those created since; the models differ "
+                   "too (see \"Who ran these tasks\").")
+    since_fix = next((x for x in ctx.strata if x["key"] == "fix"), None)
+    many = next((x for x in ctx.strata if x["key"] == "many"), None)
+    same_model = next((x for x in ctx.strata if x["key"] == "a_model"), None)
+    if since_fix and since_fix["n"] == 0:
+        why.append(f"- No done B task was created since the fix, so A has no single-session tasks from its own "
+                   f"period to be set against (the {tb['n_subagents']['n']} done B tasks were created "
+                   f"{f_range(b['created_min'], b['created_max'])} UTC, A's on "
+                   f"{f_range(a['created_min'], a['created_max'])}).")
+    if many and many["median"] is not None and ta["n_subagents"]["mean"] is not None:
+        why.append(f"- Supervisor mode delegates, so A tasks have more sub-agents (mean "
+                   f"{f_mean_count(ta['n_subagents']['mean'])}, n={ta['n_subagents']['n']}) than B tasks (mean "
+                   f"{f_mean_count(tb['n_subagents']['mean'])}, n={tb['n_subagents']['n']}). The B tasks with 5 or "
+                   f"more sub-agents had a list cost "
+                   f"per task of median {f_usd(many['median'])}, mean {f_usd(many['mean'])} "
+                   f"(n={many['n_complete']} with complete usage, of {many['n']}).")
+    if same_model and same_model["median"] is not None:
+        why.append(f"- Cost depends on the model. B tasks whose own session ran on the model A used had a list cost "
+                   f"per task of mean {f_usd(same_model['mean'])}, median {f_usd(same_model['median'])} "
+                   f"(n={same_model['n_complete']} with complete usage, of {same_model['n']}).")
+    why.append("- Which tasks got supervisor mode was not random: a setting or a model's reading of the first "
+               "message chose it for each. Nothing here separates the effect of the mode from the kind of task it "
+               "was used on, the model, or how the calls were paid for.")
+    return out + why + [""]
+
+
+def counts_section(ctx):
+    out = ["## Counts", ""]
+    rows = []
+    for g in GROUPS:
+        i = ctx.groups[g]
+        states = ", ".join(f"{k} {v}" for k, v in sorted(i["in_flight_states"].items()))
+        rows.append([GROUP_TITLES[g], i["tasks"], i["n_done"], i["n_complete"], i["n_incomplete"],
+                     f"{i['in_flight']} ({states})" if i["in_flight"] else "0"])
+    rows.append(["**All tasks**", len(ctx.task_rows), sum(ctx.groups[g]["n_done"] for g in GROUPS),
+                 sum(ctx.groups[g]["n_complete"] for g in GROUPS),
+                 sum(ctx.groups[g]["n_incomplete"] for g in GROUPS),
+                 sum(ctx.groups[g]["in_flight"] for g in GROUPS)])
+    out += md_table(["Group", "Tasks", "Done", "Done, usage complete", "Done, usage incomplete",
+                     "Not done: in flight, left out"], rows)
+    out += ["",
+            "Only done tasks enter a statistic. A done task has *complete* usage when its own session and every "
+            "sub-agent session has a usage record (see Measures); an *incomplete* one is left out of the token and "
+            "cost statistics and kept in the duration and sub-agent statistics. "
+            f"The input held {ctx.n_task_rows} tasks and {ctx.n_session_rows} sessions.", ""]
+    return out
+
+
+def results_section(ctx):
+    a, b = ctx.a, ctx.b
+    out = ["## Results: done tasks, A against B", "",
+           f"Group A: fixed supervisor mode, n = {a['n_done']} done tasks. Group B: single-session (the old way), "
+           f"n = {b['n_done']}. Each row shows its own n: the token and cost rows use the tasks with complete "
+           "usage, the duration, sub-agent and compaction rows every done task. `n/a` means not defined (a "
+           "standard deviation needs two values).", ""]
+    headers = ["", "A n", "A mean", "A median", "A stdev", "B n", "B mean", "B median", "B stdev"]
+
+    def block(title, specs, a_stats, b_stats):
+        rows = [[label] + stat_cells(a_stats[key], kind) + stat_cells(b_stats[key], kind)
+                for label, key, _, kind in specs]
+        return [f"### {title}", ""] + md_table([title.split(" (")[0].split(" alone")[0]] + headers[1:], rows) + [""]
+
+    out += block("Per task (own session plus all sub-agents)", TASK_METRICS, a["task"], b["task"])
+    out += block("The top-level session alone", TOP_METRICS, a["top"], b["top"])
+    out += block("All sub-agents of a task combined", SUB_COMBINED_METRICS, a["sub"], b["sub"])
+    rows = [
+        ["Tasks with exactly 0 sub-agents", f"{a['zero_subagents']} of {a['n_done']}",
+         f"{b['zero_subagents']} of {b['n_done']}"],
+        ["Top-level compaction count unknown", f"{a['top_compactions_unknown']} of {a['n_done']}",
+         f"{b['top_compactions_unknown']} of {b['n_done']}"],
+        ["Grand sum of billed cost, tasks with complete usage", f_usd(a["total_cost_complete"]) + f" (n={a['n_complete']})",
+         f_usd(b["total_cost_complete"]) + f" (n={b['n_complete']})"],
+        ["Grand sum of list cost, tasks with complete usage", f_usd(a["total_list_cost_complete"]) + f" (n={a['n_complete']})",
+         f_usd(b["total_list_cost_complete"]) + f" (n={b['n_complete']})"],
+        ["Recorded billed cost, all done tasks (a lower bound)", f_usd(a["total_cost"]) + f" (n={a['n_done']})",
+         f_usd(b["total_cost"]) + f" (n={b['n_done']})"],
+        ["Recorded list cost, all done tasks (a lower bound)", f_usd(a["total_list_cost"]) + f" (n={a['n_done']})",
+         f_usd(b["total_list_cost"]) + f" (n={b['n_done']})"],
+    ]
+    out += ["### Counts and sums", ""] + md_table(["", "A", "B"], rows) + [""]
+    billing_rows = [[label, a["billing"][label], b["billing"][label]]
+                    for label in ("subscription", "api", "extra-usage", "not recorded", "other")]
+    out += ["### Sessions by how they were billed", "",
+            "Sessions (a task's own session plus its sub-agents) of the done tasks, by the billing mode of the "
+            "session record. A `subscription` session is charged nothing per call, an `api` session its list cost; "
+            "\"not recorded\" is a session with no billing mode.", ""]
+    out += md_table(["Billing", "A sessions", "B sessions"], billing_rows) + [""]
+    return out
+
+
+def a_tasks_section(ctx):
+    """Group A task by task, when there are few enough to list."""
+    done = ctx.a["done"]
+    if not 0 < len(done) <= LIST_TASKS_UP_TO:
+        return []
+    out = ["### Group A, task by task", "",
+           "Every done A task, oldest first (no ids). `at least` marks a total built from the usage that was "
+           "recorded when some session's was not.", ""]
+    rows = []
+    for k, r in enumerate(done, 1):
+        complete = r["usage_status"] == "complete"
+        lead = "" if complete else "at least "
+        rows.append([k, f_when(r["created"]), r["model"] or "-", r["n_subagents"],
+                     "complete" if complete else f"incomplete ({r['sessions_usage_missing']} session without usage)",
+                     lead + f_tokens(r["recorded_tokens"]), lead + f_usd(r["recorded_list_cost"]),
+                     f_usd(r["recorded_cost"]), f_dur(r["duration_s"]), f_dur(r["work_duration_s"])])
+    out += md_table(["A task", "Created (UTC)", "Model", "Sub-agents", "Usage", "Tokens", "List cost",
+                     "Billed cost", "Created to finished", "Started to finished"], rows,
+                    ["r", "l", "l", "r", "l", "r", "r", "r", "r", "r"])
+    out.append("")
+    return out
+
+
+def comparison_section(ctx):
+    a, b = ctx.a["task"], ctx.b["task"]
+    out = ["## Comparison: A against B", "",
+           "Ratio is A divided by B. When a group is this small the ratio sets one or two tasks against a "
+           "population; it is shown because the question asks for it, not as an estimate.", ""]
+    rows = []
+    for label, key, kind in (("Billed cost", "total_cost", "usd"), ("List cost", "total_list_cost", "usd"),
+                             ("Total tokens", "total_tokens", "tokens"),
+                             ("Duration, created to finished", "duration_s", "dur"),
+                             ("Duration, started to finished", "work_duration_s", "dur")):
+        da, db = a[key], b[key]
+        rows.append([label, fmt(kind, da["mean"]), fmt(kind, db["mean"]), f_ratio(ratio(da["mean"], db["mean"])),
+                     fmt(kind, da["median"]), fmt(kind, db["median"]),
+                     f_ratio(ratio(da["median"], db["median"])), f"{da['n']} / {db['n']}"])
+    out += md_table(["Per task", "A mean", "B mean", "A/B", "A median", "B median", "A/B", "n (A / B)"], rows)
+    out += ["", "Billed cost is 0 for usage a subscription paid for, so its ratio compares how calls were paid for, "
+                "not how much was used; list cost is the like-for-like dollar figure.", ""]
+    return out
+
+
+def sessions_section(ctx):
+    a, b = ctx.a, ctx.b
+    out = ["## Sub-agent sessions", "",
+           f"One observation per sub-agent session of a done task (n counts sessions, not tasks): "
+           f"{a['n_workers']} in group A, {b['n_workers']} in group B. {a['workers_forked']} of A's and "
+           f"{b['workers_forked']} of B's started as a fork of their parent's conversation. The duration is the "
+           "session record's `updated` minus `created`, an upper bound on its working time: `updated` also "
+           "moves when the harness closes or reloads sessions (see Measures).", ""]
+    rows = []
+    for label, key, kind in SESSION_METRICS:
+        da, db = a["sessions"][key], b["sessions"][key]
+        rows.append([label, da["n"], fmt(kind, da["mean"], mean=True), fmt(kind, da["median"]),
+                     db["n"], fmt(kind, db["mean"], mean=True), fmt(kind, db["median"])])
+    out += md_table(["Per sub-agent session", "A n", "A mean", "A median", "B n", "B mean", "B median"], rows)
+    out.append("")
+    return out
+
+
+def mix_section(ctx):
+    out = ["## Who ran these tasks", "",
+           "The two groups differ in model, period and billing, which move cost and tokens whatever the mode. "
+           "A model is the one recorded on the session when it was read.", ""]
+    rows = []
+    for g in (GROUP_A, GROUP_B):
+        i = ctx.groups[g]
+        models = ", ".join(f"{k} {v}" for k, v in sorted(i["models"].items(), key=lambda kv: (-kv[1], kv[0])))
+        sub_models = Counter(r["model"] or "(none)" for r in i["session_rows"])
+        sub_text = ", ".join(f"{k} {v}" for k, v in sorted(sub_models.items(), key=lambda kv: (-kv[1], kv[0])))
+        rows.append([GROUP_TITLES[g], i["n_done"], f_range(i["created_min"], i["created_max"]),
+                     models or "-", sub_text or "-"])
+    out += md_table(["Group", "Done tasks", "Created (UTC)", "Model of the task's own session",
+                     "Model of the sub-agent sessions"], rows, ["l", "r", "l", "l", "l"])
+    out += ["",
+            "Group B cut by period and by number of sub-agents (descriptive subsets, not a controlled comparison). "
+            "List cost is per task over the tasks with complete usage.", ""]
+    rows = [[s["label"], s["n"], s["n_complete"], f_usd(s["mean"]), f_usd(s["median"]), f_dur(s["duration_median"])]
+            for s in ctx.strata]
+    out += md_table(["Group B subset", "Done tasks", "Usage complete", "List cost mean", "List cost median",
+                     "Median duration, created to finished"], rows)
+    out.append("")
+    return out
+
+
+def excluded_section(ctx):
+    i = ctx.groups[EXCLUDED_BUGGY]
+    complete = [r for r in i["done"] if r["usage_status"] == "complete"]
+    cost = describe(column(complete, "total_cost"))
+    list_cost = describe(column(complete, "total_list_cost"))
+    out = ["## Excluded: old buggy supervisor mode", "",
+           "Tasks with the supervisor flag on that were created before the fix. Kept out of A and B; shown as a "
+           "sanity check against the cache and cost incident already known about.", ""]
+    rows = [
+        ["Tasks (all states)", i["tasks"]],
+        ["Done", i["n_done"]],
+        ["Done with complete usage", i["n_complete"]],
+        ["Billed cost, all done tasks (recorded; a lower bound)", f_usd(i["total_cost"])],
+        ["List cost, all done tasks (recorded; a lower bound)", f_usd(i["total_list_cost"])],
+        ["Billed cost, tasks with complete usage", f"{f_usd(cost['sum'])} (n={cost['n']})"],
+        ["List cost, tasks with complete usage", f"{f_usd(list_cost['sum'])} (n={list_cost['n']})"],
+        ["List cost per task, tasks with complete usage: mean / median",
+         f"{f_usd(list_cost['mean'])} / {f_usd(list_cost['median'])} (n={list_cost['n']})"],
+    ]
+    out += md_table(["Excluded group", "Value"], rows, ["l", "r"]) + [""]
+    return out
+
+
+def plan_section(ctx):
+    i = ctx.groups[PLAN_MODE]
+    out = ["## Set aside: Plan mode", "",
+           f"n = {i['tasks']} tasks carry the Plan-mode flag ({i['n_done']} done).", ""]
+    if i["tasks"] == 0:
+        out += [f"The `plan` column is empty for all {len(ctx.task_rows)} tasks of the input, so nothing is set "
+                "aside. A task with the flag would be counted here and kept out of A and B; the self-test "
+                "exercises that rule.", ""]
+    return out
+
+
+def in_flight_section(ctx):
+    out = ["## Not done: in flight, left out", ""]
+    rows = []
+    for g in GROUPS:
+        for state, n in sorted(ctx.groups[g]["in_flight_states"].items()):
+            rows.append([GROUP_TITLES[g], state, n])
+    if not rows:
+        return out + ["Every task is done.", ""]
+    out += md_table(["Group", "State", "Tasks"], rows, ["l", "l", "r"])
+    out += ["",
+            "A task that is not `done` has incomplete totals, so it is in no statistic. `pending` also covers "
+            "backlog tasks that were written up and have not started, and `review` a task whose agent finished "
+            "and which waits for the user to verify it.", ""]
+    return out
+
+
+def quality_section(ctx):
+    q, a, b = ctx.quality, ctx.a, ctx.b
+    out = ["## Data quality, limits and a sensitivity check", ""]
+    items = []
+    sessions = list(ctx.sessions.values())
+    missing = [s for s in sessions if s.usage.missing]
+    if missing:
+        by_kind = Counter(s.kind for s in missing)
+        kinds = ", ".join(f"{v} of kind {k}" for k, v in sorted(by_kind.items()))
+        by_model = Counter(r["model"] or "(none)" for r in ctx.task_rows
+                           if r["state"] == TERMINAL_STATE and r["group"] in (GROUP_A, GROUP_B)
+                           and r["usage_status"] == "incomplete")
+        models = ", ".join(f"{k} {v}" for k, v in sorted(by_model.items(), key=lambda kv: (-kv[1], kv[0])))
+        items.append(f"**Usage never recorded.** {len(missing)} of the {len(sessions)} sessions took model turns "
+                     f"but have no tokens and no cost in the session record or the usage ledger ({kinds}). Their "
+                     "tasks are *incomplete*: not counted as zero, left out of the token and cost statistics. "
+                     f"Among the done A and B tasks the incomplete ones are {a['n_incomplete']} of {a['n_done']} (A) "
+                     f"and {b['n_incomplete']} of {b['n_done']} (B), by the model of their own session: "
+                     f"{models or '-'}. The cost and token figures therefore come from the tasks whose usage was "
+                     "recorded and may not represent the others.")
+    n = q.get("ledger_differs", 0)
+    if n:
+        items.append(f"**Ledger and record disagree.** For {n} older sessions the usage ledger holds more than the "
+                     "session record. The larger figure is used; the ledger was never the lower one.")
+    flagged = [r["_task"] for r in ctx.task_rows
+               if r["supervisor_flag"] == "on" and r["created"] < SUPERVISOR_INTRODUCED]
+    if flagged:
+        across = all(t.started is not None and t.finished is not None
+                     and t.started < SUPERVISOR_INTRODUCED <= t.finished for t in flagged)
+        items.append(f"**Flag before the mode existed.** {plural(len(flagged), 'task')} carries the supervisor flag "
+                     "on although it was created before supervisor mode existed"
+                     + (" (it ran from before the mode was introduced until after)" if across else "")
+                     + ". It is classified by its flag, so it sits in the excluded group, not in B.")
+    n = q.get("setting_differs_from_flag", 0)
+    if n:
+        items.append(f"**Setting and flag differ.** {plural(n, 'task')} was submitted with an explicit supervisor "
+                     "setting that its session's flag contradicts. The session's flag is the one used.")
+    sources = Counter(r["flag_source"] for r in ctx.task_rows)
+    items.append("**Where the flag came from.** The task's session for "
+                 f"{sources['session']} tasks, the task's own setting for {sources['task']} (the session had none), "
+                 f"neither for {sources['none']} (counted as off).")
+    n = q.get("task_without_session", 0)
+    if n:
+        items.append(f"**Session record missing.** {plural(n, 'task')} has no session record; it has no sub-agents "
+                     "and incomplete usage.")
+    items.append(f"**Work after the task finished.** A session's totals cover everything it did, including turns "
+                 f"after the task's `finished` instant. {a['workers_after_finish']} of A's {a['n_workers']} and "
+                 f"{b['workers_after_finish']} of B's {b['n_workers']} sub-agents were created after their task "
+                 "finished; they are counted in the task they descend from.")
+    items.append(f"**Side conversations and internal sessions.** {a['other_sessions'] + b['other_sessions']} sessions "
+                 "of kind `btw` or `internal` descend from the done A and B tasks (list cost "
+                 f"{f_usd(a['other_list_cost'] + b['other_list_cost'])}). They are not sub-agents and are in no total. "
+                 "The harness prunes `internal` sessions over time, so they are not comparable between tasks.")
+    late_a = sum(1 for r in a["session_rows"] if r["updated_after_task_finished"])
+    late_b = sum(1 for r in b["session_rows"] if r["updated_after_task_finished"])
+    items.append("**Duration of a sub-agent.** A session record has no end time, and its `updated` also moves when "
+                 "the harness closes or reloads sessions, so `updated` minus `created` is an upper bound on the "
+                 f"working time. {late_a} of A's {a['n_workers']} and {late_b} of B's {b['n_workers']} sub-agent "
+                 "records were written after their task finished.")
+    items.append("**Scope.** Only this project's tasks are in the data. Other projects keep their task stores in "
+                 "their own repositories, and reaching them needs a directory grant that only an interactive "
+                 "session can be given; the session that gathered this data could not, so tasks from other "
+                 "projects are in neither group.")
+    items.append(f"**Snapshot.** The newest session record in the input was written {f_when(ctx.snapshot)}. "
+                 "Anything after that is not here, and tasks still running then are in flight.")
+    out += [f"- {x}" for x in items] + [""]
+
+    moved, variant = ctx.moved, ctx.a_variant
+    out += ["### Sensitivity: the fix cutoff applied to the start time", "",
+            "A task written up for the backlog is *created* when it is written up and *started* later, possibly days "
+            "later, and its supervisor flag is set when it starts. The rule above uses the creation time, as "
+            "specified. Applying the fix cutoff to the start time instead would move "
+            f"{plural(len(moved), 'done task')} from the excluded group to A, making n(A) = {len(variant)}.", ""]
+    if moved:
+        rows = []
+        for label, rs in (("A by creation time (the rule above)", [r for r in variant if r not in moved]),
+                          ("A by start time", variant)):
+            comp = [r for r in rs if r["usage_status"] == "complete"]
+            lc = describe(column(comp, "total_list_cost"))
+            tk = describe(column(comp, "total_tokens"))
+            rows.append([label, len(rs), len(comp), f_usd(lc["mean"]), f_usd(lc["median"]), f_tokens(tk["median"]),
+                         f_dur(describe(column(rs, "duration_s"))["median"]),
+                         f_dur(describe(column(rs, "work_duration_s"))["median"])])
+        out += md_table(["Group A defined", "Done", "Usage complete", "List cost mean", "List cost median",
+                         "Tokens median", "Median created to finished", "Median started to finished"], rows)
+        out += ["", "A task that waited for its start has the wait in its created-to-finished time; "
+                    "started-to-finished is the time it was worked on.", ""]
+    return out
+
+
+def method_section(ctx):
     out = ["## Method", ""]
+    no_fork_kind = not any(s.kind == "fork" for s in ctx.sessions.values())
     out += ["### Data", "",
-            "The inputs are the CSVs written by `scripts/analysis/extract_usage_data.py`, which opens the harness "
-            "state directory read-only: `usage_rows.csv` (one row per model call, from `usage.db`), `sessions.csv` "
-            "(one row per session record, with compaction counts taken from its transcript), `tasks.csv` (the task "
-            "board) and, when present, `plan_steps.csv` and `manifest.json`. The extraction copies only ids, flags, "
-            "enum values, timestamps, numbers and project directory paths (it counts a transcript's nodes by kind "
-            "and copies none of their text); this script reads those CSVs and uses none of the paths. No task "
-            "title, prompt, plan text or transcript text is in the inputs, and no id or path is in this file.", "",
-            "Every timestamp in the CSVs is Unix epoch seconds. All times are held as timezone-aware UTC instants "
-            "and compared as such; the cutoffs below are given with their offset and converted to UTC first.", ""]
+            "The inputs are `tasks.csv` (the task board of this project) and `sessions.csv` (every session of those "
+            "tasks and every session descended from them), written by `scripts/analysis/extract_usage_data.py` from "
+            "a dump of the harness's task store and session records. They hold ids, flags, enum values, timestamps "
+            "(Unix epoch seconds) and numbers, and no title, prompt, name, path or transcript text; neither does "
+            "this file. Times are compared as epoch seconds: the cutoffs are written with their UTC offset and "
+            "converted first.", ""]
     out += ["### Cutoffs", ""]
     out += md_table(
         ["Event", "Commit", "Local time", "UTC"],
-        [["Supervisor mode introduced", "`73f987b`", SUPERVISOR_INTRODUCED_ISO, iso_utc(SUPERVISOR_INTRODUCED)],
-         ["Plan mode introduced", "`b0a013d`", PLAN_MODE_INTRODUCED_ISO, iso_utc(PLAN_MODE_INTRODUCED)],
+        [["Supervisor mode introduced", "`73f987b`", SUPERVISOR_INTRODUCED_ISO, f_when(SUPERVISOR_INTRODUCED)],
+         ["Plan mode introduced", "`b0a013d`", PLAN_MODE_INTRODUCED_ISO, f_when(PLAN_MODE_INTRODUCED)],
          ["Supervisor cache/cost fix landed", "`0803841` (landing `7be8ce2`)", SUPERVISOR_FIX_ISO,
-          iso_utc(SUPERVISOR_FIX)]],
-        ["l", "l", "l", "l"])
+          f_when(SUPERVISOR_FIX)]], ["l", "l", "l", "l"])
     out += ["",
             "Before the fix a supervisor's workers defaulted to inheriting (forking) the whole supervisor "
-            "conversation, the cache blow-up already known about. Plan mode (a strong model plans read-only, a "
-            "medium model works) is a different mechanism from supervisor mode's plan and sub-agents.", ""]
+            "conversation, the cache and cost blow-up already known about. Plan mode (a strong model plans "
+            "read-only, a medium model works) is a different mechanism from supervisor mode.", ""]
     out += ["### Classification", "",
-            "Each task is put in the first group whose rule it meets:", "",
+            "Each task goes to the first group whose rule it meets:", "",
             "1. **Plan mode** (set aside): the task's `plan` flag is set.",
-            "2. **Session record missing** (set aside): the task's top-level session has no record in `sessions.csv`, "
-            "so its supervisor flag, creation time and sub-agents cannot be verified and its totals cannot be "
-            "called complete.",
-            "3. **Group B, single-session (the old way)**: the top-level session was created before "
-            f"{SUPERVISOR_INTRODUCED_ISO} (supervisor mode did not exist), or its supervisor flag is off or absent.",
-            "4. **Excluded, old buggy supervisor mode**: the supervisor flag is on and the top-level session was "
-            f"created before {SUPERVISOR_FIX_ISO}. Kept out of A and B and summarised on its own.",
-            "5. **Group A, fixed supervisor mode**: the supervisor flag is on and the top-level session was created "
-            f"at or after {SUPERVISOR_FIX_ISO} (the instant itself counts as after).", "",
-            "The supervisor flag is the *resolved* one: `ext.supervisor` of the task's top-level session record "
-            "(`true` is on; `false` or no value is off). If the record carries no value, the task's own `supervisor` "
-            "setting is used when it has one. The creation time is the session record's `created` (the task's "
-            "`created` if the record has none).", "",
-            "Only tasks whose persisted state is `done` enter the comparison. Tasks in any other state (pending, "
-            "refining, active, review, merging) are counted as still in flight and left out for that reason alone. "
-            "A task with no sub-agents is a valid data point and is kept.", ""]
+            f"2. **Group A, fixed supervisor mode**: the supervisor flag is on and the task's `created` is at or "
+            f"after {SUPERVISOR_FIX_ISO} (the instant itself counts as after).",
+            f"3. **Excluded, old buggy supervisor mode**: the supervisor flag is on and the task's `created` is "
+            f"before {SUPERVISOR_FIX_ISO}. Kept out of A and B and summarised on its own.",
+            "4. **Group B, single-session (the old way)**: the supervisor flag is off or absent. A task created "
+            f"before {SUPERVISOR_INTRODUCED_ISO}, when supervisor mode did not exist, normally has no flag and falls "
+            "here.", "",
+            "The supervisor flag is the task session's own switch (`ext.supervisor` of its record: true supervises, "
+            "false works hands-on). A session with no value counts as off. When the session has no value, the "
+            "task's own explicit `supervisor` setting is used if it has one. Only tasks whose state is `done` "
+            "enter a statistic; any other state is counted as in flight and left out for that reason alone. A "
+            "task with no sub-agents is a valid data point and is kept.", ""]
     out += ["### Which sessions belong to a task", "",
             "The *top-level session* is the task's own session. A *sub-agent* is a session of kind `subagent` or "
             "`fork` whose `parent_id` chain leads back to the top-level session, directly or through other "
-            "sessions (a worker's own sub-agent counts). Sessions of kind `btw` and `internal` are not sub-agents; "
-            "their usage is reported separately under the secondary checks and is not in a task's totals. "
-            "Seed sessions (a `subagent` that only holds a shared context for fork workers) and merge-queue "
-            "conflict resolvers are `subagent`s too and are counted as such; sessions named by a plan step, and "
-            "seeds, are also counted on their own so the effect can be read.", ""]
+            "sessions (including through a side conversation of kind `btw`). "
+            + ("The data has no session of kind `fork`: a worker started as a fork of its parent's conversation is "
+               "a `subagent` with `forked` true. " if no_fork_kind else "")
+            + "Sessions of kind `btw` (side conversations) and `internal` (the harness's own model calls) are not "
+              "sub-agents and are in no total. Group B is defined by the flag, not by the absence of sub-agents: a "
+              f"hands-on session can start them too, and {ctx.b['n_done'] - ctx.b['zero_subagents']} of B's "
+              f"{ctx.b['n_done']} done tasks have at least one.", ""]
     out += ["### Measures", "",
-            "- **Tokens**: input, output, cache-read and cache-write tokens summed over the usage rows of the "
-            "top-level session and its sub-agents; *total tokens* is the sum of the four kinds. The harness prices "
-            "each kind at its own rate, so the four counts are disjoint and a token is not counted twice.",
-            "- **Billed cost**: the sum of `cost`, what was actually billed. It is 0 for calls paid under a "
-            "subscription plan, so it depends on how each call was paid for as well as on how much was used.",
-            "- **List cost**: the sum of `list_cost`, the same usage at API list prices. A row with no `list_cost` "
-            "counts at its `cost`, as the harness itself does (`harness-usage-list-cost`). It does not depend on "
-            "billing mode, so it is the like-for-like dollar measure. A model the harness has no price for is "
-            "recorded at $0; those rows are counted under the data-quality notes.",
-            "- **Billing breakdown**: row counts by `billing` value (`api`, `subscription`, `extra-usage`; rows "
-            "written before that column existed have none).",
-            "- **Task duration**: `finished` minus `created` from the task record (wall clock; it includes time "
-            "waiting for a slot and any rework after a send-back). `finished` minus `started` is reported as "
-            "a secondary figure.",
-            "- **Session duration**: a session record's `updated` minus `created`. **Usage span**: the time from "
-            "its first to its last usage row.",
-            "- **Compactions**: the compaction nodes a session's own transcript holds (nodes a fork copied from "
-            "its parent are not counted). A session whose transcript was not scanned is left out of those figures.",
-            "- **Statistics**: mean, median, sample standard deviation (n-1; not defined for one value), minimum, "
-            "maximum and sum, from Python's `statistics` module. Ratios divide A's figure by B's. No significance "
-            "test is run. A figure that could not be computed for a task (a missing timestamp, say) leaves that "
-            "task out of that figure only, and the figure shows its own n when it differs from the group's.", ""]
+            "- **Session usage**: tokens (input, output, cache-read, cache-write) and costs come from two sources, "
+            "the session record's cumulative totals and the usage ledger (`usage.db`), taking the larger per field "
+            "(they agree except for a few old sessions, where the ledger is higher). A blank list cost is the "
+            "billed cost, as the harness itself reads it.",
+            "- **Missing usage**: a session that took model turns but has no tokens and no cost in either source "
+            "has not had its usage recorded, which is not zero. A task is *complete* when neither its own session "
+            "nor any sub-agent is missing. An *incomplete* task is left out of the token and cost statistics and "
+            "written as `unknown` in the CSV, never as 0.",
+            "- **Tokens**: the four kinds are disjoint (the harness prices each at its own rate); total tokens is "
+            "their sum over the task's own session and all its sub-agents.",
+            "- **Billed cost**: what was charged. It is 0 for sessions paid by a subscription plan, so it depends on "
+            "how calls were paid for as well as on how much was used.",
+            "- **List cost**: the same usage at API list prices. It does not depend on the billing mode, so it is "
+            "the like-for-like dollar figure, though it still depends on which model's price list applies.",
+            "- **Task duration**: `finished` minus `created` of the task record (wall clock; it includes the wait "
+            "for a slot and, for a backlog task, the time before it was started). `finished` minus `started` is "
+            "shown beside it.",
+            "- **Top-level session duration**: the task's `finished` minus the session's `created`. The session "
+            "record's `updated` is not used: it also moves when the harness closes or reloads sessions, and most "
+            "sessions in the data were written long after their task ended.",
+            "- **Sub-agent duration**: the session record's `updated` minus `created`, an upper bound on its working "
+            "time for the same reason. The record has no end time.",
+            "- **Compactions**: the compactions a session itself made, from its transcript: harness `compaction` "
+            "nodes plus \"Context compacted by Claude Code\" notes, each counted for the session that created it (a "
+            "fork's log starts with copies of its parent's nodes). A count that was not obtained would be "
+            "`unknown`, not 0.",
+            "- **Statistics**: mean, median and sample standard deviation (n-1; undefined for one value) from "
+            "Python's `statistics` module; sums with `math.fsum`. Ratios divide A's figure by B's. No significance "
+            "test is run, and none would mean anything at these sizes. A figure that is not known for a task "
+            "leaves that task out of that figure only, and the row shows its own n.", ""]
     out += ["### What this cannot separate", "",
             "Tasks were not assigned to the modes at random, and the groups differ in period, so the figures "
-            "describe the two groups as they happened. They do not separate the effect of the mode from the "
-            "kind of task it was used on, the model in use, how the calls were paid for, or what else changed in "
-            "the harness over the weeks covered. The instant a fix reached the running harness is not recorded "
-            "in the data; the commit time is used. The flag is the one the session record holds when it was "
-            "read, which a judge or the user may have changed after the session started.", ""]
+            "describe the two groups as they happened. They do not separate the effect of the mode from the kind of "
+            "task it was used on, the model in use, how the calls were paid for, or what else changed in the "
+            "harness over the days covered. The instant the fix reached the running harness is not recorded; the "
+            "commit time is used. The flag is the one the session record held when it was read, which a judge or "
+            "the user may have changed after the session started.", ""]
     return out
 
 
 def reproduce_section():
     return ["## Reproduce", "", "```", *REPRODUCE, "```", "",
-            "Both scripts take their directories as flags (`--help`); `compare_supervisor_modes.py --self-test` "
-            "checks the arithmetic on a small synthetic world with known answers.", ""]
+            "`compare_supervisor_modes.py --help` lists the directory flags; `--self-test` checks the arithmetic on "
+            "a small synthetic world with known answers.", ""]
 
 
-def placeholder_report():
-    out = [PLACEHOLDER_MARK, "",
-           "# Supervisor mode vs single-session tasks: usage analysis (2026-10-12)", "",
-           "> **No results in this file yet.** It holds the method only. The analysis needs the harness's "
-           "usage database, session records and task store, which the session that wrote the scripts could not "
-           "read, so no number has been computed and none is quoted. Run the two commands under "
-           "[Reproduce](#reproduce) on the machine that holds the harness state directory; "
-           "`compare_supervisor_modes.py` then rewrites this file with the results.", "",
-           "**Question.** Has supervisor mode made tasks slower and more expensive than the old "
-           "one-session-per-task way?", ""]
-    out += method_section()
-    out += reproduce_section()
-    return "\n".join(out).rstrip("\n") + "\n"
-
-
-class Report:
-    """Everything the report quotes, computed once from the task and sub-agent rows."""
-
-    def __init__(self, task_rows, sub_rows, attribution, quality, manifest, now):
-        self.task_rows = task_rows
-        self.sub_rows = sub_rows
-        self.attribution = attribution
-        self.quality = quality
-        self.manifest = manifest
-        self.now = now
-        self.cmp = {g: [r for r in task_rows if r["group"] == g and r["in_comparison"]]
-                    for g in (GROUP_A, GROUP_B)}
-        self.subs = {g: [r for r in sub_rows if r["group"] == g and r["in_comparison"]]
-                     for g in (GROUP_A, GROUP_B)}
-        self.n = {g: len(rows) for g, rows in self.cmp.items()}
-
-    def by_group(self, group):
-        return [r for r in self.task_rows if r["group"] == group]
-
-    def stat(self, group, key):
-        return describe(column(self.cmp[group], key))
-
-
-def cell(stats, name, fmt, group_n):
-    """One statistic of a group as a table cell, with its own n when it differs from the group's."""
-    value = stats[name]
-    text = f_mean_count(value) if fmt is f_count and name in ("mean", "stdev") else fmt(value)
-    if value is not None and stats["n"] != group_n:
-        text += f" (n={stats['n']})"
-    return text
-
-
-def stat_lines(report, label, key, fmt, names=("mean", "median", "stdev", "min", "max"), with_sum=False):
-    """Rows `label | statistic | A | B` for one per-task measure."""
-    sa, sb = report.stat(GROUP_A, key), report.stat(GROUP_B, key)
-    rows = []
-    shown = list(names) + (["sum"] if with_sum else [])
-    for i, name in enumerate(shown):
-        rows.append([label if i == 0 else "", name,
-                     cell(sa, name, fmt, report.n[GROUP_A]), cell(sb, name, fmt, report.n[GROUP_B])])
-    return rows
-
-
-def sub_stat_lines(report, label, key, fmt, names=("mean", "median", "stdev")):
-    """Rows `label | statistic | A | B` for one per-sub-agent-session measure."""
-    sa, sb = describe(column(report.subs[GROUP_A], key)), describe(column(report.subs[GROUP_B], key))
-    na, nb = len(report.subs[GROUP_A]), len(report.subs[GROUP_B])
-    rows = []
-    for i, name in enumerate(names):
-        rows.append([label if i == 0 else "", name, cell(sa, name, fmt, na), cell(sb, name, fmt, nb)])
-    return rows
-
-
-def render_report(report):
-    """The full Markdown report."""
+def render_report(ctx):
     out = [GENERATED_MARK, "",
            "# Supervisor mode vs single-session tasks: usage analysis (2026-10-12)", "",
            "**Question.** Has supervisor mode made tasks slower and more expensive than the old "
-           "one-session-per-task way?", ""]
-    out += provenance_lines(report)
-    out += bottom_line(report)
-    out += counts_section(report)
-    out += results_section(report)
-    out += comparison_section(report)
-    out += subagent_section(report)
-    out += buggy_section(report)
-    out += set_aside_section(report)
-    out += in_flight_section(report)
-    out += secondary_section(report)
-    out += quality_section(report)
-    out += method_section()
+           "one-session-per-task way?", "",
+           f"**Data.** {ctx.n_task_rows} tasks of this project and {ctx.n_session_rows} sessions, as of the newest "
+           f"session record ({f_when(ctx.snapshot)}). Every number below is arithmetic on those two tables; the "
+           "method, cutoffs and limits are at the end.", ""]
+    out += bottom_line(ctx)
+    out += counts_section(ctx)
+    out += results_section(ctx)
+    out += a_tasks_section(ctx)
+    out += comparison_section(ctx)
+    out += sessions_section(ctx)
+    out += mix_section(ctx)
+    out += excluded_section(ctx)
+    out += plan_section(ctx)
+    out += in_flight_section(ctx)
+    out += quality_section(ctx)
+    out += method_section(ctx)
     out += reproduce_section()
-    return "\n".join(out).rstrip("\n") + "\n"
-
-
-def provenance_lines(report):
-    q, m = report.quality, report.manifest
-    first, last = q.get("usage_first_ts"), q.get("usage_last_ts")
-    span = (f"; usage rows run from {iso_utc(first)} to {iso_utc(last)}" if first and last else "")
-    extracted = m.get("extracted_at")
-    source = f" extracted at {extracted}" if extracted else ""
-    tasks_info = m.get("tasks") if isinstance(m.get("tasks"), dict) else {}
-    stores = tasks_info.get("stores") if isinstance(tasks_info.get("stores"), list) else []
-    kinds = Counter(str(s.get("status") or "unknown").split(" ")[0] for s in stores if isinstance(s, dict))
-    store_note = ""
-    if kinds:
-        store_note = (" Task stores: " + ", ".join(f"{n} {kind}" for kind, n in sorted(kinds.items())) + ".")
-    return [f"Generated {report.now.strftime('%Y-%m-%d %H:%M:%S UTC')} by "
-            "`scripts/analysis/compare_supervisor_modes.py` from CSVs"
-            f"{source} by `scripts/analysis/extract_usage_data.py`: {q['usage_rows']:,} usage rows, "
-            f"{q['sessions']:,} session records, {q['tasks']:,} tasks{span}.{store_note} "
-            "Aggregates only: no ids, paths, titles, prompts or transcript text appear in this file. "
-            "How each group is defined is under [Method](#method).", ""]
-
-
-def small_note(group, n):
-    if n == 0:
-        return f"group {group} has no task in state `done`, so nothing can be compared"
-    if n < SMALL_N:
-        return f"group {group} has only n = {n} tasks (fewer than {SMALL_N}), so its figures are indicative only"
-    return None
-
-
-def bottom_line(report):
-    nA, nB = report.n[GROUP_A], report.n[GROUP_B]
-    out = ["## Bottom line", ""]
-    out.append(f"Computed from {nA} group A tasks (fixed supervisor mode) and {nB} group B tasks "
-               "(single-session), each in state `done`. Only what the numbers show is stated.")
-    out.append("")
-    if nA == 0 or nB == 0:
-        which = "A" if nA == 0 else "B"
-        out.append(f"**No comparison is possible: group {which} has no task in state `done`.**")
-        for g in (GROUP_A, GROUP_B):
-            if report.n[g]:
-                out.append("")
-                out += single_group_line(report, g)
-        out.append("")
-        return out + bottom_line_tail(report)
-
-    def line(label, key, fmt):
-        sa, sb = report.stat(GROUP_A, key), report.stat(GROUP_B, key)
-        return (f"- **{label}**: mean A {fmt(sa['mean'])} (n={sa['n']}) vs B {fmt(sb['mean'])} (n={sb['n']}), "
-                f"A/B {f_ratio(ratio(sa['mean'], sb['mean']))}; median A {fmt(sa['median'])} (n={sa['n']}) vs "
-                f"B {fmt(sb['median'])} (n={sb['n']}), A/B {f_ratio(ratio(sa['median'], sb['median']))}.")
-
-    out.append(line("List cost per task (API-price equivalent)", "list_cost", f_usd))
-    out.append(line("Billed cost per task", "cost", f_usd))
-    out.append(line("Total tokens per task", "total_tokens", f_tokens))
-    out.append(line("Wall-clock per task, created to finished (H:MM:SS)", "duration_created_to_finished_s", f_dur))
-    sa, sb = report.stat(GROUP_A, "num_subagents"), report.stat(GROUP_B, "num_subagents")
-    zeros = {g: sum(1 for r in report.cmp[g] if r["num_subagents"] == 0) for g in (GROUP_A, GROUP_B)}
-    out.append(f"- **Sub-agents per task**: mean A {f_mean_count(sa['mean'])} (n={sa['n']}) vs B {f_mean_count(sb['mean'])} "
-               f"(n={sb['n']}); median A {f_count(sa['median'])} vs B {f_count(sb['median'])}; tasks with none: "
-               f"A {zeros[GROUP_A]} of {nA}, B {zeros[GROUP_B]} of {nB}.")
-    out.append("")
-    return out + bottom_line_tail(report)
-
-
-def single_group_line(report, g):
-    s = {k: report.stat(g, k) for k in ("list_cost", "cost", "total_tokens", "duration_created_to_finished_s")}
-    n = report.n[g]
-    return [f"Group {g} on its own (n={n}): mean list cost {f_usd(s['list_cost']['mean'])}, median "
-            f"{f_usd(s['list_cost']['median'])}; mean total tokens {f_tokens(s['total_tokens']['mean'])}; mean "
-            f"duration {f_dur(s['duration_created_to_finished_s']['mean'])}, median "
-            f"{f_dur(s['duration_created_to_finished_s']['median'])}."]
-
-
-def bottom_line_tail(report):
-    buggy = report.by_group(EXCLUDED_BUGGY)
-    buggy_done = [r for r in buggy if r["state"] == TERMINAL_STATE]
-    bd, bb = describe(column(buggy_done, "list_cost")), report.stat(GROUP_B, "list_cost")
-    plan = report.by_group(PLAN_MODE)
-    unresolved = report.by_group(UNRESOLVED)
-    flight = {g: sum(1 for r in report.task_rows if r["group"] == g and r["state"] != TERMINAL_STATE)
-              for g in (GROUP_A, GROUP_B)}
-    out = ["Reported separately, not in the figures above:", "",
-           f"- Old buggy supervisor mode: n={len(buggy)} tasks, total billed cost "
-           f"{f_usd(math.fsum(column(buggy, 'cost')))} and total list cost "
-           f"{f_usd(math.fsum(column(buggy, 'list_cost')))}; per task in state `done` (n={len(buggy_done)}), mean "
-           f"list cost {f_usd(bd['mean'])} and median {f_usd(bd['median'])}, against group B's mean "
-           f"{f_usd(bb['mean'])} and median {f_usd(bb['median'])} (n={bb['n']}); details in the sanity check below.",
-           f"- Plan mode: n={len(plan)} tasks. Session record missing: n={len(unresolved)} tasks.",
-           f"- Still in flight, left out for that reason alone: A {flight[GROUP_A]}, B {flight[GROUP_B]}.", ""]
-    out.append("**Caveats.**")
-    out.append("")
-    for g in (GROUP_A, GROUP_B):
-        note = small_note(g, report.n[g])
-        if note:
-            out.append(f"- Small sample: {note}.")
-    window = fix_window_note(report)
-    if window:
-        out.append(f"- {window}")
-    out.append("- Tasks were not assigned to the modes at random, and the two groups cover different periods; "
-               "these figures describe the groups as they happened and do not isolate the effect of the mode "
-               "(see [What this cannot separate](#what-this-cannot-separate)).")
-    out.append("- Both the mean and the median are given because single expensive or long tasks can move the "
-               "mean; the tables also show the minimum and maximum.")
-    out.append("")
-    return out
-
-
-def f_elapsed(seconds):
-    if seconds is None:
-        return NA
-    hours = seconds / 3600
-    return f"{hours:.1f} hours" if hours < 48 else f"{hours / 24:.1f} days"
-
-
-def fix_window_note(report):
-    """How long the fix has been in force at the newest usage row: the room group A has to exist in."""
-    last = report.quality.get("usage_last_ts")
-    if last is None:
-        return None
-    elapsed = seconds_between(SUPERVISOR_FIX, last)
-    if elapsed is None:
-        return (f"The newest usage row in the data ({iso_utc(last)}) is older than the fix "
-                f"({SUPERVISOR_FIX_ISO}), so no group A task can exist.")
-    return (f"The fix ({SUPERVISOR_FIX_ISO}) is {f_elapsed(elapsed)} before the newest usage row in the data "
-            f"({iso_utc(last)}); group A can only hold tasks created in that window.")
-
-
-def counts_section(report):
-    out = ["## Classification and counts", ""]
-    rows = []
-    totals = [0, 0, 0, 0]
-    for g in GROUPS:
-        members = report.by_group(g)
-        done = sum(1 for r in members if r["state"] == TERMINAL_STATE)
-        review = sum(1 for r in members if r["state"] == "review")
-        other = len(members) - done - review
-        rows.append([GROUP_TITLES[g], len(members), done, review, other])
-        for i, v in enumerate((len(members), done, review, other)):
-            totals[i] += v
-    rows.append(["**All tasks**", *[f"**{v}**" for v in totals]])
-    out += md_table(["Group", "Tasks", "State `done`", "State `review`", "Other states"], rows)
-    out += ["",
-            "Only `done` tasks in groups A and B enter the comparison. `review` is a task whose agent has finished "
-            "and which waits for the user to verify it; it is counted as in flight here (a variant that counts it "
-            "as finished is under the secondary checks).", ""]
-    return out
-
-
-def results_section(report):
-    nA, nB = report.n[GROUP_A], report.n[GROUP_B]
-    out = ["## Results: group A against group B", "",
-           f"Per-task figures over tasks in state `done`: group A n = {nA}, group B n = {nB}. "
-           "A figure computed over fewer tasks shows its own n. Token counts are tokens; costs are US dollars; "
-           "durations are H:MM:SS.", ""]
-    head = ["Measure", "Statistic", f"A: fixed supervisor (n={nA})", f"B: single-session (n={nB})"]
-    rows = []
-    rows += stat_lines(report, "Total tokens", "total_tokens", f_tokens, with_sum=True)
-    rows += stat_lines(report, "Input tokens", "input_tokens", f_tokens, names=("mean", "median", "stdev"))
-    rows += stat_lines(report, "Output tokens", "output_tokens", f_tokens, names=("mean", "median", "stdev"))
-    rows += stat_lines(report, "Cache-read tokens", "cache_read_tokens", f_tokens, names=("mean", "median", "stdev"))
-    rows += stat_lines(report, "Cache-write tokens", "cache_write_tokens", f_tokens, names=("mean", "median", "stdev"))
-    rows += stat_lines(report, "Billed cost", "cost", f_usd, with_sum=True)
-    rows += stat_lines(report, "List cost (API prices)", "list_cost", f_usd, with_sum=True)
-    rows += stat_lines(report, "Wall-clock, created to finished", "duration_created_to_finished_s", f_dur)
-    rows += stat_lines(report, "Wall-clock, started to finished (secondary)", "duration_started_to_finished_s",
-                       f_dur, names=("mean", "median", "stdev"))
-    rows += stat_lines(report, "Sub-agents per task", "num_subagents", f_count,
-                       names=("mean", "median", "stdev", "max"))
-    zeros = {g: sum(1 for r in report.cmp[g] if r["num_subagents"] == 0) for g in (GROUP_A, GROUP_B)}
-    rows.append(["", "tasks with exactly 0",
-                 f"{zeros[GROUP_A]} of {nA}" + (f" ({f_pct(zeros[GROUP_A] / nA)})" if nA else ""),
-                 f"{zeros[GROUP_B]} of {nB}" + (f" ({f_pct(zeros[GROUP_B] / nB)})" if nB else "")])
-    out += md_table(head, rows, ["l", "l", "r", "r"])
-    out += ["", "### The top-level session on its own, and the sub-agents together", "",
-            "The top-level (\"supervisor\") session's own usage and the sub-agents' combined usage, per task. In "
-            "group B the top-level session is the whole task apart from any sub-agents.", ""]
-    rows = []
-    rows += stat_lines(report, "Top-level session: total tokens", "top_total_tokens", f_tokens,
-                       names=("mean", "median", "stdev"))
-    rows += stat_lines(report, "Top-level session: billed cost", "top_cost", f_usd, names=("mean", "median", "stdev"))
-    rows += stat_lines(report, "Top-level session: list cost", "top_list_cost", f_usd,
-                       names=("mean", "median", "stdev"))
-    rows += stat_lines(report, "Top-level session: duration (updated - created)", "top_duration_s", f_dur,
-                       names=("mean", "median", "stdev"))
-    rows += stat_lines(report, "Top-level session: first to last usage row", "top_usage_span_s", f_dur,
-                       names=("mean", "median", "stdev"))
-    rows += stat_lines(report, "Top-level session: compactions", "top_compactions", f_count,
-                       names=("mean", "median", "max"))
-    rows += stat_lines(report, "Sub-agents combined: total tokens", "sub_total_tokens", f_tokens,
-                       names=("mean", "median", "stdev"))
-    rows += stat_lines(report, "Sub-agents combined: billed cost", "sub_cost", f_usd, names=("mean", "median", "stdev"))
-    rows += stat_lines(report, "Sub-agents combined: list cost", "sub_list_cost", f_usd,
-                       names=("mean", "median", "stdev"))
-    out += md_table(head, rows, ["l", "l", "r", "r"])
-    out.append("")
-    return out
-
-
-COMPARE_METRICS = (("Billed cost", "cost", f_usd),
-                   ("List cost", "list_cost", f_usd),
-                   ("Total tokens", "total_tokens", f_tokens),
-                   ("Duration, created to finished", "duration_created_to_finished_s", f_dur))
-
-
-def ratio_table(first_rows, second_rows, first, second, metrics=COMPARE_METRICS):
-    """Rows of per-task means and medians of two sets of tasks, with FIRST / SECOND beside them."""
-    rows = []
-    for label, key, fmt in metrics:
-        sa, sb = describe(column(first_rows, key)), describe(column(second_rows, key))
-        rows.append([label, fmt(sa["mean"]), fmt(sb["mean"]), f_ratio(ratio(sa["mean"], sb["mean"])),
-                     fmt(sa["median"]), fmt(sb["median"]), f_ratio(ratio(sa["median"], sb["median"])),
-                     f"{first} {sa['n']} / {second} {sb['n']}"])
-    return md_table(["Measure", f"{first} mean", f"{second} mean", f"{first}/{second} means",
-                     f"{first} median", f"{second} median", f"{first}/{second} medians", "n"], rows)
-
-
-def comparison_section(report):
-    nA, nB = report.n[GROUP_A], report.n[GROUP_B]
-    out = ["## Comparison: A / B", "",
-           "Ratio of group A's figure to group B's, per task, over tasks in state `done`. "
-           "\"n\" is the number of tasks behind each side.", ""]
-    out += ratio_table(report.cmp[GROUP_A], report.cmp[GROUP_B], "A", "B")
-    out += ["", f"Group A n = {nA}; group B n = {nB}.", ""]
-    return out
-
-
-def subagent_section(report):
-    sa, sb = report.subs[GROUP_A], report.subs[GROUP_B]
-    out = ["## Sub-agent sessions", "",
-           "One row per sub-agent session (not per task) of the tasks in the comparison: "
-           f"A has {len(sa)}, B has {len(sb)}. Durations are the session record's `updated` minus `created`.", ""]
-    head = ["Measure", "Statistic", f"A (sessions={len(sa)})", f"B (sessions={len(sb)})"]
-    rows = []
-    rows += sub_stat_lines(report, "Total tokens", "total_tokens", f_tokens)
-    rows += sub_stat_lines(report, "Billed cost", "cost", f_usd)
-    rows += sub_stat_lines(report, "List cost", "list_cost", f_usd)
-    rows += sub_stat_lines(report, "Duration", "duration_s", f_dur)
-    rows += sub_stat_lines(report, "Compactions", "compactions", f_count, names=("mean", "median"))
-    out += md_table(head, rows, ["l", "l", "r", "r"])
-    out += ["", "What those sessions are:", ""]
-    comp = {g: report.cmp[g] for g in (GROUP_A, GROUP_B)}
-    rows = []
-    for label, key in (("Sub-agent sessions", "num_subagents"),
-                       ("of which seed sessions", "num_seed_sessions"),
-                       ("of which named by a plan step", "num_plan_step_workers")):
-        rows.append([label, f"{sum(r[key] for r in comp[GROUP_A]):,}", f"{sum(r[key] for r in comp[GROUP_B]):,}"])
-    share = {}
-    for g in (GROUP_A, GROUP_B):
-        total = math.fsum(column(comp[g], "list_cost"))
-        share[g] = ratio(math.fsum(column(comp[g], "sub_list_cost")), total)
-    rows.append(["Sub-agents' share of the group's list cost", f_pct(share[GROUP_A]), f_pct(share[GROUP_B])])
-    out += md_table(["", f"A (tasks={report.n[GROUP_A]})", f"B (tasks={report.n[GROUP_B]})"], rows)
-    out += ["", "The other sub-agent sessions are workers started without a plan step (`spawn_agent`), "
-            "merge-queue conflict resolvers, and anything else of kind `subagent` or `fork`; the data do not "
-            "mark which is which.", ""]
-    return out
-
-
-def buggy_section(report):
-    members = report.by_group(EXCLUDED_BUGGY)
-    done = [r for r in members if r["state"] == TERMINAL_STATE]
-    out = ["## Sanity check: old buggy supervisor mode (excluded)", "",
-           "Supervisor flag on, top-level session created before "
-           f"{SUPERVISOR_FIX_ISO}. Left out of A and B; summarised here as a check on the known cache incident.", ""]
-    rows = []
-    for label, rs in (("All tasks", members), ("State `done`", done),
-                      ("Not done (in flight)", [r for r in members if r["state"] != TERMINAL_STATE])):
-        rows.append([label, len(rs), f_usd(math.fsum(column(rs, "cost"))), f_usd(math.fsum(column(rs, "list_cost"))),
-                     f_tokens(sum(column(rs, "total_tokens"))), f"{sum(column(rs, 'num_subagents')):,}"])
-    out += md_table(["Tasks", "n", "Total billed cost", "Total list cost", "Total tokens", "Sub-agent sessions"], rows)
-    late = sum(1 for r in members if (parse_ts(r["task_started_utc"]) or EPOCH_MIN) >= SUPERVISOR_FIX)
-    out += ["", f"Of these {len(members)} tasks, {late} started at or after the fix although their session was "
-            "created before it; the rule puts them here, and part of their work ran after the fix.",
-            "", "Per task, tasks in state `done`, beside A and B:", ""]
-    cols = [(EXCLUDED_BUGGY, done), (GROUP_A, report.cmp[GROUP_A]), (GROUP_B, report.cmp[GROUP_B])]
-    head = ["Per task", "Statistic"] + [f"{'Excluded (buggy)' if g == EXCLUDED_BUGGY else g} (n={len(rs)})"
-                                         for g, rs in cols]
-    rows = []
-    for label, key, fmt in (("List cost", "list_cost", f_usd), ("Total tokens", "total_tokens", f_tokens),
-                            ("Cache-read tokens", "cache_read_tokens", f_tokens),
-                            ("Cache-write tokens", "cache_write_tokens", f_tokens),
-                            ("Sub-agents", "num_subagents", f_count),
-                            ("Duration, created to finished", "duration_created_to_finished_s", f_dur)):
-        for i, name in enumerate(("mean", "median")):
-            rows.append([label if i == 0 else "", name]
-                        + [cell(describe(column(rs, key)), name, fmt, len(rs)) for _, rs in cols])
-    out += md_table(head, rows, ["l", "l", "r", "r", "r"])
-    out += ["", "Excluded group against group B, per task, tasks in state `done`:", ""]
-    out += ratio_table(done, report.cmp[GROUP_B], "Excluded", "B", COMPARE_METRICS + (
-        ("Cache-read tokens", "cache_read_tokens", f_tokens), ("Cache-write tokens", "cache_write_tokens", f_tokens)))
-    out.append("")
-    return out
-
-
-def set_aside_section(report):
-    out = ["## Set aside", ""]
-    rows = []
-    for g in (PLAN_MODE, UNRESOLVED):
-        members = report.by_group(g)
-        done = [r for r in members if r["state"] == TERMINAL_STATE]
-        rows.append([GROUP_TITLES[g], len(members), len(done), f_usd(math.fsum(column(members, "cost"))),
-                     f_usd(math.fsum(column(members, "list_cost")))])
-    out += md_table(["Group", "Tasks", "State `done`", "Total billed cost", "Total list cost"], rows)
-    plan_members = report.by_group(PLAN_MODE)
-    overlap = sum(1 for r in plan_members if r["supervisor_flag"] == "on")
-    out += ["", f"Plan mode tasks whose supervisor flag is also on: {overlap} of {len(plan_members)} (they are "
-            "counted as Plan mode only).", ""]
-    unresolved = report.by_group(UNRESOLVED)
-    before = sum(1 for r in unresolved if (parse_ts(r["task_created_utc"]) or EPOCH_MIN) < SUPERVISOR_INTRODUCED)
-    out += [f"Tasks with no session record: {len(unresolved)}, of which {before} were created before supervisor mode "
-            f"existed (group B by date alone) and {len(unresolved) - before} later. Their sub-agents cannot be "
-            "found, so their totals are not known to be complete and they are in neither group.", ""]
-    return out
-
-
-def in_flight_section(report):
-    out = ["## Tasks still in flight (left out of the comparison)", ""]
-    states = sorted({r["state"] or "(no state)" for r in report.task_rows if r["state"] != TERMINAL_STATE})
-    rows = []
-    for g in (GROUP_A, GROUP_B):
-        members = [r for r in report.by_group(g) if r["state"] != TERMINAL_STATE]
-        counts = Counter(r["state"] or "(no state)" for r in members)
-        rows.append([GROUP_TITLES[g], len(members)] + [counts[s] for s in states])
-    out += md_table(["Group", "Not done"] + states, rows) if states else ["No task is in flight."]
-    out += ["", "These tasks reached no terminal state in the data, so their totals are not complete.", ""]
-    return out
-
-
-def secondary_section(report):
-    out = ["## Secondary checks", "", "Not part of the comparison above; they show how much its choices matter.", ""]
-    gs = (GROUP_A, GROUP_B)
-
-    out += ["### Outcome of the tasks in the comparison", ""]
-    outcomes = sorted({r["outcome"] or "(none)" for g in gs for r in report.cmp[g]})
-    rows = []
-    for o in outcomes:
-        rows.append([f"`{o}`"] + [sum(1 for r in report.cmp[g] if (r["outcome"] or "(none)") == o) for g in gs])
-    out += md_table(["Outcome", f"A (n={report.n[GROUP_A]})", f"B (n={report.n[GROUP_B]})"], rows) if rows else \
-        ["No task in the comparison."]
-    reopened = {g: sum(1 for r in report.cmp[g] if r["reopened"]) for g in gs}
-    out += ["", f"Tasks that were reopened after finishing: A {reopened[GROUP_A]}, B {reopened[GROUP_B]}.", ""]
-
-    out += ["### Counting tasks that await review as finished", ""]
-    settled = {g: [r for r in report.task_rows if r["group"] == g and r["state"] in SETTLED_STATES] for g in gs}
-    head = ["Measure", "Statistic", f"A (n={len(settled[GROUP_A])})", f"B (n={len(settled[GROUP_B])})"]
-    rows = []
-    for label, key, fmt in (("List cost", "list_cost", f_usd), ("Total tokens", "total_tokens", f_tokens),
-                            ("Duration, created to finished", "duration_created_to_finished_s", f_dur)):
-        for i, name in enumerate(("mean", "median")):
-            rows.append([label if i == 0 else "", name]
-                        + [cell(describe(column(settled[g], key)), name, fmt, len(settled[g])) for g in gs])
-    out += md_table(head, rows, ["l", "l", "r", "r"])
-    out += ["", "Tasks in state `done` or `review`. A task in review may still be sent back for more work.", ""]
-
-    out += ["### Billing mode of the usage rows in the comparison", ""]
-    rows = []
-    for label, key in (("api", "rows_api"), ("subscription", "rows_subscription"), ("extra-usage", "rows_extra_usage"),
-                       ("other value", "rows_billing_other"), ("not recorded", "rows_billing_blank")):
-        cells = []
-        for g in gs:
-            total = sum(column(report.cmp[g], "usage_rows"))
-            n = sum(column(report.cmp[g], key))
-            cells.append(f"{n:,}" + (f" ({f_pct(n / total)})" if total else ""))
-        rows.append([label] + cells)
-    rows.append(["all usage rows"] + [f"{sum(column(report.cmp[g], 'usage_rows')):,}" for g in gs])
-    rows.append(["rows without a list cost (counted at their cost)"]
-                + [f"{sum(column(report.cmp[g], 'rows_list_cost_blank')):,}" for g in gs])
-    rows.append(["rows with tokens but priced at $0 (no price known for the model)"]
-                + [f"{sum(column(report.cmp[g], 'rows_priced_at_zero')):,} rows, "
-                   f"{sum(column(report.cmp[g], 'tokens_priced_at_zero')):,} tokens" for g in gs])
-    out += md_table(["Rows", f"A (n={report.n[GROUP_A]})", f"B (n={report.n[GROUP_B]})"], rows)
-    out += ["", "Billed cost is 0 for calls paid under a subscription plan; list cost is the like-for-like measure. "
-            "A model the harness has no price for is recorded at $0 whatever the tokens, which understates the "
-            "dollar figures of whatever used it.", ""]
-
-    out += ["### Usage of `btw` and `internal` sessions under the tasks (not in the task totals)", ""]
-    rows = []
-    for g in gs:
-        rs = report.cmp[g]
-        other = math.fsum(column(rs, "other_list_cost"))
-        main = math.fsum(column(rs, "list_cost"))
-        rows.append([f"{g} (n={len(rs)})", f"{sum(column(rs, 'num_other_descendants')):,}",
-                     f"{sum(column(rs, 'other_usage_rows')):,}", f_usd(other), f_usd(main), f_pct(ratio(other, main))])
-    out += md_table(["Group", "btw/internal sessions", "Usage rows", "Their list cost", "Tasks' list cost",
-                     "Share of the tasks' list cost"], rows)
-    out += ["", "Only the newest internal sessions are kept by the harness, so this is a lower bound.", ""]
-
-    out += ["### Where all usage went", ""]
-    rows = []
-    total_rows = total_list = 0
-    for key, (label, agg) in report.attribution.items():
-        rows.append([label, f"{agg.rows:,}", f_tokens(agg.tokens), f_usd(agg.cost), f_usd(agg.list_cost)])
-        total_rows += agg.rows
-        total_list += agg.list_cost
-    rows.append(["**all usage rows**", f"**{total_rows:,}**", "", "", f"**{f_usd(total_list)}**"])
-    out += md_table(["Usage rows belonging to", "Rows", "Tokens", "Billed cost", "List cost"], rows)
-    out.append("")
-
-    out += ["### When the tasks in the comparison were created (UTC)", ""]
-    rows = []
-    for g in gs:
-        created = [parse_ts(r["task_created_utc"]) for r in report.cmp[g]]
-        created = [c for c in created if c is not None]
-        rows.append([f"{g} (n={report.n[g]})", f_day(min(created) if created else None),
-                     f_day(max(created) if created else None)])
-    out += md_table(["Group", "First created", "Last created"], rows)
-    out.append("")
-    return out
-
-
-def quality_section(report):
-    q = report.quality
-    out = ["## Data-quality notes", ""]
-    notes = []
-
-    def add(count, label, why):
-        if count:
-            notes.append(f"- {label}: {count:,}. {why}")
-
-    add(q["usage_rows_list_cost_blank"], "Usage rows without a list cost",
-        "They count at their cost, as the harness does (rows written before the column existed).")
-    add(q["usage_rows_priced_at_zero"], "Usage rows with tokens but a list cost of 0",
-        "The harness records 0 for a model it has no price for, so the dollar figures understate that usage.")
-    add(q["usage_blank_token_fields"], "Blank token fields in usage rows", "Counted as 0.")
-    add(q["usage_blank_cost_fields"], "Blank cost fields in usage rows", "Counted as 0.")
-    add(q["duplicate_session_ids"], "Session ids that appear more than once in `sessions.csv`", "The last row wins.")
-    add(q["duplicate_task_ids"], "Task ids that appear more than once in `tasks.csv`", "The first row wins.")
-    add(q["task_setting_differs_from_session_flag"],
-        "Tasks whose own `supervisor` setting differs from their session's flag", "The session's flag is used.")
-    add(q["supervisor_on_before_it_existed"], "Tasks with the supervisor flag on although their session predates "
-        "supervisor mode", "They are group B by the rule.")
-    add(q["plan_flag_before_plan_mode_existed"], "Tasks with the Plan-mode flag although they predate Plan mode",
-        "They are set aside as Plan mode.")
-    add(q["supervisor_judge_still_pending"], "Tasks whose session is still marked as awaiting the supervisor judge",
-        "Their flag is the default, not a judged value.")
-    add(q["done_tasks_without_finished_time"], "Tasks in state `done` with no `finished` time",
-        "They are out of the duration figures only.")
-    add(q["tasks_finished_before_created"], "Tasks with a `finished` time earlier than `created`",
-        "They are out of the duration figures only.")
-    add(q["adopted_tasks"], "Tasks adopted from a sub-agent session", "Their top-level session has a parent.")
-    add(q["tasks_sharing_a_top_session"], "Tasks that share their top-level session with another task",
-        "Their usage is counted for each.")
-    add(q["tasks_with_shared_sessions"], "Tasks with a session that another task's totals also include",
-        "An adopted task's session is also a sub-agent of the task that started it, so its usage is in both.")
-    add(q["subagent_sessions_outside_any_task"], "Sub-agent or fork sessions that belong to no task",
-        "Side conversations outside the task board, or sessions whose parent was deleted.")
-    cmp_rows = report.cmp[GROUP_A] + report.cmp[GROUP_B]
-    add(sum(1 for r in cmp_rows if r["usage_rows"] == 0), "Tasks in the comparison with no usage rows at all",
-        "Kept; their cost is 0.")
-    if not q.get("usage_has_list_cost_column"):
-        notes.append("- `usage_rows.csv` has no `list_cost` column: list cost equals billed cost throughout.")
-    if not q.get("usage_has_billing_column"):
-        notes.append("- `usage_rows.csv` has no `billing` column: the billing breakdown counts every row as not recorded.")
-    if not q.get("sessions_have_compactions"):
-        notes.append("- `sessions.csv` has no `compactions` column: compaction figures are not available.")
-    if not q.get("plan_steps_file"):
-        notes.append("- `plan_steps.csv` was not found: sub-agents named by a plan step are not counted.")
-    sessions_info = report.manifest.get("sessions")
-    unparseable = sessions_info.get("unparseable") if isinstance(sessions_info, dict) else None
-    if isinstance(unparseable, list) and unparseable:
-        notes.append(f"- Session record files the extraction could not parse, and which are absent: {len(unparseable)}.")
-    out += notes if notes else ["No data-quality issue was found by these checks."]
-    out.append("")
-    return out
+    text = "\n".join(out).rstrip("\n") + "\n"
+    for pattern in PRIVATE_PATTERNS:
+        if pattern.search(text):
+            raise AssertionError(f"the report would contain private-looking text: {pattern.pattern!r}")
+    return text
 
 
 # --------------------------------------------------------------------------
-# Driver
+# Running
 
-def load_and_analyse(in_dir, now):
+def build(in_dir):
+    """Read the CSVs of IN_DIR and compute everything.  Return a Context."""
     quality = Counter()
-    usage = load_usage(in_dir / "usage_rows.csv", quality)
-    sessions = load_sessions(in_dir / "sessions.csv", quality)
-    tasks = load_tasks(in_dir / "tasks.csv", quality)
-    plan_workers = load_plan_workers(in_dir / "plan_steps.csv", quality)
-    manifest = load_manifest(in_dir / "manifest.json")
-    quality["sessions"] = len(sessions)
-    quality["tasks"] = len(tasks)
-    children = child_index(sessions)
-    task_rows, sub_rows, attribution = analyse(tasks, sessions, children, usage, plan_workers, quality)
-    return Report(task_rows, sub_rows, attribution, quality, manifest, now)
-
-
-def parse_args(argv):
-    ap = argparse.ArgumentParser(
-        description=__doc__.split("\n\n")[0],
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="See the module docstring for the classification rule.")
-    ap.add_argument("--in-dir", default=str(DEFAULT_IN_DIR),
-                    help="directory with the extraction's CSVs (default %(default)s)")
-    ap.add_argument("--csv-out-dir", default=None,
-                    help="where classified_tasks.csv and subagents.csv go (default: --in-dir)")
-    ap.add_argument("--out", default=str(DEFAULT_OUT),
-                    help="the Markdown report to write (default %(default)s)")
-    ap.add_argument("--methodology-only", action="store_true",
-                    help="write the report's method and a notice that it holds no results; read no data")
-    ap.add_argument("--force", action="store_true",
-                    help="let --methodology-only replace a report that holds results")
-    ap.add_argument("--quiet", action="store_true")
-    ap.add_argument("--self-test", action="store_true",
-                    help="check the arithmetic on a small synthetic world with known answers")
-    return ap.parse_args(argv)
+    task_input, _ = read_table(in_dir / "tasks.csv", TASK_REQUIRED, "tasks.csv")
+    session_input, _ = read_table(in_dir / "sessions.csv", SESSION_REQUIRED, "sessions.csv")
+    sessions = load_sessions(session_input, quality)
+    tasks = load_tasks(task_input)
+    task_rows, sub_rows = analyse(tasks, sessions, quality)
+    result = compare_groups(task_rows)
+    add_session_stats(result, sub_rows)
+    return Context(task_rows, sub_rows, sessions, result, quality, len(task_input), len(session_input))
 
 
 def run(args):
-    out = Path(args.out).expanduser()
-    if args.methodology_only:
-        if out.exists() and not args.force:
-            existing = out.read_text(encoding="utf-8", errors="replace")
-            if PLACEHOLDER_MARK not in existing:
-                print(f"error: {out} holds results; --methodology-only would replace them (use --force)",
-                      file=sys.stderr)
-                return 2
-        write_text(out, placeholder_report())
-        if not args.quiet:
-            print(f"wrote {out} (method only, no results)")
-        return 0
-
-    in_dir = Path(args.in_dir).expanduser()
-    csv_dir = Path(args.csv_out_dir).expanduser() if args.csv_out_dir else in_dir
-    try:
-        report = load_and_analyse(in_dir, dt.datetime.now(UTC))
-    except InputError as err:
-        print(f"error: {err}", file=sys.stderr)
-        print("run scripts/analysis/extract_usage_data.py first (it writes usage_rows.csv, sessions.csv, "
-              "tasks.csv and plan_steps.csv)", file=sys.stderr)
-        return 2
-    write_csv(csv_dir / "classified_tasks.csv", TASK_OUT_COLUMNS, report.task_rows)
-    write_csv(csv_dir / "subagents.csv", SUB_OUT_COLUMNS, report.sub_rows)
-    write_text(out, render_report(report))
-    if not args.quiet:
-        counts = Counter(r["group"] for r in report.task_rows)
-        print(f"{len(report.task_rows)} tasks: " + ", ".join(f"{g} {counts[g]}" for g in GROUPS))
-        print(f"in the comparison: A {report.n[GROUP_A]}, B {report.n[GROUP_B]}")
-        print(f"wrote {csv_dir / 'classified_tasks.csv'}, {csv_dir / 'subagents.csv'}")
-        print(f"wrote {out}")
+    ctx = build(args.in_dir)
+    csv_dir = args.csv_out_dir or args.in_dir
+    write_csv(csv_dir / "classified_tasks.csv", TASK_OUT_COLUMNS, ctx.task_rows)
+    write_csv(csv_dir / "subagents.csv", SUB_OUT_COLUMNS, ctx.sub_rows)
+    write_text(args.out, render_report(ctx))
+    print(f"classified_tasks.csv  {len(ctx.task_rows):5d} rows  {csv_dir / 'classified_tasks.csv'}")
+    print(f"subagents.csv         {len(ctx.sub_rows):5d} rows  {csv_dir / 'subagents.csv'}")
+    print(f"report                {args.out}")
+    for g in GROUPS:
+        i = ctx.groups[g]
+        print(f"{GROUP_TITLES[g]:42s} tasks {i['tasks']:4d}  done {i['n_done']:4d}  "
+              f"usage complete {i['n_complete']:4d}  in flight {i['in_flight']:3d}")
     return 0
 
 
-# --------------------------------------------------------------------------
-# Self-test: a small synthetic world whose answers were worked out by hand.
-# Every id and number is made up.
-
-def _utc(*parts):
-    return dt.datetime(*parts, tzinfo=UTC).timestamp()
-
-
-def dump_world(root, sessions, tasks, usage, plan_steps=()):
-    """Write the four input CSVs from lists of row dicts."""
-    def dump(name, columns, rows):
-        with open(root / name, "w", newline="", encoding="utf-8") as fh:
-            writer = csv.writer(fh, lineterminator="\n")
-            writer.writerow(columns)
-            for row in rows:
-                writer.writerow([row.get(c, "") for c in columns])
-
-    dump("sessions.csv", ("session_id", "kind", "parent_id", "supervisor", "seed", "created", "updated", "status",
-                          "has_nodes_file", "compactions"), sessions)
-    dump("tasks.csv", ("task_id", "session_id", "state", "outcome", "created", "started", "finished",
-                       "supervisor_setting", "plan", "adopted", "session_found"), tasks)
-    dump("usage_rows.csv", ("id", "ts", "session", "input", "output", "cache_read", "cache_write", "cost",
-                            "list_cost", "billing"), usage)
-    dump("plan_steps.csv", ("session_id", "step_id", "worker_session_id", "previous_session_id"), plan_steps)
-
-
-def build_world(root):
-    """Write a synthetic extraction under ROOT and return the ids used."""
-    intro = _utc(2026, 10, 8, 19, 24, 17)    # 2026-10-08T15:24:17-04:00
-    fix = _utc(2026, 10, 12, 3, 55, 53)      # 2026-10-11T23:55:53-04:00
-    root.mkdir(parents=True, exist_ok=True)
-    sessions, tasks, usage = [], [], []
-
-    def sess(sid, kind="main", parent="", flag="", created=0.0, updated=None, seed=False, compactions=0,
-             nodes=True):
-        sessions.append({"session_id": sid, "kind": kind, "parent_id": parent, "supervisor": flag,
-                         "seed": "true" if seed else "", "created": created,
-                         "updated": "" if updated is None else updated, "status": "idle",
-                         "has_nodes_file": "true" if nodes else "false",
-                         "compactions": "" if compactions is None else compactions})
-
-    def task(tid, sid, state, created, finished=None, started=None, outcome="merged", setting="", plan="",
-             found=True):
-        tasks.append({"task_id": tid, "session_id": sid, "state": state, "outcome": outcome, "created": created,
-                      "started": "" if started is None else started, "finished": "" if finished is None else finished,
-                      "supervisor_setting": setting, "plan": plan, "session_found": "true" if found else "false"})
-
-    def use(sid, ts, i, o, cr, cw, cost, list_cost, billing):
-        usage.append({"id": len(usage) + 1, "ts": ts, "session": sid, "input": i, "output": o, "cache_read": cr,
-                      "cache_write": cw, "cost": cost, "list_cost": list_cost, "billing": billing})
-
-    # --- Group A, tA1: created exactly at the fix.  Five sub-agents: a worker, a fork, a seed, the seed's
-    # fork worker, and a worker's own worker; plus a btw and an internal session that are not sub-agents.
-    sess("sA1", flag="true", created=fix, updated=fix + 2000, compactions=2)
-    sess("sA1w1", "subagent", "sA1", created=fix + 10, updated=fix + 110, compactions=1)
-    sess("sA1f1", "fork", "sA1", created=fix + 20, updated=fix + 220, compactions=0)
-    sess("sA1seed", "subagent", "sA1", created=fix + 30, updated=fix + 330, seed=True, compactions=None)
-    sess("sA1w2", "subagent", "sA1seed", created=fix + 40, updated=fix + 440, compactions=0)
-    sess("sA1gc", "subagent", "sA1w1", created=fix + 50, updated=None, compactions=None, nodes=False)
-    sess("sA1btw", "btw", "sA1", created=fix + 60, updated=fix + 61)
-    sess("sA1int", "internal", "sA1", created=fix + 70, updated=fix + 71)
-    task("tA1", "sA1", "done", fix - 1, finished=fix + 1800, started=fix + 10, setting="true")
-    use("sA1", fix + 5, 100, 10, 1000, 50, 1.00, 1.50, "api")
-    use("sA1", fix + 1700, 200, 20, 2000, 0, 2.00, 2.50, "api")
-    use("sA1w1", fix + 100, 10, 1, 100, 0, 0.0, 0.40, "subscription")
-    use("sA1f1", fix + 200, 20, 2, 200, 0, 0.5, "", "")
-    use("sA1seed", fix + 300, 5, 0, 500, 0, 0.1, 0.1, "api")
-    use("sA1w2", fix + 400, 1, 1, 1, 1, 0.2, 0.2, "extra-usage")
-    use("sA1btw", fix + 500, 1000, 0, 0, 0, 9.0, 9.0, "api")
-    use("sA1int", fix + 600, 7, 0, 0, 0, 0.25, 0.25, "api")
-    # --- Group A, tA2: no sub-agents at all (kept).
-    sess("sA2", flag="true", created=fix + 3600, updated=fix + 4300, compactions=0)
-    task("tA2", "sA2", "done", fix + 3600, finished=fix + 4200, started=fix + 3601)
-    use("sA2", fix + 3700, 50, 5, 500, 5, 0.5, 0.6, "api")
-    # --- Group A but not done: in flight (active) and awaiting review.
-    sess("sAin", flag="true", created=fix + 5000, updated=fix + 5100)
-    task("tAin", "sAin", "active", fix + 5000, started=fix + 5001, outcome="")
-    use("sAin", fix + 5050, 1, 1, 1, 1, 0.3, 0.3, "api")
-    sess("sArev", flag="true", created=fix + 5500, updated=fix + 6000)
-    task("tArev", "sArev", "review", fix + 5500, finished=fix + 6000, started=fix + 5501)
-    # --- Old buggy supervisor mode: created one second before the fix.
-    sess("sX1", flag="true", created=fix - 1, updated=fix + 900)
-    task("tX1", "sX1", "done", fix - 1, finished=fix + 899)
-    use("sX1", fix - 0.5, 100, 0, 0, 0, 7.0, 7.0, "api")
-    sess("sX2", flag="true", created=fix - 100, updated=fix - 50)
-    task("tX2", "sX2", "active", fix - 100, started=fix - 99, outcome="")
-    use("sX2", fix - 80, 10, 0, 0, 0, 1.0, 1.0, "api")
-    # --- Plan mode, including one that is also supervised and one that predates Plan mode.
-    sess("sP1", flag="true", created=fix + 100, updated=fix + 200)
-    task("tP1", "sP1", "done", fix + 100, finished=fix + 200, plan="true")
-    sess("sP2", flag="", created=intro - 86400, updated=intro - 80000)
-    task("tP2", "sP2", "done", intro - 86400, finished=intro - 80000, plan="true")
-    # --- Session record missing: set aside, whatever its date.
-    task("tU1", "sMissing", "done", fix + 200, finished=fix + 300, found=False)
-    task("tU2", "sMissing2", "done", intro - 5, finished=intro + 5, found=False)
-    # --- Group B.
-    sess("sB1", flag="", created=intro - 86400, updated=intro - 86400 + 3600, compactions=3)
-    sess("sB1w", "subagent", "sB1", created=intro - 86400 + 10, updated=intro - 86400 + 60, compactions=0)
-    task("tB1", "sB1", "done", intro - 86400, finished=intro - 86400 + 3600, started=intro - 86400 + 1)
-    use("sB1", intro - 86000, 1000, 100, 10000, 500, 5.0, "", "")
-    use("sB1w", intro - 85990, 10, 0, 0, 0, 0.01, "", "")
-    sess("sB2", flag="", created=intro + 86400, updated=intro + 86400 + 1100, compactions=0)
-    task("tB2", "sB2", "done", intro + 86400, finished=intro + 86400 + 1200, outcome="end-turn")
-    use("sB2", intro + 86500, 200, 20, 2000, 100, 1.0, 1.0, "api")
-    sess("sB3", flag="false", created=fix + 7200, updated=fix + 7200 + 1900, compactions=1)
-    task("tB3", "sB3", "done", fix + 7200, finished=fix + 7200 + 1800, setting="false")
-    use("sB3", fix + 7300, 300, 30, 3000, 0, 0.0, 2.0, "subscription")
-    sess("sB4", flag="", created=intro, updated=intro + 650, compactions=0)
-    task("tB4", "sB4", "done", intro, finished=intro + 600)
-    use("sB4", intro + 10, 100, 0, 0, 0, 0.3, 0.3, "api")
-    sess("sB5", flag="true", created=intro - 3600, updated=intro - 3250, compactions=0)   # anomaly: on before it existed
-    task("tB5", "sB5", "done", intro - 3600, finished=intro - 3300)
-    use("sB5", intro - 3500, 50, 0, 0, 0, 0.1, 0.1, "api")
-    sess("sB6", flag="", created=intro - 7200, updated=intro - 7000, nodes=False)
-    task("tB6", "sB6", "done", intro - 7200)           # no finished time, no usage rows
-    sess("sBin", flag="", created=fix + 8000, updated=fix + 8000)
-    task("tBin", "sBin", "pending", fix + 8000, outcome="")
-    sess("sBref", flag="", created=fix + 8100, updated=fix + 8100)
-    task("tBref", "sBref", "refining", fix + 8100, outcome="")
-    # --- Usage that belongs to no task.
-    sess("sFree", flag="", created=fix + 9000, updated=fix + 9100)
-    use("sFree", fix + 9050, 1, 1, 1, 1, 2.0, 2.0, "api")
-    use("sGone", fix + 9060, 1, 0, 0, 0, 0.4, 0.4, "api")
-
-    dump_world(root, sessions, tasks, usage,
-               [{"session_id": "sA1", "step_id": "s1", "worker_session_id": "sA1w1"},
-                {"session_id": "sA1", "step_id": "s2", "worker_session_id": "sA1w2"}])
-    return {"session_ids": [s["session_id"] for s in sessions] + ["sMissing", "sMissing2", "sGone"],
-            "task_ids": [t["task_id"] for t in tasks], "intro": intro, "fix": fix}
-
-
-def self_test():
-    failures = []
-
-    def check(name, got, want):
-        if got != want:
-            failures.append(f"{name}: got {got!r}, want {want!r}")
-
-    def close(name, got, want, tol=1e-9):
-        if got is None or want is None:
-            check(name, got, want)
-        elif abs(got - want) > tol * max(1.0, abs(want)):
-            failures.append(f"{name}: got {got!r}, want {want!r}")
-
-    # Cutoffs: the offset is converted, not dropped.
-    check("intro in UTC", SUPERVISOR_INTRODUCED, dt.datetime(2026, 10, 8, 19, 24, 17, tzinfo=UTC))
-    check("plan mode in UTC", PLAN_MODE_INTRODUCED, dt.datetime(2026, 10, 12, 1, 48, 45, tzinfo=UTC))
-    check("fix in UTC", SUPERVISOR_FIX, dt.datetime(2026, 10, 12, 3, 55, 53, tzinfo=UTC))
-    check("parse_ts epoch", parse_ts("86400"), dt.datetime(1970, 1, 2, tzinfo=UTC))
-    check("parse_ts offset", parse_ts("2026-10-11T23:55:53-04:00"), SUPERVISOR_FIX)
-    check("parse_ts Z", parse_ts("2026-10-12T03:55:53Z"), SUPERVISOR_FIX)
-    check("parse_ts naive is UTC", parse_ts("2026-10-12T03:55:53"), SUPERVISOR_FIX)
-    check("parse_ts junk", (parse_ts(""), parse_ts("nan"), parse_ts("inf"), parse_ts("soon"), parse_ts(None)),
-          (None, None, None, None, None))
-    check("seconds_between order", (seconds_between(SUPERVISOR_FIX, SUPERVISOR_INTRODUCED),
-                                    seconds_between(None, SUPERVISOR_FIX)), (None, None))
-    d = describe([4.0, 8.0])
-    check("describe n=2", (d["n"], d["mean"], d["median"], d["min"], d["max"], d["sum"]), (2, 6.0, 6.0, 4.0, 8.0, 12.0))
-    close("describe stdev", d["stdev"], math.sqrt(8))
-    check("describe n=1 has no stdev", describe([5])["stdev"], None)
-    check("describe empty", describe([None, None])["n"], 0)
-    check("ratio guards", (ratio(1, 0), ratio(None, 2), ratio(3, 2)), (None, None, 1.5))
-    check("duration format", (f_dur(3725), f_dur(None), f_dur(360000)), ("1:02:05", NA, "100:00:00"))
-
-    # The columns this script reads are ones the extraction writes.
-    extractor = Path(__file__).resolve().with_name("extract_usage_data.py")
-    if extractor.is_file():
-        keep, sys.dont_write_bytecode = sys.dont_write_bytecode, True   # leave no __pycache__ in the tree
-        try:
-            spec = importlib.util.spec_from_file_location("extract_usage_data_for_contract", extractor)
-            mod = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(mod)
-        finally:
-            sys.dont_write_bytecode = keep
-        for label, used, written in (
-                ("tasks", TASK_REQUIRED + TASK_OPTIONAL, mod.TASK_COLUMNS),
-                ("sessions", SESSION_REQUIRED + SESSION_OPTIONAL, mod.SESSION_COLUMNS),
-                ("usage", USAGE_REQUIRED + USAGE_OPTIONAL, mod.USAGE_COLUMNS),
-                ("plan steps", PLAN_STEP_COLUMNS_USED, mod.PLAN_STEP_COLUMNS)):
-            check(f"columns of {label} the extraction writes", sorted(set(used) - set(written)), [])
-
-    with tempfile.TemporaryDirectory(prefix="compare-selftest-") as tmp:
-        root = Path(tmp)
-        world = build_world(root / "in")
-        report = load_and_analyse(root / "in", dt.datetime(2026, 10, 13, 0, 0, 0, tzinfo=UTC))
-        rows = {r["task_id"]: r for r in report.task_rows}
-
-        check("task count", len(rows), 18)
-        check("groups", {t: r["group"] for t, r in rows.items()},
-              {"tA1": "A", "tA2": "A", "tAin": "A", "tArev": "A", "tX1": "excluded-buggy", "tX2": "excluded-buggy",
-               "tP1": "plan-mode", "tP2": "plan-mode", "tU1": "unresolved", "tU2": "unresolved",
-               "tB1": "B", "tB2": "B", "tB3": "B", "tB4": "B", "tB5": "B", "tB6": "B", "tBin": "B", "tBref": "B"})
-        check("in comparison", sorted(t for t, r in rows.items() if r["in_comparison"]),
-              ["tA1", "tA2", "tB1", "tB2", "tB3", "tB4", "tB5", "tB6"])
-        check("stages", {t: rows[t]["stage"] for t in ("tA1", "tAin", "tArev", "tBin", "tBref")},
-              {"tA1": "done", "tAin": "in-flight", "tArev": "review", "tBin": "in-flight", "tBref": "in-flight"})
-        check("flag sources", (rows["tA1"]["supervisor_flag"], rows["tB3"]["supervisor_flag"],
-                               rows["tB1"]["supervisor_flag"], rows["tB5"]["supervisor_flag"]),
-              ("on", "off", "absent", "on"))
-        check("anomaly counted", report.quality["supervisor_on_before_it_existed"], 1)
-        check("plan flag before plan mode counted", report.quality["plan_flag_before_plan_mode_existed"], 1)
-
-        a1 = rows["tA1"]
-        check("tA1 sub-agents", (a1["num_subagents"], a1["num_seed_sessions"], a1["num_subagents_excl_seeds"],
-                                 a1["num_plan_step_workers"], a1["num_other_descendants"]), (5, 1, 4, 2, 2))
-        check("tA1 tokens", (a1["input_tokens"], a1["output_tokens"], a1["cache_read_tokens"],
-                             a1["cache_write_tokens"], a1["total_tokens"]), (336, 34, 3801, 51, 4222))
-        close("tA1 cost", a1["cost"], 3.8)
-        close("tA1 list cost (a blank list cost counts at its cost)", a1["list_cost"], 5.2)
-        check("tA1 rows by billing", (a1["usage_rows"], a1["rows_api"], a1["rows_subscription"],
-                                      a1["rows_extra_usage"], a1["rows_billing_blank"], a1["rows_billing_other"],
-                                      a1["rows_list_cost_blank"]), (6, 3, 1, 1, 1, 0, 1))
-        check("tA1 top-level", (a1["top_total_tokens"], a1["top_usage_rows"], a1["top_duration_s"],
-                                a1["top_usage_span_s"], a1["top_compactions"]), (3380, 2, 2000.0, 1695.0, 2))
-        close("tA1 top cost", a1["top_cost"], 3.0)
-        close("tA1 top list cost", a1["top_list_cost"], 4.0)
-        check("tA1 sub-agents combined", (a1["sub_total_tokens"], a1["sub_usage_rows"], a1["sub_compactions_total"]),
-              (842, 4, 1))
-        close("tA1 sub cost", a1["sub_cost"], 0.8)
-        close("tA1 sub list cost", a1["sub_list_cost"], 1.2)
-        check("tA1 btw/internal kept apart", (a1["other_total_tokens"], a1["other_usage_rows"]), (1007, 2))
-        close("tA1 btw/internal list cost", a1["other_list_cost"], 9.25)
-        check("tA1 durations (session created at the cutoff, task created a second before)",
-              (a1["duration_created_to_finished_s"], a1["duration_started_to_finished_s"]), (1801.0, 1790.0))
-        check("tA2 has no sub-agents and is kept", (rows["tA2"]["num_subagents"], rows["tA2"]["in_comparison"],
-                                                    rows["tA2"]["total_tokens"]), (0, True, 560))
-        check("tB4 created at the introduction is B", rows["tB4"]["group_reason"],
-              "supervisor setting absent")
-        check("tB5 on before it existed is B", rows["tB5"]["group_reason"], "created before supervisor mode existed")
-        check("tB6 has no finished time or usage", (rows["tB6"]["duration_created_to_finished_s"],
-                                                      rows["tB6"]["usage_rows"], rows["tB6"]["in_comparison"]),
-              (None, 0, True))
-        check("task before the fix with the flag on", rows["tX1"]["group_reason"],
-              "supervisor on, created before the fix")
-        check("record missing wins over dates", (rows["tU1"]["descendants_resolved"], rows["tU2"]["group"]),
-              (False, "unresolved"))
-        check("a worker's worker is found", sorted(r["session_id"] for r in report.sub_rows if r["task_id"] == "tA1"),
-              ["sA1f1", "sA1gc", "sA1seed", "sA1w1", "sA1w2"])
-        check("sub-agent rows", len(report.sub_rows), 6)
-
-        # Group statistics, from the hand-worked numbers.
-        check("n", report.n, {"A": 2, "B": 6})
-        sa, sb = report.stat("A", "total_tokens"), report.stat("B", "total_tokens")
-        check("A tokens", (sa["mean"], sa["median"], sa["sum"], sa["min"], sa["max"]), (2391.0, 2391.0, 4782.0, 560, 4222))
-        close("A tokens stdev", sa["stdev"], abs(4222 - 560) / math.sqrt(2))
-        close("B tokens mean", sb["mean"], 17410 / 6)
-        check("B tokens median and sum", (sb["median"], sb["sum"]), (1210.0, 17410.0))
-        sa, sb = report.stat("A", "cost"), report.stat("B", "cost")
-        close("A cost sum", sa["sum"], 4.3)
-        close("A cost mean", sa["mean"], 2.15)
-        close("B cost sum", sb["sum"], 6.41)
-        close("B cost median", sb["median"], 0.2)
-        sa, sb = report.stat("A", "list_cost"), report.stat("B", "list_cost")
-        close("A list cost sum", sa["sum"], 5.8)
-        close("B list cost sum", sb["sum"], 8.41)
-        close("B list cost median", sb["median"], 0.65)
-        close("B list cost mean", sb["mean"], 8.41 / 6)
-        sa, sb = report.stat("A", "duration_created_to_finished_s"), report.stat("B", "duration_created_to_finished_s")
-        check("A duration", (sa["n"], sa["mean"]), (2, 1200.5))
-        check("B duration (tB6 has none)", (sb["n"], sb["mean"], sb["median"]), (5, 1500.0, 1200.0))
-        sa, sb = report.stat("A", "num_subagents"), report.stat("B", "num_subagents")
-        check("A sub-agents per task", (sa["mean"], sa["median"], sa["max"]), (2.5, 2.5, 5))
-        close("B sub-agents per task", sb["mean"], 1 / 6)
-        check("B sub-agents median", sb["median"], 0)
-        check("tasks with exactly 0 sub-agents", {g: sum(1 for r in report.cmp[g] if r["num_subagents"] == 0)
-                                                  for g in ("A", "B")}, {"A": 1, "B": 5})
-        sa = describe(column(report.subs["A"], "total_tokens"))
-        check("A sub-agent sessions tokens", (sa["n"], sa["mean"], sa["median"]), (5, 168.4, 111))
-        sa = describe(column(report.subs["A"], "list_cost"))
-        close("A sub-agent list cost mean", sa["mean"], 0.24)
-        close("A sub-agent list cost median", sa["median"], 0.2)
-        sa = describe(column(report.subs["A"], "duration_s"))
-        check("A sub-agent durations skip the one with no update time", (sa["n"], sa["mean"], sa["median"]),
-              (4, 250.0, 250.0))
-        sa = describe(column(report.subs["A"], "compactions"))
-        check("A sub-agent compactions skip the unscanned one", (sa["n"], sa["mean"], sa["median"]), (4, 0.25, 0))
-        sb = describe(column(report.subs["B"], "total_tokens"))
-        check("B sub-agent sessions", (sb["n"], sb["mean"]), (1, 10))
-        sa, sb = report.stat("A", "top_compactions"), report.stat("B", "top_compactions")
-        check("top-level compactions", (sa["mean"], sb["median"]), (1.0, 0))
-        close("B top-level compactions mean", sb["mean"], 4 / 6)
-
-        buggy = report.by_group("excluded-buggy")
-        close("buggy cost total", math.fsum(column(buggy, "cost")), 8.0)
-        close("buggy list cost total", math.fsum(column(buggy, "list_cost")), 8.0)
-        check("buggy counts", (len(buggy), sum(1 for r in buggy if r["state"] == "done")), (2, 1))
-        check("billing rows A", tuple(sum(column(report.cmp["A"], k)) for k in
-                                      ("rows_api", "rows_subscription", "rows_extra_usage", "rows_billing_blank",
-                                       "usage_rows", "rows_list_cost_blank")), (4, 1, 1, 1, 7, 1))
-        check("billing rows B", tuple(sum(column(report.cmp["B"], k)) for k in
-                                      ("rows_api", "rows_subscription", "rows_extra_usage", "rows_billing_blank",
-                                       "usage_rows", "rows_list_cost_blank")), (3, 1, 0, 2, 6, 2))
-        att = report.attribution
-        check("usage attribution rows", {k: v[1].rows for k, v in att.items()},
-              {"task": 16, "task-other": 2, "no-task": 1, "no-record": 1})
-        check("quality", (report.quality["usage_rows"], report.quality["usage_rows_list_cost_blank"],
-                          report.quality["subagent_sessions_outside_any_task"]), (20, 3, 0))
-
-        # CSV and report output.
-        outdir = root / "csv"
-        doc = root / "docs" / "report.md"
-        status = run(parse_args(["--in-dir", str(root / "in"), "--csv-out-dir", str(outdir), "--out", str(doc),
-                                 "--quiet"]))
-        check("run status", status, 0)
-        with open(outdir / "classified_tasks.csv", newline="", encoding="utf-8") as fh:
-            written = list(csv.DictReader(fh))
-        check("classified_tasks.csv rows and columns", (len(written), list(written[0].keys())),
-              (18, TASK_OUT_COLUMNS))
-        with open(outdir / "subagents.csv", newline="", encoding="utf-8") as fh:
-            subs_written = list(csv.DictReader(fh))
-        check("subagents.csv rows and columns", (len(subs_written), list(subs_written[0].keys())),
-              (6, SUB_OUT_COLUMNS))
-        check("csv values", {r["task_id"]: r["total_tokens"] for r in written if r["task_id"] in ("tA1", "tB6")},
-              {"tA1": "4222", "tB6": "0"})
-        text = doc.read_text(encoding="utf-8")
-        check("report marks itself generated", text.startswith(GENERATED_MARK), True)
-        for needle in ("fixed supervisor mode", "(n=2)", "(n=6)", "73f987b", "0803841", "7be8ce2", "b0a013d",
-                       "2026-10-12T03:55:53Z", "## Bottom line", "## Method", "indicative only",
-                       "is 2.5 hours before the newest usage row",          # fix + 9060 s, worked out by hand
-                       "mean A $2.90 (n=2) vs B $1.40 (n=6), A/B 2.07x",     # 5.8/2 over 8.41/6
-                       "median A $2.90 (n=2) vs B $0.650 (n=6), A/B 4.46x",
-                       "per task in state `done` (n=1), mean list cost $7.00",
-                       "| List cost | $7.00 | $1.40 | 4.99x | $7.00 | $0.650 | 10.77x | Excluded 1 / B 6 |"):
-            check(f"report mentions {needle!r}", needle in text, True)
-        leaked = [i for i in world["session_ids"] + world["task_ids"] if i in text]
-        check("no session or task id in the report", leaked, [])
-        check("no placeholder mark in a real report", PLACEHOLDER_MARK in text, False)
-
-        # A comparison with an empty side must not fail.
-        thin = root / "thin"
-        thin.mkdir()
-        keep_tasks = {"tB1", "tB2", "tX1", "tP1"}
-        for name, key in (("tasks.csv", "task_id"),):
-            with open(root / "in" / name, newline="", encoding="utf-8") as fh:
-                rdr = csv.DictReader(fh)
-                head, kept = rdr.fieldnames, [r for r in rdr if r[key] in keep_tasks]
-            with open(thin / name, "w", newline="", encoding="utf-8") as fh:
-                w = csv.DictWriter(fh, head, lineterminator="\n")
-                w.writeheader()
-                w.writerows(kept)
-        for name in ("sessions.csv", "usage_rows.csv", "plan_steps.csv"):
-            (thin / name).write_bytes((root / "in" / name).read_bytes())
-        thin_report = load_and_analyse(thin, dt.datetime(2026, 10, 13, tzinfo=UTC))
-        check("thin n", thin_report.n, {"A": 0, "B": 2})
-        thin_text = render_report(thin_report)
-        check("empty group A is said so", "No comparison is possible: group A has no task" in thin_text, True)
-
-        # Parent cycles must not hang, and a session two tasks both include must be flagged.
-        mini = root / "mini"
-        mini.mkdir()
-        t0 = world["fix"] + 100
-        mini_sessions = [
-            {"session_id": "m1", "kind": "main", "supervisor": "true", "created": t0, "updated": t0 + 10,
-             "parent_id": "m1x"},                                                   # the task's session has a parent that is its child
-            {"session_id": "m1x", "kind": "subagent", "parent_id": "m1", "created": t0 + 1, "updated": t0 + 5},
-            {"session_id": "m2", "kind": "main", "supervisor": "true", "created": t0 + 50, "updated": t0 + 90},
-            {"session_id": "m2a", "kind": "subagent", "parent_id": "m2", "created": t0 + 55, "updated": t0 + 80},
-            {"session_id": "m3", "kind": "subagent", "parent_id": "m2a", "created": t0 + 60, "updated": t0 + 70}]
-        mini_tasks = [
-            {"task_id": "mt1", "session_id": "m1", "state": "done", "created": t0, "finished": t0 + 10},
-            {"task_id": "mt2", "session_id": "m2", "state": "done", "created": t0 + 50, "finished": t0 + 90},
-            {"task_id": "mt3", "session_id": "m3", "state": "done", "created": t0 + 60, "finished": t0 + 70,
-             "adopted": "true"}]
-        mini_usage = [{"id": 1, "ts": t0 + 61, "session": "m3", "input": 7, "output": 0, "cache_read": 0,
-                       "cache_write": 0, "cost": 0.5, "list_cost": 0.5, "billing": "api"},
-                      {"id": 2, "ts": t0 + 2, "session": "m1", "input": 3, "output": 2, "cache_read": 0,
-                       "cache_write": 0, "cost": 0.0, "list_cost": 0.0, "billing": "api"},      # tokens, priced at 0
-                      {"id": 3, "ts": t0 + 3, "session": "m1", "input": 0, "output": 0, "cache_read": 0,
-                       "cache_write": 0, "cost": 0.0, "list_cost": 0.0, "billing": "api"}]      # no tokens: not counted
-        dump_world(mini, mini_sessions, mini_tasks, mini_usage)
-        mini_report = load_and_analyse(mini, dt.datetime(2026, 10, 13, tzinfo=UTC))
-        mrows = {r["task_id"]: r for r in mini_report.task_rows}
-        check("cycle: the only sub-agent of a task whose session is its own child's child", mrows["mt1"]["num_subagents"], 1)
-        check("adopted: m2's tree includes the adopted session and the adopted task is its own top",
-              (mrows["mt2"]["num_subagents"], mrows["mt2"]["total_tokens"], mrows["mt3"]["num_subagents"],
-               mrows["mt3"]["total_tokens"]), (2, 7, 0, 7))
-        check("rows with tokens but priced at 0", (mrows["mt1"]["rows_priced_at_zero"],
-                                                    mrows["mt1"]["tokens_priced_at_zero"], mrows["mt1"]["usage_rows"],
-                                                    mini_report.quality["usage_rows_priced_at_zero"]), (1, 5, 2, 1))
-        check("adopted: shared sessions flagged on both tasks",
-              (mrows["mt2"]["shared_sessions"], mrows["mt3"]["shared_sessions"],
-               mini_report.quality["tasks_with_shared_sessions"], mini_report.quality["adopted_tasks"]), (1, 1, 2, 1))
-
-        # Methodology-only: no data read, results not replaced without --force.
-        placeholder = root / "placeholder.md"
-        check("methodology-only status", run(parse_args(["--methodology-only", "--out", str(placeholder), "--quiet"])), 0)
-        ptext = placeholder.read_text(encoding="utf-8")
-        check("placeholder says it has no results", ("No results in this file yet" in ptext, PLACEHOLDER_MARK in ptext),
-              (True, True))
-        check("placeholder lists no figures", "## Results" in ptext or "## Bottom line" in ptext, False)
-        with contextlib.redirect_stderr(io.StringIO()) as err:
-            status = run(parse_args(["--methodology-only", "--out", str(doc), "--quiet"]))
-        check("results are not replaced by a placeholder", (status, "holds results" in err.getvalue(),
-                                                            "No results" in doc.read_text(encoding="utf-8")),
-              (2, True, False))
-        check("force replaces them", run(parse_args(["--methodology-only", "--force", "--out", str(doc),
-                                                      "--quiet"])), 0)
-
-        # Missing and malformed inputs are reported, not tracebacks.
-        empty = root / "empty"
-        empty.mkdir()
-        with contextlib.redirect_stderr(io.StringIO()) as err:
-            status = run(parse_args(["--in-dir", str(empty), "--out", str(root / "none.md"), "--quiet"]))
-        check("missing inputs", (status, "not found" in err.getvalue(), (root / "none.md").exists()),
-              (2, True, False))
-        bad = root / "bad"
-        bad.mkdir()
-        for name in ("sessions.csv", "tasks.csv", "plan_steps.csv"):
-            (bad / name).write_bytes((root / "in" / name).read_bytes())
-        (bad / "usage_rows.csv").write_text("id,session\n1,x\n", encoding="utf-8")
-        with contextlib.redirect_stderr(io.StringIO()) as err:
-            status = run(parse_args(["--in-dir", str(bad), "--out", str(root / "none.md"), "--quiet"]))
-        check("missing column", (status, "lacks the column(s)" in err.getvalue()), (2, True))
-
-    if failures:
-        print("self-test FAILED:", file=sys.stderr)
-        for line in failures:
-            print("  " + line, file=sys.stderr)
-        return 1
-    print("self-test ok")
-    return 0
+def parse_args(argv):
+    parser = argparse.ArgumentParser(
+        description="Compare fixed supervisor-mode tasks with single-session tasks.")
+    parser.add_argument("--in-dir", type=Path, default=DEFAULT_IN_DIR,
+                        help="directory with tasks.csv and sessions.csv (default: scripts/.dev/usage-analysis)")
+    parser.add_argument("--csv-out-dir", type=Path, default=None,
+                        help="where classified_tasks.csv and subagents.csv go (default: --in-dir)")
+    parser.add_argument("--out", type=Path, default=DEFAULT_OUT, help="the Markdown report to write")
+    parser.add_argument("--self-test", action="store_true",
+                        help="check the arithmetic on a small synthetic world and exit")
+    return parser.parse_args(argv)
 
 
 def main(argv=None):
     args = parse_args(argv)
     if args.self_test:
         return self_test()
-    return run(args)
+    try:
+        return run(args)
+    except InputError as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 2
+
+
+# --------------------------------------------------------------------------
+# Self-test: a small synthetic world whose answers were worked out by hand.
+
+def _load_extractor():
+    """Import extract_usage_data.py by path, leaving no bytecode cache in the repository."""
+    spec = importlib.util.spec_from_file_location("extract_usage_data", EXTRACTOR)
+    module = importlib.util.module_from_spec(spec)
+    previous = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.dont_write_bytecode = previous
+    return module
+
+
+def _close(actual, expected, what):
+    assert actual is not None and math.isclose(actual, expected, rel_tol=1e-9, abs_tol=1e-9), \
+        f"{what}: got {actual!r}, expected {expected!r}"
+
+
+def _write_world(root):
+    """Write tasks.csv and sessions.csv of the synthetic world into ROOT."""
+    ext = _load_extractor()
+    fix, intro = SUPERVISOR_FIX, SUPERVISOR_INTRODUCED
+
+    def sid(n):
+        return "aaaaaaaa-0000-4000-8000-%012d" % n
+
+    sessions = []
+
+    def session(n, kind="main", parent=None, created=0.0, updated=None, flag="", model="claude:opus",
+                tokens=(0, 0, 0, 0), cost=0.0, list_cost="", billing="", turns=1, compactions="0",
+                forked="false", ledger=None):
+        row = dict.fromkeys(ext.SESSION_COLUMNS, "")
+        row.update(id=sid(n), kind=kind, parent_id=sid(parent) if parent else "", created=repr(created),
+                   updated=repr(created + 100.0 if updated is None else updated), status="inactive",
+                   model=model, supervisor=flag, input=tokens[0], output=tokens[1], cache_read=tokens[2],
+                   cache_write=tokens[3], cost=repr(cost), list_cost=list_cost, billing=billing,
+                   turns=turns, compactions=compactions, forked=forked)
+        if ledger:
+            row.update({"ledger_input": ledger[0], "ledger_output": ledger[1], "ledger_cache_read": ledger[2],
+                        "ledger_cache_write": ledger[3], "ledger_cost": repr(ledger[4]),
+                        "ledger_list_cost": repr(ledger[5]), "ledger_calls": ledger[6]})
+        sessions.append(row)
+
+    # T1 (group A, created exactly at the fix): a top session, two nested sub-agents, a side conversation
+    # with a sub-agent under it, and an internal session.
+    session(1, created=fix, updated=fix + 5000, flag="true", tokens=(10, 20, 30, 40), cost=1.0, list_cost="2.0",
+            billing="api", turns=3, compactions="1")
+    session(2, "subagent", 1, fix + 100, fix + 200, tokens=(1, 2, 3, 4), cost=0.1, list_cost="0.2",
+            billing="subscription")
+    session(3, "subagent", 2, fix + 150, fix + 260, tokens=(5, 5, 5, 5), cost=0.2, list_cost="0.4", billing="api",
+            compactions="2", forked="true")
+    session(4, "btw", 1, fix + 120, tokens=(100, 100, 100, 100), cost=9.0, list_cost="9.0", billing="api")
+    session(5, "subagent", 4, fix + 130, fix + 230, tokens=(1, 1, 1, 1), cost=0.05, list_cost="0.1")
+    session(6, "internal", 3, fix + 160, tokens=(50, 0, 0, 0), cost=0.5, list_cost="0.5", billing="api")
+    # T2 (group A through the task's own setting; the session has no flag)
+    session(7, created=fix + 100, tokens=(100, 0, 0, 0), cost=0.5, list_cost="1.5", billing="subscription", turns=2)
+    # T3 (excluded: flag on, created one second before the fix) and T4 (flag on, created before the mode existed)
+    session(8, created=fix - 1, flag="true", tokens=(1000, 0, 0, 0), cost=4.0, list_cost="8.0", billing="api")
+    session(9, created=intro - 100, flag="true", tokens=(10, 0, 0, 0), cost=1.0, list_cost="1.0", billing="api")
+    # T5 (B; the ledger holds more than the record, and the record has no list cost)
+    session(10, created=fix + 50, flag="false", tokens=(10, 10, 10, 10), cost=1.0, billing="api", turns=4,
+            ledger=(20, 20, 20, 20, 2.0, 3.0, 5))
+    # T6 (B; usage never recorded, compaction count unknown)
+    session(11, created=intro - 1000, turns=2, compactions="")
+    # T7 (B; one sub-agent has no recorded usage, one does; the top session has no list cost: it is the cost)
+    session(12, created=intro - 500, tokens=(40, 0, 0, 0), cost=0.4, list_cost="", billing="api",
+            compactions="3")
+    session(13, "subagent", 12, intro - 400, tokens=(0, 0, 0, 0), compactions="", forked="true")
+    session(14, "subagent", 12, intro - 300, tokens=(8, 0, 0, 0), cost=0.08, list_cost="0.08", billing="api")
+    # T8 (B: the session says off, the task setting says on), T9 (A, not done), T10 (B, review), T11 (plan mode)
+    session(15, created=fix + 500, flag="false", tokens=(60, 0, 0, 0), cost=0.6, list_cost="0.6", billing="api")
+    session(16, created=fix + 10, flag="true", turns=0)
+    session(17, created=intro + 10, tokens=(5, 0, 0, 0), cost=0.05, list_cost="0.05", billing="api")
+    # a sub-agent with a cost but no tokens did record usage: it is not "missing"
+    session(19, "subagent", 17, intro + 20, tokens=(0, 0, 0, 0), cost=0.3, list_cost="0.3", billing="api")
+    session(18, created=fix + 5, flag="true", tokens=(7, 0, 0, 0), cost=0.07, list_cost="0.07", billing="api")
+
+    tasks = []
+
+    def task(tid, n, created, started, finished, state="done", setting="", plan=""):
+        row = dict.fromkeys(ext.TASK_COLUMNS, "")
+        row.update(id=tid, session=sid(n), created=repr(created), started=repr(started) if started else "",
+                   finished=repr(finished) if finished else "", state=state, outcome="merged" if state == "done" else "",
+                   supervisor=setting, plan=plan)
+        tasks.append(row)
+
+    task("t-aaaa0001", 1, fix, fix + 10, fix + 1010)
+    task("t-aaaa0002", 7, fix + 100, fix + 110, fix + 400, setting="true")
+    task("t-aaaa0003", 8, fix - 1, fix + 4, fix + 50)
+    task("t-aaaa0004", 9, intro - 100, intro - 90, intro + 3600)
+    task("t-bbbb0001", 10, fix + 50, fix + 60, fix + 260)
+    task("t-bbbb0002", 11, intro - 1000, intro - 900, intro - 100)
+    task("t-bbbb0003", 12, intro - 500, intro - 450, intro + 500)
+    task("t-bbbb0004", 15, fix + 500, None, fix + 900, setting="true")
+    task("t-dddd0001", 16, fix + 10, None, None, state="pending")
+    task("t-eeee0001", 17, intro + 10, intro + 20, None, state="review")
+    task("t-ffff0001", 18, fix + 5, fix + 6, fix + 60, plan="true")
+
+    root.mkdir(parents=True, exist_ok=True)
+    for name, columns, rows in (("tasks.csv", ext.TASK_COLUMNS, tasks), ("sessions.csv", ext.SESSION_COLUMNS, sessions)):
+        with open(root / name, "w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=columns, lineterminator="\n")
+            writer.writeheader()
+            writer.writerows(rows)
+    return ext
+
+
+def self_test():
+    """Check constants, classification and arithmetic on a synthetic world.  Return the exit status."""
+    try:
+        _self_test()
+    except AssertionError as err:
+        print(f"self-test FAILED: {err}", file=sys.stderr)
+        return 1
+    print("self-test ok")
+    return 0
+
+
+def _self_test():
+    # The cutoffs, as epoch seconds (checked against dates worked out by hand).
+    assert SUPERVISOR_INTRODUCED == 1791487457.0, SUPERVISOR_INTRODUCED
+    assert SUPERVISOR_FIX == 1791777353.0, SUPERVISOR_FIX
+    assert PLAN_MODE_INTRODUCED == 1791769725.0, PLAN_MODE_INTRODUCED
+    assert SUPERVISOR_INTRODUCED < PLAN_MODE_INTRODUCED < SUPERVISOR_FIX
+
+    # Statistics and formatting helpers.
+    d = describe([1, 2, 3, 4, None])
+    assert d["n"] == 4 and d["mean"] == 2.5 and d["median"] == 2.5 and d["sum"] == 10
+    _close(d["stdev"], statistics.stdev([1, 2, 3, 4]), "stdev")
+    assert describe([5])["stdev"] is None and describe([])["mean"] is None
+    assert ratio(6, 3) == 2 and ratio(1, 0) is None and ratio(None, 1) is None
+    assert f_dur(3661) == "1:01:01" and f_dur(None) == NA and f_usd(0.0005) == "$0.0005"
+    assert f_usd(12.345) == "$12.35" and f_tokens(1234567) == "1,234,567" and f_ratio(1.5) == "1.50x"
+    assert plural(1, "task") == "1 task" and plural(2, "task") == "2 tasks"
+    assert PRIVATE_PATTERNS[0].search("aaaaaaaa-0000-4000-8000-000000000001")
+    assert PRIVATE_PATTERNS[1].search("task t-aaaa0001 ran") and PRIVATE_PATTERNS[2].search("in /home/x")
+
+    ext = None
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        ext = _write_world(root / "in")
+
+        # Every column this script reads is one the extractor writes.
+        for name in TASK_REQUIRED + TASK_OPTIONAL:
+            assert name in ext.TASK_COLUMNS, f"tasks.csv has no column {name}"
+        for name in SESSION_REQUIRED + SESSION_OPTIONAL:
+            assert name in ext.SESSION_COLUMNS, f"sessions.csv has no column {name}"
+
+        ctx = build(root / "in")
+        rows = {r["task_id"]: r for r in ctx.task_rows}
+        groups = {tid: r["group"] for tid, r in rows.items()}
+        assert groups == {
+            "t-aaaa0001": GROUP_A,           # created exactly at the fix counts as after
+            "t-aaaa0002": GROUP_A,           # flag from the task's own setting
+            "t-aaaa0003": EXCLUDED_BUGGY,    # one second before the fix
+            "t-aaaa0004": EXCLUDED_BUGGY,    # flag on although the mode did not exist yet
+            "t-bbbb0001": GROUP_B,           # flag off, created after the fix
+            "t-bbbb0002": GROUP_B,           # no flag
+            "t-bbbb0003": GROUP_B,
+            "t-bbbb0004": GROUP_B,           # the session's flag (off) beats the task's setting (on)
+            "t-dddd0001": GROUP_A,           # not done
+            "t-eeee0001": GROUP_B,           # not done
+            "t-ffff0001": PLAN_MODE,         # the plan flag wins over the supervisor flag
+        }, groups
+        assert rows["t-aaaa0002"]["flag_source"] == "task" and rows["t-aaaa0001"]["flag_source"] == "session"
+        assert rows["t-bbbb0002"]["flag_source"] == "none" and rows["t-bbbb0002"]["supervisor_flag"] == "absent"
+        assert ctx.quality["ledger_differs"] == 1
+        assert ctx.quality["flag_before_mode_existed"] == 1
+        assert ctx.quality["setting_differs_from_flag"] == 1
+
+        # T1: descendants are found transitively and through a side conversation; btw and internal are not
+        # sub-agents.
+        t1 = rows["t-aaaa0001"]
+        assert t1["n_subagents"] == 3 and t1["n_forked_subagents"] == 1 and t1["n_other_descendants"] == 2
+        assert t1["usage_status"] == "complete"
+        assert (t1["total_input"], t1["total_output"], t1["total_cache_read"], t1["total_cache_write"]) == (17, 28, 39, 50)
+        assert t1["total_tokens"] == 134
+        _close(t1["total_cost"], 1.35, "T1 cost")
+        _close(t1["total_list_cost"], 2.7, "T1 list cost")
+        assert t1["top_tokens"] == 100 and t1["sub_tokens"] == 34
+        _close(t1["top_list_cost"], 2.0, "T1 top list cost")
+        _close(t1["sub_list_cost"], 0.7, "T1 sub list cost")
+        assert t1["duration_s"] == 1010 and t1["work_duration_s"] == 1000 and t1["top_duration_s"] == 1010
+        assert t1["top_compactions"] == 1 and t1["sub_compactions"] == 2
+        assert (t1["sessions_api"], t1["sessions_subscription"], t1["sessions_billing_none"]) == (2, 1, 1)
+
+        # T5: the ledger wins where it is higher, and a blank list cost falls back to the cost.
+        t5 = rows["t-bbbb0001"]
+        assert t5["total_tokens"] == 80 and t5["n_subagents"] == 0
+        _close(t5["total_cost"], 2.0, "T5 cost")
+        _close(t5["total_list_cost"], 3.0, "T5 list cost")
+
+        # T6 and T7: usage that was never recorded makes a task incomplete; its totals are unknown, not zero.
+        t6, t7 = rows["t-bbbb0002"], rows["t-bbbb0003"]
+        assert t6["usage_status"] == "incomplete" and t6["total_tokens"] is None and t6["top_tokens"] is None
+        assert t6["sub_tokens"] == 0 and t6["top_compactions"] is None
+        assert t7["usage_status"] == "incomplete" and t7["total_tokens"] is None
+        assert t7["top_tokens"] == 40 and t7["sub_tokens"] is None and t7["recorded_tokens"] == 48
+        assert t7["n_subagents"] == 2 and t7["sub_compactions"] is None and t7["sessions_usage_missing"] == 1
+
+        t10 = rows["t-eeee0001"]
+        assert t10["usage_status"] == "complete" and t10["n_subagents"] == 1 and t10["total_tokens"] == 5
+        _close(t10["sub_cost"], 0.3, "T10 sub cost")
+
+        # Group statistics, worked out by hand.
+        a, b = ctx.a, ctx.b
+        assert (a["tasks"], a["n_done"], a["n_complete"], a["in_flight"]) == (3, 2, 2, 1)
+        assert (b["tasks"], b["n_done"], b["n_complete"], b["n_incomplete"], b["in_flight"]) == (5, 4, 2, 2, 1)
+        assert dict(a["in_flight_states"]) == {"pending": 1} and dict(b["in_flight_states"]) == {"review": 1}
+        assert (ctx.groups[EXCLUDED_BUGGY]["tasks"], ctx.groups[EXCLUDED_BUGGY]["n_done"]) == (2, 2)
+        assert (ctx.groups[PLAN_MODE]["tasks"], ctx.groups[PLAN_MODE]["n_done"]) == (1, 1)
+        assert a["task"]["total_tokens"]["mean"] == 117 and a["task"]["total_tokens"]["median"] == 117
+        _close(a["task"]["total_tokens"]["stdev"], math.sqrt(578), "A tokens stdev")
+        _close(a["task"]["total_cost"]["mean"], 0.925, "A cost mean")
+        _close(a["task"]["total_list_cost"]["mean"], 2.1, "A list cost mean")
+        _close(a["total_list_cost_complete"], 4.2, "A list cost sum")
+        assert a["task"]["duration_s"]["mean"] == 655 and a["task"]["work_duration_s"]["mean"] == 645
+        assert a["task"]["n_subagents"]["mean"] == 1.5 and a["zero_subagents"] == 1
+        assert a["top"]["top_compactions"]["mean"] == 0.5 and a["sub"]["sub_compactions"]["mean"] == 1.0
+        assert dict(a["billing"]) == {"subscription": 2, "api": 2, "extra-usage": 0, "not recorded": 1, "other": 0}
+        assert a["n_workers"] == 3 and a["workers_forked"] == 1 and a["other_sessions"] == 2
+        _close(a["other_list_cost"], 9.5, "A side-conversation list cost")
+        assert a["sessions"]["tokens"]["n"] == 3 and a["sessions"]["tokens"]["median"] == 10
+        _close(a["sessions"]["duration_s"]["mean"], 310 / 3, "A sub-agent duration mean")
+        _close(a["sessions"]["compactions"]["mean"], 2 / 3, "A sub-agent compactions mean")
+        assert b["task"]["total_tokens"]["n"] == 2 and b["task"]["total_tokens"]["mean"] == 70
+        _close(b["task"]["total_list_cost"]["mean"], 1.8, "B list cost mean")
+        _close(b["task"]["total_cost"]["mean"], 1.3, "B cost mean")
+        assert b["task"]["duration_s"]["n"] == 4 and b["task"]["duration_s"]["mean"] == 627.5
+        assert b["task"]["duration_s"]["median"] == 650
+        assert b["task"]["work_duration_s"]["n"] == 3 and b["task"]["work_duration_s"]["median"] == 800
+        assert b["task"]["n_subagents"]["mean"] == 0.5 and b["zero_subagents"] == 3
+        assert b["top_compactions_unknown"] == 1 and b["top"]["top_compactions"]["n"] == 3
+        _close(b["total_cost"], 3.08, "B recorded cost")
+        _close(b["total_list_cost"], 4.08, "B recorded list cost")
+        assert b["n_workers"] == 2 and b["sessions"]["tokens"]["n"] == 1 and b["sessions"]["compactions"]["n"] == 1
+        excluded = ctx.groups[EXCLUDED_BUGGY]
+        _close(excluded["total_cost"], 5.0, "excluded cost")
+        _close(excluded["total_list_cost"], 9.0, "excluded list cost")
+        moved_ids = [r["task_id"] for r in ctx.moved]
+        assert moved_ids == ["t-aaaa0003"] and len(ctx.a_variant) == 3
+
+        # The end-to-end run writes the CSVs and the report.
+        out = root / "report.md"
+        args = parse_args(["--in-dir", str(root / "in"), "--out", str(out)])
+        stdout = sys.stdout
+        try:
+            sys.stdout = open(os.devnull, "w")
+            assert run(args) == 0
+            first = out.read_bytes()
+            assert run(args) == 0 and out.read_bytes() == first, "the run is not repeatable"
+        finally:
+            sys.stdout.close()
+            sys.stdout = stdout
+        with open(root / "in" / "classified_tasks.csv", newline="", encoding="utf-8") as handle:
+            written = {r["task_id"]: r for r in csv.DictReader(handle)}
+        assert len(written) == 11 and list(next(iter(written.values()))) == TASK_OUT_COLUMNS
+        assert written["t-bbbb0002"]["total_tokens"] == UNKNOWN and written["t-bbbb0002"]["top_compactions"] == UNKNOWN
+        assert written["t-bbbb0003"]["sub_tokens"] == UNKNOWN and written["t-bbbb0003"]["recorded_tokens"] == "48"
+        assert written["t-aaaa0001"]["total_tokens"] == "134" and written["t-aaaa0001"]["in_comparison"] == "true"
+        assert written["t-dddd0001"]["in_comparison"] == "false" and written["t-dddd0001"]["finished"] == ""
+        assert written["t-ffff0001"]["group"] == PLAN_MODE and written["t-aaaa0003"]["group"] == EXCLUDED_BUGGY
+        with open(root / "in" / "subagents.csv", newline="", encoding="utf-8") as handle:
+            subs = list(csv.DictReader(handle))
+        assert len(subs) == 6 and list(subs[0]) == SUB_OUT_COLUMNS
+        missing = [s for s in subs if s["usage_status"] == "missing"]
+        assert len(missing) == 1 and missing[0]["tokens"] == UNKNOWN and missing[0]["compactions"] == UNKNOWN
+        assert missing[0]["forked"] == "true" and missing[0]["depth"] == "1"
+        assert {s["depth"] for s in subs if s["task_id"] == "t-aaaa0001"} == {"1", "2"}
+        assert (root / "in" / "classified_tasks.csv").stat().st_mode & 0o777 == 0o600
+        text = out.read_text(encoding="utf-8")
+        assert text.startswith(GENERATED_MARK) and "The data cannot answer the question yet." in text
+        assert "| A: fixed supervisor mode | 3 | 2 | 2 | 0 | 1 (pending 1) |" in text, text
+        assert "| B: single-session (the old way) | 5 | 4 | 2 | 2 | 1 (review 1) |" in text
+        assert "| Set aside: Plan mode | 1 | 1 | 1 | 0 | 0 |" in text
+        assert "### Group A, task by task" in text and "making n(A) = 3" in text
+        for pattern in PRIVATE_PATTERNS:
+            assert not pattern.search(text), f"the report holds {pattern.pattern}"
+
+        # The model-matched subset of B and the other descriptive subsets.
+        by_key = {x["key"]: x for x in ctx.strata}
+        assert by_key["all"]["n"] == 4 and by_key["a_model"]["n"] == 4 and by_key["a_model"]["n_complete"] == 2
+        assert by_key["before"]["n"] == 2 and by_key["since"]["n"] == 2 and by_key["zero"]["n"] == 3
+        assert by_key["fix"]["n"] == 2 and by_key["fix"]["n_complete"] == 2
+        assert by_key["few"]["n"] == 1 and by_key["many"]["n"] == 0 and by_key["many"]["median"] is None
+        assert "Cost depends on the model." in text
+
+        # A world where one A task has incomplete usage, and one with no A task at all.
+        inc = root / "incomplete"
+        _write_world(inc)
+        with open(inc / "sessions.csv", newline="", encoding="utf-8") as handle:
+            table = list(csv.DictReader(handle))
+        for row in table:
+            if row["id"].endswith("000000000007"):
+                row.update(input="0", cost="0.0", list_cost="0.0")
+        with open(inc / "sessions.csv", "w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=list(table[0]), lineterminator="\n")
+            writer.writeheader()
+            writer.writerows(table)
+        text = render_report(build(inc))
+        assert "n = 2 done tasks, 1 of them with a complete usage record" in text
+        assert "An A task with incomplete usage: 1 of its 1 sessions" in text and "at least $" in text
+        none = root / "no-a"
+        _write_world(none)
+        with open(none / "tasks.csv", newline="", encoding="utf-8") as handle:
+            table = [r for r in csv.DictReader(handle) if r["supervisor"] != "true" and not r["id"].startswith(
+                ("t-aaaa0001", "t-dddd0001"))]
+        with open(none / "tasks.csv", "w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=list(table[0]), lineterminator="\n")
+            writer.writeheader()
+            writer.writerows(table)
+        text = render_report(build(none))
+        assert "No task has been done under fixed supervisor mode" in text and "n/a" in text
+
+        nofix = root / "no-b-since-the-fix"
+        _write_world(nofix)
+        with open(nofix / "tasks.csv", newline="", encoding="utf-8") as handle:
+            table = [r for r in csv.DictReader(handle) if r["id"] not in ("t-bbbb0001", "t-bbbb0004")]
+        with open(nofix / "tasks.csv", "w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=list(table[0]), lineterminator="\n")
+            writer.writeheader()
+            writer.writerows(table)
+        text = render_report(build(nofix))
+        assert "No done B task was created since the fix" in text
+
+        # Bad inputs are reported, not guessed at.
+        for name, mutate, needle in (
+                ("missing file", lambda d: (d / "tasks.csv").unlink(), "not found"),
+                ("missing column", lambda d: (d / "sessions.csv").write_text("id,kind\nx,main\n"), "lacks the column"),
+                ("duplicate task", lambda d: (d / "tasks.csv").write_text(
+                    "id,session,created,state\nt-1,s,1.0,done\nt-1,s,1.0,done\n"), "duplicate task id")):
+            bad = root / f"bad-{name.replace(' ', '-')}"
+            _write_world(bad)
+            mutate(bad)
+            try:
+                build(bad)
+            except InputError as err:
+                assert needle in str(err), f"{name}: {err}"
+            else:
+                raise AssertionError(f"{name}: no InputError")
 
 
 if __name__ == "__main__":
