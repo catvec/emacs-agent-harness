@@ -119,6 +119,19 @@
 ;; suspension is per project, like the concurrency limit, kept across
 ;; restarts in `harness-tasks--queue-name', and shown on the board.
 ;;
+;; Waiting for a slot: a queued task knows since when it waits
+;; (`:queued-at', stamped whenever a task joins the queue: submitted,
+;; taken out of the backlog by `task/queue', or put back by a return to
+;; pending, a pre-emption or work held back after review;
+;; `harness-tasks--queued-since'), and every start of a task that waited
+;; there records how long it did and at which priority in its `:waits'
+;; (the last 20, newest first; `harness-tasks--waits-after').
+;; `task/slots' hands a UI a project's slots as plain data -- who holds
+;; them, the queue in the order it will start, the recent waits
+;; (`harness-tasks-slot-wait-days') -- read from what the scheduler goes
+;; by, so the sub-agents and the merge queue that take no slot are not
+;; in it.
+;;
 ;; Return to pending: `task/return-to-pending' (the board's u,
 ;; task_control's return-to-pending) stops the turn of a task at work
 ;; and puts it back in the pending queue, keeping its session, branch
@@ -293,6 +306,14 @@ page, starts the tasks it lets through at once; one lowered stops no
 task at work, and fewer start after (`harness-tasks--on-config-changed')."
   :type '(choice (const :tag "No limit" nil) (natnum :tag "Tasks at once")) :group 'harness)
 
+(defcustom harness-tasks-slot-wait-days 7
+  "Days back the slot page's queue wait figures look.
+Every start of a task that waited in its project's queue records how
+long it waited, and at which priority, on the task (`:waits', see
+`harness-tasks--start').  `task/slots' reports the waits of the last
+this many days, which the UI's slot page sums up per priority; older
+ones stay on their tasks but are left out of it."
+  :type '(number :tag "Days") :group 'harness)
 (defcustom harness-tasks-lend-blocked-slot-after 300
   "Seconds a task waits on the user before it lends its slot, or nil.
 A task whose own session is blocked on you -- a permission request, an
@@ -1968,6 +1989,33 @@ sub-agent or the merge queue.  `most-positive-fixnum' without a limit."
   (and (eq (plist-get task :state) 'pending) (not (harness-tasks--backlog-p task))
        (not (plist-get task :archived))))
 
+(defun harness-tasks--queued-since (task)
+  "Return when queued TASK began waiting for a slot, a float time.
+That is its `:queued-at', stamped whenever a task joins the queue: at
+submission, when `task/queue' takes it out of the backlog, and when it
+is put back (`harness-tasks--to-pending': returned by hand, pre-empted,
+sent back from review while no slot could take it).  A record from
+before that has none and says when it was returned, else when it was
+created."
+  (or (plist-get task :queued-at) (plist-get task :returned) (plist-get task :created)
+      (float-time)))
+
+(defconst harness-tasks--waits-kept 20
+  "Most waits a task keeps in `:waits', the newest first.")
+
+(defun harness-tasks--waits-after (task started)
+  "Return TASK's `:waits' with the wait that ends as it starts at STARTED.
+TASK is queued (`harness-tasks--queued-p'), so it has waited since
+`harness-tasks--queued-since'.  The wait is a plist of `:at' (STARTED),
+`:seconds' (how long it waited) and `:priority' (the level's name, at
+which it waited, as its start finds it), first in the list; no more
+than `harness-tasks--waits-kept' are kept.  The slot view sums them up
+per priority (`task/slots')."
+  (cons (list :at started
+              :seconds (max 0.0 (- started (harness-tasks--queued-since task)))
+              :priority (symbol-name (harness-priority-of-task task)))
+        (take (1- harness-tasks--waits-kept) (plist-get task :waits))))
+
 (defun harness-tasks--outranks-p (task other)
   "Non-nil when TASK, sent back from review, may take the slot of OTHER.
 OTHER is a task at work.  TASK outranks it when its priority is above
@@ -2479,7 +2527,12 @@ pre-empted while its worktree was being made
 ready (`harness-tasks--start-current-p'): the worktree is kept for the
 task's next start, which waits for that same one when it is not ready
 yet (`harness-tasks--worktree-promise').  A task pre-empted before its
-session got the work starts it afresh, as it never began."
+session got the work starts it afresh, as it never began.
+
+A task that was waiting in the queue (`harness-tasks--queued-p') records
+how long it waited and at which priority in its `:waits'
+\(`harness-tasks--waits-after'), and its `:queued-at' goes; a backlog
+task started by hand was not waiting for a slot and records nothing."
   (let* ((id (plist-get task :id))
          (worktree (plist-get task :worktree))
          (launch (cond ((and (harness-tasks--returned-p task) (harness-tasks--session task)
@@ -2488,10 +2541,16 @@ session got the work starts it afresh, as it never began."
                        ((harness-tasks--session task)
                         #'harness-tasks--continue-session)
                        (t #'harness-tasks--open-session)))
-         (started (float-time)))
+         (started (float-time))
+         ;; A task that waited in the queue records how long it did, in
+         ;; the same change that takes it out of it; a backlog task
+         ;; started by hand waited for no slot and records nothing.
+         (waits (and (harness-tasks--queued-p task)
+                     (harness-tasks--waits-after task started))))
     (puthash id t harness-tasks--starting)
-    (harness-tasks--set id :state 'active :outcome nil :error nil :duplicate-of nil
-                        :returned nil :started started :finished nil)
+    (apply #'harness-tasks--set id :state 'active :outcome nil :error nil :duplicate-of nil
+           :returned nil :started started :finished nil :queued-at nil
+           (and waits (list :waits waits)))
     (cond
      ((harness-tasks--main-tree-p task)
       ;; No worktree even where the project has them: the main checkout.
@@ -3083,17 +3142,19 @@ Its session, branch and worktree stay; `:returned' is now, so it leads
 its priority's queue (see `harness-tasks--start-order'), and its state
 before is forgotten: no outcome, no round of feedback pending, no
 verification.  `:return-reason' is `returned', the return by hand,
-unless PLIST says why (`harness-tasks--return-reason').  Return the
-task's view."
+unless PLIST says why (`harness-tasks--return-reason').  `:queued-at' is
+now too: it waits for a slot from here (`harness-tasks--queued-since').
+Return the task's view."
   (remhash id harness-tasks--waking)
-  (apply #'harness-tasks--set id
-         :state 'pending :returned (float-time) :backlog nil
-         :return-reason 'returned :preempted-by nil
-         :outcome nil :error nil :waiting nil :finished nil
-         :merge-status nil :merge-attempts 0
-         :verified nil :verified-at nil
-         :recap nil :recap-at nil :recap-turns nil :recap-tools nil
-         plist))
+  (let ((now (float-time)))
+    (apply #'harness-tasks--set id
+           :state 'pending :returned now :queued-at now :backlog nil
+           :return-reason 'returned :preempted-by nil
+           :outcome nil :error nil :waiting nil :finished nil
+           :merge-status nil :merge-attempts 0
+           :verified nil :verified-at nil
+           :recap nil :recap-at nil :recap-turns nil :recap-tools nil
+           plist)))
 
 (defun harness-tasks--stop-turn (id)
   "Stop the turn of task ID's session, if one runs, for a return to pending.
@@ -3278,7 +3339,9 @@ restart, gets the task itself."
   (condition-case err
       (let* ((task (harness-tasks--get id))
              (session (harness-tasks--session task)))
+        ;; Out of the queue, if it was in it: it waits for the user now.
         (harness-tasks--set id :state 'refining :backlog t :outcome nil :error nil :duplicate-of nil
+                            :queued-at nil
                             :note (or (plist-get task :note) (plist-get task :prompt)))
         (if session
             (let* ((sid (plist-get session :id))
@@ -3695,7 +3758,7 @@ restart."
             (harness-tasks--open-session id (plist-get task :worktree) (plist-get task :worktree)))
            (t
             (harness-log 'info "task %s: queued again after a restart" id)
-            (harness-tasks--set id :state 'pending :started nil)))
+            (harness-tasks--set id :state 'pending :started nil :queued-at (float-time))))
         (error (harness-tasks--fail id err))))))
 
 (defun harness-tasks--pick-up ()
@@ -3744,6 +3807,7 @@ session takes it."
          ;; priority plugin reads the name (and refuses one no level
          ;; has before any task is made) and puts it there.
          (priority (plist-get opts :priority))
+         (created (float-time))
          (task (list :id (concat "t-" (harness-short-id 8))
                      :project (harness-tasks--project cwd) :cwd cwd
                      :prompt (string-trim prompt)
@@ -3752,7 +3816,7 @@ session takes it."
                      :permission-mode (let ((m (plist-get opts :permission-mode)))
                                         (if (stringp m) (intern m) m))
                      :thinking (plist-get opts :thinking)
-                     :state 'pending :created (float-time))))
+                     :state 'pending :created created)))
     (when priority
       (harness-priority-read priority))
     (when (plist-member opts :non-interactive)
@@ -3763,8 +3827,12 @@ session takes it."
                             (if (harness-json-true-p (plist-get opts :supervisor)) t :false))))
     (when main-tree
       (setq task (append task (list :main-tree t))))
-    (when refine
-      (setq task (append task (list :backlog t :note (string-trim prompt)))))
+    ;; A task that waits for a slot joins the queue as it is submitted
+    ;; (`harness-tasks--queued-since'); one written up for the backlog
+    ;; waits for the user instead, and joins it with `task/queue'.
+    (if refine
+        (setq task (append task (list :backlog t :note (string-trim prompt))))
+      (setq task (append task (list :queued-at created))))
     (harness-tasks--put task)
     ;; Its session from the start, holding the task's priority; before
     ;; the naming request goes out, so the session leaves its naming to
@@ -3921,6 +3989,124 @@ that does not say): `harness-tasks-require-verification'.
      (and (boundp 'harness-supervisor-tasks)
           (list :supervisor (if harness-supervisor-tasks t :false))))))
 
+;;;; The slots, as a page shows them
+;;
+;; `task/slots' reads what the scheduler goes by -- who holds a slot
+;; (`harness-tasks--holds-slot-p'), who waits for one, in what order
+;; (`harness-tasks--queued-p', `harness-tasks--start-order') -- and the
+;; waits the starts recorded (`harness-tasks--waits-after'), and hands
+;; them to a UI as plain data.  It counts nothing of its own: a task's
+;; sub-agents, forks and the merge queue's resolvers take no slot, so
+;; they are in none of it.
+
+(defconst harness-tasks--slot-waits-max 500
+  "Most waits `task/slots' reports.")
+
+(defun harness-tasks--slot-title (task)
+  "Return how the slot view names TASK, 80 characters at most.
+That is the title the board shows: its session's name, else its own
+`:name', else the first line of its prompt."
+  (let ((name (plist-get (harness-tasks--session task) :name)))
+    (harness-first-line (cond ((not (harness-string-blank-p name)) name)
+                              ((not (harness-string-blank-p (plist-get task :name))) (plist-get task :name))
+                              (t (plist-get task :prompt)))
+                        80)))
+
+(defun harness-tasks--slot-holder (task)
+  "Return the entry of TASK, which holds a slot, in `task/slots' :holders."
+  (let ((id (plist-get task :id))
+        (session (harness-tasks--session task)))
+    (list :id id
+          :title (harness-tasks--slot-title task)
+          :session (plist-get task :session)
+          :priority (symbol-name (harness-priority-of-task task))
+          :state (cond ((gethash id harness-tasks--starting) "starting")
+                       ((plist-get task :waiting) "waiting")
+                       (t (format "%s" (plist-get session :status))))
+          :since (harness-tasks--working-since task)
+          :sent-back (if (harness-tasks--sent-back-p task) t :false))))
+
+(defun harness-tasks--slot-queued (task)
+  "Return the entry of TASK, which waits for a slot, in `task/slots' :queue."
+  (list :id (plist-get task :id)
+        :title (harness-tasks--slot-title task)
+        :priority (symbol-name (harness-priority-of-task task))
+        :since (harness-tasks--queued-since task)
+        :reason (and (harness-tasks--returned-p task)
+                     (symbol-name (harness-tasks--return-reason task)))))
+
+(defun harness-tasks--slot-waits (project)
+  "Return the recent waits of PROJECT's tasks, newest first, for `task/slots'.
+Those recorded in the last `harness-tasks-slot-wait-days' days by any
+task of PROJECT, archived and done ones included, as (:id :priority
+:seconds :at) plists, at most `harness-tasks--slot-waits-max'."
+  (let ((since (- (float-time)
+                  (* 86400.0 (max 0 (if (numberp harness-tasks-slot-wait-days)
+                                        harness-tasks-slot-wait-days
+                                      7)))))
+        waits)
+    (maphash (lambda (_ task)
+               (when (equal (harness-tasks--slot-project task) project)
+                 (dolist (wait (plist-get task :waits))
+                   (let ((at (plist-get wait :at))
+                         (seconds (plist-get wait :seconds)))
+                     (when (and (numberp at) (numberp seconds) (>= at since))
+                       (push (list :id (plist-get task :id) :priority (plist-get wait :priority)
+                                   :seconds seconds :at at)
+                             waits))))))
+             harness-tasks--table)
+    (take harness-tasks--slot-waits-max
+          (sort waits (lambda (a b) (> (plist-get a :at) (plist-get b :at)))))))
+
+(harness-defmethod task/slots (&optional cwd)
+  "Return how the task slots of CWD's project are used, for a slot page.
+A plist, all of it plain data:
+  :project   the project's root, as `task/list' files its tasks under
+  :limit     its slots, `harness-tasks-max-running': a number, 0 when
+             no task starts by itself, nil without a limit
+  :suspended t while its pending queue is suspended (`task/suspend-queue'),
+             else :false
+  :days      `harness-tasks-slot-wait-days', how far back :waits go
+  :holders   the tasks holding a slot (`harness-tasks--holds-slot-p'),
+             the longest at work first, each a plist of :id, :title (its
+             name, else its prompt's first line), :session, :priority
+             (\"low\", \"medium\" or \"high\"), :state (\"starting\";
+             \"waiting\", its session ended its turn but left work
+             running; or its session's status, \"running\" or
+             \"blocked\"), :since (when its work began or was last sent
+             back, a float time) and :sent-back (t when its work is
+             feedback that sent it back from review, else :false)
+  :queue     the tasks waiting for a slot (`harness-tasks--queued-p'),
+             in the order they will start (`harness-tasks--start-order'),
+             each a plist of :id, :title, :priority, :since (when it
+             began waiting, `harness-tasks--queued-since') and :reason
+             (why it was put back in the queue after it worked --
+             \"returned\", \"preempted\" or \"sent-back\" -- else nil)
+  :waits     how long tasks of the project waited for a slot before
+             they started, newest first, the last :days days only, at
+             most 500: plists of :id, :priority (the level it waited
+             at), :seconds and :at (when it started, a float time)
+No sub-agent, fork or merge-queue work holds a slot, so none is listed."
+  (harness-tasks--load)
+  (let* ((project (harness-tasks--project (or cwd default-directory)))
+         (mine (lambda (task) (equal (harness-tasks--slot-project task) project))))
+    (harness-tasks--open-project project)
+    (list :project project
+          :limit harness-tasks-max-running
+          :suspended (if (harness-tasks--suspended-p project) t :false)
+          :days harness-tasks-slot-wait-days
+          :holders (mapcar #'harness-tasks--slot-holder
+                           (sort (harness-tasks--sorted
+                                  (lambda (task) (and (funcall mine task)
+                                                      (harness-tasks--holds-slot-p task))))
+                                 (lambda (a b) (< (harness-tasks--working-since a)
+                                                  (harness-tasks--working-since b)))))
+          :queue (mapcar #'harness-tasks--slot-queued
+                         (harness-tasks--start-order
+                          (harness-tasks--sorted
+                           (lambda (task) (and (funcall mine task) (harness-tasks--queued-p task))))))
+          :waits (harness-tasks--slot-waits project))))
+
 (harness-defmethod task/set-all (settings &optional filter)
   "Apply SETTINGS to every current task FILTER selects; return the ids changed.
 SETTINGS is a plist of `:model', `:thinking', `:permission-mode',
@@ -4043,13 +4229,15 @@ priority, as it starts any queued task; while the project's queue is
 suspended (`task/suspend-queue') it waits in pending until the queue is
 resumed or it is started by hand.  The write-up is kept: the work opens
 with the write-up and the request it came from
-\(`harness-tasks--start-text').  Return the task's view."
+\(`harness-tasks--start-text').  It waits for a slot from now
+\(`:queued-at', see `harness-tasks--queued-since').  Return the task's
+view."
   (let ((task (harness-tasks--get id)))
     (unless (and (eq (plist-get task :state) 'pending) (harness-tasks--backlog-p task))
       (error "Task %s is not waiting in the backlog (%s)" id (or (plist-get task :state) "?")))
     (when (harness-tasks--turn-p task)
       (error "Task %s is still being written up; wait for it or stop it" id))
-    (prog1 (harness-tasks--set id :backlog nil)
+    (prog1 (harness-tasks--set id :backlog nil :queued-at (float-time))
       (harness-tasks--schedule))))
 
 (harness-defmethod task/return-to-pending (id)

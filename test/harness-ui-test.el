@@ -186,6 +186,7 @@ top, whole, and leaves them as they were."
 
 (require 'harness-ui-chat)
 (require 'harness-ui-tasks)
+(require 'harness-ui-slots)
 (require 'harness-ui-sessions)
 (require 'harness-ui-tree)
 (require 'harness-ui-worktree)
@@ -454,8 +455,8 @@ leave free.  None is left out by the menu."
                                               (eq command (lookup-key map (vector 'remap global)))))))
                                  maps)))))))))
   ;; What every harness buffer offers is checked above; here, that each mode is there.
-  (dolist (mode '(harness-chat-mode harness-ui-tasks-mode harness-ui-sessions-mode harness-ui-tree-mode
-                  harness-ui-worktree-mode harness-ui-usage-mode harness-ui-dirs-mode
+  (dolist (mode '(harness-chat-mode harness-ui-tasks-mode harness-ui-slots-mode harness-ui-sessions-mode
+                  harness-ui-tree-mode harness-ui-worktree-mode harness-ui-usage-mode harness-ui-dirs-mode
                   harness-ui-btw-minor-mode harness-ui-media-recording-mode harness-ui-review-minor-mode))
     (should (get mode 'harness-menu-group))))
 

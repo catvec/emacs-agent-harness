@@ -4199,6 +4199,7 @@ Task mode: one session per task.  TASK =
 :waiting nil|"what the session started runs outside its turn"
 :error "…" :duplicate-of ID :main-tree BOOL :worktree DIR :branch NAME :base NAME :merge-status nil|queued|merging|conflict
 :merge-queued F :conflicts (FILE…) :merged BOOL :archived BOOL :created F :started F :finished F
+:queued-at F :waits ((:at F :seconds F :priority "low|medium|high") ...)
 :verified BOOL :verified-at F :feedback ((:text "..." :at F) ...))`.
 `:column` is derived on every read: `backlog` for a backlog task or
 its write-up -- one the scheduler never starts, for the user's
@@ -4318,6 +4319,31 @@ priority).
   holds a title request back is a throttle of its own, not the limit,
   and what retries one that failed is the layers below it, as for any
   model call, not a timer of the tasks module (see Titles).
+- Waiting for a slot: a task that joins the queue is stamped
+  `:queued-at` -- on submission (its `:created`), `task/queue` from the
+  backlog, and every return to pending (by hand, pre-empted, sent back
+  and held) -- and `harness-tasks--queued-since` reads it, else
+  `:returned`, else `:created` for older records.  When a queued task
+  starts (by the scheduler, or by hand with `task/start`), the same
+  `harness-tasks--set` that makes it active pushes `(:at STARTED
+  :seconds WAITED :priority P)` on its `:waits` (newest first, at most
+  20) and clears `:queued-at`; a backlog task started by hand waited for
+  no slot and records nothing.  A task submitted while a slot is free is
+  queued for the moment the scheduler takes, and records a wait of about
+  nothing, so the waits count every start.  `task/slots &optional CWD`
+  hands a UI the slots of CWD's project as plain data: `:project`,
+  `:limit` (`harness-tasks-max-running`, nil without one), `:suspended`
+  (t or `:false`), `:days` (`harness-tasks-slot-wait-days`, 7),
+  `:holders` (every task with `harness-tasks--holds-slot-p`, the longest
+  at work first: `:id :title :session :priority :state` -- "starting",
+  "waiting" on work its session left running, else its session's
+  status -- `:since :sent-back`), `:queue` (the queued tasks in
+  `harness-tasks--start-order`: `:id :title :priority :since :reason`,
+  the return reason as a string or nil) and `:waits` (the `:waits` of
+  the project's tasks, archived and done ones too, of the last `:days`
+  days, newest first, at most 500: `:id :priority :seconds :at`).  It
+  reads the scheduler's own predicates, so a task's sub-agents, forks
+  and the merge queue's resolvers are in none of it.
 - A task's session also runs on `harness-tasks-context-limit' (384000)
   tokens of context at most, so it compacts earlier than an interactive
   session; nil gives it the whole window.  A refined task's write-up
@@ -4646,7 +4672,7 @@ priority).
   in its directory.  A task for the other directory is submitted there.
 - `task/list &optional CWD`, `task/get ID`, `task/settings &optional CWD`
   (what new tasks start with, and `:max-running`, the limit, nil for
-  none),
+  none), `task/slots &optional CWD` (the slots, above),
   `task/start ID` (ignores the limit; not while a write-up runs),
   `task/queue ID` (a backlog task back in the pending queue, where the
   scheduler starts it as slots free; the suspended queue holds it there),
@@ -9153,9 +9179,12 @@ and re-reads the tasks, so the card shows the new level.  The card's
 menu entries do the same, offered while the task has not started and it
 is not at the end of the range.  A high task wears `↑`
 (`harness-icon-task-priority-high`) before its title and a low one
-`↓`, and their facts open with "high priority" or
-"low priority" (`harness-task-priority-high-face` /
-`-low-face`); medium shows nothing.  `I` or
+`↓`, and that is all: no words among its facts repeat it (the faces
+`harness-task-priority-high-face` / `-low-face` are the compose box's
+and the bulk edit's priority buttons'); medium shows nothing.  A
+pending card's "queued X ago" counts from when the task joined the
+queue (`harness-ui-tasks--queued-since`: `:queued-at`, else
+`:returned`, else `:created`).  `I` or
 [Add session] makes an ongoing session a task.  A card in Ready for
 review whose worktree is itself a checkout of the harness gets Open
 harness in its menu (`mouse-3`, `harness-ui-tasks-open-harness`; no
@@ -9194,7 +9223,31 @@ board fits its cards to the room they leave.
 `harness-ui-tasks-redraw-tail-lines` draws those lines again, the box
 left alone, when a module's corner would change (the companion pet's
 figure).
-Boards reload after any
+A section's cards are laid out together (`harness-ui-tasks--card-parts`
+takes each card apart, `harness-ui-tasks--layout` finds the section's
+columns): the titles start at one column, the facts stand in a
+right-aligned column per kind (`harness-ui-tasks--fact-kinds`: archived,
+main tree, merge, todos, time, tokens, rate, spend), as wide as the
+widest of the section's, and the buttons start at one column.  Each
+column starts with a space `:align-to` its place, so an icon or an
+arrow drawn wider or narrower than its character moves nothing after
+it; a section short of room lets a column go on all its cards, the
+tokens first, never on one card alone.  A board taller than its window
+holds its least urgent cards back behind `… N more  [Show all]`; a
+section opened with [Show all] keeps its [Show fewer] only while folding
+it would hold cards back (`harness-ui-tasks--moot-expansions` forgets
+an expansion once its list fits).  A button pushed on a card is held
+down at once (`harness-task-button-pressed-face`) until the requests
+its command makes are answered or fail, no sooner than
+`harness-ui-tasks--pressed-min-seconds` (0.3) and no later than
+`-max-seconds` (15) after the push; a second push meanwhile only says
+so, and a key typed on a card holds that card's button of the same
+command (`harness-ui-tasks--press`).  The clock that redraws the visible
+boards for their elapsed times (`harness-ui-tasks--tick`, every
+`harness-ui-tasks--tick-interval` seconds) then runs
+`harness-ui-tasks-tick-hook`, so a view whose times run as the board's
+needs no timer of its own.  `S` opens the project's task slots page
+(below).  Boards reload after any
 task, merge, turn, status, worktree, budget or reload event.  New tasks show at
 the top of in progress (latest started first), review lists the latest
 finished first and completed the latest completed (verified, else
@@ -9327,6 +9380,35 @@ of the answer are proposed with [Do it] and [Skip]: nothing is done
 unasked.  A search that found nothing even widened says "Nothing found".
 Answers carry the search's number and a popout drops those of an earlier
 search.
+
+Task slots page (`harness-ui-slots`, `harness-slots`: `S` on a board
+for its project -- `harness-ui-tasks-slots`, which names the module
+when it is not loaded -- `C-c h Q` and the menu's `Q` for the current one;
+`*harness slots*`, `harness-ui-slots-mode`): the answer of
+`_harness/task/slots` drawn as a box for each slot -- the ones in use
+first, the longest at work first, each with its task's title, its
+priority's arrow and border face, its state and for how long; then the
+free ones (at most `harness-ui-slots--max-free`); holders past a lowered
+limit are marked over it -- then the queue's waits by priority (how
+many, the longest and the average so far), the next five in line, and
+the recorded waits of the last `:days` days by priority (how many
+started, their average and longest).  `RET` or a click on a box opens
+its task's session (`harness-ui-session-opener`), `TAB` and `S-TAB` go
+from box to box, `l` or [Set limit] is the board's
+`harness-ui-tasks-set-max-running`.  Every column and border is placed
+with `(space :align-to COLUMN)`.  The page is a function of the answer,
+the width of its widest window and the time
+(`harness-ui-slots--page`); `harness-ui-slots--render` draws it only
+when that text differs from what is drawn, keeping point on the same
+box or line and each window's start.  It keeps up without churn: after
+the events a board reloads on (`harness-ui-tasks--refresh-events`),
+`task/changed`, `task/deleted` and a change of a session's priority
+(`session/ext-changed` for its key), a page a window shows asks again
+once the burst settles (`harness-ui-slots--refetch-delay`, 0.5 s), and
+a hidden one is only marked stale, asking once a window shows it again
+(`window-buffer-change-functions`); its times run on the boards' clock
+(`harness-ui-tasks-tick-hook`), drawn from the answer it has; an answer
+to an older request than the last is dropped.
 
 Companion pet (`harness-ui-pet`, `C-c h z`, `harness-pet`, menu `z`):
 the buffer `*harness pet*`, and a few places besides.  Before it
@@ -9830,7 +9912,11 @@ main checkout once, with `harness-files-owning-checkout`), or, with `a`,
 to every project.  A task's session is of kind task and goes by its
 task's title, as on the board, until the model names it after its first
 turn: the list loads the tasks with `_harness/task/list` and follows
-`task/changed` and `task/deleted`.  SPC on a session pops out what it
+`task/changed` and `task/deleted`.  Its rows are printed by `harness-ui-sessions--print-row`, each cell
+ending in a space aligned to the next column's start whether it fills
+its column or not, so a long name or a glyph wider than a cell never
+shifts the rest of its row, and the figures -- Context, Output, Tok/s and
+Cost, wide enough for `$0.0058+Max` -- are right-aligned.  SPC on a session pops out what it
 waits on (a session that waits on nothing leaves SPC scrolling), its
 status cell's tooltip says so (`harness-ui-sessions-requests`).
 

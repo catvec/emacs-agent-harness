@@ -117,6 +117,7 @@ layout: half the frame keeps the board's cards whole.")
 (declare-function harness-ui-tasks-reply "harness-ui-tasks")
 (declare-function harness-ui-tasks-compose-reset "harness-ui-tasks")
 (declare-function harness-ui-tasks--find "harness-ui-tasks")
+(declare-function harness-ui-tasks-search-clear "harness-ui-tasks-search")
 (declare-function harness-ui-tasks--searching-p "harness-ui-tasks")
 (declare-function harness-ui-tasks-search "harness-ui-tasks")
 (declare-function harness-ui-tasks-compose-quit "harness-ui-tasks")
@@ -141,7 +142,12 @@ layout: half the frame keeps the board's cards whole.")
 (defvar harness-ui-insights--writing)
 (declare-function harness-worktrees "harness-ui-worktree")
 (declare-function harness-settings "harness-ui-config")
+(declare-function harness-slots "harness-ui-slots" (&optional dir))
+(defvar harness-ui-slots--data)
+(defvar harness-tasks-max-running)
 (declare-function harness-tasks--set "harness-tasks")
+(declare-function harness-merge--key "harness-merge")
+(defvar harness-merge--locks)
 (declare-function harness-ui-cowboy-waiting-p "harness-ui-cowboy")
 (declare-function harness-sender-session "harness-util")
 (declare-function harness-json-array "harness-util")
@@ -1140,6 +1146,14 @@ task's card (`harness-tasks--missing-report')."
          (harness-media--tool "write_file" :path "docs/openapi.yaml" :content harness-media--openapi))
    nil nil t))
 
+(defun harness-media--task-compress (_request)
+  "Task in progress, taking the slots picture's last slot: compressed responses."
+  (harness-media--task-script
+   '("Find where responses are written" "Compress them when the client accepts gzip" "Test both ways")
+   (list (harness-media--tool "read_file" :path "acme/app.py")
+         (harness-media--tool "read_file" :path "tests/test_app.py"))
+   nil nil t))
+
 (defun harness-media--task-health (_request)
   "Task that asks the user a question."
   (list
@@ -1193,7 +1207,13 @@ The handle is the one the approval message names."
     ("OpenAPI" . "Write the OpenAPI schema")
     ("/health" . "Add a /health endpoint")
     ("csv" . "Export orders as CSV")
-    ("retry" . "Retry failed webhooks"))
+    ("retry" . "Retry failed webhooks")
+    ;; The slots picture's: one at work, four waiting.
+    ("gzip" . "Compress large responses")
+    ("refund" . "Refund paid orders")
+    ("customer_id" . "Index orders by customer")
+    ("DELETE /orders" . "Cancel unshipped orders")
+    ("created_at" . "Rename the created column"))
   "Titles the scripted naming gives, by a regexp of the first message.")
 
 (defconst harness-media--scripts
@@ -1219,7 +1239,8 @@ The handle is the one the approval message names."
     ;; The denied call and the user's approval of it.
     ("baseline" . harness-media--baseline-denied-script)
     ("The user approved the denied call" . harness-media--rerun-approved-script)
-    ("/health" . harness-media--task-health))
+    ("/health" . harness-media--task-health)
+    ("gzip" . harness-media--task-compress))
   "Scripts as (REGEXP . FUNCTION), matched against the newest user message.")
 
 ;;;; Scripted providers
@@ -1498,12 +1519,13 @@ to still be running while the picture is taken, a line each round.")
   (list (harness-media--tool "bash" :command harness-media--notes-command)
         (harness-media--say "Every run passed.")))
 
-(defun harness-media--hold-merge-session ()
-  "Keep the task project's merge lock taken, so a merged branch waits in the queue.
-A task's branch merges into the main checkout, which has no session to
-keep busy: the lock is what the queue waits for.  The picture of the
-board then has a task in its merging section."
-  (puthash (directory-file-name harness-media-project) "media" harness-merge--locks))
+(defun harness-media--hold-merge-queue ()
+  "Keep the demo project's merge queue busy, so a verified branch waits in it.
+The picture of the board then has a task in its merging section.  A
+task's branch merges into the main checkout, which has no session to
+keep busy (see harness-merge.el): the checkout's merge lock is taken
+instead, by a merge that never ends."
+  (puthash (harness-merge--key harness-media-project) "media-hold" harness-merge--locks))
 
 (defun harness-media--build-tasks ()
   "Fill the task board: done, merging, in review, in progress, stuck and in the backlog."
@@ -1523,8 +1545,8 @@ board then has a task in its merging section."
           (retry (harness-media--submit "webhooks: retry failed deliveries with exponential backoff, give up after an hour" :refine t)))
       (dolist (id (list pagination slow))
         (harness-media--wait-task id (lambda (task) (equal (harness-media--column task) "review")) "to wait for review"))
-      ;; With the merge session busy, the verified branch waits in the queue.
-      (harness-media--hold-merge-session)
+      ;; With the merge queue busy, the verified branch waits in it.
+      (harness-media--hold-merge-queue)
       (harness-call 'task/verify pagination)
       (harness-media--wait-task pagination (lambda (task) (equal (harness-media--column task) "merging"))
                                 "to wait in the merge queue")
@@ -1932,7 +1954,8 @@ and the review banner."
 The session talked pagination yesterday; today another session's agent
 writes to it, and the message waits on what goes first.  The session is
 made here and deleted after, so no other picture shows it, and the
-picture is taken last, so its usage counts in none of theirs."
+picture is taken after every picture of usage, so its usage counts in
+none of theirs."
   (let* ((id (harness-media--new-session :name "Paginate the orders list" :model "claude:claude-opus-5-5"
                                          :permission-mode 'accept-edits))
          (sender (harness-media--session (plist-get harness-media--world :ratelimit))))
@@ -1966,6 +1989,83 @@ picture is taken last, so its usage counts in none of theirs."
     (harness-media--wait (lambda () (not (harness-call 'agent/running id))) 15 "the turn to end")
     (harness-call 'session/delete id)))
 
+;;;; The task slots page
+
+(defconst harness-media--slot-queue
+  '(("returns: add POST /orders/{id}/refund, refunding a paid order in full or in part" "high" 2.5)
+    ("add an index on orders.customer_id: the customer page scans the whole table" "high" 1)
+    ("add DELETE /orders/{id}, which cancels an order that has not shipped yet" "medium" 15)
+    ("rename the created column of orders to created_at, with a migration" "low" 48))
+  "The tasks of the slots picture that wait for a slot: (PROMPT PRIORITY MINUTES).
+Each joined the queue MINUTES ago.")
+
+(defconst harness-media--slot-waits
+  '((:constant 180 0 "medium") (:python 1560 6 "medium") (:slow 110 9 "medium")
+    (:pagination 35 5 "high") (:health 26 25 "low") (:settings 12 1 "high")
+    (:openapi 4 16 "medium") (:compress 2 1 "high"))
+  "How long the tasks of the slots picture waited for their slot.
+Each is (KEY STARTED WAITED PRIORITY): the task of KEY started STARTED
+minutes ago, as `harness-media--age' has it, after waiting WAITED
+minutes at PRIORITY.  The times agree with the queue's: no task started
+while one above it, or one older at its level, waited.")
+
+(defun harness-media--slot-titles ()
+  "Return the titles the scripted naming gives the slots picture's new tasks."
+  (mapcar (lambda (prompt)
+            (cdr (cl-find-if (lambda (entry) (string-match-p (car entry) prompt)) harness-media--titles)))
+          (cons "gzip" (mapcar #'car harness-media--slot-queue))))
+
+(defun harness-media--fill-slots ()
+  "Give the demo project four slots, every one held, and four tasks waiting.
+The three tasks at work hold three slots, a fourth task starts and takes
+the last, and four more wait for one, at every priority
+\(`harness-media--slot-queue').  Their times are moved back, and each
+task that started gets the wait such a limit would have made it
+\(`harness-media--slot-waits'), which the page sums by priority."
+  (setq harness-tasks-max-running 4)
+  (let* ((tasks (plist-get harness-media--world :tasks))
+         (compress (harness-media--submit "gzip responses larger than 1 KB when the client accepts gzip"))
+         (all (append (list :compress compress) tasks)))
+    (harness-media--wait-task compress
+                              (lambda (task)
+                                (let ((session (harness-ui-session (plist-get task :session))))
+                                  (cl-some (lambda (todo) (equal (plist-get todo :status) "done"))
+                                           (plist-get session :todos))))
+                              "to get going")
+    (pcase-dolist (`(,prompt ,priority ,minutes) harness-media--slot-queue)
+      (let ((id (harness-media--submit prompt :priority priority)))
+        (harness-media--wait-task id (lambda (task) (equal (harness-media--column task) "pending"))
+                                  "to wait for a slot")
+        (harness-tasks--set id :created (harness-media--ago minutes) :queued-at (harness-media--ago minutes))))
+    (pcase-dolist (`(,key ,started ,waited ,priority) harness-media--slot-waits)
+      (let ((id (plist-get all key)))
+        (when (eq key :compress)
+          (harness-tasks--set id :created (harness-media--ago (+ started waited))
+                              :started (harness-media--ago started)))
+        (harness-tasks--set id :waits (list (list :at (harness-media--ago started)
+                                                  :seconds (* 60.0 waited) :priority priority)))))
+    ;; The tasks at work at three levels, set on their sessions.
+    (pcase-dolist (`(,key ,priority) '((:settings "high") (:compress "high") (:health "low")))
+      (harness-call 'priority/set (plist-get (harness-media--task (plist-get all key)) :session) priority))
+    ;; Named as a task is while it waits, beside everything else.
+    (let ((titles (harness-media--slot-titles)))
+      (harness-media--wait (lambda ()
+                             (let* ((slots (harness-call 'task/slots harness-media-project))
+                                    (shown (mapcar (lambda (entry) (plist-get entry :title))
+                                                   (append (plist-get slots :holders) (plist-get slots :queue)))))
+                               (cl-every (lambda (title) (member title shown)) titles)))
+                           30 "the new tasks to be named"))))
+
+(defun harness-media-shot-slots ()
+  "The task slots page: four slots held at three priorities, four tasks waiting."
+  (harness-media--fill-slots)
+  (harness-media--view (lambda () (harness-slots harness-media-project))
+                       (lambda ()
+                         (let ((buffer (current-buffer)))
+                           (harness-media--wait (lambda () (buffer-local-value 'harness-ui-slots--data buffer))
+                                                10 "the slots page to load"))
+                         (goto-char (point-min))))
+  (harness-media--capture "slots"))
 (defun harness-media--denied-call (id)
   "Return the newest refused call of session ID, or nil.
 That is its tool result whose `:meta' says `:denied', the node the
@@ -2404,8 +2504,15 @@ board every other picture shows."
   (with-current-buffer (window-buffer (selected-window))
     (harness-ui-tasks-compose-quit)
     (harness-ui-tasks-compose-quit))
-  (let ((id (plist-get (plist-get harness-media--world :tasks) :slow)))
-    (ignore-errors (harness-call 'task/archive id t))))
+  (let* ((id (plist-get (plist-get harness-media--world :tasks) :slow))
+         (sid (plist-get (harness-media--task id) :session)))
+    (ignore-errors (harness-call 'task/archive id t))
+    ;; Archived, its session was closed, and restored it stays closed:
+    ;; open it again, with the times `harness-media--age' gave it.
+    (when sid
+      (ignore-errors (harness-call 'session/resume sid))
+      (harness-media--set-times sid 110 41)
+      (harness-ui-refresh-sessions))))
 
 (defconst harness-media--quick-search-line "how do I attach the API guide?"
   "What the quick search picture asks.")
@@ -2445,8 +2552,14 @@ The popout closes after the picture."
       (harness-ui-popout-close '(quick-search) t))))
 
 (defun harness-media-shot-sessions ()
-  "The session list."
-  (harness-media--view #'harness-sessions)
+  "The session list, in a frame wide enough for its last column, the project.
+Its columns take about 156 of `harness-media-columns'; the first
+picture's width, `harness-media-hero-columns', shows the project too."
+  (harness-media--view (lambda ()
+                         (set-frame-size nil harness-media-hero-columns (frame-height))
+                         (harness-sessions))
+                       ;; Point on the first row, whatever row the loads left it on.
+                       (lambda () (goto-char (point-min))))
   (harness-media--capture "sessions"))
 
 (defun harness-media--goto-session-row (id)
@@ -2465,13 +2578,14 @@ The popout closes after the picture."
     (goto-char (prop-match-beginning match))
     (recenter 4)))
 
-(defun harness-media--fit-popout-shot (most &optional spare)
+(defun harness-media--fit-popout-shot (most &optional columns spare)
   "Size the frame for a view with a popout under it, at most MOST lines.
 The frame is fitted to the text of every window, so the view and the
 popout both show; the popout is a side window and keeps its height,
 which is more than its text needs.  SPARE lines more make up for that
-when the view must show whole."
-  (set-frame-size nil harness-media-columns
+when the view must show whole.  It is COLUMNS wide, by default
+`harness-media-columns'."
+  (set-frame-size nil (or columns harness-media-columns)
                   (min (or most harness-media-lines)
                        (max 24 (+ 6 (or spare 0)
                                   (cl-loop for w in (window-list nil 'nomini)
@@ -2479,13 +2593,15 @@ when the view must show whole."
   (harness-media--settle 1))
 
 (defun harness-media-shot-popout-permission ()
-  "The session list, with the permission a blocked session waits for popped out."
+  "The session list, with the permission a blocked session waits for popped out.
+The frame is as wide as the session list's own picture, which its last
+column, the project, needs."
   (harness-media--view #'harness-sessions)
   (harness-media--goto-session-row (plist-get harness-media--world :permission))
   (harness-ui-sessions-requests)
   ;; The whole list shows over the popout: four lines more than the
   ;; text of the two windows, which the popout's own height eats.
-  (harness-media--fit-popout-shot 36 4)
+  (harness-media--fit-popout-shot 36 harness-media-hero-columns 4)
   (harness-media--capture "popout-permission"))
 
 (defun harness-media-shot-popout-question ()
@@ -2922,6 +3038,9 @@ afterwards."
     ("notes" . harness-media-shot-notes)
     ;; After every picture of usage: its session's usage would count there.
     ("chat-cowboy" . harness-media-shot-chat-cowboy)
+    ;; Last: it sets a limit, starts a task and queues four, which every
+    ;; board picture would show, and their usage would count.
+    ("slots" . harness-media-shot-slots)
     ;; And after that one: these make sessions of their own, whose usage
     ;; would count in the usage pictures' totals.
     ("chat-denied" . harness-media-shot-chat-denied)

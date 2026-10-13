@@ -78,6 +78,9 @@
 ;; rates, token counts and a reload of the UI leave it alone; its own
 ;; commands -- the filter, the scope, the toggles -- still redraw it,
 ;; with what changed meanwhile.
+;; Every cell starts at the same place on every row, under its header,
+;; and the figures -- context, output, rate and cost -- are right-aligned
+;; so their ends line up (see "Rows" below for how the rows are printed).
 ;;
 ;; The Priority column shows the arrow for the level the harness serves
 ;; the session's work at -- up for high, down for low, the default,
@@ -440,13 +443,13 @@ of its messages has."
                       (if-let* ((m (plist-get s :permission-mode))) (harness-ui-permission-mode-label m) "")))
         (list :name "Priority" :width 9 :sort #'harness-ui-sessions--priority<
               :cell #'harness-ui-sessions--priority-cell)
-        (list :name "Context" :width 13 :sort (harness-ui-sessions--tokens< :context)
+        (list :name "Context" :width 13 :sort (harness-ui-sessions--tokens< :context) :right-align t
               :cell (lambda (s _depth) (harness-ui-format-context s)))
         (list :name "Output" :width 7 :sort (harness-ui-sessions--tokens< :output) :right-align t
               :cell (lambda (s _depth) (or (harness-ui-format-output s t) "")))
         (list :name "Avg tok/s" :width 9 :sort #'harness-ui-sessions--average-rate< :right-align t
               :cell (lambda (s _depth) (or (harness-ui-format-average-rate s t) "")))
-        (list :name "Cost" :width 10 :sort #'harness-ui-sessions--spend<
+        (list :name "Cost" :width 12 :sort #'harness-ui-sessions--spend< :right-align t
               :cell (lambda (s _depth) (harness-ui-format-spend s)))
         (list :name "Last msg" :width 9 :sort #'harness-ui-sessions--last-message<
               :cell #'harness-ui-sessions--last-message-cell)
@@ -634,6 +637,90 @@ It has the buttons answering R, then says what R is, under the name."
             " " (harness-ui-kbd "b")
             "\n")))
 
+;;;; Rows
+;;
+;; Every cell of a row starts where its column does, whatever the cells
+;; before it hold.  `tabulated-list-print-entry' ends a cell with an
+;; aligning space only when the cell is shorter than its column, so a
+;; name that fills its column -- a long one, cut to fit -- leaves the
+;; row's next cell wherever the name's glyphs happen to end, and a glyph
+;; that is not one cell wide (an emoji, a CJK character, a check mark in
+;; another font) shifts the rest of that row against the header and the
+;; rows around it.  The list prints its rows itself: the same row, but
+;; each cell ends in one space that aligns to the start of the next
+;; column, whether it fills its column or not, and takes the cell's
+;; padding with it.  A cell that runs a little over its column, by up to
+;; the padding, is therefore pulled back to the column's edge instead of
+;; pushing the next cell further; one that runs over by more cannot be,
+;; as a space only ever moves what follows it forward.
+
+(defun harness-ui-sessions--print-cell (n desc x)
+  "Insert cell N of a row at point, from its descriptor DESC, at column X.
+Return the column the next cell starts at.  This is
+`tabulated-list-print-col' with two differences.  A cell that is not the
+last ends in an aligning space even when it fills its column, and its
+padding is part of that space.  And a cell is cut to its own column,
+never into the room a right-aligned neighbour leaves, as
+`tabulated-list-print-col' lets it: no cell of this list could use that
+room."
+  (let* ((spec (aref tabulated-list-format n))
+         (name (nth 0 spec))
+         (width (nth 1 spec))
+         (props (nthcdr 3 spec))
+         (pad-right (or (plist-get props :pad-right) 1))
+         (right-align (plist-get props :right-align))
+         (label (cond ((stringp desc) desc)
+                      ((eq (car desc) 'image) " ")
+                      (t (car desc))))
+         (label-width (string-width label))
+         (help-echo (concat name ": " label))
+         (last-column (= (1+ n) (length tabulated-list-format)))
+         (start (point)))
+    ;; A cell is cut to its column, with an ellipsis, the last one apart:
+    ;; it has the rest of the line.
+    (when (and (not last-column) (> label-width width))
+      (setq label (truncate-string-to-width label width nil nil t t)
+            label-width width))
+    (setq label (bidi-string-mark-left-to-right label))
+    ;; A right-aligned cell starts after the room its label leaves.
+    (when (and right-align (> width label-width))
+      (let ((shift (- width label-width)))
+        (insert (propertize (make-string shift ?\s) 'display `(space :align-to ,(+ x shift))))
+        (setq width (- width shift)
+              x (+ x shift))))
+    (cond ((stringp desc)
+           (insert (if (get-text-property 0 'help-echo label)
+                       label
+                     (propertize label 'help-echo help-echo))))
+          ((eq (car desc) 'image)
+           (insert (propertize " " 'display desc 'help-echo help-echo)))
+          (t (apply #'insert-text-button label (cdr desc))))
+    (let ((next-x (+ x pad-right width)))
+      ;; The last cell needs nothing after it.  The others end in one
+      ;; space, the padding and the room the label leaves in one, that
+      ;; stretches up to the next column: nothing at all (zero width) when
+      ;; the label already reaches it.
+      (unless last-column
+        (insert (propertize (make-string (max 1 (+ pad-right (- width (min width label-width)))) ?\s)
+                            'display `(space :align-to ,next-x))))
+      (put-text-property start (point) 'tabulated-list-column-name name)
+      next-x)))
+
+(defun harness-ui-sessions--print-row (id cols)
+  "Insert the row of the entry ID, whose cells are COLS, at point.
+It is what `tabulated-list-print-entry' inserts -- the padding, the
+cells and the newline, with the entry's id and cells as properties of
+the whole line -- but with the cells of `harness-ui-sessions--print-cell'."
+  (let ((start (point))
+        (x (max tabulated-list-padding 0))
+        (inhibit-read-only t))
+    (when (> tabulated-list-padding 0)
+      (insert (make-string x ?\s)))
+    (dotimes (n (length tabulated-list-format))
+      (setq x (harness-ui-sessions--print-cell n (aref cols n) x)))
+    (insert ?\n)
+    (add-text-properties start (point) `(tabulated-list-id ,id tabulated-list-entry ,cols))))
+
 ;;;; The footer
 ;;
 ;; A module may draw something under the rows -- the companion pet
@@ -691,7 +778,7 @@ Under the last row, and its line, goes the footer
     (when (equal id (car (car entries)))
       (setq harness-ui-sessions--last-id (car (car (last entries))))))
   (let ((start (point)))
-    (tabulated-list-print-entry id cols)
+    (harness-ui-sessions--print-row id cols)
     (when (and harness-ui-sessions--marked (gethash id harness-ui-sessions--marked))
       (save-excursion
         (goto-char start)

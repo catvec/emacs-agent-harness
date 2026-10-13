@@ -126,7 +126,7 @@ OpenAI-compatible APIs and AWS Bedrock.
 | A permission request, answered in the chat | A question from the agent, answered with a digit |
 | ![A call the harness denied, with an [Approve] button under it and the handle the denial named](docs/media/chat-denied.png) | ![That call after the user approved it: marked user-approved, the agent's rerun under it with what the command printed](docs/media/chat-denied-approved.png) |
 | A denied call: the harness blocked it, [Approve] lets it run anyway | Approved: the agent reruns the call exactly as it was denied |
-| ![The task board with tasks needing input, in review, merging, in progress, pending and completed](docs/media/tasks.png) | ![The conversation tree of a session, its fork and a BTW](docs/media/tree.png) |
+| ![The task board with tasks needing input, in review, merging, in progress, in the backlog and completed, each fact in its column](docs/media/tasks.png) | ![The conversation tree of a session, its fork and a BTW](docs/media/tree.png) |
 | The task board: each task has a session and a worktree | The conversation tree of a session, a fork and a BTW |
 | ![A task's report popped out of the board: its chart large, the test run it quotes, and the banner and box to verify it or send it back](docs/media/report.png) | ![The chart of that report shown larger, in a popout of its own](docs/media/report-image.png) |
 | A task's report: verify it or send it back from there | An image of the report, clicked: shown larger |
@@ -144,6 +144,8 @@ OpenAI-compatible APIs and AWS Bedrock.
 | A search in words, typed in the board's own box: the board shows what it is about, and acts | |
 | ![The Insights report over 30 days: the totals, the summary the model wrote, and the messages by hour of day and by weekday](docs/media/insights.png) | ![The Insights report further down: the busiest sessions, each tool's calls and failures, the permission decisions and the tasks](docs/media/insights-activity.png) |
 | Insights: a month of work, summed up by your model | The sessions, tools, permissions and tasks behind it |
+| ![The task slots page: four slots in use, each a box with its task, priority, state and time at work; the queue by priority, the next four in line, and how long tasks waited for a slot this week](docs/media/slots.png) | |
+| A project's task slots: who holds them, who waits, for how long | |
 | ![A chat whose agent replied in three paragraphs, the reply quoted in the compose box with C-c > and answered inline: the middle of the long paragraph elided as [...], the quote split in two with an answer under each part](docs/media/quote-reply.png) | |
 | Answering a reply inline: `C-c >` quotes it, `C-c [` elides what you skip as `[...]`, `M-RET` splits the quote to answer a part | |
 
@@ -416,6 +418,7 @@ default), or nil for nowhere.
 | `C-c h A` | `harness-insights` | Show the Insights report: how a period of work with the agents went |
 | `C-c h B` | `harness-delete-budget` | Delete a budget, chosen by name |
 | `C-c h w` | `harness-worktrees` | List the git worktrees of the project |
+| `C-c h Q` | `harness-slots` | Show the project's task slots: who holds each one and at which priority, who waits for one and for how long (`S` on the task board) |
 | `C-c h S` | `harness-settings` | Show the settings page |
 | `C-c h z` | `harness-pet` | Show your companion pet, or the egg it hatches from |
 | `C-c h r` | `harness-record-audio` | Start or stop recording from the microphone |
@@ -434,6 +437,13 @@ send its first message, while the agent works on it (see
 `harness-naming-auto` and `harness-naming-model`). A task gets its
 title as soon as you submit it (see [Task board](#task-board)).
 
+The session list (`C-c h l`) has a row for each session: its name,
+status, kind, model, mode, priority, context, output, output rate, cost,
+when it was last updated and its project. Every cell starts under its
+header on every row, whatever the cells before it hold -- a name cut to
+fit, an emoji, an icon drawn wider than a letter -- and the figures are
+right-aligned, so their ends line up; the Cost column has room for the
+longest it reads, such as `$0.0058+Max`.
 In the session list the harness prefix's setting commands -- `C-c h m`,
 `C-c h T`, `C-c h p`, `C-c h i` and `C-c h V` -- change every marked
 session, or the session at point when none is marked; the list's own
@@ -2227,6 +2237,21 @@ your checkout itself can be submitted to the **main tree** instead (the
   take back. A task waiting on you that still has workers or sub-agents
   running keeps its slot, and so does a borrower that comes to wait on
   you: it never lends a slot it only borrowed.
+- `S` on the board, or `C-c h Q` from anywhere, opens the project's
+  **Task slots** page: a box for each slot, in use or free -- the task
+  that holds it, its priority's arrow, what it is doing (running,
+  waiting on you, starting) and for how long -- then the queue by
+  priority, with how many wait and the longest and average wait so far,
+  the next five in line, and how long tasks waited for a slot over the
+  last `harness-tasks-slot-wait-days` days (7), by priority. `RET` or a
+  click on a box opens its task's session, `TAB` goes from box to box,
+  and `[Set limit]` (`l`) is the board's `N at a time`. The page keeps
+  itself current without churn: it asks the harness again once a burst
+  of the board's events settles, and only while a window shows it (a
+  hidden page asks once when it shows again); its times run on the
+  board's own 15-second clock; and a redraw that would change nothing is
+  skipped. The harness answers it with `task/slots`, which counts the
+  slots as the scheduler does.
 - Each card is one line, with a subtitle that recaps the task: what it is
   doing or has done so far, written by a short model call and refreshed
   at the first of so many turns, seconds or tool calls since the last
@@ -2237,6 +2262,24 @@ your checkout itself can be submitted to the **main tree** instead (the
   elsewhere `TAB` on a card, or a click on its chevron, shows it. A card
   in *Merging* says on its one line when the merge is under way or in
   conflict.
+- A section's cards line up: the titles start at one column, whatever
+  arrow or icon a card has before its title; the facts -- how long the
+  task has worked or waited, its tokens, its output rate, its cost --
+  stand in right-aligned columns that the section's cards share; and
+  the buttons start at one column. A section short of room lets a
+  column go on all its cards at once, the tokens first, never on one
+  card alone. A pending card says how long its task has waited since it
+  joined the queue.
+- A board taller than its window holds its least urgent cards back,
+  behind `… N more  [Show all]`. A section opened with `[Show all]` keeps
+  its `[Show fewer]` only while folding it would still hold cards back:
+  once its list shrinks to fit, the line goes, as `[Show all]` does from
+  a capped section that comes to fit.
+- A button you push on a card is held down at once -- dimmed and sunk --
+  until the harness has answered what it asked for, for at least 0.3
+  seconds and at most 15, and pushing it again meanwhile does nothing. A
+  key typed on a card (`s`, `v`, `k`, ...) holds that card's button for
+  it down the same way.
 - `C-c h m`, `C-c h T`, `C-c h p` and `C-c h i` set the model, thinking
   level, permission mode and non-interactive mode of the next task, or
   of the task at point. New tasks run in auto mode and are interactive
@@ -2277,7 +2320,8 @@ your checkout itself can be submitted to the **main tree** instead (the
   queue; to give many tasks a priority at once, mark their sessions in
   the session list and press `p` there (see
   [Session list](#session-list)). A high task shows `↑`
-  before its title and a low one `↓`. An
+  before its title and a low one `↓`, and nothing more: no words among
+  the card's facts repeat it. An
   agent sets it with `task_submit`'s `priority`, `task_control`'s
   `priority` action or `set_priority` on the task's session, and the
   board's search understands "do the docs
@@ -3494,7 +3538,7 @@ ACP, so it works the same with a local or a remote harness.
 | Core | `config` `project` `store` `session` `agent` `perms` `sandbox` `secrets` `redact` `usage` `compaction` `cowboy` `handoff` `naming` `judge` `skills` `worktree` `merge` `tasks` `notifications` `tasks-notify` `supervisor` `seed` `acp` `acp-remote` |
 | Providers | `provider` `provider-claude` `provider-copilot` `provider-openai` `provider-deepseek` `provider-bedrock` `provider-demo` |
 | Tools | `tools` `tools-fs` `tools-shell` `tools-ssh` `tools-emacs` `tools-web` `tools-agent` `tools-sessions` `tools-events` `tools-notify` |
-| User interface | `ui` `ui-chat` `ui-compose` `ui-compact` `ui-cowboy` `ui-sessions` `ui-tasks` `ui-tree` `ui-notify` `ui-usage` `ui-worktree` `ui-merge` `ui-children` `ui-btw` `ui-media` `ui-dirs` `ui-config` `ui-qr` `ui-remote` `ui-supervisor` `ui-secrets` |
+| User interface | `ui` `ui-chat` `ui-compose` `ui-compact` `ui-cowboy` `ui-sessions` `ui-tasks` `ui-slots` `ui-tree` `ui-notify` `ui-usage` `ui-worktree` `ui-merge` `ui-children` `ui-btw` `ui-media` `ui-dirs` `ui-config` `ui-qr` `ui-remote` `ui-supervisor` `ui-secrets` |
 
 Beside the modules, `lisp/vendor` holds libraries the harness ships that
 need nothing of it, and may be used without it: `compose-quote`, which

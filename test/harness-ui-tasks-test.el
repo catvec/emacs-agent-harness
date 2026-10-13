@@ -1220,7 +1220,7 @@ one-shot choice, so the next task is a worktree task again."
 (declare-function harness-ui-tasks-raise-priority "harness-ui-tasks")
 (declare-function harness-ui-tasks-lower-priority "harness-ui-tasks")
 (declare-function harness-ui-tasks-cycle-new-priority "harness-ui-tasks")
-(declare-function harness-ui-tasks--meta "harness-ui-tasks")
+(declare-function harness-ui-tasks--facts "harness-ui-tasks")
 (declare-function harness-ui-tasks--actions "harness-ui-tasks")
 
 (defun harness-ui-tasks-test--priority-actions (board text)
@@ -1232,27 +1232,32 @@ one-shot choice, so the next task is a worktree task again."
 
 (ert-deftest harness-ui-tasks-pending-in-priority-order ()
   "Pending lists the waiting tasks as they will start: by priority, then oldest first.
-A high or low card has an arrow before its title and says so among its
-facts; medium goes without saying.  + and - on a card move its priority
-a step, and the card moves with it; off a card they type."
+A high or low card has an arrow before its title and no words for it
+among its facts; medium goes without saying.  + and - on a card move its
+priority a step, and the card moves with it; off a card they type."
   (harness-ui-tasks-test-with
     (let ((harness-tasks-max-running 0))
       (harness-call 'task/submit default-directory "Alpha, low" (list :priority "low"))
       (harness-call 'task/submit default-directory "Bravo, medium")
       (harness-call 'task/submit default-directory "Charlie, high" (list :priority "high"))
       (harness-ui-tasks-test--wait-text board "Pending  3\\(.\\|\n\\)*Charlie\\(.\\|\n\\)*Bravo\\(.\\|\n\\)*Alpha")
-      (should (string-match-p "↑ Charlie, high" (harness-ui-tasks-test--card-text board "Charlie")))
-      (should (string-match-p "↓ Alpha, low" (harness-ui-tasks-test--card-text board "Alpha")))
+      (should (string-match-p "↑ +Charlie, high" (harness-ui-tasks-test--card-text board "Charlie")))
+      (should (string-match-p "↓ +Alpha, low" (harness-ui-tasks-test--card-text board "Alpha")))
       (should-not (string-match-p "[↑↓]" (harness-ui-tasks-test--card-text board "Bravo")))
       (with-current-buffer board
         (let ((facts (lambda (title)
-                       (harness-ui-tasks--meta (cl-find title harness-ui-tasks--tasks
-                                                        :key (lambda (task) (plist-get task :prompt))
-                                                        :test #'equal)
-                                               'pending nil))))
-          (should (string-prefix-p "high priority · queued" (funcall facts "Charlie, high")))
-          (should (string-prefix-p "low priority · queued" (funcall facts "Alpha, low")))
-          (should (string-prefix-p "queued" (funcall facts "Bravo, medium")))))
+                       (harness-ui-tasks--facts (cl-find title harness-ui-tasks--tasks
+                                                         :key (lambda (task) (plist-get task :prompt))
+                                                         :test #'equal)
+                                                'pending nil))))
+          ;; The arrow says it, so the facts are the queue's alone and
+          ;; carry no words for the priority.
+          (dolist (title '("Charlie, high" "Alpha, low" "Bravo, medium"))
+            (should (equal '(time) (mapcar #'car (funcall facts title))))
+            (should (string-prefix-p "queued" (cdr (assq 'time (funcall facts title)))))
+            (should-not (string-match-p "priority" (cdr (assq 'time (funcall facts title))))))))
+      (dolist (title '("Charlie" "Alpha" "Bravo"))
+        (should-not (string-match-p "priority" (harness-ui-tasks-test--card-text board title))))
       ;; The place in line is the place it starts in.
       (harness-ui-tasks-test--show-subtitle board "Charlie")
       (harness-ui-tasks-test--show-subtitle board "Alpha")
@@ -1273,7 +1278,7 @@ a step, and the card moves with it; off a card they type."
       (harness-ui-tasks-test--wait-text board "Pending  3\\(.\\|\n\\)*Bravo\\(.\\|\n\\)*Charlie\\(.\\|\n\\)*Alpha")
       (should (eq 'high (plist-get (harness-call 'task/get (harness-ui-tasks-test--card-id board "Bravo"))
                                    :priority)))
-      (should (string-match-p "↑ Bravo" (harness-ui-tasks-test--card-text board "Bravo")))
+      (should (string-match-p "↑ +Bravo" (harness-ui-tasks-test--card-text board "Bravo")))
       ;; Nothing above high, nothing below low.
       (harness-ui-tasks-test--goto-card board "Bravo")
       (with-current-buffer board (should-error (harness-ui-tasks-raise-priority) :type 'user-error))
@@ -1336,7 +1341,7 @@ rather than sent to the harness."
     (let ((harness-tasks-max-running 0)
           (changed nil))
       (harness-call 'task/submit default-directory "Alpha, low" (list :priority "low"))
-      (harness-ui-tasks-test--wait-text board "Pending  1\\(.\\|\n\\)*↓ Alpha, low")
+      (harness-ui-tasks-test--wait-text board "Pending  1\\(.\\|\n\\)*↓ +Alpha, low")
       (let* ((id (harness-ui-tasks-test--card-id board "Alpha, low"))
              (sid (plist-get (harness-call 'task/get id) :session)))
         (should (stringp sid))
@@ -1559,7 +1564,7 @@ choice on with [keep on]; a submission spends a one-shot choice."
         (should (eq harness-ui-tasks--priority-mode 'once))
         (should (string-match-p "High priority for the next task only" (harness-ui-tasks-test--tail-text board))))
       (harness-ui-tasks-test--type-and-submit board "Urgent fix")
-      (harness-ui-tasks-test--wait-text board "Pending  1\\(.\\|\n\\)*↑ Urgent fix")
+      (harness-ui-tasks-test--wait-text board "Pending  1\\(.\\|\n\\)*↑ +Urgent fix")
       (should (eq 'high (plist-get (car (harness-call 'task/list default-directory)) :priority)))
       ;; The one-shot choice is spent: the next task is medium again.
       (with-current-buffer board
@@ -1577,7 +1582,7 @@ choice on with [keep on]; a submission spends a one-shot choice."
         (push-button (harness-ui-tasks-test--tail-button board "[keep on]"))
         (should (eq harness-ui-tasks--priority-mode 'sticky)))
       (harness-ui-tasks-test--type-and-submit board "Whenever")
-      (harness-ui-tasks-test--wait-text board "Pending  2\\(.\\|\n\\)*↑ Urgent fix\\(.\\|\n\\)*Whenever")
+      (harness-ui-tasks-test--wait-text board "Pending  2\\(.\\|\n\\)*↑ +Urgent fix\\(.\\|\n\\)*Whenever")
       (should (eq 'high (plist-get (cadr (harness-call 'task/list default-directory)) :priority)))
       ;; Sticky stays, until it is clicked off.
       (with-current-buffer board
@@ -2295,7 +2300,8 @@ conflict which files its session is resolving."
           (should (string-match-p "queued 2m ago" card))
           (should-not (string-match-p "conflict\\|merging now" card)))
         (should (= 1 (harness-ui-tasks-test--card-lines board "Second to merge")))
-        (should (string-match-p "conflict · queued [0-9]+s ago"
+        ;; The merge and the time are facts of their own, in columns.
+        (should (string-match-p "conflict +queued [0-9]+s ago"
                                 (harness-ui-tasks-test--card-text board "Second to merge")))
         ;; Shown, a conflict says which files its session is resolving.
         (harness-ui-tasks-test--show-subtitle board "Second to merge")
@@ -2306,7 +2312,7 @@ conflict which files its session is resolving."
         (harness-ui-tasks-test--change board first :merge-status "merging")
         (with-current-buffer board (harness-ui-tasks--render))
         (should (= 1 (harness-ui-tasks-test--card-lines board "First to merge")))
-        (should (string-match-p "merging now · queued 2m ago"
+        (should (string-match-p "merging now +queued 2m ago"
                                 (harness-ui-tasks-test--card-text board "First to merge")))
         ;; TAB on the card shows its recap, with the merge beside it, and
         ;; folds it away again.
@@ -2812,6 +2818,330 @@ overflow the window, or a card that fits went missing."
                   (harness-ui-tasks--draw-board caps)
                   (should-not (harness-ui-tasks--fits-p window))))))
       (set-frame-height nil 25)))))
+
+;;;; Sections opened with [Show all] close when the window holds nothing back
+
+(defvar harness-ui-tasks--expanded)
+(defvar harness-ui-tasks--folded)
+(defvar harness-ui-tasks--drawn-key)
+(defvar harness-ui-tasks--cap-min-lines)
+(declare-function harness-ui-tasks--needs-open-p "harness-ui-tasks")
+(declare-function harness-ui-tasks--fits-p "harness-ui-tasks")
+(declare-function harness-ui-tasks--window "harness-ui-tasks")
+(declare-function harness-ui-tasks-show-all "harness-ui-tasks")
+
+(defmacro harness-ui-tasks-test-in-frame (height &rest body)
+  "Run BODY with the frame HEIGHT lines tall and `window' the board's window.
+For use in `harness-ui-tasks-test-with', which names `board': a batch
+window is too short for the headings alone, so a test that caps
+sections makes the frame taller, and puts it back after."
+  (declare (indent 1))
+  `(unwind-protect
+       (progn
+         (set-frame-height nil ,height)
+         (let ((window (get-buffer-window board)))
+           (should window)
+           (select-window window)
+           ,@body))
+     (set-frame-height nil 25)))
+
+(defun harness-ui-tasks-test--fake-pending (board n)
+  "Put N pending tasks on BOARD, as the harness's own store would."
+  (with-current-buffer board
+    (setq harness-ui-tasks--tasks
+          (append harness-ui-tasks--tasks
+                  (cl-loop for i below n
+                           collect (list :id (format "t-wait%03d" i)
+                                         :project harness-ui-tasks--project
+                                         :cwd harness-ui-tasks--dir
+                                         :prompt (format "Waiting task %d: tidy the orders API" i)
+                                         :state "pending" :column "pending"
+                                         :created (- (float-time) (* 60 i))))))))
+
+(defun harness-ui-tasks-test--archive-done (board keep)
+  "Archive all but KEEP of BOARD's completed tasks, as archiving them would."
+  (with-current-buffer board
+    (let ((kept 0))
+      (setq harness-ui-tasks--tasks
+            (mapcar (lambda (task)
+                      (if (and (equal (plist-get task :column) "done")
+                               (not (plist-get task :archived))
+                               (> (cl-incf kept) keep))
+                          (plist-put (copy-sequence task) :archived t)
+                        task))
+                    harness-ui-tasks--tasks)))))
+
+(defun harness-ui-tasks-test--show-all (board)
+  "Push BOARD's [Show all]: the first capped section opens."
+  (with-current-buffer board
+    (goto-char (point-min))
+    (search-forward "[Show all]")
+    (goto-char (line-beginning-position))
+    (call-interactively #'harness-ui-tasks-show-all)))
+
+(defun harness-ui-tasks-test--count (regexp board)
+  "How many times REGEXP matches in BOARD's board region."
+  (let ((text (harness-ui-tasks-test--board-text board)) (n 0) (start 0))
+    (while (string-match regexp text start)
+      (cl-incf n)
+      (setq start (match-end 0)))
+    n))
+
+(ert-deftest harness-ui-tasks-show-fewer-goes-once-the-section-fits ()
+  "An open section loses its [Show fewer] when its list shrinks to fit.
+Archiving completed tasks leaves the section still too tall for the
+window: folding it would hold cards back, so the line stays.  Archiving
+on until the whole board fits leaves nothing for the line to fold back:
+it goes, and the section is no longer open, so a list that grows past
+the window again is capped again, with its [Show all]."
+  (harness-ui-tasks-test-with
+    (harness-ui-tasks-test--fake-done board 60)
+    (harness-ui-tasks-test-in-frame 40
+      (with-current-buffer board
+        (harness-ui-tasks--render t)
+        (harness-ui-tasks-test--show-all board)
+        (should (memq 'done harness-ui-tasks--expanded))
+        (should (string-match-p "\\[Show fewer\\]" (harness-ui-tasks-test--board-text board)))
+        ;; Fewer, but more than the window holds: the line is still needed.
+        (harness-ui-tasks-test--archive-done board 45)
+        (harness-ui-tasks--render)
+        (should (string-match-p "Completed  45" (harness-ui-tasks-test--board-text board)))
+        (should-not (harness-ui-tasks--fits-p window))
+        (should (memq 'done harness-ui-tasks--expanded))
+        (should (= 1 (harness-ui-tasks-test--count "\\[Show fewer\\]" board)))
+        ;; Few enough to fit whole: the line goes, and the section closes.
+        ;; Point is on the line that goes, and rests on the board.
+        (goto-char (point-min))
+        (search-forward "[Show fewer]")
+        (goto-char (match-beginning 0))
+        (harness-ui-tasks-test--archive-done board 5)
+        (harness-ui-tasks--render)
+        (should (< (point) (marker-position harness-ui-tasks--list-end)))
+        (should-not (string-search "Show fewer" (buffer-substring-no-properties
+                                                 (line-beginning-position) (line-end-position))))
+        (should (string-match-p "Completed  5" (harness-ui-tasks-test--board-text board)))
+        (should (harness-ui-tasks--fits-p window))
+        (should (string-match-p "Completed task 4" (harness-ui-tasks-test--board-text board)))
+        (should-not (string-match-p "\\[Show fewer\\]\\|\\[Show all\\]" (harness-ui-tasks-test--board-text board)))
+        (should-not harness-ui-tasks--expanded)
+        ;; The list grows past the window again: capped, not left open.
+        (setq harness-ui-tasks--tasks
+              (mapcar (lambda (task) (plist-put (copy-sequence task) :archived nil))
+                      harness-ui-tasks--tasks))
+        (harness-ui-tasks--render)
+        (should (harness-ui-tasks--fits-p window))
+        (should (string-match-p "more +\\[Show all\\]" (harness-ui-tasks-test--board-text board)))
+        (should-not (string-match-p "\\[Show fewer\\]" (harness-ui-tasks-test--board-text board)))))))
+
+(ert-deftest harness-ui-tasks-show-all-goes-once-the-section-fits ()
+  "The \"N more\" line of a capped section goes when its list shrinks to fit.
+A capped section says how many cards it holds back and offers
+[Show all]; when tasks leave it until the whole board fits the window,
+it holds none back and the line has nothing to say."
+  (harness-ui-tasks-test-with
+    (harness-ui-tasks-test--fake-done board 60)
+    (harness-ui-tasks-test-in-frame 40
+      (with-current-buffer board
+        (harness-ui-tasks--render t)
+        (should (string-match-p "more +\\[Show all\\]" (harness-ui-tasks-test--board-text board)))
+        (should (> (harness-ui-tasks--held (cdr harness-ui-tasks--fitting)) 0))
+        (harness-ui-tasks-test--archive-done board 5)
+        (harness-ui-tasks--render)
+        (should (string-match-p "Completed  5" (harness-ui-tasks-test--board-text board)))
+        (should-not (string-match-p "more +\\[Show all\\]\\|\\[Show all\\]" (harness-ui-tasks-test--board-text board)))
+        (should (zerop (harness-ui-tasks--held (cdr harness-ui-tasks--fitting))))
+        (should (harness-ui-tasks--fits-p window))))))
+
+(ert-deftest harness-ui-tasks-open-section-is-checked-once-per-shape ()
+  "Whether an open section is still needed is not asked on every redraw.
+A section that needs it is checked when the board's shape changes, then
+kept without asking while only what the cards read changes; one that
+does not is closed in the redraw that finds out, and that redraw is the
+board as drawn then: the next one has nothing to redraw."
+  (harness-ui-tasks-test-with
+    (harness-ui-tasks-test--fake-done board 60)
+    (harness-ui-tasks-test-in-frame 40
+      (with-current-buffer board
+        (harness-ui-tasks--render t)
+        (harness-ui-tasks-test--show-all board)
+        (should (memq 'done harness-ui-tasks--expanded))
+        (let ((asked 0))
+          (cl-letf* ((real (symbol-function 'harness-ui-tasks--needs-open-p))
+                     ((symbol-function 'harness-ui-tasks--needs-open-p)
+                      (lambda (&rest args) (cl-incf asked) (apply real args))))
+            ;; Needed, and known to be: redrawing the same board asks nothing.
+            (harness-ui-tasks--render t)
+            (harness-ui-tasks--render t)
+            (should (zerop asked))
+            (should (memq 'done harness-ui-tasks--expanded))
+            ;; The list shrinks to fit: asked once, which closes the section.
+            (harness-ui-tasks-test--archive-done board 5)
+            (harness-ui-tasks--render)
+            (should (= 1 asked))
+            (should-not harness-ui-tasks--expanded)
+            (should-not (string-match-p "\\[Show fewer\\]" (harness-ui-tasks-test--board-text board)))
+            ;; And the board fitted again without it asked nothing more.
+            (harness-ui-tasks--render t)
+            (should (= 1 asked))))
+        ;; The board was drawn once for it: what it depends on, with the
+        ;; section closed, is what was drawn, so no redraw follows.
+        (should (equal harness-ui-tasks--drawn-key (harness-ui-tasks--board-key)))))))
+
+(ert-deftest harness-ui-tasks-open-section-closes-in-a-window-too-small-to-cap ()
+  "Nothing is capped in a window with no room to speak of, so nothing needs opening.
+The board is drawn whole there and scrolls; an open section would have
+a [Show fewer] that does nothing.  It goes, and the section is capped
+again when the window has room."
+  (harness-ui-tasks-test-with
+    (harness-ui-tasks-test--fake-done board 60)
+    (harness-ui-tasks-test-in-frame 40
+      (with-current-buffer board
+        (harness-ui-tasks--render t)
+        (harness-ui-tasks-test--show-all board)
+        (should (memq 'done harness-ui-tasks--expanded)))
+      (set-frame-height nil 20)
+      (should (< (window-body-height window) harness-ui-tasks--cap-min-lines))
+      (with-current-buffer board
+        (harness-ui-tasks--render t)
+        (should-not harness-ui-tasks--expanded)
+        (should (string-match-p "Completed task 59" (harness-ui-tasks-test--board-text board)))
+        (should-not (string-match-p "\\[Show fewer\\]" (harness-ui-tasks-test--board-text board))))
+      (set-frame-height nil 40)
+      (with-current-buffer board
+        (harness-ui-tasks--render t)
+        (should (string-match-p "more +\\[Show all\\]" (harness-ui-tasks-test--board-text board)))
+        (should (harness-ui-tasks--fits-p window))))))
+
+(ert-deftest harness-ui-tasks-open-section-stays-while-the-board-is-hidden ()
+  "A board no window shows keeps what you opened.
+There is no window to measure, so nothing says the section is not
+needed; it is checked when the board is shown again."
+  (harness-ui-tasks-test-with
+    (harness-ui-tasks-test--fake-done board 3)
+    (harness-ui-tasks-test-in-frame 40
+      (let ((elsewhere (get-buffer-create " *harness-tasks-test-elsewhere*")))
+        (unwind-protect
+            (with-current-buffer board
+              (setq harness-ui-tasks--expanded '(done))
+              (set-window-buffer window elsewhere)
+              (should-not (harness-ui-tasks--window))
+              (harness-ui-tasks--render t)
+              (should (equal '(done) harness-ui-tasks--expanded))
+              (should (string-match-p "\\[Show fewer\\]" (harness-ui-tasks-test--board-text board)))
+              (set-window-buffer window board)
+              (select-window window)
+              (harness-ui-tasks--render t)
+              (should-not harness-ui-tasks--expanded)
+              (should-not (string-match-p "\\[Show fewer\\]" (harness-ui-tasks-test--board-text board))))
+          (kill-buffer elsewhere))))))
+
+(ert-deftest harness-ui-tasks-folded-section-keeps-its-expansion ()
+  "Nothing of a folded section shows, so what you opened in it is not judged.
+Unfolded, it is: the section that fits closes."
+  (harness-ui-tasks-test-with
+    (harness-ui-tasks-test--fake-done board 3)
+    (harness-ui-tasks-test-in-frame 40
+      (with-current-buffer board
+        (setq harness-ui-tasks--expanded '(done)
+              harness-ui-tasks--folded '(done))
+        (harness-ui-tasks--render t)
+        (should (equal '(done) harness-ui-tasks--expanded))
+        (setq harness-ui-tasks--folded nil)
+        (harness-ui-tasks--render t)
+        (should-not harness-ui-tasks--expanded)))))
+
+(ert-deftest harness-ui-tasks-open-section-stays-for-the-urgent-ones-it-spares ()
+  "A section stays open while folding it would cap it, and with it a section after it.
+Completed is open and short enough to fit, but the board does not fit
+with it open: Pending, which is more urgent, is capped to make room.
+Folded, Completed would be capped first and spare Pending, so its
+[Show fewer] is worth having, and it stays."
+  (harness-ui-tasks-test-with
+    (harness-ui-tasks-test--fake-done board 10)
+    (harness-ui-tasks-test--fake-pending board 30)
+    (harness-ui-tasks-test-in-frame 40
+      (with-current-buffer board
+        (setq harness-ui-tasks--expanded '(done))
+        (harness-ui-tasks--render t)
+        (should (harness-ui-tasks--fits-p window))
+        (should (equal '(done) harness-ui-tasks--expanded))
+        (should (string-match-p "\\[Show fewer\\]" (harness-ui-tasks-test--board-text board)))
+        (should (string-match-p "more +\\[Show all\\]" (harness-ui-tasks-test--board-text board)))
+        (should (string-match-p "Completed task 9" (harness-ui-tasks-test--board-text board)))
+        ;; The oldest wait first; the newest are the cards held back.
+        (should (string-match-p "Waiting task 29" (harness-ui-tasks-test--board-text board)))
+        (should-not (string-match-p "Waiting task 0:" (harness-ui-tasks-test--board-text board)))))))
+
+(ert-deftest harness-ui-tasks-open-section-closes-when-a-less-urgent-one-makes-room ()
+  "A section closes when the fitting never needed it open.
+Pending is open and short enough to fit, with Completed, which is less
+urgent, taking all the capping: folded, Pending would not be capped, so
+its [Show fewer] would do nothing and goes.  Completed stays capped."
+  (harness-ui-tasks-test-with
+    (harness-ui-tasks-test--fake-done board 40)
+    (harness-ui-tasks-test--fake-pending board 10)
+    (harness-ui-tasks-test-in-frame 40
+      (with-current-buffer board
+        (setq harness-ui-tasks--expanded '(pending))
+        (harness-ui-tasks--render t)
+        (should (harness-ui-tasks--fits-p window))
+        (should-not harness-ui-tasks--expanded)
+        (should-not (string-match-p "\\[Show fewer\\]" (harness-ui-tasks-test--board-text board)))
+        (should (string-match-p "Waiting task 9" (harness-ui-tasks-test--board-text board)))
+        (should (= 1 (harness-ui-tasks-test--count "more +\\[Show all\\]" board)))
+        (should-not (string-match-p "Completed task 39" (harness-ui-tasks-test--board-text board)))))))
+
+(ert-deftest harness-ui-tasks-open-section-beside-a-longer-one-stays-open ()
+  "A section stays open when folding it would hold cards back, whatever else is open.
+Completed and Pending are both open and the window holds neither whole:
+Completed is capped first when only one is folded, but folding Pending
+caps Pending, as Completed stays open.  Each keeps its [Show fewer],
+as a user who opened both would have it; once few enough tasks are left
+for the board to fit, both close."
+  (harness-ui-tasks-test-with
+    (harness-ui-tasks-test--fake-done board 60)
+    (harness-ui-tasks-test--fake-pending board 3)
+    (harness-ui-tasks-test-in-frame 40
+      (with-current-buffer board
+        (setq harness-ui-tasks--expanded '(done pending))
+        (harness-ui-tasks--render t)
+        (should-not (harness-ui-tasks--fits-p window))
+        (should (equal '(done pending) (sort (copy-sequence harness-ui-tasks--expanded) #'string<)))
+        (should (= 2 (harness-ui-tasks-test--count "\\[Show fewer\\]" board)))
+        (harness-ui-tasks-test--archive-done board 3)
+        (harness-ui-tasks--render)
+        (should (harness-ui-tasks--fits-p window))
+        (should-not harness-ui-tasks--expanded)
+        (should-not (string-match-p "\\[Show fewer\\]" (harness-ui-tasks-test--board-text board)))))))
+
+;;;; How long a pending task has waited
+
+(declare-function harness-ui-tasks--queued-since "harness-ui-tasks")
+
+(ert-deftest harness-ui-tasks-queued-since-counts-from-the-queue ()
+  "A pending card says how long its task has waited in the queue.
+That is since the harness last queued it (`:queued-at'), else since it
+was returned to pending, else since it was submitted: a task written
+days ago and put back in the queue waits from then, not from the day it
+was written."
+  (harness-ui-tasks-test-with
+    (let* ((now (float-time))
+           (written (- now (* 3 86400))))
+      (should (equal (- now 300)
+                     (harness-ui-tasks--queued-since
+                      (list :queued-at (- now 300) :returned (- now 200) :created written))))
+      (should (equal (- now 200)
+                     (harness-ui-tasks--queued-since (list :returned (- now 200) :created written))))
+      (should (equal written (harness-ui-tasks--queued-since (list :created written))))
+      ;; The card says so, each from its own start.
+      (harness-ui-tasks-test--fake-pending board 3)
+      (harness-ui-tasks-test--change board "t-wait000" :created written :queued-at (- now 300))
+      (harness-ui-tasks-test--change board "t-wait001" :created written :returned (- now 7200))
+      (harness-ui-tasks-test--change board "t-wait002" :created written)
+      (with-current-buffer board (harness-ui-tasks--render t))
+      (should (string-match-p "queued 5m ago" (harness-ui-tasks-test--card-text board "Waiting task 0")))
+      (should (string-match-p "queued 2h ago" (harness-ui-tasks-test--card-text board "Waiting task 1")))
+      (should (string-match-p "queued 3d ago" (harness-ui-tasks-test--card-text board "Waiting task 2"))))))
 
 (ert-deftest harness-ui-tasks-redraw-for-figures-keeps-the-fitting ()
   "A redraw for a card's figures draws the caps again, without measuring.
@@ -3441,7 +3771,7 @@ medium for the next one."
           (should (string-match-p "High priority for the next task only" tail))
           (should (string-match-p "\\[keep on\\]" tail))))
       (harness-ui-tasks-test--type-and-submit board "Urgent fix")
-      (harness-ui-tasks-test--wait-text board "Pending  1\\(.\\|\n\\)*↑ Urgent fix")
+      (harness-ui-tasks-test--wait-text board "Pending  1\\(.\\|\n\\)*↑ +Urgent fix")
       (should (eq 'high (plist-get (car (harness-call 'task/list default-directory)) :priority)))
       ;; Spent: medium again, and the notice is gone.
       (harness-test-wait
@@ -3466,7 +3796,7 @@ it applies to, and the notice stays until its [off] button is used."
         (should (string-match-p "High priority for every task until you click it off"
                                 (harness-ui-tasks-test--tail-text board))))
       (harness-ui-tasks-test--type-and-submit board "First urgent")
-      (harness-ui-tasks-test--wait-text board "Pending  1\\(.\\|\n\\)*↑ First urgent")
+      (harness-ui-tasks-test--wait-text board "Pending  1\\(.\\|\n\\)*↑ +First urgent")
       (should (string-match-p "High priority for every task until you click it off"
                               (harness-ui-tasks-test--tail-text board)))
       ;; A second submit goes high too, the notice still showing.
@@ -3560,6 +3890,887 @@ it says there was nothing to merge."
     (harness-ui-tasks-test--show-subtitle board "Document the flag")
     (should (string-match-p "nothing to merge"
                             (harness-ui-tasks-test--card-text board "Document the flag")))))
+
+;;;; A button pushed is held down until the harness answers
+
+;; A push sends a request and the board only changes when the event it
+;; causes comes back.  The button is drawn held down meanwhile, so the
+;; click is seen to have landed.  The requests here are kept, not sent, so
+;; the tests answer them when they choose.
+
+(defvar harness-ui-tasks--pressed)
+(defvar harness-ui-tasks--pressable)
+(defvar harness-ui-tasks--card-id)
+(defvar harness-ui-tasks--pressed-min-seconds)
+(defvar harness-ui-tasks--pressed-max-seconds)
+(declare-function harness-ui-tasks--pressed-keys "harness-ui-tasks")
+(declare-function harness-ui-tasks--more-line "harness-ui-tasks")
+(declare-function harness-ui-tasks--tick "harness-ui-tasks")
+(declare-function harness-ui-tasks-start "harness-ui-tasks")
+
+(defmacro harness-ui-tasks-test-holding (var &rest body)
+  "Run BODY with the requests the board makes kept in VAR, not sent.
+VAR is the list of them, the newest first, each (METHOD PARAMS CALLBACK
+ON-ERROR): the test answers one by calling CALLBACK, or fails it with
+ON-ERROR.  The harness is not asked."
+  (declare (indent 1))
+  `(let ((,var nil))
+     (cl-letf (((symbol-function 'harness-ui-call)
+                (lambda (method params callback &optional on-error)
+                  (push (list method params callback on-error) ,var))))
+       ,@body)))
+
+(defun harness-ui-tasks-test--sent (sent method)
+  "The requests of METHOD among SENT, oldest first."
+  (reverse (cl-remove-if-not (lambda (request) (equal method (car request))) sent)))
+
+(defun harness-ui-tasks-test--card-button (board card label)
+  "Where the button LABEL is, on BOARD's card whose title shows CARD."
+  (with-current-buffer board
+    (harness-ui-tasks-test--goto-card board card)
+    (save-excursion
+      (search-forward label (or (next-single-property-change (point) 'harness-task-id) (point-max)))
+      (match-beginning 0))))
+
+(defun harness-ui-tasks-test--push (board card label)
+  "Push the button LABEL on BOARD's card whose title shows CARD."
+  (with-current-buffer board
+    (push-button (harness-ui-tasks-test--card-button board card label))))
+
+(defun harness-ui-tasks-test--held-p (board card label)
+  "Non-nil when BOARD draws the button LABEL of the card showing CARD held down."
+  (with-current-buffer board
+    (eq 'harness-task-button-pressed-face
+        (get-text-property (harness-ui-tasks-test--card-button board card label) 'face))))
+
+(defun harness-ui-tasks-test--waiting-task (board)
+  "Submit a task that waits in Pending, and wait for BOARD to show its card."
+  (harness-call 'task/submit default-directory "Waiting task" nil)
+  (harness-ui-tasks-test--wait-text board "Pending  1\\(.\\|\n\\)*Waiting task"))
+
+(ert-deftest harness-ui-tasks-pushed-button-is-held-down-until-the-harness-answers ()
+  "A button pushed is drawn held down, at once, until its request is answered.
+The request is still out when it shows; a second push meanwhile runs
+nothing and says why (a task started twice is an error); the answer lets
+the button go, and it can be pushed again.  Held down it reads the same,
+only its look and its tooltip change."
+  (harness-ui-tasks-test-with
+    (let ((harness-tasks-max-running 0)
+          (harness-ui-tasks--pressed-min-seconds 0))
+      (harness-ui-tasks-test--waiting-task board)
+      (harness-ui-tasks-test-holding sent
+        (let ((text (harness-ui-tasks-test--board-text board))
+              (start (lambda (n) (nth n (harness-ui-tasks-test--sent sent "_harness/task/start")))))
+          (should-not (harness-ui-tasks-test--held-p board "Waiting task" "[Start now]"))
+          (harness-ui-tasks-test--push board "Waiting task" "[Start now]")
+          ;; Held down while the request is out.
+          (should (funcall start 0))
+          (should (harness-ui-tasks-test--held-p board "Waiting task" "[Start now]"))
+          (should-not (harness-ui-tasks-test--held-p board "Waiting task" "[Edit]"))
+          (with-current-buffer board
+            (let ((pos (harness-ui-tasks-test--card-button board "Waiting task" "[Start now]")))
+              (should (button-at pos))
+              (should (string-prefix-p "Working on it" (get-text-property pos 'help-echo)))
+              (should-not (get-text-property pos 'mouse-face))))
+          ;; Same words, same width: nothing but the look changed.
+          (should (equal text (harness-ui-tasks-test--board-text board)))
+          ;; A second push says so and sends nothing.
+          (let ((said nil))
+            (cl-letf (((symbol-function 'message)
+                       (lambda (format-string &rest args)
+                         (push (apply #'format format-string args) said))))
+              (harness-ui-tasks-test--push board "Waiting task" "[Start now]"))
+            (should (string-match-p "Still working" (car said))))
+          (should-not (funcall start 1))
+          (should (harness-ui-tasks-test--held-p board "Waiting task" "[Start now]"))
+          ;; The answer lets it go...
+          (funcall (nth 2 (funcall start 0)) nil)
+          (should-not (harness-ui-tasks-test--held-p board "Waiting task" "[Start now]"))
+          (should-not (with-current-buffer board (harness-ui-tasks--pressed-keys)))
+          (with-current-buffer board
+            (should (string-prefix-p "Start now"
+                                     (get-text-property
+                                      (harness-ui-tasks-test--card-button board "Waiting task" "[Start now]")
+                                      'help-echo))))
+          ;; ...and it works again.
+          (harness-ui-tasks-test--push board "Waiting task" "[Start now]")
+          (should (funcall start 1))
+          (should (harness-ui-tasks-test--held-p board "Waiting task" "[Start now]")))))))
+
+(ert-deftest harness-ui-tasks-held-button-stays-down-through-redraws-and-may-leave ()
+  "A button held down stays so through the board's redraws.
+The key outlives the button: once the task has started, its card has
+other buttons, none of them held down, and the answer, arriving after
+that, only forgets the key."
+  (harness-ui-tasks-test-with
+    (let ((harness-tasks-max-running 0)
+          (harness-ui-tasks--pressed-min-seconds 0))
+      (harness-ui-tasks-test--waiting-task board)
+      (harness-ui-tasks-test-holding sent
+        (let ((id (harness-ui-tasks-test--card-id board "Waiting task")))
+          (harness-ui-tasks-test--push board "Waiting task" "[Start now]")
+          (should (harness-ui-tasks-test--held-p board "Waiting task" "[Start now]"))
+          ;; Redrawn, by hand, by the tick and for new figures: still down.
+          (with-current-buffer board
+            (harness-ui-tasks--render t)
+            (harness-ui-tasks--tick)
+            (harness-ui-tasks--refit-tail))
+          (should (harness-ui-tasks-test--held-p board "Waiting task" "[Start now]"))
+          ;; The task starts before the answer is in: its card has other
+          ;; buttons now, and none is held down.
+          (harness-ui-tasks-test--change board id :state "active" :column "active" :started (float-time))
+          (with-current-buffer board (harness-ui-tasks--render t))
+          (should-not (string-search "[Start now]" (harness-ui-tasks-test--card-text board "Waiting task")))
+          (should (string-search "[Steer]" (harness-ui-tasks-test--card-text board "Waiting task")))
+          (should-not (harness-ui-tasks-test--held-p board "Waiting task" "[Steer]"))
+          (should (with-current-buffer board (harness-ui-tasks--pressed-keys)))
+          (funcall (nth 2 (car (harness-ui-tasks-test--sent sent "_harness/task/start"))) nil)
+          (should-not (with-current-buffer board (harness-ui-tasks--pressed-keys))))))))
+
+(ert-deftest harness-ui-tasks-pushed-button-goes-up-when-its-request-fails ()
+  "A request that fails lets the button go too, and the board says what failed."
+  (harness-ui-tasks-test-with
+    (let ((harness-tasks-max-running 0)
+          (harness-ui-tasks--pressed-min-seconds 0))
+      (harness-ui-tasks-test--waiting-task board)
+      (harness-ui-tasks-test-holding sent
+        (harness-ui-tasks-test--push board "Waiting task" "[Start now]")
+        (should (harness-ui-tasks-test--held-p board "Waiting task" "[Start now]"))
+        (funcall (nth 3 (car (harness-ui-tasks-test--sent sent "_harness/task/start")))
+                 '(acp-error 1 "no slot" nil))
+        (should-not (harness-ui-tasks-test--held-p board "Waiting task" "[Start now]"))
+        (should-not (with-current-buffer board (harness-ui-tasks--pressed-keys)))
+        (should (string-match-p "Starting the task failed: no slot"
+                                (harness-ui-tasks-test--tail-text board)))))))
+
+(ert-deftest harness-ui-tasks-button-waits-for-every-request-its-command-made ()
+  "A button stays down until each request of its command has been answered.
+A request made by the callback of another is waited for too; the button
+goes up once the last answer is in, and one answer counts once."
+  (harness-ui-tasks-test-with
+    (let ((harness-tasks-max-running 0)
+          (harness-ui-tasks--pressed-min-seconds 0))
+      (harness-ui-tasks-test--waiting-task board)
+      (harness-ui-tasks-test-holding sent
+        (cl-letf (((symbol-function 'harness-ui-tasks-start)
+                   (lambda ()
+                     (interactive)
+                     (harness-ui-tasks--request-then
+                      "_harness/first" nil "Asking"
+                      (lambda (_) (harness-ui-tasks--request-then "_harness/third" nil "Asking again")))
+                     (harness-ui-tasks--request-then "_harness/second" nil "Asking"))))
+          (harness-ui-tasks-test--push board "Waiting task" "[Start now]")
+          (let ((answer (lambda (method)
+                          (funcall (nth 2 (car (harness-ui-tasks-test--sent sent method))) nil))))
+            (should (harness-ui-tasks-test--held-p board "Waiting task" "[Start now]"))
+            ;; One of two answered: it waits for the other.
+            (funcall answer "_harness/second")
+            (should (harness-ui-tasks-test--held-p board "Waiting task" "[Start now]"))
+            ;; The answer to the first asks again, and the button waits
+            ;; for that too.  A request answered and failed both counts
+            ;; down once.
+            (funcall answer "_harness/first")
+            (should (harness-ui-tasks-test--sent sent "_harness/third"))
+            (should (harness-ui-tasks-test--held-p board "Waiting task" "[Start now]"))
+            (funcall (nth 3 (car (harness-ui-tasks-test--sent sent "_harness/first"))) '(acp-error 1 "late" nil))
+            (funcall (nth 3 (car (harness-ui-tasks-test--sent sent "_harness/second"))) '(acp-error 1 "late" nil))
+            (should (harness-ui-tasks-test--held-p board "Waiting task" "[Start now]"))
+            (funcall answer "_harness/third")
+            (should-not (harness-ui-tasks-test--held-p board "Waiting task" "[Start now]"))))))))
+
+(ert-deftest harness-ui-tasks-button-that-asks-for-nothing-is-held-down-for-a-moment ()
+  "A command that makes no request still shows its push, for a moment.
+[Edit] puts the task's prompt in the compose box and asks the harness
+for nothing; its button is held down for at least the least time, and
+then goes up without disturbing what the box holds."
+  (harness-ui-tasks-test-with
+    (let ((harness-tasks-max-running 0)
+          (harness-ui-tasks--pressed-min-seconds 0.3))
+      (harness-ui-tasks-test--waiting-task board)
+      (harness-ui-tasks-test-holding sent
+        (let ((before (float-time))
+              (shown-first 'never)
+              (set-compose (symbol-function 'harness-ui-tasks--set-compose)))
+          ;; The push is drawn before the command runs, so that it shows
+          ;; while the command prompts or works.
+          (cl-letf (((symbol-function 'harness-ui-tasks--set-compose)
+                     (lambda (&rest args)
+                       (setq shown-first (harness-ui-tasks-test--held-p board "Waiting task" "[Edit]"))
+                       (apply set-compose args))))
+            (harness-ui-tasks-test--push board "Waiting task" "[Edit]"))
+          (should (eq t shown-first))
+          (should (harness-ui-tasks-test--held-p board "Waiting task" "[Edit]"))
+          (should (string-match-p "Waiting task" (with-current-buffer board (harness-compose-text))))
+          (harness-test-wait (lambda () (not (harness-ui-tasks-test--held-p board "Waiting task" "[Edit]")))
+                             5 "the button to be let go")
+          (should (>= (- (float-time) before) 0.3))
+          (should-not (with-current-buffer board (harness-ui-tasks--pressed-keys)))
+          ;; The box is as the command left it.
+          (should (string-match-p "Waiting task" (with-current-buffer board (harness-compose-text))))
+          (should (equal '(edit) (list (car (buffer-local-value 'harness-ui-tasks--target board)))))
+          (should-not (harness-ui-tasks-test--sent sent "_harness/task/start")))))))
+
+(ert-deftest harness-ui-tasks-command-typed-on-a-card-holds-its-button-down ()
+  "A key of the board holds the card's button for its command down, as a click does.
+`s' is the command of [Start now]: with point on the card its request
+keeps the button down until it is answered.  A command the card has no
+button for holds none down, and neither does one typed off a card."
+  (harness-ui-tasks-test-with
+    (let ((harness-tasks-max-running 0)
+          (harness-ui-tasks--pressed-min-seconds 0))
+      (harness-ui-tasks-test--waiting-task board)
+      (harness-ui-tasks-test-holding sent
+        (harness-ui-tasks-test--goto-card board "Waiting task")
+        (with-current-buffer board
+          (let ((this-command 'harness-ui-tasks-start))
+            (harness-ui-tasks-start)))
+        (should (= 1 (length (harness-ui-tasks-test--sent sent "_harness/task/start"))))
+        (should (harness-ui-tasks-test--held-p board "Waiting task" "[Start now]"))
+        (should-not (harness-ui-tasks-test--held-p board "Waiting task" "[Edit]"))
+        (funcall (nth 2 (car (harness-ui-tasks-test--sent sent "_harness/task/start"))) nil)
+        (should-not (harness-ui-tasks-test--held-p board "Waiting task" "[Start now]"))
+        ;; No button for it on the card: nothing is held down.
+        (harness-ui-tasks-test--goto-card board "Waiting task")
+        (with-current-buffer board
+          (let ((this-command 'harness-ui-tasks-raise-priority))
+            (harness-ui-tasks-raise-priority)))
+        (should (= 1 (length (harness-ui-tasks-test--sent sent "_harness/priority/set"))))
+        (should-not (with-current-buffer board (harness-ui-tasks--pressed-keys)))
+        ;; Typed off a card, there is nothing to hold.
+        (with-current-buffer board
+          (goto-char (point-max))
+          (let ((this-command 'harness-ui-tasks-start))
+            (should-error (harness-ui-tasks-start) :type 'user-error)))
+        (should-not (with-current-buffer board (harness-ui-tasks--pressed-keys)))))))
+
+(ert-deftest harness-ui-tasks-button-held-down-too-long-is-let-go ()
+  "An answer that never comes does not leave a button stuck.
+The tick lets it go once it has been down for the longest it may be, and
+so does the next push of it; the answer, were it to come after all, does
+nothing to a button pushed since."
+  (harness-ui-tasks-test-with
+    (let ((harness-tasks-max-running 0)
+          (harness-ui-tasks--pressed-min-seconds 0)
+          (harness-ui-tasks--pressed-max-seconds 0.3))
+      (harness-ui-tasks-test--waiting-task board)
+      (harness-ui-tasks-test-holding sent
+        (let ((starts (lambda () (harness-ui-tasks-test--sent sent "_harness/task/start")))
+              (held (lambda () (harness-ui-tasks-test--held-p board "Waiting task" "[Start now]"))))
+          (harness-ui-tasks-test--push board "Waiting task" "[Start now]")
+          (should (funcall held))
+          (sleep-for 0.4)
+          ;; The tick lets it go.
+          (with-current-buffer board (harness-ui-tasks--tick))
+          (should-not (funcall held))
+          (should-not (with-current-buffer board (harness-ui-tasks--pressed-keys)))
+          ;; Pushed again it waits for its own answer, not the lost one.
+          (harness-ui-tasks-test--push board "Waiting task" "[Start now]")
+          (should (= 2 (length (funcall starts))))
+          (should (funcall held))
+          (funcall (nth 2 (nth 0 (funcall starts))) nil)
+          (should (funcall held))
+          ;; Lost as well: the next push does not say the harness is
+          ;; working, it pushes the button.
+          (sleep-for 0.4)
+          (harness-ui-tasks-test--push board "Waiting task" "[Start now]")
+          (should (= 3 (length (funcall starts))))
+          (should (funcall held))
+          (funcall (nth 2 (nth 1 (funcall starts))) nil)
+          (should (funcall held))
+          (funcall (nth 2 (nth 2 (funcall starts))) nil)
+          (should-not (funcall held)))))))
+
+(ert-deftest harness-ui-tasks-buttons-above-the-box-are-not-held-down ()
+  "The buttons above the compose box act at once, as they always did.
+Pushed, they are not held down and not turned away when pushed again."
+  (harness-ui-tasks-test-with
+    (with-current-buffer board
+      (let ((mode (harness-ui-tasks-test--modes-shown board)))
+        (push-button (harness-ui-tasks-test--toggle board))
+        (should-not (equal mode (harness-ui-tasks-test--modes-shown board)))
+        (should-not (harness-ui-tasks--pressed-keys))
+        (should-not harness-ui-tasks--pressed)
+        (should-not (eq 'harness-task-button-pressed-face
+                        (get-text-property (harness-ui-tasks-test--toggle board) 'face)))
+        (push-button (harness-ui-tasks-test--toggle board))
+        (should (equal mode (harness-ui-tasks-test--modes-shown board)))
+        (should-not harness-ui-tasks--pressed)))))
+
+(defun harness-ui-tasks-test--chevron (board)
+  "Where the first card's recap chevron is, in BOARD."
+  (with-current-buffer board
+    (save-excursion
+      (goto-char (point-min))
+      (let (found)
+        (while (and (not found) (< (point) (point-max)))
+          (let ((id (get-text-property (point) 'harness-task-button)))
+            (if (and (stringp id) (string-prefix-p "subtitle:" id))
+                (setq found (point))
+              (goto-char (or (next-single-property-change (point) 'harness-task-button) (point-max))))))
+        found))))
+
+(ert-deftest harness-ui-tasks-recap-chevron-is-not-held-down ()
+  "The chevron that folds a card's recap acts at once, and can be pushed again.
+It asks the harness for nothing, so holding it down would only turn the
+second push of a quick open-and-close away."
+  (harness-ui-tasks-test-with
+    (let ((harness-tasks-max-running 0))
+      (harness-ui-tasks-test--waiting-task board)
+      (let ((recap (lambda () (string-search "in line" (harness-ui-tasks-test--board-text board)))))
+        (should-not (funcall recap))
+        (with-current-buffer board (push-button (harness-ui-tasks-test--chevron board)))
+        (should (funcall recap))
+        (should-not (with-current-buffer board (harness-ui-tasks--pressed-keys)))
+        (should-not (eq 'harness-task-button-pressed-face
+                        (get-text-property (harness-ui-tasks-test--chevron board) 'face)))
+        (with-current-buffer board (push-button (harness-ui-tasks-test--chevron board)))
+        (should-not (funcall recap))
+        (should-not (with-current-buffer board harness-ui-tasks--pressed))))))
+
+(ert-deftest harness-ui-tasks-section-lines-are-held-down-one-at-a-time ()
+  "The [Show all] of one section is held down without those of the others."
+  (with-temp-buffer
+    (setq harness-ui-tasks--pressed (make-hash-table :test #'equal))
+    (puthash (cons 'done "[Show all]") (list :at (float-time) :requests 0) harness-ui-tasks--pressed)
+    (let ((harness-ui-tasks--pressable t)
+          (inhibit-read-only t))
+      (harness-ui-tasks--more-line 3 'pending)
+      (harness-ui-tasks--more-line 3 'done)
+      (harness-ui-tasks--more-line 3 'backlog))
+    (let ((faces nil))
+      (goto-char (point-min))
+      (while (re-search-forward "\\[Show all\\]" nil t)
+        (push (get-text-property (match-beginning 0) 'face) faces))
+      (should (equal '(button harness-task-button-pressed-face button) (nreverse faces))))))
+
+;;;; The cards of a section line up in columns
+
+;; A section's cards are drawn together (`harness-ui-tasks--insert-cards'):
+;; the facts have a column for each kind, the cells right-aligned in it,
+;; the buttons start at one place and the titles at another.  Each column
+;; starts with a space aligned to its place (`harness-ui-tasks--align'),
+;; so these tests read the places off those spaces, in columns from the
+;; window's left edge, instead of counting the characters that come
+;; before: an icon drawn wider than its characters moves none of them.
+
+(defvar harness-ui-tasks--subtitles)
+(defvar harness-ui-tasks--fact-kinds)
+(defvar harness-ui-tasks--min-title-room)
+(defvar harness-ui-tasks--project)
+(defvar harness-ui-tasks--dir)
+(defvar harness-ui--rates)
+(declare-function harness-ui-tasks--insert-cards "harness-ui-tasks")
+(declare-function harness-ui-tasks--aligned-p "harness-ui-tasks")
+(declare-function harness-ui-tasks--set-subtitle "harness-ui-tasks")
+(declare-function harness-ui-tasks--column "harness-ui-tasks")
+(declare-function harness-ui-tasks--priority-mark "harness-ui-tasks")
+
+(defmacro harness-ui-tasks-test-in-wide-frame (width &rest body)
+  "Run BODY with the frame WIDTH columns wide, and the board's window as `window'.
+For use in `harness-ui-tasks-test-with', which names `board': the cards
+of a section say more than an 80 column window has room for.  The frame
+is put back after."
+  (declare (indent 1))
+  `(unwind-protect
+       (progn
+         (set-frame-width nil ,width)
+         (let ((window (get-buffer-window board)))
+           (should window)
+           (select-window window)
+           (should (>= (window-body-width window) ,width))
+           ,@body))
+     (set-frame-width nil 80)))
+
+(defun harness-ui-tasks-test--columns (width)
+  "The columns drawn in this buffer for a window WIDTH columns wide.
+One entry for each line that has any, in order: a plist with `:id', the
+task whose card the line belongs to, `:text', the line, and `:columns',
+\(KIND START END TEXT) for each of its columns left to right.  KIND is
+`title', `zone' (the buttons) or a kind of fact
+\(`harness-ui-tasks--fact-kinds'); START and END count from the window's
+left edge.  A column runs from the space aligned to where it starts, to
+the next one's or the end of the line, and TEXT is what is in it."
+  (let (lines)
+    (save-excursion
+      (goto-char (point-min))
+      (while (not (eobp))
+        (let* ((bol (line-beginning-position))
+               (eol (line-end-position))
+               (marks (cl-loop for pos from bol below eol
+                               when (get-text-property pos 'harness-task-column) collect pos))
+               (columns (cl-loop for (pos . rest) on marks
+                                 for kind = (get-text-property pos 'harness-task-column)
+                                 for spec = (plist-get (cdr (get-text-property pos 'display)) :align-to)
+                                 for text = (buffer-substring-no-properties (1+ pos) (or (car rest) eol))
+                                 for start = (if (integerp spec) spec (- width (nth 2 spec)))
+                                 collect (list kind start (+ start (string-width text)) text))))
+          (when columns
+            (push (list :id (get-text-property bol 'harness-task-id)
+                        :text (buffer-substring-no-properties bol eol)
+                        :columns columns)
+                  lines)))
+        (forward-line 1)))
+    (nreverse lines)))
+
+(defun harness-ui-tasks-test--line-up (lines width)
+  "Check that the columns of LINES, drawn for WIDTH, line up; return their places.
+Every title starts in one column, every buttons zone at one place, and
+the cells of a kind end together.  Along a line the columns follow in
+order, two apart at least, inside the window.  The result is an alist
+\(KIND . PLACE): where the titles and the buttons start, and where the
+facts end."
+  (let ((order (append '(title) harness-ui-tasks--fact-kinds '(zone)))
+        places)
+    (dolist (line lines)
+      (let ((previous nil))
+        (pcase-dolist (`(,kind ,start ,end ,_) (plist-get line :columns))
+          (when previous
+            (should (< (cl-position (nth 0 previous) order) (cl-position kind order)))
+            (should (>= start (+ (nth 2 previous) 2))))
+          (should (< end width))
+          (let ((place (if (memq kind '(title zone)) start end))
+                (known (assq kind places)))
+            (if known
+                (should (equal (cdr known) place))
+              (push (cons kind place) places)))
+          (setq previous (list kind start end)))))
+    places))
+
+(defun harness-ui-tasks-test--cards-of (lines column)
+  "The entries of LINES, from `harness-ui-tasks-test--columns', of cards in COLUMN."
+  (seq-filter (lambda (line)
+                (eq column (harness-ui-tasks--column (harness-ui-tasks--find (plist-get line :id)))))
+              lines))
+
+(defun harness-ui-tasks-test--line-of (lines id)
+  "The first entry of LINES, from `harness-ui-tasks-test--columns', of card ID."
+  (seq-find (lambda (line) (equal id (plist-get line :id))) lines))
+
+(defun harness-ui-tasks-test--column-of (line kind)
+  "The column KIND of LINE, an entry of `harness-ui-tasks-test--columns', or nil."
+  (assq kind (plist-get line :columns)))
+
+(defun harness-ui-tasks-test--fake-tasks (board &rest tasks)
+  "Put TASKS, plists, on BOARD as the harness's own store would."
+  (with-current-buffer board
+    (setq harness-ui-tasks--tasks
+          (append harness-ui-tasks--tasks
+                  (mapcar (lambda (task)
+                            (append (list :project harness-ui-tasks--project :cwd harness-ui-tasks--dir) task))
+                          tasks)))))
+
+(defun harness-ui-tasks-test--waiting-four (board)
+  "Put four waiting tasks on BOARD whose cards differ in everything they say.
+The first is high priority, in the main tree, and was sent back: [Start
+now] and [Reply].  The second is low priority and plain: [Start now] and
+\[Edit].  The third handed in no report, so has a third button, [No
+report].  The fourth waits in a suspended queue, which its time says at
+length."
+  ;; The [No report] button is there once the harness has loaded the report popout.
+  (require 'harness-ui-report)
+  (let ((now (float-time)))
+    (harness-ui-tasks-test--fake-tasks
+     board
+     (list :id "t-col-high" :prompt "Retry the webhooks on a 5xx answer" :state "pending" :column "pending"
+           :priority "high" :main-tree t :created (- now 90000) :returned (- now 300))
+     (list :id "t-col-low" :prompt "Document the paging parameters" :state "pending" :column "pending"
+           :priority "low" :created (- now 10800))
+     (list :id "t-col-report" :prompt "Rename the orders table" :state "pending" :column "pending"
+           :created (- now 172800) :returned (- now 172000) :report (list :missing t))
+     (list :id "t-col-wait" :prompt "Send a receipt email after checkout" :state "pending" :column "pending"
+           :created (- now 40) :queue-suspended t))))
+
+(defun harness-ui-tasks-test--buttons-of (lines id)
+  "The text of the buttons on card ID in LINES, from `harness-ui-tasks-test--columns'."
+  (let ((zone (cl-some (lambda (line)
+                         (and (equal id (plist-get line :id))
+                              (harness-ui-tasks-test--column-of line 'zone)))
+                       lines)))
+    (and zone (nth 3 zone))))
+
+(ert-deftest harness-ui-tasks-columns-cards-of-a-section-line-up ()
+  "The cards of a section say each thing in the same place.
+Four waiting tasks differ in the facts they have, in priority -- an arrow
+before the title of two -- and in their buttons.  Their titles start in
+one column, whatever the arrow takes; the facts of a kind end together
+and the buttons start at one place, each under the first.  An arrow takes
+room on every card, or on none."
+  (harness-ui-tasks-test-with
+    (harness-ui-tasks-test-in-wide-frame 140
+      (harness-ui-tasks-test--waiting-four board)
+      (with-current-buffer board
+        (harness-ui-tasks--render t)
+        (let* ((width (harness-ui-tasks--width))
+               (lines (harness-ui-tasks-test--columns width))
+               (places (harness-ui-tasks-test--line-up lines width))
+               (wait (harness-ui-tasks--find "t-col-wait")))
+          (should (= 4 (length lines)))
+          ;; A column for each kind that some card has a fact of, and none
+          ;; for the others: these have the main tree and the time.
+          (should (equal '(title main-tree time zone)
+                         (seq-filter (lambda (kind) (assq kind places))
+                                     (append '(title) harness-ui-tasks--fact-kinds '(zone)))))
+          (should (equal '("[Start now] [Reply]" "[Start now] [Edit]"
+                           "[Start now] [Reply] [No report]" "[Start now] [Edit]")
+                         (mapcar (lambda (id) (string-trim-right (harness-ui-tasks-test--buttons-of lines id)))
+                                 '("t-col-high" "t-col-low" "t-col-report" "t-col-wait"))))
+          ;; The widest buttons make the zone, which ends one column short
+          ;; of the window's edge; the facts end two columns before it; the
+          ;; widest time -- the suspended queue's -- makes its column.
+          (should (= (- width 1 (string-width "[Start now] [Reply] [No report]"))
+                     (cdr (assq 'zone places))))
+          (should (= (- (cdr (assq 'zone places)) 2) (cdr (assq 'time places))))
+          (let ((widest (string-width (cdr (assq 'time (harness-ui-tasks--facts wait 'pending nil))))))
+            (should (equal "queued 40s ago · queue suspended"
+                           (cdr (assq 'time (harness-ui-tasks--facts wait 'pending nil)))))
+            (should (= (- (cdr (assq 'time places)) widest 2) (cdr (assq 'main-tree places)))))
+          ;; The cells are right-aligned in their column: they end together
+          ;; and start where their length says.
+          (let ((starts (mapcar (lambda (line) (nth 1 (harness-ui-tasks-test--column-of line 'time))) lines)))
+            (should (= 2 (length (delete-dups (copy-sequence starts)))))
+            (should (= (apply #'min starts) (nth 1 (harness-ui-tasks-test--column-of
+                                                    (harness-ui-tasks-test--line-of lines "t-col-wait")
+                                                    'time)))))
+          ;; Only the card that has the main tree has a cell in its column.
+          (should (equal '("t-col-high")
+                         (mapcar (lambda (line) (plist-get line :id))
+                                 (seq-filter (lambda (line) (harness-ui-tasks-test--column-of line 'main-tree))
+                                             lines))))
+          ;; An arrow takes the same room on every card: without one on any,
+          ;; the titles start as far left as the arrow's room is wide.
+          (let ((room (string-width (harness-ui-tasks--priority-mark (harness-ui-tasks--find "t-col-high") 'pending)))
+                (title (cdr (assq 'title places))))
+            (should (= 2 room))
+            (should (string-match-p "↑ +Retry" (plist-get (harness-ui-tasks-test--line-of lines "t-col-high") :text)))
+            (should (string-match-p "↓ +Document" (plist-get (harness-ui-tasks-test--line-of lines "t-col-low") :text)))
+            (harness-ui-tasks-test--change board "t-col-high" :priority "medium")
+            (harness-ui-tasks-test--change board "t-col-low" :priority "medium")
+            (harness-ui-tasks--render t)
+            (let ((plain (harness-ui-tasks-test--line-up (harness-ui-tasks-test--columns width) width)))
+              (should (= (- title room) (cdr (assq 'title plain)))))
+            (should-not (string-match-p "[↑↓]" (buffer-substring-no-properties (point-min) harness-ui-tasks--list-end)))))))))
+
+(ert-deftest harness-ui-tasks-columns-card-keeps-what-it-always-had ()
+  "A card laid out in columns is still one card: its title, its id, its buttons.
+The title is the part of the line that opens the session, the card is
+one task to everything that asks which one point is on, and the facts
+stay dim."
+  (harness-ui-tasks-test-with
+    (harness-ui-tasks-test-in-wide-frame 140
+      (harness-ui-tasks-test--waiting-four board)
+      (with-current-buffer board
+        (harness-ui-tasks--render t)
+        (goto-char (point-min))
+        (search-forward "Rename the orders table")
+        (let* ((bol (line-beginning-position))
+               (eol (line-end-position))
+               (title (match-beginning 0)))
+          (should (eq 'highlight (get-text-property title 'mouse-face)))
+          (should (equal "Open the session" (get-text-property title 'help-echo)))
+          (should (eq 'harness-task-title-face (get-text-property title 'face)))
+          ;; All of the card is its task's, and the line ends it.
+          (should (equal "t-col-report" (get-text-property bol 'harness-task-id)))
+          (should (equal "t-col-report" (get-text-property (1- eol) 'harness-task-id)))
+          (should (equal "t-col-report" (plist-get (harness-ui-tasks--task) :id)))
+          ;; The cell is dim, as the facts always were.
+          (let ((time (text-property-any bol eol 'harness-task-column 'time)))
+            (should time)
+            (should (eq 'harness-dim-face (get-text-property (1+ time) 'face))))
+          ;; The buttons are buttons.
+          (should (harness-ui-tasks--find-button 'harness-ui-tasks-start bol eol))
+          (should (harness-ui-tasks--find-button "report" bol eol)))))))
+
+(ert-deftest harness-ui-tasks-columns-two-line-card-keeps-its-columns ()
+  "A card that shows its recap keeps its facts in their columns, and its buttons in the zone.
+The facts stay on the first line and the buttons go to the second, where
+they start at the place the other cards' buttons start.  A section of
+cards that all show their recap has no card with its buttons beside its
+facts, so the facts take the room that would be left for them and end at
+the window's edge."
+  (harness-ui-tasks-test-with
+    (harness-ui-tasks-test-in-wide-frame 140
+      (harness-ui-tasks-test--waiting-four board)
+      (with-current-buffer board
+        (harness-ui-tasks--set-subtitle "t-col-report" t)
+        (harness-ui-tasks--render t)
+        (let* ((width (harness-ui-tasks--width))
+               (lines (harness-ui-tasks-test--columns width))
+               (places (harness-ui-tasks-test--line-up lines width))
+               (card (seq-filter (lambda (line) (equal "t-col-report" (plist-get line :id))) lines)))
+          ;; Five lines with columns: the three one-line cards' and the two
+          ;; of the card that shows its recap.
+          (should (= 5 (length lines)))
+          (should (= 2 (length card)))
+          (should (harness-ui-tasks-test--column-of (car card) 'time))
+          (should-not (harness-ui-tasks-test--column-of (car card) 'zone))
+          (should (equal '(zone) (mapcar #'car (plist-get (cadr card) :columns))))
+          (should (equal "[Start now] [Reply] [No report]"
+                         (string-trim-right (nth 3 (harness-ui-tasks-test--column-of (cadr card) 'zone)))))
+          ;; The buttons of the second line start where the others' do.
+          (should (= (cdr (assq 'zone places)) (nth 1 (harness-ui-tasks-test--column-of (cadr card) 'zone))))
+          (should (= (- width 1 (string-width "[Start now] [Reply] [No report]")) (cdr (assq 'zone places))))
+          (should (= (- (cdr (assq 'zone places)) 2) (cdr (assq 'time places)))))
+        ;; Every card shows its recap: the zone is on the second lines
+        ;; alone and the facts end at the edge of the window.
+        (dolist (id '("t-col-high" "t-col-low" "t-col-wait"))
+          (harness-ui-tasks--set-subtitle id t))
+        (harness-ui-tasks--render t)
+        (let* ((width (harness-ui-tasks--width))
+               (lines (harness-ui-tasks-test--columns width))
+               (places (harness-ui-tasks-test--line-up lines width)))
+          (should (= 8 (length lines)))
+          (should (= (- width 1) (cdr (assq 'time places))))
+          (should (= (- width 1 (string-width "[Start now] [Reply] [No report]")) (cdr (assq 'zone places))))
+          (should (= 4 (length (seq-filter (lambda (line) (harness-ui-tasks-test--column-of line 'zone)) lines))))
+          (should (= 4 (length (seq-filter (lambda (line) (harness-ui-tasks-test--column-of line 'title)) lines)))))))))
+
+(ert-deftest harness-ui-tasks-columns-sections-are-laid-out-apart ()
+  "Each section of the board lays its cards out by itself.
+A card in another section, with facts wider than any of these, changes
+nothing of where the waiting cards' columns are, and has columns of its own."
+  (harness-ui-tasks-test-with
+    (harness-ui-tasks-test-in-wide-frame 140
+      (harness-ui-tasks-test--waiting-four board)
+      (with-current-buffer board
+        (harness-ui-tasks--render t)
+        (let* ((width (harness-ui-tasks--width))
+               (before (harness-ui-tasks-test--line-up
+                        (harness-ui-tasks-test--cards-of (harness-ui-tasks-test--columns width) 'pending)
+                        width)))
+          (harness-ui-tasks-test--fake-tasks
+           board
+           (list :id "t-col-busy" :prompt "Cache the product catalogue" :state "running" :column "active"
+                 :started (- (float-time) 7500) :main-tree t))
+          (harness-ui-tasks--render t)
+          (let* ((lines (harness-ui-tasks-test--columns width))
+                 (pending (harness-ui-tasks-test--line-up (harness-ui-tasks-test--cards-of lines 'pending) width))
+                 (active (harness-ui-tasks-test--line-up (harness-ui-tasks-test--cards-of lines 'active) width)))
+            (should (equal (sort (copy-sequence before) (lambda (a b) (string< (car a) (car b))))
+                           (sort (copy-sequence pending) (lambda (a b) (string< (car a) (car b))))))
+            ;; Its own: it has the main tree and the time it has run, and
+            ;; its zone is as wide as its own buttons.
+            (should (equal '(main-tree time title zone)
+                           (sort (mapcar #'car active) #'string<)))
+            (should (= (- width 1 (string-width "[Steer] [Pause]")) (cdr (assq 'zone active))))))))))
+
+
+(defun harness-ui-tasks-test--busy-session ()
+  "Put the session of a working task in the session cache; return its id.
+It has todos, token figures, a rate and a cost: every fact a card has."
+  (puthash "s-col-busy"
+           (list :id "s-col-busy" :name "Count the tokens" :status "running" :context-window 200000
+                 :usage (list :context 12300 :last-output 100 :output 3400 :cost 0.0123
+                              :stream-output 3360 :stream-seconds 70.0)
+                 :todos (list (list :status "done" :text "Read it")
+                              (list :status "in-progress" :text "Write it")
+                              (list :status "pending" :text "Check it")))
+           harness-ui--sessions)
+  (puthash "s-col-busy" (list :rate 48.0 :output 3400 :seconds 70.0 :calls 1 :at (float-time)
+                              :model "demo:scripted")
+           harness-ui--rates)
+  "s-col-busy")
+
+(defun harness-ui-tasks-test--working-pair ()
+  "Two working tasks: one with every kind of fact, one with only the time it ran."
+  (let ((now (float-time)))
+    (list (list :id "t-col-busy" :session (harness-ui-tasks-test--busy-session) :prompt "Count the tokens"
+                :state "running" :column "active" :started (- now 720))
+          (list :id "t-col-idle" :prompt "Wait for it" :state "running" :column "active" :started (- now 60)))))
+
+(defun harness-ui-tasks-test--draw-cards (column tasks width)
+  "Draw the cards of TASKS in COLUMN for WIDTH columns; return their columns.
+That is `harness-ui-tasks-test--columns' of a buffer of its own."
+  (cl-letf (((symbol-function 'harness-ui-tasks--width) (lambda () width)))
+    (with-temp-buffer
+      (harness-ui-tasks--insert-cards column (mapcar (lambda (task) (cons task nil)) tasks))
+      (harness-ui-tasks-test--columns width))))
+
+(ert-deftest harness-ui-tasks-columns-short-of-room-a-section-drops-columns-together ()
+  "A section short of room lets the token figures go first, then every fact.
+It is the section that decides, not each card: the card that has no
+tokens to show moves its columns with the one that has them, so what the
+section's cards say goes on lining up.  The buttons stay."
+  (harness-ui-tasks-test-with
+    (let* ((tasks (harness-ui-tasks-test--working-pair))
+           (real (symbol-function 'harness-ui-tasks--facts))
+           (calls 0)
+           (seen nil)
+           (widest 200))
+      ;; From a wide board down to the narrowest one that keeps two-line
+      ;; cards: what facts the section shows, and how often it asked.
+      (cl-letf (((symbol-function 'harness-ui-tasks--facts)
+                 (lambda (&rest args) (cl-incf calls) (apply real args))))
+        (cl-loop for width from widest downto harness-ui-tasks--collapse-min-width
+                 do (let* ((lines (harness-ui-tasks-test--draw-cards 'active tasks width))
+                           (places (harness-ui-tasks-test--line-up lines width))
+                           (kinds (seq-filter (lambda (kind) (assq kind places))
+                                              harness-ui-tasks--fact-kinds)))
+                      ;; Each card's facts are worked out once, however
+                      ;; many layouts are tried for the section.
+                      (should (= (* 2 (1+ (- widest width))) calls))
+                      (should (assq 'title places))
+                      (should (assq 'zone places))
+                      (should (= 2 (length lines)))
+                      (unless (member kinds seen) (push kinds seen)))))
+      ;; From every kind of fact, through all but the tokens, to none, and
+      ;; nothing between, such as the tokens without the rest.
+      (should (equal '((todos time tokens rate spend) (todos time rate spend) nil)
+                     (nreverse seen)))
+      ;; The card with no tokens moved when the section let them go: its
+      ;; time ends the figures' width and the two columns between them
+      ;; nearer the window's edge.
+      (let* ((tokens (cdr (assq 'tokens (harness-ui-tasks--facts (car tasks) 'active
+                                                                 (harness-ui-tasks--session (car tasks))))))
+             (time-at (lambda (width)
+                        (- width (cdr (assq 'time (harness-ui-tasks-test--line-up
+                                                   (harness-ui-tasks-test--draw-cards 'active tasks width)
+                                                   width))))))
+             (dropped (cl-loop for width from widest downto harness-ui-tasks--collapse-min-width
+                               unless (assq 'tokens (harness-ui-tasks-test--line-up
+                                                     (harness-ui-tasks-test--draw-cards 'active tasks width) width))
+                               return width)))
+        (should (string-match-p " out\\'" tokens))
+        (should dropped)
+        (should (= (+ 2 (string-width tokens))
+                   (- (funcall time-at widest) (funcall time-at dropped))))))))
+
+(ert-deftest harness-ui-tasks-columns-long-title-is-cut-to-leave-the-facts-their-room ()
+  "A title longer than its room is cut short of what comes after it.
+The room is what is left of the line past the title's column and the
+first thing its card has after it: a long title never runs into its
+card's facts, and a card with fewer of them lets its title run on until
+the ones it has -- the buttons, when it has no fact at all."
+  (harness-ui-tasks-test-with
+    (let* ((long (make-string 150 ?x))
+           (tasks (harness-ui-tasks-test--working-pair))
+           (busy (car tasks))
+           (idle (plist-put (copy-sequence (cadr tasks)) :name (concat "Idle " long)))
+           ;; Not started, so it has no time to say, and nothing else.
+           (bare (list :id "t-col-bare" :name (concat "Bare " long) :state "running" :column "active"))
+           (width 110))
+      (puthash "s-col-busy" (plist-put (copy-sequence (gethash "s-col-busy" harness-ui--sessions))
+                                       :name (concat "Busy " long))
+               harness-ui--sessions)
+      (let* ((lines (harness-ui-tasks-test--draw-cards 'active (list busy idle bare) width))
+             (places (harness-ui-tasks-test--line-up lines width))
+             (column (lambda (id kind)
+                       (harness-ui-tasks-test--column-of (harness-ui-tasks-test--line-of lines id) kind))))
+        ;; There is room for every kind of fact at this width, and no more
+        ;; than the least a title keeps.
+        (should (assq 'tokens places))
+        (dolist (id '("t-col-busy" "t-col-idle" "t-col-bare"))
+          (should (string-suffix-p "…" (nth 3 (funcall column id 'title)))))
+        ;; Each title stops two columns short of its card's first fact:
+        ;; the busy card's todos, the idle card's time, further right.
+        (should (= (- (nth 1 (funcall column "t-col-busy" 'todos)) 2) (nth 2 (funcall column "t-col-busy" 'title))))
+        (should (= (- (nth 1 (funcall column "t-col-idle" 'time)) 2) (nth 2 (funcall column "t-col-idle" 'title))))
+        (should (> (nth 2 (funcall column "t-col-idle" 'title)) (nth 2 (funcall column "t-col-busy" 'title))))
+        (should-not (funcall column "t-col-bare" 'time))
+        (should (= (- (nth 1 (funcall column "t-col-bare" 'zone)) 2) (nth 2 (funcall column "t-col-bare" 'title))))
+        (should (> (nth 2 (funcall column "t-col-bare" 'title)) (nth 2 (funcall column "t-col-idle" 'title))))
+        (should (>= (- (nth 2 (funcall column "t-col-busy" 'title)) (nth 1 (funcall column "t-col-busy" 'title)))
+                    harness-ui-tasks--min-title-room))))))
+
+(ert-deftest harness-ui-tasks-columns-icons-drawn-wide-do-not-move-the-titles ()
+  "A mark drawn wider than the characters that stand for it moves no title.
+Titles start at a column worked out from how wide the marks before them
+are drawn, in pixels, not from how many characters they are: the card
+with a wide image for its icon and the one with a plain symbol start
+their titles together, and the wide image makes room for both."
+  (harness-ui-tasks-test-with
+    (let* ((wide (propertize "x" 'display '(image :type svg :file "wide.svg")))
+           (tasks (harness-ui-tasks-test--working-pair))
+           (title-of (lambda (width)
+                       (cdr (assq 'title (harness-ui-tasks-test--line-up
+                                          (harness-ui-tasks-test--draw-cards 'active tasks width) width))))))
+      (cl-letf (((symbol-function 'frame-char-width) (lambda (&optional _) 10)))
+        ;; Plain symbols: two spaces, a chevron, a space, the icon and a
+        ;; space take six columns.
+        (should (= 6 (funcall title-of 120)))
+        ;; One card draws a 30 pixel image: its title would start two
+        ;; columns later than the plain one's, and so do both.
+        (cl-letf (((symbol-function 'image-size) (lambda (&rest _) (cons 30 10)))
+                  ((symbol-function 'harness-ui-tasks--icon)
+                   (lambda (task &rest _) (if (equal "t-col-busy" (plist-get task :id)) wide "x"))))
+          (should (= 8 (funcall title-of 120))))))))
+
+(ert-deftest harness-ui-tasks-columns-facts-are-cells-of-a-kind ()
+  "A card's facts are cells: one for each kind of fact it has, in the order of the kinds.
+A working task that was archived and works in the main tree has every
+kind a working card can have; one in the merge queue, the queue's;
+a completed one, when it was done and what it cost.  The cells are dim
+and keep what they carry: the tokens a button that asks for another
+limit, the cost its tooltip.  The priority is not a fact: the arrow
+says it."
+  (harness-ui-tasks-test-with
+    (let* ((now (float-time))
+           (busy (car (harness-ui-tasks-test--working-pair)))
+           (session (harness-ui-tasks--session busy))
+           (kinds (lambda (task column session)
+                    (mapcar #'car (harness-ui-tasks--facts task column session)))))
+      (setq busy (plist-put (plist-put (copy-sequence busy) :main-tree t) :archived t))
+      (let ((cells (harness-ui-tasks--facts busy 'active session)))
+        (should (equal '(archived main-tree todos time tokens rate spend) (mapcar #'car cells)))
+        (should (equal '("archived" "main tree" "1/3" "12m") (mapcar #'cdr (seq-take cells 4))))
+        (should (equal "48 tok/s avg" (cdr (assq 'rate cells))))
+        (should (equal "$0.012" (cdr (assq 'spend cells))))
+        (should (string-prefix-p "12.4k/200k · 3.4k out" (cdr (assq 'tokens cells))))
+        ;; Dim, and carrying their own properties.
+        (dolist (cell cells)
+          (should (eq 'harness-dim-face (get-text-property 0 'face (cdr cell)))))
+        (should (get-text-property 0 'harness-context-session (cdr (assq 'tokens cells))))
+        (should (keymapp (get-text-property 0 'keymap (cdr (assq 'tokens cells)))))
+        (should (stringp (get-text-property 0 'help-echo (cdr (assq 'spend cells)))))
+        (should (stringp (get-text-property 0 'help-echo (cdr (assq 'rate cells)))))
+        (should-not (cl-some (lambda (cell) (string-match-p "priority" (cdr cell))) cells)))
+      ;; The tokens and the todos are for work in progress; in review it
+      ;; says when it finished instead.  A task with nothing to say has no
+      ;; cell for it.
+      (should (equal '(archived main-tree time rate spend)
+                     (funcall kinds (plist-put (copy-sequence busy) :finished (- now 3600)) 'review session)))
+      (should (equal '(time) (funcall kinds (list :id "t-1" :started (- now 60)) 'active nil)))
+      (should (equal nil (funcall kinds (list :id "t-1") 'active nil)))
+      ;; The queue's: where the merge stands, then the time it joined.
+      (let ((queued (list :id "t-2" :merge-status "conflict" :merge-queued (- now 5) :column "merging")))
+        (should (equal '(merge time) (funcall kinds queued 'merging nil)))
+        (should (equal '("conflict" "queued 5s ago") (mapcar #'cdr (harness-ui-tasks--facts queued 'merging nil))))
+        (should (equal '(time) (funcall kinds (plist-put (copy-sequence queued) :merge-status "queued")
+                                        'merging nil)))
+        (should (equal "merging now" (cdr (assq 'merge (harness-ui-tasks--facts
+                                                        (plist-put (copy-sequence queued) :merge-status "merging")
+                                                        'merging nil))))))
+      ;; A queue held back says so with the time, in the one cell.
+      (should (equal "queued 40s ago · queue suspended"
+                     (cdr (assq 'time (harness-ui-tasks--facts
+                                       (list :id "t-3" :created (- now 40) :queue-suspended t) 'pending nil)))))
+      (should (equal '(time) (funcall kinds (list :id "t-4" :created (- now 40) :priority "high") 'pending nil)))
+      ;; A write-up in progress has no time to speak of.
+      (should (equal nil (funcall kinds (list :id "t-5" :state "refining" :created (- now 40)) 'backlog nil))))))
+
+(ert-deftest harness-ui-tasks-columns-point-stays-by-column-not-by-count ()
+  "A position in the facts or the buttons is kept as far from the line's end.
+The title's column is a place on the line from its start, as the text
+before it is; everything after a space aligned to the window's right edge is measured from the
+line's end (`harness-ui-tasks--aligned-p'), where it stays when what
+is on its left changes."
+  (harness-ui-tasks-test-with
+    (let ((tasks (harness-ui-tasks-test--working-pair)))
+      (cl-letf (((symbol-function 'harness-ui-tasks--width) (lambda () 120)))
+        (with-temp-buffer
+          (harness-ui-tasks--insert-cards 'active (mapcar (lambda (task) (cons task nil)) tasks))
+          (goto-char (point-min))
+          (let* ((title (text-property-any (point-min) (line-end-position) 'harness-task-column 'title))
+                 (time (text-property-any (point-min) (line-end-position) 'harness-task-column 'time))
+                 (zone (text-property-any (point-min) (line-end-position) 'harness-task-column 'zone)))
+            (should (and title time zone))
+            ;; Not the spaces that start the title's text, nor the left of it.
+            (should-not (harness-ui-tasks--aligned-p (point-min)))
+            (should-not (harness-ui-tasks--aligned-p (1+ title)))
+            (should-not (harness-ui-tasks--aligned-p (+ title 4)))
+            ;; The cells and the buttons are right of one.
+            (should (harness-ui-tasks--aligned-p (1+ time)))
+            (should (harness-ui-tasks--aligned-p (1+ zone)))
+            (should (harness-ui-tasks--aligned-p (1- (line-end-position))))))))))
 
 (provide 'harness-ui-tasks-test)
 ;;; harness-ui-tasks-test.el ends here

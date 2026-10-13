@@ -3104,6 +3104,287 @@ it opens the list as ever."
         (should (equal '("busy") (harness-ui-sessions-test--shown)))
         (should (equal " [Pause] [project]" (harness-ui-sessions-test--mode-line)))))))
 
+;;;; Columns
+
+;; Every cell of a row ends in a space that aligns to the start of the
+;; next column (`harness-ui-sessions--print-cell'), whether it fills its
+;; column or not, and the figures are right-aligned.  A batch Emacs
+;; draws nothing, but `current-column' follows integer `:align-to'
+;; targets as redisplay does, and a name of double-width characters cut
+;; to its column ends a column short of it -- as a glyph that is not as
+;; wide as its character count says does on screen -- so these tests
+;; read the columns the cells start and end at.
+
+(defun harness-ui-sessions-test--layout ()
+  "Return (NAME START WIDTH RIGHT-ALIGN) for each column of the list.
+START is the column the cell starts at: the first after the padding,
+each next one after the width and the padding of the one before."
+  (let ((x tabulated-list-padding)
+        layout)
+    (dotimes (n (length tabulated-list-format))
+      (let* ((spec (aref tabulated-list-format n))
+             (props (nthcdr 3 spec)))
+        (push (list (nth 0 spec) x (nth 1 spec) (plist-get props :right-align)) layout)
+        (setq x (+ x (nth 1 spec) (or (plist-get props :pad-right) 1)))))
+    (nreverse layout)))
+
+(defun harness-ui-sessions-test--align-target (pos &optional string)
+  "Return the column the character at POS aligns to, or nil if it is no such space.
+It is read from STRING, else from the current buffer.  The header's
+targets are relative to its indent: `(+ header-line-indent-width N)'."
+  (let ((display (get-text-property pos 'display string)))
+    (when (eq (car-safe display) 'space)
+      (let ((target (plist-get (cdr display) :align-to)))
+        (if (consp target) (car (last target)) target)))))
+
+(defun harness-ui-sessions-test--cells (id)
+  "Return the cells of session ID's row, as (NAME START END) of their text."
+  (with-current-buffer harness-ui-sessions--buffer-name
+    (save-excursion
+      (goto-char (harness-ui-sessions--position id))
+      (let ((pos (line-beginning-position))
+            (eol (line-end-position))
+            cells)
+        (while (< pos eol)
+          (let ((name (get-text-property pos 'tabulated-list-column-name))
+                (next (next-single-property-change pos 'tabulated-list-column-name nil eol)))
+            (when name (push (list name pos next) cells))
+            (setq pos next)))
+        (nreverse cells)))))
+
+(defun harness-ui-sessions-test--column-at (pos)
+  "Return the column POS is at in the list buffer."
+  (with-current-buffer harness-ui-sessions--buffer-name
+    (save-excursion (goto-char pos) (current-column))))
+
+(defun harness-ui-sessions-test--label-end (cell)
+  "Return where the label of CELL, (NAME START END), ends.
+That is where its closing space starts; an empty right-aligned cell is
+only spaces, so it ends where it starts."
+  (with-current-buffer harness-ui-sessions--buffer-name
+    (let ((pos (nth 2 cell)))
+      (while (and (> pos (nth 1 cell))
+                  (harness-ui-sessions-test--align-target (1- pos)))
+        (setq pos (1- pos)))
+      pos)))
+
+(defun harness-ui-sessions-test--header-labels ()
+  "Return (NAME START END) of each label of the header, in columns.
+The header is a string of labels and aligning spaces: walk it as
+redisplay does, a space only ever moving the position forward."
+  (let ((header (nth 2 header-line-format))
+        (x 0)
+        labels)
+    (dotimes (i (length header))
+      (if-let* ((target (harness-ui-sessions-test--align-target i header)))
+          (setq x (max x target))
+        (let ((start x)
+              (name (get-text-property i 'tabulated-list-column-name header)))
+          (setq x (+ x (char-width (aref header i))))
+          (when name
+            (if (and labels (equal name (car (car labels))) (= start (nth 2 (car labels))))
+                (setcar (nthcdr 2 (car labels)) x)
+              (push (list name start x) labels))))))
+    (nreverse labels)))
+
+(ert-deftest harness-ui-sessions-every-cell-ends-at-its-column ()
+  "Each cell of a row, the last apart, ends in a space aligning to the next column.
+A name that fills its column -- exactly as wide, cut to fit, or cut at a
+double-width character, which leaves it a column short -- still has that
+space, so every cell starts at the column its header gives it on every
+row, whatever the cells before it hold: the rows end their cells in the
+same targets, which are the columns' own, and nothing follows the last
+cell."
+  (harness-ui-sessions-test-with-repo
+    (let ((full (make-string 28 ?n))
+          (ids '("short" "full" "cut" "wide" "arrow" "child" "asks" "unnamed")))
+      (harness-ui-sessions-test--add "short" root :name "short")
+      (harness-ui-sessions-test--add "full" root :name full)
+      (harness-ui-sessions-test--add "cut" root :name (make-string 40 ?c))
+      ;; Fifteen double-width characters are 30 columns: cut to thirteen
+      ;; and an ellipsis, 27, a column short of the 28 the column has.
+      (harness-ui-sessions-test--add "wide" root :name (make-string 15 ?日))
+      (harness-ui-sessions-test--add "arrow" root :name full :ext '(:priority "high"))
+      (harness-ui-sessions-test--add "child" root :parent-id "short" :name full)
+      (harness-ui-sessions-test--blocked "asks" root "permission" :name full)
+      (harness-ui-sessions-test--add "unnamed" root :name nil :status "inactive")
+      (let ((default-directory root)) (harness-sessions))
+      (with-current-buffer harness-ui-sessions--buffer-name
+        (let* ((layout (harness-ui-sessions-test--layout))
+               (starts (mapcar #'cadr layout))
+               (closing (lambda (cell)
+                          (harness-ui-sessions-test--align-target (1- (nth 2 cell))))))
+          ;; Each cell starts at its column's own column, on every row.
+          (dolist (id ids)
+            (let ((cells (harness-ui-sessions-test--cells id)))
+              (should (equal (mapcar #'car layout) (mapcar #'car cells)))
+              (should (equal (list id starts)
+                             (list id (mapcar (lambda (cell)
+                                                (harness-ui-sessions-test--column-at (nth 1 cell)))
+                                              cells))))))
+          ;; Each ends in a space aligning to where the next one starts,
+          ;; the last in nothing: it has the rest of the line.
+          (dolist (id ids)
+            (let ((cells (harness-ui-sessions-test--cells id)))
+              (should (equal (list id (cdr starts))
+                             (list id (mapcar closing (butlast cells)))))
+              (should-not (funcall closing (car (last cells)))))))))))
+
+(ert-deftest harness-ui-sessions-figures-are-right-aligned ()
+  "Context, Avg tok/s and Cost end at the right edge of their column.
+So their ends line up row under row, whatever the figures' widths: the
+longest of each fits its column untouched, `$0.0058+Max' in Cost."
+  (harness-ui-sessions-test-with-repo
+    (let ((harness-ui--rates (make-hash-table :test 'equal))
+          (figures '("Context" "Avg tok/s" "Cost")))
+      (harness-ui-sessions-test--add "small" root
+                                     :usage (list :cost 1.23 :billing "api" :context 1200 :output 300
+                                                  :stream-output 17 :stream-seconds 4.0))
+      (harness-ui-sessions-test--add "plan" root :context-window 384000
+                                     :usage (list :cost 0 :list-cost 2.5 :billing "subscription"
+                                                  :plan "max" :context 145000 :output 49900
+                                                  :stream-output 12345 :stream-seconds 10.0))
+      (harness-ui-sessions-test--add "extra" root
+                                     :usage (list :cost 0.0058 :list-cost 1.0 :billing "extra-usage"
+                                                  :plan "max" :context 12345 :output 108000))
+      (harness-ui-sessions-test--add "big" root :context-window 1000000
+                                     :usage (list :cost 12.5 :billing "api" :context 987654
+                                                  :output 2500000))
+      (harness-ui-sessions-test--add "fresh" root)
+      (puthash "small" '(:rate 4.3 :output 17 :seconds 4.0 :calls 1 :at 900.0 :model "demo:scripted")
+               harness-ui--rates)
+      (puthash "plan" '(:rate 1234.5 :output 600 :seconds 9.8 :calls 2 :at 1000.0 :model "demo:scripted")
+               harness-ui--rates)
+      (let ((default-directory root)) (harness-sessions))
+      (with-current-buffer harness-ui-sessions--buffer-name
+        (let ((layout (harness-ui-sessions-test--layout)))
+          ;; The four are the right-aligned columns of the list.
+          (should (equal figures (mapcar #'car (cl-remove-if-not #'cadddr layout))))
+          (dolist (id '("small" "plan" "extra" "big" "fresh"))
+            (let ((cells (harness-ui-sessions-test--cells id)))
+              (dolist (name figures)
+                (let* ((col (assoc name layout))
+                       (cell (assoc name cells))
+                       (text (harness-ui-sessions-test--cell id name)))
+                  ;; A figure that is there ends at its column's right edge.
+                  (unless (string-empty-p text)
+                    (should (equal (list id name (+ (nth 1 col) (nth 2 col)))
+                                   (list id name (harness-ui-sessions-test--column-at
+                                                  (harness-ui-sessions-test--label-end cell)))))
+                    ;; And it shows whole: no ellipsis stands in for any of it.
+                    (should (<= (string-width text) (nth 2 col)))
+                    (should-not (cl-loop for pos from (nth 1 cell) below (nth 2 cell)
+                                         thereis (stringp (get-text-property pos 'display)))))))))
+          ;; The longest cost reads in full, in a column that has room for it.
+          (should (equal "$0.0058+Max" (harness-ui-sessions-test--cell "extra" "Cost")))
+          (should (>= (nth 2 (assoc "Cost" layout)) (string-width "$0.0058+Max")))
+          (should (equal "1.2k/200k" (harness-ui-sessions-test--cell "small" "Context")))
+          (should (equal "145k/384k" (harness-ui-sessions-test--cell "plan" "Context")))
+          (should (equal "Max" (harness-ui-sessions-test--cell "plan" "Cost")))
+          (should (equal "1.2k" (harness-ui-sessions-test--cell "plan" "Avg tok/s"))))))))
+
+(defun harness-ui-sessions-test--check-header-in-step (id)
+  "Check that the header's labels start and end where session ID's cells do.
+A left-aligned one starts where its cell does, at its column's start; a
+right-aligned one ends where its figure does, at the column's right edge."
+  (let ((layout (harness-ui-sessions-test--layout))
+        (labels (harness-ui-sessions-test--header-labels))
+        (cells (harness-ui-sessions-test--cells id)))
+    ;; The first column, the status icon, has no label.
+    (dolist (col (cdr layout))
+      (let* ((name (car col))
+             (label (assoc name labels))
+             (cell (assoc name cells))
+             (right (nth 3 col))
+             (edge (if right (+ (nth 1 col) (nth 2 col)) (nth 1 col))))
+        (should label)
+        (should (equal (list name edge) (list name (if right (nth 2 label) (nth 1 label)))))
+        (should (equal (list name edge)
+                       (list name (harness-ui-sessions-test--column-at
+                                   (if right
+                                       (harness-ui-sessions-test--label-end cell)
+                                     (nth 1 cell))))))))))
+
+(ert-deftest harness-ui-sessions-header-is-in-step-with-the-rows ()
+  "The header's labels start and end where the rows' cells do.
+A left-aligned label starts where its cells do, a right-aligned one ends
+where its figures end -- also while its column is the one sorted by,
+which adds an indicator to the label."
+  (harness-ui-sessions-test-with-repo
+    ;; A session with every figure, so every right-aligned cell has an end.
+    (let ((harness-ui--rates (make-hash-table :test 'equal)))
+      (harness-ui-sessions-test--add "one" root
+                                     :usage (list :cost 1.23 :billing "api" :context 1200 :output 300
+                                                  :stream-output 600 :stream-seconds 9.8))
+      (puthash "one" '(:rate 61.4 :output 600 :seconds 9.8 :calls 2 :at 1000.0 :model "demo:scripted")
+               harness-ui--rates)
+      (let ((default-directory root)) (harness-sessions))
+      (with-current-buffer harness-ui-sessions--buffer-name
+        (let ((width (lambda ()
+                       (let ((label (assoc "Context" (harness-ui-sessions-test--header-labels))))
+                         (- (nth 2 label) (nth 1 label))))))
+          (harness-ui-sessions-test--check-header-in-step "one")
+          (should (= (string-width "Context") (funcall width)))
+          ;; Sorted by a right-aligned column, its label carries the
+          ;; indicator and still ends where the figures do.
+          (tabulated-list-sort (cl-position "Context" tabulated-list-format :key #'car :test #'equal))
+          (should (equal "Context" (car tabulated-list-sort-key)))
+          (should (> (funcall width) (string-width "Context")))
+          (harness-ui-sessions-test--check-header-in-step "one"))))))
+
+(defun harness-ui-sessions-test--in-cell (cell predicate)
+  "Return the first position in CELL, (NAME START END), where PREDICATE holds.
+PREDICATE gets the position.  Nil when it holds nowhere in the cell."
+  (with-current-buffer harness-ui-sessions--buffer-name
+    (cl-loop for pos from (nth 1 cell) below (nth 2 cell)
+             when (funcall predicate pos) return pos)))
+
+(ert-deftest harness-ui-sessions-rows-keep-what-the-list-printer-keeps ()
+  "A row has what `tabulated-list-print-entry' gives one.
+The id and the cells of its entry over the whole line, the column of
+each cell, a tooltip on a label, the ellipsis of a cut one, and the
+buttons inside the cells: the context figure, the priority arrow."
+  (harness-ui-sessions-test-with-repo
+    (let ((cut (make-string 40 ?c)))
+      (harness-ui-sessions-test--add "high" root :name cut :ext '(:priority "high"))
+      (let ((default-directory root)) (harness-sessions))
+      (with-current-buffer harness-ui-sessions--buffer-name
+        (harness-ui-sessions-test--goto "high")
+        (let* ((entry (cadr (assoc "high" tabulated-list-entries)))
+               (bol (line-beginning-position))
+               (eol (line-end-position))
+               (cells (harness-ui-sessions-test--cells "high"))
+               (name (assoc "Name" cells))
+               (context (assoc "Context" cells)))
+          ;; Every cell of the entry is a cell of the row, in order, and
+          ;; the cells cover the line from its padding to its newline.
+          (should (equal (mapcar #'car (harness-ui-sessions-test--layout)) (mapcar #'car cells)))
+          (should (= (1+ bol) (nth 1 (car cells))))
+          (should (= eol (nth 2 (car (last cells)))))
+          ;; The whole line, its padding and newline too, is the entry's.
+          (dolist (pos (list bol (1+ bol) (1- eol) eol))
+            (should (equal "high" (get-text-property pos 'tabulated-list-id)))
+            (should (eq entry (get-text-property pos 'tabulated-list-entry))))
+          (should (equal "high" (tabulated-list-get-id)))
+          (should (eq entry (tabulated-list-get-entry)))
+          ;; A label has its tooltip, naming the column and holding the whole name.
+          (should (equal (concat "Name: " cut) (get-text-property (nth 1 name) 'help-echo)))
+          ;; A cut label keeps its text and shows an ellipsis in place of its end.
+          (should (equal cut (buffer-substring-no-properties (nth 1 name)
+                                                             (+ (nth 1 name) (length cut)))))
+          (should (harness-ui-sessions-test--in-cell
+                   name (lambda (pos) (equal (truncate-string-ellipsis)
+                                             (get-text-property pos 'display)))))
+          ;; The buttons inside the cells survive being printed.
+          (let ((arrow (harness-ui-sessions-test--arrow-position "high")))
+            (should arrow)
+            (should (equal "high" (get-text-property arrow 'harness-priority-session)))
+            (should (keymapp (get-text-property arrow 'keymap))))
+          (should (harness-ui-sessions-test--in-cell
+                   context (lambda (pos) (equal "high" (get-text-property pos 'harness-context-session)))))
+          (should (harness-ui-sessions-test--in-cell
+                   context (lambda (pos) (keymapp (get-text-property pos 'keymap))))))))))
+
 ;;;; The footer
 
 (defun harness-ui-sessions-test--after-rows ()

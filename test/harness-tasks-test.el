@@ -4964,6 +4964,386 @@ task afresh: its work never began."
                            (file-name-as-directory (plist-get (harness-call 'session/get fsid) :cwd)))))
           (should (equal '("write the docs") (harness-tasks-test-user-texts fsid))))))))
 
+;;;; Waiting for a slot: since when, for how long, and what a slot page shows
+
+(defvar harness-tasks-slot-wait-days)
+(defvar harness-tasks--slot-waits-max)
+(declare-function harness-tasks--queued-since "harness-tasks")
+(declare-function harness-tasks--project "harness-tasks")
+(declare-function harness-tasks--load "harness-tasks")
+
+(ert-deftest harness-tasks-queued-since-falls-back-on-older-records ()
+  "A record from before `:queued-at' says since when it waits by what it has."
+  (harness-tasks-test-with
+    (should (= 5 (harness-tasks--queued-since (list :queued-at 5 :returned 7 :created 9))))
+    (should (= 7 (harness-tasks--queued-since (list :returned 7 :created 9))))
+    (should (= 9 (harness-tasks--queued-since (list :created 9))))))
+
+(ert-deftest harness-tasks-queued-at-says-since-when-a-task-waits ()
+  "A task is stamped with when it joined the queue, whichever way it did.
+At submission that is when it was made.  A task written up for the
+backlog waits for the user, so it has none until `task/queue' puts it
+in the queue; a task returned to pending waits from the return, however
+long ago it was made."
+  (harness-tasks-test-with
+    (harness-tasks-test--settle)
+    (let ((harness-agent--cancel-grace 0.05)
+          (harness-tasks-max-running 0))
+      ;; Submitted: it waits from the moment it exists.
+      (let* ((id (harness-tasks-test-submit "queued as it is submitted"))
+             (task (harness-tasks-test-task id)))
+        (should (eq 'pending (plist-get task :state)))
+        (should (floatp (plist-get task :queued-at)))
+        (should (= (plist-get task :created) (plist-get task :queued-at)))
+        (should (= (plist-get task :created) (harness-tasks--queued-since task))))
+      ;; Written up for the backlog: it waits for the user, not for a slot.
+      (let ((harness-provider-demo-script-override
+             `((:type text :delta ,harness-tasks-test-write-up) (:type done :stop-reason end-turn))))
+        (let ((id (harness-tasks-test-refine "the parser chokes on nested quotes")))
+          (should-not (plist-get (harness-tasks-test-task id) :queued-at))
+          (harness-tasks-test-wait-state id 'pending)
+          (should (eq 'backlog (plist-get (harness-tasks-test-task id) :column)))
+          (should-not (plist-get (harness-tasks-test-task id) :queued-at))
+          (let ((before (float-time)))
+            (harness-call 'task/queue id)
+            (let ((task (harness-tasks-test-task id)))
+              (should (eq 'pending (plist-get task :column)))
+              (should (<= before (plist-get task :queued-at) (float-time)))
+              (should (< (plist-get task :created) (plist-get task :queued-at)))))))
+      ;; Returned to pending: it waits from the return.
+      (let ((harness-provider-demo-script-override '((:type wait :seconds 30))))
+        (let* ((id (harness-tasks-test-submit "starts, then is returned"))
+               (created (plist-get (harness-tasks-test-task id) :created)))
+          (harness-call 'task/start id)
+          (should-not (plist-get (harness-tasks-test-task id) :queued-at))
+          (let ((before (float-time)))
+            (harness-call 'task/return-to-pending id)
+            (harness-test-wait (lambda () (harness-tasks-test--idle id)) 5 "its turn to stop")
+            (let ((task (harness-tasks-test-task id)))
+              (should (eq 'pending (plist-get task :state)))
+              (should (<= before (plist-get task :queued-at) (float-time)))
+              (should (= (plist-get task :returned) (plist-get task :queued-at)))
+              (should (< created (plist-get task :queued-at)))
+              (should (= (plist-get task :queued-at) (harness-tasks--queued-since task))))))))))
+
+(ert-deftest harness-tasks-queued-at-is-stamped-when-feedback-waits-for-a-slot ()
+  "Work sent back from review that has to wait for a slot waits from then.
+The suspended queue holds it back; it starts when the queue resumes,
+and the wait it recorded began when it was sent back."
+  (harness-tasks-test-with
+    (harness-tasks-test--settle)
+    (let ((harness-tasks-require-verification t)
+          (harness-provider-demo-script-override
+           '((:type text :delta "Done.\n") (:type done :stop-reason end-turn))))
+      (let ((id (harness-tasks-test-submit "fix the parser")))
+        (harness-tasks-test-wait-state id 'review)
+        (should-not (plist-get (harness-tasks-test-task id) :queued-at))
+        (harness-call 'task/suspend-queue default-directory)
+        (let ((before (float-time)))
+          (harness-call 'task/reject id "handle tabs too")
+          (let ((task (harness-tasks-test-task id)))
+            (should (eq 'pending (plist-get task :state)))
+            (should (<= before (plist-get task :queued-at) (float-time)))
+            (should (= (plist-get task :returned) (plist-get task :queued-at)))))
+        (harness-tasks--set id :queued-at (- (float-time) 45))
+        (harness-call 'task/resume-queue default-directory)
+        (let* ((task (harness-tasks-test-task id))
+               (wait (car (plist-get task :waits))))
+          (should (eq 'active (plist-get task :state)))
+          (should-not (plist-get task :queued-at))
+          ;; Its first start waited too, for no time at all; this one for 45 s.
+          (should (= 2 (length (plist-get task :waits))))
+          (should (<= 45 (plist-get wait :seconds) 75))
+          (should (= (plist-get task :started) (plist-get wait :at))))
+        (harness-tasks-test-wait-state id 'review)))))
+
+(ert-deftest harness-tasks-start-records-how-long-the-task-waited ()
+  "A task that waited in the queue records the wait when it starts.
+The wait says how long it queued and at which priority, newest first, and
+`:queued-at' goes.  A backlog task started by hand waited for no slot
+and records nothing; a task keeps its last 20 waits."
+  (harness-tasks-test-with
+    (harness-tasks-test--settle)
+    (let ((harness-agent--cancel-grace 0.05)
+          (harness-tasks-max-running 0))
+      ;; Start now, on a task in the queue.
+      (let* ((id (harness-tasks-test-submit-at "urgent, but it queued" "high"))
+             (before (float-time)))
+        (harness-tasks--set id :queued-at (- before 30))
+        (harness-call 'task/start id)
+        (let* ((task (harness-tasks-test-task id))
+               (wait (car (plist-get task :waits))))
+          (should (= 1 (length (plist-get task :waits))))
+          (should (equal "high" (plist-get wait :priority)))
+          (should (= (plist-get task :started) (plist-get wait :at)))
+          (should (<= 30 (plist-get wait :seconds) (+ 30 (- (float-time) before))))
+          (should-not (plist-get task :queued-at)))
+        (harness-tasks-test-wait-state id 'done))
+      ;; A backlog task started by hand waited for the user, not for a slot.
+      (let ((harness-provider-demo-script-override
+             `((:type text :delta ,harness-tasks-test-write-up) (:type done :stop-reason end-turn))))
+        (let ((id (harness-tasks-test-refine "jot this down")))
+          (harness-tasks-test-wait-state id 'pending)
+          (harness-call 'task/start id)
+          (should (eq 'active (harness-tasks-test-state id)))
+          (should-not (plist-get (harness-tasks-test-task id) :waits))
+          (harness-tasks-test-wait-state id 'done)
+          (should-not (plist-get (harness-tasks-test-task id) :waits))
+          (should-not (plist-get (harness-tasks-test-task id) :queued-at))))
+      ;; Started, returned and started again: each start recorded its wait,
+      ;; at the priority the task had then.
+      (let ((harness-provider-demo-script-override '((:type wait :seconds 30))))
+        (let ((id (harness-tasks-test-submit "starts twice")))
+          (harness-call 'task/start id)
+          (harness-call 'task/return-to-pending id)
+          (harness-test-wait (lambda () (harness-tasks-test--idle id)) 5 "its turn to stop")
+          (harness-call 'priority/set (harness-tasks-test-session-id id) "low")
+          (harness-tasks--set id :queued-at (- (float-time) 20))
+          (setq harness-provider-demo-script-override harness-tasks-test-script)
+          (harness-call 'task/start id)
+          (let ((waits (plist-get (harness-tasks-test-task id) :waits)))
+            (should (= 2 (length waits)))
+            (should (equal "low" (plist-get (car waits) :priority)))
+            (should (<= 20 (plist-get (car waits) :seconds) 50))
+            (should (equal "medium" (plist-get (cadr waits) :priority)))
+            (should (> (plist-get (car waits) :at) (plist-get (cadr waits) :at))))
+          (harness-tasks-test-wait-state id 'done)))
+      ;; A task keeps its 20 latest waits, the newest first.
+      (let ((id (harness-tasks-test-submit "has waited a lot")))
+        (harness-tasks--set id :waits (cl-loop for n from 1 to 25
+                                               collect (list :at (float n) :seconds 1.0 :priority "low")))
+        (harness-call 'task/start id)
+        (let ((waits (plist-get (harness-tasks-test-task id) :waits)))
+          (should (= 20 (length waits)))
+          (should (equal "medium" (plist-get (car waits) :priority)))
+          (should (> (plist-get (car waits) :at) 100))
+          (should (= 1.0 (plist-get (cadr waits) :at)))
+          (should (= 19.0 (plist-get (car (last waits)) :at))))
+        (harness-tasks-test-wait-state id 'done)))))
+
+(ert-deftest harness-tasks-waits-are-kept-in-the-store ()
+  "The waits a task recorded come back from the store as they were."
+  (harness-tasks-test-with
+    (let ((harness-tasks-max-running 0))
+      (let ((id (harness-tasks-test-submit-at "waits, then is read back" "low")))
+        (harness-tasks--set id :queued-at (- (float-time) 12.5))
+        (harness-call 'task/start id)
+        (harness-tasks-test-wait-state id 'done)
+        (let ((waits (plist-get (harness-tasks-test-task id) :waits)))
+          (should (= 1 (length waits)))
+          (should (equal "low" (plist-get (car waits) :priority)))
+          (harness-tasks--save)
+          (clrhash harness-tasks--table)
+          (setq harness-tasks--loaded nil)
+          (harness-tasks--load)
+          (should (equal waits (plist-get (harness-tasks-test-task id) :waits)))
+          (should (stringp (plist-get (car (plist-get (harness-tasks-test-task id) :waits)) :priority))))))))
+
+(defun harness-tasks-test--slot-ids (entries)
+  "The ids of ENTRIES, plists of a `task/slots' answer."
+  (mapcar (lambda (entry) (plist-get entry :id)) entries))
+
+(defun harness-tasks-test--slot-values (key entries)
+  "The values of KEY in ENTRIES, plists of a `task/slots' answer."
+  (mapcar (lambda (entry) (plist-get entry key)) entries))
+
+(defun harness-tasks-test--session-at (status &rest opts)
+  "Make a session in the test directory with STATUS; return its id.
+OPTS are more arguments of `session/create'."
+  (let ((sid (plist-get (apply #'harness-call 'session/create :cwd default-directory
+                               :model "demo:scripted" opts)
+                        :id)))
+    (harness-call 'session/set-status sid status)
+    sid))
+
+(defun harness-tasks-test--hold (state sid project &rest props)
+  "Store a task record in STATE worked on by session SID, in PROJECT.
+PROPS are more fields of the record.  Return its id."
+  (let ((record (harness-tasks-test--record state sid project)))
+    (while props (setq record (plist-put record (pop props) (pop props))))
+    (plist-get (harness-tasks--put record) :id)))
+
+(ert-deftest harness-tasks-slots-report-holders-queue-and-waits ()
+  "task/slots tells a project's slot use from what the scheduler goes by.
+Of four slots, the two tasks whose own sessions work hold one each, the
+longest at work first: a sub-agent at work holds none, its own task or
+not, nor does the merge queue.  The queue is the waiting tasks in the
+order they will start, each since it joined it.  The waits are the
+project's recent ones, any task's, newest first; another project's are
+left out."
+  (harness-tasks-test-with
+    ;; The start-up pass that picks up interrupted work runs before the
+    ;; records below exist, not after: it would take them for such work.
+    (harness-tasks-test--settle)
+    (let* ((now (float-time))
+           (other (harness-test-temp-dir))
+           low med high pre away project)
+      ;; The queue, built while nothing may start.  They were made and
+      ;; joined the queue at different times: the one pre-empted before
+      ;; was made first and waits the shortest, and goes first of the
+      ;; high ones, as a returned task does.
+      (let ((harness-tasks-max-running 0))
+        (setq low (harness-tasks-test-submit-at "low priority" "low")
+              med (harness-tasks-test-submit "medium by default")
+              high (harness-tasks-test-submit-at "high priority" "high")
+              pre (harness-tasks-test-submit-at "high, pre-empted before" "high")
+              away (harness-tasks-test-submit "another project's" other)))
+      (setq project (plist-get (harness-tasks-test-task low) :project))
+      (should-not (equal project (plist-get (harness-tasks-test-task away) :project)))
+      (harness-tasks--set low :created (- now 5000) :queued-at (- now 500))
+      (harness-tasks--set med :created (- now 4000) :queued-at (- now 400))
+      (harness-tasks--set high :created (- now 3000) :queued-at (- now 300))
+      (harness-tasks--set pre :created (- now 9000) :queued-at (- now 100)
+                          :returned (- now 100) :return-reason 'preempted :preempted-by "t-other")
+      ;; The backlog and the archive are not the queue.
+      (harness-tasks-test--hold 'pending nil project :backlog t :prompt "in the backlog")
+      (harness-tasks-test--hold 'pending nil project :archived t :prompt "archived while it waited")
+      (let* ((sid-a (harness-tasks-test--session-at 'running :name "Parser fix"))
+             (sid-b (harness-tasks-test--session-at 'blocked))
+             (helper (harness-tasks-test--session-at 'running :kind 'subagent :parent-id sid-a))
+             (merger (harness-tasks-test--session-at 'running))
+             a b finished archived)
+        (harness-call 'priority/set sid-a "high")
+        ;; B was made first, but A has worked the longest: B was sent back.
+        (setq a (harness-tasks-test--hold 'active sid-a project
+                                          :name "Task title" :created (- now 4000) :started (- now 600))
+              b (harness-tasks-test--hold 'active sid-b project
+                                          :name "Write the docs" :created (- now 5000)
+                                          :started (- now 900) :sent-back (- now 100)))
+        (harness-tasks-test--hold 'active helper project :started (- now 800))
+        (harness-tasks-test--hold 'merging merger project :started (- now 700))
+        (harness-tasks-test--hold 'review nil project)
+        ;; Waits: one in the queue's tasks, a done one (with an old wait too),
+        ;; an archived one, and another project's.
+        (harness-tasks--set med :waits (list (list :at (- now 60) :seconds 5.5 :priority "medium")))
+        (setq finished (harness-tasks-test--hold
+                        'done nil project
+                        :waits (list (list :at (- now 3600) :seconds 12.0 :priority "high")
+                                     (list :at (- now (* 8 86400)) :seconds 999.0 :priority "low")))
+              archived (harness-tasks-test--hold
+                        'done nil project :archived t
+                        :waits (list (list :at (- now (* 2 86400)) :seconds 300.0 :priority "low"))))
+        (harness-tasks--set away :waits (list (list :at (- now 10) :seconds 1.0 :priority "medium")))
+        (let* ((harness-tasks-max-running 4)
+               (slots (harness-call 'task/slots default-directory))
+               (holders (plist-get slots :holders))
+               (queue (plist-get slots :queue))
+               (waits (plist-get slots :waits)))
+          (should (equal project (plist-get slots :project)))
+          (should (eql 4 (plist-get slots :limit)))
+          (should (eq :false (plist-get slots :suspended)))
+          (should (eql 7 (plist-get slots :days)))
+          ;; Two slots held, the longest at work first.
+          (should (equal (list a b) (harness-tasks-test--slot-ids holders)))
+          (should (equal '("Parser fix" "Write the docs") (harness-tasks-test--slot-values :title holders)))
+          (should (equal (list sid-a sid-b) (harness-tasks-test--slot-values :session holders)))
+          (should (equal '("high" "medium") (harness-tasks-test--slot-values :priority holders)))
+          (should (equal '("running" "blocked") (harness-tasks-test--slot-values :state holders)))
+          (should (equal (list (- now 600) (- now 100)) (harness-tasks-test--slot-values :since holders)))
+          (should (equal '(:false t) (harness-tasks-test--slot-values :sent-back holders)))
+          ;; The queue in start order: high first, the pre-empted one leading.
+          (should (equal (list pre high med low) (harness-tasks-test--slot-ids queue)))
+          (should (equal '("high" "high" "medium" "low") (harness-tasks-test--slot-values :priority queue)))
+          (should (equal (list (- now 100) (- now 300) (- now 400) (- now 500))
+                         (harness-tasks-test--slot-values :since queue)))
+          (should (equal '("preempted" nil nil nil) (harness-tasks-test--slot-values :reason queue)))
+          (should (equal '("high, pre-empted before" "high priority" "medium by default" "low priority")
+                         (harness-tasks-test--slot-values :title queue)))
+          ;; The recent waits of the project, newest first.
+          (should (equal (list med finished archived) (harness-tasks-test--slot-ids waits)))
+          (should (equal '("medium" "high" "low") (harness-tasks-test--slot-values :priority waits)))
+          (should (equal '(5.5 12.0 300.0) (harness-tasks-test--slot-values :seconds waits)))
+          (should (equal (list (- now 60) (- now 3600) (- now (* 2 86400)))
+                         (harness-tasks-test--slot-values :at waits)))
+          ;; How far back they look is an option.
+          (let ((harness-tasks-slot-wait-days 1))
+            (let ((slots (harness-call 'task/slots default-directory)))
+              (should (eql 1 (plist-get slots :days)))
+              (should (equal (list med finished) (harness-tasks-test--slot-ids (plist-get slots :waits))))))
+          (let ((harness-tasks-slot-wait-days 10))
+            (should (equal (list med finished archived finished)
+                           (harness-tasks-test--slot-ids
+                            (plist-get (harness-call 'task/slots default-directory) :waits)))))
+          (let ((harness-tasks--slot-waits-max 2))
+            (should (equal (list med finished)
+                           (harness-tasks-test--slot-ids
+                            (plist-get (harness-call 'task/slots default-directory) :waits)))))
+          ;; No limit, and a limit of nothing at all.
+          (let ((harness-tasks-max-running nil))
+            (should-not (plist-get (harness-call 'task/slots default-directory) :limit)))
+          (let ((harness-tasks-max-running 0))
+            (should (eql 0 (plist-get (harness-call 'task/slots default-directory) :limit))))
+          ;; Another project's slots are its own.
+          (let ((elsewhere (harness-call 'task/slots other)))
+            (should-not (equal project (plist-get elsewhere :project)))
+            (should-not (plist-get elsewhere :holders))
+            (should (equal (list away) (harness-tasks-test--slot-ids (plist-get elsewhere :queue))))
+            (should (equal (list away) (harness-tasks-test--slot-ids (plist-get elsewhere :waits)))))
+          ;; A suspended queue says so.  Over the wire too, where the
+          ;; lists arrive as lists of plists, a false as :false and a
+          ;; nil as nothing; suspended, the queue starts nothing meanwhile.
+          (harness-call 'task/suspend-queue default-directory)
+          (should (eq t (plist-get (harness-call 'task/slots default-directory) :suspended)))
+          (let* ((conn (harness-acp-connect))
+                 (wire (harness-test-await
+                        (harness-acp-request conn "_harness/task/slots" (list :cwd default-directory)))))
+            (should (equal project (plist-get wire :project)))
+            (should (eql 4 (plist-get wire :limit)))
+            (should (eq t (plist-get wire :suspended)))
+            (should (equal (list a b) (harness-tasks-test--slot-ids (plist-get wire :holders))))
+            (should (keywordp (car (car (plist-get wire :holders)))))
+            (should (eq :false (plist-get (car (plist-get wire :holders)) :sent-back)))
+            (should (eq t (plist-get (cadr (plist-get wire :holders)) :sent-back)))
+            (should (equal (list pre high med low) (harness-tasks-test--slot-ids (plist-get wire :queue))))
+            (should (equal "preempted" (plist-get (car (plist-get wire :queue)) :reason)))
+            (should-not (plist-get (cadr (plist-get wire :queue)) :reason))
+            (should (equal (list med finished archived) (harness-tasks-test--slot-ids (plist-get wire :waits))))
+            (should (< (abs (- (plist-get (car (plist-get wire :waits)) :at) (- now 60))) 0.001))
+            (should (= 5.5 (plist-get (car (plist-get wire :waits)) :seconds)))))))))
+
+(ert-deftest harness-tasks-slots-say-why-a-slot-is-held ()
+  "A held slot is a task at work, blocked, waiting on work or still starting.
+A task is called by its session's name, else its own, else the first
+line of its prompt, cut at 80 characters.  A task whose session is idle
+with nothing outstanding holds no slot, and a project without tasks has
+nothing to report."
+  (harness-tasks-test-with
+    (harness-tasks-test--settle)
+    (let* ((now (float-time))
+           (project (harness-tasks--project default-directory))
+           (long (concat "A first line that is longer than eighty characters, so that the slot view "
+                         "has to cut it short"))
+           (running (harness-tasks-test--hold 'active (harness-tasks-test--session-at 'running) project
+                                              :started (- now 400) :name "Named task"
+                                              :prompt "Its prompt, which its name beats"))
+           (blocked (harness-tasks-test--hold 'active (harness-tasks-test--session-at 'blocked) project
+                                              :started (- now 300) :prompt (concat "\n  " long "\nsecond line")))
+           (waiting (harness-tasks-test--hold 'active (harness-tasks-test--session-at 'idle) project
+                                              :started (- now 200) :waiting "2 workers running"
+                                              :prompt "Waits on its workers\nand more"))
+           (starting (harness-tasks-test--hold 'active nil project
+                                               :started (- now 100) :prompt "Just starting")))
+      (puthash starting t harness-tasks--starting)
+      ;; Idle, with nothing outstanding: it holds nothing.
+      (harness-tasks-test--hold 'active (harness-tasks-test--session-at 'idle) project :started (- now 50))
+      (should-not (plist-get (harness-call 'task/slots (harness-test-temp-dir)) :holders))
+      (let* ((harness-tasks-max-running 4)
+             (slots (harness-call 'task/slots default-directory))
+             (holders (plist-get slots :holders)))
+        (should-not (plist-get slots :queue))
+        (should-not (plist-get slots :waits))
+        (should (equal (list running blocked waiting starting) (harness-tasks-test--slot-ids holders)))
+        (should (equal '("running" "blocked" "waiting" "starting")
+                       (harness-tasks-test--slot-values :state holders)))
+        (should (equal '("Named task" "Waits on its workers" "Just starting")
+                       (harness-tasks-test--slot-values :title (cons (car holders) (cddr holders)))))
+        (let ((title (plist-get (cadr holders) :title)))
+          (should (= 80 (length title)))
+          (should (string-prefix-p "A first line that is longer than eighty characters" title))
+          (should (string-suffix-p "…" title)))
+        (should-not (plist-get (car (last holders)) :session))
+        (should (equal '("medium" "medium" "medium" "medium")
+                       (harness-tasks-test--slot-values :priority holders)))))))
 (ert-deftest harness-tasks-session-says-its-context-is-capped ()
   "A task session created with the task cap says so in a hint naming
 the setting that capped it, so the cap is never silent; without a cap

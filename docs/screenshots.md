@@ -47,7 +47,7 @@ The pictures, by the name `scripts/media.sh` takes:
 | `chat-permission` | A chat waiting for permission to run `pip install` | `harness-media-shot-chat-permission` |
 | `chat-question` | A chat waiting for the answer to a question | `harness-media-shot-chat-question` |
 | `attachments` | A compose box holding a picture and a video, their thumbnails in the chips, and a link still downloading with its progress | `harness-media-shot-attachments` |
-| `tasks` | The task board, every column filled, a task typed in its box | `harness-media-shot-tasks` |
+| `tasks` | The task board, every section filled but Pending (no limit holds a task back), a task typed in its box | `harness-media-shot-tasks` |
 | `tasks-search` | The board searched in words, the query typed in its own compose box: one task matches, the archive it did and `[Undo]`, and the box, in its search colours, ready for the next search | `harness-media-shot-tasks-search` |
 | `quick-search` | The quick search opened from the rate-limit session's chat, `acme/ratelimit.py` beside it: its popout lists the command that attaches a file, with `[Run]` and `[Describe]`, and, under a Sessions heading with `[All matches]`, the session that wrote the API guide, with `[Open]` and the passage the session search found in it | `harness-media-shot-quick-search` |
 | `tasks-long` | That board after weeks of merges, its completed list held back to keep the box in the window | `harness-media-shot-tasks-long` |
@@ -55,7 +55,7 @@ The pictures, by the name `scripts/media.sh` takes:
 | `report` | The board with a task's report popped out, at its end: the chart it handed in, the test run it quotes, the review banner and the feedback box | `harness-media-shot-report` |
 | `report-image` | That chart, clicked: shown larger in a popout of its own | `harness-media-shot-report-image` |
 | `sessions` | The session list | `harness-media-shot-sessions` |
-| `popout-permission` | The session list with a session's permission request popped out under it | `harness-media-shot-popout-permission` |
+| `popout-permission` | The session list with a session's permission request popped out under it, as wide as the `sessions` picture | `harness-media-shot-popout-permission` |
 | `popout-question` | The task board with a task's question popped out under it | `harness-media-shot-popout-question` |
 | `tree` | The conversation tree: a session, a fork and a BTW | `harness-media-shot-tree` |
 | `usage` | The usage dashboard over 30 days, by model, with the fallback list beneath the plan | `harness-media-shot-usage` |
@@ -70,6 +70,8 @@ The pictures, by the name `scripts/media.sh` takes:
 | `insights` | The Insights report over 30 days of every project: the totals, the summary the scripted model wrote, the messages by hour and weekday | `harness-media-shot-insights` |
 | `insights-activity` | The same report further down: the busiest sessions, the tools, the permission decisions and the tasks | `harness-media-shot-insights-activity` |
 | `chat-cowboy` | A chat whose prompt cache went cold yesterday, `orders.py` beside it: another session's message waits while the panel asks what goes first, each choice with its cost | `harness-media-shot-chat-cowboy` |
+| `notes` | A session's chat whose `spawn_agent` call runs, and the sub-agent's chat beside it: the note under the spawn call says what the child does, with a recap of it and its facts, and the note under the child's `bash` call says it is still running | `harness-media-shot-notes` |
+| `slots` | The demo project's task slots: four slots, every one held, at three priorities; four tasks waiting, by priority and next in line; and how long tasks waited for a slot this week. Taken last: it sets a limit, starts a task and queues four (`harness-media--fill-slots`) | `harness-media-shot-slots` |
 | `quote-reply` | A chat whose agent replied in three paragraphs, `acme/webhooks.py` beside it: the reply quoted in the box with `C-c >`, the middle of its long paragraph elided with `C-c [` (`[...]`), the quote split with `M-RET` and an answer typed under each part, point in the box | `harness-media-shot-quote-reply` |
 | `notes` | A session's chat after its `spawn_agent` call started a sub-agent, and the sub-agent's chat beside it: the sub-agents panel above the session's compose box lists the child running, with its name as a link, how long its turn has gone on and what it does now, and the note under the child's `bash` call says it is still running | `harness-media-shot-notes` |
 | `chat-denied` | A session's chat whose `bash` call its own rule refuses: the denial names the handle, and the call offers `[Approve]`, the user's yes, which no mode, rule or judge can deny | `harness-media-shot-chat-denied` |
@@ -135,8 +137,10 @@ A run of the pictures does not depend on how loaded the machine is.
   weekly one is hard, so it stays at $5 at least: early in the week the
   seeded spend is small, and the world's own turns must still fit.
 - `harness-media--build-tasks` submits tasks and drives them, as a user
-  would, into every column of the board: two verified and merged, one
-  verified and waiting in the merge queue, one in review (sent back
+  would, into every section of the board but Pending: two verified and
+  merged, one verified and waiting in the merge queue (whose lock on the
+  main checkout `harness-media--hold-merge-queue` holds, so its merge
+  never starts), one in review (sent back
   once: the first picture shows its session), one asking a question,
   two working (their turns held half way), two written up for the
   backlog.  They run in real worktrees, commit and merge.  Every round
