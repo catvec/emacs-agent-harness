@@ -660,23 +660,58 @@ pending says why it waits (`harness-ui-tasks--returned-why')."
      (t (let ((line (if named (harness-first-line (plist-get task :prompt) 70) body)))
           (format "#%d in line%s" (or position 1) (if line (concat sep line) "")))))))
 
+(defun harness-ui-tasks--named (id fallback)
+  "Name task ID for a card: its title in quotes when the board has it.
+Else ID itself, else FALLBACK when there is no ID."
+  (let ((task (and id (harness-ui-tasks--find id))))
+    (cond (task (format "\"%s\"" (harness-truncate-end (harness-ui-tasks--title task) 40)))
+          (id (format "%s" id))
+          (t fallback))))
+
 (defun harness-ui-tasks--returned-why (task)
   "Why TASK, returned to pending, waits in the queue, for its card.
 A task returned by hand carries on where it stopped, and so does one
 pre-empted (`:return-reason' preempted): a task sent back from review
-took its slot, named by its title when the board has it.  One the user
+took its slot, named by its title when the board has it.  So does one
+whose slot was taken back (reclaimed): it worked in the slot of a task
+waiting on you, which took it back once you answered.  One the user
 sent back from review while no slot could take it waits with their
 feedback."
   (pcase (format "%s" (or (plist-get task :return-reason) "returned"))
     ("preempted"
-     (let* ((id (plist-get task :preempted-by))
-            (by (and id (harness-ui-tasks--find id))))
-       (format "pre-empted by %s, carries on where it stopped"
-               (cond (by (format "\"%s\"" (harness-truncate-end (harness-ui-tasks--title by) 40)))
-                     (id (format "%s" id))
-                     (t "a task sent back")))))
+     (format "pre-empted by %s, carries on where it stopped"
+             (harness-ui-tasks--named (plist-get task :preempted-by) "a task sent back")))
+    ("reclaimed"
+     (format "slot taken back by %s, carries on where it stopped"
+             (harness-ui-tasks--named (plist-get task :preempted-by) "the task that lent it")))
     ("sent-back" "sent back from review, waits for a slot with your feedback")
     (_ "returned, carries on where it stopped")))
+
+(defun harness-ui-tasks--loan-fact (task column)
+  "The fact on TASK's card in COLUMN about a slot lent to the queue, or nil.
+A task blocked on you long enough lends its slot, and the queue starts
+another task in it (the harness's `harness-tasks-lend-blocked-slot-after'):
+that task says \"borrowed slot\" (`:borrowed-from'), and the lender
+\"slot lent\", each naming the other in its tooltip.  Only while both
+are at work or wait on you: a loan ends with either."
+  (when (memq column '(active needs-input))
+    (let* ((id (plist-get task :id))
+           (from (plist-get task :borrowed-from))
+           (borrower (and (not from)
+                          (cl-find-if (lambda (other)
+                                        (and (equal (plist-get other :borrowed-from) id)
+                                             (memq (harness-ui-tasks--column other) '(active needs-input))))
+                                      harness-ui-tasks--tasks))))
+      (cond
+       (from
+        (let ((lender (harness-ui-tasks--named from "a task waiting on you")))
+          (propertize "borrowed slot"
+                      'help-echo (format "Works in the slot %s lends while it waits on you: answering %s takes the slot back, and this task goes back to the queue to carry on later"
+                                         lender lender))))
+       (borrower
+        (propertize "slot lent"
+                    'help-echo (format "Waited on you long enough to lend its slot: %s works in it until you answer, then goes back to the queue"
+                                       (harness-ui-tasks--named (plist-get borrower :id) "another task"))))))))
 
 (defun harness-ui-tasks--sent-back-message (task)
   "Say where TASK went once `task/reject' sent it back, as a message.
@@ -747,6 +782,7 @@ has written, unless LEAN, which a narrow card falls back on."
          (parts
           (delq nil
                 (list (and (harness-json-true-p (plist-get task :main-tree)) "main tree")
+                      (harness-ui-tasks--loan-fact task column)
                       ;; Where a branch in the queue stands, past waiting
                       ;; for its turn: the card is one line, and the same
                       ;; working mark shows a merge under way and a

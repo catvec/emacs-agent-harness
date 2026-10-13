@@ -2183,6 +2183,20 @@ your checkout itself can be submitted to the **main tree** instead (the
   lost, as any request is; a title that still fails is not asked for
   again while its task waits, and its session is named from its first
   message once the task starts.
+- With a limit, a task that has waited on you -- a question, a
+  permission request -- for five minutes **lends its slot**
+  (`harness-tasks-lend-blocked-slot-after`, in seconds; nil never
+  lends): the queue starts the next task in it,
+  whose card says `borrowed slot`, and the waiting task's card says
+  `slot lent`, each naming the other in its tooltip. Answering takes the
+  slot back at once: the borrower goes back to the front of *Pending*,
+  its turn stopped and whatever it left running stopped with it, keeping
+  its session, branch and worktree, and carries on where it stopped when
+  a slot frees, its session told why; the task you answered works on in
+  its slot. A borrower that finished in the meantime leaves nothing to
+  take back. A task waiting on you that still has workers or sub-agents
+  running keeps its slot, and so does a borrower that comes to wait on
+  you: it never lends a slot it only borrowed.
 - Each card is one line, with a subtitle that recaps the task: what it is
   doing or has done so far, written by a short model call and refreshed
   at the first of so many turns, seconds or tool calls since the last
@@ -2223,7 +2237,9 @@ your checkout itself can be submitted to the **main tree** instead (the
   first, which is also the order *Pending* lists them in. A priority
   stops a task at work only for work you send back from review, which
   can take the slot of a task it outranks (see *Ready for review*
-  below); a backlog task still waits for you to start it. The
+  below); the only other task stopped to free a slot is one working in
+  a slot lent while its lender waited on you, once you answer, whatever
+  the priorities. A backlog task still waits for you to start it. The
   `medium priority` button beside the Submit / Refine switch sets the
   next task's (a click cycles it through high and low);
   `+` and `-` on a card raise and lower that task's — the session's it
@@ -2294,7 +2310,8 @@ your checkout itself can be submitted to the **main tree** instead (the
   raising its priority above a task at work starts it at once. A
   suspended queue holds it too, until you resume the queue or start it
   with `s`. A pending card says why the task waits: pre-empted by
-  which task, or sent back and waiting for a slot. Only you review: a
+  which task, its borrowed slot taken back by which task, or sent back
+  and waiting for a slot. Only you review: a
   message another session's agent
   sends the task (`session_send`, or `task_control`'s message) reaches
   it as that session's, not as your feedback. The task deals with it

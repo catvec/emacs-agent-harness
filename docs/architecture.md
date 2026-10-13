@@ -4180,7 +4180,8 @@ priority).
   `:parent-id` -- running or blocked mid-turn, or idle with work it
   left running (`:waiting`, a supervisor's workers say), which it holds
   through that work: such a task can be pre-empted (below), and its work
-  stops with it.  The sessions working for
+  stops with it.  A task blocked on the user long enough lends its slot
+  instead (lending, below).  The sessions working for
   a task never take one of their own: its sub-agents and forks, and the
   merge queue's conflict resolvers (`subagent` children of its session).
   Nor does the merge queue, which the limit never holds up: a task in it
@@ -4491,6 +4492,39 @@ priority).
   pending, pre-empted or sent back while it waits; the user's own
   message to a returned or pre-empted task starts it, as `task/start`
   would.  A task that never started is left alone.
+- Lending a blocked task's slot: a task whose own session has been
+  `blocked` on the user (a question or a permission request) for
+  `harness-tasks-lend-blocked-slot-after` seconds (300; nil never lends,
+  and nothing lends without a limit or at 0) holds no slot
+  (`harness-tasks--lending-p`, which `harness-tasks--holds-slot-p`
+  asks), so the scheduler fills the slot by priority.  How long it has
+  waited is from the `session/status` that blocked it
+  (`harness-tasks--blocked-at`, else its oldest pending request's
+  `:created`), and a timer (`harness-tasks--arm-lend-timer`) runs the
+  scheduler when the wait is over, with no other event.  A task waiting
+  on work it left running (`:waiting`, or `agent/outstanding` mid-turn)
+  keeps its slot, and so does one working in a borrowed slot: loans do
+  not nest.  The task the harness starts in a lent slot -- the queue's
+  start, or work sent back from review (`harness-tasks--make-room`) --
+  records it (`harness-tasks--note-borrow`): `:borrowed-from` is the
+  lender (`harness-tasks--lender-for`: the slot is lent when the
+  project's tasks in slots of their own and its lenders fill its
+  limit).  An explicit `task/start` borrows nothing, as it ignores the
+  limit.  When the lender's session stops being blocked,
+  `harness-tasks--reclaim` runs soon after (so a turn cancelled with its
+  question is over first): if the lender is back at work
+  (`harness-tasks--back-p`: not blocked, a turn running or the task
+  starting) and its project is over the limit, its borrower is
+  pre-empted the way work sent back pre-empts (`harness-tasks--preempt`
+  with `:return-reason` `reclaimed` and `:preempted-by` the lender):
+  back at the front of the queue, its turn and outstanding work
+  stopped, session, branch and worktree kept, a hint saying why, and
+  `harness-tasks--reclaimed-message` when it starts again.  A borrower
+  that finished, or a lender that stopped lending another way (its turn
+  cancelled, the wait or the limit changed, gone), stops nothing: the
+  loan just ends (`harness-tasks--tidy-loans`, at each scheduling
+  pass).  The board shows `borrowed slot` and `slot lent` on the two
+  cards.
 - Stopping the work left running.  A task that goes back to the queue
   after its work began -- pre-empted (`harness-tasks--preempt`), or
   returned to pending by hand (`task/return-to-pending`) -- has nothing
@@ -4498,7 +4532,9 @@ priority).
   stops with it (`harness-tasks--stop-outstanding`): the tasks module
   asks `agent/stop-outstanding SESSION-ID REASON` (see agent), REASON
   being "its task was pre-empted: task T, sent back from review, took
-  its slot" or "its task was returned to the queue".  It asks once no
+  its slot" (or "...: task T, whose slot it borrowed while that task
+  waited on the user, was answered and took its slot back") or "its
+  task was returned to the queue".  It asks once no
   turn of the session runs: at once when none did, which is the case of
   a task that only waited on its workers (`:waiting`), else when the
   turn the pre-emption or the return stopped has ended

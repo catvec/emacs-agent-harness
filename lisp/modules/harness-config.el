@@ -214,7 +214,7 @@ reader of the layers skips it (see `harness-config--layered-keys').")
      :keys (harness-tasks-model harness-tasks-thinking harness-tasks-permission-mode
             harness-tasks-non-interactive harness-tasks-context-limit
             harness-tasks-require-verification
-            harness-tasks-max-running harness-tasks-worktrees
+            harness-tasks-max-running harness-tasks-lend-blocked-slot-after harness-tasks-worktrees
             harness-merge-conflict-resolver harness-merge-resolver-model))
     (notifications
      :title "Notifications"

@@ -13,6 +13,10 @@
 (defvar harness-tasks--starting)
 (defvar harness-tasks--waking)
 (defvar harness-tasks--naming)
+(defvar harness-tasks--blocked-at)
+(defvar harness-tasks--lend-timers)
+(defvar harness-tasks-lend-blocked-slot-after)
+(defvar harness-tasks--reclaimed-message)
 (defvar harness-tasks--naming-pool)
 (defvar harness-tasks--naming-concurrency)
 (defvar harness-tasks--loaded)
@@ -59,6 +63,10 @@ turn `harness-tasks-require-verification' on themselves."
      (clrhash harness-tasks--starting)
      (clrhash harness-tasks--waking)
      (clrhash harness-tasks--naming)
+     ;; No earlier test's blocked session or lend timer reaches this one.
+     (clrhash harness-tasks--blocked-at)
+     (maphash (lambda (_ timer) (cancel-timer timer)) harness-tasks--lend-timers)
+     (clrhash harness-tasks--lend-timers)
      (harness-tasks--forget-stores)
      ;; Nothing of an earlier test waits to be written over this one's files,
      ;; nor for a slot of the title throttle: a request of an earlier test
@@ -5342,6 +5350,301 @@ of its is stopped, and its next turn ends waiting on them again."
           (should harness-tasks-test--workers)
           (should-not harness-tasks-test--stops)
           (should-not (harness-tasks-test--hint-p bsid "Stopped while the task waits in the queue: ")))))))
+
+;;;; Lending a blocked task's slot
+
+(declare-function harness-tasks--lending-p "harness-tasks")
+(declare-function harness-tasks--blocked-since "harness-tasks")
+(declare-function harness-tasks--reclaim "harness-tasks")
+
+(defun harness-tasks-test--block (sid &optional question)
+  "Have session SID ask the user QUESTION; return the pending request's id."
+  (harness-call 'session/pending-add sid
+                (list :kind 'question :payload (list :question (or question "Which one?")))))
+
+(defun harness-tasks-test--borrowed-from (id)
+  "Whose lent slot task ID says it works in, or nil."
+  (plist-get (harness-tasks-test-task id) :borrowed-from))
+
+(ert-deftest harness-tasks-blocked-task-lends-its-slot-once-it-waited-long-enough ()
+  "A task blocked on the user keeps its slot until it has waited long enough.
+Then it lends it: it holds no slot, and its project has one more free.
+How long it waited is how long its session has been blocked.  A task
+waiting on work it left running -- workers once its turn ended,
+sub-agents mid-turn -- keeps its slot, and so does one working in a
+borrowed slot; a sub-agent blocked takes no slot either way.  With the
+wait nil, or without slots, nothing is lent, as before.  Answered, the
+task holds its slot again."
+  (harness-tasks-test-with
+    (let* ((harness-tasks-max-running 2)
+           (harness-tasks-lend-blocked-slot-after 300)
+           (top (plist-get (harness-call 'session/create :cwd dir :model "demo:scripted") :id))
+           (task (harness-tasks-test--record 'active top))
+           (project (plist-get task :project)))
+      (harness-tasks--put task)
+      (harness-call 'session/set-status top 'running)
+      (should (harness-tasks--holds-slot-p task))
+      (let ((pid (harness-tasks-test--block top)))
+        (should (eq 'blocked (plist-get (harness-call 'session/get top) :status)))
+        ;; Blocked since now: it keeps its slot for the wait.
+        (let ((since (harness-tasks--blocked-since (harness-call 'session/get top))))
+          (should (numberp since))
+          (should (< (- (float-time) since) 5)))
+        (should (harness-tasks--holds-slot-p task))
+        (should-not (harness-tasks--lending-p task))
+        (should (= 1 (harness-tasks--free-slots project)))
+        ;; Blocked for longer than the wait: it lends its slot.
+        (puthash top (- (float-time) 301) harness-tasks--blocked-at)
+        (should (harness-tasks--lending-p task))
+        (should-not (harness-tasks--holds-slot-p task))
+        (should (= 2 (harness-tasks--free-slots project)))
+        ;; Work it left running keeps its slot: workers once its turn
+        ;; ended ...
+        (should (harness-tasks--holds-slot-p (append task (list :waiting "2 workers running"))))
+        ;; ... or a sub-agent still at work mid-turn.
+        (let ((report (lambda (value session-id) (if (equal session-id top) "1 sub-agent running" value))))
+          (harness-add-filter 'agent/outstanding report)
+          (unwind-protect (should (harness-tasks--holds-slot-p task))
+            (harness-remove-filter 'agent/outstanding report)))
+        (should-not (harness-tasks--holds-slot-p task))
+        ;; A borrowed slot is not lent on.
+        (should (harness-tasks--holds-slot-p (append task (list :borrowed-from "t-lender"))))
+        ;; Without a wait, or without slots, nothing is lent.
+        (let ((harness-tasks-lend-blocked-slot-after nil))
+          (should (harness-tasks--holds-slot-p task))
+          (should (= 1 (harness-tasks--free-slots project))))
+        (dolist (limit '(nil 0))
+          (let ((harness-tasks-max-running limit))
+            (should (harness-tasks--holds-slot-p task))
+            (should-not (harness-tasks--lending-p task))))
+        ;; A sub-agent blocked holds no slot, lending or not.
+        (let ((sub (plist-get (harness-call 'session/create :cwd dir :model "demo:scripted"
+                                            :kind 'subagent :parent-id top)
+                              :id)))
+          (harness-tasks-test--block sub)
+          (should-not (harness-tasks--holds-slot-p (harness-tasks-test--record 'active sub)))
+          (puthash sub (- (float-time) 301) harness-tasks--blocked-at)
+          (should-not (harness-tasks--holds-slot-p (harness-tasks-test--record 'active sub))))
+        ;; Answered, it works again and holds its slot.
+        (harness-call 'session/pending-resolve top pid "this")
+        (should (eq 'running (plist-get (harness-call 'session/get top) :status)))
+        (should-not (gethash top harness-tasks--blocked-at))
+        (should-not (harness-tasks--lending-p task))
+        (should (harness-tasks--holds-slot-p task))
+        (harness-call 'session/set-status top 'idle)))))
+
+(ert-deftest harness-tasks-blocked-task-lends-its-slot-and-takes-it-back ()
+  "A task blocked long enough lends its slot; the user's answer takes it back.
+While the task has waited less than `harness-tasks-lend-blocked-slot-after'
+it keeps its slot and the next task waits.  Then, with no other event,
+that task starts in the slot, as its borrower.  The answer takes the
+slot back at once: the borrower goes back to the front of the queue,
+its turn stopped, its session, branch and worktree kept, and its session
+says why; the task answered works on in its slot.  When the slot frees,
+the borrower carries on in its own session and worktree, told why by
+the harness."
+  (harness-tasks-test-with-git
+    (harness-tasks-test--settle)
+    (let* ((harness-tasks-test--slow (list "Ask about the parser" "Write the docs"))
+           (harness-agent--cancel-grace 0.05)
+           (harness-tasks-max-running 1)
+           (harness-tasks-lend-blocked-slot-after 0.5)
+           (harness-provider-demo-script-override #'harness-tasks-test--slow-script)
+           (lender (harness-tasks-test-submit "Ask about the parser"))
+           (lsid (harness-tasks-test-session-id lender)))
+      (harness-test-wait (lambda () (harness-tasks-test--running-p lsid)) 10 "the first task at work")
+      (let* ((borrower (harness-tasks-test-submit "Write the docs"))
+             (bsid (harness-tasks-test-session-id borrower))
+             (pid (harness-tasks-test--block lsid "Which parser?")))
+        ;; Blocked for less than the wait: it keeps its slot, and the next
+        ;; task waits.
+        (harness-tasks--schedule)
+        (should (eq 'pending (harness-tasks-test-state borrower)))
+        (should (harness-tasks--holds-slot-p (harness-tasks-test-task lender)))
+        (should-not (harness-tasks-test--borrowed-from borrower))
+        ;; The wait over, the next task starts in the slot it lends.
+        (harness-test-wait (lambda () (eq 'active (harness-tasks-test-state borrower))) 10 "the borrower to start")
+        (should (equal lender (harness-tasks-test--borrowed-from borrower)))
+        (should (harness-tasks--lending-p (harness-tasks-test-task lender)))
+        (should (eq 'needs-input (plist-get (harness-tasks-test-task lender) :column)))
+        (harness-test-wait (lambda () (and (plist-get (harness-tasks-test-task borrower) :worktree)
+                                           (harness-tasks-test--running-p bsid)))
+                           10 "the borrower at work in its worktree")
+        (let* ((task (harness-tasks-test-task borrower))
+               (worktree (plist-get task :worktree))
+               (branch (plist-get task :branch)))
+          (should (file-directory-p worktree))
+          ;; The answer takes the slot back.
+          (harness-call 'session/pending-resolve lsid pid "the new one")
+          (harness-test-wait (lambda () (eq 'pending (harness-tasks-test-state borrower))) 5
+                             "the borrower back in the queue")
+          (let ((back (harness-tasks-test-task borrower)))
+            (should (eq 'reclaimed (plist-get back :return-reason)))
+            (should (equal lender (plist-get back :preempted-by)))
+            (should (plist-get back :returned))
+            (should-not (plist-get back :borrowed-from))
+            (should (equal bsid (plist-get back :session)))
+            (should (equal worktree (plist-get back :worktree)))
+            (should (equal branch (plist-get back :branch))))
+          (should (file-directory-p worktree))
+          ;; Its turn stops, and its session says why.
+          (harness-test-wait (lambda () (harness-tasks-test--hint-p bsid "Task pre-empted: task ")) 5
+                             "the borrower told why")
+          (should (cl-some (lambda (hint) (and (stringp hint)
+                                               (string-match-p "was answered and took its slot back" hint)))
+                           (harness-tasks-test-hints bsid)))
+          (should-not (harness-call 'agent/running bsid))
+          ;; The task answered works on, in its slot.
+          (let ((answered (harness-tasks-test-task lender)))
+            (should (eq 'active (plist-get answered :state)))
+            (should (eq 'active (plist-get answered :column)))
+            (should (harness-tasks-test--running-p lsid))
+            (should (= 0 (harness-tasks--free-slots (harness-tasks--slot-project answered)))))
+          (harness-tasks-test--settle)
+          (should (eq 'pending (harness-tasks-test-state borrower)))
+          ;; Once it stops, the borrower carries on in its session and worktree.
+          (setq harness-tasks-test--slow nil)
+          (harness-call 'task/cancel lender)
+          (harness-test-wait (lambda () (harness-tasks-test--said bsid harness-tasks--reclaimed-message)) 10
+                             "the borrower to carry on")
+          (let ((opening (car (harness-tasks-test--said bsid harness-tasks--reclaimed-message))))
+            (should (eq 'system (harness-sender-kind (harness-node-sender opening)))))
+          (should (equal worktree (plist-get (harness-call 'session/get bsid) :cwd)))
+          (should (equal bsid (harness-tasks-test-session-id borrower))))))))
+
+(ert-deftest harness-tasks-borrower-that-gave-the-slot-up-is-not-stopped ()
+  "A borrower that already gave the slot up leaves nothing to take back.
+It borrowed the lent slot and finished in it: the loan ended with it.
+The lender's answer then stops nothing, and the lender works on."
+  (harness-tasks-test-with
+    (harness-tasks-test--settle)
+    (let* ((harness-tasks-test--slow (list "Ask about the parser"))
+           (harness-agent--cancel-grace 0.05)
+           (harness-tasks-max-running 1)
+           (harness-tasks-lend-blocked-slot-after 0.3)
+           (harness-provider-demo-script-override #'harness-tasks-test--slow-script)
+           (borrowed nil)
+           (lender (harness-tasks-test-submit "Ask about the parser"))
+           (lsid (harness-tasks-test-session-id lender)))
+      (harness-on 'task/changed (lambda (task)
+                                  (when (plist-get task :borrowed-from)
+                                    (push (cons (plist-get task :id) (plist-get task :borrowed-from)) borrowed))))
+      (harness-test-wait (lambda () (harness-tasks-test--running-p lsid)) 5 "the first task at work")
+      (let* ((pid (harness-tasks-test--block lsid))
+             (quick (harness-tasks-test-submit "Fix a typo")))
+        (should (eq 'pending (harness-tasks-test-state quick)))
+        ;; It borrows the lent slot and is done in it; the loan ends.
+        (harness-tasks-test-wait-state quick 'done)
+        (should (member (cons quick lender) borrowed))
+        (harness-tasks-test--settle)
+        (should-not (harness-tasks-test--borrowed-from quick))
+        ;; The answer has nothing to take back.
+        (harness-call 'session/pending-resolve lsid pid "go on")
+        (harness-tasks-test--settle)
+        (should-not (harness-tasks--reclaim lender))
+        (let ((done (harness-tasks-test-task quick)))
+          (should (eq 'done (plist-get done :state)))
+          (should-not (plist-get done :return-reason)))
+        (should (eq 'active (harness-tasks-test-state lender)))
+        (should (harness-tasks-test--running-p lsid))
+        (harness-call 'task/cancel lender)))))
+
+(ert-deftest harness-tasks-lent-slot-goes-to-the-next-borrower ()
+  "The slot a borrower gives up while its lender still waits goes to the next task.
+That task is the lender's borrower now, and it is the one the answer
+stops; the borrower done stays done."
+  (harness-tasks-test-with
+    (harness-tasks-test--settle)
+    (let* ((harness-tasks-test--slow (list "Ask about the parser" "Write the docs"))
+           (harness-agent--cancel-grace 0.05)
+           (harness-tasks-max-running 1)
+           (harness-tasks-lend-blocked-slot-after 0.3)
+           (harness-provider-demo-script-override #'harness-tasks-test--slow-script)
+           (lender (harness-tasks-test-submit "Ask about the parser"))
+           (lsid (harness-tasks-test-session-id lender)))
+      (harness-test-wait (lambda () (harness-tasks-test--running-p lsid)) 5 "the first task at work")
+      (let* ((pid (harness-tasks-test--block lsid))
+             (quick (harness-tasks-test-submit "Fix a typo"))
+             (slow (harness-tasks-test-submit "Write the docs"))
+             (ssid (harness-tasks-test-session-id slow)))
+        (harness-tasks-test-wait-state quick 'done)
+        (harness-test-wait (lambda () (harness-tasks-test--running-p ssid)) 5 "the next borrower at work")
+        (should (equal lender (harness-tasks-test--borrowed-from slow)))
+        (harness-call 'session/pending-resolve lsid pid "go on")
+        (harness-test-wait (lambda () (eq 'pending (harness-tasks-test-state slow))) 5 "the borrower stopped")
+        (let ((back (harness-tasks-test-task slow)))
+          (should (eq 'reclaimed (plist-get back :return-reason)))
+          (should (equal lender (plist-get back :preempted-by))))
+        (should (eq 'done (harness-tasks-test-state quick)))
+        (should (eq 'active (harness-tasks-test-state lender)))
+        (setq harness-tasks-test--slow nil)
+        (harness-call 'task/cancel lender)
+        (harness-tasks-test-wait-state slow 'done)
+        (should (harness-tasks-test--said ssid harness-tasks--reclaimed-message))))))
+
+(ert-deftest harness-tasks-work-sent-back-borrows-a-lent-slot ()
+  "Work sent back from review takes a lent slot like a free one, and borrows it.
+The lender's answer then takes the slot back from it as from any
+borrower: it waits in the queue, its feedback still to finish, and
+carries on once the slot frees."
+  (harness-tasks-test-with
+    (harness-tasks-test--settle)
+    (let* ((harness-tasks-test--slow (list "Ask about the parser"))
+           (harness-agent--cancel-grace 0.05)
+           (harness-tasks-max-running 1)
+           (harness-tasks-require-verification t)
+           (harness-tasks-lend-blocked-slot-after 0.3)
+           (harness-provider-demo-script-override #'harness-tasks-test--slow-script)
+           (reviewed (harness-tasks-test-submit "Fix the parser")))
+      (harness-tasks-test-wait-state reviewed 'review)
+      (let* ((lender (harness-tasks-test-submit "Ask about the parser"))
+             (lsid (harness-tasks-test-session-id lender)))
+        (harness-test-wait (lambda () (harness-tasks-test--running-p lsid)) 5 "the other task at work")
+        (let ((pid (harness-tasks-test--block lsid)))
+          (harness-test-wait (lambda () (harness-tasks--lending-p (harness-tasks-test-task lender))) 5
+                             "the slot lent")
+          (push "Fix the parser" harness-tasks-test--slow)
+          (harness-call 'task/reject reviewed "handle tabs too")
+          (should (eq 'active (harness-tasks-test-state reviewed)))
+          (should (equal lender (harness-tasks-test--borrowed-from reviewed)))
+          (harness-call 'session/pending-resolve lsid pid "go on")
+          (harness-test-wait (lambda () (eq 'pending (harness-tasks-test-state reviewed))) 5 "the slot taken back")
+          (let ((back (harness-tasks-test-task reviewed)))
+            (should (eq 'reclaimed (plist-get back :return-reason)))
+            (should (plist-get back :sent-back)))
+          (setq harness-tasks-test--slow nil)
+          (harness-call 'task/cancel lender)
+          (harness-tasks-test-wait-state reviewed 'review))))))
+
+(ert-deftest harness-tasks-lend-wait-changed-lends-at-once ()
+  "Without a wait a blocked task keeps its slot, as before lending.
+A wait set through `config/set' then lends the slot of a task blocked
+that long at once, not at the next event: the scheduler runs on the
+change."
+  (harness-tasks-test-with
+    (harness-tasks-test--settle)
+    (let* ((harness-tasks-test--slow (list "Ask about the parser" "Write the docs"))
+           (harness-agent--cancel-grace 0.05)
+           (harness-tasks-max-running 1)
+           (harness-tasks-lend-blocked-slot-after nil)
+           (harness-provider-demo-script-override #'harness-tasks-test--slow-script)
+           (lender (harness-tasks-test-submit "Ask about the parser"))
+           (lsid (harness-tasks-test-session-id lender)))
+      (cl-letf (((symbol-function 'harness-save-user-option) (lambda (symbol value) (set symbol value))))
+        (harness-test-wait (lambda () (harness-tasks-test--running-p lsid)) 5 "the first task at work")
+        (harness-tasks-test--block lsid)
+        (let ((next (harness-tasks-test-submit "Write the docs")))
+          ;; However long it waits on the user, it keeps its slot.
+          (accept-process-output nil 0.3)
+          (harness-tasks--schedule)
+          (should (eq 'pending (harness-tasks-test-state next)))
+          (should (harness-tasks--holds-slot-p (harness-tasks-test-task lender)))
+          (should-not (gethash lender harness-tasks--lend-timers))
+          (harness-call 'config/set "harness-tasks-lend-blocked-slot-after" "0.1" :printed t :scope 'global)
+          (harness-test-wait (lambda () (eq 'active (harness-tasks-test-state next))) 5 "the next task to start")
+          (should (equal lender (harness-tasks-test--borrowed-from next)))
+          (harness-call 'task/cancel next)
+          (harness-call 'task/cancel lender))))))
 
 (provide 'harness-tasks-test)
 ;;; harness-tasks-test.el ends here

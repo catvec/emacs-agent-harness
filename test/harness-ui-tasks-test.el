@@ -3218,7 +3218,8 @@ it again."
 (ert-deftest harness-ui-tasks-says-why-a-returned-task-waits ()
   "A returned task's card says why it waits; sending work back says where it went.
 A task pre-empted names the task sent back from review that took its
-slot, by its title when the board has that task; one sent back while no
+slot, by its title when the board has that task, and one whose borrowed
+slot was taken back names the task that lent it; one sent back while no
 slot could take it waits with the feedback.  The tasks have the shape
 the wire gives them, symbols as strings."
   (harness-ui-tasks-test-with
@@ -3228,6 +3229,10 @@ the wire gives them, symbols as strings."
                      (harness-ui-tasks--returned-why '(:returned t :return-reason "preempted" :preempted-by "t-1"))))
       (should (equal "pre-empted by t-2, carries on where it stopped"
                      (harness-ui-tasks--returned-why '(:returned t :return-reason "preempted" :preempted-by "t-2"))))
+      (should (equal "slot taken back by \"Fix the parser\", carries on where it stopped"
+                     (harness-ui-tasks--returned-why '(:returned t :return-reason "reclaimed" :preempted-by "t-1"))))
+      (should (equal "slot taken back by the task that lent it, carries on where it stopped"
+                     (harness-ui-tasks--returned-why '(:returned t :return-reason "reclaimed"))))
       (should (equal "sent back from review, waits for a slot with your feedback"
                      (harness-ui-tasks--returned-why '(:returned t :return-reason "sent-back"))))
       (dolist (task '((:returned t :return-reason "returned") (:returned t)))
@@ -3238,6 +3243,74 @@ the wire gives them, symbols as strings."
                             (harness-ui-tasks--sent-back-message '(:state "pending"))))
     (should (string-match-p "waits in the suspended queue"
                             (harness-ui-tasks--sent-back-message '(:state "pending" :queue-suspended t))))))
+
+(defvar harness-tasks-lend-blocked-slot-after)
+(declare-function harness-ui-tasks--loan-fact "harness-ui-tasks")
+
+(defun harness-ui-tasks-test--fact-tooltip (board title fact)
+  "The tooltip of FACT on BOARD's card whose title shows TITLE."
+  (with-current-buffer board
+    (save-excursion
+      (harness-ui-tasks-test--goto-card board title)
+      (search-forward fact (line-end-position))
+      (get-text-property (match-beginning 0) 'help-echo))))
+
+(ert-deftest harness-ui-tasks-card-says-a-slot-is-lent ()
+  "A task waiting on you lends its slot, and both cards say so.
+The task the queue started in the slot says \"borrowed slot\", the one
+waiting on you \"slot lent\", each naming the other in its tooltip.
+Answered, the lender takes its slot back: the borrower's card goes back
+to Pending, saying why it waits, and no card speaks of a loan any more."
+  (harness-ui-tasks-test-with
+    (let ((harness-agent--cancel-grace 0.05)
+          (harness-tasks-max-running 1)
+          (harness-tasks-lend-blocked-slot-after 0.2)
+          (harness-provider-demo-script-override '((:type wait :seconds 30))))
+      (harness-ui-tasks-test--type-and-submit board "Ask about the parser")
+      (harness-ui-tasks-test--wait-text board "In progress  1\\(.\\|\n\\)*Ask about the parser")
+      (let* ((lender (harness-ui-tasks-test--card-id board "Ask about the parser"))
+             (lsid (plist-get (harness-call 'task/get lender) :session)))
+        (harness-test-wait (lambda () (eq 'running (plist-get (harness-call 'session/get lsid) :status)))
+                           5 "the first task at work")
+        (let ((pid (harness-call 'session/pending-add lsid
+                                 (list :kind 'question :payload (list :question "Which parser?")))))
+          (harness-ui-tasks-test--type-and-submit board "Write the docs")
+          ;; The wait over, the next task starts in the slot it lends.
+          (harness-ui-tasks-test--wait-text
+           board "Requires your input  1\\(.\\|\n\\)*Ask about the parser\\(.\\|\n\\)*In progress  1\\(.\\|\n\\)*Write the docs")
+          (harness-ui-tasks-test--wait-text board "borrowed slot")
+          (let ((borrower (harness-ui-tasks-test--card-id board "Write the docs")))
+            (should (equal lender (plist-get (harness-call 'task/get borrower) :borrowed-from)))
+            (let ((lent (harness-ui-tasks-test--card-text board "Ask about the parser"))
+                  (borrowed (harness-ui-tasks-test--card-text board "Write the docs")))
+              (should (string-match-p "slot lent" lent))
+              (should-not (string-match-p "borrowed slot" lent))
+              (should (string-match-p "borrowed slot" borrowed))
+              (should-not (string-match-p "slot lent" borrowed)))
+            ;; Each names the other in its tooltip.
+            (should (string-match-p "\"Write the docs\" works in it until you answer"
+                                    (harness-ui-tasks-test--fact-tooltip board "Ask about the parser" "slot lent")))
+            (should (string-match-p "the slot \"Ask about the parser\" lends while it waits on you"
+                                    (harness-ui-tasks-test--fact-tooltip board "Write the docs" "borrowed slot")))
+            ;; Only a card at work or waiting on you speaks of a loan.
+            (with-current-buffer board
+              (let ((task (harness-ui-tasks--find borrower)))
+                (should (harness-ui-tasks--loan-fact task 'active))
+                (should (harness-ui-tasks--loan-fact task 'needs-input))
+                (dolist (column '(pending review merging done))
+                  (should-not (harness-ui-tasks--loan-fact task column)))))
+            ;; Answered, the lender takes its slot back.
+            (harness-call 'session/pending-resolve lsid pid "the new one")
+            (harness-ui-tasks-test--wait-text
+             board "In progress  1\\(.\\|\n\\)*Ask about the parser\\(.\\|\n\\)*Pending  1\\(.\\|\n\\)*Write the docs")
+            ;; Why it waits, as much of it as the card's width shows
+            ;; (`harness-ui-tasks--returned-why' says it whole).
+            (harness-ui-tasks-test--show-subtitle board "Write the docs")
+            (should (string-match-p "#1 in line · slot taken back by \"Ask about"
+                                    (harness-ui-tasks-test--card-text board "Write the docs")))
+            (should-not (string-match-p "slot lent\\|borrowed slot" (harness-ui-tasks-test--board-text board)))
+            (harness-call 'task/cancel borrower)
+            (harness-call 'task/cancel lender)))))))
 
 (ert-deftest harness-ui-tasks-supervisor-switch ()
   "The settings line turns supervisor mode for the next task.

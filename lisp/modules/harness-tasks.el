@@ -141,7 +141,9 @@
 ;; suspended.  A task pre-empted for work sent back from review
 ;; (Scheduling below) is returned the same way, and told why when it
 ;; starts again (`harness-tasks--preempted-message'), as one sent back
-;; while no slot could take it waits with its feedback.  While a returned
+;; while no slot could take it waits with its feedback; so is one that
+;; worked in the slot of a task blocked on the user, which took it back
+;; once answered (`harness-tasks--reclaimed-message').  While a returned
 ;; task waits, its session takes no turn of its own -- another session's
 ;; message, a sub-agent reporting back -- and keeps the message for the
 ;; start (`harness-tasks--before-turn'); the user's own message to it
@@ -282,11 +284,34 @@ which goes back to the queue to carry on later, its turn stopped and
 the work its session left running outside it stopped too; when it
 outranks none it waits in the queue (`harness-tasks--make-room').
 
+A task waiting on the user for long enough lends its slot to the queue
+until it is answered (`harness-tasks-lend-blocked-slot-after').
+
 The task board's \"N at a time\" button sets it (through `config/set',
 saved for every project).  A limit raised that way, or on the settings
 page, starts the tasks it lets through at once; one lowered stops no
 task at work, and fewer start after (`harness-tasks--on-config-changed')."
   :type '(choice (const :tag "No limit" nil) (natnum :tag "Tasks at once")) :group 'harness)
+
+(defcustom harness-tasks-lend-blocked-slot-after 300
+  "Seconds a task waits on the user before it lends its slot, or nil.
+A task whose own session is blocked on you -- a permission request, an
+ask_user question, the harness's question about a cold prompt cache --
+keeps its slot while it waits, as its turn goes on once you answer.
+After this many seconds of waiting it lends that slot to the queue: the
+next pending task starts in it, by priority as usual, and works there
+until you answer.  Your answer takes the slot back at once: the task
+that borrowed it goes back to the front of the queue, its turn stopped
+and its session, branch and worktree kept, and carries on later where
+it stopped, told why by the harness.  The wait keeps a task you answer
+quickly from starting another one only to stop it a moment later.
+
+A task that waits on work it left running -- a supervisor's workers,
+sub-agents -- keeps its slot however long it is blocked, and so does a
+task working in a borrowed slot.  Only `harness-tasks-max-running'
+makes slots, so without a limit nothing is lent.  nil never lends: a
+blocked task keeps its slot for as long as it waits."
+  :type '(choice (const :tag "Never" nil) (number :tag "Seconds")) :group 'harness)
 
 (defcustom harness-tasks-require-verification t
   "When non-nil, finished work waits for the user to review it.
@@ -544,6 +569,16 @@ reports to the session what it was on.  When the queue starts it again
 its own session carries on, told so by this message, as
 `harness-tasks--resume-prompt' tells it after a restart.")
 
+(defconst harness-tasks--reclaimed-message
+  "Your work on this task was stopped: it was working in a slot another task lent while that task waited on the user, and once the user answered, that task took its slot back. Tool calls that were still running did not finish, and workers or sub-agents still running were stopped (what they were on is reported above: retry it or plan it again). The task waited in the queue and has started again now. Check where you left off -- the files you changed are still there -- then carry on with the task."
+  "Message that starts a task again after its lender took its slot back.
+A task blocked on the user long enough lends its slot
+\(`harness-tasks-lend-blocked-slot-after'), and the queue starts a task
+in it; when the user answers, that borrower goes back to the queue, its
+turn stopped and the work its session left running stopped too
+\(`harness-tasks--reclaim').  When the queue starts it again its own
+session carries on, told so by this message.")
+
 (defconst harness-tasks--sent-back-message
   "The user sent your work on this task back from review, and it waited in the queue for a slot until now: every slot was taken by work that goes first. Address the feedback they sent it back with, then finish as before (commit your changes, if you work in a git worktree). Your work goes back to the user for review when your turn ends."
   "Message that starts a task sent back from review once it gets a slot.
@@ -661,6 +696,17 @@ A task pre-empted while its worktree was being made can start again
 before it is ready; that start waits for the same worktree rather than
 make another one on the branch the first is taking
 \(`harness-tasks--worktree-promise').")
+
+(defvar harness-tasks--blocked-at (make-hash-table :test 'equal)
+  "Session id -> when it last became blocked on the user, a float time.
+Kept from `session/status' while the session stays blocked, so a task
+knows how long it has waited (`harness-tasks--blocked-since').")
+
+(defvar harness-tasks--lend-timers (make-hash-table :test 'equal)
+  "Task id -> timer that runs the scheduler once the task lends its slot.
+Armed while the task's session is blocked on the user
+\(`harness-tasks--arm-lend-timer'), for when it has waited
+`harness-tasks-lend-blocked-slot-after'.")
 
 ;;;; Records
 
@@ -794,8 +840,11 @@ again.  `:return-reason' says why (`harness-tasks--return-reason')."
 That is `returned' when it was returned by hand (`task/return-to-pending',
 and a record from before the reasons), `preempted' when a task sent
 back from review took its slot (`harness-tasks--preempt'; `:preempted-by'
-names that task), or `sent-back' when the user sent it back from review
-while no slot could take it, so it waits for one with their feedback
+names that task), `reclaimed' when it worked in the slot of a task
+blocked on the user, which took it back once answered
+\(`harness-tasks--reclaim'; `:preempted-by' names the lender), or
+`sent-back' when the user sent it back from review while no slot could
+take it, so it waits for one with their feedback
 \(`harness-tasks--hold-back').  The reason outlives `:returned' until the
 task's next turn begins: its start tells the session why it stopped
 \(`harness-tasks--start-paused')."
@@ -1763,9 +1812,37 @@ SUSPENDED), which the boards follow."
 ;; its priority, with its feedback, and its session takes no turn until
 ;; it starts (`harness-tasks--before-turn'); the scheduler lets it
 ;; pre-empt as soon as it outranks a task at work (a priority changed,
-;; say: `harness-tasks--on-priority-changed').  Nothing else pre-empts: a new
-;; task, a returned or pre-empted one and a follow-up only take free
-;; slots, and a priority changed otherwise only reorders the queue.
+;; say: `harness-tasks--on-priority-changed').  Nothing else pre-empts but
+;; a lender taking its slot back (below): a new task, a returned or
+;; pre-empted one and a follow-up only take free slots, and a priority
+;; changed otherwise only reorders the queue.
+;;
+;; Lending: a task whose own session waits on the user keeps its slot,
+;; its turn going on once answered -- until it has waited
+;; `harness-tasks-lend-blocked-slot-after'.  Then it lends the slot
+;; (`harness-tasks--lending-p'): it holds none, so the scheduler fills
+;; it like any free slot, by priority.  How long it has waited is how
+;; long its session has been blocked (`harness-tasks--blocked-since'),
+;; and a timer per blocked task runs the scheduler when the wait is up
+;; (`harness-tasks--arm-lend-timer'), as nothing else happens then.  A
+;; task that waits on work its session left running (`:waiting', or
+;; work `agent/outstanding' reports mid-turn) lends nothing, as that
+;; work goes on, and neither does a task working in a borrowed slot,
+;; whose slot is the lender's.  The task the queue starts in a lent
+;; slot -- the slot free only because a task lends it -- is its
+;; borrower, and says whose slot it took (`:borrowed-from',
+;; `harness-tasks--note-borrow'); so is work sent back from review that
+;; takes one (`harness-tasks--make-room').  An explicit `task/start'
+;; ignores the limit and borrows nothing.  The loan ends when the
+;; lender's session is answered (`harness-tasks--on-session-status'):
+;; the lender is at work again, and when its project is over its limit
+;; for it, its borrower is pre-empted -- `:return-reason' `reclaimed',
+;; back at the front of the queue, its turn and the work it left
+;; running stopped, its session, branch and worktree kept
+;; (`harness-tasks--reclaim').  A borrower that gave its slot up
+;; already, or a lender that stopped some other way, ends the loan with
+;; nothing to stop (`harness-tasks--tidy-loans'); a project with a slot
+;; free for the lender stops nothing either.
 
 (defun harness-tasks--working-p (task)
   "Non-nil when TASK is at work: starting, running or blocked mid-turn.
@@ -1786,21 +1863,85 @@ and the session list shows them under it."
   "Non-nil when TASK takes one of its project's slots.
 It does while it starts, and while it is active with its own session
 running or blocked mid-turn: one waiting on the user keeps its slot, as
-its turn goes on once answered.  So does one that waits on work its
-session left running (`:waiting', see `agent/outstanding'), such as the
-workers of a supervisor's plan.  Only that session counts, and only
-when it is top-level (`harness-tasks--top-level-p'): the sub-agents,
-forks and conflict resolvers working for a task take no slot of their
-own, and neither does a sub-agent made a task (`task/adopt'), which
-works for the session that started it.  A task in the merge queue
-\(merging) holds none, even while its own session commits or resolves
-the conflicts, and nor does writing a backlog task up (refining)."
-  (or (gethash (plist-get task :id) harness-tasks--starting)
-      (and (eq (plist-get task :state) 'active)
-           (let ((session (harness-tasks--session task)))
-             (and (harness-tasks--top-level-p session)
+its turn goes on once answered -- until it has waited long enough to
+lend it (`harness-tasks--lending-p'), when it holds none.  So does one
+that waits on work its session left running (`:waiting', see
+`agent/outstanding'), such as the workers of a supervisor's plan.  Only
+that session counts, and only when it is top-level
+\(`harness-tasks--top-level-p'): the sub-agents, forks and conflict
+resolvers working for a task take no slot of their own, and neither
+does a sub-agent made a task (`task/adopt'), which works for the
+session that started it.  A task in the merge queue (merging) holds
+none, even while its own session commits or resolves the conflicts,
+and nor does writing a backlog task up (refining)."
+  (let ((session nil))
+    (and (or (gethash (plist-get task :id) harness-tasks--starting)
+             (and (eq (plist-get task :state) 'active)
+                  (setq session (harness-tasks--session task))
+                  (harness-tasks--top-level-p session)
                   (or (plist-get task :waiting)
-                      (memq (plist-get session :status) '(running blocked))))))))
+                      (memq (plist-get session :status) '(running blocked)))))
+         (not (harness-tasks--lending-p task session)))))
+
+(defun harness-tasks--lending-on-p ()
+  "Non-nil when a task blocked on the user may lend its slot.
+That takes slots, `harness-tasks-max-running' above 0, and a wait,
+`harness-tasks-lend-blocked-slot-after' a number of seconds."
+  (and (numberp harness-tasks-max-running) (> harness-tasks-max-running 0)
+       (numberp harness-tasks-lend-blocked-slot-after)))
+
+(defun harness-tasks--blocked-since (session)
+  "Return since when SESSION has been blocked on the user, a float time, or nil.
+That is when its status last became `blocked' (`harness-tasks--blocked-at'),
+else when its oldest pending request was made (`session/pending-add'
+stamps `:created'): a permission request, an ask_user question, the
+harness's own question about a cold prompt cache.  Nil when SESSION is
+not blocked."
+  (when (eq (plist-get session :status) 'blocked)
+    (or (gethash (plist-get session :id) harness-tasks--blocked-at)
+        (let ((times (delq nil (mapcar (lambda (item)
+                                         (let ((at (plist-get item :created)))
+                                           (and (numberp at) at)))
+                                       (plist-get session :pending)))))
+          (and times (apply #'min times))))))
+
+(defun harness-tasks--blocked-p (task &optional session)
+  "Non-nil when active TASK's own top-level session is blocked on the user.
+SESSION is TASK's session plist when the caller has it."
+  (and (eq (plist-get task :state) 'active)
+       (let ((session (or session (harness-tasks--session task))))
+         (and (harness-tasks--top-level-p session)
+              (eq (plist-get session :status) 'blocked)))))
+
+(defun harness-tasks--lend-due-at (task &optional session)
+  "Return when TASK, blocked on the user, has waited long enough to lend its slot.
+A float time, or nil when TASK is not blocked (`harness-tasks--blocked-p')
+or nothing is lent (`harness-tasks--lending-on-p').  SESSION is TASK's
+session plist when the caller has it."
+  (when (and (harness-tasks--lending-on-p) (eq (plist-get task :state) 'active))
+    (let ((session (or session (harness-tasks--session task))))
+      (when (harness-tasks--blocked-p task session)
+        (when-let* ((since (harness-tasks--blocked-since session)))
+          (+ since harness-tasks-lend-blocked-slot-after))))))
+
+(defun harness-tasks--lending-p (task &optional session)
+  "Non-nil when TASK lends its slot, as it has waited on the user long enough.
+That is a task at work whose own top-level session has been blocked on
+the user (`harness-tasks--blocked-since') for at least
+`harness-tasks-lend-blocked-slot-after', while slots limit its project
+\(`harness-tasks--lending-on-p').  It holds no slot then
+\(`harness-tasks--holds-slot-p'), and the queue may start a task in it,
+whose turn stops when the user answers (`harness-tasks--reclaim').  A
+task that waits on work its session left running lends nothing, as that
+work goes on: `:waiting', once its turn ended, or work `agent/outstanding'
+reports mid-turn, such as sub-agents.  Nor does a task working in a
+borrowed slot (`:borrowed-from'): the slot is the lender's.  SESSION is
+TASK's session plist when the caller has it."
+  (and (not (plist-get task :waiting))
+       (not (plist-get task :borrowed-from))
+       (when-let* ((due (harness-tasks--lend-due-at task session)))
+         (>= (float-time) due))
+       (not (harness-tasks--outstanding task))))
 
 (defun harness-tasks--slot-project (task)
   "Return the project whose slots TASK takes: its `:project', else its `:cwd'.
@@ -1846,7 +1987,8 @@ session running or waiting on the user mid-turn, the task still
 starting, or waiting on work its session left running outside its
 turn (`:waiting'), such as a supervisor's workers.  Pre-empting it
 stops that work too (`harness-tasks--stop-outstanding'), so the slot
-it held is free."
+it held is free.  A task that lends its slot while it waits on the user
+\(`harness-tasks--lending-p') holds none, so it is not one."
   (harness-tasks--holds-slot-p task))
 
 (defun harness-tasks--working-since (task)
@@ -1898,25 +2040,41 @@ task starts by itself then, nor takes another's slot."
         (format "%s" id)
       (format "%s (%s)" id (string-trim name)))))
 
+(defun harness-tasks--preempted-why (task)
+  "Return who took the slot of TASK, pre-empted, and why, a short text.
+TASK's `:preempted-by' was sent back from review and outranks it
+\(`:return-reason' `preempted'), or lent TASK the slot while it waited
+on the user and took it back once answered (`reclaimed')."
+  (let ((by (harness-tasks--label (plist-get task :preempted-by))))
+    (if (eq (harness-tasks--return-reason task) 'reclaimed)
+        (format "task %s, whose slot it borrowed while that task waited on the user, was answered and took its slot back" by)
+      (format "task %s, sent back from review, took its slot" by))))
+
 (defun harness-tasks--preempted-hint (id)
   "Say in task ID's session that it was pre-empted, as a hint.
 It is added once no turn of the session runs, so it does not land in
 the middle of one: at once for a task stopped before its turn began,
-else when the stopped turn ends (`harness-tasks--on-turn-ended')."
+else when the stopped turn ends (`harness-tasks--on-turn-ended').  It
+says who took its slot, and why (`harness-tasks--preempted-why')."
   (let* ((task (harness-tasks--get id))
          (sid (plist-get task :session)))
     (when (and sid (harness-call 'session/exists-p sid))
       (harness-call 'session/hint sid
-                    (format "Task pre-empted: task %s, sent back from review, took its slot; this one waits in the queue and carries on when it gets one again"
-                            (harness-tasks--label (plist-get task :preempted-by)))))))
+                    (format "Task pre-empted: %s; this one waits in the queue and carries on when it gets one again"
+                            (harness-tasks--preempted-why task))))))
+
+(defun harness-tasks--pre-empted-p (task)
+  "Non-nil when TASK waits in the queue because another task took its slot.
+That is a task pre-empted for work sent back from review, or one whose
+lender took back the slot it borrowed (`harness-tasks--preempt')."
+  (memq (harness-tasks--return-reason task) '(preempted reclaimed)))
 
 (defun harness-tasks--stop-reason (task)
   "Return why the work TASK's session left running is stopped, a short text.
 TASK waits in the queue: pre-empted (`harness-tasks--preempt') or
 returned to pending."
-  (if (eq (harness-tasks--return-reason task) 'preempted)
-      (format "its task was pre-empted: task %s, sent back from review, took its slot"
-              (harness-tasks--label (plist-get task :preempted-by)))
+  (if (harness-tasks--pre-empted-p task)
+      (format "its task was pre-empted: %s" (harness-tasks--preempted-why task))
     "its task was returned to the queue"))
 
 (defun harness-tasks--stop-outstanding (id)
@@ -1953,30 +2111,234 @@ agent module."
           (harness-call 'session/hint sid (format "Stopped while the task waits in the queue: %s" text)))
         text))))
 
-(defun harness-tasks--preempt (id by)
+(defun harness-tasks--preempt (id by &optional reason)
   "Stop task ID's work and put it back in the queue: task BY takes its slot.
-BY was sent back from review and outranks it (`harness-tasks--victim').
-ID is returned to pending as `task/return-to-pending' returns a task --
-it keeps its session, branch and worktree and leads its priority's
-queue -- with `:return-reason' `preempted' and `:preempted-by' BY, and
-its turn is stopped.  Once no turn of its session runs -- at once when
-none did, else when the stopped turn ends (`harness-tasks--on-turn-ended')
--- its session says it was pre-empted (`harness-tasks--preempted-hint'),
-and the work its session left running outside its turn, a supervisor's
-workers say, stops (`harness-tasks--stop-outstanding'): a task that only
-waits on such work (`:waiting') gives its slot up this way.  When it
-starts again its session carries on, told so by
-`harness-tasks--preempted-message'.  A task still starting gives its
+REASON says why, `preempted' when nil: BY was sent back from review and
+outranks it (`harness-tasks--victim').  It is `reclaimed' when BY lent
+ID the slot while it waited on the user, and takes it back now that it
+was answered (`harness-tasks--reclaim').  ID is returned to pending as
+`task/return-to-pending' returns a task -- it keeps its session, branch
+and worktree and leads its priority's queue -- with REASON as its
+`:return-reason' and `:preempted-by' BY, no longer borrowing a slot,
+and its turn is stopped.  Once no turn of its session runs -- at once
+when none did, else when the stopped turn ends
+\(`harness-tasks--on-turn-ended') -- its session says it was pre-empted
+\(`harness-tasks--preempted-hint'), and the work its session left running
+outside its turn, a supervisor's workers say, stops
+\(`harness-tasks--stop-outstanding'): a task that only waits on such
+work (`:waiting') gives its slot up this way.  When it starts again its
+session carries on, told so by `harness-tasks--preempted-message' (or
+`harness-tasks--reclaimed-message').  A task still starting gives its
 slot up too: one whose worktree is still being made launches nothing
 once it is ready (`harness-tasks--start-current-p'), and a first turn
 held before it began is cancelled.  Return ID's view."
-  (harness-log 'info "task %s: pre-empted; task %s, sent back from review, takes its slot" id by)
-  (remhash id harness-tasks--starting)
-  ;; The queue first, then the turn (see `task/return-to-pending').
-  (prog1 (harness-tasks--to-pending id :return-reason 'preempted :preempted-by by)
-    (unless (harness-tasks--stop-turn id)
-      (harness-tasks--preempted-hint id)
-      (harness-tasks--stop-outstanding id))))
+  (let ((reason (or reason 'preempted)))
+    (if (eq reason 'reclaimed)
+        (harness-log 'info "task %s: pre-empted; task %s, answered, takes back the slot it lent it" id by)
+      (harness-log 'info "task %s: pre-empted; task %s, sent back from review, takes its slot" id by))
+    (remhash id harness-tasks--starting)
+    ;; The queue first, then the turn (see `task/return-to-pending').
+    (prog1 (harness-tasks--to-pending id :return-reason reason :preempted-by by :borrowed-from nil)
+      (unless (harness-tasks--stop-turn id)
+        (harness-tasks--preempted-hint id)
+        (harness-tasks--stop-outstanding id)))))
+
+;;;;; Lending a blocked task's slot
+
+(defun harness-tasks--borrowers (id)
+  "Return the tasks that say they work in the slot task ID lent, oldest first.
+Normally one at most, and only while it holds a slot; a stale one waits
+for `harness-tasks--tidy-loans'."
+  (harness-tasks--sorted (lambda (task) (equal (plist-get task :borrowed-from) id))))
+
+(defun harness-tasks--lender-for (task)
+  "Return the task whose lent slot TASK starts in now, or nil.
+TASK, of a project with slots, is about to take a free slot of its
+project.  The slot is a lent one when the project would have none free
+were every lender (`harness-tasks--lending-p') holding its own: its
+tasks at work in slots of their own and its lenders fill its
+`harness-tasks-max-running'.  A task working in a lent slot
+\(`:borrowed-from' a lender) shares its lender's, so it is not counted
+apart.  Of the lenders whose slot no task works in, the one blocked
+longest lends it.  Nil when a slot of the project's own is free, or no
+lent slot is."
+  (when (harness-tasks--lending-on-p)
+    (let ((project (harness-tasks--slot-project task))
+          (id (plist-get task :id))
+          (lenders nil)
+          (holders nil))
+      (maphash (lambda (_ other)
+                 (when (and (equal (harness-tasks--slot-project other) project)
+                            (not (equal (plist-get other :id) id)))
+                   (cond ((harness-tasks--lending-p other) (push other lenders))
+                         ((harness-tasks--holds-slot-p other) (push other holders)))))
+               harness-tasks--table)
+      (when lenders
+        (let* ((ids (mapcar (lambda (lender) (plist-get lender :id)) lenders))
+               (lent (delete-dups (cl-loop for holder in holders
+                                           for from = (plist-get holder :borrowed-from)
+                                           when (member from ids) collect from)))
+               (own (- (length holders) (length lent))))
+          (when (<= (- harness-tasks-max-running own (length lenders)) 0)
+            (car (sort (cl-remove-if (lambda (lender) (member (plist-get lender :id) lent)) lenders)
+                       (lambda (a b)
+                         (< (or (harness-tasks--blocked-since (harness-tasks--session a)) 0)
+                            (or (harness-tasks--blocked-since (harness-tasks--session b)) 0)))))))))))
+
+(defun harness-tasks--note-borrow (task)
+  "Record whose lent slot TASK starts in, when it starts in one.
+Called as the harness itself gives TASK a free slot: the queue starting
+it (`harness-tasks--schedule'), work sent back from review taking one
+\(`harness-tasks--make-room').  TASK says so in `:borrowed-from', the
+lender's id (`harness-tasks--lender-for'): it is that task's borrower,
+which gives the slot back when the lender is answered
+\(`harness-tasks--reclaim').  Return the lender's id, or nil."
+  (when-let* ((lender (harness-tasks--lender-for task)))
+    (let ((id (plist-get task :id))
+          (from (plist-get lender :id)))
+      (harness-log 'info "task %s: starts in the slot task %s lends while it waits on the user" id from)
+      (harness-tasks--set id :borrowed-from from)
+      from)))
+
+(defun harness-tasks--back-p (lender)
+  "Non-nil when LENDER, which lent its slot, is answered and works again.
+Its session is no longer blocked on the user and a turn of it runs, or
+the task starts, so it holds its slot (`harness-tasks--holds-slot-p').
+A turn stopped while the session waited still leaves it blocked, and an
+answer after that runs nothing: neither is back."
+  (let ((session (harness-tasks--session lender)))
+    (and session
+         (not (eq (plist-get session :status) 'blocked))
+         (harness-tasks--holds-slot-p lender)
+         (or (gethash (plist-get lender :id) harness-tasks--starting)
+             (harness-tasks--turn-p lender))
+         t)))
+
+(defun harness-tasks--reclaim (id)
+  "End the loan of the slot task ID lent, taking it back if ID works again.
+Nothing happens while ID still lends it (`harness-tasks--lending-p').
+Once its session was answered and works again (`harness-tasks--back-p'),
+and its project is over its limit for it, its borrower -- the task
+whose `:borrowed-from' is ID, holding a slot -- is pre-empted
+\(`harness-tasks--preempt', `:return-reason' `reclaimed'): back at the
+front of the queue, its turn and the work it left running stopped, its
+session, branch and worktree kept, told why.  A borrower that gave the
+slot up already, a project with a slot free for ID, and a lender that
+stopped lending some other way -- its turn stopped, the limit or the
+wait changed, gone -- stop nothing: the loan just ends, and a borrower
+still at work keeps its slot as one of its own.  Run soon after ID's
+session stops being blocked (`harness-tasks--on-session-status'), and
+for a loan the scheduler finds over (`harness-tasks--tidy-loans').
+Return the id of the task pre-empted, or nil."
+  (let ((borrowers (harness-tasks--borrowers id))
+        (lender (gethash id harness-tasks--table)))
+    (when (and borrowers (not (and lender (harness-tasks--lending-p lender))))
+      (let* ((victim (and lender
+                          (harness-tasks--back-p lender)
+                          (< (harness-tasks--free-slots (harness-tasks--slot-project lender)) 0)
+                          (cl-find-if #'harness-tasks--holds-slot-p borrowers)))
+             (victim-id (and victim (plist-get victim :id))))
+        (dolist (borrower borrowers)
+          (unless (equal (plist-get borrower :id) victim-id)
+            (harness-tasks--set (plist-get borrower :id) :borrowed-from nil)))
+        (if victim
+            (harness-tasks--preempt victim-id id 'reclaimed)
+          (harness-log 'info "task %s: no longer lends its slot; nothing to take back" id))
+        ;; A borrower that keeps its slot as its own may lend it now.
+        (harness-run-soon #'harness-tasks--schedule victim-id)
+        victim-id))))
+
+(defun harness-tasks--tidy-loans ()
+  "End the loans whose borrower or lender moved on, at a scheduling pass.
+A borrower (`:borrowed-from') that no longer holds a slot -- done, in
+review, returned to pending -- forgets the loan, and so does one whose
+lender is gone, or stopped lending without coming back to work
+\(returned to pending, say).  A lender back at work takes its slot back
+through `harness-tasks--reclaim', run soon, as its session's answer
+does."
+  (let ((ended nil))
+    (maphash (lambda (id task)
+               (when-let* ((from (plist-get task :borrowed-from)))
+                 (let ((lender (gethash from harness-tasks--table)))
+                   (cond ((not (harness-tasks--holds-slot-p task)) (push id ended))
+                         ((null lender) (push id ended))
+                         ((harness-tasks--lending-p lender) nil)
+                         ((harness-tasks--back-p lender) (harness-run-soon #'harness-tasks--reclaim from))
+                         (t (push id ended))))))
+             harness-tasks--table)
+    (dolist (id ended)
+      (harness-tasks--set id :borrowed-from nil))))
+
+(defconst harness-tasks--lend-recheck 60
+  "Seconds between looks at a blocked task that may not lend its slot yet.
+One that waits on work its session left running, or works in a borrowed
+slot, may lend once that is over, with no event to say so.")
+
+(defun harness-tasks--arm-lend-timer (task)
+  "Have the scheduler run when TASK, blocked on the user, lends its slot.
+The timer fires once TASK has waited `harness-tasks-lend-blocked-slot-after'
+\(`harness-tasks--lend-due-at'), and `harness-tasks--lend-due' runs the
+scheduler, which then finds the slot free.  A task no longer blocked has
+its timer cancelled."
+  (let* ((id (plist-get task :id))
+         (old (gethash id harness-tasks--lend-timers))
+         (due (harness-tasks--lend-due-at task)))
+    (when old
+      (cancel-timer old)
+      (remhash id harness-tasks--lend-timers))
+    (when due
+      (puthash id (run-at-time (max 0 (- due (float-time))) nil #'harness-tasks--lend-due id)
+               harness-tasks--lend-timers))))
+
+(defun harness-tasks--arm-lend-timers ()
+  "Arm or cancel the lend timer of every task at work.
+After the wait or the limit changed, and after a reload."
+  (maphash (lambda (_ task)
+             (when (or (eq (plist-get task :state) 'active)
+                       (gethash (plist-get task :id) harness-tasks--lend-timers))
+               (harness-tasks--arm-lend-timer task)))
+           harness-tasks--table))
+
+(defun harness-tasks--lend-due (id)
+  "Run the scheduler now that task ID, blocked on the user, lends its slot.
+A timer of `harness-tasks--arm-lend-timer' calls this.  A task that may
+not lend yet, though blocked long enough (`harness-tasks--lending-p':
+work still running for it, a borrowed slot), is looked at again after
+`harness-tasks--lend-recheck'; one that fired early waits the rest."
+  (remhash id harness-tasks--lend-timers)
+  (when-let* ((task (gethash id harness-tasks--table)))
+    (if (harness-tasks--lending-p task)
+        (progn
+          (harness-log 'info "task %s: blocked on the user for %ss; it lends its slot meanwhile"
+                       id harness-tasks-lend-blocked-slot-after)
+          (harness-tasks--schedule))
+      (when-let* ((due (harness-tasks--lend-due-at task)))
+        (puthash id (run-at-time (max 0.05 (if (> due (float-time))
+                                                (- due (float-time))
+                                              harness-tasks--lend-recheck))
+                                 nil #'harness-tasks--lend-due id)
+                 harness-tasks--lend-timers)))))
+
+(defun harness-tasks--on-session-status (session-id status &rest _)
+  "Follow SESSION-ID becoming STATUS: when it blocks, lends, and is answered.
+On `session/status'.  When it becomes blocked on the user its time is
+kept (`harness-tasks--blocked-at'), and for its task a timer has the
+scheduler run once the task has waited long enough to lend its slot
+\(`harness-tasks--arm-lend-timer').  When it stops being blocked --
+answered -- the timer goes, and its task, if it lent its slot, takes it
+back soon (`harness-tasks--reclaim'): soon rather than now, so a turn
+being cancelled as its question goes is over first."
+  (let ((blocked (eq status 'blocked))
+        (was (gethash session-id harness-tasks--blocked-at)))
+    (cond (blocked (unless was (puthash session-id (float-time) harness-tasks--blocked-at)))
+          (was (remhash session-id harness-tasks--blocked-at)))
+    ;; Running and idle come and go with every turn: only a block that
+    ;; begins or ends concerns a loan.
+    (when (or blocked was)
+      (when-let* ((task (harness-tasks--by-session session-id)))
+        (harness-tasks--arm-lend-timer task)
+        (unless blocked
+          (harness-run-soon #'harness-tasks--reclaim (plist-get task :id)))))))
 
 (defun harness-tasks--make-room (task)
   "Find TASK, which the user sends back from review, a slot to work in now.
@@ -1984,14 +2346,19 @@ Return non-nil when it may work at once: without a limit, with a slot
 of its project free, or by taking the slot of a task at work it
 outranks, which is pre-empted (`harness-tasks--victim',
 `harness-tasks--preempt'); a task that only waits on work its session
-left running is one too, and that work stops with it.  Nil means it
-waits in the queue: every task at work outranks it, the limit is 0,
-or its project's queue is suspended, which holds work sent back from
-review back as it holds back any start the harness makes by itself."
+left running is one too, and that work stops with it.  A slot free
+because a task blocked on the user lends it is free for it too, which
+it then borrows (`harness-tasks--note-borrow').  Nil means it waits in
+the queue: every task at work outranks it, the limit is 0, or its
+project's queue is suspended, which holds work sent back from review
+back as it holds back any start the harness makes by itself."
   (cond ((harness-tasks--task-suspended-p task) nil)
-        ((> (harness-tasks--free-slots (harness-tasks--slot-project task)) 0) t)
+        ((> (harness-tasks--free-slots (harness-tasks--slot-project task)) 0)
+         (harness-tasks--note-borrow task)
+         t)
         (t (when-let* ((victim (harness-tasks--victim task)))
              (harness-tasks--preempt (plist-get victim :id) (plist-get task :id))
+             (harness-tasks--note-borrow task)
              t))))
 
 (defun harness-tasks--schedule (&optional skip)
@@ -2013,8 +2380,14 @@ take it (`:return-reason' `sent-back') does not wait for a free slot
 alone: once it outranks a task at work -- its priority raised, or that
 task just starting when it was sent back -- it takes that task's slot
 \(`harness-tasks--victim', `harness-tasks--preempt'), as it would have
-when it was sent back.  No other waiting task pre-empts."
+when it was sent back.  No other waiting task pre-empts.
+
+A slot a task blocked on the user lends (`harness-tasks--lending-p') is
+free like any other, and the task started in it says whose it borrowed
+\(`harness-tasks--note-borrow').  Loans whose borrower or lender moved on
+end first (`harness-tasks--tidy-loans')."
   (harness-tasks--load-queues)
+  (harness-tasks--tidy-loans)
   (let ((free (make-hash-table :test 'equal)))
     (dolist (task (harness-tasks--start-order (harness-tasks--sorted #'harness-tasks--queued-p)))
       (unless (or (equal (plist-get task :id) skip)
@@ -2024,10 +2397,12 @@ when it was sent back.  No other waiting task pre-empts."
           (cond
            ((> left 0)
             (cl-decf left)
+            (harness-tasks--note-borrow task)
             (harness-tasks--start task))
            ((eq (harness-tasks--return-reason task) 'sent-back)
             (when-let* ((victim (harness-tasks--victim task)))
               (harness-tasks--preempt (plist-get victim :id) (plist-get task :id))
+              (harness-tasks--note-borrow task)
               (harness-tasks--start task))))
           (puthash project left free))))))
 
@@ -2037,8 +2412,14 @@ On `config/changed': the board's \"N at a time\" button and the
 settings page change `harness-tasks-max-running' through `config/set'
 \(or `config/unset').  A higher limit frees slots, which waiting tasks
 take at once rather than at the next task's end; a lower one stops no
-task at work, and the scheduler then finds no slot free."
-  (when (eq (if (stringp key) (intern-soft key) key) 'harness-tasks-max-running)
+task at work, and the scheduler then finds no slot free.  The same goes
+for `harness-tasks-lend-blocked-slot-after', how long a task blocked on
+the user waits before it lends its slot: the timers that wait for that
+follow the new value (`harness-tasks--arm-lend-timers'), and a loan the
+new value ends stops no task at work."
+  (when (memq (if (stringp key) (intern-soft key) key)
+              '(harness-tasks-max-running harness-tasks-lend-blocked-slot-after))
+    (harness-run-soon #'harness-tasks--arm-lend-timers)
     (harness-run-soon #'harness-tasks--schedule)))
 
 (defun harness-tasks--on-priority-changed (_session-id key &rest _)
@@ -2626,11 +3007,13 @@ session that has no name yet takes the task's title."
   "Return the harness's message that starts TASK again after it waited.
 It says why it waited (`harness-tasks--return-reason'):
 `harness-tasks--preempted-message' for a task pre-empted,
-`harness-tasks--sent-back-message' for one sent back from review while
-no slot could take it, `harness-tasks--paused-message' for one returned
-to pending by hand."
+`harness-tasks--reclaimed-message' for one whose lender took back the
+slot it borrowed, `harness-tasks--sent-back-message' for one sent back
+from review while no slot could take it, `harness-tasks--paused-message'
+for one returned to pending by hand."
   (pcase (harness-tasks--return-reason task)
     ('preempted harness-tasks--preempted-message)
+    ('reclaimed harness-tasks--reclaimed-message)
     ('sent-back harness-tasks--sent-back-message)
     (_ harness-tasks--paused-message)))
 
@@ -2737,6 +3120,7 @@ TASK waits in the queue (`harness-tasks--before-turn')."
           (pcase (harness-tasks--return-reason task)
             ('sent-back ", sent back from review with your feedback")
             ('preempted (format ", pre-empted by task %s" (plist-get task :preempted-by)))
+            ('reclaimed (format ", its borrowed slot taken back by task %s" (plist-get task :preempted-by)))
             (_ ", returned to pending"))))
 
 (defun harness-tasks--holds-turns-p (task from)
@@ -3157,7 +3541,7 @@ while it waits, do not start it again: the return starts nothing."
           (harness-log 'info "task %s: the turn it was returned from ended after it started again; starting it once more" id)
           (harness-tasks--start-paused id (plist-get task :worktree) (plist-get task :worktree)))
          (t
-          (when (eq (harness-tasks--return-reason task) 'preempted)
+          (when (harness-tasks--pre-empted-p task)
             (harness-tasks--preempted-hint id))
           (harness-tasks--stop-outstanding id))))
        ((harness-tasks--refinement-p task) (harness-tasks--finish-refinement id reason))
@@ -3200,7 +3584,8 @@ while it waits, do not start it again: the return starts nothing."
     (harness-emit 'task/changed (harness-tasks--view task))))
 
 (defun harness-tasks--on-session-deleted (session-id &rest _)
-  "Forget the task of deleted SESSION-ID."
+  "Forget the task of deleted SESSION-ID, and since when it was blocked."
+  (remhash session-id harness-tasks--blocked-at)
   (when-let* ((task (harness-tasks--by-session session-id)))
     (harness-tasks--remove (plist-get task :id))))
 
@@ -4191,6 +4576,7 @@ up again, merges in flight are queued again and waiting tasks start."
   (harness-on 'agent/tool-call #'harness-tasks--on-tool-call)
   (harness-on 'session/deleted #'harness-tasks--on-session-deleted)
   (harness-on 'session/pending-changed #'harness-tasks--on-pending-changed)
+  (harness-on 'session/status #'harness-tasks--on-session-status)
   (harness-on 'merge/started #'harness-tasks--on-merge-started)
   (harness-on 'merge/conflict #'harness-tasks--on-merge-conflict)
   (harness-on 'merge/finished #'harness-tasks--on-merge-finished)
@@ -4209,7 +4595,9 @@ up again, merges in flight are queued again and waiting tasks start."
   (harness-tasks--pick-up))
 
 (defun harness-tasks--shutdown ()
-  "Write what waits to be written."
+  "Write what waits to be written, and drop the timers of blocked tasks."
+  (maphash (lambda (_ timer) (cancel-timer timer)) harness-tasks--lend-timers)
+  (clrhash harness-tasks--lend-timers)
   (harness-tasks-flush))
 
 (harness-declare-event 'task/changed "(TASK) after a task is submitted or changes state or column.")
@@ -4219,7 +4607,7 @@ up again, merges in flight are queued again and waiting tasks start."
 (harness-declare-event 'task/queue "(PROJECT SUSPENDED) when a project's pending queue is suspended or resumed.")
 
 (harness-define-module 'tasks
-  :doc "Task mode: one session per task on a shorter context, from backlog write-up or worktree through your review to merged, with a concurrency limit per project that starts waiting tasks by priority and that work sent back from review keeps to, pre-empting a task at work it outranks; a project's queue can be suspended (task/suspend-queue), and a task at work can be returned to the front of it (task/return-to-pending)."
+  :doc "Task mode: one session per task on a shorter context, from backlog write-up or worktree through your review to merged, with a concurrency limit per project that starts waiting tasks by priority and that work sent back from review keeps to, pre-empting a task at work it outranks; a task left waiting on you lends its slot to the queue until you answer (harness-tasks-lend-blocked-slot-after); a project's queue can be suspended (task/suspend-queue), and a task at work can be returned to the front of it (task/return-to-pending)."
   :requires '(store project session agent)
   :init #'harness-tasks--init
   :shutdown #'harness-tasks--shutdown)
@@ -4233,10 +4621,14 @@ up again, merges in flight are queued again and waiting tasks start."
 ;; it, and the tasks of the boards without a title get one.  A limit
 ;; raised from a board starts the tasks it lets through, here too, and
 ;; so does a priority that lets work sent back from review pre-empt; the
-;; session of a task waiting in the queue takes no turn of its own.
+;; session of a task waiting in the queue takes no turn of its own.  A
+;; task blocked on the user lends its slot once it has waited long
+;; enough, and takes it back when answered.
 (when (harness-module-ready-p 'tasks)
   (harness-on 'config/changed #'harness-tasks--on-config-changed)
   (harness-on 'session/ext-changed #'harness-tasks--on-priority-changed)
+  (harness-on 'session/status #'harness-tasks--on-session-status)
+  (harness-run-soon #'harness-tasks--arm-lend-timers)
   (harness-add-filter 'permission/decide #'harness-tasks--write-up-gate 25)
   (harness-add-filter 'agent/message #'harness-tasks--on-message)
   (harness-add-filter 'agent/before-turn #'harness-tasks--before-turn 2)
