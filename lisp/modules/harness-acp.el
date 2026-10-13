@@ -208,7 +208,8 @@ it can answer for another one.")
     worktree/created worktree/removed worktree/locked worktree/unlocked session/forked session/head-moved
     session/nodes-removed session/redacted secrets/redacted
     session/moved session/ext-changed supervisor/changed
-    question/answered task/changed task/deleted task/review task/done task/queue permission/dir-allowed permission/dir-revoked
+    question/answered task/changed task/deleted task/review task/done task/queue task/backlog-mode
+    permission/dir-allowed permission/dir-revoked
     config/changed harness/reloaded tools/file-written acp/remote-changed pet/changed pet/said version/checked)
   "Bus events forwarded verbatim as `_harness/event' notifications.")
 

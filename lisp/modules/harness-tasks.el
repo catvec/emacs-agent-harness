@@ -88,6 +88,26 @@
 ;; queued task -- as soon as its project has a free slot -- the write-up
 ;; kept for the start.
 ;;
+;; Backlog mode: that is a project's backlog in manual mode, the
+;; default, where every written-up task waits for someone to queue or
+;; start it.  In auto mode (`task/set-backlog-mode',
+;; `task/toggle-backlog-mode', the board's [Manual queue] / [Auto queue]
+;; on its Backlog heading, task_control's auto-queue and manual-queue)
+;; a write-up that finishes queues its task itself, as `task/queue'
+;; would (`harness-tasks--auto-queue'): the task leaves the backlog for
+;; the pending queue, where the scheduler starts it by priority, within
+;; the limit, and not while the queue is suspended.  Every write-up that
+;; ends cleanly does, the first and one done again -- after feedback,
+;; after an error, or all the same after a refusal as a duplicate -- so
+;; in auto mode a finished write-up never waits in the backlog.  A
+;; write-up that stops (an error, a cancel, a refusal) still waits for
+;; the user, and a prompt edited by hand (`task/update') stays where it
+;; is.  Switching to auto queues none of the tasks already in the
+;; backlog, which were written up to wait there, and switching back to
+;; manual takes none out of the queue.  The mode is per project, like
+;; the queue's suspension, and outlives a restart: the projects in auto
+;; mode are named in `harness-tasks--auto-queue-name'.
+;;
 ;; Main tree: a task submitted with `:main-tree' (the `task_submit'
 ;; tool's `main_tree', or the board's worktree switch) gets no worktree
 ;; and no branch.  Its session works in the project's main checkout, so
@@ -744,6 +764,14 @@ The suspension is a property of this harness's board, not of the tasks
 themselves, so it is kept out of the task stores, whose format stays as
 it was for harnesses without the feature.")
 
+(defconst harness-tasks--auto-queue-name "task-auto-queue.json"
+  "File in the state directory naming the projects whose backlog queues itself.
+Those are the projects in auto backlog mode (`harness-tasks--backlog-mode'),
+where a write-up that finishes queues its task.  Like the suspended
+queues, it is the board's and not the tasks', so it is a file of its
+own: neither `harness-tasks--queue-name' nor the task stores change
+format.")
+
 (defconst harness-tasks--symbol-keys '(:state :outcome :merge-status :return-reason)
   "Keys whose values are symbols in memory and strings on disk.
 A priority is not one of them: it lives on the task's session, which
@@ -793,6 +821,23 @@ always starts its task (see `harness-tasks--schedule').")
   "Non-nil once `harness-tasks--queue-name' was read.
 Reading is lazy, so a test run or a reload reads the file of its own
 state directory the first time it looks at a queue.")
+
+(defvar harness-tasks--auto-queues (make-hash-table :test 'equal)
+  "Project root -> t while that project's backlog queues its write-ups itself.
+That is auto backlog mode (`harness-tasks--backlog-mode'); a project not
+in it is in manual mode, the default.")
+
+(defvar harness-tasks--auto-queues-loaded nil
+  "Non-nil once `harness-tasks--auto-queue-name' was read.
+Read lazily, as the suspended queues are (`harness-tasks--queues-loaded').")
+
+(defvar harness-tasks--joining (make-hash-table :test 'equal)
+  "Task ids just written up that join the queue in a moment.
+In auto backlog mode the end of a write-up puts its task in the backlog,
+and `task/queue' takes it on to the pending queue soon after
+\(`harness-tasks--auto-queue').  Meanwhile its view says so
+\(`:joining-queue'), so that nothing takes it for a task the backlog
+keeps until someone starts it: a wait on it, say.")
 
 (defvar harness-tasks--returning (make-hash-table :test 'equal)
   "Task ids whose turn is being stopped by a return to pending.
@@ -1274,12 +1319,15 @@ has it; one that cannot be written leaves its records there."
       (error (harness-log 'error "tasks: could not save the task records: %S" err)))))
 
 (defun harness-tasks--forget-stores ()
-  "Forget what this process read and wrote of the stores and of the queues."
+  "Forget what this process read and wrote of the stores and of the queues.
+The queues' backlog modes too (`harness-tasks--auto-queues')."
   (clrhash harness-tasks--stores)
   (clrhash harness-tasks--written)
   (clrhash harness-tasks--queues)
+  (clrhash harness-tasks--auto-queues)
   (setq harness-tasks--backup-checked nil
-        harness-tasks--queues-loaded nil))
+        harness-tasks--queues-loaded nil
+        harness-tasks--auto-queues-loaded nil))
 
 (defun harness-tasks--load ()
   "Read the task records from their stores once.
@@ -1360,13 +1408,21 @@ still show as it stopped.  Return the task's view."
 Its `:priority' is always there: the priority plugin's
 `harness-priority-of-task', which defaults a record from before
 priorities to medium (`harness-priority-default').  `:queue-suspended'
-is there, true, while the task's project's pending queue is suspended."
+is there, true, while the task's project's pending queue is suspended,
+and `:auto-queue', true, while its project's backlog queues its
+write-ups itself (`harness-tasks--backlog-mode'); `:joining-queue',
+true, from the end of a write-up there until the task is in the queue
+\(`harness-tasks--joining')."
   ;; `append' copies TASK, so `plist-put' changes only the view.
   (let ((view (plist-put (append task (list :column (harness-tasks--column task)))
                          :priority (harness-priority-of-task task))))
-    (if (harness-tasks--task-suspended-p task)
-        (append view (list :queue-suspended t))
-      view)))
+    (when (harness-tasks--task-suspended-p task)
+      (setq view (append view (list :queue-suspended t))))
+    (when (harness-tasks--auto-queue-p (harness-tasks--slot-project task))
+      (setq view (append view (list :auto-queue t))))
+    (when (gethash (plist-get task :id) harness-tasks--joining)
+      (setq view (append view (list :joining-queue t))))
+    view))
 
 ;;;; Git
 
@@ -1874,6 +1930,128 @@ SUSPENDED), which the boards follow."
       (harness-tasks--save-queues)
       (harness-emit 'task/queue key now))
     now))
+
+;;;; Backlog mode
+;;
+;; Whether a project's written-up tasks wait in its backlog for someone
+;; to queue them (`manual', the default) or queue themselves as their
+;; write-up finishes (`auto').  It is kept as the suspended queues are:
+;; the projects in auto mode are named in `harness-tasks--auto-queue-name'
+;; in the state directory, read the first time a mode is asked for.
+;; `task/set-backlog-mode' and `task/toggle-backlog-mode' (the board's
+;; toggle on its Backlog heading, task_control's auto-queue and
+;; manual-queue) change it and emit `task/backlog-mode' (PROJECT MODE);
+;; the end of a write-up reads it (`harness-tasks--auto-queue').
+
+(defconst harness-tasks-backlog-modes '(manual auto)
+  "The modes a project's backlog can be in, the default first.
+In `manual' a written-up task waits in the backlog until someone queues
+it (`task/queue') or starts it (`task/start'); in `auto' its write-up's
+end queues it (`harness-tasks--auto-queue').")
+
+(defun harness-tasks--auto-queue-file ()
+  "Return the path of the file naming the projects whose backlog queues itself."
+  (expand-file-name harness-tasks--auto-queue-name (harness-tasks--state-directory)))
+
+(defun harness-tasks--load-auto-queues ()
+  "Read the projects in auto backlog mode once from this harness's state directory."
+  (unless harness-tasks--auto-queues-loaded
+    (setq harness-tasks--auto-queues-loaded t)
+    (clrhash harness-tasks--auto-queues)
+    (dolist (project (harness-json-parse (harness-read-file (harness-tasks--auto-queue-file))))
+      (when (stringp project)
+        (puthash (harness-tasks--queue-key project) t harness-tasks--auto-queues)))))
+
+(defun harness-tasks--save-auto-queues ()
+  "Write the projects in auto backlog mode now; none left deletes the file."
+  (let ((projects (sort (hash-table-keys harness-tasks--auto-queues) #'string<))
+        (path (harness-tasks--auto-queue-file)))
+    (if projects
+        (harness-tasks--write-json path (harness-json-array projects))
+      (harness-tasks--delete-json path))))
+
+(defun harness-tasks--auto-queue-p (project)
+  "Non-nil when PROJECT's backlog queues its write-ups itself (auto mode)."
+  (harness-tasks--load-auto-queues)
+  (let ((key (harness-tasks--queue-key project)))
+    (and key (gethash key harness-tasks--auto-queues) t)))
+
+(defun harness-tasks--backlog-mode (project)
+  "Return PROJECT's backlog mode, `manual' or `auto'.
+See `harness-tasks-backlog-modes'."
+  (if (harness-tasks--auto-queue-p project) 'auto 'manual))
+
+(defun harness-tasks--read-backlog-mode (mode)
+  "Return MODE, a symbol or its name, as one of `harness-tasks-backlog-modes'.
+Signal an error for anything else."
+  (let ((symbol (cond ((stringp mode) (intern-soft (downcase (string-trim mode))))
+                      ((symbolp mode) mode))))
+    (or (car (memq symbol harness-tasks-backlog-modes))
+        (signal 'harness-error (list (format "Unknown backlog mode %S: it is manual or auto" mode))))))
+
+(defun harness-tasks--set-backlog-mode (project mode)
+  "Put PROJECT's backlog in MODE, `manual' or `auto'; return the mode.
+The change is written at once and emitted as `task/backlog-mode'
+\(PROJECT MODE), which the boards follow.  It moves no task: auto mode
+queues each task as its write-up finishes, not the ones already
+waiting in the backlog, and manual mode takes none out of the queue."
+  (harness-tasks--load-auto-queues)
+  (let* ((key (harness-tasks--queue-key project))
+         (auto (eq mode 'auto))
+         (was (and key (gethash key harness-tasks--auto-queues) t)))
+    (when (and key (not (eq auto was)))
+      (if auto
+          (puthash key t harness-tasks--auto-queues)
+        (remhash key harness-tasks--auto-queues))
+      (harness-tasks--save-auto-queues)
+      (harness-emit 'task/backlog-mode key (if auto 'auto 'manual)))
+    (if auto 'auto 'manual)))
+
+(defun harness-tasks--auto-queue (id)
+  "Queue task ID, just written up, when its project's backlog queues itself.
+In auto backlog mode (`harness-tasks--backlog-mode') the end of a
+write-up hands the task to `task/queue', which takes it out of the
+backlog to the pending queue: the scheduler starts it there like any
+queued task, by priority, within the limit and not while the queue is
+suspended.  That happens soon after, out of the end of the turn
+\(`harness-run-soon'), as `task/queue' may start the task, and only
+while the task is still as the write-up left it: in the backlog, no
+turn of its session running and no message queued in its session --
+feedback the user queued for the write-up starts another one, whose
+end queues the task instead.  A write-up done again after feedback
+queues the task the same way: in auto mode a finished write-up does
+not wait in the backlog.
+
+It is called as the write-up ends, before the task goes to the backlog,
+so that the view announcing that already says the task joins the queue
+\(`harness-tasks--joining'): a wait on the task does not settle on it
+there.  A task left in the backlog after all is announced again,
+without it."
+  (when-let* ((task (gethash id harness-tasks--table))
+              ((harness-tasks--auto-queue-p (harness-tasks--slot-project task))))
+    (puthash id t harness-tasks--joining)
+    (harness-run-soon
+     (lambda ()
+       (remhash id harness-tasks--joining)
+       (let ((queued nil))
+         (when-let* ((task (gethash id harness-tasks--table))
+                     ((eq (plist-get task :state) 'pending))
+                     ((harness-tasks--backlog-p task))
+                     ((not (plist-get task :archived)))
+                     ((harness-tasks--auto-queue-p (harness-tasks--slot-project task)))
+                     ((not (harness-tasks--turn-p task))))
+           (if (plist-get (harness-tasks--session task) :queue)
+               (harness-log 'info "task %s: written up, but more for its write-up is queued: it stays in the backlog for now" id)
+             (harness-log 'info "task %s: written up in auto backlog mode, so it joins the queue" id)
+             (condition-case err
+                 (progn (harness-call 'task/queue id)
+                        (setq queued t))
+               (error (harness-log 'warn "task %s: queueing it after its write-up failed: %s"
+                                   id (harness-error-message err))))))
+         ;; Where it is, it no longer joins the queue: its views say so.
+         (unless queued
+           (when-let* ((task (gethash id harness-tasks--table)))
+             (harness-emit 'task/changed (harness-tasks--view task)))))))))
 
 ;;;; Scheduling
 ;;
@@ -3689,7 +3867,9 @@ other end, leaves it refining with an outcome, in front of the user: a
 refusal is `duplicate', with `:duplicate-of' the task it names (nil
 when it names none) and its message as `:error'.  Only a reply naming a
 task of this harness, or what looks like one of its ids, refuses: a
-write-up that merely opens \"Duplicate of a task …\" is a write-up."
+write-up that merely opens \"Duplicate of a task …\" is a write-up.
+In auto backlog mode the task goes on from the backlog to the pending
+queue (`harness-tasks--auto-queue')."
   (let* ((task (harness-tasks--get id))
          (sid (plist-get task :session))
          (handed-in (and sid (gethash sid harness-tasks--plans-submitted)))
@@ -3711,8 +3891,11 @@ write-up that merely opens \"Duplicate of a task …\" is a write-up."
       (harness-log 'info "task %s: its write-up refused it as a duplicate of %s" id (car refusal))
       (harness-tasks--set id :state 'refining :outcome 'duplicate
                           :duplicate-of of :error (cdr refusal)))
-     (t (harness-tasks--set id :state 'pending :backlog t :prompt (string-trim reply)
-                            :refined (float-time) :outcome nil :error nil :duplicate-of nil)))))
+     (t
+      ;; First, so that the backlog task's views say it joins the queue.
+      (harness-tasks--auto-queue id)
+      (harness-tasks--set id :state 'pending :backlog t :prompt (string-trim reply)
+                          :refined (float-time) :outcome nil :error nil :duplicate-of nil)))))
 
 ;;;; Reports
 ;;
@@ -4080,8 +4263,10 @@ cleaning up uncommitted changes); missing ones come from the
 task is interactive unless `harness-tasks-non-interactive' or the
 directory's `harness-non-interactive' is on.  With `:refine'
 the task goes to the backlog instead: an agent writes it up (state
-refining), then it waits in the backlog until `task/start' -- unless the
-agent finds the board has it already, and refuses it as a duplicate.
+refining), then it waits in the backlog until `task/start', or in auto
+backlog mode goes on to the pending queue (`task/set-backlog-mode') --
+unless the agent finds the board has it already, and refuses it as a
+duplicate.
 With `:plan' (which implies `:refine') the write-up is a plan: an agent
 on a strong model (the hard tier of the task model's provider) reads
 the code and hands in a plan for a cheaper model, which the task's work
@@ -4158,7 +4343,8 @@ A task waiting for a slot becomes a backlog task.  One written up
 already, or whose write-up stopped, is written up again by the same
 session, TEXT being feedback for it; without TEXT one the agent
 refused as a duplicate is written up all the same.  Either way it then
-waits in the backlog until `task/start'."
+waits in the backlog until `task/start', or in auto backlog mode goes
+on to the pending queue (`harness-tasks--auto-queue')."
   (let ((task (harness-tasks--get id)))
     (unless (memq (plist-get task :state) '(pending refining))
       (error "Task %s has started; only a task that has not can be refined" id))
@@ -4306,7 +4492,9 @@ a setting of its own would get, `harness-supervisor-tasks';
 review, else false (not nil, which JSON could not tell from a harness
 that does not say): `harness-tasks-require-verification'.
 `:queue-suspended' is t while the project's pending queue is suspended
-\(`task/suspend-queue').  The models and thinking levels a new task's
+\(`task/suspend-queue'), `:backlog-mode' the mode of its backlog, `auto'
+while a write-up that finishes queues its task, else `manual'
+\(`task/set-backlog-mode').  The models and thinking levels a new task's
 write-up would get are there too, resolved for the project's task
 model: `:refine-model' and `:refine-thinking' for a brief write-up
 \(Refine), `:plan-model' and `:plan-thinking' for a plan (Plan), and
@@ -4322,6 +4510,7 @@ task was given a setting of its own (the supervisor module's
     (append
      (list :max-running harness-tasks-max-running
            :queue-suspended (if (harness-tasks--suspended-p root) t :false)
+           :backlog-mode (harness-tasks--backlog-mode root)
            :permission-mode harness-tasks-permission-mode
            :non-interactive (and (or harness-tasks-non-interactive
                                      (harness-json-true-p (harness-tasks--config 'harness-non-interactive root)))
@@ -4557,6 +4746,35 @@ queue is suspended, :false once it runs again."
     (harness-tasks--set-suspended project suspended)
     (when (not suspended) (harness-tasks--schedule))
     (list :project project :suspended (if suspended t :false))))
+
+(harness-defmethod task/backlog-mode (&optional cwd)
+  "Return the backlog mode of CWD's project (the current one by default).
+That is (:project PROJECT :mode MODE).  MODE is `manual', the default --
+a written-up task waits in the backlog until someone queues it
+\(`task/queue') or starts it -- or `auto': a write-up that finishes
+queues its task, which the scheduler then starts like any queued task."
+  (let ((project (harness-tasks--project (or cwd default-directory))))
+    (list :project project :mode (harness-tasks--backlog-mode project))))
+
+(harness-defmethod task/set-backlog-mode (mode &optional cwd)
+  "Put the backlog of CWD's project in MODE, `manual' or `auto' (or its name).
+In auto mode each write-up that finishes from now on queues its task,
+as `task/queue' would (`harness-tasks--auto-queue'): by priority, within
+the limit, and held while the queue is suspended.  The tasks already
+waiting in the backlog stay there, and going back to manual takes no
+task out of the queue.  The mode is per project and kept across
+restarts.  Return (:project PROJECT :mode MODE)."
+  (let ((project (harness-tasks--project (or cwd default-directory)))
+        (mode (harness-tasks--read-backlog-mode mode)))
+    (list :project project :mode (harness-tasks--set-backlog-mode project mode))))
+
+(harness-defmethod task/toggle-backlog-mode (&optional cwd)
+  "Switch the backlog of CWD's project between manual and auto queueing.
+See `task/set-backlog-mode'.  Return (:project PROJECT :mode MODE), the
+new mode."
+  (let* ((project (harness-tasks--project (or cwd default-directory)))
+         (mode (if (harness-tasks--auto-queue-p project) 'manual 'auto)))
+    (list :project project :mode (harness-tasks--set-backlog-mode project mode))))
 
 (harness-defmethod task/start (id)
   "Start pending task ID now, even when every slot of its project is taken.
@@ -5158,6 +5376,7 @@ turn that stopped without a plan back (`harness-tasks--plan-stop')."
 (harness-declare-event 'task/deleted "(ID) after a task is removed.")
 (harness-declare-event 'task/review "(TASK) when a task's finished work starts waiting for the user's review.")
 (harness-declare-event 'task/done "(TASK HOW) when a task becomes done; HOW is merged, finished, verified or completed.")
+(harness-declare-event 'task/backlog-mode "(PROJECT MODE) when a project's backlog mode changes: manual or auto.")
 (harness-declare-event 'task/queue "(PROJECT SUSPENDED) when a project's pending queue is suspended or resumed.")
 
 (harness-define-module 'tasks

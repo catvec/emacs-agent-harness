@@ -12,6 +12,7 @@
 (defvar harness-tasks--table)
 (defvar harness-tasks--starting)
 (defvar harness-tasks--waking)
+(defvar harness-tasks--joining)
 (defvar harness-tasks--naming)
 (defvar harness-tasks--blocked-at)
 (defvar harness-tasks--lend-timers)
@@ -1467,6 +1468,242 @@ Its work still opens with the write-up and the request it came from."
             (should (= 2 (length texts)))
             (should (string-match-p (regexp-quote harness-tasks-test-write-up) (cadr texts)))
             (should (string-match-p "^> the parser chokes on nested quotes$" (cadr texts)))))))))
+
+;;;; Backlog mode: written-up tasks queued by hand, or by themselves
+
+(defun harness-tasks-test--backlog-mode (&optional cwd)
+  "The backlog mode of CWD's project, as `task/settings' says it."
+  (plist-get (harness-call 'task/settings (or cwd default-directory)) :backlog-mode))
+
+(defun harness-tasks-test--wait-queued (id)
+  "Wait until task ID left the backlog for the pending queue, or went further."
+  (harness-test-wait (lambda () (let ((task (harness-tasks-test-task id)))
+                                  (and (not (plist-get task :backlog))
+                                       (not (eq 'refining (plist-get task :state))))))
+                     5 (format "task %s to leave the backlog" id)))
+
+(ert-deftest harness-tasks-backlog-mode-is-manual-by-default ()
+  "A project's backlog is queued by hand until it is switched to auto.
+The toggle switches it both ways, and manual is the backlog as it always
+was: the written-up task waits there, whatever the slots."
+  (harness-tasks-test-with
+    (let ((harness-tasks-max-running nil)
+          (harness-provider-demo-script-override
+           `((:type text :delta ,harness-tasks-test-write-up) (:type done :stop-reason end-turn))))
+      (should (eq 'manual (harness-tasks-test--backlog-mode)))
+      (should (eq 'manual (plist-get (harness-call 'task/backlog-mode default-directory) :mode)))
+      (should (eq 'auto (plist-get (harness-call 'task/toggle-backlog-mode default-directory) :mode)))
+      (should (eq 'auto (harness-tasks-test--backlog-mode)))
+      (should (eq 'manual (plist-get (harness-call 'task/toggle-backlog-mode default-directory) :mode)))
+      (should (eq 'manual (harness-tasks-test--backlog-mode)))
+      (let ((id (harness-tasks-test-refine "the parser chokes on nested quotes")))
+        (should-not (plist-get (harness-tasks-test-task id) :auto-queue))
+        (harness-tasks-test-wait-state id 'pending)
+        ;; Its write-up done, it waits: nothing queues it in manual mode.
+        (harness-tasks-test--settle)
+        (harness-tasks--schedule)
+        (let ((task (harness-tasks-test-task id)))
+          (should (eq 'pending (plist-get task :state)))
+          (should (plist-get task :backlog))
+          (should (eq 'backlog (plist-get task :column))))))))
+
+(ert-deftest harness-tasks-auto-queue-starts-a-written-up-task ()
+  "In auto mode a finished write-up queues its task, and the queue starts it.
+The work opens with the write-up and the request it came from, as a task
+queued by hand does."
+  (harness-tasks-test-with
+    (let ((harness-tasks-max-running 1)
+          (harness-provider-demo-script-override
+           `((:type text :delta ,harness-tasks-test-write-up) (:type done :stop-reason end-turn))))
+      (harness-call 'task/set-backlog-mode 'auto default-directory)
+      (let* ((id (harness-tasks-test-refine "the parser chokes on nested quotes"))
+             (sid (harness-tasks-test-session-id id)))
+        ;; Being written up, it is in the backlog, and says it queues itself.
+        (should (eq 'backlog (plist-get (harness-tasks-test-task id) :column)))
+        (should (plist-get (harness-tasks-test-task id) :auto-queue))
+        ;; Written up, it leaves the backlog and the queue starts it.
+        (harness-tasks-test-wait-state id 'done)
+        (let ((task (harness-tasks-test-task id)))
+          (should-not (plist-get task :backlog))
+          (should (equal harness-tasks-test-write-up (plist-get task :prompt)))
+          (should (plist-get task :refined)))
+        (let ((texts (harness-tasks-test-user-texts sid)))
+          (should (= 2 (length texts)))
+          (should (equal "the parser chokes on nested quotes" (car texts)))
+          (should (string-match-p (regexp-quote harness-tasks-test-write-up) (cadr texts)))
+          (should (string-match-p "^> the parser chokes on nested quotes$" (cadr texts))))
+        ;; The harness composed the start message, as for a task queued by hand.
+        (should (equal (harness-sender-system "tasks")
+                       (harness-node-sender (cadr (harness-tasks-test-user-nodes sid)))))))))
+
+(ert-deftest harness-tasks-auto-queue-says-the-task-joins-the-queue ()
+  "From its write-up's end until it is queued, a task's views say it joins the queue.
+So nothing takes the moment it spends in the backlog for a wait there
+until someone starts it; queued, it no longer says so."
+  (harness-tasks-test-with
+    (let ((harness-tasks-max-running 0)
+          (views nil)
+          (harness-provider-demo-script-override
+           `((:type text :delta ,harness-tasks-test-write-up) (:type done :stop-reason end-turn))))
+      (harness-call 'task/set-backlog-mode 'auto default-directory)
+      (let ((id (harness-tasks-test-refine "the parser chokes on nested quotes")))
+        (harness-on 'task/changed (lambda (view) (when (equal id (plist-get view :id)) (push view views))))
+        (harness-tasks-test--wait-queued id)
+        (let ((written-up (cl-remove-if-not (lambda (view) (and (eq 'pending (plist-get view :state))
+                                                                (plist-get view :backlog)))
+                                            views)))
+          (should written-up)
+          (dolist (view written-up)
+            (should (plist-get view :joining-queue))))
+        (should-not (plist-get (car views) :backlog))
+        (should-not (plist-get (car views) :joining-queue))
+        (should-not (plist-get (harness-tasks-test-task id) :joining-queue))
+        (should-not (gethash id harness-tasks--joining))))))
+
+(ert-deftest harness-tasks-auto-queue-keeps-to-the-slots-and-the-suspension ()
+  "An auto-queued task waits in Pending like any queued one.
+No slot free, it waits; a suspended queue holds it even once a slot is
+free; resuming starts it."
+  (harness-tasks-test-with
+    (let ((harness-tasks-max-running 0)
+          (harness-provider-demo-script-override
+           `((:type text :delta ,harness-tasks-test-write-up) (:type done :stop-reason end-turn))))
+      (harness-call 'task/set-backlog-mode "auto" default-directory)
+      (let ((id (harness-tasks-test-refine "the parser chokes on nested quotes")))
+        (harness-tasks-test--wait-queued id)
+        ;; Queued, not started: no slot.
+        (let ((task (harness-tasks-test-task id)))
+          (should (eq 'pending (plist-get task :state)))
+          (should (eq 'pending (plist-get task :column)))
+          (should-not (plist-get task :started)))
+        ;; A slot, but the queue is suspended: it still waits.
+        (harness-call 'task/suspend-queue default-directory)
+        (setq harness-tasks-max-running 1)
+        (harness-tasks--schedule)
+        (should (eq 'pending (harness-tasks-test-state id)))
+        ;; Resumed, it starts.
+        (harness-call 'task/resume-queue default-directory)
+        (should (eq 'active (harness-tasks-test-state id)))
+        (harness-tasks-test-wait-state id 'done)))))
+
+(ert-deftest harness-tasks-auto-queue-leaves-what-waits-for-the-user ()
+  "Auto mode queues only a write-up that ends cleanly.
+A write-up that fails or refuses the task as a duplicate waits for the
+user as ever; written up after all, the task is queued.  So is one
+written up again after feedback.  Switching to auto queues none of the
+tasks already waiting in the backlog."
+  (harness-tasks-test-with
+    (let ((harness-tasks-max-running 0) waiting failed refused)
+      ;; Written up in manual mode: it waits in the backlog.
+      (let ((harness-provider-demo-script-override
+             '((:type text :delta "Written up before") (:type done :stop-reason end-turn))))
+        (setq waiting (harness-tasks-test-refine "an idea from before"))
+        (harness-tasks-test-wait-state waiting 'pending))
+      (harness-call 'task/set-backlog-mode 'auto default-directory)
+      (harness-tasks-test--settle)
+      (should (plist-get (harness-tasks-test-task waiting) :backlog))
+      ;; A write-up that fails stays in front of the user.
+      (let ((harness-provider-demo-script-override
+             '((:type text :delta "oops") (:type done :stop-reason error :error "boom"))))
+        (setq failed (harness-tasks-test-refine "a flaky idea"))
+        (harness-test-wait (lambda () (equal "boom" (plist-get (harness-tasks-test-task failed) :error))) 5 "the error"))
+      ;; So does one that refuses the task as a duplicate.
+      (let ((harness-provider-demo-script-override
+             `((:type text :delta ,(format "Duplicate of %s\n\nThe board has it." waiting))
+               (:type done :stop-reason end-turn))))
+        (setq refused (harness-tasks-test-refine "the idea from before, again"))
+        (harness-test-wait (lambda () (eq 'duplicate (plist-get (harness-tasks-test-task refused) :outcome)))
+                           5 "the refusal"))
+      (harness-tasks-test--settle)
+      (dolist (id (list failed refused))
+        (let ((task (harness-tasks-test-task id)))
+          (should (eq 'refining (plist-get task :state)))
+          (should (eq 'needs-input (plist-get task :column)))
+          (should (plist-get task :backlog))))
+      ;; Retried, written up all the same, and feedback on the one from
+      ;; before: every write-up that ends cleanly queues its task.
+      (let ((harness-provider-demo-script-override
+             '((:type text :delta "Written up now") (:type done :stop-reason end-turn))))
+        (harness-call 'task/refine failed)
+        (harness-call 'task/refine refused)
+        (harness-call 'task/prompt waiting "mention the docs too")
+        (dolist (id (list failed refused waiting))
+          (harness-tasks-test--wait-queued id)
+          (let ((task (harness-tasks-test-task id)))
+            (should (eq 'pending (plist-get task :state)))
+            (should (eq 'pending (plist-get task :column)))
+            (should (equal "Written up now" (plist-get task :prompt)))))))))
+
+(ert-deftest harness-tasks-auto-queue-waits-for-queued-feedback ()
+  "Feedback queued for a write-up that is running is written up before the task queues.
+The write-up's end leaves the task in the backlog while its session has
+messages queued: they start another write-up, whose end queues it.  It
+never starts in the session that writes it up."
+  (harness-tasks-test-with
+    (let ((harness-tasks-max-running 0)
+          (harness-provider-demo-script-override
+           '((:type wait :seconds 0.3) (:type text :delta "Written up") (:type done :stop-reason end-turn))))
+      (harness-call 'task/set-backlog-mode 'auto default-directory)
+      (let* ((views nil)
+             (id (harness-tasks-test-refine "an idea"))
+             (sid (harness-tasks-test-session-id id)))
+        (harness-on 'task/changed (lambda (view) (when (equal id (plist-get view :id)) (push view views))))
+        (harness-test-wait (lambda () (harness-call 'agent/running sid)) 5 "the write-up to run")
+        (harness-call 'session/queue sid "and mention the docs")
+        (harness-tasks-test--wait-queued id)
+        ;; Left in the backlog by the first write-up's end, it was
+        ;; announced so: not joining the queue then.
+        (should (cl-some (lambda (view) (and (eq 'pending (plist-get view :state)) (plist-get view :backlog)
+                                             (not (plist-get view :joining-queue))))
+                         views))
+        ;; Nothing more runs in its session once it is queued: no slot
+        ;; starts it, and no feedback is left to take a turn of its own.
+        (let ((deadline (+ (float-time) 0.6)))
+          (while (< (float-time) deadline)
+            (accept-process-output nil 0.05)))
+        (should-not (harness-call 'agent/running sid))
+        (let ((task (harness-tasks-test-task id)))
+          (should (eq 'pending (plist-get task :state)))
+          (should (eq 'pending (plist-get task :column)))
+          (should-not (plist-get task :started)))
+        ;; Both the request and the queued feedback were written up.
+        (should (equal '("an idea" "and mention the docs") (harness-tasks-test-user-texts sid)))))))
+
+(ert-deftest harness-tasks-backlog-mode-is-kept-per-project ()
+  "A project's backlog mode is its own, and outlives a restart."
+  (harness-tasks-test-with
+    (harness-tasks-test--settle)
+    (let ((other (harness-test-temp-dir))
+          (file (expand-file-name "task-auto-queue.json" harness-state-directory)))
+      (harness-call 'task/set-backlog-mode 'auto default-directory)
+      (should (file-exists-p file))
+      (should-error (harness-call 'task/set-backlog-mode "sometimes" default-directory))
+      (harness-tasks-test--restart)
+      (should (eq 'auto (harness-tasks-test--backlog-mode)))
+      (should (eq 'manual (harness-tasks-test--backlog-mode other)))
+      ;; It still works after the restart: a write-up queues its task.
+      (let ((harness-tasks-max-running 0)
+            (harness-provider-demo-script-override
+             '((:type text :delta "Written up") (:type done :stop-reason end-turn))))
+        (let ((id (harness-tasks-test-refine "after the restart")))
+          (harness-tasks-test--wait-queued id)
+          (should (eq 'pending (plist-get (harness-tasks-test-task id) :column)))))
+      ;; Back to manual: nothing is left in the file, which goes.
+      (harness-call 'task/set-backlog-mode 'manual default-directory)
+      (should-not (file-exists-p file))
+      (harness-tasks-test--restart)
+      (should (eq 'manual (harness-tasks-test--backlog-mode))))))
+
+(ert-deftest harness-tasks-backlog-mode-change-is-announced ()
+  "Switching the mode emits `task/backlog-mode' (PROJECT MODE); setting it again does not."
+  (harness-tasks-test-with
+    (let ((seen nil)
+          (project (harness-tasks--project default-directory)))
+      (harness-on 'task/backlog-mode (lambda (p mode) (push (list p mode) seen)))
+      (harness-call 'task/set-backlog-mode 'auto default-directory)
+      (harness-call 'task/set-backlog-mode 'auto default-directory)
+      (harness-call 'task/toggle-backlog-mode default-directory)
+      (should (equal (list (list project 'manual) (list project 'auto)) seen)))))
 
 (ert-deftest harness-tasks-backlog-work-is-interactive-by-default ()
   "A write-up is non-interactive, to keep it read-only; the work it leads to is not."

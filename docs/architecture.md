@@ -4387,7 +4387,30 @@ priority).
   `pending` with `:backlog t`, whose column is the backlog, apart from
   the queued pending tasks: the scheduler never starts it, only
   `task/start`, so the backlog survives restarts; `task/queue` (the
-  board's [Queue it]) puts it back in that queue, the write-up kept.  A turn of a backlog
+  board's [Queue it]) puts it back in that queue, the write-up kept.
+  Who does that is the project's backlog mode: the user in `manual`
+  mode, the default, and in `auto` mode the write-up's own end.
+  `--finish-refinement` then hands the task to
+  `harness-tasks--auto-queue`, which calls `task/queue` soon after
+  (`harness-run-soon`: out of the turn's end, as `task/queue` may start
+  the task) unless by then the task left the backlog, was archived, has a
+  turn of its session running or a message queued in it -- feedback for
+  the write-up, whose own end queues the task instead.  Only a clean end
+  queues: a write-up that fails, stops or refuses the task as a duplicate
+  waits for the user as ever, and one done again -- feedback,
+  `task/refine` after a failure, writing a duplicate up anyway -- queues
+  it.  A hand edit (`task/update`) is no write-up and queues nothing,
+  and switching modes moves no task.  From the write-up's end until the
+  task is queued its id is in `harness-tasks--joining` and its view has
+  `:joining-queue t`, so that a `task_wait` does not settle on it as a
+  backlog task: it waits on for the work.  `task/backlog-mode &optional
+  CWD` returns `(:project ROOT :mode MODE)`, `task/set-backlog-mode MODE
+  &optional CWD` (`manual` or `auto`, a symbol or a string) and
+  `task/toggle-backlog-mode &optional CWD` switch it; `task/settings`
+  has it as `:backlog-mode`, and a task's view has `:auto-queue t` while
+  its project's backlog is in auto mode.  The projects in auto mode are
+  kept, like the suspended queues, in `task-auto-queue.json` in the
+  state directory: a JSON array of project roots.  A turn of a backlog
   task's session before it starts is feedback (`task/prompt`) and
   rewrites the write-up; a write-up that stops needs input (restarts:
   below).  `task/refine ID &optional TEXT` refines a queued task or
@@ -4803,7 +4826,10 @@ priority).
   `finished` when its turn ended with nothing to merge or review,
   `verified` when the user verified it with nothing left to merge, or
   `completed` when it was marked done by hand, `task/complete`; a task
-  already done emits nothing).  Records are written
+  already done emits nothing), `task/queue PROJECT SUSPENDED` (its
+  pending queue was suspended or resumed) and `task/backlog-mode PROJECT
+  MODE` (its backlog mode switched, to `manual` or `auto`), both
+  forwarded to ACP clients so every board follows.  Records are written
   shortly after a change and on exit (`harness-tasks-flush`), each into
   its project's store; a store whose text would not change is skipped.
 - `task/redact SECRETS &optional PROJECT DRY-RUN` takes secrets out of
@@ -6381,8 +6407,8 @@ TRAMP prefixes come from the session host):
 | `unwatch_events` | Stop watching events | watch_id (default: every watch of the session) | read (tools-events; needs no approval: `harness-perms--inspection-tools`) |
 | `task_list` | List tasks | column (pending/backlog/needs-input/active/review/merging/done), include_archived, all_projects, limit (the most recent) | read (needs no approval: `harness-perms--inspection-tools`) |
 | `task_submit` | Submit task | prompt, cwd, model, thinking, refine (for the backlog), main_tree (no worktree: the project's main checkout), priority (low/medium/high: given to the session the task is submitted with, and the order waiting tasks start in) | meta |
-| `task_control` | Control task | task_id, action (start/queue/message/cancel/merge/verify/reject/complete/archive/restore/delete/priority), message (the feedback, for reject), priority (low/medium/high, for priority: given to the task's session, where a task's priority lives) | meta |
-| `task_wait` | Wait for tasks | task_id / task_ids, until (settled/done/needs-input/active/review/merging/changed; settled counts review), mode, timeout_seconds | read (needs no approval: `harness-perms--inspection-tools`) |
+| `task_control` | Control task | task_id, action (start/queue/message/cancel/return-to-pending/merge/verify/reject/complete/archive/restore/delete/priority, and on a project with no task_id: suspend-queue/resume-queue, auto-queue/manual-queue for its backlog mode), message (the feedback, for reject), priority (low/medium/high, for priority: given to the task's session, where a task's priority lives), cwd (the project of the four project actions; default: this session's) | meta |
+| `task_wait` | Wait for tasks | task_id / task_ids, until (settled/done/needs-input/active/review/merging/changed; settled counts review, and a written-up backlog task unless an auto-queued backlog hands it on to the queue), mode, timeout_seconds | read (needs no approval: `harness-perms--inspection-tools`) |
 | `hand_in` | Hand in the finished work | summary, evidence (image/video/file/code/note/tool_call, each with a caption), cannot_continue (cannot finish: to user input, nothing merges), no_merge (informational: verify completes without the merge queue) | meta (task sessions only; needs no approval: `harness-perms--auto-allow-tools`) |
 | `compact` | Compact the conversation | kind (summary/brief/transcript/fresh/truncate, default summary), mode (queue/interrupt, default queue), reason | meta (tools-compact; offered to every session, so an agent compacts its own conversation) |
 | `open_harness` | Open harness in Emacs | path (default: the session's worktree, else its cwd), focus (for the user: stays until the task is done) | exec (tools-dev; offered in a checkout of the harness only; the instance stops by itself once nothing needs it; needs no approval: `harness-perms--auto-allow-tools`) |
@@ -9295,7 +9321,25 @@ max-running button ends the settings line in every mode: a
 write-up or a plan takes no slot, the limit counting the tasks at
 work.  `r` refines a queued task,
 retries a stopped write-up, writes one up all the same when it refused
-the task as a duplicate, or sends feedback on a backlog task's.  A task
+the task as a duplicate, or sends feedback on a backlog task's.  Right
+after its count, the Backlog's heading has the project's backlog mode
+as a switch, [Manual queue] or [Auto queue]
+(`harness-ui-tasks--backlog-mode-button`, from `task/settings`'s
+`:backlog-mode`): a click or `W` (`harness-ui-tasks-toggle-backlog-mode`)
+shows the other mode at once and sends `_harness/task/set-backlog-mode`,
+and every board of the project follows its `task/backlog-mode` event.
+In auto mode the heading's note, after the switch, says each task joins
+the queue once written up, and a write-up's card that it joins the
+queue after; a board too narrow for the note keeps the switch and drops
+the note.  The Pending heading has the queue's switch in the same
+place, [Queue: running] or, in the attention face, [Queue: suspended]
+followed by a note that nothing starts on its own
+(`harness-ui-tasks--queue-button`, from `task/settings`'s
+`:queue-suspended`): a click or `P` (`harness-ui-tasks-toggle-queue`)
+shows the other state at once and sends `_harness/task/toggle-queue`,
+and every board follows its `task/queue` event.  Neither switch is in
+the header line, nor pushed to the right edge, where [Archive all]
+ends the Completed heading.  A task
 whose write-up refused it as a duplicate shows it in Requires your
 input, naming the task it duplicates and saying why: `k` drops it, `r`
 writes it up anyway, `m` takes what makes it another task than the one

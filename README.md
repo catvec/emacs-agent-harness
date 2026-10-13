@@ -2229,7 +2229,18 @@ your checkout itself can be submitted to the **main tree** instead (the
   *Backlog* is its own section, and the queue never starts one of
   those: `Q` on a backlog card (or its [Queue it] button) puts it back
   in *Pending*, where it starts by itself as soon as a slot frees, and
-  `s` starts it at once. Refining and planning look at the board
+  `s` starts it at once. Right after its count, the *Backlog* heading
+  has the project's switch between the two ways out, **[Manual queue]**,
+  the default, and **[Auto queue]**: click it, or press `W`. With the
+  auto queue a task joins *Pending* by itself as soon as its write-up
+  is done -- one done again after your feedback too -- and the queue
+  starts it like any waiting task, by priority as slots free, and not
+  while the queue is suspended. A write-up that fails, or that finds
+  the task a duplicate, still waits for you, and switching moves none
+  of the tasks already in the backlog. The switch is kept per project,
+  across restarts; `task_control`'s `auto-queue` and `manual-queue`
+  flip it too.
+  Refining and planning look at the board
   first: a task it already has is refused rather than written up (drop
   it, or write it up anyway), and the write-up or plan names the tasks
   working on the same code, to coordinate with instead of redoing their
@@ -2457,8 +2468,11 @@ your checkout itself can be submitted to the **main tree** instead (the
   supervisor's workers too. Its turn stops and it keeps its session,
   branch and worktree. It goes to the front of its priority's queue and
   carries on where it stopped when a slot frees, or at once with `s`;
-  returning it starts nothing itself. `P` suspends the project's queue,
-  so that no waiting task starts by itself until you resume it.
+  returning it starts nothing itself. `P`, or a click on
+  **[Queue: running]** right after the *Pending* heading's count,
+  suspends the project's queue, so that no waiting task starts by
+  itself until you resume it; the switch then reads
+  **[Queue: suspended]**, and a click or `P` resumes it.
   Whatever its session left running outside its turn stops with it, as
   it does for a task that is pre-empted: the workers of its supervisor
   plan and its sub-agents are cancelled, and what they were on is

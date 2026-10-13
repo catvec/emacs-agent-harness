@@ -3582,14 +3582,15 @@ but for [Refresh], still opening the usage dashboard."
     (harness-test-wait (lambda () (string-match-p "  Max . 5h 23% . 7d 41% . budget 0%  "
                                                   (harness-ui-tasks-test--header board)))
                        5 "the plan, its quota and the budget")
-    ;; The buttons and the project's name go before the quota.  The
-    ;; queue switch takes the wide separator before it goes, as the
-    ;; counts did (see `harness-ui-tasks--header').
+    ;; The buttons and the project's name go before the quota, which
+    ;; keeps the wide separator after the title (see
+    ;; `harness-ui-tasks--header'): the queue's switch, which had it
+    ;; before, is on the Pending heading.
     (let ((header (harness-ui-tasks-test--header board 56)))
-      (should (string-match-p "\\` Tasks  Max . 5h 23% . 7d 41% . budget 0% \\[Refresh\\]\\'" header)))
+      (should (string-match-p "\\` Tasks   Max . 5h 23% . 7d 41% . budget 0% \\[Refresh\\]\\'" header)))
     ;; Narrower still, the budget goes and the quota stays.
     (let ((header (harness-ui-tasks-test--header board 50)))
-      (should (string-match-p "\\` Tasks  Max . 5h 23% . 7d 41% \\[Refresh\\]\\'" header)))
+      (should (string-match-p "\\` Tasks   Max . 5h 23% . 7d 41% \\[Refresh\\]\\'" header)))
     (with-current-buffer board
       (let* ((header (harness-ui-tasks--header 50))
              (pos (string-match "Max" header)))
@@ -3738,26 +3739,37 @@ RET opens it in another window instead, and the layout stays as it was."
 (declare-function harness-ui-tasks--supervisor-p "harness-ui-tasks")
 
 (ert-deftest harness-ui-tasks-queue-suspends-from-the-board ()
-  "P suspends the board's queue: the header, the Pending heading and the box say so.
-Pressing it again resumes, and the waiting task starts."
+  "P suspends the board's queue: the Pending heading's switch and the box say so.
+The switch is on the heading, right after its count rather than at the
+end of the line, and the header line has none.  A click on it resumes,
+and the waiting task starts."
   (harness-ui-tasks-test-with
     (let ((harness-tasks-max-running 1))
       (harness-ui-tasks-test--type-and-submit board "First task")
       (harness-ui-tasks-test--type-and-submit board "Waiting task")
-      (harness-ui-tasks-test--wait-text board "Pending  1\\(.\\|\n\\)*Waiting task")
+      (harness-ui-tasks-test--wait-text board "Pending  1  \\[Queue: running\\]\n\\(.\\|\n\\)*Waiting task")
       (with-current-buffer board
         (goto-char (point-min))
         (should (eq 'harness-ui-tasks-toggle-queue (key-binding (kbd "P"))))
-        (should (string-match-p "Queue: running" (harness-ui-tasks--header most-positive-fixnum)))
+        ;; Beside the count: two plain spaces, no stretch of space
+        ;; pushing it to the right of the line.
+        (search-forward "[Queue: running]")
+        (let ((at (match-beginning 0)))
+          (should (eq 'pending (get-text-property at 'harness-task-section)))
+          (should (button-at at))
+          (should (equal "Pending  1  " (buffer-substring-no-properties (- at 12) at)))
+          (should-not (text-property-not-all (- at 12) at 'display nil))
+          (should (string-match-p "\\`The queue is running.*Click or P to suspend it"
+                                  (harness-ui-tasks--queue-help nil nil at))))
+        (should-not (string-match-p "Queue" (harness-ui-tasks--header most-positive-fixnum)))
+        (goto-char (point-min))
         (execute-kbd-macro "P"))
-      ;; Suspended: the header says so, and so do the heading and the box.
-      (harness-test-wait
-       (lambda () (with-current-buffer board
-                    (harness-ui-tasks--render)
-                    (string-match-p "Queue suspended" (harness-ui-tasks--header most-positive-fixnum))))
-       5 "the queue to be suspended")
-      (harness-ui-tasks-test--wait-text board "queue suspended: nothing starts on its own")
+      ;; Suspended: the heading's switch says so, and so does the box.
+      (harness-ui-tasks-test--wait-text board "Pending  1  \\[Queue: suspended\\]  · nothing starts on its own\n")
       (with-current-buffer board
+        (should-not (string-match-p "Queue" (harness-ui-tasks--header most-positive-fixnum)))
+        (should (string-match-p "\\`The queue is suspended.*Click or P to let the waiting tasks start again"
+                                (harness-ui-tasks--queue-help nil nil (point-min))))
         (should (string-match-p "queue suspended" (harness-ui-tasks--new-settings-line))))
       ;; The waiting task stays pending while the queue is suspended, and
       ;; its card says so, the facts coming with the tasks a moment later.
@@ -3771,12 +3783,14 @@ Pressing it again resumes, and the waiting task starts."
          5 "the board to hear the queue is suspended")
         (harness-ui-tasks-test--show-subtitle board "Waiting task")
         (should (string-match-p "queue suspended" (harness-ui-tasks-test--card-text board "Waiting task")))
-        ;; Resuming starts it.
+        ;; A click on the switch resumes, which starts it.
         (with-current-buffer board
           (goto-char (point-min))
-          (execute-kbd-macro "P"))
+          (search-forward "[Queue: suspended]")
+          (push-button (match-beginning 0)))
         (harness-test-wait (lambda () (eq 'active (plist-get (harness-call 'task/get id) :state)))
-                           5 "the waiting task to start")))))
+                           5 "the waiting task to start")
+        (harness-ui-tasks-test--wait-text board "Pending  0  \\[Queue: running\\]\n")))))
 
 (declare-function harness-tasks--schedule "harness-tasks")
 
@@ -3796,11 +3810,13 @@ backlog task stays where it is."
       (harness-ui-tasks-test--type-and-submit board "jot the lexer down")
       (harness-ui-tasks-test--wait-text board "Backlog  1\\(.\\|\n\\)*Fix the lexer")
       (let ((text (harness-ui-tasks-test--board-text board)))
-        ;; The queued task is Pending; the backlog has a section of its own,
-        ;; saying only you start one, with no suspended-queue notice.
-        (should (string-match-p "Pending  1\\(.\\|\n\\)*Waits for a slot" text))
-        (should (string-match-p "Backlog  1  · start one when ready\\(.\\|\n\\)*Fix the lexer" text))
-        (should-not (string-match-p "queue suspended" text)))
+        ;; The queued task is Pending, whose queue runs; the backlog has a
+        ;; section of its own, saying only you start one, with no
+        ;; suspended-queue notice.
+        (should (string-match-p "Pending  1  \\[Queue: running\\]\n\\(.\\|\n\\)*Waits for a slot" text))
+        (should (string-match-p "Backlog  1  \\[Manual queue\\]  · start one when ready\n\\(.\\|\n\\)*Fix the lexer"
+                                text))
+        (should-not (string-match-p "suspended\\|nothing starts on its own" text)))
       ;; Refined: the card says it waits to be started, not for a slot.
       (harness-ui-tasks-test--show-subtitle board "Fix the lexer")
       (should (string-match-p "refined, start it when ready"
@@ -3808,8 +3824,8 @@ backlog task stays where it is."
       ;; Suspended: Pending says so; the backlog, which never drains on its
       ;; own, waits for you either way.
       (with-current-buffer board (harness-ui-tasks-toggle-queue))
-      (harness-ui-tasks-test--wait-text board "Pending  1  · queue suspended: nothing starts on its own")
-      (should (string-match-p "Backlog  1  · start one when ready\\(.\\|\n\\)*Fix the lexer"
+      (harness-ui-tasks-test--wait-text board "Pending  1  \\[Queue: suspended\\]  · nothing starts on its own\n")
+      (should (string-match-p "Backlog  1  \\[Manual queue\\]  · start one when ready\n\\(.\\|\n\\)*Fix the lexer"
                               (harness-ui-tasks-test--board-text board)))
       ;; A free slot does not start either while the queue is suspended.
       (setq harness-tasks-max-running 1)
@@ -3848,6 +3864,76 @@ backlog task stays where it is."
         (should (eq 'pending (plist-get task :column)))
         (should-not (plist-get task :backlog)))
       (should (string-match-p "Backlog  0" (harness-ui-tasks-test--board-text board))))))
+
+(declare-function harness-ui-tasks-toggle-backlog-mode "harness-ui-tasks")
+(declare-function harness-ui-tasks--backlog-mode-help "harness-ui-tasks")
+
+(ert-deftest harness-ui-tasks-backlog-mode-from-the-board ()
+  "The Backlog's heading switches it between a manual and an auto queue.
+The switch is right after the heading's count, not at the end of the
+line.  W, or a click on [Manual queue], gives the project an auto
+queue: a task written up for the backlog then joins the queue by itself,
+and waits in Pending for a slot like any queued task.  A click on
+\[Auto queue] switches back.  The tooltips say which it is, with the key."
+  (harness-ui-tasks-test-with
+    (let ((harness-tasks-max-running 0)
+          (harness-provider-demo-script-override
+           '((:type wait :seconds 1)
+             (:type text :delta "Fix the lexer\n\nIt drops the last token.") (:type done :stop-reason end-turn))))
+      ;; A queued task (0 at a time, so it waits) brings the columns out,
+      ;; the Backlog's heading saying its tasks are queued by hand.
+      (harness-ui-tasks-test--type-and-submit board "Waits for a slot")
+      (harness-ui-tasks-test--wait-text board "Pending  1\\(.\\|\n\\)*Waits for a slot")
+      (harness-ui-tasks-test--wait-text board "Backlog  0  \\[Manual queue\\]\n")
+      (with-current-buffer board
+        (goto-char (point-min))
+        (search-forward "[Manual queue]")
+        ;; Beside the count: two plain spaces, no stretch of space
+        ;; pushing it to the right of the line.
+        (should (equal "Backlog  0  " (buffer-substring-no-properties (- (match-beginning 0) 12) (match-beginning 0))))
+        (should-not (text-property-not-all (- (match-beginning 0) 12) (match-beginning 0) 'display nil))
+        (let ((help (harness-ui-tasks--backlog-mode-help nil nil (match-beginning 0))))
+          (should (string-match-p "Manual queue: a written-up task waits in the Backlog" help))
+          (should (string-match-p "Click or W to" help)))
+        (should (eq 'harness-ui-tasks-toggle-backlog-mode (key-binding (kbd "W"))))
+        (goto-char (point-min))
+        (execute-kbd-macro "W"))
+      ;; The heading switches at once, and the harness follows.
+      (harness-ui-tasks-test--wait-text board "Backlog  0  \\[Auto queue\\]\n")
+      (harness-test-wait (lambda () (eq 'auto (plist-get (harness-call 'task/backlog-mode default-directory) :mode)))
+                         5 "the project's backlog to queue its tasks itself")
+      (with-current-buffer board
+        (should (string-match-p "Auto queue: a task written up for the backlog joins the queue by itself"
+                                (harness-ui-tasks--backlog-mode-help nil nil (point-min)))))
+      ;; While its write-up goes on, the task waits in the Backlog, whose
+      ;; heading and card say it joins the queue once written up.
+      (with-current-buffer board (harness-ui-tasks-toggle-refine))
+      (harness-ui-tasks-test--type-and-submit board "jot the lexer down")
+      (harness-ui-tasks-test--wait-text
+       board "Backlog  1  \\[Auto queue\\]  · each joins the queue once written up\n\\(.\\|\n\\)*jot the lexer down")
+      (harness-ui-tasks-test--show-subtitle board "jot the lexer down")
+      (should (string-match-p "writing it up, then it joins the queue"
+                              (harness-ui-tasks-test--card-text board "jot the lexer down")))
+      ;; Written up, it moves to Pending by itself, where it waits for a slot.
+      (harness-ui-tasks-test--wait-text board "Pending  2\\(.\\|\n\\)*Fix the lexer")
+      (should (string-match-p "Backlog  0  \\[Auto queue\\]\n" (harness-ui-tasks-test--board-text board)))
+      (let ((task (cl-find-if (lambda (task) (string-prefix-p "Fix the lexer" (plist-get task :prompt)))
+                              (harness-call 'task/list default-directory))))
+        (should task)
+        (should (eq 'pending (plist-get task :column)))
+        (should-not (plist-get task :backlog))
+        (should (plist-get task :auto-queue)))
+      ;; A click on [Auto queue] gives the backlog back to your hand.
+      (with-current-buffer board
+        (goto-char (point-min))
+        (search-forward "[Auto queue]")
+        (push-button (match-beginning 0)))
+      (harness-ui-tasks-test--wait-text board "Backlog  0  \\[Manual queue\\]\n")
+      (harness-test-wait (lambda () (eq 'manual (plist-get (harness-call 'task/backlog-mode default-directory) :mode)))
+                         5 "the project's backlog to be queued by hand again")
+      ;; The switch moved nothing: the queued task still waits for a slot.
+      (should (string-match-p "Pending  2\\(.\\|\n\\)*Fix the lexer"
+                              (harness-ui-tasks-test--board-text board))))))
 
 (ert-deftest harness-ui-tasks-return-to-pending-from-the-card ()
   "u returns the task at point to the pending queue, keeping its session.

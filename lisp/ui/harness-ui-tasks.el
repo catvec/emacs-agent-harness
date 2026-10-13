@@ -17,12 +17,16 @@
 ;;   Pending               waiting for a slot, so it starts on its own
 ;;                         while the project has one free; editable,
 ;;                         startable; in the order they start: by
-;;                         priority, then oldest first
+;;                         priority, then oldest first.  Beside its
+;;                         count, [Queue: running] (P) suspends the
+;;                         queue, so none starts on its own until resumed
 ;;   Backlog               jotted down or written up for later: the queue
 ;;                         never starts one by itself; Q queues it, so it
 ;;                         drains like any pending task, and s starts it
 ;;                         now; editable, refinable; where a write-up
-;;                         runs too
+;;                         runs too.  Beside its count, [Manual queue] /
+;;                         [Auto queue] (W) says whether a finished
+;;                         write-up waits here or joins the queue itself
 ;;   Completed             finished and verified; reply to reopen,
 ;;                         archive to hide
 ;;
@@ -31,7 +35,10 @@
 ;; cycles through three modes.  Submit starts the task.  Refine (backlog
 ;; refinement, once called grooming) has an agent write the task up and
 ;; leaves it in the Backlog until you start it: jot things down now,
-;; pick them up later, even after a restart.  Plan has a strong model
+;; pick them up later, even after a restart.  With the Backlog's auto
+;; queue (W, or a click on its heading's [Manual queue]) a finished
+;; write-up joins the queue by itself instead, which starts it as slots
+;; free; the project keeps the choice across restarts.  Plan has a strong model
 ;; (the hard tier of the task model's provider: Opus for Claude) read the
 ;; code and plan the task, read-only, for a cheaper one (the medium
 ;; tier, Sonnet) to carry out once you start it.  The lines above the
@@ -737,9 +744,12 @@ pending says why it waits (`harness-ui-tasks--returned-why')."
      ((harness-ui-tasks--refining-p task)
       (or (nth 2 todos)
           (concat (if (harness-ui-tasks--planned-p task) "planning it" "writing it up")
+                  ;; With the Backlog's auto queue it does not stay.
+                  (if (harness-ui-tasks--auto-queue-p) ", then it joins the queue" "")
                   harness-ui-tasks--ellipsis)))
      ((harness-ui-tasks--backlog-p task)
-      (concat (cond ((not (plist-get task :refined)) "on hold")
+      (concat (cond ((harness-json-true-p (plist-get task :joining-queue)) "written up, joining the queue")
+                    ((not (plist-get task :refined)) "on hold")
                     ((harness-ui-tasks--planned-p task) "planned, start it when ready")
                     (t "refined, start it when ready"))
               (if body (concat sep body) "")))
@@ -2129,29 +2139,53 @@ section are drawn together: see `harness-ui-tasks--insert-cards'."
 (defun harness-ui-tasks--insert-section (column heading tasks &optional cap)
   "Draw COLUMN: HEADING, its TASKS and, with CAP (SHOW . MORE), the cap.
 SHOW of the tasks are drawn, in order, and its line says how many MORE
-the window is too small for."
-  (let ((folded (memq column harness-ui-tasks--folded))
-        (start (point)))
-    (insert (propertize (harness-ui-icon (if folded 'harness-icon-collapsed 'harness-icon-expanded))
-                        'face 'harness-dim-face)
-            " " (propertize heading 'face (pcase (and tasks column)
-                                            ('needs-input '(harness-task-attention-face harness-task-section-face))
-                                            ('review '(harness-task-review-face harness-task-section-face))
-                                            (_ 'harness-task-section-face)))
-            (propertize (format "  %d" (length tasks)) 'face 'harness-dim-face)
-            (if (and (eq column 'pending) (harness-ui-tasks--queue-suspended-p))
-                (propertize "  · queue suspended: nothing starts on its own"
-                            'face 'harness-task-attention-face)
-              "")
-            ;; The backlog drains into In progress by nobody's hand but
-            ;; yours: its heading says so, whoever else is waiting.
-            (if (and (eq column 'backlog) tasks)
-                (propertize "  · start one when ready" 'face 'harness-dim-face)
-              ""))
-    (when (and (eq column 'done) tasks (not folded))
-      (let ((b (harness-ui-tasks--button "[Archive all]" #'harness-ui-tasks-archive-done
-                                         "Archive every completed task" 'harness-ui-tasks-archive-done)))
-        (insert (propertize " " 'display `(space :align-to (- right ,(1+ (string-width b))))) b)))
+the window is too small for.  The headings of Pending and Backlog have
+their column's switch right after the count, folded or not: whether the
+queue starts its tasks on its own (`harness-ui-tasks--queue-button'),
+and whether written-up tasks are queued by hand or by themselves
+\(`harness-ui-tasks--backlog-mode-button')."
+  (let* ((folded (memq column harness-ui-tasks--folded))
+         (start (point))
+         (head (concat
+                (propertize (harness-ui-icon (if folded 'harness-icon-collapsed 'harness-icon-expanded))
+                            'face 'harness-dim-face)
+                " " (propertize heading 'face (pcase (and tasks column)
+                                                ('needs-input '(harness-task-attention-face harness-task-section-face))
+                                                ('review '(harness-task-review-face harness-task-section-face))
+                                                (_ 'harness-task-section-face)))
+                (propertize (format "  %d" (length tasks)) 'face 'harness-dim-face)))
+         ;; Beside the count, not at the far right: the switch is the
+         ;; column's, and reads with its name.
+         (switch (pcase column
+                   ('pending (harness-ui-tasks--queue-button))
+                   ('backlog (harness-ui-tasks--backlog-mode-button))))
+         (note (cond
+                ;; Suspended, the queue starts nothing: its switch says
+                ;; so, and the note what that means.
+                ((and (eq column 'pending) (harness-ui-tasks--queue-suspended-p))
+                 (propertize "  · nothing starts on its own" 'face 'harness-task-attention-face))
+                ;; The backlog drains into In progress by nobody's hand
+                ;; but yours, unless it queues its write-ups itself: its
+                ;; heading says which, whoever else is waiting.
+                ((and (eq column 'backlog) tasks)
+                 (propertize (if (harness-ui-tasks--auto-queue-p)
+                                 "  · each joins the queue once written up"
+                               "  · start one when ready")
+                             'face 'harness-dim-face))
+                (t "")))
+         (archive (and (eq column 'done) tasks (not folded)
+                       (harness-ui-tasks--button "[Archive all]" #'harness-ui-tasks-archive-done
+                                                 "Archive every completed task" 'harness-ui-tasks-archive-done))))
+    (insert head (if switch (concat "  " switch) "")
+            ;; A narrow board keeps the buttons and lets the note go.
+            (if (> (+ (string-width head) (string-width note)
+                      (if switch (+ 2 (string-width switch)) 0)
+                      (if archive (1+ (string-width archive)) 0))
+                   (harness-ui-tasks--width))
+                ""
+              note))
+    (when archive
+      (insert (propertize " " 'display `(space :align-to (- right ,(1+ (string-width archive))))) archive))
     (insert "\n")
     (put-text-property start (point) 'harness-task-section column)
     (unless folded
@@ -3292,6 +3326,10 @@ switches to the next mode, as `harness-ui-tasks-cycle-mode' does."
         (next (assq (harness-ui-tasks--next-mode) harness-ui-tasks--modes)))
     (pcase-let ((`(,_ ,label ,icon ,help) (or (assq harness-ui-tasks--mode harness-ui-tasks--modes)
                                               (car harness-ui-tasks--modes))))
+      ;; With the Backlog's auto queue a written-up task does not wait there.
+      (when (and (harness-ui-tasks--auto-queue-p) (not (eq harness-ui-tasks--mode 'submit)))
+        (setq help (replace-regexp-in-string "it waits in the Backlog until you start it"
+                                             "it joins the queue by itself (the Backlog's auto queue)" help)))
       (propertize
        (harness-ui-tasks--button
         (concat (harness-ui-icon icon) " " label)
@@ -3509,10 +3547,10 @@ running until they say otherwise."
   (harness-json-true-p (plist-get harness-ui-tasks--settings :queue-suspended)))
 
 (defun harness-ui-tasks--queue-help (window _object _pos)
-  "The tooltip of the queue switch in WINDOW's header line.
+  "The tooltip of the queue switch on the Pending heading of the board in WINDOW.
 It says what the switch does now and how to turn it.  A `help-echo'
-function, so the keymaps are searched on hover, not on every redisplay
-of the header line."
+function, so the keymaps are searched on hover, not on every redraw of
+the board."
   (with-current-buffer (if (window-live-p window) (window-buffer window) (current-buffer))
     (let ((keys (substitute-command-keys
                  "\\<harness-ui-tasks-board-map>\\[harness-ui-tasks-toggle-queue]" t)))
@@ -3520,17 +3558,45 @@ of the header line."
           (format "The queue is suspended: no waiting task of this project starts on its own, so the board is clear for one urgent task -- [Start now], and task_control start, still start one.  Tasks already at work go on, and returning one to pending does not start another.  Click or %s to let the waiting tasks start again, by priority." keys)
         (format "The queue is running: waiting tasks start by themselves as slots free, by priority.  Click or %s to suspend it, so none starts on its own until you resume it or start one by hand." keys)))))
 
-(defun harness-ui-tasks--queue-segment ()
-  "The header's queue switch: whether waiting tasks start on their own.
-A click suspends or resumes the board's project queue
-\(`harness-ui-tasks-toggle-queue').  Suspended, it stands out: the
-board then waits for you."
-  (harness-ui-tasks--segment
-   (if (harness-ui-tasks--queue-suspended-p)
-       (concat (propertize (harness-ui-icon 'harness-icon-task-paused) 'face 'harness-task-attention-face)
-               (propertize " Queue suspended" 'face 'harness-task-attention-face))
-     "[Queue: running]")
-   #'harness-ui-tasks-toggle-queue #'harness-ui-tasks--queue-help))
+(defun harness-ui-tasks--queue-button ()
+  "The switch on the Pending heading: [Queue: running] or [Queue: suspended].
+It shows whether waiting tasks start on their own, and a click suspends
+or resumes the board's project queue (`harness-ui-tasks-toggle-queue').
+Suspended, it stands out: the board then waits for you."
+  (harness-ui-tasks--button (if (harness-ui-tasks--queue-suspended-p)
+                                (propertize "[Queue: suspended]" 'face 'harness-task-attention-face)
+                              "[Queue: running]")
+                            #'harness-ui-tasks-toggle-queue
+                            #'harness-ui-tasks--queue-help
+                            'harness-ui-tasks-toggle-queue))
+
+(defun harness-ui-tasks--auto-queue-p ()
+  "Non-nil when the board's project queues its written-up tasks itself.
+That is its backlog in auto mode, as the harness's `task/settings' said
+last (`:backlog-mode'): in manual mode, the default, a written-up task
+waits in the Backlog until you queue or start it."
+  (equal (format "%s" (or (plist-get harness-ui-tasks--settings :backlog-mode) "manual")) "auto"))
+
+(defun harness-ui-tasks--backlog-mode-help (window _object _pos)
+  "The tooltip of the backlog's switch on the board in WINDOW.
+It says what the backlog does with a task once it is written up, and
+how to switch.  A `help-echo' function, so the keymaps are searched on
+hover, not on every redraw of the board."
+  (with-current-buffer (if (window-live-p window) (window-buffer window) (current-buffer))
+    (let ((keys (substitute-command-keys
+                 "\\<harness-ui-tasks-board-map>\\[harness-ui-tasks-toggle-backlog-mode]" t)))
+      (if (harness-ui-tasks--auto-queue-p)
+          (format "Auto queue: a task written up for the backlog joins the queue by itself, which starts it as a slot frees, by priority (not while the queue is suspended).  Tasks already in the Backlog stay there.  Click or %s to queue written-up tasks by hand again." keys)
+        (format "Manual queue: a written-up task waits in the Backlog until you queue it (Q, [Queue it]) or start it (s).  Click or %s to have each one join the queue by itself once written up." keys)))))
+
+(defun harness-ui-tasks--backlog-mode-button ()
+  "The switch on the Backlog's heading: [Manual queue] or [Auto queue].
+It shows how written-up tasks leave the backlog, and a click switches
+the board's project to the other way (`harness-ui-tasks-toggle-backlog-mode')."
+  (harness-ui-tasks--button (if (harness-ui-tasks--auto-queue-p) "[Auto queue]" "[Manual queue]")
+                            #'harness-ui-tasks-toggle-backlog-mode
+                            #'harness-ui-tasks--backlog-mode-help
+                            'harness-ui-tasks-toggle-backlog-mode))
 
 (defun harness-ui-tasks--spend (groups)
   "Return what the tasks of GROUPS cost and who pays, for the header.
@@ -3565,16 +3631,17 @@ is on the column's heading, and whether finished work waits for review
 is a setting (`harness-tasks-require-verification', on the settings
 page; \\<harness-ui-tasks-board-map>\\[harness-ui-tasks-toggle-review] here).
 
-In a window too narrow for all of it, [Add session] goes first, then
-the queue switch while the queue runs; the project's name shortens
-after those, then [Archived], [BTW] and the other modules' segments
-\(`harness-ui-tasks-header-functions', the search's [Search]) go.
-Another module's segment with a priority of its own goes when that
-says: the companion pet's face before anything else.  What the tasks
-cost and the plan's quota stay longer, the budget going first
-\(`harness-ui-tasks--spend-segment'); [Refresh], a board still loading
-and a suspended queue stay longest.  WIDTH is as `harness-ui-fit-header'
-takes it."
+In a window too narrow for all of it, [Add session] goes first; the
+project's name shortens after it, then [Archived], [BTW] and the other
+modules' segments (`harness-ui-tasks-header-functions', the search's
+\[Search]) go.  Another module's segment with a priority of its own
+goes when that says: the companion pet's face before anything else.
+What the tasks cost and the plan's quota stay longer, the budget going
+first (`harness-ui-tasks--spend-segment'); [Refresh] and a board still
+loading stay longest.  The queue's switch is not here but on the
+Pending heading, and the backlog's on its own
+\(`harness-ui-tasks--insert-section').  WIDTH is as
+`harness-ui-fit-header' takes it."
   (let* ((groups (harness-ui-tasks--visible))
          ;; Other modules' segments: strings join into one, lists stand
          ;; on their own.
@@ -3593,10 +3660,6 @@ takes it."
        (concat " " (propertize "Tasks" 'face 'bold))
        (list (concat " " (propertize name 'face 'harness-dim-face))
              50 (concat " " (propertize (harness-truncate-end name 6) 'face 'harness-dim-face)))
-       ;; The queue switch: conspicuous while the queue is suspended, and
-       ;; among the first to go when it is running.
-       (list (concat (funcall gap) (harness-ui-tasks--queue-segment))
-             (if (harness-ui-tasks--queue-suspended-p) 92 30))
        (harness-ui-tasks--spend-segment groups (funcall gap))
        ;; Other modules' segments, the search's say.
        (and joined (list (concat (funcall gap) (mapconcat #'identity joined " ")) 65)))
@@ -3719,12 +3782,15 @@ It is drawn 0.1 seconds after the last call, if it is still a board."
   '("merge/queued" "merge/started" "merge/conflict" "merge/finished"
     "agent/turn-started" "agent/turn-ended" "session/status" "session/pending-changed"
     "session/created" "session/deleted" "worktree/created" "worktree/removed"
-    "harness/reloaded" "config/changed" "task/queue" "usage/budgets-changed" "usage/budget-warning")
+    "harness/reloaded" "config/changed" "task/queue" "task/backlog-mode"
+    "usage/budgets-changed" "usage/budget-warning")
   "Events after which every board quietly reloads its tasks and budgets.
 `task/changed' and `task/deleted' update a board directly; these catch
 anything that moves a task without one, so a board never drifts.  A
-turn's end and the budget events also change what its budgets show, and
-`task/queue' changes the queue switch's state in the settings.  The
+turn's end and the budget events also change what its budgets show,
+`task/queue' changes the queue switch's state in the settings, and
+`task/backlog-mode' the backlog's switch between a manual and an auto
+queue.  The
 creation, status change and deletion of an internal session reload no
 board (`harness-ui-internal-event-p'): the harness makes one for every
 model call of its own, and none moves a task.")
@@ -3897,6 +3963,9 @@ so they type, into the compose box (`harness-compose-acts-p')."
   (define-key map (kbd "s") #'harness-ui-tasks-start)
   (define-key map (kbd "t") #'harness-ui-tasks-retry)
   (define-key map (kbd "Q") #'harness-ui-tasks-queue)
+  ;; The Backlog heading's switch: write-ups queued by hand or by
+  ;; themselves.  Not B, which once edited many tasks at once.
+  (define-key map (kbd "W") #'harness-ui-tasks-toggle-backlog-mode)
   (define-key map (kbd "e") #'harness-ui-tasks-edit)
   (define-key map (kbd "m") #'harness-ui-tasks-reply)
   (define-key map (kbd "SPC") #'harness-ui-tasks-requests)
@@ -4010,6 +4079,7 @@ task's key typed off a card.
         (". I" "Adopt a session" harness-ui-tasks-adopt)
         (". X" "Archive completed" harness-ui-tasks-archive-done)
         (". A" "Show archived" harness-ui-tasks-toggle-archived)
+        (". W" "Backlog: manual or auto queue" harness-ui-tasks-toggle-backlog-mode)
         (". P" "Suspend or resume the queue" harness-ui-tasks-toggle-queue)
         (". S" "Task slots: who holds them, who waits" harness-ui-tasks-slots)
         (". V" "Review on or off" harness-ui-tasks-toggle-review)
@@ -4765,8 +4835,7 @@ this one does not wait for them."
     (setq harness-ui-tasks--settings
           (plist-put (copy-sequence harness-ui-tasks--settings) :queue-suspended (if suspended t :false)))
     (harness-ui-tasks--render)
-    (harness-ui-tasks--refit-tail)
-    (force-mode-line-update)))
+    (harness-ui-tasks--refit-tail)))
 
 (defun harness-ui-tasks-toggle-queue (&optional arg)
   "Suspend the pending queue of the board's project, or resume it.
@@ -4779,8 +4848,9 @@ while the queue is suspended.  Resuming lets the waiting tasks start
 again at once, by priority, the tasks returned to pending first.
 
 The suspension is per project, like the concurrency limit, and kept
-across restarts.  With a prefix ARG, suspend when ARG is positive and
-resume otherwise."
+across restarts.  The Pending heading shows it as [Queue: running] or
+\[Queue: suspended], which a click switches too.  With a prefix ARG,
+suspend when ARG is positive and resume otherwise."
   (interactive "P")
   (let* ((buffer (current-buffer))
          (suspend (if arg (> (prefix-numeric-value arg) 0)
@@ -4796,6 +4866,47 @@ resume otherwise."
     (message "%s" (if suspend
                        "Queue suspended: nothing starts on its own; s starts one by hand"
                      "Queue resumed: waiting tasks start again, by priority"))))
+
+(defun harness-ui-tasks--show-backlog-mode (mode)
+  "Show MODE, \"auto\" or \"manual\", as the board's backlog mode now.
+Its `task/backlog-mode' event brings every board the settings again
+shortly; this one does not wait for them."
+  (when harness-ui-tasks--settings
+    (setq harness-ui-tasks--settings
+          (plist-put (copy-sequence harness-ui-tasks--settings) :backlog-mode (format "%s" mode)))
+    (harness-ui-tasks--render)
+    (harness-ui-tasks--refit-tail)))
+
+(defun harness-ui-tasks-toggle-backlog-mode (&optional arg)
+  "Switch the board's backlog between a manual and an auto queue.
+With a manual queue, the default, a task written up for the backlog
+waits there until you queue it (\\<harness-ui-tasks-board-map>\\[harness-ui-tasks-queue], [Queue it]) or start it
+\(\\[harness-ui-tasks-start]).  With an auto queue it joins the queue by itself as soon as
+its write-up is done, a write-up done again after your feedback too,
+and the queue starts it like any waiting task: by priority, as slots
+free, and not while the queue is suspended (\\[harness-ui-tasks-toggle-queue]).  A write-up
+that stops or refuses the task as a duplicate still waits for you, and
+switching queues none of the tasks already in the Backlog.
+
+The mode is the project's, kept across restarts, and the Backlog's
+heading shows it as [Manual queue] or [Auto queue], which a click
+switches too.  With a prefix ARG, switch to the auto queue when ARG is
+positive and to the manual one otherwise."
+  (interactive "P")
+  (let* ((buffer (current-buffer))
+         (auto (if arg (> (prefix-numeric-value arg) 0) (not (harness-ui-tasks--auto-queue-p))))
+         (mode (if auto "auto" "manual")))
+    (harness-ui-tasks--show-backlog-mode mode)
+    (harness-ui-tasks--request-then
+     "_harness/task/set-backlog-mode" (list :mode mode :cwd harness-ui-tasks--dir)
+     (if auto "Switching the backlog to an auto queue" "Switching the backlog to a manual queue")
+     (lambda (state)
+       (when (buffer-live-p buffer)
+         (with-current-buffer buffer
+           (harness-ui-tasks--show-backlog-mode (plist-get state :mode))))))
+    (message "%s" (if auto
+                      "Auto queue: each task written up for the backlog joins the queue by itself"
+                    "Manual queue: written-up tasks wait in the Backlog until you queue or start them"))))
 
 (defun harness-ui-tasks-toggle-review (&optional arg)
   "Turn the review of finished tasks off, or back on.

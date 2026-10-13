@@ -1682,6 +1682,40 @@ An explicit start still starts a task while the queue is suspended."
                               (harness-tools-sessions-test-ok me "task_control" '(:action "resume-queue"))))
       (should-not (string-match-p "Queue suspended" (harness-tools-sessions-test-ok me "task_list" nil))))))
 
+(ert-deftest harness-tools-sessions-task-backlog-auto-and-manual-queue ()
+  "task_control auto-queue has a project's backlog queue its write-ups; manual-queue undoes it.
+task_list names the auto-queued backlog.  A task written up there joins
+the queue by itself, so a wait on it does not settle at its write-up: it
+waits on for the work, here for a slot that never frees."
+  (harness-tools-sessions-test-with
+    (let* ((harness-tasks-max-running 0)
+           (harness-provider-demo-script-override
+            '((:type text :delta "Fix the lexer\n\nIt drops the last token.") (:type done :stop-reason end-turn)))
+           (me (harness-tools-sessions-test-session)))
+      (let ((text (harness-tools-sessions-test-ok me "task_control" '(:action "auto-queue"))))
+        (should (string-match-p "Backlog auto-queued for" text))
+        (should (string-match-p "joins the pending queue by itself" text)))
+      (should (eq 'auto (plist-get (harness-call 'task/backlog-mode default-directory) :mode)))
+      (let* ((id (plist-get (plist-get (harness-tools-sessions-test-run me "task_submit" '(:prompt "lexer eats a token" :refine t))
+                                       :meta)
+                            :task-id))
+             (waited (harness-tools-sessions-test-ok me "task_wait" (list :task_id id :timeout_seconds 1))))
+        ;; Written up, it joined the queue and waits there for a slot.
+        (should (string-match-p "Still waiting" waited))
+        (should (string-match-p (concat (regexp-quote id) "[^\n]*\n    state pending") waited))
+        (should-not (string-match-p "backlog" waited))
+        (let ((task (harness-call 'task/get id)))
+          (should (eq 'pending (plist-get task :state)))
+          (should-not (plist-get task :backlog))
+          (should (equal "Fix the lexer\n\nIt drops the last token." (plist-get task :prompt))))
+        (let ((listing (harness-tools-sessions-test-ok me "task_list" nil)))
+          (should (string-match-p "Backlog auto-queued for" listing))
+          (should (string-match-p (concat (regexp-quote id) " +pending +Fix the lexer") listing))))
+      (should (string-match-p "Backlog queued by hand for"
+                              (harness-tools-sessions-test-ok me "task_control" '(:action "manual-queue"))))
+      (should (eq 'manual (plist-get (harness-call 'task/backlog-mode default-directory) :mode)))
+      (should-not (string-match-p "Backlog auto-queued" (harness-tools-sessions-test-ok me "task_list" nil))))))
+
 (ert-deftest harness-tools-sessions-task-return-to-pending ()
   "task_control return-to-pending stops a working task's turn, keeping its session.
 The task waits in pending until the queue starts it again."
