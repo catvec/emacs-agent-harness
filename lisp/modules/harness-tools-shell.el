@@ -26,8 +26,9 @@
 ;;   home directory stays hidden.
 ;;
 ;;   A module can confine a session's commands further.  The sync
-;;   filter `tools/sandbox-options' runs before each command, with the
-;;   value nil and the session id as its argument.  A handler returns
+;;   filter `tools/sandbox-options' runs before each command, the elisp
+;;   tool's background Emacs included, with the value nil and the
+;;   session id as its argument.  A handler returns
 ;;   the plist of options for `sandbox/wrap' that it was given with its
 ;;   own put over them, such as (:read-only t :network nil), so that a
 ;;   later handler's options win over an earlier one's.  The options
@@ -59,6 +60,23 @@
 ;;   code to return at once and the user did not turn it off with
 ;;   `harness-emacs-eval'.  The tool itself runs here, in the harness,
 ;;   like every tool.
+;;
+;;   The child is a command like any other, so it runs in the sandbox
+;;   as a bash command of the session does: `harness-tools-shell--wrap'
+;;   shows it the same directories, asks the same `tools/sandbox-options'
+;;   filter, and refuses to run it unconfined where it refuses a bash
+;;   command (a `required' policy without the sandbox).  Besides those
+;;   it reads the harness's harness.el and lisp/, from which it loads
+;;   -- not the rest of the checkout, whose scripts/.dev holds the
+;;   sockets of the instances scripts/dev.sh runs -- and the Emacs it
+;;   runs, where that is not in /usr; and it writes the call's own io/
+;;   directory, where its code waits and it leaves its result, even when
+;;   a filter makes it read-only (the sandbox's `:scratch').  The child
+;;   always runs on this machine, where a remote session has no
+;;   directory, so a remote session's code runs in the call's own.
+;;   The result is read back only from a regular file, since a child in
+;;   the sandbox could leave a link there to a file only the harness
+;;   can read.
 
 ;;; Code:
 
@@ -182,7 +200,8 @@ is no config module."
        (cl-loop for (key) on options by #'cddr always (keywordp key))))
 
 (defun harness-tools-shell--sandbox-options (ctx)
-  "Return the extra `sandbox/wrap' options a bash call under CTX must run with.
+  "Return the extra `sandbox/wrap' options a command under CTX must run with.
+That is a bash call's command or the elisp tool's background Emacs.
 They are what the `tools/sandbox-options' filter makes of nil, with the
 session id as its argument: a handler returns the plist it was given
 with its own options set over it, such as (:read-only t :network nil),
@@ -195,20 +214,25 @@ restrictions than it meant."
       (error "The handlers of tools/sandbox-options gave %S, not a plist of sandbox options" options))
     options))
 
-(defun harness-tools-shell--wrap-options (writable readable options)
+(defun harness-tools-shell--wrap-options (writable readable options &optional scratch)
   "Return the `sandbox/wrap' options for the directories WRITABLE and READABLE.
-OPTIONS, the plist of extra ones, go with them, and its own `:writable'
-and `:readable' directories join the lists.  With `:read-only' in
-OPTIONS none is writable: all the directories go as readable, so that
-the command is shown what its session may touch and changes none of it."
+OPTIONS, the plist of extra ones, go with them, and its own `:writable',
+`:readable' and `:scratch' directories join the lists.  With
+`:read-only' in OPTIONS none is writable: all the directories go as
+readable, so that the command is shown what its session may touch and
+changes none of it.  The SCRATCH directories, made for the one command
+and deleted after it, go as `:scratch', which the command writes
+whatever OPTIONS say, and only when there are any."
   (let ((writable (append writable (plist-get options :writable)))
-        (readable (append readable (plist-get options :readable))))
+        (readable (append readable (plist-get options :readable)))
+        (scratch (append scratch (plist-get options :scratch))))
     (when (harness-json-true-p (plist-get options :read-only))
       (setq readable (delete-dups (append writable readable))
             writable nil))
     (append (list :writable writable :readable readable)
+            (and scratch (list :scratch scratch))
             (cl-loop for (key value) on options by #'cddr
-                     unless (memq key '(:writable :readable)) append (list key value)))))
+                     unless (memq key '(:writable :readable :scratch)) append (list key value)))))
 
 (defun harness-tools-shell--refuse-unconfined (options why)
   "Signal an error: a command that needs sandbox OPTIONS cannot have the sandbox.
@@ -216,17 +240,20 @@ WHY says what stands in the way."
   (error "A command that needs the sandbox options %S cannot run unconfined, but %s"
          options why))
 
-(defun harness-tools-shell--wrap (cwd command &optional writable readable options)
+(defun harness-tools-shell--wrap (cwd command &optional writable readable options scratch)
   "Return COMMAND wrapped by the sandbox for CWD when the sandbox module is loaded.
 WRITABLE lists other directories the command may write to, READABLE
-directories it may read.  OPTIONS are the extra `sandbox/wrap' options
-asked for (see `harness-tools-shell--sandbox-options'); they are given
-to it with the directories (see `harness-tools-shell--wrap-options').
-Without the sandbox module a `required' `harness-sandbox-policy'
-signals an error rather than letting COMMAND run unconfined, as the
-sandbox does when it has no backend.  OPTIONS ask for the sandbox
-whatever the policy: the error comes too when the module is not loaded
-or CWD is remote."
+directories it may read, and SCRATCH directories made for this command
+alone, which it may write whatever OPTIONS say.  OPTIONS are the extra
+`sandbox/wrap' options asked for (see
+`harness-tools-shell--sandbox-options'); they are given to it with the
+directories (see `harness-tools-shell--wrap-options').  Without the
+sandbox module a `required' `harness-sandbox-policy' signals an error
+rather than letting COMMAND run unconfined, as the sandbox does when it
+has no backend.  OPTIONS ask for the sandbox whatever the policy: the
+error comes too when the module is not loaded or CWD is remote.
+SCRATCH asks for nothing: unwrapped, COMMAND reaches it anyway.
+Unwrapped, COMMAND comes back itself, the very list given."
   (cond
    ((and options (file-remote-p cwd))
     (harness-tools-shell--refuse-unconfined
@@ -234,7 +261,7 @@ or CWD is remote."
    ((file-remote-p cwd) command)
    ((harness-method-exists-p 'sandbox/wrap)
     (apply #'harness-call 'sandbox/wrap cwd command
-           (harness-tools-shell--wrap-options writable readable options)))
+           (harness-tools-shell--wrap-options writable readable options scratch)))
    (options
     (harness-tools-shell--refuse-unconfined options "the sandbox module is not loaded"))
    ((harness-tools-shell--sandbox-required-p cwd)
@@ -388,16 +415,20 @@ Emacs wrote it or the user's Emacs answered it."
                                                     (or (plist-get payload :messages) ""))
                        :meta meta)))))
 
-(defun harness-tools-shell--elisp-batch-result (r result-file timeout)
+(defun harness-tools-shell--elisp-batch-result (r result-file timeout &optional meta)
   "Turn R, a `harness-run-command' result, into an elisp tool result.
 RESULT-FILE is the JSON the child wrote; TIMEOUT names the evaluation's
-limit in the message a killed child gets."
+limit in the message a killed child gets; META goes into the result's
+own.  Only a regular file is read: the child, which may run in the
+sandbox, could leave a symbolic link there instead, and this Emacs,
+which runs outside, would read whatever it names, or a named pipe it
+would wait on for good."
   (let* ((exit (plist-get r :exit))
-         (meta (list :emacs "background" :exit exit)))
+         (meta (append (list :emacs "background" :exit exit) meta)))
     (cond
      ((eq exit 'timeout)
       (harness-tool-error (format "Evaluation timed out after %ss" timeout) :meta meta))
-     ((not (file-readable-p result-file))
+     ((not (and (file-regular-p result-file) (not (file-symlink-p result-file))))
       (harness-tool-error
        (format "Evaluation produced no result (exit %s): %s"
                exit (string-trim (or (plist-get r :stderr) "")))
@@ -409,48 +440,128 @@ limit in the message a killed child gets."
          (error (harness-log 'warn "elisp: unreadable result: %S" err) nil))
        meta)))))
 
+(defun harness-tools-shell--emacs-dirs ()
+  "Return the directories outside /usr the background Emacs reads itself from.
+They are where `harness-elisp-emacs' is, symbolic links followed, and,
+when that is this Emacs, where this one keeps its Lisp, its data, its
+helper programs and its native code.  The sandbox shows /usr anyway;
+an Emacs installed elsewhere, in the home directory say, or run from
+its source tree, starts in there only once these are shown."
+  (let* ((program (expand-file-name harness-elisp-emacs))
+         (real (file-truename program))
+         (this (file-truename (expand-file-name invocation-name invocation-directory)))
+         (eln (car (last (bound-and-true-p native-comp-eln-load-path))))
+         (dirs (append (list (file-name-directory program) (file-name-directory real))
+                       (and (equal real this)
+                            (list invocation-directory data-directory exec-directory
+                                  (bound-and-true-p lisp-directory)
+                                  ;; The last is the Emacs's own; the first, the
+                                  ;; user's cache in the home directory.
+                                  (and (stringp eln) (expand-file-name eln invocation-directory)))))))
+    (delete-dups
+     (delq nil (mapcar (lambda (dir)
+                         (and (stringp dir) (file-directory-p dir)
+                              (let ((dir (file-name-as-directory (expand-file-name dir))))
+                                (and (not (string-prefix-p "/usr/" dir)) dir))))
+                       dirs)))))
+
+(defun harness-tools-shell--harness-files ()
+  "Return the harness files the background Emacs loads: harness.el and lisp/.
+Of `harness-directory' only these are shown to it, not the whole
+checkout: the scripts/.dev of a checkout holds the state of the
+instances scripts/dev.sh runs from it, and their sockets, over which
+whatever reaches them evaluates Lisp outside the sandbox."
+  (list (expand-file-name "harness.el" harness-directory)
+        (file-name-as-directory (expand-file-name "lisp" harness-directory))))
+
+(defun harness-tools-shell--elisp-command (child env cwd io ctx)
+  "Return the command line that runs CHILD, the background Emacs, under CTX.
+ENV is the alist of environment variables CHILD reads, CWD where it
+runs and IO the directory of its code and its result.  It goes through
+the sandbox as a bash command of CTX's session does
+\(`harness-tools-shell--wrap'): it is shown the same directories, with
+the same `tools/sandbox-options', and fails the same way when it may
+not run unconfined.  It is shown besides the harness
+\(`harness-tools-shell--harness-files') and the Emacs it runs
+\(`harness-tools-shell--emacs-dirs') read-only, and IO writable
+whatever the options say, so that it can report even when it is
+`:read-only'.  Unwrapped, as without the sandbox module, the command
+line is CHILD itself, run with ENV as it always was; in the sandbox
+`env' sets ENV first, since systemd-run passes none of the harness's
+environment on.  Signals an error when CHILD may not run."
+  (let* ((options (harness-tools-shell--sandbox-options ctx))
+         (dirs (harness-tools-shell--session-dirs ctx))
+         (in-env (append (list "env")
+                         (mapcar (lambda (v) (concat (car v) "=" (cdr v))) env)
+                         child))
+         (wrapped (harness-tools-shell--wrap
+                   cwd in-env
+                   (delete-dups (delq nil (cons (harness-tools-shell--tmp-dir ctx) (car dirs))))
+                   (append (harness-tools-shell--skill-dirs ctx) (cdr dirs)
+                           (harness-tools-shell--harness-files) (harness-tools-shell--emacs-dirs))
+                   options (list io))))
+    (if (eq wrapped in-env) child wrapped)))
+
 (defun harness-tools-shell--elisp-batch (code input ctx)
   "Evaluate CODE for the elisp tool in a background Emacs; return a promise.
 INPUT and CTX supply the working directory and the timeout; the child
 adds the harness to its `load-path' so `(require \='harness-...)' works
 as it did when the code ran in the harness's own Emacs.  It runs apart
 from the user's Emacs, so code that blocks cannot freeze that, and it
-is killed, tree and all, when it overruns."
+is killed, tree and all, when it overruns.  It runs in the sandbox as
+a bash command of the session does (see
+`harness-tools-shell--elisp-command'): an error that keeps it from
+running there is returned at once as the tool's error, instead of a
+promise, and it does not run.
+
+The call has a directory of its own, whose io/ holds the code and the
+result.  The child runs on this machine whatever the session's
+directory is, so a remote session's code runs in the call's own
+directory."
   (let* ((cwd (harness-tools-shell--bash-cwd input ctx))
-         (cwd (if (file-remote-p cwd) default-directory cwd))
-         (dir (make-temp-file "harness-elisp-" t))
-         (code-file (expand-file-name "code.el" dir))
-         (result-file (expand-file-name "result.json" dir))
-         (timeout (harness-tools-shell--elisp-timeout input)))
+         (dir (file-name-as-directory (make-temp-file "harness-elisp-" t)))
+         (io (expand-file-name "io/" dir))
+         (cwd (if (file-remote-p cwd) dir cwd))
+         (code-file (expand-file-name "code.el" io))
+         (result-file (expand-file-name "result.json" io))
+         (timeout (harness-tools-shell--elisp-timeout input))
+         (child (list harness-elisp-emacs "--batch" "-Q"
+                      "-L" harness-directory
+                      "-L" (expand-file-name "lisp" harness-directory)
+                      "-l" (expand-file-name "lisp/harness-elisp.el" harness-directory)
+                      "-f" "harness-elisp-batch-main"))
+         (env (list (cons "HARNESS_ELISP_CODE" code-file)
+                    (cons "HARNESS_ELISP_RESULT" result-file)
+                    (cons "HARNESS_ELISP_TIMEOUT" (number-to-string timeout))
+                    (cons "HARNESS_ELISP_MAX_VALUE_CHARS"
+                          (number-to-string harness-elisp--max-value-chars))))
+         cmd)
+    (with-file-modes #o700 (make-directory io))
     (let ((coding-system-for-write 'utf-8-unix))
       (write-region code nil code-file nil 'silent)
       (set-file-modes code-file #o600))
-    (harness-with-promise (resolve reject)
-      (ignore reject)
-      (let* ((settled nil)
-             (finish (lambda (result)
-                       (unless settled
-                         (setq settled t)
-                         (ignore-errors (delete-directory dir t))
-                         (funcall resolve result)))))
-        (harness-then
-         (harness-run-command
-          (list harness-elisp-emacs "--batch" "-Q"
-                "-L" harness-directory
-                "-L" (expand-file-name "lisp" harness-directory)
-                "-l" (expand-file-name "lisp/harness-elisp.el" harness-directory)
-                "-f" "harness-elisp-batch-main")
-          :cwd cwd
-          :timeout (+ timeout 5)
-          :name "harness-elisp"
-          :env (list (cons "HARNESS_ELISP_CODE" code-file)
-                     (cons "HARNESS_ELISP_RESULT" result-file)
-                     (cons "HARNESS_ELISP_TIMEOUT" (number-to-string timeout))
-                     (cons "HARNESS_ELISP_MAX_VALUE_CHARS"
-                           (number-to-string harness-elisp--max-value-chars))))
-         (lambda (r) (funcall finish (harness-tools-shell--elisp-batch-result r result-file timeout)))
-         (lambda (e) (funcall finish (harness-tool-error
-                                      (format "elisp failed: %s" (harness-error-message e))))))))))
+    (setq cmd (condition-case err
+                  (harness-tools-shell--elisp-command child env cwd io ctx)
+                (error (list :error (harness-error-message err)))))
+    (if (eq (car-safe cmd) :error)
+        (progn
+          (ignore-errors (delete-directory dir t))
+          (harness-tool-error (format "Cannot evaluate: %s" (plist-get cmd :error))))
+      (harness-with-promise (resolve reject)
+        (ignore reject)
+        (let* ((settled nil)
+               (meta (list :sandboxed (not (eq cmd child))))
+               (finish (lambda (result)
+                         (unless settled
+                           (setq settled t)
+                           (ignore-errors (delete-directory dir t))
+                           (funcall resolve result)))))
+          (harness-then
+           (harness-run-command cmd :cwd cwd :timeout (+ timeout 5) :name "harness-elisp" :env env)
+           (lambda (r) (funcall finish (harness-tools-shell--elisp-batch-result r result-file timeout meta)))
+           (lambda (e) (funcall finish (harness-tool-error
+                                        (format "elisp failed: %s" (harness-error-message e))
+                                        :meta meta)))))))))
 
 (defun harness-tools-shell--elisp (input ctx)
   "Handler for the elisp tool with INPUT under CTX; returns a promise.
@@ -475,7 +586,7 @@ emacs_eval unless the user turned that off (`harness-emacs-eval')."
 
 (harness-define-tool "elisp"
   :label "Emacs Lisp"
-  :description "Evaluate Emacs Lisp with lexical binding in a fresh background Emacs process, never the user's: its working directory is the working directory, its load path has the harness, so a harness library can be required to inspect or drive it, and it is killed at timeout seconds (30 by default). Use it as the Emacs-native alternative to bash for file work, such as a dired-style batch rename. Read or drive the user's live Emacs with the emacs_* tools instead. Returns the value of the last form, anything printed to standard-output, and messages logged during evaluation."
+  :description "Evaluate Emacs Lisp with lexical binding in a fresh background Emacs process, never the user's: its working directory is the working directory, its load path has the harness, so a harness library can be required to inspect or drive it, and it is killed at timeout seconds (30 by default). Use it as the Emacs-native alternative to bash for file work, such as a dired-style batch rename; it may run in the same sandbox as bash commands, and sees what they see. Read or drive the user's live Emacs with the emacs_* tools instead. Returns the value of the last form, anything printed to standard-output, and messages logged during evaluation."
   :schema '(:type "object"
             :properties (:code (:type "string" :description "One or more Emacs Lisp forms")
                          :timeout (:type "integer" :description "Seconds before the evaluation is stopped. Default 30"))

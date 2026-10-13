@@ -90,7 +90,7 @@ collects the sockets that are."
        (when (timerp harness-tools-dev--check-timer) (cancel-timer harness-tools-dev--check-timer))
        (setq harness-tools-dev--check-timer nil)
        (cl-letf (((symbol-function 'harness-tools-dev--ask-to-exit)
-                  (lambda (socket) (push socket harness-tools-dev-test--asked) (harness-resolved nil))))
+                  (lambda (socket &optional _path) (push socket harness-tools-dev-test--asked) (harness-resolved nil))))
          (unwind-protect (progn ,@body)
            (when (timerp harness-tools-dev--check-timer) (cancel-timer harness-tools-dev--check-timer))
            (setq harness-tools-dev--check-timer nil))))))
@@ -426,7 +426,7 @@ A restart of the harness process alone must not stop the instances."
       (harness-tools-dev-test--session "talk" :cwd dir :status 'running)
       (harness-tools-dev-test--open dir "talk")
       (cl-letf (((symbol-function 'harness-tools-dev--ask-to-exit)
-                 (lambda (socket) (push socket harness-tools-dev-test--asked) gate)))
+                 (lambda (socket &optional _path) (push socket harness-tools-dev-test--asked) gate)))
         (let ((stop (harness-call 'harness-dev/stop dir))
               (start (harness-tools-dev--open (list :path dir) (list :session-id "talk" :cwd dir))))
           (harness-test-wait (lambda () harness-tools-dev-test--asked) 5 "the stop to begin")
@@ -479,6 +479,50 @@ A restart of the harness process alone must not stop the instances."
               (should (integerp (plist-get found :pid))))
             (should (harness-test-await (harness-call 'harness-dev/stop dir) 30))
             (should-not (funcall harness-tools-dev--processes-function)))
+        (let ((left (funcall harness-tools-dev--processes-function)))
+          (when (listp left)
+            (dolist (daemon left) (ignore-errors (signal-process (plist-get daemon :pid) 'kill)))))))))
+
+(ert-deftest harness-tools-dev-stops-a-daemon-through-the-socket-in-its-checkout ()
+  "A daemon whose socket is in its checkout, where scripts/dev.sh puts it,
+is asked to exit through that socket, not killed: emacsclient names it
+from the checkout, as its whole name is longer than a Unix socket's."
+  (harness-tools-dev-test-with
+    (skip-unless (listp (harness-tools-dev-processes)))
+    (skip-unless (file-directory-p (format "/proc/%d/cwd" (emacs-pid))))
+    (let* ((long (expand-file-name (concat (make-string 90 ?x) "/checkout/") (harness-test-temp-dir)))
+           (dir (progn (make-directory (expand-file-name "scripts" long) t) long))
+           (socket (harness-tools-dev-socket dir))
+           (file (expand-file-name (concat "scripts/.dev/run/" socket) dir))
+           (emacs (expand-file-name invocation-name invocation-directory))
+           (logged nil)
+           (harness-log-hook (list (lambda (level message) (push (cons level message) logged))))
+           (harness-tools-dev--processes-function
+            (lambda ()
+              (let ((all (harness-tools-dev-processes)))
+                (if (listp all)
+                    (cl-remove-if-not (lambda (daemon) (equal socket (plist-get daemon :socket))) all)
+                  all)))))
+      (should (> (string-bytes file) 107))
+      (with-temp-file (expand-file-name "harness.el" dir) (insert ";; fake harness\n"))
+      ;; As the real one does, through its working directory: the
+      ;; daemon starts in the checkout.
+      (with-temp-file (expand-file-name "scripts/harness-dev.el" dir)
+        (insert ";;; -*- lexical-binding: t; -*-\n"
+                "(setq server-socket-dir (format \"/proc/%d/cwd/scripts/.dev/run/\" (emacs-pid)))\n"))
+      (unwind-protect
+          (let ((default-directory dir))
+            (call-process emacs nil nil nil "-Q" (concat "--daemon=" socket)
+                          "-l" (expand-file-name "scripts/harness-dev.el" dir))
+            (harness-test-wait (lambda () (funcall harness-tools-dev--processes-function))
+                               10 "the daemon to start")
+            (should (file-exists-p file))
+            (should (harness-test-await (harness-call 'harness-dev/stop dir) 30))
+            (should-not (funcall harness-tools-dev--processes-function))
+            ;; It exited when asked: its server took its socket away, and
+            ;; nothing had to kill it.
+            (should-not (file-exists-p file))
+            (should-not (cl-some (lambda (entry) (string-match-p "did not exit" (cdr entry))) logged)))
         (let ((left (funcall harness-tools-dev--processes-function)))
           (when (listp left)
             (dolist (daemon left) (ignore-errors (signal-process (plist-get daemon :pid) 'kill)))))))))

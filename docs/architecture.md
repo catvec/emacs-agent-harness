@@ -123,7 +123,8 @@ default) the layers above are split across two Emacs processes:
   bounded actions (show a buffer, insert text, save one, trace a
   function or a variable); none evaluates code.  The `elisp` tool
   evaluates in a child `emacs --batch` (lisp/harness-elisp.el), never
-  in the lent Emacs.  Model-written Lisp reaches the lent Emacs only
+  in the lent Emacs, and that child runs in the sandbox as a `bash`
+  command does.  Model-written Lisp reaches the lent Emacs only
   through `emacs_eval` (tools-emacs-eval), which the user can turn off
   with `harness-emacs-eval` (on by default): the code runs on the UI's
   only thread, where a blocking call freezes typing and redisplay,
@@ -2746,13 +2747,13 @@ non-interactive session it stays a denial.
 
 ### sandbox
 
-- `sandbox/wrap CWD COMMAND-LIST &optional (:network t :writable (…) :readable (…) :read-only nil)` →
+- `sandbox/wrap CWD COMMAND-LIST &optional (:network t :writable (…) :readable (…) :read-only nil :scratch (…))` →
   command list (bwrap / systemd-run / plain).  `sandbox/status` →
   `(:backend bwrap|systemd|none :available (…) :policy …)`.  Fails closed
   when `harness-sandbox-policy` is `required` and no backend exists.
-  Without the sandbox module the bash tool fails closed for `required`
-  too (`harness-tools-shell--wrap`), rather than running the command
-  unconfined.
+  Without the sandbox module the bash and elisp tools fail closed for
+  `required` too (`harness-tools-shell--wrap`), rather than running the
+  command unconfined.
 - `:read-only`, for a caller that needs a command to change nothing (a
   supervising session's shell, which only looks), mounts the working
   directory, the git directories and every `:writable` entry read-only
@@ -2762,6 +2763,18 @@ non-interactive session it stays a denial.
   backend, `sandbox/wrap` signals `harness-sandbox-unavailable` instead
   of returning COMMAND.  `sandbox/confined-p CWD` says beforehand
   whether it can be had.
+- `:scratch` lists directories the caller made for the one command and
+  deletes after it, which the command writes even when it is
+  `:read-only`: the elisp tool's background Emacs leaves its result in
+  one.  They are mounted after everything else (bwrap `--bind`;
+  systemd `BindPaths=` and `ReadWritePaths=`), so nothing covers them.
+  One that is no local directory, or is `/`, holds the working
+  directory or the home directory, or is, holds or lies in `/usr`,
+  `/etc`, `/proc`, `/dev` or `/sys`, signals an error
+  (`harness-sandbox--scratch-mounts`): shown writable, it would undo
+  what the sandbox hides or keeps read-only.  They ask for no
+  confinement: where the command runs unconfined it reaches them
+  anyway.
 - `$HOME`: bwrap keeps its path, covered by an empty tmpfs (after the
   one on /tmp, which may hold it, and before every bind), so `~/x`
   names the same path inside as outside and shows only what is mounted
@@ -2792,8 +2805,8 @@ non-interactive session it stays a denial.
   `:contained` ones of `skills/directories`) as `:readable`, so `cat
   ~/.claude/skills/x/SKILL.md` works in the sandbox as outside it.
 - `harness-sandbox--mounts READABLE WRITABLE CWD HOME` → `(MODE SOURCE
-  DEST)` mounts, `ro` for a readable directory and `rw` for a writable
-  directory or file, each shown where it is named, where its symbolic
+  DEST)` mounts, `ro` for a readable directory or file and `rw` for a
+  writable one, each shown where it is named, where its symbolic
   links lead, and, under a `$HOME` that is not the real one's path
   (HOME: `/tmp` for systemd-run, `/tmp/harness-home` when bwrap cannot
   keep the path), at the same place under it.  Left out: what lies
@@ -6329,7 +6342,16 @@ checkout's true name, so the same worktree reuses its instance and two
 worktrees never share one; the instance's state and compiled files stay
 in that checkout's `scripts/.dev/state-SOCKET`, passed as
 `HARNESS_DEV_STATE` (dev.sh keeps one it inherits, so an instance
-opened by the harness of another would share that one's state).  The result lists the
+opened by the harness of another would share that one's state).  The
+instance's server socket is in that checkout too, at
+`scripts/.dev/run/SOCKET` (`harness-tools-dev--socket-dir`), not in
+`$XDG_RUNTIME_DIR`: the bash tool's sandbox shows the checkout and
+hides `$XDG_RUNTIME_DIR`, so the agent drives the instance from bash.
+A Unix socket's path holds 107 bytes at most, too few for a worktree's,
+so `scripts/harness-dev.el` sets `server-socket-dir` to
+`/proc/PID/cwd/scripts/.dev/run/`, PID being the daemon, which dev.sh
+starts in the checkout, and dev.sh names it through its own
+`/proc/$$/cwd`.  The result lists the
 `scripts/dev.sh` commands that drive it (shot, keys, eval, errors,
 reload, stop) prefixed with that socket.  `path` defaults to the
 session's worktree, else its cwd; a directory that is not a checkout
@@ -6385,7 +6407,11 @@ else's and stays, and so does the one this harness runs in (its
 `harness-tools-dev--own-socket`).
 
 Stopping (`harness-tools-dev--stop`) runs `emacsclient -a false -s
-SOCKET --eval (kill-emacs)`, from Emacs's own `invocation-directory`,
+scripts/.dev/run/SOCKET --eval (kill-emacs)`, the emacsclient of
+Emacs's own `invocation-directory`, in the checkout: a short relative
+path to the socket there.  When the checkout holds no such socket, as
+for an instance an older dev.sh started, or the checkout is gone, it
+runs `-s SOCKET` from `/`, which finds a socket in the default place,
 so nothing of the checkout has to exist.  A daemon still running
 `harness-tools-dev--kill-grace` seconds later has its process tree
 killed with TERM, then KILL.  The record is forgotten and
@@ -6414,7 +6440,8 @@ finds or stops an Emacs it did not start.
 
 `bash` (tools-shell) lets a module confine a session's commands further
 through the sync filter `tools/sandbox-options`, run before each command
-with the value nil and the session id as its argument.  A handler returns
+-- the `elisp` tool's background Emacs included -- with the value nil
+and the session id as its argument.  A handler returns
 the plist it was given with its own `sandbox/wrap` options set over it,
 such as `(:read-only t :network nil)`, so a later handler's options win
 over an earlier one's; a value that is no plist of options signals an
@@ -7005,6 +7032,30 @@ shape `harness-elisp-payload` describes (value, output, messages or
 error).  It never runs in the lent Emacs.  A call that asks for the
 user's Emacs (the old `emacs` input) is refused with that explanation,
 naming `emacs_eval` unless that is off.
+
+The child is a command like a `bash` call's, and runs in the sandbox
+the same way (`harness-tools-shell--elisp-command`): it is shown the
+directories the session may use, with the options `tools/sandbox-options`
+gives, and refuses to run where a `bash` command would (a `required`
+policy without a backend or without the sandbox module, options with no
+`sandbox/wrap`).  It used to run unconfined, a way out of the sandbox
+for any session.  Besides those directories it reads the harness it
+loads, `harness.el` and `lisp/` in `harness-directory`
+(`harness-tools-shell--harness-files`), but not the rest of that
+checkout: its `scripts/.dev/run/` holds the sockets of the dev
+instances `open_harness` starts unconfined, and a socket connects
+through a read-only mount as well.  It also reads the Emacs it runs
+where that is not in `/usr` (`harness-tools-shell--emacs-dirs`), and it
+writes the call's own `io/` directory, where its code waits and it
+leaves its result, even when the options make it read-only (the
+sandbox's `:scratch`).  `env` sets the variables the child reads
+(`HARNESS_ELISP_CODE` ...) on its command line, since systemd-run passes
+none of the harness's environment on.  Unwrapped, as without the
+sandbox module, the command line and its environment are as they always
+were.  A remote session's code runs in the call's own directory, the
+child running on this machine.  The harness, outside the sandbox, reads
+the result only from a regular file, never through a symbolic link the
+child left there.
 
 `emacs_eval` (tools-emacs-eval) is the one tool that evaluates
 model-written Lisp in the lent Emacs, so a model can change the Emacs

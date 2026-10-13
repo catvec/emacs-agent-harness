@@ -598,6 +598,64 @@ hold as written."
          (delete-directory cwd t)
          (delete-directory elsewhere t))))))
 
+(ert-deftest harness-sandbox-readable-files-are-shown-read-only ()
+  "A readable file is shown read-only where it is named, as a readable
+directory is, and its directory is not; a missing one is left out."
+  (harness-sandbox-test--setup)
+  (harness-sandbox-test-with-home home
+    (ignore home)
+    (let* ((cwd (harness-test-temp-dir))
+           (dir (harness-test-temp-dir))
+           (file (expand-file-name "shown.el" dir))
+           (path (directory-file-name (file-truename file)))
+           (harness-sandbox-policy 'preferred)
+           (harness-sandbox-backend 'auto))
+      (harness-sandbox-test--write file ";; shown\n")
+      (unwind-protect
+          (progn
+            (harness-sandbox-test-with-executables '(("bwrap" . "/usr/bin/bwrap"))
+              (let ((cmd (harness-call 'sandbox/wrap cwd '("true")
+                                       :readable (list file (expand-file-name "missing.el" dir)))))
+                (should (harness-sandbox-test--subseq-p (list "--ro-bind" path path) cmd))
+                (should-not (member (directory-file-name dir) cmd))
+                (should-not (cl-find-if (lambda (a) (string-search "missing.el" a)) cmd))))
+            (harness-sandbox-test-with-executables '(("systemd-run" . "/usr/bin/systemd-run"))
+              (should (harness-sandbox-test--subseq-p
+                       (list "-p" (concat "BindReadOnlyPaths=" path))
+                       (harness-call 'sandbox/wrap cwd '("true") :readable (list file))))))
+        (harness-sandbox-detect)
+        (delete-directory cwd t)
+        (delete-directory dir t)))))
+
+(ert-deftest harness-sandbox-bwrap-real-run-readable-file ()
+  "Under the real bwrap a readable file reads but cannot be written, and
+the other files of its directory do not show."
+  (harness-sandbox-test--setup)
+  (skip-unless (executable-find "bwrap"))
+  (harness-sandbox-detect)
+  (skip-unless (eq 'bwrap (plist-get (harness-call 'sandbox/status) :backend)))
+  (let* ((cwd (harness-test-temp-dir))
+         (dir (harness-test-temp-dir))
+         (file (expand-file-name "shown.el" dir))
+         (harness-sandbox-policy 'required)
+         (script (format "cat %s; cat %s 2>/dev/null || echo sibling-hidden; { echo x >> %s; } 2>/dev/null && echo file-written || echo file-refused"
+                         (shell-quote-argument file)
+                         (shell-quote-argument (expand-file-name "sibling.txt" dir))
+                         (shell-quote-argument file))))
+    (harness-sandbox-test--write file "shown\n")
+    (harness-sandbox-test--write (expand-file-name "sibling.txt" dir) "hidden\n")
+    (unwind-protect
+        (let ((probe (harness-await (harness-run-command (harness-call 'sandbox/wrap cwd '("true"))
+                                                         :cwd cwd :timeout 20))))
+          (unless (eql 0 (plist-get probe :exit))
+            (ert-skip (format "bwrap cannot start here: %s" (string-trim (plist-get probe :stderr)))))
+          (let* ((cmd (harness-call 'sandbox/wrap cwd (list "sh" "-c" script) :readable (list file)))
+                 (r (harness-await (harness-run-command cmd :cwd cwd :timeout 20))))
+            (should (equal "shown\nsibling-hidden\nfile-refused\n" (plist-get r :stdout)))
+            (should (equal "shown\n" (with-temp-buffer (insert-file-contents file) (buffer-string))))))
+      (delete-directory cwd t)
+      (delete-directory dir t))))
+
 (ert-deftest harness-sandbox-confined-p-says-when-commands-are-confined ()
   "`sandbox/confined-p' is non-nil where a backend wraps the commands."
   (harness-sandbox-test--setup)
@@ -1057,6 +1115,158 @@ was somewhere else."
     (should (equal before (harness-sandbox-test--git wt "rev-parse" "HEAD")))
     (should (string-empty-p (harness-sandbox-test--git wt "status" "--porcelain")))
     (should-not (string-match-p "inside" (harness-sandbox-test--git root "branch" "--list")))))
+
+;;;; Scratch directories
+
+(ert-deftest harness-sandbox-scratch-bwrap-arguments ()
+  "A scratch directory is bound writable after every other mount, so it
+is writable whatever covers it, :read-only included."
+  (harness-sandbox-test--setup)
+  (harness-sandbox-test-with-home home
+    (ignore home)
+    (let* ((cwd (harness-test-temp-dir))
+           (scratch (harness-test-temp-dir))
+           (inner (file-name-as-directory (expand-file-name "inner" cwd)))
+           (cwd-bind (directory-file-name cwd))
+           (scratch-bind (directory-file-name scratch))
+           (harness-sandbox-policy 'preferred)
+           (harness-sandbox-backend 'auto)
+           (command '("sh" "-c" "true")))
+      (make-directory inner)
+      (unwind-protect
+          (harness-sandbox-test-with-executables '(("bwrap" . "/usr/bin/bwrap"))
+            (dolist (read-only '(nil t))
+              (let ((cmd (harness-call 'sandbox/wrap cwd command :scratch (list scratch)
+                                       :readable (list scratch) :read-only read-only)))
+                ;; Shown read-only as the readable directory it also is,
+                ;; then writable over that, last of all.
+                (should (harness-sandbox-test--subseq-p (list "--ro-bind" scratch-bind scratch-bind) cmd))
+                (should (equal (list "--bind" scratch-bind scratch-bind)
+                               (car (last (harness-sandbox-test--binds cmd)))))
+                (should (harness-sandbox-test--subseq-p
+                         (list (if read-only "--ro-bind" "--bind") cwd-bind cwd-bind) cmd))
+                (should (equal command (cdr (member "--" cmd))))))
+            ;; Read-only, it is the one writable mount.
+            (should (equal (list (list "--bind" scratch-bind scratch-bind))
+                           (harness-sandbox-test--rw-binds
+                            (harness-call 'sandbox/wrap cwd command :scratch (list scratch) :read-only t))))
+            ;; One in the working directory is writable in the read-only one.
+            (should (equal (list (list "--ro-bind" cwd-bind cwd-bind)
+                                 (list "--bind" (directory-file-name inner) (directory-file-name inner)))
+                           (last (harness-sandbox-test--binds
+                                  (harness-call 'sandbox/wrap cwd command :scratch (list inner) :read-only t))
+                                 2)))
+            ;; Without one, the command line is as it was.
+            (should (equal (harness-call 'sandbox/wrap cwd command :read-only t)
+                           (harness-call 'sandbox/wrap cwd command :read-only t :scratch nil))))
+        (harness-sandbox-detect)
+        (delete-directory cwd t)
+        (delete-directory scratch t)))))
+
+(ert-deftest harness-sandbox-scratch-systemd-arguments ()
+  "systemd binds a scratch directory writable, read-only or not, and
+refuses one whose path its settings cannot hold."
+  (harness-sandbox-test--setup)
+  (let* ((cwd (harness-test-temp-dir))
+         (scratch (harness-test-temp-dir))
+         (spaced (file-name-as-directory (make-temp-file "harness scratch " t)))
+         (cwd-path (directory-file-name cwd))
+         (scratch-path (directory-file-name scratch))
+         (harness-sandbox-policy 'preferred)
+         (harness-sandbox-backend 'auto)
+         (command '("sh" "-c" "true"))
+         (writable-settings (lambda (cmd)
+                              (cl-remove-if-not
+                               (lambda (a) (string-match-p "\\`\\(BindPaths\\|ReadWritePaths\\)=" a)) cmd))))
+    (unwind-protect
+        (harness-sandbox-test-with-executables '(("systemd-run" . "/usr/bin/systemd-run"))
+          (dolist (read-only '(nil t))
+            (let ((cmd (harness-call 'sandbox/wrap cwd command :scratch (list scratch) :read-only read-only)))
+              (should (harness-sandbox-test--subseq-p
+                       (list "-p" (concat "BindPaths=" scratch-path) "-p" (concat "ReadWritePaths=" scratch-path))
+                       cmd))
+              (should (equal command (cdr (member "--" cmd))))))
+          (let ((cmd (harness-call 'sandbox/wrap cwd command :scratch (list scratch) :read-only t)))
+            (should (harness-sandbox-test--subseq-p '("-p" "ProtectSystem=strict") cmd))
+            (should (harness-sandbox-test--subseq-p (list "-p" (concat "BindReadOnlyPaths=" cwd-path)) cmd))
+            ;; Nothing else is writable.
+            (should (equal (list (concat "BindPaths=" scratch-path) (concat "ReadWritePaths=" scratch-path))
+                           (funcall writable-settings cmd))))
+          (should-error (harness-call 'sandbox/wrap cwd command :scratch (list spaced) :read-only t)))
+      (harness-sandbox-detect)
+      (delete-directory cwd t)
+      (delete-directory scratch t)
+      (delete-directory spaced t))))
+
+(ert-deftest harness-sandbox-scratch-refuses-what-it-must-not-show ()
+  "A scratch directory that would show writable what the sandbox hides or
+keeps read-only is refused with an error, and so is one that is no local
+directory.  Where the command runs unconfined nothing is checked: it
+reaches the directory anyway."
+  (harness-sandbox-test--setup)
+  (harness-sandbox-test-with-home home
+    (let* ((cwd (harness-test-temp-dir))
+           (inner (file-name-as-directory (expand-file-name "inner" cwd)))
+           (harness-sandbox-policy 'preferred)
+           (harness-sandbox-backend 'auto)
+           (command '("true")))
+      (make-directory inner)
+      (unwind-protect
+          (progn
+            (dolist (backend '(("bwrap" . "/usr/bin/bwrap") ("systemd-run" . "/usr/bin/systemd-run")))
+              (harness-sandbox-test-with-executables (list backend)
+                (dolist (bad (list "/"
+                                   ;; The working directory, and what holds it.
+                                   inner cwd (file-name-directory (directory-file-name cwd))
+                                   ;; The home directory, and what holds it.
+                                   home (file-name-directory (directory-file-name home))
+                                   ;; System directories, and what lies in them.
+                                   "/usr" "/usr/share" "/etc" "/proc/self" "/dev/shm"
+                                   ;; No local directory.
+                                   (expand-file-name "missing" cwd) "/ssh:example.invalid:/tmp/x" 42))
+                  (dolist (read-only '(nil t))
+                    (should-error (harness-call 'sandbox/wrap inner command :scratch (list bad)
+                                                :read-only read-only))))
+                ;; A good one beside a bad one does not save it.
+                (should-error (harness-call 'sandbox/wrap cwd command :scratch (list home inner)))))
+            ;; No backend, or the policy off: the command runs as it is.
+            (harness-sandbox-test-with-executables nil
+              (should (equal command (harness-call 'sandbox/wrap cwd command :scratch (list "/")))))
+            (harness-sandbox-test-with-executables '(("bwrap" . "/usr/bin/bwrap"))
+              (let ((harness-sandbox-policy 'off))
+                (should (equal command (harness-call 'sandbox/wrap cwd command :scratch (list "/")))))))
+        (harness-sandbox-detect)
+        (delete-directory cwd t)))))
+
+(ert-deftest harness-sandbox-bwrap-real-run-scratch ()
+  "Under the real bwrap a :read-only command writes its scratch directory
+and nothing else."
+  (harness-sandbox-test--setup)
+  (skip-unless (executable-find "bwrap"))
+  (harness-sandbox-detect)
+  (skip-unless (eq 'bwrap (plist-get (harness-call 'sandbox/status) :backend)))
+  (let* ((cwd (harness-test-temp-dir))
+         (scratch (harness-test-temp-dir))
+         (harness-sandbox-policy 'required)
+         (script (format "cat seen.txt; echo x > new.txt 2>/dev/null && echo cwd-written || echo cwd-refused; echo made > %s && echo scratch-written"
+                         (shell-quote-argument (expand-file-name "result.json" scratch)))))
+    (harness-sandbox-test--write (expand-file-name "seen.txt" cwd) "seen\n")
+    (unwind-protect
+        (let ((probe (harness-await (harness-run-command (harness-call 'sandbox/wrap cwd '("true"))
+                                                         :cwd cwd :timeout 20))))
+          (unless (eql 0 (plist-get probe :exit))
+            (ert-skip (format "bwrap cannot start here: %s" (string-trim (plist-get probe :stderr)))))
+          (let* ((cmd (harness-call 'sandbox/wrap cwd (list "sh" "-c" script)
+                                    :read-only t :scratch (list scratch)))
+                 (r (harness-await (harness-run-command cmd :cwd cwd :timeout 20))))
+            (should (equal "seen\ncwd-refused\nscratch-written\n" (plist-get r :stdout)))
+            (should (eql 0 (plist-get r :exit)))
+            (should (equal '("seen.txt") (directory-files cwd nil "\\`[^.]")))
+            (should (equal "made\n" (with-temp-buffer
+                                      (insert-file-contents (expand-file-name "result.json" scratch))
+                                      (buffer-string))))))
+      (delete-directory cwd t)
+      (delete-directory scratch t))))
 
 (provide 'harness-sandbox-test)
 ;;; harness-sandbox-test.el ends here

@@ -13,6 +13,9 @@
 ;; runs for.  The daemon exits once that Emacs is gone, so an Emacs that
 ;; quits or crashes leaves no daemon behind.  One started by hand has no
 ;; owner and runs until it is stopped.
+;;
+;; The daemon's server socket goes in the checkout, scripts/.dev/run,
+;; where scripts/dev.sh looks for it (see `harness-dev-socket-dir').
 
 ;;; Code:
 
@@ -40,6 +43,25 @@ for it.")
   "Seconds between two checks that the owner still runs.")
 
 (defvar harness-tasks-store-in-repository)
+(defvar server-socket-dir)
+
+(defun harness-dev-socket-dir ()
+  "Return the directory this daemon's server socket goes in.
+That is scripts/.dev/run in the checkout, where scripts/dev.sh looks
+for it: a command the harness runs in its sandbox, such as the bash
+tool's, sees the checkout but not $XDG_RUNTIME_DIR, where Emacs puts
+its sockets by default.  A Unix socket's name holds 107 bytes at most,
+too few for the path of a task's worktree, so the directory is named
+through /proc/PID/cwd, PID being this Emacs, which scripts/dev.sh
+starts in the checkout.  The name stays good for whatever reads it
+from this Emacs's server, such as the emacsclient a desktop
+notification runs, for as long as this Emacs runs.  Without /proc, or
+for an Emacs working elsewhere, the directory is named as it is."
+  (let ((dir (expand-file-name "scripts/.dev/run/" harness-dev-root))
+        (cwd (format "/proc/%d/cwd" (emacs-pid))))
+    (if (and (file-directory-p cwd) (file-equal-p cwd harness-dev-root))
+        (concat cwd "/scripts/.dev/run/")
+      dir)))
 
 (defun harness-dev--process-start (pid)
   "Return when process PID started, in seconds since the epoch, or nil."
@@ -150,6 +172,9 @@ Without HARNESS_DEV_OWNER, as when started by hand, do nothing."
     (redisplay t)
     (buffer-name)))
 
+;; The daemon starts its server once this file is loaded, in the place
+;; set here.
+(setq server-socket-dir (harness-dev-socket-dir))
 ;; Watch the owner first: should loading the harness fail, the daemon
 ;; still goes once its owner does.
 (harness-dev-watch-owner)

@@ -14,7 +14,9 @@
 ;;   list, right after the user switched the mode on;
 ;; - only read-only, offline bash, and only when the sandbox can confine
 ;;   commands (`sandbox/confined-p'): `tools/sandbox-options' makes every
-;;   command run with every directory read-only and no network;
+;;   command run with every directory read-only and no network.  The
+;;   elisp tool's background Emacs is such a command too, so the elisp
+;;   tool, which the allowlist leaves out, would run so all the same;
 ;; - a turn that may end only on a decision.  The `agent/stop' filter
 ;;   sends a model that stopped without one back, twice at most, with a
 ;;   reminder; after that it lets the turn end and leaves a hint.

@@ -7,7 +7,9 @@
 ;; a dedicated `emacs -Q' daemon from a checkout -- a task's worktree,
 ;; say -- under a socket and state directory of its own, and drives it
 ;; with emacsclient; harness-dev.el in that checkout provides the
-;; eval / keys / shot / errors commands.
+;; eval / keys / shot / errors commands.  The socket is in the checkout
+;; (scripts/.dev/run), so the agent's bash commands, which run in the
+;; sandbox, reach the instance this module starts outside it.
 ;;
 ;; This module makes that instance one call away:
 ;;
@@ -57,8 +59,9 @@
 ;; belongs to somebody else and is left alone, as is the instance this
 ;; harness runs in.
 ;;
-;; Stopping asks the daemon to exit over emacsclient.  A daemon still
-;; alive after that has its process tree killed.  As a last resort, an
+;; Stopping asks the daemon to exit over emacsclient, through the
+;; socket in its checkout.  A daemon still alive after that has its
+;; process tree killed.  As a last resort, an
 ;; instance exits by itself once the Emacs the user runs the harness in
 ;; is gone: HARNESS_DEV_OWNER names that Emacs, and harness-dev.el
 ;; watches it.  So an Emacs that quits or crashes leaves no instance
@@ -83,6 +86,12 @@
 
 (defconst harness-tools-dev--marker "harness.el"
   "File that, with `harness-tools-dev--script', marks a harness checkout.")
+
+(defconst harness-tools-dev--socket-dir "scripts/.dev/run/"
+  "Where scripts/dev.sh puts a checkout's instance sockets, in the checkout.
+A command the bash tool runs in the sandbox sees the checkout, so it
+reaches the instance there; the default place of an Emacs socket,
+$XDG_RUNTIME_DIR, is hidden from it.")
 
 (defcustom harness-tools-dev-timeout 180
   "Seconds `scripts/dev.sh start' may take before the tool gives up.
@@ -235,7 +244,8 @@ once that Emacs is gone."
 LIFETIME, a sentence, says when the instance stops."
   (let ((dir (abbreviate-file-name (plist-get info :path)))
         (socket (plist-get info :socket)))
-    (format (concat "Harness from %s is running in an Emacs of its own (emacsclient socket %s), "
+    (format (concat "Harness from %s is running in an Emacs of its own (emacsclient socket %s, "
+                    "kept in that checkout's %s, where bash commands reach it), "
                     "with its state and compiled files in %s.%s\n"
                     "Drive it from %s with:\n"
                     "  HARNESS_DEV_SOCKET=%s scripts/dev.sh shot [PATH]   # screenshot its frame\n"
@@ -245,7 +255,7 @@ LIFETIME, a sentence, says when the instance stops."
                     "  HARNESS_DEV_SOCKET=%s scripts/dev.sh reload   # load the source as it is now\n"
                     "  HARNESS_DEV_SOCKET=%s scripts/dev.sh stop\n"
                     "Opening it again reuses this instance.%s")
-            dir socket (abbreviate-file-name (plist-get info :state))
+            dir socket harness-tools-dev--socket-dir (abbreviate-file-name (plist-get info :state))
             (if (plist-get info :focused)
                 "  Its frame was raised and focused."
               "  Its frame stays lowered, so it does not steal focus.")
@@ -644,14 +654,25 @@ it never stops itself."
   (let ((own (expand-file-name "emacsclient" invocation-directory)))
     (if (file-executable-p own) own "emacsclient")))
 
-(defun harness-tools-dev--ask-to-exit (socket)
+(defun harness-tools-dev--ask-to-exit (socket &optional path)
   "Ask the instance under SOCKET to exit, over emacsclient; return a promise.
-Nothing of its checkout runs for that, so it works when the checkout is
-gone too.  `-a false' keeps emacsclient from starting an Emacs when
-none answers, as an empty ALTERNATE_EDITOR would have it do."
-  (harness-run-command (list (harness-tools-dev--emacsclient) "-a" "false" "-s" socket
-                             "--eval" "(kill-emacs)")
-                       :cwd "/" :timeout harness-tools-dev--exit-timeout :name "harness-dev-stop"))
+PATH is its checkout, where scripts/dev.sh puts the socket
+\(`harness-tools-dev--socket-dir'): emacsclient then runs there and
+names the socket from there, as its whole name can be longer than a
+Unix socket's 107 bytes.  When the checkout holds no such socket -- an
+instance an older scripts/dev.sh started, or a checkout that is gone --
+it asks under SOCKET alone, in the place Emacs puts a socket by
+default.  Nothing of the checkout runs for that, so it works when the
+checkout is gone too.  `-a false' keeps emacsclient from starting an
+Emacs when none answers, as an empty ALTERNATE_EDITOR would have it do."
+  (let* ((relative (concat harness-tools-dev--socket-dir socket))
+         (here (and (stringp path) (not (file-remote-p path))
+                    (file-exists-p (expand-file-name relative path)))))
+    (harness-run-command (list (harness-tools-dev--emacsclient) "-a" "false"
+                               "-s" (if here relative socket)
+                               "--eval" "(kill-emacs)")
+                         :cwd (if here path "/")
+                         :timeout harness-tools-dev--exit-timeout :name "harness-dev-stop")))
 
 (defun harness-tools-dev--kill-leftovers (socket)
   "Kill the daemon under SOCKET should it still run in a moment; return a promise.
@@ -698,7 +719,7 @@ in is forgotten, never stopped."
                      (if path (abbreviate-file-name path) "?") socket reason)
         (harness-then
          (harness-then (harness-catch (condition-case err
-                                          (harness-tools-dev--ask-to-exit socket)
+                                          (harness-tools-dev--ask-to-exit socket path)
                                         (error (harness-rejected err)))
                                       #'ignore)
                        (lambda (_) (harness-tools-dev--kill-leftovers socket)))

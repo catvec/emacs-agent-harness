@@ -716,7 +716,9 @@ yours, only these directories, each at its own path: a directory you
 grant the session reaches its commands at once, as it reaches the other
 tools. `~` is your home directory there as well, emptied, so
 `~/.emacs.d/x` names the same file inside as outside, and only what the
-session may use shows in it.
+session may use shows in it. The `elisp` tool's background Emacs runs
+in the same sandbox and sees the same directories, plus the harness's
+own Lisp (`harness.el` and `lisp/`), read-only, so it can load it.
 
 Every permission request offers the same five answers, under the same
 names and keys wherever it shows (the chat, BTW, the popout, an ACP
@@ -3281,11 +3283,11 @@ It leaves alone:
 - Remote hosts through TRAMP. A session started in a TRAMP directory
   works on its host, and a tool given a TRAMP path reaches another host
   once you grant access to it (see [Remote hosts](#remote-hosts)).
-- Shell commands. They follow the permission mode and the sandbox, as
-  always, so a command can still reach the network. Use a permission
-  mode that asks before commands run (Ask or Accept edits), and set
-  `harness-sandbox-policy` to `required` so that no command runs
-  outside the sandbox.
+- Shell commands, and the `elisp` tool's background Emacs. They follow
+  the permission mode and the sandbox, as always, so a command can
+  still reach the network. Use a permission mode that asks before
+  commands run (Ask or Accept edits), and set `harness-sandbox-policy`
+  to `required` so that no command runs outside the sandbox.
 
 The settings page does not list the option, and no ACP client can
 change it. If you change it later with `setopt` or Customize, the

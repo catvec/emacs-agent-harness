@@ -29,7 +29,7 @@
 ;; inside the working directory, which is then visible anyway.
 ;;
 ;; A caller shows more: `:writable' directories (or files) read-write
-;; and `:readable' directories read-only.  The bash tool shows the
+;; and `:readable' ones read-only.  The bash tool shows the
 ;; session's own temporary directory and every directory granted to the
 ;; session read-write, so a grant reaches bash as it reaches the other
 ;; tools, and the skills directories and the tool output directory
@@ -53,6 +53,15 @@
 ;; unconfined, with the `off' policy, in a remote directory or with no
 ;; backend (whatever the policy), `sandbox/wrap' signals
 ;; `harness-sandbox-unavailable' instead of returning it.
+;;
+;; `:scratch' lists directories the caller made for the one command and
+;; deletes after it, which the command writes even when it is
+;; `:read-only': the elisp tool's background Emacs leaves its result in
+;; one, for the harness to read.  They are mounted last, so nothing
+;; covers them, and one that would show writable what the sandbox hides
+;; or keeps read-only -- the root directory, one holding the working
+;; directory or the home directory, a system directory -- is refused
+;; with an error.
 ;;
 ;; Seeing only its own directory makes some git commands destructive
 ;; inside the sandbox: `git worktree prune' takes every other worktree
@@ -190,10 +199,10 @@ moving it to `harness-sandbox--home'."
 
 (defun harness-sandbox--mounts (readable writable cwd home)
   "Return the mounts showing READABLE and WRITABLE as (MODE SOURCE DESTINATION).
-MODE is `ro' for READABLE, which lists directories, and `rw' for
-WRITABLE, which lists directories and files.  Each one that exists is
-shown where it is named and where its symbolic links lead, and, when
-it lies under the real home directory, at the same place under HOME,
+MODE is `ro' for READABLE and `rw' for WRITABLE, which both list
+directories and files.  Each one that exists is shown where it is
+named and where its symbolic links lead, and, when it lies under the
+real home directory, at the same place under HOME,
 the sandbox's $HOME when that is not the real home's path (nil
 otherwise), so that ~/... names it inside as well.  Left out are what
 lies inside CWD, which is shown read-write anyway; a readable
@@ -226,7 +235,7 @@ working directory is mounted where it is named, after these."
       (dolist (d paths)
         (let* ((named (and (stringp d) (not (file-remote-p d)) (expand-file-name d)))
                (dir (and named (file-directory-p named)))
-               (real (and named (or dir (and (eq mode 'rw) (file-exists-p named)))
+               (real (and named (or dir (file-exists-p named))
                           (funcall (if dir #'file-name-as-directory #'directory-file-name)
                                    (file-truename named))))
                (named (and real (funcall (if dir #'file-name-as-directory #'directory-file-name) named))))
@@ -263,6 +272,38 @@ See `harness-sandbox--mounts', of which these are the READABLE ones
 with no writable ones beside them; CWD and HOME are as there."
   (mapcar (lambda (m) (cons (nth 1 m) (nth 2 m)))
           (harness-sandbox--mounts readable nil cwd home)))
+
+(defun harness-sandbox--scratch-mounts (scratch cwd)
+  "Return the mounts showing the SCRATCH directories as (SOURCE . DESTINATION).
+SCRATCH lists directories the caller made for the one command and
+deletes after it, which the command writes even when it is
+`:read-only'.  Each is shown where it is named and where its symbolic
+links lead.  One that is no existing local directory, or that is the
+root directory, holds the working directory CWD or the home directory,
+or is, holds or lies in one of `harness-sandbox--system-paths',
+signals an error: shown writable, it would undo what the sandbox hides
+or keeps read-only."
+  (let ((home (getenv "HOME"))
+        mounts)
+    (dolist (d scratch)
+      (let* ((named (and (stringp d) (not (file-remote-p d)) (expand-file-name d)))
+             (real (and named (file-directory-p named)
+                        (directory-file-name (file-truename named)))))
+        (cond
+         ((null real)
+          (error "Sandbox scratch directory %S is no local directory" d))
+         ((or (equal real "/")
+              (harness-path-within-p real cwd)
+              (and (stringp home) (file-name-absolute-p home) (harness-path-within-p real home))
+              (cl-some (lambda (system)
+                         (or (harness-path-within-p system real) (harness-path-within-p real system)))
+                       harness-sandbox--system-paths))
+          (error "Sandbox scratch directory %s would show writable what the sandbox hides or keeps read-only"
+                 d))
+         (t
+          (dolist (dest (delete-dups (list real (directory-file-name named))))
+            (push (cons real dest) mounts))))))
+    (nreverse mounts)))
 
 (defun harness-sandbox--systemd-path-p (path)
   "Non-nil when PATH can be written in a systemd mount setting as it is.
@@ -357,13 +398,16 @@ writable, as for `harness-sandbox--bwrap-git-args'."
               (cl-loop for (var . value) in (harness-sandbox--git-env (plist-get git :common))
                        collect (format "--setenv=%s=%s" var value))))))
 
-(cl-defun harness-sandbox--bwrap-command (program cwd command &key (network t) writable readable read-only)
+(cl-defun harness-sandbox--bwrap-command (program cwd command &key (network t) writable readable read-only
+                                                   scratch)
   "Build the bwrap command line running COMMAND in CWD.
 PROGRAM is the bwrap executable.  NETWORK nil unshares the network
-namespace; WRITABLE and READABLE list extra directories to expose (see
-`harness-sandbox--mounts' for how they are shown).  READ-ONLY binds
+namespace; WRITABLE and READABLE list extra directories or files to
+expose (see `harness-sandbox--mounts' for how they are shown).  READ-ONLY binds
 CWD, the git directories and every WRITABLE entry with `--ro-bind', so
-that the command writes nothing but the sandbox's private /tmp.
+that the command writes nothing but the sandbox's private /tmp and the
+SCRATCH directories, which are bound with `--bind' after everything
+else (see `harness-sandbox--scratch-mounts').
 
 $HOME keeps its path: an empty tmpfs covers the home directory, so
 ~/x names the same path inside as outside and shows only what is
@@ -396,6 +440,9 @@ under it too."
               append (list (if (and (eq mode 'rw) (not read-only)) "--bind" "--ro-bind") source dest))
      (list (if read-only "--ro-bind" "--bind") cwd cwd)
      (harness-sandbox--bwrap-git-args cwd read-only)
+     ;; The scratch directories last, writable whatever holds them.
+     (cl-loop for (source . dest) in (harness-sandbox--scratch-mounts scratch cwd)
+              append (list "--bind" source dest))
      (list "--unshare-pid" "--unshare-ipc" "--unshare-uts"
            "--die-with-parent" "--new-session"
            "--chdir" cwd)
@@ -404,16 +451,20 @@ under it too."
      (list "--")
      command)))
 
-(cl-defun harness-sandbox--systemd-command (program cwd command &key (network t) writable readable read-only)
+(cl-defun harness-sandbox--systemd-command (program cwd command &key (network t) writable readable read-only
+                                                     scratch)
   "Build the systemd-run command line running COMMAND in CWD.
-PROGRAM is the systemd-run executable; NETWORK, WRITABLE, READABLE and
-READ-ONLY are as for `harness-sandbox--bwrap-command'.  READ-ONLY binds
-CWD, the git directories and every WRITABLE entry with
-`BindReadOnlyPaths=', sets no `ReadWritePaths=', and makes the rest of
-the file system read-only with `ProtectSystem=strict': unlike bwrap's,
-this sandbox shows the whole file system, and only the user's own files
-are hidden (`ProtectHome=tmpfs'), so what it does not show it must
-still refuse to write.
+PROGRAM is the systemd-run executable; NETWORK, WRITABLE, READABLE,
+READ-ONLY and SCRATCH are as for `harness-sandbox--bwrap-command'.
+READ-ONLY binds CWD, the git directories and every WRITABLE entry with
+`BindReadOnlyPaths=', sets no `ReadWritePaths=' but for the SCRATCH
+directories, and makes the rest of the file system read-only with
+`ProtectSystem=strict': unlike bwrap's, this sandbox shows the whole
+file system, and only the user's own files are hidden
+\(`ProtectHome=tmpfs'), so what it does not show it must still refuse
+to write.  The SCRATCH directories are bound writable as CWD is when it
+is, whatever READ-ONLY says; one whose path a setting cannot hold as
+written signals an error.
 
 Home directories are hidden with `ProtectHome=tmpfs' rather than
 `ProtectHome=yes': with the latter systemd cannot mount anything
@@ -442,6 +493,11 @@ too, so ~/x reaches them."
                                         source (if (equal source dest) "" (concat ":" dest))))
               else do (harness-log 'debug "sandbox: systemd cannot show %s at %s" source dest))
      (harness-sandbox--systemd-git-args cwd read-only)
+     (cl-loop for (source . dest) in (harness-sandbox--scratch-mounts scratch cwd)
+              do (unless (and (harness-sandbox--systemd-path-p source) (harness-sandbox--systemd-path-p dest))
+                   (error "Sandbox scratch directory %s cannot be written in a systemd setting" dest))
+              append (list "-p" (concat "BindPaths=" source (if (equal source dest) "" (concat ":" dest)))
+                           "-p" (concat "ReadWritePaths=" dest)))
      (unless network (list "-p" "PrivateNetwork=yes"))
      (unless (harness-sandbox--home-inside-p cwd)
        (list "--setenv=HOME=/tmp"))
@@ -463,14 +519,20 @@ must not run unconfined, whatever the policy says."
   "Return COMMAND (a list of strings) wrapped to run confined in CWD.
 OPTS: `:network' (default t; nil cuts network access), `:writable'
 \(extra directories or files mounted read-write, such as the
-directories granted to a session) and `:readable' (extra read-only
-directories).  Both are shown where they are named, where their
-symbolic links lead and, under a sandbox $HOME that is not the real
-one's path, where they are under the real one; see
+directories granted to a session) and `:readable' (extra directories
+or files mounted read-only).  Both are shown where they are named,
+where their symbolic links lead and, under a sandbox $HOME that is not
+the real one's path, where they are under the real one; see
 `harness-sandbox--mounts'.  `:read-only' non-nil mounts read-only the
 working directory, the git directories and every `:writable' entry as
 well, so that the command can write nothing but the sandbox's private
-/tmp.  A remote CWD or the `off' policy return COMMAND unchanged.
+/tmp and the `:scratch' directories: those the caller made for the one
+command and deletes after it, mounted writable whatever `:read-only'
+says, after everything else (see `harness-sandbox--scratch-mounts',
+which signals an error for one that would show writable what the
+sandbox hides or keeps read-only).  They ask for no confinement: where
+COMMAND runs unconfined it reaches them anyway.  A remote CWD or the
+`off' policy return COMMAND unchanged.
 Signals `harness-sandbox-unavailable' when the policy is `required' and
 no backend exists.  A `:read-only' command fails closed instead of
 running unconfined: it signals `harness-sandbox-unavailable' too for
@@ -480,7 +542,8 @@ policy."
         (network (if (plist-member opts :network) (plist-get opts :network) t))
         (writable (plist-get opts :writable))
         (readable (plist-get opts :readable))
-        (read-only (harness-json-true-p (plist-get opts :read-only))))
+        (read-only (harness-json-true-p (plist-get opts :read-only)))
+        (scratch (plist-get opts :scratch)))
     (cond
      ((and read-only (eq policy 'off))
       (harness-sandbox--refuse-read-only command "the sandbox policy is `off'"))
@@ -494,11 +557,11 @@ policy."
      ((eq harness-sandbox--backend 'bwrap)
       (harness-sandbox--bwrap-command (alist-get 'bwrap harness-sandbox--programs) cwd command
                                       :network network :writable writable :readable readable
-                                      :read-only read-only))
+                                      :read-only read-only :scratch scratch))
      ((eq harness-sandbox--backend 'systemd)
       (harness-sandbox--systemd-command (alist-get 'systemd harness-sandbox--programs) cwd command
                                         :network network :writable writable :readable readable
-                                        :read-only read-only))
+                                        :read-only read-only :scratch scratch))
      (read-only
       (harness-sandbox--refuse-read-only command "neither bwrap nor systemd-run is available"))
      ((eq policy 'required)

@@ -747,6 +747,10 @@ a child never yields, so nothing in the evaluating Emacs can end it."
            (code (format "(call-process \"sh\" nil nil nil \"-c\" %S)" command))
            (start (float-time))
            (harness--process-kill-grace 0.3)
+           ;; Unconfined, whether or not an earlier test loaded the
+           ;; sandbox: in bwrap's PID namespace $$ is a number of that
+           ;; namespace, which says nothing about a process out here.
+           (harness-sandbox-policy 'off)
            (r (harness-tools-shell-test--call "elisp" :timeout 1 :code code)))
       (should (plist-get r :is-error))
       (should (string-search "timed out" (plist-get r :content)))
@@ -781,6 +785,463 @@ place to ask for one, and a call that asks anyway is refused."
       (should-not (equal (format "=> %d" (emacs-pid)) content))
       (should (equal "background" (plist-get (plist-get r :meta) :emacs))))
     (should (equal "Emacs Lisp: (+ 1 2)" (harness-tool-title "elisp" '(:code "(+ 1 2)"))))))
+
+;;;; elisp: the sandbox
+
+(defun harness-tools-shell-test--elisp-reads ()
+  "Return what every evaluation shows the sandbox read-only: the
+harness's harness.el and lisp/, not the rest of its checkout, and the
+Emacs it runs where that is not in /usr."
+  (append (list (expand-file-name "harness.el" harness-directory)
+                (expand-file-name "lisp/" harness-directory))
+          (harness-tools-shell--emacs-dirs)))
+
+(defun harness-tools-shell-test--env-arg (command var)
+  "Return the value COMMAND, an `env' command line, gives VAR, or nil."
+  (cl-some (lambda (arg) (and (string-prefix-p (concat var "=") arg) (substring arg (1+ (length var)))))
+           command))
+
+(defun harness-tools-shell-test--keys (plist)
+  "Return the keys of PLIST, in order."
+  (cl-loop for (key) on plist by #'cddr collect key))
+
+(ert-deftest harness-tools-shell-elisp-sandbox-required-without-backend ()
+  "With the sandbox loaded, a required policy and no backend, elisp does
+not evaluate: its background Emacs would run unconfined.  The call's own
+directory goes with it."
+  (harness-tools-shell-test--setup)
+  (harness-test-load-module 'project)
+  (harness-test-load-module 'config)
+  (harness-test-load-module 'sandbox)
+  (harness-tools-shell-test-in-dir
+    (let ((marker (expand-file-name "ran" root))
+          (temporary-file-directory (file-name-as-directory (make-temp-file "harness-elisp-test-" t))))
+      (unwind-protect
+          (cl-letf (((symbol-function 'executable-find) (lambda (&rest _) nil)))
+            (harness-sandbox-detect)
+            (let* ((harness-sandbox-policy 'required)
+                   (r (harness-tools-shell-test--call
+                       "elisp" :code (format "(write-region \"x\" nil %S) 'leaked" marker))))
+              (should (plist-get r :is-error))
+              (should (string-search "Cannot evaluate" (plist-get r :content)))
+              (should-not (string-search "leaked" (plist-get r :content)))
+              (should-not (file-exists-p marker))
+              (should-not (directory-files temporary-file-directory nil "\\`[^.]")))
+            ;; preferred without a backend evaluates plain.
+            (let ((harness-sandbox-policy 'preferred))
+              (should (equal "=> 3" (plist-get (harness-tools-shell-test--call "elisp" :code "(+ 1 2)")
+                                               :content)))))
+        (harness-sandbox-detect)
+        (delete-directory temporary-file-directory t)))))
+
+(ert-deftest harness-tools-shell-elisp-sandbox-required-without-the-module ()
+  "A required sandbox, as a policy sets it, refuses an evaluation when the
+sandbox module is not loaded, rather than run the background Emacs
+unconfined."
+  (harness-test-reset-bus)
+  (harness-tools-shell-test--setup)
+  (harness-test-load-module 'project)
+  (harness-test-load-module 'config)
+  (should-not (harness-method-exists-p 'sandbox/wrap))
+  (harness-tools-shell-test-in-dir
+    (let ((marker (expand-file-name "ran" root)))
+      (harness-test-with-policy '((harness-sandbox-policy . required))
+        (let ((r (harness-tools-shell-test--call
+                  "elisp" :code (format "(write-region \"x\" nil %S) 'leaked" marker))))
+          (should (plist-get r :is-error))
+          (should (string-search "the sandbox module is not loaded" (plist-get r :content)))
+          (should-not (string-search "leaked" (plist-get r :content)))
+          (should-not (file-exists-p marker))))
+      ;; Not required: it evaluates as it always did.
+      (let ((r (harness-tools-shell-test--call "elisp" :code "(+ 1 2)")))
+        (should (equal "=> 3" (plist-get r :content)))
+        (should-not (plist-get (plist-get r :meta) :sandboxed))))))
+
+(ert-deftest harness-tools-shell-elisp-without-the-sandbox-runs-as-before ()
+  "Without the sandbox module the background Emacs runs as it did before
+the tool went through the sandbox: the same command line, in the
+working directory, with the same environment variables."
+  (harness-test-reset-bus)
+  (harness-tools-shell-test--setup)
+  (harness-test-load-module 'project)
+  (harness-test-load-module 'config)
+  (should-not (harness-method-exists-p 'sandbox/wrap))
+  (harness-tools-shell-test-in-dir
+    (let* ((orig (symbol-function 'harness-run-command))
+           (calls nil)
+           (r (cl-letf (((symbol-function 'harness-run-command)
+                         (lambda (command &rest args)
+                           (push (cons command args) calls)
+                           (apply orig command args))))
+                (harness-tools-shell-test--call "elisp" :code "(+ 1 2)"))))
+      (should (equal "=> 3" (plist-get r :content)))
+      (should-not (plist-get (plist-get r :meta) :sandboxed))
+      (should (= 1 (length calls)))
+      (pcase-let ((`(,command . ,args) (car calls)))
+        (should (equal (list harness-elisp-emacs "--batch" "-Q"
+                             "-L" harness-directory
+                             "-L" (expand-file-name "lisp" harness-directory)
+                             "-l" (expand-file-name "lisp/harness-elisp.el" harness-directory)
+                             "-f" "harness-elisp-batch-main")
+                       command))
+        (should (equal root (plist-get args :cwd)))
+        (should (equal "harness-elisp" (plist-get args :name)))
+        (should (equal '("HARNESS_ELISP_CODE" "HARNESS_ELISP_RESULT"
+                         "HARNESS_ELISP_TIMEOUT" "HARNESS_ELISP_MAX_VALUE_CHARS")
+                       (mapcar #'car (plist-get args :env))))
+        (should (equal "30" (alist-get "HARNESS_ELISP_TIMEOUT" (plist-get args :env) nil nil #'equal)))))))
+
+(ert-deftest harness-tools-shell-elisp-lets-the-sandbox-write-the-tmp-dir ()
+  "elisp asks the sandbox to let its background Emacs write the session's
+own temporary directory, as bash does, and, whatever else it asks, the
+io/ directory of the call, where its code waits and its result goes.
+Without a session, only the latter.  The directory is gone after the
+call, and the background Emacs, unwrapped, runs as it always did."
+  (harness-tools-shell-test--setup)
+  (let ((seen nil))
+    (harness-tools-shell-test-with-methods
+        (list (cons 'session/tmp-dir (lambda (sid) (and (equal sid "s1") "/tmp/harness-0/s1/")))
+              ;; Whether or not an earlier test loaded the permissions module.
+              (cons 'permission/dirs (lambda (_sid) nil))
+              (cons 'sandbox/wrap (lambda (cwd command &rest opts) (push (list cwd command opts) seen) command)))
+      (harness-tools-shell-test-in-dir
+        (let ((r (harness-tools-shell-test--as "s1" "elisp" :code "(+ 1 2)")))
+          (should (equal "=> 3" (plist-get r :content)))
+          ;; Returned unwrapped, it ran unwrapped.
+          (should-not (plist-get (plist-get r :meta) :sandboxed)))
+        (pcase-let ((`(,cwd ,command ,opts) (car seen)))
+          (should (equal root cwd))
+          (should (equal '("/tmp/harness-0/s1/") (plist-get opts :writable)))
+          (let ((io (car (plist-get opts :scratch))))
+            (should (equal (list io) (plist-get opts :scratch)))
+            (should (string-suffix-p "/io/" io))
+            ;; The code and the result are there; the sandbox is given the
+            ;; Emacs and the variables it reads, set by `env'.
+            (should (equal io (file-name-directory (harness-tools-shell-test--env-arg command "HARNESS_ELISP_CODE"))))
+            (should (equal io (file-name-directory (harness-tools-shell-test--env-arg command "HARNESS_ELISP_RESULT"))))
+            (should (equal "env" (car command)))
+            (should (member harness-elisp-emacs command))
+            (should-not (file-exists-p io))))
+        (harness-tools-shell-test--call "elisp" :code "(+ 1 2)")
+        (should-not (plist-get (nth 2 (car seen)) :writable))
+        (should (plist-get (nth 2 (car seen)) :scratch))))))
+
+(ert-deftest harness-tools-shell-elisp-shows-the-skills-to-the-sandbox ()
+  "elisp shows its background Emacs the skills directories bash shows a
+command, read-only, besides the harness and the Emacs it runs; without
+the skills module only those."
+  (harness-tools-shell-test--setup)
+  (let ((seen nil) (asked nil))
+    (harness-tools-shell-test-with-methods
+        (list (cons 'sandbox/wrap (lambda (cwd command &rest opts) (push (cons cwd opts) seen) command)))
+      (harness-tools-shell-test-in-dir
+        (harness-tools-shell-test-with-methods
+            (list (cons 'skills/directories
+                        (lambda (cwd)
+                          (push cwd asked)
+                          (list (list :dir "/skills/mine/" :source 'global :contained t)
+                                (list :dir "/proj/.claude/skills/" :source 'project :contained nil)
+                                (list :dir "/skills/mine/linked/" :source 'global :contained t)))))
+          (should (equal "=> 3" (plist-get (harness-tools-shell-test--call "elisp" :code "(+ 1 2)") :content)))
+          (should (equal (append '("/skills/mine/" "/skills/mine/linked/") (harness-tools-shell-test--elisp-reads))
+                         (plist-get (cdar seen) :readable)))
+          ;; Asked for the session's directory.
+          (should (equal (list root) asked)))
+        (harness-tools-shell-test--call "elisp" :code "(+ 1 2)")
+        (should (equal (harness-tools-shell-test--elisp-reads) (plist-get (cdar seen) :readable)))))))
+
+(ert-deftest harness-tools-shell-elisp-shows-the-session-dirs-to-the-sandbox ()
+  "elisp shows its background Emacs every directory the session may touch,
+as bash shows a command: read-write those the permission layer lets
+every tool reach, the directories granted to it among them, and
+read-only the tool output directory.  A remote one is left out; without
+a session nothing is asked."
+  (harness-tools-shell-test--setup)
+  (let ((seen nil) (asked nil))
+    (harness-tools-shell-test-with-methods
+        (list (cons 'sandbox/wrap (lambda (cwd command &rest opts) (push (cons cwd opts) seen) command))
+              (cons 'session/tmp-dir (lambda (sid) (and (equal sid "s1") "/tmp/harness-0/s1/")))
+              (cons 'permission/dirs
+                    (lambda (sid)
+                      (push sid asked)
+                      (list (list :dir "/work/proj/" :source 'cwd)
+                            (list :dir "/tmp/harness-0/s1/" :source 'tmp)
+                            (list :dir "/home/u/.emacs.d/" :source 'session)
+                            (list :dir "/home/u/notes/*.org" :source 'session)
+                            (list :dir "/ssh:box:/srv/" :source 'session)
+                            (list :dir "/home/u/shared/" :source 'config)
+                            (list :dir "/home/u/later/" :source 'turn)
+                            (list :dir "/state/outputs/" :source 'outputs)))))
+      (harness-tools-shell-test-in-dir
+        (should (equal "=> 3" (plist-get (harness-tools-shell-test--as "s1" "elisp" :code "(+ 1 2)") :content)))
+        (should (equal '("s1") asked))
+        (should (equal '("/tmp/harness-0/s1/" "/work/proj/" "/home/u/.emacs.d/" "/home/u/notes/*.org"
+                         "/home/u/shared/" "/home/u/later/")
+                       (plist-get (cdar seen) :writable)))
+        (should (equal (cons "/state/outputs/" (harness-tools-shell-test--elisp-reads))
+                       (plist-get (cdar seen) :readable)))
+        (harness-tools-shell-test--call "elisp" :code "(+ 1 2)")
+        (should (equal '("s1") asked))
+        (should-not (plist-get (cdar seen) :writable))
+        (should (equal (harness-tools-shell-test--elisp-reads) (plist-get (cdar seen) :readable)))))))
+
+(ert-deftest harness-tools-shell-elisp-asks-for-sandbox-options ()
+  "elisp runs the `tools/sandbox-options' filter as bash does, from nil and
+with the session id, and gives what it returns to the sandbox; with no
+handler it asks for nothing more than the directories."
+  (harness-tools-shell-test--setup)
+  (let ((seen nil) (asked nil))
+    (harness-tools-shell-test-with-methods
+        (list (cons 'sandbox/wrap (lambda (cwd command &rest opts) (push (cons cwd opts) seen) command)))
+      (harness-tools-shell-test-in-dir
+        ;; No handler: the directories alone.
+        (should (equal "=> 3" (plist-get (harness-tools-shell-test--as "s1" "elisp" :code "(+ 1 2)") :content)))
+        (should (equal '(:writable :readable :scratch) (harness-tools-shell-test--keys (cdar seen))))
+        (harness-tools-shell-test-with-options
+            (list (cons 10 (lambda (options session-id)
+                             (push (list options session-id) asked)
+                             (plist-put (copy-sequence options) :network nil))))
+          (should (equal "=> 3" (plist-get (harness-tools-shell-test--as "s1" "elisp" :code "(+ 1 2)") :content)))
+          (should (equal '((nil "s1")) asked))
+          (should-not (plist-member (cdar seen) :read-only))
+          (should (plist-member (cdar seen) :network))
+          (should (null (plist-get (cdar seen) :network)))
+          (should (equal "=> 3" (plist-get (harness-tools-shell-test--call "elisp" :code "(+ 1 2)") :content)))
+          (should (equal '((nil nil) (nil "s1")) asked)))
+        ;; A handler that has gone: as it was.
+        (harness-tools-shell-test--as "s1" "elisp" :code "(+ 1 2)")
+        (should (equal '(:writable :readable :scratch) (harness-tools-shell-test--keys (cdar seen))))))))
+
+(ert-deftest harness-tools-shell-elisp-merges-the-sandbox-options-of-the-handlers ()
+  "Each handler gets the options earlier ones gave, and sets its own over
+them, so a later one wins, for elisp as for bash."
+  (harness-tools-shell-test--setup)
+  (let ((seen nil) (given nil))
+    (harness-tools-shell-test-with-methods
+        (list (cons 'sandbox/wrap (lambda (cwd command &rest opts) (push (cons cwd opts) seen) command)))
+      (harness-tools-shell-test-in-dir
+        (harness-tools-shell-test-with-options
+            (list (cons 20 (lambda (options _sid)
+                             (push options given)
+                             (plist-put (plist-put (copy-sequence options) :read-only t) :network :later)))
+                  (cons 10 (lambda (options _sid)
+                             (push options given)
+                             (plist-put (plist-put (copy-sequence options) :network nil) :read-only :false))))
+          (should (equal "=> 3" (plist-get (harness-tools-shell-test--as "s1" "elisp" :code "(+ 1 2)") :content)))
+          ;; The one with the lower priority first, from nothing.
+          (should (equal (list '(:network nil :read-only :false) nil) given))
+          (should (eq t (plist-get (cdar seen) :read-only)))
+          (should (eq :later (plist-get (cdar seen) :network))))))))
+
+(ert-deftest harness-tools-shell-elisp-read-only-keeps-its-io-writable ()
+  "With :read-only no directory of the session is writable, as for bash:
+those that would be are readable, once each.  The call's io/ directory
+still is, for the result to come back, and a handler's own scratch
+directories join it."
+  (harness-tools-shell-test--setup)
+  (let ((seen nil))
+    (harness-tools-shell-test-with-methods
+        (list (cons 'sandbox/wrap (lambda (cwd command &rest opts) (push (cons cwd opts) seen) command))
+              (cons 'session/tmp-dir (lambda (sid) (and (equal sid "s1") "/tmp/harness-0/s1/")))
+              (cons 'skills/directories
+                    (lambda (_cwd) (list (list :dir "/skills/mine/" :source 'global :contained t))))
+              (cons 'permission/dirs
+                    (lambda (_sid)
+                      (list (list :dir "/work/proj/" :source 'cwd)
+                            (list :dir "/tmp/harness-0/s1/" :source 'tmp)
+                            (list :dir "/home/u/shared/" :source 'config)
+                            (list :dir "/state/outputs/" :source 'outputs)))))
+      (harness-tools-shell-test-in-dir
+        (let ((extra nil))
+          (harness-tools-shell-test-with-options
+              (list (cons 10 (lambda (options _sid) (append (list :read-only t) extra options))))
+            (harness-tools-shell-test--as "s1" "elisp" :code "(+ 1 2)")
+            (let* ((opts (cdar seen))
+                   (io (car (plist-get opts :scratch))))
+              (should (string-suffix-p "/io/" io))
+              (should (equal (list :writable nil
+                                   :readable (append '("/tmp/harness-0/s1/" "/work/proj/" "/home/u/shared/"
+                                                       "/skills/mine/" "/state/outputs/")
+                                                     (harness-tools-shell-test--elisp-reads))
+                                   :scratch (list io)
+                                   :read-only t)
+                             opts)))
+            (setq extra (list :scratch '("/handler/scratch/")))
+            (harness-tools-shell-test--as "s1" "elisp" :code "(+ 1 2)")
+            (let ((scratch (plist-get (cdar seen) :scratch)))
+              (should (= 2 (length scratch)))
+              (should (string-suffix-p "/io/" (car scratch)))
+              (should (equal "/handler/scratch/" (cadr scratch)))
+              (should-not (plist-get (cdar seen) :writable)))))))))
+
+(ert-deftest harness-tools-shell-elisp-sandbox-options-fail-closed-without-the-sandbox ()
+  "An evaluation that asks for sandbox options does not run unconfined:
+not without the sandbox method, whatever the policy says, and not when
+a handler's answer is no plist of options."
+  (harness-tools-shell-test--setup)
+  (harness-tools-shell-test-in-dir
+    (let ((marker (expand-file-name "ran" root))
+          (answer '(:read-only t)))
+      (cl-flet ((run ()
+                  (harness-tools-shell-test--as "s1" "elisp" :code (format "(write-region \"x\" nil %S) 'leaked" marker))))
+        (harness-tools-shell-test-without-methods '(sandbox/wrap)
+          (should-not (harness-method-exists-p 'sandbox/wrap))
+          ;; As it is without a handler: no sandbox, no required policy, it runs.
+          (let ((r (let ((harness-sandbox-policy 'preferred)) (run))))
+            (should (equal "=> leaked" (plist-get r :content)))
+            (should (file-exists-p marker))
+            (delete-file marker))
+          (dolist (policy '(preferred required off))
+            (let ((harness-sandbox-policy policy))
+              (dolist (options '((:read-only t) (:network nil) (:read-only :false)))
+                (setq answer options)
+                (harness-tools-shell-test-with-options (list (cons 10 (lambda (_options _sid) answer)))
+                  (let ((r (run)))
+                    (should (plist-get r :is-error))
+                    (should (string-search "Cannot evaluate" (plist-get r :content)))
+                    (should (string-search "the sandbox module is not loaded" (plist-get r :content)))
+                    (should (string-search (format "%S" options) (plist-get r :content)))
+                    (should-not (string-search "leaked" (plist-get r :content)))
+                    (should-not (file-exists-p marker))))))))
+        ;; A handler that answers something that is no plist of options.
+        (harness-tools-shell-test-with-methods
+            (list (cons 'sandbox/wrap (lambda (_cwd command &rest _opts) command)))
+          (dolist (bad (list 42 "read-only" '(:read-only) '(read-only t)))
+            (setq answer bad)
+            (harness-tools-shell-test-with-options (list (cons 10 (lambda (_options _sid) answer)))
+              (let ((r (run)))
+                (should (plist-get r :is-error))
+                (should (string-search "not a plist of sandbox options" (plist-get r :content)))
+                (should-not (file-exists-p marker))))))))))
+
+(ert-deftest harness-tools-shell-elisp-reads-its-result-only-from-a-regular-file ()
+  "A background Emacs that leaves a symbolic link where its result goes
+gets no result, not the file the link names: in the sandbox it could
+name one only the harness, which reads the result outside, can read."
+  (harness-tools-shell-test--setup)
+  (harness-tools-shell-test-in-dir
+    (let ((secret (expand-file-name "secret.json" root)))
+      (with-temp-file secret
+        (insert "{\"value\":\"s3cret\",\"output\":\"\",\"messages\":\"\",\"error\":null}"))
+      (let ((r (harness-tools-shell-test--call
+                "elisp" :code (format "(make-symbolic-link %S (getenv \"HARNESS_ELISP_RESULT\") t) (kill-emacs 0)"
+                                      secret))))
+        (should (plist-get r :is-error))
+        (should (string-search "produced no result" (plist-get r :content)))
+        (should-not (string-search "s3cret" (plist-get r :content)))))))
+
+(ert-deftest harness-tools-shell-elisp-runs-inside-bwrap ()
+  "With bwrap available the background Emacs runs in the sandbox as a bash
+command does: $HOME at its path but emptied, the working directory
+writable, and the harness there to load, but not the rest of its
+checkout, whose scripts/.dev holds the sockets of the instances dev.sh
+starts."
+  (harness-tools-shell-test--setup)
+  (skip-unless (executable-find "bwrap"))
+  (harness-test-load-module 'project)
+  (harness-test-load-module 'config)
+  (harness-test-load-module 'sandbox)
+  (harness-sandbox-detect)
+  (skip-unless (eq 'bwrap (plist-get (harness-call 'sandbox/status) :backend)))
+  (harness-tools-shell-test-in-dir
+    (let* ((home (harness-test-temp-dir))
+           (process-environment (cons (concat "HOME=" (directory-file-name home)) process-environment))
+           (harness-sandbox-policy 'required))
+      (with-temp-file (expand-file-name "private.txt" home) (insert "private\n"))
+      (unwind-protect
+          (let ((r (harness-tools-shell-test--call
+                    "elisp" :code (concat "(write-region \"made\" nil \"made.txt\")"
+                                          "(list (getenv \"HOME\") (file-exists-p \"~/private.txt\")"
+                                          " (featurep 'harness) (and (locate-library \"harness-provider-openai\") t)"
+                                          " (file-exists-p (expand-file-name \"scripts/dev.sh\" harness-directory)))"))))
+            (when (and (plist-get r :is-error) (string-search "bwrap:" (plist-get r :content)))
+              (ert-skip (format "bwrap cannot start in this environment: %s" (plist-get r :content))))
+            (should-not (plist-get r :is-error))
+            ;; Out here the checkout has its scripts.
+            (should (file-exists-p (expand-file-name "scripts/dev.sh" harness-directory)))
+            (should (equal (format "=> (%S nil t t nil)" (directory-file-name home)) (plist-get r :content)))
+            (should (plist-get (plist-get r :meta) :sandboxed))
+            (should (file-exists-p (expand-file-name "made.txt" root))))
+        (delete-directory home t)))))
+
+(ert-deftest harness-tools-shell-elisp-timeout-kills-a-blocked-evaluation-in-bwrap ()
+  "In the sandbox too a blocking evaluation is killed, tree and all, at
+its timeout.  The process it waits on is found out here by its command
+line, since a pid it could report is one of bwrap's PID namespace."
+  (harness-tools-shell-test--setup)
+  (skip-unless (executable-find "bwrap"))
+  (harness-test-load-module 'project)
+  (harness-test-load-module 'config)
+  (harness-test-load-module 'sandbox)
+  (harness-sandbox-detect)
+  (skip-unless (eq 'bwrap (plist-get (harness-call 'sandbox/status) :backend)))
+  (harness-tools-shell-test-in-dir
+    (let* ((harness-sandbox-policy 'required)
+           (harness--process-kill-grace 0.3)
+           ;; A duration no other process sleeps for names this one.
+           (marker (format "300.%06d%d" (random 1000000) (emacs-pid)))
+           (code (format "(call-process \"sh\" nil nil nil \"-c\" \"touch started; exec sleep %s\")" marker))
+           (running (lambda ()
+                      (cl-some (lambda (pid)
+                                 (member marker (split-string
+                                                 (or (alist-get 'args (process-attributes pid)) ""))))
+                               (list-system-processes))))
+           (start (float-time))
+           (r (harness-tools-shell-test--call "elisp" :timeout 2 :code code)))
+      (when (string-search "bwrap:" (plist-get r :content))
+        (ert-skip (format "bwrap cannot start in this environment: %s" (plist-get r :content))))
+      (should (plist-get r :is-error))
+      (should (string-search "timed out" (plist-get r :content)))
+      (should (plist-get (plist-get r :meta) :sandboxed))
+      (should (< (- (float-time) start) 15))
+      ;; It did start the process it then waited on.
+      (should (file-exists-p (expand-file-name "started" root)))
+      (let ((deadline (+ (float-time) 5)))
+        (while (and (funcall running) (< (float-time) deadline))
+          (sleep-for 0.1)))
+      (should-not (funcall running)))))
+
+(ert-deftest harness-tools-shell-bwrap-read-only-elisp ()
+  "Under the real bwrap the background Emacs of a session whose handler
+asks for :read-only reads the working directory and the session's
+temporary directory and writes neither, and its result comes back all
+the same; another session's evaluation writes them."
+  (harness-tools-shell-test--setup)
+  (skip-unless (executable-find "bwrap"))
+  (dolist (m '(store project config provider session sandbox)) (harness-test-load-module m))
+  (harness-sandbox-detect)
+  (skip-unless (eq 'bwrap (plist-get (harness-call 'sandbox/status) :backend)))
+  (harness-tools-shell-test-in-dir
+    (let* ((harness-sandbox-policy 'required)
+           (sid (plist-get (harness-call 'session/create :cwd root) :id))
+           (other (plist-get (harness-call 'session/create :cwd root) :id))
+           (tmp (harness-call 'session/tmp-dir sid))
+           (note (concat tmp "note.txt"))
+           (code (format "(list (string-trim (with-temp-buffer (insert-file-contents \"seen.txt\") (buffer-string)))
+                                (condition-case nil (progn (write-region \"x\" nil \"new.txt\") 'cwd-written)
+                                  (file-error 'cwd-refused))
+                                (condition-case nil (progn (write-region \"x\" nil %S) 'tmp-written)
+                                  (file-error 'tmp-refused)))"
+                         note)))
+      (with-temp-file (expand-file-name "seen.txt" root) (insert "seen\n"))
+      (unwind-protect
+          (harness-tools-shell-test-with-options
+              (list (cons 10 (lambda (options session-id)
+                               (if (equal session-id sid) (plist-put (copy-sequence options) :read-only t) options))))
+            (let ((r (harness-tools-shell-test--as sid "elisp" :code code)))
+              (when (and (plist-get r :is-error) (string-search "bwrap:" (plist-get r :content)))
+                (ert-skip (format "bwrap cannot start in this environment: %s" (plist-get r :content))))
+              (should-not (plist-get r :is-error))
+              (should (plist-get (plist-get r :meta) :sandboxed))
+              (should (equal "=> (\"seen\" cwd-refused tmp-refused)" (plist-get r :content)))
+              (should-not (file-exists-p (expand-file-name "new.txt" root)))
+              (should-not (file-exists-p note)))
+            ;; The other session is untouched by it.
+            (let ((r (harness-tools-shell-test--as other "elisp" :code code)))
+              (should (equal "=> (\"seen\" cwd-written tmp-refused)" (plist-get r :content)))
+              (should (file-exists-p (expand-file-name "new.txt" root)))))
+        (harness-call 'session/delete sid)
+        (harness-call 'session/delete other)))))
 
 (provide 'harness-tools-shell-test)
 ;;; harness-tools-shell-test.el ends here

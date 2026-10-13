@@ -22,6 +22,19 @@ the worktree's checkout, under a socket and state directory of its own,
 and raises its frame.  The agent's `open_harness` tool does the same
 and returns the commands above with the socket to use.
 
+The daemon's socket lives in the checkout, at
+`scripts/.dev/run/SOCKET`, not where Emacs puts sockets by default
+(`$XDG_RUNTIME_DIR/emacs/`).  So an agent's `bash` tool, whose sandbox
+shows the checkout but not `$XDG_RUNTIME_DIR`, drives an instance the
+harness started outside it: `scripts/dev.sh status`, `eval`, `keys`,
+`shot` and the rest work from bash, as does `emacsclient -s
+scripts/.dev/run/SOCKET` run in the checkout.  A Unix socket's path
+holds 107 bytes at most, too few for a task's worktree, so the daemon
+and `dev.sh` name the socket through `/proc/PID/cwd` of a process that
+works in the checkout: the daemon's `server-socket-dir` reads like
+`/proc/4242/cwd/scripts/.dev/run/`.  With no socket there, `dev.sh`
+looks for a daemon an older `dev.sh` started, in the default place.
+
 The daemon runs `emacs -Q` and loads only `scripts/harness-dev.el`, so
 results are reproducible.  State lives in `scripts/.dev/state-SOCKET`
 (`HARNESS_DEV_SOCKET` picks the socket, `HARNESS_DEV_STATE` the directory),

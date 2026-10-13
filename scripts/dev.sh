@@ -10,22 +10,51 @@
 #   scripts/dev.sh show BUFFER      display a buffer in the frame
 #   scripts/dev.sh errors           recent *Messages* and harness log warnings
 #   scripts/dev.sh reload           harness-reload
+#
+# The daemon's socket is in the checkout, scripts/.dev/run/SOCKET, so a
+# command the harness runs in its sandbox (the bash tool) reaches a
+# daemon the harness started outside it: the sandbox shows the checkout
+# but not $XDG_RUNTIME_DIR, where Emacs puts its sockets by default.  A
+# Unix socket's name holds 107 bytes at most, too few for the path of a
+# task's worktree, so both ends name the socket through /proc/PID/cwd,
+# PID being a process that works in the checkout: the daemon itself
+# (harness-dev.el) and this script, for emacsclient.
 set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
+SELF="$ROOT/scripts/$(basename "$0")"
 SOCKET=${HARNESS_DEV_SOCKET:-harness-v3}
 DEVDIR="$ROOT/scripts/.dev"
 export HARNESS_DEV_STATE=${HARNESS_DEV_STATE:-$DEVDIR/state-$SOCKET}
 mkdir -p "$DEVDIR"
 
+# This script works in the checkout, through which it names the socket;
+# emacsclient runs where the caller is, which the daemon takes for the
+# default-directory of what it evaluates.  A socket named with a slash
+# is the caller's own, used as given.
+HERE=$PWD
+cd "$ROOT" || exit 1
+case $SOCKET in
+  */*) SOCKPATH=$SOCKET ;;
+  *) if [ -d "/proc/$$/cwd" ]; then SOCKPATH="/proc/$$/cwd/scripts/.dev/run/$SOCKET"
+     else SOCKPATH="$DEVDIR/run/$SOCKET"; fi ;;
+esac
+
 # Never let a wedged daemon hang the script (or a caller) forever.
 DEV_TIMEOUT=${HARNESS_DEV_TIMEOUT:-60}
-ec() { timeout "$DEV_TIMEOUT" emacsclient -s "$SOCKET" "$@"; }
+ec() {
+  local s=$SOCKPATH
+  # With no socket in the checkout, look where Emacs puts sockets by
+  # default: a daemon an older dev.sh started has its socket there.
+  case $SOCKET in */*) ;; *) [ -S "$DEVDIR/run/$SOCKET" ] || s=$SOCKET ;; esac
+  (cd "$HERE" && timeout "$DEV_TIMEOUT" emacsclient -s "$s" "$@")
+}
 alive() { ec --eval t >/dev/null 2>&1; }
 
 cmd=${1:-status}; shift || true
 case "$cmd" in
   start)
     if alive; then echo "daemon $SOCKET already running"; else
+      # Started in the checkout, which the daemon names its socket through.
       (cd "$ROOT" && emacs -Q --daemon="$SOCKET" -l "$ROOT/scripts/harness-dev.el" >"$DEVDIR/daemon.log" 2>&1)
       for _ in $(seq 1 50); do alive && break; sleep 0.2; done
       alive || { echo "daemon failed to start"; cat "$DEVDIR/daemon.log"; exit 1; }
@@ -33,7 +62,7 @@ case "$cmd" in
     ec --eval '(progn (harness-dev-frame) t)' >/dev/null && echo "daemon $SOCKET up, frame ready" ;;
   stop)
     alive && ec --eval '(kill-emacs)' >/dev/null 2>&1; echo "stopped" ;;
-  restart) "$0" stop; sleep 0.5; "$0" start ;;
+  restart) "$SELF" stop; sleep 0.5; "$SELF" start ;;
   status) if alive; then echo "running"; else echo "not running"; exit 1; fi ;;
   eval) ec --eval "$*" ;;
   # An Elisp string: only \ and " are escaped.  The shell's quoting of

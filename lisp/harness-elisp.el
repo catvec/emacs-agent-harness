@@ -15,7 +15,9 @@
 ;; which it kills, tree and all, when it overruns its timeout.  The
 ;; child adds the harness to its `load-path', so `(require
 ;; 'harness-...)` works as it did when the code ran in the harness's own
-;; Emacs.
+;; Emacs.  It is a command like a bash call's, and the tool runs it in
+;; the sandbox the same way (lisp/modules/harness-tools-shell.el), so it
+;; sees no more of the machine than one.
 ;;
 ;; The elisp tool has no other place to run.  Code reaches the user's
 ;; Emacs only through the separate emacs_eval tool

@@ -65,6 +65,7 @@
 (declare-function harness-acp-set-handler "harness-acp")
 (declare-function harness-acp-request "harness-acp")
 (declare-function harness-acp--drop-client "harness-acp")
+(declare-function harness-tools-shell--elisp "harness-tools-shell" (input ctx))
 
 ;;;; Fixtures
 
@@ -1830,6 +1831,91 @@ selected by `:active' alone; the active sessions change as ever."
         (should-not (file-exists-p (expand-file-name "made.txt" dir)))
         (should-not (plist-get own :is-error))
         (should (file-exists-p (expand-file-name "own.txt" dir)))))))
+
+;;;; Elisp
+
+;; elisp is off the allowlist, so a supervising session never runs it.
+;; Its background Emacs is a command all the same, and asks
+;; `tools/sandbox-options' as bash does: were it to run, past a gap in
+;; the permission chain, it would look but not touch.
+
+(defun harness-supervisor-test-elisp (sid code)
+  "Run the elisp tool's handler on CODE for session SID, past the permission chain."
+  (harness-test-await
+   (harness-tools-shell--elisp (list :code code)
+                               (list :session-id sid :cwd (plist-get (harness-call 'session/get sid) :cwd)))
+   20))
+
+(ert-deftest harness-supervisor-elisp-reaches-the-sandbox-read-only ()
+  "A supervising session's elisp is denied; run past that, its background
+Emacs is read-only and offline, and may still leave its result.
+Hands-on, the session's directories are writable."
+  (harness-supervisor-test-with-modules (tools-shell)
+    (harness-supervisor-test-allow-all)
+    (harness-supervisor-test-confined t)
+    (let ((wrapped nil)
+          (sid (harness-supervisor-test-session))
+          (hands-on (harness-supervisor-test-session :ext '(:supervisor :false))))
+      (harness-register-method 'sandbox/wrap
+                               (lambda (_cwd command &rest options) (push options wrapped) command))
+      ;; Denied, so nothing runs.
+      (should (plist-get (harness-supervisor-test-run sid "elisp" '(:code "(+ 1 2)")) :is-error))
+      (should-not wrapped)
+      (should (equal "=> 3" (plist-get (harness-supervisor-test-elisp sid "(+ 1 2)") :content)))
+      (let ((options (car wrapped)))
+        (should (plist-get options :read-only))
+        (should (plist-member options :network))
+        (should-not (plist-get options :network))
+        (should-not (plist-get options :writable))
+        (should (plist-get options :readable))
+        (should (plist-get options :scratch)))
+      (should (equal "=> 3" (plist-get (harness-supervisor-test-run hands-on "elisp" '(:code "(+ 1 2)"))
+                                       :content)))
+      (let ((options (car wrapped)))
+        (should-not (plist-get options :read-only))
+        (should-not (plist-member options :network))
+        (should (plist-get options :writable))))))
+
+(ert-deftest harness-supervisor-elisp-under-bwrap-is-read-only-and-offline ()
+  "Under the real sandbox a supervising session's background Emacs, run past
+the permission chain, reads the working directory but writes nothing
+there and reaches no server, and its result comes back; hands-on, it
+does both."
+  (skip-unless (executable-find "bwrap"))
+  (harness-supervisor-test-with-modules (tools-shell sandbox)
+    (harness-supervisor-test-allow-all)
+    (harness-sandbox-detect)
+    (skip-unless (eq 'bwrap (plist-get (harness-call 'sandbox/status) :backend)))
+    (let* ((dir (harness-test-temp-dir))
+           (probe (harness-await (harness-run-command (harness-call 'sandbox/wrap dir '("true"))
+                                                      :cwd dir :timeout 20)))
+           (server (harness-test-http-serve nil))
+           (code (format "(list (string-trim (with-temp-buffer (insert-file-contents \"seen.txt\") (buffer-string)))
+                                (condition-case nil (progn (write-region \"x\" nil \"made.txt\") 'written)
+                                  (file-error 'refused))
+                                (condition-case nil
+                                    (progn (delete-process (make-network-process :name \"probe\" :host \"127.0.0.1\"
+                                                                                 :service %d))
+                                           'online)
+                                  (error 'offline)))"
+                         (process-contact server :service))))
+      (unwind-protect
+          (progn
+            (unless (eql 0 (plist-get probe :exit))
+              (ert-skip (format "bwrap cannot start here: %s" (string-trim (plist-get probe :stderr)))))
+            (with-temp-file (expand-file-name "seen.txt" dir) (insert "visible\n"))
+            (let* ((sid (plist-get (harness-call 'session/create :cwd dir :model "demo:scripted") :id))
+                   (hands-on (plist-get (harness-call 'session/create :cwd dir :model "demo:scripted"
+                                                      :ext '(:supervisor :false))
+                                        :id))
+                   (look (harness-supervisor-test-elisp sid code)))
+              (should (plist-get (plist-get look :meta) :sandboxed))
+              (should (equal "=> (\"visible\" refused offline)" (plist-get look :content)))
+              (should-not (file-exists-p (expand-file-name "made.txt" dir)))
+              (should (equal "=> (\"visible\" written online)"
+                             (plist-get (harness-supervisor-test-elisp hands-on code) :content)))
+              (should (file-exists-p (expand-file-name "made.txt" dir)))))
+        (delete-process server)))))
 
 ;;;; The turn must end on a decision
 
