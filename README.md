@@ -132,6 +132,8 @@ OpenAI-compatible APIs and AWS Bedrock.
 | The task board: each task has a session and a worktree | The conversation tree of a session, a fork and a BTW |
 | ![A task's report popped out of the board: its chart large, the test run it quotes, and the banner and box to verify it or send it back](docs/media/report.png) | ![The chart of that report shown larger, in a popout of its own](docs/media/report-image.png) |
 | A task's report: verify it or send it back from there | An image of the report, clicked: shown larger |
+| ![A chat whose turn runs: a message sent during it says delivered, one sent since says sent, and two queued messages drawn as your messages, each saying queued beside your name with send now, edit and remove buttons, above the line saying what the agent is doing](docs/media/chat-queue.png) | ![A compose box whose message names an image, a file and a task, each reference the same chip: the image's thumbnail, the file's or the task's icon, then its name as a link](docs/media/compose-chips.png) |
+| Messages sent mid-turn say where they stand; queued ones send now, one by one | An image, a file and a task, named in the text: one chip, a click opens it |
 | ![The usage dashboard: a month of cost per day, cost by model, the plan's quota, the fallback list and budgets](docs/media/usage.png) | ![The settings page for one project, which overrides two settings](docs/media/settings.png) |
 | Usage: cost per day and model, plan quota, fallback list, budgets | Settings, here as one project overrides them |
 | ![The session list with forks, BTWs and task sessions](docs/media/sessions.png) | ![The worktrees of a project, with their branches and sessions](docs/media/worktrees.png) |
@@ -377,6 +379,7 @@ default), or nil for nowhere.
 | `C-c h s` | `harness-switch-session` | Switch to another session |
 | `C-c h o` | `harness-open-latest-session` | Open the newest session of the current project |
 | `C-c h O` | `harness-open-session` | Open a session chosen by name |
+| `C-c h >` | `harness-prompt-region` | Start a message with the selected text, in any buffer (see [Prompting with the region](#prompting-with-the-region)) |
 | `C-c h l` | `harness-sessions` | Show the session list (see [Session list](#session-list)) |
 | `SPC` | `harness-ui-sessions-requests` | Pop out what the session at point waits on |
 | `b` | `harness-ui-sessions-toggle-blocked` | In the session list, show only the sessions waiting for you, or every session again |
@@ -433,11 +436,11 @@ default), or nil for nowhere.
 | menu `E` | `harness-secrets-list-sources` | In the `C-c h ?` menu, list the sources of the secrets that tool output is masked of; `a` adds one |
 | `C-c h ?` | `harness-menu` | Open the menu of every command |
 
-The menu (`C-c h ?`) also renames the session (`r`). A session you
-have not named gets a short title from a cheap model as soon as you
-send its first message, while the agent works on it (see
-`harness-naming-auto` and `harness-naming-model`). A task gets its
-title as soon as you submit it (see [Task board](#task-board)).
+The menu (`C-c h ?`) also renames the session (`r`) and prompts with the
+region (`>`). A session you have not named gets a short title from a
+cheap model as soon as you send its first message, while the agent works
+on it (see `harness-naming-auto` and `harness-naming-model`). A task
+gets its title as soon as you submit it (see [Task board](#task-board)).
 
 The session list (`C-c h l`) has a row for each session: its name,
 status, kind, model, mode, priority, context, output, output rate, cost,
@@ -557,16 +560,20 @@ the `[menu]` button in the header line. A region selected in the
 transcript is dropped on the way, not deleted. On a request's panel the
 panel's own keys answer it instead: a question's digits, up to its
 number of options, and a permission's `y`, `s`, `a`, `n` and `N`, and
-`e` when it has a pattern to edit.
+`e` when it has a pattern to edit. In the compose box those keys type,
+so `C-c .` is how you aim a key at a panel from there (see
+[Pressing a panel's key from the compose box](#pressing-a-panels-key-from-the-compose-box)).
 
 | Key | Action |
 |---|---|
 | `C-c C-c` | Send the message; while the agent is working, it steers the current turn |
 | `C-c C-q` | Queue the message for the next turn |
 | `RET` | Insert a newline |
-| `@` | Complete a file to attach: part of a name finds a project file in any subdirectory, a path (`/`, `~/`, `./`, `../`) any file. An `@path` typed out in full attaches its file when the message is sent, and stays in the text |
+| `@` | Complete a file to attach: part of a name finds a project file in any subdirectory, a path (`/`, `~/`, `./`, `../`) any file. The file's `@path` stays in the text as a chip you can click; one typed out in full attaches its file when the message is sent. `@task:` completes a task of the project the same way |
 | `/` | Complete a skill, or `/compact` |
-| `C-c C-a` | Attach a file found the same way, by part of a name or by path (`C-u C-c C-a` browses the file system) |
+| `C-c C-a` | Attach a file found the same way, by part of a name or by path (`C-u C-c C-a` browses the file system), or a task as `task:ID` |
+| `C-c .` then a key | Press that key on the panel above the box: a question's digit, a permission's `y` or `n`. With a numeric argument, on the Nth panel up. `C-g` quits |
+| `M-<` / `M->` | Go to the top or the bottom of the compose box. Pressed again, from outside the box or with a prefix argument, they go to those of the buffer |
 | `C-y` | Attach the image on the clipboard (or the files a file manager copied), keeping `kill-ring` out of it; text yanks as usual |
 | `M-y` | Right after a media yank, swap it for an earlier capture; otherwise the usual `yank-pop` |
 | `C-c C-y` / `C-c C-n` | Allow or deny the newest permission request |
@@ -581,13 +588,27 @@ number of options, and a permission's `y`, `s`, `a`, `n` and `N`, and
 | `C-c C-s` | Search the transcript |
 | `C-c C-t` | Show or hide the session's todo list |
 | `C-c C-w` | Copy the last reply |
-| `C-c >` | Quote, to reply: the selected text, or the agent's reply or plan at point (elsewhere the one above it, from the box the last), goes in the compose box as a Markdown quote, point under it. A selection keeps its code blocks, inline code and links as Markdown, and leaves out what a fold hides. It is the [compose-quote](lisp/vendor/compose-quote/README.md) library's command (see *Answering inline*, below) |
+| `C-c >` | Quote, to reply: the selected text, or the agent's reply or plan at point (elsewhere the one above it, from the box the last), goes in the compose box as a Markdown quote, point under it. A selection keeps its code blocks, inline code and links as Markdown, and leaves out what a fold hides. It is the [compose-quote](lisp/vendor/compose-quote/README.md) library's command (see *Answering inline*, below). `C-c h >` does it for the selection of any buffer (see [Prompting with the region](#prompting-with-the-region)) |
 | `M-RET` | In a quote in the compose box: split it where point is, to answer that part: the quote above, an empty line for your answer, the quote below |
 | `C-c [` | In a quote in the compose box: elide the region, or the rest of its paragraph from point (with `C-u`, the rest of the quote), leaving `[...]`, so a bit of front matter stays for context |
 | `C-c >` | Quote, to reply: the selected text, or the agent's reply or plan at point (elsewhere the one above it, from the box the last), goes in the compose box as a Markdown quote, point under it. A selection keeps its code blocks, inline code and links as Markdown, and leaves out what a fold hides |
 | `C-c C-e` | Jump to the bottom; while the window is scrolled away from it, the header line shows `↓ newer messages`, which does the same |
 | `C-c C-r` | Redraw the buffer |
 | `C-c C-z` | Bury the session: its window shows the buffer it showed before (a side window closes) |
+
+`C-c C-q` queues a message for the next turn. A queued message shows
+just as it will once sent, your name, its text and its attachments, but
+with a dim `queued` beside your name, so it never looks sent, and its
+buttons. The queued messages come last in the conversation, the line
+saying what the agent is doing under them. `[send now]` sends that
+message alone, and the others stay queued: while the agent works it
+gets the message at its next step, otherwise the message starts a turn
+of its own (the tooltip says which). `[edit]` takes a message back into
+the box and `[×]` drops it. A message sent while a turn runs, queued or
+not, gives its state on the line with your name: *sent* until the model
+takes it at its next step, then *delivered*. Nothing is said once the
+turn is over, unless the model never got the message because you
+cancelled the turn: *not delivered*, and the next turn reads it.
 
 **Answering inline.** A long message is seldom answered by one reply.
 `C-c >` puts it in the box as a quote; once point is in a quote the echo
@@ -640,20 +661,49 @@ that key is the review banner's `[Verify]`, so a screenshot never has
 to fight the banner's key. Set
 `harness-compose-yank-media` to nil to leave `C-y` and `M-y` alone.
 
-Each image you attach, paste or drop also puts a token into the message
-where point is (or at its end): `[image 1]`, `[image 2]`, and so on. It
-shows as a small chip with the image's thumbnail, so you can write
-"in [image 2] the button is cut off" and the model knows which
-screenshot you mean: it gets the same `[image 2]` right before that
-image. Delete a token (`DEL` right after it takes it whole) and its
-image goes with it; undo or yank the token back and the image returns.
-The `×` on an image's line removes its tokens too. Numbers never shift
-under a sentence you already wrote: a new image takes the number after
-the highest one attached, and every message starts again at 1. The
-attachment lines above the box stay, each image's leading with its
-token, since they also hold files that are not images, downloads still
-on their way, and the larger thumbnail, size and `×`. In the transcript
-the tokens keep their look, and each image has its token over it.
+Whatever you attach, paste or drop also puts a reference to it into the
+message, where point is (or at its end), so a sentence can name it. The
+reference shows as a small chip, the same chip for every kind of
+attachment, in the colour of a link:
+
+- An image is `[image 1]`, `[image 2]`, and so on, led by its thumbnail.
+  You can write "in [image 2] the button is cut off" and the model knows
+  which screenshot you mean: it gets the same `[image 2]` right before
+  that image. Numbers never shift under a sentence you already wrote: a
+  new image takes the number after the highest one attached, and every
+  message starts again at 1.
+- A file is `@lisp/notes-util.el`, its path in the project (else under
+  `~` or absolute), led by a file icon. The chip shows the file's name,
+  `@notes-util.el`, shortened in the middle when it is long; the text
+  keeps the whole path. It is what `@` completes, so a file you complete
+  or attach with `C-c C-a` looks the same.
+- A task is `@task:t-1a2b`, with the task's title after it and a task
+  icon. The model gets the task as text: its id and title, column, priority,
+  session and branch, then its prompt (cut at 3,000 characters), and the
+  task tools to read more.
+
+Click a chip (`mouse-1` or `mouse-2`) to open what it names: a file or an
+image in a buffer, a video or a sound in its player, a task in its
+session's chat, or on the task board while it has no session yet.
+`mouse-3` offers *Open*, *Remove from the message* and *Copy the path*
+(a task's id, for a task); the tooltip says what the chip is. Point
+steps over a chip as a whole. Delete the reference (`DEL` right after it
+takes it whole) and the attachment goes with it; undo or yank the
+reference back and the attachment returns. The `×` on an attachment's
+line removes its references too. The attachment lines above the box
+stay, each with its larger thumbnail, size and `×`, since they also hold
+downloads still on their way and files with no reference, such as one
+whose name has a space. In the transcript a sent message keeps the look
+of its references -- the tokens of images, the `@` reference of each file
+and `@task:` ones are in the chip's colour -- and each image has its token
+over it; a task you attached follows your words as a paragraph of its own.
+
+`M-x harness-compose-attach-task` attaches a task by its title, `C-c C-a`
+with `task:ID`, and so does `@task:` in the box, which completes the
+project's tasks by id with their titles and columns. On the task board,
+`@` on a task's card attaches that task to the board's box (see
+[Task board](#task-board)).
+
 A message you send while the agent works takes its images along the
 same way, whichever provider runs the session: Claude Code and Copilot,
 which hear such a message inside the next tool result, are handed its
@@ -873,8 +923,9 @@ of half as many, so the request stays the same between two chunks and
 the prompt cache with it. The result of a call whose image went says so,
 and the model can read the file again.
 
-A digit answers a question with that option; any other answer goes in
-the compose box. An answer typed there takes the box's attachments with
+A digit answers a question with that option (with point in the compose
+box, where a digit types, `C-c .` and the digit does); any other answer
+goes in the compose box. An answer typed there takes the box's attachments with
 it, in a chat, a popout or on the task board: "it looks like [image 1]"
 with a screenshot attached reaches the model with the screenshot. When
 the options are easier to compare by sight, such
@@ -995,6 +1046,68 @@ once. Turning it off only brings you back, so it asks nothing.
 
 Opening an inactive session shows it without resuming it. Its compose
 box stays available, and the first message you send resumes it.
+
+### Pressing a panel's key from the compose box
+
+What sits above the compose box and answers to a key -- a question's
+digits, a permission's `y`, `s`, `a`, `n` and `N`, the cache panel's
+choices, the task board's `F` -- answers only while point is on it. With
+point in the box those same keys are typing, so they go into your
+message, which is what you want nine times in ten. When you mean the
+panel, `C-c .` and then the key says so, the same way everywhere: the
+dot is the one the harness menu already puts before a view's plain keys
+(`. F`).
+
+- `C-c . 1` picks the first option of the question above the box,
+  `C-c . y` allows the permission request, `C-c . F` starts the
+  fullscreen layout from the task board's box. Point comes back to where
+  it was in the box, and your draft with it.
+- The key is pressed on the nearest panel above the box that has it. A
+  numeric argument takes the Nth panel up: `M-2 C-c . 1` answers the
+  second question from the box. `C-g` at the prompt for the key quits.
+- Each panel says so in a dim line of its own, with a key it has:
+  `from the box: C-c . 1`. The box's tooltip names `C-c .` too, and so
+  does the harness menu, under the chat's, the popout's and the board's
+  own commands.
+- A popout (`SPC`) is a panel of its own box: `C-c . q` closes it and
+  `C-c . g` draws it again from there, as `q` and `g` do on its content.
+- The task board's keys for the task at point need a card under point,
+  which the box does not have. Pressing one from the box says so, rather
+  than guessing which task you meant.
+
+Point on the panel works as before, with no prefix. To use another key
+than `C-c .`, bind `harness-compose-panel-key` in `harness-compose-map`;
+the hints follow it.
+
+`M-<` and `M->` are the box's own too: in the box they go to its top and
+its bottom, not to the buffer's, which holds the transcript above the box
+and no text to edit. Pressed again at the box's edge, from outside the
+box, or with a prefix argument, they go on to the buffer's top and
+bottom, so the transcript is one more press away.
+
+### Prompting with the region
+
+Select text in any buffer and press `C-c h >` (`harness-prompt-region`,
+also `>` in the menu) to start a message with it. It works in the
+harness's own buffers and in every other.
+
+![Lines of a Python file selected on the left, and on the right the newest session of the project, its compose box holding where they come from, the file and its lines, and the code in a fenced python block, ready for the request](docs/media/prompt-region.png)
+
+- In a chat, the task board or a popout it does what `C-c >` does: the
+  selection goes into the compose box as a Markdown quote, point under
+  it for your reply.
+- In any other buffer the text becomes the start of a message in the
+  compose box of the newest session of the buffer's project. Its chat is
+  shown and selected, with point in the box under the text, ready for
+  what you want done with it. A draft already in the box stays above
+  the text. A project with no session yet gets a new one.
+- The text comes with where it is from: a line naming the file and its
+  lines (``From `lisp/foo.el` (lines 12–30):``), or the buffer's name
+  when it has no file. Code from a programming or configuration buffer
+  goes in a fenced code block in its language, any other text as a
+  Markdown quote.
+- `C-u C-c h >` asks which session gets it instead: one of the
+  project's, newest first, or a new one.
 
 ### Moving a session to another directory
 
@@ -2245,6 +2358,21 @@ your checkout itself can be submitted to the **main tree** instead (the
   it, or write it up anyway), and the write-up or plan names the tasks
   working on the same code, to coordinate with instead of redoing their
   work.
+- The board's keys are letters, which type in the compose box. `C-c .`
+  and then a key presses it on the board from the box: `C-c . F`
+  starts the fullscreen layout, say (see [Pressing a panel's key from
+  the compose box](#pressing-a-panels-key-from-the-compose-box)). The
+  empty box shows the key in its hint, and its tooltip names it. The
+  keys for the task at point need a card under point, which the box has
+  none of, and say so.
+- `@` on a card attaches its task to the compose box, whatever the box
+  is for: the new task, the message or the feedback it sends carries the
+  task along as text (its id, title, column, session, branch and prompt),
+  and `@task:ID` goes into the text as a chip a click opens, so
+  "do what t-1a2b should have done" names the task it means. `C-c C-a`
+  attaches a task too, as `task:ID`, and `@task:` in the box completes
+  the project's tasks. An answer to a question is text only: a task its
+  text names goes as its reference, and anything else attached stops it.
 - The lines above the compose box are the current mode's alone. A step
   of a task has a model and a thinking level of its own, and nothing
   else. In Refine and Plan a line per step says which model does it, at

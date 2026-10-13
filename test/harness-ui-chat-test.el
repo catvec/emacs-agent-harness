@@ -2224,8 +2224,8 @@ stays only when no line shows whole."
 
 ;;;; Quoting to reply
 
-(defun harness-ui-chat-test-quote (buf from &optional to)
-  "Type C-c > in BUF, point at FROM, or the region from FROM to TO.
+(defun harness-ui-chat-test-quote (buf from &optional to keys)
+  "Type C-c > (or KEYS) in BUF, point at FROM, or the region from FROM to TO.
 The key goes through the command loop, BUF in the selected window.
 Return (TEXT . UNDER): what the box then holds, and whether the
 window's point ends at the end of the box, under the quote."
@@ -2236,7 +2236,7 @@ window's point ends at the end of the box, under the quote."
       (when to
         (setq-local transient-mark-mode t)
         (push-mark from t t))
-      (execute-kbd-macro (kbd "C-c >"))
+      (execute-kbd-macro (kbd (or keys "C-c >")))
       (cons (harness-compose-text) (= (window-point) harness-compose-end)))))
 
 (ert-deftest harness-ui-chat-quote-reply ()
@@ -2285,6 +2285,400 @@ the quote, ready for the reply."
             (should (string-match-p "^> .*thinking (6 words)$" text))
             (should (string-match-p "^> Fixed the parser: it was `parse-it`$" text))
             (should-not (string-match-p "drops the last token" text))))))))
+
+;;;; Prompting with the region
+
+(defun harness-ui-chat-test-region-project ()
+  "Make a git project with a Lisp file and a note; return its root.
+src/parser.el has six lines, two functions with a blank line between
+them; notes.txt four lines of text, the third blank."
+  (let ((root (harness-test-temp-dir)))
+    (let ((default-directory root)) (call-process "git" nil nil nil "init" "-q"))
+    (make-directory (expand-file-name "src" root))
+    (with-temp-file (expand-file-name "src/parser.el" root)
+      (insert "(defun parse (x)\n  \"Parse X.\"\n  (list x))\n\n(defun render (x)\n  (format \"%S\" x))\n"))
+    (with-temp-file (expand-file-name "notes.txt" root)
+      (insert "first line\nsecond line\n\nthird line\n"))
+    root))
+
+(defun harness-ui-chat-test-project-sessions (root names)
+  "Create a demo session in the project at ROOT for each of NAMES, oldest first.
+Return their ids, once the UI knows the sessions."
+  (let ((ids (mapcar (lambda (name)
+                       (sleep-for 0.02)
+                       (plist-get (harness-call 'session/create :cwd root :model "demo:scripted" :name name)
+                                  :id))
+                     names)))
+    (harness-test-wait (lambda () (= (length ids) (length (harness-chat--project-sessions root))))
+                       5 "the project's sessions in the session cache")
+    ids))
+
+(defun harness-ui-chat-test-select (buffer from &optional to)
+  "Make the text in BUFFER from the start of FROM to the end of TO the region.
+TO defaults to FROM.  The region is active."
+  (with-current-buffer buffer
+    (setq-local transient-mark-mode t)
+    (goto-char (point-min))
+    (search-forward from)
+    (let ((beg (match-beginning 0)))
+      (goto-char (point-min))
+      (search-forward (or to from))
+      (set-mark beg)
+      (activate-mark))))
+
+(defmacro harness-ui-chat-test-with-buffer (name mode text &rest body)
+  "Run BODY in a new buffer called NAME holding TEXT in MODE, point at its start.
+The buffer is `buffer' in BODY, and killed afterwards."
+  (declare (indent 3))
+  `(let ((buffer (generate-new-buffer ,name)))
+     (unwind-protect
+         (with-current-buffer buffer
+           (insert ,text)
+           (funcall ,mode)
+           (goto-char (point-min))
+           ,@body)
+       (kill-buffer buffer))))
+
+(ert-deftest harness-ui-chat-prompt-region-from-a-source-file ()
+  "The region of a file's buffer starts a message in the newest session of its project.
+A line says where it comes from -- the file, named from the project's
+root, and its lines -- and the Lisp follows in a fenced block in its
+language.  The chat is shown and selected, point in its box under the
+text, ready for the request, and stays so once the transcript has
+loaded; the region is no longer active."
+  (harness-ui-chat-test-with
+    (let* ((root (harness-ui-chat-test-region-project))
+           (ids (harness-ui-chat-test-project-sessions root '("Older" "Newer")))
+           (source (find-file-noselect (expand-file-name "src/parser.el" root)))
+           (want (concat "From `src/parser.el` (lines 1–3):\n\n"
+                         "```emacs-lisp\n(defun parse (x)\n  \"Parse X.\"\n  (list x))\n```\n\n")))
+      (unwind-protect
+          (save-window-excursion
+            (delete-other-windows)
+            (switch-to-buffer source)
+            (harness-ui-chat-test-select source "(defun parse" "(list x))")
+            (call-interactively #'harness-prompt-region)
+            (let ((chat (harness-chat--buffer-for (cadr ids))))
+              (should chat)
+              (should (eq chat (window-buffer (selected-window))))
+              (should-not (harness-chat--buffer-for (car ids)))
+              (should-not (buffer-local-value 'mark-active source))
+              (with-current-buffer chat
+                (should (equal want (harness-compose-text)))
+                (should (= (point) harness-compose-end))
+                (should (= (window-point) harness-compose-end)))
+              (harness-test-wait (lambda () (not (buffer-local-value 'harness-chat--loading chat)))
+                                 5 "the transcript")
+              (with-current-buffer chat
+                (should (equal want (harness-compose-text)))
+                (should (= (window-point) harness-compose-end)))))
+        (kill-buffer source)))))
+
+(ert-deftest harness-ui-chat-prompt-region-quotes-prose-under-the-draft ()
+  "Prose, which has no language, goes in as a Markdown quote.
+A draft in the box stays above it with a blank line between, and a
+second prompt goes under the first."
+  (harness-ui-chat-test-with
+    (let* ((root (harness-ui-chat-test-region-project))
+           (sid (car (harness-ui-chat-test-project-sessions root '("Notes"))))
+           (chat (harness-ui-chat-test-open sid))
+           (source (find-file-noselect (expand-file-name "notes.txt" root)))
+           (first "From `notes.txt` (lines 2–4):\n\n> second line\n>\n> third line\n\n"))
+      (unwind-protect
+          (save-window-excursion
+            (delete-other-windows)
+            (switch-to-buffer source)
+            (with-current-buffer chat (harness-compose-set "what do you make of this?"))
+            (harness-ui-chat-test-select source "second line" "third line")
+            (harness-prompt-region)
+            (with-current-buffer chat
+              (should (equal (concat "what do you make of this?\n\n" first) (harness-compose-text)))
+              (should (= (point) harness-compose-end)))
+            (switch-to-buffer source)
+            (harness-ui-chat-test-select source "first line")
+            (harness-prompt-region)
+            (with-current-buffer chat
+              (should (equal (concat "what do you make of this?\n\n" first
+                                     "From `notes.txt` (line 1):\n\n> first line\n\n")
+                             (harness-compose-text)))
+              (should (= (point) harness-compose-end))))
+        (kill-buffer source)))))
+
+(ert-deftest harness-ui-chat-prompt-region-from-a-buffer-without-a-file ()
+  "A buffer that visits no file is named by its name.
+Programming and configuration buffers get a fenced block in their
+mode's language, the others a quote."
+  (harness-ui-chat-test-with
+    (let* ((root (harness-ui-chat-test-region-project))
+           (sid (car (harness-ui-chat-test-project-sessions root '("Any"))))
+           (chat (harness-ui-chat-test-open sid)))
+      (save-window-excursion
+        (delete-other-windows)
+        (cl-flet ((prompt (name mode text region)
+                    (harness-ui-chat-test-with-buffer name mode text
+                      (setq default-directory root)
+                      (switch-to-buffer buffer)
+                      (harness-ui-chat-test-select buffer region)
+                      (harness-prompt-region))
+                    (prog1 (with-current-buffer chat (harness-compose-text))
+                      (with-current-buffer chat (harness-compose-set "")))))
+          (should (equal "From the buffer `*snippet*`:\n\n```emacs-lisp\n(+ 3 4)\n```\n\n"
+                         (prompt "*snippet*" #'emacs-lisp-mode "(+ 1 2)\n(+ 3 4)\n" "(+ 3 4)")))
+          (should (equal "From the buffer `*Output*`:\n\n> warning: unused\n\n"
+                         (prompt "*Output*" #'special-mode "built it\nwarning: unused\n" "warning: unused")))
+          (should (equal "From the buffer `*settings*`:\n\n```conf-unix\nname=value\n```\n\n"
+                         (prompt "*settings*" #'conf-unix-mode "[core]\nname=value\n" "name=value"))))))))
+
+(ert-deftest harness-ui-chat-region-prompt-names-the-lines ()
+  "The lines named are those of the text left once the blank ones around it are.
+One line is \"line N\", several \"lines A–B\"; a region that ends at the start of
+a line ends on the one before.  A file outside the project is named by
+its abbreviated path."
+  (harness-ui-chat-test-with
+    (let* ((root (harness-ui-chat-test-region-project))
+           (file (expand-file-name "src/parser.el" root))
+           (source (find-file-noselect file)))
+      (unwind-protect
+          (with-current-buffer source
+            (cl-flet ((header (beg end &optional (project root))
+                        (car (split-string (harness-chat--region-prompt beg end project) "\n")))
+                      (line-start (n) (save-excursion (goto-char (point-min)) (forward-line (1- n)) (point))))
+              (should (equal "From `src/parser.el` (line 3):" (header (line-start 3) (line-start 4))))
+              (should (equal "From `src/parser.el` (lines 5–6):" (header (line-start 5) (point-max))))
+              ;; From the end of line 3: the blank line and the next function.
+              (should (equal "From `src/parser.el` (lines 5–6):" (header (1- (line-start 4)) (point-max))))
+              (should (equal "From `src/parser.el` (lines 1–6):" (header (point-min) (point-max))))
+              (should (string-prefix-p "From `src/parser.el` (lines 5–6):\n\n```emacs-lisp\n(defun render"
+                                       (harness-chat--region-prompt (1- (line-start 4)) (point-max) root)))
+              ;; Not in that project: where the file is.
+              (should (equal (format "From `%s` (line 1):" (abbreviate-file-name file))
+                             (header (line-start 1) (line-start 2) "/elsewhere/")))
+              ;; Nothing but blanks.
+              (should-error (harness-chat--region-prompt (1- (line-start 4)) (1+ (line-start 4)) root)
+                            :type 'user-error)))
+        (kill-buffer source)))))
+
+(ert-deftest harness-ui-chat-region-prompt-fences-outgrow-the-code ()
+  "A fence is three backticks, or one more than the longest run in the code."
+  (harness-ui-chat-test-with
+    (let ((root "/proj/"))
+      (harness-ui-chat-test-with-buffer "*code*" #'emacs-lisp-mode ";; `a`\n(f)\n"
+        (should (equal "From the buffer `*code*`:\n\n```emacs-lisp\n;; `a`\n(f)\n```"
+                       (harness-chat--region-prompt (point-min) (point-max) root))))
+      (harness-ui-chat-test-with-buffer "*code*" #'emacs-lisp-mode ";; ```sh\n;; make\n;; ```\n"
+        (should (equal (concat "From the buffer `*code*`:\n\n"
+                               "````emacs-lisp\n;; ```sh\n;; make\n;; ```\n````")
+                       (harness-chat--region-prompt (point-min) (point-max) root)))))))
+
+(ert-deftest harness-ui-chat-code-language-comes-from-the-mode ()
+  "The language of a fence is the mode's name less its -mode, or -ts-mode."
+  (harness-ui-chat-test-with
+    (should (equal "emacs-lisp" (harness-chat--code-language 'emacs-lisp-mode)))
+    (should (equal "emacs-lisp" (harness-chat--code-language 'lisp-interaction-mode)))
+    (should (equal "python" (harness-chat--code-language 'python-mode)))
+    (should (equal "python" (harness-chat--code-language 'python-ts-mode)))
+    (should (equal "c++" (harness-chat--code-language 'c++-mode)))
+    (should (equal "c++" (harness-chat--code-language 'c++-ts-mode)))
+    (should (equal "js" (harness-chat--code-language 'js-mode)))
+    (should (equal "conf-toml" (harness-chat--code-language 'conf-toml-mode)))
+    (should (equal "mystery" (harness-chat--code-language 'mystery)))
+    (harness-ui-chat-test-with-buffer "*code*" #'emacs-lisp-mode ""
+      (should (equal "emacs-lisp" (harness-chat--code-language))))))
+
+(ert-deftest harness-ui-chat-prompt-region-in-a-chat-quotes-as-c-c->-does ()
+  "Where there is a compose box -- here a chat -- the region is quoted in it.
+That is what \\[harness-compose-quote-reply] does, a prefix argument changes
+nothing, and no session is opened or made."
+  (harness-ui-chat-test-with
+    (let ((sid (harness-ui-chat-test-session)))
+      (harness-call 'session/append sid '(:kind user :content "fix the parser"))
+      (harness-call 'session/append sid '(:kind assistant :content "Run them:\n\n```sh\nmake test\n```\n\nThey pass."))
+      (let* ((buf (harness-ui-chat-test-open sid))
+             (from (- (harness-ui-chat-test-find buf "Run them:") 9))
+             (to (harness-ui-chat-test-find buf "make test"))
+             (quoted '("> Run them:\n>\n> ```sh\n> make test\n> ```\n\n" . t))
+             (opened nil))
+        (cl-letf (((symbol-function 'harness-ui-display-session) (lambda (&rest args) (push args opened)))
+                  ((symbol-function 'harness-new-session) (lambda (&rest args) (push args opened))))
+          (should (equal quoted (harness-ui-chat-test-quote buf from to)))
+          (with-current-buffer buf (harness-compose-set ""))
+          (should (equal quoted (harness-ui-chat-test-quote buf from to "C-c h >")))
+          (with-current-buffer buf (harness-compose-set ""))
+          (should (equal quoted (harness-ui-chat-test-quote buf from to "C-u C-c h >")))
+          (should-not opened))))))
+
+(ert-deftest harness-ui-chat-prompt-region-needs-text-selected ()
+  "Without an active region, or with one of nothing but blanks, there is nothing to prompt with.
+It says so before it shows or makes a session."
+  (harness-ui-chat-test-with
+    (let ((shown nil))
+      (cl-letf (((symbol-function 'harness-ui-display-session) (lambda (&rest args) (push args shown)))
+                ((symbol-function 'harness-new-session) (lambda (&rest args) (push args shown))))
+        (with-temp-buffer
+          (insert "a\n\n\nb")
+          (setq-local transient-mark-mode t)
+          (let ((err (should-error (harness-prompt-region) :type 'user-error)))
+            (should (equal "Select the text to prompt with first" (cadr err))))
+          ;; A mark that is not active selects nothing.
+          (set-mark 2)
+          (goto-char 5)
+          (deactivate-mark)
+          (should-error (harness-prompt-region) :type 'user-error)
+          ;; Nor does a blank region, which says so.
+          (set-mark 2)
+          (goto-char 4)
+          (activate-mark)
+          (let ((err (should-error (harness-prompt-region) :type 'user-error)))
+            (should (string-match-p "blank" (cadr err))))
+          (should (region-active-p)))
+        ;; In a chat just as well.
+        (with-current-buffer (harness-ui-chat-test-open (harness-ui-chat-test-session))
+          (let ((err (should-error (harness-prompt-region) :type 'user-error)))
+            (should (equal "Select the text to prompt with first" (cadr err)))))
+        (should-not shown)))))
+
+(ert-deftest harness-ui-chat-prompt-region-prefix-chooses-the-session ()
+  "With a prefix argument you choose among the project's sessions, newest first, or a new one.
+The text goes to the one chosen, and to no other."
+  (harness-ui-chat-test-with
+    (let* ((root (harness-ui-chat-test-region-project))
+           (ids (harness-ui-chat-test-project-sessions root '("Oldest" "Middle" "Newest")))
+           (elsewhere (harness-ui-chat-test-session "Other project"))
+           (source (find-file-noselect (expand-file-name "notes.txt" root)))
+           (asked nil))
+      (unwind-protect
+          (save-window-excursion
+            (delete-other-windows)
+            (switch-to-buffer source)
+            (harness-ui-chat-test-select source "first line")
+            (cl-letf (((symbol-function 'completing-read)
+                       (lambda (_prompt table &rest _)
+                         (setq asked (all-completions "" table))
+                         (nth 1 asked))))
+              (let ((current-prefix-arg '(4)))
+                (call-interactively #'harness-prompt-region)))
+            (should (= 4 (length asked)))
+            (should (string-match-p "Newest" (nth 0 asked)))
+            (should (string-match-p "Middle" (nth 1 asked)))
+            (should (string-match-p "Oldest" (nth 2 asked)))
+            (should (equal "New session" (nth 3 asked)))
+            (let ((chat (harness-chat--buffer-for (cadr ids))))
+              (should chat)
+              (should (eq chat (window-buffer (selected-window))))
+              (should (equal "From `notes.txt` (line 1):\n\n> first line\n\n"
+                             (with-current-buffer chat (harness-compose-text)))))
+            (should-not (harness-chat--buffer-for (car ids)))
+            (should-not (harness-chat--buffer-for (nth 2 ids)))
+            (should-not (harness-chat--buffer-for elsewhere)))
+        (kill-buffer source)))))
+
+(ert-deftest harness-ui-chat-prompt-region-labels-tell-sessions-apart ()
+  "Sessions that share a name and a model are told apart by their ids."
+  (harness-ui-chat-test-with
+    (let* ((a (list :id "aaaaaaaa-1111" :name "Same" :status "idle" :model "demo:scripted"))
+           (b (list :id "bbbbbbbb-2222" :name "Same" :status "idle" :model "demo:scripted"))
+           (c (list :id "cccccccc-3333" :name "Other" :status "idle" :model "demo:scripted"))
+           (labels (harness-chat--prompt-labels (list a b c))))
+      (should (= 3 (length (delete-dups (mapcar #'substring-no-properties (mapcar #'car labels))))))
+      (should (string-match-p "Same.*aaaaaaaa" (car (nth 0 labels))))
+      (should (string-match-p "Same.*bbbbbbbb" (car (nth 1 labels))))
+      (should-not (string-match-p "cccccccc" (car (nth 2 labels))))
+      (should (equal (list a b c) (mapcar #'cdr labels))))))
+
+(ert-deftest harness-ui-chat-prompt-region-makes-a-session-when-the-project-has-none ()
+  "A project without a session gets one for the text: made, shown, and given the text.
+The text is in the new session's box, point under it, once the
+transcript has loaded as well."
+  (harness-ui-chat-test-with
+    (let* ((root (harness-ui-chat-test-region-project))
+           (source (find-file-noselect (expand-file-name "notes.txt" root))))
+      (unwind-protect
+          (save-window-excursion
+            (delete-other-windows)
+            (should-not (harness-chat--project-sessions root))
+            (switch-to-buffer source)
+            (harness-ui-chat-test-select source "third line")
+            (call-interactively #'harness-prompt-region)
+            (should-not (buffer-local-value 'mark-active source))
+            (let ((chat (harness-test-wait
+                         (lambda ()
+                           (when-let* ((s (car (harness-chat--project-sessions root)))
+                                       (buf (harness-chat--buffer-for (plist-get s :id))))
+                             (and (with-current-buffer buf (not (string-empty-p (harness-compose-text)))) buf)))
+                         10 "the new session's chat")))
+              (should (= 1 (length (harness-chat--project-sessions root))))
+              (should (eq chat (window-buffer (selected-window))))
+              (harness-test-wait (lambda () (not (buffer-local-value 'harness-chat--loading chat)))
+                                 5 "the transcript")
+              (with-current-buffer chat
+                (should (equal "From `notes.txt` (line 4):\n\n> third line\n\n" (harness-compose-text)))
+                (should (= (window-point) harness-compose-end)))))
+        (kill-buffer source)))))
+
+(ert-deftest harness-ui-chat-prompt-region-can-choose-a-new-session ()
+  "Choosing \"New session\" with a prefix argument makes one, though the project has others."
+  (harness-ui-chat-test-with
+    (let* ((root (harness-ui-chat-test-region-project))
+           (ids (harness-ui-chat-test-project-sessions root '("Only")))
+           (source (find-file-noselect (expand-file-name "notes.txt" root))))
+      (unwind-protect
+          (save-window-excursion
+            (delete-other-windows)
+            (switch-to-buffer source)
+            (harness-ui-chat-test-select source "first line")
+            (cl-letf (((symbol-function 'completing-read)
+                       (lambda (_prompt table &rest _) (car (last (all-completions "" table))))))
+              (let ((current-prefix-arg '(4)))
+                (call-interactively #'harness-prompt-region)))
+            (let ((chat (harness-test-wait
+                         (lambda ()
+                           (when-let* ((new (cl-find-if-not (lambda (s) (equal (plist-get s :id) (car ids)))
+                                                            (harness-chat--project-sessions root)))
+                                       (buf (harness-chat--buffer-for (plist-get new :id))))
+                             (and (with-current-buffer buf (not (string-empty-p (harness-compose-text)))) buf)))
+                         10 "the new session's chat")))
+              (should (= 2 (length (harness-chat--project-sessions root))))
+              (should (equal "From `notes.txt` (line 1):\n\n> first line\n\n"
+                             (with-current-buffer chat (harness-compose-text))))
+              (should-not (harness-chat--buffer-for (car ids)))))
+        (kill-buffer source)))))
+
+(ert-deftest harness-ui-chat-prompt-region-text-waits-for-a-box-not-drawn-yet ()
+  "Text put in a chat whose box is not drawn is the box's when it is."
+  (harness-ui-chat-test-with
+    (let ((buf (harness-ui-chat-test-open (harness-ui-chat-test-session))))
+      (with-current-buffer buf
+        (setq harness-compose--text "draft"
+              harness-compose-start nil
+              harness-compose-end nil)
+        (should-not (harness-compose-live-p))
+        (harness-chat--append-to-box buf "From x:\n\n> y")
+        (should (equal "draft\n\nFrom x:\n\n> y\n\n" harness-compose--text))
+        (harness-chat--render-tail)
+        (should (harness-compose-live-p))
+        (should (equal "draft\n\nFrom x:\n\n> y\n\n" (harness-compose-text)))))))
+
+(ert-deftest harness-ui-chat-prompt-region-key ()
+  "C-c h > prompts with the region, next to C-c h o, which opens the newest session."
+  (harness-ui-chat-test-with
+    (should (commandp 'harness-prompt-region))
+    (should (eq 'harness-prompt-region (lookup-key harness-ui-map (kbd ">"))))
+    (should (eq 'harness-prompt-region (key-binding (kbd "C-c h >"))))
+    (should (eq 'harness-open-latest-session (key-binding (kbd "C-c h o"))))))
+
+(ert-deftest harness-ui-chat-open-latest-session-is-the-projects-newest ()
+  "The newest session of the project the buffer is in is the one that opens,
+that of another project never."
+  (harness-ui-chat-test-with
+    (let* ((root (harness-ui-chat-test-region-project))
+           (ids (harness-ui-chat-test-project-sessions root '("Older" "Newer")))
+           (_elsewhere (harness-ui-chat-test-session "Newest, but of another project"))
+           (opened nil))
+      (cl-letf (((symbol-function 'harness-ui-display-session)
+                 (lambda (id &rest _) (setq opened id))))
+        (let ((default-directory root))
+          (harness-open-latest-session))
+        (should (equal (cadr ids) opened))))))
 
 (ert-deftest harness-ui-chat-quote-answers-inline ()
   "A chat's box answers a quote of the agent's message inline, like any box.
@@ -2336,6 +2730,7 @@ off.  The transcript is left as it was."
 ;;;; Queue
 
 (ert-deftest harness-ui-chat-queue-add-edit-remove ()
+  "A queued message shows as a message of the user's, and can be edited or removed."
   (harness-ui-chat-test-with
     (let* ((sid (harness-ui-chat-test-session))
            (buf (harness-ui-chat-test-open sid)))
@@ -2344,9 +2739,10 @@ off.  The transcript is left as it was."
       (harness-test-wait (lambda () (with-current-buffer buf (= 1 (length harness-chat--queue)))) 5 "queued")
       (with-current-buffer buf
         (should (equal "" (harness-compose-text)))
-        (should (harness-ui-chat-test-find buf "queued for the next turn (1)"))
+        ;; The user's name, "queued" and the buttons, then the text, on the user's background.
+        (should (harness-ui-chat-test-find buf (concat (harness-ui-chat-test-state-line 'queued) "\nlater\n")))
         (let ((pos (harness-ui-chat-test-find buf "later")))
-          (should (harness-ui-chat-test-face-at (1- pos) 'harness-queue-face)))
+          (should (harness-ui-chat-test-face-at (1- pos) 'harness-user-face)))
         ;; Edit: the text comes back into the compose box; sending removes the item.
         (let ((qid (plist-get (car harness-chat--queue) :id)))
           (harness-chat-edit-queued qid)
@@ -2395,7 +2791,7 @@ It is never added to the running turn."
       (harness-ui-chat-test-type buf "for later")
       (with-current-buffer buf (harness-chat-queue))
       (harness-test-wait (lambda () (with-current-buffer buf (= 1 (length harness-chat--queue)))) 5 "queued")
-      (should (harness-ui-chat-test-find buf "queued for the next turn (1)"))
+      (should (harness-ui-chat-test-find buf (concat (harness-ui-chat-test-state-line 'queued) "\nfor later\n")))
       (should (harness-agent-running-p sid))
       (should (equal '("go") (funcall users)))
       (harness-resolve gate t)
@@ -2403,13 +2799,552 @@ It is never added to the running turn."
       (harness-test-wait (lambda () (with-current-buffer buf (null harness-chat--queue))) 5 "the queue area emptied")
       (should (equal '("go" "for later") (funcall users)))
       (should-not (cl-find-if (lambda (n) (plist-get (plist-get n :meta) :steering)) (harness-call 'session/nodes sid)))
-      (should-not (harness-ui-chat-test-find buf "queued for the next turn"))
+      (should-not (harness-ui-chat-test-find buf "queued  [send now]"))
+      (should-not (harness-ui-chat-test-queued-texts buf))
       ;; Sending an empty queue starts nothing.
       (with-current-buffer buf (harness-chat-send-queue))
       (accept-process-output nil 0.2)
       (should-not (harness-agent-running-p sid))
       (should (= 2 (harness-ui-chat-test-turns-ended sid)))
       (should (equal '("go" "for later") (funcall users))))))
+
+(defun harness-ui-chat-test-count (buf regexp)
+  "Return how many times REGEXP matches in BUF, case sensitively."
+  (with-current-buffer buf
+    (save-excursion
+      (goto-char (point-min))
+      (let ((case-fold-search nil))
+        (how-many regexp)))))
+
+(defun harness-ui-chat-test-prop (buf text prop)
+  "Return property PROP on the last character of the first TEXT in BUF."
+  (let ((pos (harness-ui-chat-test-find buf text)))
+    (and pos (get-text-property (1- pos) prop buf))))
+
+(defun harness-ui-chat-test-prop-face (buf text face)
+  "Non-nil when FACE is among the faces of the last character of the first TEXT in BUF."
+  (let ((pos (harness-ui-chat-test-find buf text)))
+    (and pos (with-current-buffer buf (harness-ui-chat-test-face-at (1- pos) face)))))
+
+(defun harness-ui-chat-test-user-texts (sid)
+  "Return the text of the user messages of session SID, oldest first."
+  (mapcar (lambda (n) (plist-get n :content))
+          (cl-remove-if-not (lambda (n) (eq (plist-get n :kind) 'user)) (harness-call 'session/nodes sid))))
+
+(defun harness-ui-chat-test-last-user-text (buf)
+  "Return the text of the newest user block of BUF, with the sender line."
+  (with-current-buffer buf
+    (let ((block (car (last (harness-ui-chat-test-blocks buf "user")))))
+      (buffer-substring-no-properties (harness-chat-block-start block) (harness-chat-block-end block)))))
+
+(defun harness-ui-chat-test-state-line (state)
+  "Return the sender line of a user's message in STATE, without its newline.
+STATE is `queued', `sent', `delivered' or `not-delivered': the line is
+the user's label, then the state alone, after the icon of its level if
+it has one; a queued message's buttons follow its state."
+  (concat harness-chat-user-label "  "
+          (pcase state
+            ('queued (concat (harness-ui-icon 'harness-icon-caution) " queued  [send now] [edit] [×]"))
+            ('sent (concat (harness-ui-level-icon 'caution) " sent"))
+            ('delivered (concat (harness-ui-level-icon 'success) " delivered"))
+            ('not-delivered "not delivered"))))
+
+(defun harness-ui-chat-test-queued-texts (buf)
+  "Return the queued messages BUF shows, as (ID . TEXT), top first.
+TEXT is the message's whole text, its sender line included."
+  (with-current-buffer buf
+    (let ((pos harness-chat--transcript-end) out)
+      (while (and pos (< pos (point-max)))
+        (let ((next (or (next-single-property-change pos 'harness-chat-queued) (point-max)))
+              (id (get-text-property pos 'harness-chat-queued)))
+          (when id (push (cons id (buffer-substring-no-properties pos next)) out))
+          (setq pos next)))
+      (nreverse out))))
+
+(ert-deftest harness-ui-chat-queue-has-a-send-now-per-message ()
+  "Each queued message has a [send now] of its own and says it is still queued.
+Each is a message of its own, \"queued\" and its buttons on its sender
+line; no header stands over them.  Sending one asks the harness for that
+message alone: it goes out as a turn of its own, and the other waits for
+its turn.  `harness-chat-send-queue' sends them all."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid))
+           (calls nil))
+      (dolist (text '("first" "second"))
+        (harness-ui-chat-test-type buf text)
+        (with-current-buffer buf (harness-chat-queue)))
+      (harness-test-wait (lambda () (with-current-buffer buf (= 2 (length harness-chat--queue)))) 5 "queued")
+      (let ((second (with-current-buffer buf (plist-get (cadr harness-chat--queue) :id)))
+            (line (harness-ui-chat-test-state-line 'queued)))
+        (should (equal (list (concat line "\nfirst\n\n") (concat line "\nsecond\n\n"))
+                       (mapcar #'cdr (harness-ui-chat-test-queued-texts buf))))
+        (should (= 2 (harness-ui-chat-test-count buf "\\[send now\\]")))
+        (should-not (harness-ui-chat-test-find buf "[send all now]"))
+        (should-not (harness-ui-chat-test-find buf "queued for the next turn"))
+        (let ((help (lambda (label) (harness-ui-chat-test-prop buf label 'help-echo))))
+          ;; No turn runs: sending goes out as a turn of its own.
+          (should (string-match-p "as a turn of its own" (funcall help "[send now]")))
+          (should (string-match-p "others stay queued" (funcall help "[send now]"))))
+        (with-current-buffer buf
+          ;; The second message's own button.
+          (let ((pos (harness-ui-chat-test-find buf "[send now]" (harness-ui-chat-test-find buf "[send now]")))
+                (orig (symbol-function 'harness-ui-call-turn)))
+            (cl-letf (((symbol-function 'harness-ui-call-turn)
+                       (lambda (id method params &rest more)
+                         (push (cons method params) calls)
+                         (apply orig id method params more))))
+              (goto-char (- pos 2))
+              (harness-chat-push))))
+        (should (equal (list (cons "_harness/agent/send-queue" (list :session-id sid :qids (list second))))
+                       calls))
+        ;; It goes first, as a turn of its own; the other one's turn comes after.
+        (harness-test-wait (lambda () (= 2 (harness-ui-chat-test-turns-ended sid))) 10 "both turns")
+        (should (equal '("second" "first") (harness-ui-chat-test-user-texts sid)))
+        (harness-test-wait (lambda () (with-current-buffer buf (null harness-chat--queue))) 5 "the queue emptied")
+        (should-not (harness-ui-chat-test-queued-texts buf))
+        (should-not (harness-ui-chat-test-find buf "[send now]"))))))
+
+(ert-deftest harness-ui-chat-queue-line-reads-with-or-without-text ()
+  "A queued message says it waits, whether it has words or only attachments.
+One with only a file reads as it will once sent: an @ reference to the
+file, then the file's button."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid))
+           (queue (list (list :id "q1" :text "fix the build")
+                        (list :id "q2" :text nil :attachments (list (list :path "/tmp/a.txt" :name "a.txt")))))
+           (line (harness-ui-chat-test-state-line 'queued)))
+      (with-current-buffer buf
+        (harness-chat--on-update
+         sid (list :sessionUpdate "_harness/session"
+                   :session (plist-put (copy-sequence harness-chat--session) :queue queue))))
+      (should (equal (list (cons "q1" (concat line "\nfix the build\n\n"))
+                           (cons "q2" (concat line "\n@a.txt\n" (harness-ui-icon 'harness-icon-attach) " a.txt\n\n")))
+                     (harness-ui-chat-test-queued-texts buf)))
+      (should (= 2 (harness-ui-chat-test-count buf "\\[send now\\]")))
+      ;; The reference reads as one, as it does in the transcript.
+      (should (harness-ui-chat-test-prop-face buf "@a.txt" 'harness-compose-token-face))
+      ;; Point anywhere on a message finds it.
+      (with-current-buffer buf
+        (goto-char (harness-ui-chat-test-find buf "fix the build"))
+        (should (equal "q1" (harness-chat--queued-at-point)))
+        (goto-char (harness-ui-chat-test-find buf "@a.txt"))
+        (should (equal "q2" (harness-chat--queued-at-point)))
+        (goto-char (line-beginning-position 0))
+        (should (equal "q2" (harness-chat--queued-at-point)))
+        ;; Elsewhere it is the first.
+        (goto-char (point-min))
+        (should (equal "q1" (harness-chat--queued-at-point)))))))
+
+(ert-deftest harness-ui-chat-send-queued-needs-a-queued-message ()
+  "Sending a queued message with none queued is an error, not a request."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid))
+           (calls nil))
+      (with-current-buffer buf
+        (cl-letf (((symbol-function 'harness-ui-call) (lambda (&rest args) (push args calls))))
+          (should-error (call-interactively #'harness-chat-send-queued) :type 'user-error)
+          (should-error (harness-chat-send-queued) :type 'user-error))
+        (should-not calls)))))
+
+(ert-deftest harness-ui-chat-send-now-while-running-tells-where-the-message-stands ()
+  "A queued message sent now while a turn runs steers it, and says where it stands.
+Its sender line says \"sent\", and nothing more, until the turn took it;
+then \"delivered\"; and once the turn is over, nothing.  The tooltip of
+the state says what it means.  The [send now] of a queued message says
+that the running turn gets it."
+  (harness-ui-chat-test-with
+    (let* ((calls 0)
+           (sent (harness-ui-chat-test-state-line 'sent))
+           (delivered (harness-ui-chat-test-state-line 'delivered))
+           (gates (list (harness-make-promise) (harness-make-promise)))
+           (harness-provider-demo-script-override
+            ;; Two calls of the tool, each waiting for a gate of its own: the
+            ;; turn takes the steering message after the first, and goes on.
+            '((:type tool-call :id "w1" :name "hold" :input (:n 1))
+              (:type tool-call :id "w2" :name "hold" :input (:n 2))
+              (:type text :delta "Done.")
+              (:type done :stop-reason end-turn)))
+           (sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid)))
+      (harness-define-tool "hold" :label "Hold" :description "hold" :kind 'read
+                           :handler (lambda (_input _ctx)
+                                      (harness-then (nth (min (1- (cl-incf calls)) 1) gates)
+                                                    (lambda (_) "held"))))
+      (harness-ui-chat-test-type buf "go")
+      (with-current-buffer buf (harness-chat-send))
+      (harness-test-wait (lambda () (memq 'tool-call (mapcar (lambda (n) (plist-get n :kind))
+                                                             (harness-call 'session/nodes sid))))
+                         5 "the turn in its tool")
+      (dolist (text '("for later" "right now"))
+        (harness-ui-chat-test-type buf text)
+        (with-current-buffer buf (harness-chat-queue)))
+      (harness-test-wait (lambda () (with-current-buffer buf (= 2 (length harness-chat--queue)))) 5 "queued")
+      ;; A turn runs: the buttons say the message steers it.
+      (should (string-match-p "running turn gets it at its next step"
+                              (harness-ui-chat-test-prop buf "[send now]" 'help-echo)))
+      ;; Point on the second message sends that one.
+      (with-current-buffer buf
+        (goto-char (harness-ui-chat-test-find buf "right now"))
+        (call-interactively #'harness-chat-send-queued))
+      (harness-test-wait (lambda () (harness-ui-chat-test-find buf (concat sent "\n")))
+                         5 "the state sent")
+      (harness-test-wait (lambda () (with-current-buffer buf (equal '("for later")
+                                                                    (mapcar (lambda (it) (plist-get it :text))
+                                                                            harness-chat--queue))))
+                         5 "only the other message queued")
+      ;; The state is on the sender line of that message, alone, in the colour of work in progress.
+      (should (string-prefix-p (concat sent "\nright now") (harness-ui-chat-test-last-user-text buf)))
+      (should (harness-ui-chat-test-prop-face buf sent 'harness-caution-face))
+      (should (equal "The model gets this message at its next step"
+                     (harness-ui-chat-test-prop buf sent 'help-echo)))
+      (should-not (harness-ui-chat-test-find buf delivered))
+      (let ((steering (cl-find-if (lambda (n) (plist-get (plist-get n :meta) :steering))
+                                  (harness-call 'session/nodes sid))))
+        (should (equal "right now" (plist-get steering :content)))
+        (should-not (plist-get (plist-get steering :meta) :delivered-after)))
+      ;; The tool returns: the turn takes the message at its next step.
+      (harness-resolve (nth 0 gates) t)
+      (harness-test-wait (lambda () (harness-ui-chat-test-find buf (concat delivered "\n"))) 10
+                         "the state delivered")
+      (should-not (harness-ui-chat-test-find buf sent))
+      (should (harness-ui-chat-test-prop-face buf delivered 'harness-success-face))
+      (should (equal "The model has this message" (harness-ui-chat-test-prop buf delivered 'help-echo)))
+      (should (string-prefix-p (concat delivered "\nright now") (harness-ui-chat-test-last-user-text buf)))
+      ;; The turn ends, and the message needs no state any more.
+      (harness-resolve (nth 1 gates) t)
+      (harness-test-wait (lambda () (= 2 (harness-ui-chat-test-turns-ended sid))) 10 "both turns")
+      (harness-test-wait (lambda () (with-current-buffer buf (and (null harness-chat--queue) (null harness-chat--turn-start))))
+                         5 "the turn over")
+      (should-not (harness-ui-chat-test-find buf delivered))
+      (should-not (harness-ui-chat-test-find buf sent))
+      (should-not (harness-ui-chat-test-find buf "not delivered"))
+      (should (equal '("go" "right now" "for later") (harness-ui-chat-test-user-texts sid))))))
+
+(ert-deftest harness-ui-chat-cancelled-turn-leaves-the-steering-message-undelivered ()
+  "A message sent to a turn that is cancelled before it took it was never delivered.
+Its sender line says \"not delivered\", until a turn has read it; the
+tooltip says the next turn does."
+  (harness-ui-chat-test-with
+    (let* ((harness-provider-demo--delay 0.5)
+           (sent (harness-ui-chat-test-state-line 'sent))
+           (unread (harness-ui-chat-test-state-line 'not-delivered))
+           (sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid)))
+      (harness-ui-chat-test-type buf "tour")
+      (with-current-buffer buf (harness-chat-send))
+      (harness-test-wait (lambda () (with-current-buffer buf harness-chat--turn-start)) 5 "the turn")
+      ;; Sent while the turn runs: C-c C-c steers it.
+      (harness-ui-chat-test-type buf "wait, stop")
+      (with-current-buffer buf (harness-chat-send))
+      (harness-test-wait (lambda () (harness-ui-chat-test-find buf (concat sent "\n")))
+                         5 "the state sent")
+      (with-current-buffer buf (harness-chat-cancel))
+      (harness-test-wait (lambda () (= 1 (harness-ui-chat-test-turns-ended sid))) 10 "the turn to end")
+      (harness-test-wait (lambda () (harness-ui-chat-test-find buf (concat unread "\nwait, stop")))
+                         5 "the state not delivered")
+      (should-not (harness-ui-chat-test-find buf sent))
+      (should (harness-ui-chat-test-prop-face buf unread 'harness-dim-face))
+      (should (string-match-p "the next turn reads it\\'" (harness-ui-chat-test-prop buf unread 'help-echo)))
+      ;; The next turn reads it: it needs no note any more.
+      (setq harness-provider-demo--delay 0.005)
+      (harness-ui-chat-test-prompt buf "go on")
+      (should-not (harness-ui-chat-test-find buf "not delivered"))
+      (should (equal '("tour" "wait, stop" "go on") (harness-ui-chat-test-user-texts sid))))))
+
+(ert-deftest harness-ui-chat-steering-notes-follow-the-turn ()
+  "The note on a message that steers a turn follows the turn, and only the latest one's.
+While it goes on the message says \"sent\", then \"delivered\"; when it
+is over the message says nothing, unless nothing came of it: \"not
+delivered\".  Rendering a transcript again draws the same notes."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid))
+           (user (lambda (id text &optional meta) (list :id id :kind "user" :content text :ts 1.0 :meta meta)))
+           (agent (lambda (id) (list :id id :kind "assistant" :content "Working on it." :ts 1.0)))
+           (sent (concat (harness-ui-chat-test-state-line 'sent) "\n"))
+           (had (concat (harness-ui-chat-test-state-line 'delivered) "\n"))
+           (unread (concat (harness-ui-chat-test-state-line 'not-delivered) "\n"))
+           (feed (lambda (node) (harness-chat--on-update sid (list :sessionUpdate "_harness/node" :node node))))
+           (count (lambda (text) (harness-ui-chat-test-count buf (regexp-quote text)))))
+      (with-current-buffer buf
+        ;; A turn runs.
+        (setq harness-chat--turn-start (float-time))
+        (funcall feed (funcall user "p1" "start" (list :from (harness-sender-system "tasks"))))
+        (funcall feed (funcall agent "a1"))
+        ;; The message that began the turn is no steering, and needs no note.
+        (should (= 0 (funcall count sent)))
+        ;; A message that steers it: sent, waiting for the next step.
+        (funcall feed (funcall user "s1" "change course" '(:steering t)))
+        (should (= 1 (funcall count sent)))
+        ;; The turn takes it: the harness marks the node, as an update says.
+        (funcall feed (funcall user "s1" "change course" '(:steering t :delivered-after "a1")))
+        (should (= 0 (funcall count sent)))
+        (should (= 1 (funcall count had)))
+        ;; Another one, not taken yet; the first keeps its note.
+        (funcall feed (funcall user "s2" "and this" '(:steering t)))
+        (should (= 1 (funcall count sent)))
+        (should (= 1 (funcall count had)))
+        ;; The turn is over: the message it took needs no note, the one it never took says so.
+        (setq harness-chat--turn-start nil)
+        (harness-chat--turn-changed)
+        (should (= 0 (funcall count sent)))
+        (should (= 0 (funcall count had)))
+        (should (= 1 (funcall count unread)))
+        ;; The next turn begins with a message of the user's, and reads that one: the note goes.
+        (funcall feed (funcall user "p2" "next"))
+        (should (= 0 (funcall count unread)))
+        ;; The whole transcript drawn again, at rest: the same.
+        (let ((nodes (list (funcall user "p1" "start" (list :from (harness-sender-system "tasks"))) (funcall agent "a1")
+                           (funcall user "s1" "change course" '(:steering t :delivered-after "a1"))
+                           (funcall user "s2" "and this" '(:steering t))
+                           (funcall user "p2" "next") (funcall agent "a2")
+                           (funcall user "s3" "late one" '(:steering t)))))
+          (harness-chat--render-nodes nodes)
+          (should (= 1 (funcall count unread)))
+          (should (= 0 (funcall count sent)))
+          (should (= 0 (funcall count had)))
+          ;; Drawn while a turn runs: only the messages it was sent are told of.
+          (setq harness-chat--turn-start (float-time))
+          (harness-chat--render-nodes nodes)
+          (should (= 1 (funcall count sent)))
+          (should (= 0 (funcall count unread)))
+          (should (string-match-p (concat (regexp-quote sent) "late one")
+                                  (harness-ui-chat-test-last-user-text buf))))
+        ;; An answered message at the end of a finished turn needs none.
+        (setq harness-chat--turn-start nil)
+        (harness-chat--render-nodes (list (funcall user "p1" "start")
+                                          (funcall user "s1" "early" '(:steering t))
+                                          (funcall agent "a1")))
+        (should (= 0 (funcall count unread)))))))
+
+(ert-deftest harness-ui-chat-queue-buttons-follow-whether-a-turn-runs ()
+  "What a queued message's buttons say follows the turn beginning and ending.
+They tell the running turn gets the message at its next step, or that it
+goes out as a turn of its own; the queue is drawn again when that changes,
+by the session record or by the events of the turn."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid))
+           (queue '((:id "q1" :text "next")))
+           (help (lambda () (harness-ui-chat-test-prop buf "[send now]" 'help-echo)))
+           (record (lambda (status)
+                     (harness-chat--on-update
+                      sid (list :sessionUpdate "_harness/session"
+                                :session (plist-put (plist-put (copy-sequence (buffer-local-value 'harness-chat--session buf))
+                                                               :status status)
+                                                    :queue queue))))))
+      (with-current-buffer buf
+        (funcall record "running")
+        (should harness-chat--turn-start)
+        (should (string-match-p "running turn gets it" (funcall help)))
+        ;; The turn ends without sending the queue (it was cancelled): the session goes idle.
+        (funcall record "idle")
+        (should-not harness-chat--turn-start)
+        (should (string-match-p "as a turn of its own" (funcall help)))
+        (should-not (string-match-p "running turn" (funcall help)))
+        ;; The events of a turn say so before the record does.
+        (harness-chat--on-event "agent/turn-started" (list sid))
+        (should (string-match-p "running turn gets it" (funcall help)))
+        (harness-chat--on-event "agent/turn-ended" (list sid))
+        (should (string-match-p "as a turn of its own" (funcall help)))))))
+
+(ert-deftest harness-ui-chat-queued-message-reads-as-the-message-sent ()
+  "A queued message is drawn as the message it is once sent, but for its sender line.
+The same code draws both (`harness-chat--render-user'): the text, the
+reference of the file it attached and the file's button read the same,
+on the same background and bar.  Only what follows the name differs:
+\"queued\" and the buttons before it goes, nothing once it went."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid))
+           (file (expand-file-name "notes.txt" (harness-test-temp-dir)))
+           (queued-line (harness-ui-chat-test-state-line 'queued)))
+      (with-temp-file file (insert "a few notes\n"))
+      (harness-call 'session/queue sid "Read @notes.txt and sum it up."
+                    (list (list :path file :name "notes.txt" :size 12 :mime "text/plain")))
+      (harness-test-wait (lambda () (with-current-buffer buf (= 1 (length harness-chat--queue)))) 5 "queued")
+      (pcase-let* ((`((,qid . ,queued)) (harness-ui-chat-test-queued-texts buf))
+                   (props (lambda (text)
+                            (let ((pos (1- (harness-ui-chat-test-find buf text))))
+                              (list (get-text-property pos 'face buf) (get-text-property pos 'line-prefix buf)))))
+                   (before-text (funcall props "sum it up"))
+                   (before-reference (funcall props "@notes.txt")))
+        (should (string-prefix-p (concat queued-line "\nRead @notes.txt and sum it up.\n") queued))
+        (should (string-search "notes.txt (12" queued))
+        (should (memq 'harness-user-face (ensure-list (car before-text))))
+        (should (memq 'harness-compose-token-face (ensure-list (car before-reference))))
+        ;; Sent now, as a turn of its own.
+        (with-current-buffer buf (harness-chat-send-queued qid))
+        (harness-test-wait (lambda () (= 1 (harness-ui-chat-test-turns-ended sid))) 10 "the turn")
+        (harness-test-wait (lambda () (with-current-buffer buf (null harness-chat--queue))) 5 "the queue emptied")
+        (should (equal (concat harness-chat-user-label (substring queued (length queued-line)))
+                       (harness-ui-chat-test-last-user-text buf)))
+        (should (equal-including-properties before-text (funcall props "sum it up")))
+        (should (equal-including-properties before-reference (funcall props "@notes.txt")))))))
+
+(ert-deftest harness-ui-chat-long-queued-message-shows-more ()
+  "A long queued message shows a page at a time, as a long message sent does.
+Its \"show the rest\" button shows the rest, which a redraw keeps."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid))
+           (text (concat (make-string harness-chat--message-limit ?a) "TAIL")))
+      (with-current-buffer buf
+        (harness-chat--on-update
+         sid (list :sessionUpdate "_harness/session"
+                   :session (plist-put (copy-sequence harness-chat--session) :queue (list (list :id "q1" :text text)))))
+        (should-not (harness-ui-chat-test-find buf "TAIL"))
+        (goto-char (1- (harness-ui-chat-test-find buf "show the rest (4 more chars)")))
+        (harness-chat-push)
+        (should (harness-ui-chat-test-find buf "aaTAIL\n"))
+        (should-not (harness-ui-chat-test-find buf "show the rest"))
+        (harness-chat--render-tail)
+        (should (harness-ui-chat-test-find buf "aaTAIL\n"))))))
+
+(ert-deftest harness-ui-chat-activity-line-goes-under-the-queued-messages ()
+  "While a turn runs, the line saying what it does goes under the queued messages.
+They read as the newest messages of the conversation: what the turn adds
+to the transcript goes above them, and the line stays under them."
+  (harness-ui-chat-test-with
+    (let* ((calls 0)
+           (gates (list (harness-make-promise) (harness-make-promise)))
+           (harness-provider-demo-script-override
+            '((:type tool-call :id "w1" :name "hold" :input (:n 1))
+              (:type tool-call :id "w2" :name "hold" :input (:n 2))
+              (:type text :delta "Done.")
+              (:type done :stop-reason end-turn)))
+           (sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid))
+           (calls-made (lambda () (cl-count 'tool-call (mapcar (lambda (n) (plist-get n :kind))
+                                                               (harness-call 'session/nodes sid)))))
+           (under-queue (lambda ()
+                          (with-current-buffer buf
+                            (let* ((ov harness-chat--activity-overlay)
+                                   (pos (and ov (overlay-buffer ov) (overlay-get ov 'before-string)
+                                             (overlay-start ov))))
+                              (and pos
+                                   (get-text-property (1- pos) 'harness-chat-queue)
+                                   (not (get-text-property pos 'harness-chat-queue))
+                                   (<= harness-chat--transcript-end (harness-ui-chat-test-find buf "for later"))))))))
+      (harness-define-tool "hold" :label "Hold" :description "hold" :kind 'read
+                           :handler (lambda (_input _ctx)
+                                      (harness-then (nth (min (1- (cl-incf calls)) 1) gates)
+                                                    (lambda (_) "held"))))
+      (harness-ui-chat-test-type buf "go")
+      (with-current-buffer buf (harness-chat-send))
+      (harness-test-wait (lambda () (= 1 (funcall calls-made))) 5 "the turn in its tool")
+      (harness-ui-chat-test-type buf "for later")
+      (with-current-buffer buf (harness-chat-queue))
+      (harness-test-wait (lambda () (with-current-buffer buf (= 1 (length harness-chat--queue)))) 5 "queued")
+      (harness-test-wait under-queue 5 "the line under the queued message")
+      ;; The turn goes on: its next call comes above the queue, the line stays under it.
+      (harness-resolve (nth 0 gates) t)
+      (harness-test-wait (lambda () (= 2 (funcall calls-made))) 5 "the second call")
+      (harness-test-wait (lambda () (= 2 (length (harness-ui-chat-test-blocks buf "tool-call")))) 5 "the call drawn")
+      (should (funcall under-queue))
+      ;; The turn ends: the queue goes out as a turn of its own, and the line goes once it ends.
+      (harness-resolve (nth 1 gates) t)
+      (harness-test-wait (lambda () (= 2 (harness-ui-chat-test-turns-ended sid))) 10 "both turns")
+      (harness-test-wait (lambda () (with-current-buffer buf
+                                      (and (null harness-chat--queue)
+                                           (null (overlay-get harness-chat--activity-overlay 'before-string)))))
+                         5 "no queue and no line")
+      (should-not (harness-ui-chat-test-queued-texts buf)))))
+
+;;;; The box's keys
+
+(defun harness-ui-chat-test--menu-entries ()
+  "Return the entries of the chat's part of the harness menu."
+  (cl-loop for column in (cdr (get 'harness-chat-mode 'harness-menu-group))
+           append (cl-loop for item across column
+                           when (and (consp item) (stringp (car item))) collect item)))
+
+(ert-deftest harness-ui-chat-box-says-how-to-press-a-panels-key ()
+  "The box's tooltip, the menu and the mode's documentation name the box's keys.
+That is C-c ., which presses a key of the panel above the box, as a
+question's digit or a permission's y; M-< and M-> that stay in the box;
+and C-c C-a, which attaches a task as well as a file.  The task board's
+and a popout's tooltips and menus say the same (their own tests)."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid)))
+      (with-current-buffer buf
+        ;; The tooltip of the prompt.
+        (let ((help (get-text-property (1- harness-compose-start) 'help-echo)))
+          (should (string-match-p "\\`C-c C-c sends, RET newline, C-c C-q queues, C-c C-k cancels, " help))
+          (should (string-match-p "C-c C-a attaches a file or task, C-c > quotes, " help))
+          (should (string-match-p "C-c \\. KEY: a key of the panel above\\'" help)))
+        ;; It follows a rebinding of the key.
+        (cl-letf (((symbol-function 'harness-compose-panel-keys) (lambda () "C-c ,")))
+          (should (string-match-p "C-c , KEY: a key of the panel above\\'" (harness-chat--box-help))))
+        ;; Redrawn, the box keeps it.
+        (harness-chat--render-tail)
+        (should (string-match-p "C-c \\. KEY: a key of the panel above\\'"
+                                (get-text-property (1- harness-compose-start) 'help-echo)))
+        (should (eq 'harness-compose-panel-key (key-binding (kbd "C-c ."))))
+        (should (eq 'harness-compose-beginning-of-buffer (key-binding (kbd "M-<"))))
+        (should (eq 'harness-compose-end-of-buffer (key-binding (kbd "M->"))))
+        ;; The menu lists them with the chat's own keys.
+        (let ((entries (harness-ui-chat-test--menu-entries)))
+          (dolist (entry '(("C-c ." "A key of the panel above, from the box" harness-compose-panel-key)
+                           ("C-c C-a" "Attach file or task" harness-compose-add-attachment)
+                           ("M-<" "Top of the box, then the buffer" harness-compose-beginning-of-buffer)
+                           ("M->" "Bottom of the box, then the buffer" harness-compose-end-of-buffer)))
+            (should (member entry entries))
+            (should (fboundp (nth 2 entry)))))
+        ;; The documentation of the mode describes them.
+        (let ((doc (documentation 'harness-chat-mode)))
+          (should (string-match-p "C-c \\. and then a key presses it on the nearest panel above the box" doc))
+          (should (string-match-p "C-c \\. 1 picks a question.s first option, C-c \\. y allows a\npermission" doc))
+          (should (string-match-p "M-< and M-> in the box go to its top and its bottom" doc))
+          (should (string-match-p "attaches a file, or a task as task:ID" doc))
+          (let ((flat (replace-regexp-in-string "\n" " " doc)))
+            (should (string-match-p "A queued message shows above the box as it will in the transcript" flat))
+            (should (string-match-p "\\[send now\\] sends it alone" flat))
+            (should (string-match-p "gives its state on its sender line: \"sent\" until the model has it, then \"delivered\"; \"not delivered\" when the turn ended before the model got it\\." flat))))))))
+
+(ert-deftest harness-ui-chat-user-message-styles-the-references-of-its-attachments ()
+  "A message sent shows the references of what it attached as the box showed them.
+The tokens of images do, and so does the @ reference of a file attached
+\(its name, or a path ending in it) and an @task: one, in the face of the
+box's chips with a tooltip saying what they are.  A word that only
+looks like one -- another file's, an address, a word in a sentence -- is
+plain text, and the punctuation after a reference is left out of it."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid))
+           (file (expand-file-name "notes.el" (harness-test-temp-dir)))
+           (token (lambda (text)
+                    (with-current-buffer buf
+                      (let ((pos (harness-ui-chat-test-find buf text)))
+                        (and pos (harness-ui-chat-test-face-at (1- pos) 'harness-compose-token-face)))))))
+      (with-temp-file file (insert "(message \"hi\")\n"))
+      (harness-chat--on-update
+       sid (list :sessionUpdate "_harness/node"
+                 :node (list :id "u1" :kind "user" :ts 1.0
+                             :content "look at @lisp/notes.el, @task:t-1a2b. And @other.el or me@notes.el, task:t-1, @task: [image 1]"
+                             :blocks (list (list :type "file" :path file :mime "text/plain" :name "notes.el" :size 16)
+                                           (list :type "text" :text "Task t-1a2b, attached: Fix" :attached t)))))
+      (should (funcall token "@lisp/notes.el"))
+      (should-not (funcall token "@lisp/notes.el,"))
+      (should (funcall token "@task:t-1a2b"))
+      (should-not (funcall token "@task:t-1a2b."))
+      ;; Not references to what is attached.
+      (should-not (funcall token "@other.el"))
+      (should-not (funcall token "me@notes.el"))
+      (should-not (funcall token "task:t-1,"))
+      (should-not (funcall token "@task: "))
+      ;; Nothing is labelled [image 1] here: a plain token.
+      (should-not (funcall token "[image 1]"))
+      ;; The tooltips say what they are.
+      (should (equal (format "file: %s" (abbreviate-file-name file)) (harness-ui-chat-test-prop buf "@lisp/notes.el" 'help-echo)))
+      (should (equal "task t-1a2b" (harness-ui-chat-test-prop buf "@task:t-1a2b" 'help-echo)))
+      ;; The words are the text; the file is a button under them.
+      (should (harness-ui-chat-test-find buf "look at @lisp/notes.el, @task:t-1a2b. And @other.el"))
+      (should (harness-ui-chat-test-find buf "notes.el (16 B)")))))
 
 ;;;; Pending panel
 
@@ -4215,7 +5150,8 @@ split the run of reads around it, so part of the run stayed unfolded."
         (should (> (buffer-local-value 'harness-chat--generation buf) generation)))
       (harness-test-wait (lambda () (with-current-buffer buf (and (not harness-chat--loading) harness-chat--order))) 5 "redrawn")
       (with-current-buffer buf
-        (should (equal "a draft in progress" (harness-compose-text)))
+        ;; The draft, and the reference the file put after it.
+        (should (string-match-p "\\`a draft in progress @.*/harness-ui-chat-test\\.el \\'" (harness-compose-text)))
         (should (= 1 (length harness-compose-attachments)))
         (should (harness-ui-chat-test-find buf "hello there"))
         (should (harness-ui-chat-test-find buf "You said"))
@@ -4319,7 +5255,8 @@ once, even when nothing showed it, whenever the model catalogue came."
         (harness-ui-chat-test-type buf "for later")
         (harness-compose-add-attachment file)
         (harness-chat-queue))
-      (should (equal "for later" (car (car seen))))
+      ;; The text, with the reference the file put after it.
+      (should (string-match-p "\\`for later @.*/harness-ui-chat-test\\.el\\'" (car (car seen))))
       (should (equal (list file) (mapcar (lambda (a) (plist-get a :path)) (cadr (car seen)))))
       (harness-test-wait (lambda () (plist-get (harness-call 'session/get sid) :queue)) 5 "the queued message")
       ;; An answer to a question is not a message.
@@ -4428,7 +5365,8 @@ to a waiting question still goes through the question instead."
         (harness-ui-chat-test-type buf "  looks good  ")
         (harness-compose-add-attachment file)
         (harness-chat-send)
-        (should (equal "looks good" (car (car sent))))
+        ;; The text, with the reference the file put after it.
+        (should (string-match-p "\\`looks good  @.*/harness-ui-chat-test\\.el\\'" (car (car sent))))
         (should (equal (list file) (mapcar (lambda (a) (plist-get a :path)) (cadr (car sent)))))
         (should (equal "" (harness-compose-text)))
         (should-not harness-compose-attachments)
@@ -4615,11 +5553,11 @@ into the response where it landed, read-only as the transcript is."
           (should (member "notes.txt" (all-completions "not" (nth 2 capf))))
           ;; The @ starts completion: popups needing a few characters show at once.
           (should (eq t (plist-get (nthcdr 3 capf) :company-prefix-length)))
-          ;; Choosing a file turns the token into an attachment chip.
+          ;; Choosing a file attaches it, the token staying as its reference.
           (delete-region (nth 0 capf) (nth 1 capf))
           (insert "notes.txt")
           (funcall (plist-get (nthcdr 3 capf) :exit-function) "notes.txt" 'finished)
-          (should (equal "see " (harness-compose-text)))
+          (should (equal "see @notes.txt " (harness-compose-text)))
           (should (equal (expand-file-name "notes.txt" cwd) (plist-get (car harness-compose-attachments) :path)))
           (should (equal "text/plain" (plist-get (car harness-compose-attachments) :mime)))
           (should (harness-ui-chat-test-find buf "notes.txt (1 B)")))

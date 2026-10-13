@@ -3892,11 +3892,13 @@ That is the root of the project `default-directory' is in, else
   (harness-files-project-root default-directory))
 
 ;;;###autoload
-(defun harness-new-session (directory &optional position)
+(defun harness-new-session (directory &optional position callback)
   "Start a new session in DIRECTORY and show it in POSITION.
 It shows once the harness has made it, in the frame this command ran in,
 and where a window prefix typed before the command says -- `C-x 4 4',
-`C-x 5 5', `C-x t t' (`harness-ui-display-later')."
+`C-x 5 5', `C-x t t' (`harness-ui-display-later').  CALLBACK, when given,
+is called then with the session's buffer, shown by now with its window
+selected."
   (interactive (list (read-directory-name "Session directory: " (harness-ui--default-directory) nil t)
                      (and current-prefix-arg (harness-ui-read-position))))
   (let ((later (harness-ui-display-later)))
@@ -3907,8 +3909,9 @@ and where a window prefix typed before the command says -- `C-x 4 4',
                        (harness-ui-refresh-sessions
                         (lambda (_)
                           (funcall later (lambda (frame)
-                                           (harness-ui-display-session (plist-get result :sessionId)
-                                                                       position frame)))))))))
+                                           (let ((buffer (harness-ui-display-session (plist-get result :sessionId)
+                                                                                     position frame)))
+                                             (when callback (funcall callback buffer)))))))))))
 
 ;;;###autoload
 (defun harness-switch-session (&optional position)
@@ -5158,6 +5161,8 @@ leaves the buffer's commands out, never the whole menu."
   [["Sessions"
     ("n" "New session" harness-new-session)
     ("s" "Switch session" harness-switch-session)
+    (">" "Prompt with the region" harness-prompt-region
+     :if (lambda () (harness-ui--command-available-p 'harness-prompt-region)))
     ("l" "Session list" harness-sessions :if (lambda () (harness-ui--command-available-p 'harness-sessions)))
     ("g" "Search sessions" harness-search-sessions
      :if (lambda () (harness-ui--command-available-p 'harness-search-sessions)))

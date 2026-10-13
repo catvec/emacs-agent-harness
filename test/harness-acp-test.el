@@ -775,6 +775,89 @@ Once the turn ends the message runs as a turn of its own."
                                                  :stop-reason)))
       (should-not (harness-agent-running-p sid)))))
 
+(ert-deftest harness-acp-local-send-one-queued-message-now ()
+  "What `harness-chat-send-queued' sends steers the running turn with that message alone.
+`:qids' names the queued messages to send; the others stay queued, and
+the update of the steering node tells the client once the turn took it."
+  (harness-acp-test-with
+    (let* ((gate (harness-make-promise))
+           (harness-provider-demo-script-override
+            '((:type tool-call :id "w1" :name "hold" :input (:n 1))
+              (:type text :delta "Done.")
+              (:type done :stop-reason end-turn)))
+           (conn (harness-acp-test-connect))
+           (sid (harness-acp-test-new-session conn))
+           (queue (lambda (text)
+                    (harness-acp-test-request
+                     conn "_harness/agent/prompt"
+                     (list :session-id sid :blocks (list (list :type "text" :text text))
+                           :opts (list :queue t)))))
+           (p (progn
+                (harness-define-tool "hold" :label "Hold" :description "hold" :kind 'read
+                                     :handler (lambda (_input _ctx) (harness-then gate (lambda (_) "held"))))
+                (harness-acp-request conn "session/prompt"
+                                     (list :sessionId sid :prompt (list (list :type "text" :text "tour")))))))
+      (harness-test-wait (lambda () (memq 'tool-call (mapcar (lambda (n) (plist-get n :kind))
+                                                             (harness-call 'session/nodes sid))))
+                         5 "the turn in its tool")
+      (funcall queue "for later")
+      (funcall queue "right now")
+      (let* ((items (plist-get (harness-call 'session/get sid) :queue))
+             (qid (plist-get (cadr items) :id))
+             (send (harness-acp-request conn "_harness/agent/send-queue"
+                                        (list :session-id sid :qids (list qid)))))
+        (harness-test-wait (lambda () (cl-find-if (lambda (n) (plist-get (plist-get n :meta) :steering))
+                                                  (harness-call 'session/nodes sid)))
+                           5 "the steering message")
+        (should (equal '("for later")
+                       (mapcar (lambda (it) (plist-get it :text)) (plist-get (harness-call 'session/get sid) :queue))))
+        (should (equal "right now"
+                       (plist-get (cl-find-if (lambda (n) (plist-get (plist-get n :meta) :steering))
+                                              (harness-call 'session/nodes sid))
+                                  :content)))
+        (harness-resolve gate t)
+        (should (equal "end-turn" (plist-get (harness-test-await send) :stop-reason)))
+        (should (equal "end_turn" (plist-get (harness-test-await p) :stopReason))))
+      ;; The turn took the message, and the client heard it did.
+      (harness-test-wait
+       (lambda ()
+         (cl-some (lambda (u) (and (equal (plist-get u :sessionUpdate) "_harness/node")
+                                   (equal (plist-get (plist-get u :node) :content) "right now")
+                                   (plist-get (plist-get (plist-get u :node) :meta) :delivered-after)))
+                  (harness-acp-test-updates)))
+       5 "the update saying the model has the message")
+      ;; The one left in the queue goes out as a turn of its own.
+      (harness-test-wait (lambda () (and (null (plist-get (harness-call 'session/get sid) :queue))
+                                         (not (harness-agent-running-p sid))))
+                         10 "the queued turn")
+      (should (equal '("tour" "right now" "for later")
+                     (mapcar (lambda (n) (plist-get n :content))
+                             (cl-remove-if-not (lambda (n) (eq (plist-get n :kind) 'user))
+                                               (harness-call 'session/nodes sid))))))))
+
+(ert-deftest harness-acp-text-block-keeps-the-mark-of-an-attachments-text ()
+  "A text block marked `_harness.attached' stays marked in the harness.
+The compose box marks the text of a task it attaches that way; the
+transcript then sets it apart from the user's words.  A mark that is
+false, or none, leaves a text block as it was."
+  (harness-acp-test-with
+    (should (equal '(:type "text" :text "words") (harness-acp--block-from-acp '(:type "text" :text "words"))))
+    (should (equal '(:type "text" :text "Task t-1" :attached t)
+                   (harness-acp--block-from-acp '(:type "text" :text "Task t-1" :_harness (:attached t)))))
+    (should (equal '(:type "text" :text "words")
+                   (harness-acp--block-from-acp '(:type "text" :text "words" :_harness (:attached :false)))))
+    ;; Over the wire, as the chat sends it.
+    (let* ((conn (harness-acp-test-connect))
+           (sid (harness-acp-test-new-session conn)))
+      (harness-acp-test-request
+       conn "session/prompt"
+       (list :sessionId sid
+             :prompt (list (list :type "text" :text "see @task:t-1")
+                           (list :type "text" :text "Task t-1, attached: Fix" :_harness (list :attached t)))))
+      (let ((node (car (cl-remove-if-not (lambda (n) (eq (plist-get n :kind) 'user))
+                                         (harness-call 'session/nodes sid)))))
+        (should (equal "see @task:t-1\n\nTask t-1, attached: Fix" (plist-get node :content)))))))
+
 (ert-deftest harness-acp-local-wire-normalisation ()
   (harness-acp-test-with
     (let* ((conn (harness-acp-test-connect))

@@ -31,8 +31,11 @@
 ;; tool calls in brief -- for cents, where a summary on the session's
 ;; model reads all of it uncached, as
 ;; carrying on would.  A transcript file asks no model at all.  The
-;; buttons' keys work while point is on their line.  A session blocked
-;; on an answer is in the middle of a turn, so it shows no panel at all.
+;; buttons' keys work while point is on their line; in the compose box
+;; they type, and C-c . and a key press it there
+;; (`harness-compose-panel-key'), as the line under the buttons says.  A
+;; session blocked on an answer is in the middle of a turn, so it shows no
+;; panel at all.
 ;;
 ;; A cache can be dropped before its clock says so.  A redaction
 ;; (harness-redact.el) takes a secret out of a conversation and resets a
@@ -93,6 +96,7 @@
 (defvar harness-ui-switch--prompt)
 (declare-function harness-chat--buffer-for "harness-ui-chat" (sid))
 (declare-function harness-compose-redraw "harness-ui-compose" ())
+(declare-function harness-compose-panel-hint "harness-ui-compose" (key))
 (declare-function harness-chat--button "harness-ui-chat" (label action &rest props))
 (declare-function harness-chat--kbd "harness-ui-chat" (key))
 (declare-function harness-ui-cowboy-waiting-p "harness-ui-cowboy" (session-id))
@@ -438,8 +442,11 @@ the panel started runs, the line says so instead."
                                                 :help (harness-ui-cache--offer-help estimate kind))
                           (if cost (propertize (format " (%s)" cost) 'face 'harness-dim-face) ""))))
               harness-ui-compact-kinds "")
-             "\n")))
-      (add-text-properties 0 (length line) (list 'wrap-prefix "   ") line)
+             "\n"
+             ;; The keys type in the compose box: this is how to press one there.
+             "   " (harness-compose-panel-hint (char-to-string (cadr (car harness-ui-compact-kinds)))) "\n")))
+      ;; The lines are a panel of the compose box too (`harness-compose-panel-key').
+      (add-text-properties 0 (length line) (list 'wrap-prefix "   " 'harness-compose-panel 'cache) line)
       (harness-ui-with-keymap line map)))))
 
 ;;;; Showing it on time

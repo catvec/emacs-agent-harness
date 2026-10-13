@@ -431,6 +431,10 @@ text block names it.  A tool_result block whose call returned images
 gets them the same way (`harness-agent--prepare-result'); any other is
 returned as it is."
   (pcase (plist-get block :type)
+    ;; What marks the text of an attachment is for the transcript.
+    ("text" (if (plist-member block :attached)
+                (list :type "text" :text (plist-get block :text))
+              block))
     ("image"
      (cond ((plist-get block :data) block)
            ((and (plist-get block :path) (harness-agent--vision-p session)
@@ -450,12 +454,8 @@ returned as it is."
      (if (plist-get block :images) (harness-agent--prepare-result block session) block))
     (_ block)))
 
-(defun harness-agent--image-label (block)
-  "Return the label of image BLOCK (image 1), or nil when it has none.
-The compose box labels the images it attaches and puts their tokens,
-[image 1], in the message's text."
-  (let ((label (and (equal (plist-get block :type) "image") (plist-get block :label))))
-    (and (stringp label) (not (string-empty-p label)) label)))
+(defalias 'harness-agent--image-label #'harness-image-label
+  "Alias of `harness-image-label', shared with the UIs (harness-util.el).")
 
 (defun harness-agent--prepare-content (blocks session)
   "Return BLOCKS, the content of a user message, ready for SESSION's provider.
@@ -483,26 +483,16 @@ cut to the newest `harness-agent-history-images' first (see
               m))
           (harness-agent--cap-images messages session)))
 
-(defun harness-agent--blocks-text (blocks)
-  "Return the plain text of BLOCKS for a transcript node.
-An image reads [image], or its token, [image 1], when it has a label;
-nothing when the text holds its token already, as the compose box's
-does."
-  (let ((text (mapconcat (lambda (b) (if (equal (plist-get b :type) "text") (or (plist-get b :text) "") ""))
-                         blocks " ")))
-    (mapconcat #'identity
-               (delq nil (mapcar (lambda (b)
-                                   (pcase (plist-get b :type)
-                                     ("text" (plist-get b :text))
-                                     ("file" (format "@%s" (file-name-nondirectory (or (plist-get b :path) ""))))
-                                     ("image" (let ((label (harness-agent--image-label b)))
-                                                (cond ((null label) "[image]")
-                                                      ((string-search (format "[%s]" label) text) nil)
-                                                      (t (format "[%s]" label)))))
-                                     ("audio" "[audio]")
-                                     (_ "")))
-                                 blocks))
-               " ")))
+(defalias 'harness-agent--names-file-p #'harness-names-file-p
+  "Alias of `harness-names-file-p', shared with the UIs (harness-util.el).")
+
+(defalias 'harness-agent--attached-text-p #'harness-attached-text-p
+  "Alias of `harness-attached-text-p', shared with the UIs (harness-util.el).")
+
+(defalias 'harness-agent--blocks-text #'harness-blocks-text
+  "Alias of `harness-blocks-text', shared with the UIs (harness-util.el).
+A UI reads a queued message with it as the agent will record it
+\(`harness-queued-message-node').")
 
 (defun harness-agent--only-text-p (blocks)
   "Non-nil when every block of BLOCKS is a text block."
@@ -557,19 +547,8 @@ the model can tell apart every image of the message."
                              (harness-agent-attachments-to-blocks atts)))))
     (harness-agent--join-texts blocks)))
 
-(defun harness-agent-attachments-to-blocks (attachments)
-  "Turn ATTACHMENTS, attachment plists, into content blocks.
-An image keeps its `:label', which its token in the text names."
-  (mapcar (lambda (a)
-            (let ((mime (or (plist-get a :mime) "")))
-              (cond ((string-prefix-p "image/" mime)
-                     (append (list :type "image" :mime mime :path (plist-get a :path))
-                             (and (stringp (plist-get a :label)) (list :label (plist-get a :label)))))
-                    ((string-prefix-p "audio/" mime)
-                     (list :type "audio" :mime mime :path (plist-get a :path)))
-                    (t (list :type "file" :path (plist-get a :path) :size (plist-get a :size)
-                             :mime mime :name (plist-get a :name))))))
-          attachments))
+(defalias 'harness-agent-attachments-to-blocks #'harness-attachments-to-blocks
+  "Alias of `harness-attachments-to-blocks', shared with the UIs (harness-util.el).")
 
 ;;;; Images tools return
 ;;
@@ -1119,17 +1098,19 @@ Return nil when nothing is pending.  See `harness-agent--take-pending'."
 
 (defun harness-agent--mark-delivered (sid ids)
   "Mark the steering nodes IDS of session SID as delivered now.
-They count as delivered after the newest node that is not one of them;
-a node already after it keeps its place and is left untouched."
+They count as delivered after the newest node that is not one of them,
+which is where `session/messages' puts them for the model.  A node
+already after it keeps its place there, and is marked all the same:
+the mark is also how a UI tells a message the model has from one that
+still waits for its next step."
   (let* ((nodes (and ids (harness-call 'session/nodes sid)))
          (anchor (cl-find-if-not (lambda (n) (member (plist-get n :id) ids)) nodes :from-end t)))
     (when anchor
-      (cl-loop for n in nodes
-               until (eq n anchor)
-               when (member (plist-get n :id) ids)
-               do (harness-call 'session/update-node sid (plist-get n :id)
-                                :meta (plist-put (copy-sequence (plist-get n :meta))
-                                                 :delivered-after (plist-get anchor :id)))))))
+      (dolist (n nodes)
+        (when (member (plist-get n :id) ids)
+          (harness-call 'session/update-node sid (plist-get n :id)
+                        :meta (plist-put (copy-sequence (plist-get n :meta))
+                                         :delivered-after (plist-get anchor :id))))))))
 
 (defun harness-agent--on-event (turn ev &optional model)
   "Handle EV from TURN's provider; late events of a finished turn are dropped.
@@ -1975,17 +1956,22 @@ Otherwise it is from the first item's sender (see `agent/prompt')."
   (unless (cl-some (lambda (it) (null (harness-sender-kind (plist-get it :from)))) items)
     (plist-get (car items) :from)))
 
-(harness-defmethod agent/send-queue (session-id)
-  "Send every queued message of SESSION-ID as one turn; return its promise.
+(harness-defmethod agent/send-queue (session-id &optional qids)
+  "Send the queued messages of SESSION-ID as one turn; return its promise.
+Every queued message goes, or with QIDS, a list of queue item ids (a
+vector works too), only those: one message sent now, the others still
+waiting for the turn that sends the queue (`session/queue-take').
 Items with neither text nor attachments are dropped, and the images of
 the others numbered across the message (`harness-agent--queue-blocks').
-With nothing to send no turn starts and the promise resolves to
+With nothing to send -- an empty queue, or QIDS naming items that went
+already -- no turn starts and the promise resolves to
 \(:stop-reason nothing-queued).  While a turn runs the messages steer
-it, like any message sent then.  The message is the user's when any
-item is, else from the first item's sender."
+it, like any message sent then, and reach the model at its next step.
+The message is the user's when any item is, else from the first item's
+sender."
   (let* ((items (cl-remove-if (lambda (it) (and (harness-string-blank-p (plist-get it :text))
                                                 (null (plist-get it :attachments))))
-                              (harness-call 'session/queue-take session-id)))
+                              (harness-call 'session/queue-take session-id qids)))
          (blocks (harness-agent--queue-blocks items))
          (from (harness-agent--queue-sender items)))
     (if (null blocks)

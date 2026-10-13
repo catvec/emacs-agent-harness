@@ -393,6 +393,154 @@ It is never added to the running turn: no steering node, no
       (should (eq 'end-turn (plist-get (harness-test-await (harness-call 'agent/send-queue id)) :stop-reason)))
       (should (equal "first\n\nsecond" (plist-get (car (harness-call 'session/nodes id)) :content))))))
 
+(defun harness-agent-test-queue-texts (id)
+  "Return the texts of the messages queued in session ID."
+  (mapcar (lambda (it) (plist-get it :text)) (plist-get (harness-call 'session/get id) :queue)))
+
+(ert-deftest harness-agent-send-queue-one-message-steers-the-running-turn ()
+  "Sending one queued message while a turn runs gives the turn that message alone.
+It steers like any message sent then -- here it rides on the result of
+the tool that ran meanwhile -- and the others stay queued, to go out as
+a turn of their own once this one ends."
+  (harness-agent-test-with
+    (let* ((id (harness-agent-test-hosted-session))
+           (qid (progn (harness-call 'session/queue id "not yet")
+                       (prog1 (plist-get (harness-call 'session/queue id "change of plan") :id)
+                         (harness-call 'session/queue id "also later"))))
+           (left :unset))
+      (harness-define-tool "slow" :label "Slow" :description "slow" :kind 'read
+                           :handler (lambda (_input _ctx)
+                                      (harness-call 'agent/send-queue id (list qid))
+                                      (setq left (harness-agent-test-queue-texts id))
+                                      "slow output"))
+      (harness-agent-test-define-hosted
+       (lambda (prompt)
+         (if (equal prompt "go")
+             '((:type tool-call :id "h1" :name "slow" :input (:n 1))
+               (:type tool-call :id "h2" :name "list_dir" :input (:path "/b"))
+               (:type text :delta "Done.")
+               (:type done :stop-reason end-turn))
+           '((:type text :delta "Got it.") (:type done :stop-reason end-turn)))))
+      (should (eq 'end-turn (plist-get (harness-test-await (harness-call 'agent/prompt id "go")) :stop-reason)))
+      ;; The message left the queue as it was sent; the others did not.
+      (should (equal '("not yet" "also later") left))
+      (should (equal "slow output\n\n<user_message>\nchange of plan\n</user_message>"
+                     (nth 0 harness-agent-test-results)))
+      (should-not (string-match-p "user_message" (nth 1 harness-agent-test-results)))
+      (let ((steering (harness-agent-test-steering-nodes id)))
+        (should (equal '("change of plan") (mapcar (lambda (n) (plist-get n :content)) steering)))
+        ;; The turn took it: it was delivered after the result that carried it.
+        (should (equal (plist-get (cl-find "h1" (harness-call 'session/nodes id)
+                                           :key (lambda (n) (plist-get n :call-id)) :test #'equal
+                                           :from-end t)
+                                  :id)
+                       (plist-get (plist-get (car steering) :meta) :delivered-after))))
+      ;; The rest goes out when this turn ends, as one turn of its own.
+      (harness-test-wait (lambda () (and (null (plist-get (harness-call 'session/get id) :queue))
+                                         (not (harness-agent-running-p id))))
+                         5 "the rest of the queue")
+      (should (equal '("go" "not yet\n\nalso later") harness-agent-test-prompts))
+      (should (equal '("go" "change of plan" "not yet\n\nalso later")
+                     (mapcar (lambda (n) (plist-get n :content)) (harness-agent-test-user-nodes id)))))))
+
+(ert-deftest harness-agent-send-queue-one-message-starts-a-turn-when-idle ()
+  "Sending one queued message of an idle session starts a turn with that message alone.
+The others stay queued until it ends, then go out together."
+  (harness-agent-test-with
+    (let ((id (harness-agent-test-session)))
+      (harness-call 'session/queue id "one")
+      (let* ((qid (plist-get (harness-call 'session/queue id "two") :id))
+             (p (progn (harness-call 'session/queue id "three")
+                       (harness-call 'agent/send-queue id (list qid)))))
+        (should (harness-agent-running-p id))
+        (should (equal '("one" "three") (harness-agent-test-queue-texts id)))
+        (should (eq 'end-turn (plist-get (harness-test-await p) :stop-reason)))
+        (harness-test-wait (lambda () (and (null (plist-get (harness-call 'session/get id) :queue))
+                                           (not (harness-agent-running-p id))))
+                           5 "the rest of the queue")
+        (should (equal '("two" "one\n\nthree")
+                       (mapcar (lambda (n) (plist-get n :content)) (harness-agent-test-user-nodes id))))
+        (should-not (harness-agent-test-steering-nodes id))))))
+
+(ert-deftest harness-agent-send-queue-a-message-that-went-already-starts-nothing ()
+  "Sending a queued message that is not queued any more starts no turn.
+It was sent already, or removed; the other queued messages stay."
+  (harness-agent-test-with
+    (let ((id (harness-agent-test-session))
+          (started 0))
+      (harness-on 'agent/turn-started (lambda (_) (cl-incf started)))
+      (harness-call 'session/queue id "waiting")
+      (should (eq 'nothing-queued
+                  (plist-get (harness-test-await (harness-call 'agent/send-queue id (list "gone"))) :stop-reason)))
+      (should (eq 'nothing-queued
+                  (plist-get (harness-test-await (harness-call 'agent/send-queue id (vector "gone"))) :stop-reason)))
+      (accept-process-output nil 0.05)
+      (should (= 0 started))
+      (should-not (harness-agent-running-p id))
+      (should (equal '("waiting") (harness-agent-test-queue-texts id)))
+      (should (null (harness-call 'session/nodes id))))))
+
+(ert-deftest harness-agent-delivered-steering-is-marked-wherever-it-stands ()
+  "Delivering steering marks each message, whether the model's place for it moves or not.
+One sent while the model worked stands before the node it is delivered
+after, and `session/messages' moves it there; one sent while the model
+answered stands after that node already, and keeps its place.  Both are
+marked, which is how a UI tells a message the model has from one that
+still waits for its next step."
+  (harness-agent-test-with
+    (let* ((id (harness-agent-test-session))
+           (add (lambda (node) (plist-get (harness-call 'session/append id node) :id)))
+           (mark (lambda (nid)
+                   (plist-get (plist-get (cl-find nid (harness-call 'session/nodes id)
+                                                  :key (lambda (n) (plist-get n :id)) :test #'equal)
+                                         :meta)
+                              :delivered-after))))
+      (funcall add '(:kind user :content "go"))
+      (let* ((s1 (funcall add '(:kind user :content "steer one" :meta (:steering t))))
+             (answer (funcall add '(:kind assistant :content "Done.")))
+             (s2 (funcall add '(:kind user :content "steer two" :meta (:steering t)))))
+        (should-not (funcall mark s1))
+        (should-not (funcall mark s2))
+        (harness-agent--mark-delivered id (list s1 s2))
+        (should (equal answer (funcall mark s1)))
+        (should (equal answer (funcall mark s2)))
+        (should (plist-get (plist-get (cl-find s2 (harness-call 'session/nodes id)
+                                               :key (lambda (n) (plist-get n :id)) :test #'equal)
+                                      :meta)
+                           :steering))
+        ;; The model reads them both after its answer, in the order they were sent.
+        (let ((msgs (harness-call 'session/messages id)))
+          (should (equal '(user assistant user) (mapcar (lambda (m) (plist-get m :role)) msgs)))
+          (should (equal '("steer one" "steer two")
+                         (mapcar (lambda (b) (plist-get b :text)) (plist-get (nth 2 msgs) :content)))))))))
+
+(ert-deftest harness-agent-attachments-with-text-are-text-blocks ()
+  "An attachment that carries its own text and no file is that text for the model.
+A task the user attached is such an attachment; files are as they were."
+  (let ((task (list :name "Fix the build" :text "Task t-1 \"Fix the build\": it fails on main")))
+    (should (equal '((:type "text" :text "Task t-1 \"Fix the build\": it fails on main" :attached t))
+                   (harness-agent-attachments-to-blocks (list task))))
+    ;; Blank text is nothing to send.
+    (should (null (harness-agent-attachments-to-blocks (list '(:name "empty" :text " \n")))))
+    ;; With a file it is the file that goes, as before.
+    (should (equal '((:type "file" :path "/tmp/a.txt" :size 1 :mime "text/plain" :name "a.txt"))
+                   (harness-agent-attachments-to-blocks
+                    (list '(:path "/tmp/a.txt" :size 1 :mime "text/plain" :name "a.txt" :text "ignored")))))
+    ;; A queued message sends its text, then the attachments' text, as one message.
+    (should (equal '((:type "text" :text "see this\n\nTask t-1 \"Fix the build\": it fails on main"))
+                   (harness-agent--queue-blocks
+                    (list (list :text "see this" :attachments (list task))))))))
+
+(ert-deftest harness-agent-send-queue-sends-the-text-of-an-attachment ()
+  "A queued message with a text attachment reaches the model with that text."
+  (harness-agent-test-with
+    (let ((id (harness-agent-test-session)))
+      (harness-call 'session/queue id "see this"
+                    (list (list :name "Fix the build" :text "Task t-1: it fails on main")))
+      (should (eq 'end-turn (plist-get (harness-test-await (harness-call 'agent/send-queue id)) :stop-reason)))
+      (should (equal "see this\n\nTask t-1: it fails on main"
+                     (plist-get (car (harness-call 'session/nodes id)) :content))))))
+
 (defun harness-agent-test-image (dir)
   "Write a PNG image in DIR and return its file name."
   (let ((file (expand-file-name "shot.png" dir)))
@@ -441,6 +589,104 @@ image placeholder for each image the text names already."
     (should (equal "see [image 1]"
                    (harness-agent--blocks-text (list (list :type "text" :text "see")
                                                      (list :type "image" :data "AAAA" :label "image 1")))))))
+
+(ert-deftest harness-agent-blocks-text-names-a-file-once ()
+  "A file the text has an @ reference to is not named again in the transcript.
+The compose box puts the reference in the text; the file's own
+block, after the text, adds `@name' only when the text lacks one."
+  (let ((file (lambda (path) (list :type "file" :path path :mime "text/plain" :size 1))))
+    ;; No reference: the file is named after the text, as before.
+    (should (equal "see @notes.el"
+                   (harness-agent--blocks-text (list (list :type "text" :text "see") (funcall file "/p/lisp/notes.el")))))
+    ;; The reference is its name, its path in the project or under ~: named already.
+    (dolist (text '("see @notes.el" "see @lisp/notes.el please" "@~/p/lisp/notes.el\nis it" "(see @notes.el)"
+                    "see @notes.el, and" "see @notes.el."))
+      (should (equal text (harness-agent--blocks-text (list (list :type "text" :text text)
+                                                             (funcall file "/p/lisp/notes.el"))))))
+    ;; Another file's reference, a longer name, an e-mail address and a word
+    ;; with an @ inside are not a reference to it.
+    (dolist (text '("see @other.el" "see @notes.elx" "see @my-notes.el" "mail me@notes.el" "see notes.el"))
+      (should (equal (concat text " @notes.el")
+                     (harness-agent--blocks-text (list (list :type "text" :text text)
+                                                       (funcall file "/p/lisp/notes.el"))))))
+    ;; Two files, one of them named: the other one is added.
+    (should (equal "see @a.el @b.el"
+                   (harness-agent--blocks-text (list (list :type "text" :text "see @a.el")
+                                                     (funcall file "/p/a.el") (funcall file "/p/b.el")))))
+    ;; Files alone read as before.
+    (should (equal "@a.el @b.el"
+                   (harness-agent--blocks-text (list (funcall file "/p/a.el") (funcall file "/p/b.el")))))))
+
+(ert-deftest harness-agent-blocks-text-sets-an-attachments-text-apart ()
+  "The text of an attachment follows the message, a paragraph apart.
+A task attached to a message is such a text: the transcript does not run
+it on from the sentence, wherever it stands among the blocks.  Text
+blocks that are not attachments' join with a space, as they did, and
+images read as they did."
+  (let ((text (lambda (s) (list :type "text" :text s)))
+        (task (lambda (s) (list :type "text" :text s :attached t)))
+        (file (list :type "file" :path "/p/notes.el" :mime "text/plain" :size 1)))
+    (should (equal "see @task:t-1 please\n\nTask t-1, attached: Fix"
+                   (harness-agent--blocks-text
+                    (list (funcall text "see @task:t-1 please") (funcall task "Task t-1, attached: Fix")))))
+    ;; A file between them goes with the words it was attached to; so does an image.
+    (should (equal "see @task:t-1 and notes please @notes.el\n\nTask t-1, attached: Fix"
+                   (harness-agent--blocks-text
+                    (list (funcall text "see @task:t-1 and notes please") file
+                          (funcall task "Task t-1, attached: Fix")))))
+    (should (equal "see @notes.el [audio]\n\nTask t-1, attached: Fix"
+                   (harness-agent--blocks-text
+                    (list (funcall text "see") (funcall task "Task t-1, attached: Fix") file '(:type "audio")))))
+    ;; Each task is a paragraph.
+    (should (equal "a\n\nTask t-1\n\nTask t-2"
+                   (harness-agent--blocks-text (list (funcall text "a") (funcall task "Task t-1") (funcall task "Task t-2")))))
+    ;; A message of a task alone, or of blank text and a task.
+    (should (equal "Task t-1" (harness-agent--blocks-text (list (funcall task "Task t-1")))))
+    (should (equal "Task t-1" (harness-agent--blocks-text (list (funcall text "") (funcall task "Task t-1")))))
+    ;; The words of the message, not the task's text, say whether a file is named.
+    (should (equal "see @notes.el\n\nTask t-1: look at @notes.el"
+                   (harness-agent--blocks-text
+                    (list (funcall text "see") file (funcall task "Task t-1: look at @notes.el")))))
+    ;; Text blocks that are not an attachment's join with a space, as they did.
+    (should (equal "a b" (harness-agent--blocks-text (list (funcall text "a") (funcall text "b")))))
+    (should (equal "see [image] [audio]" (harness-agent--blocks-text
+                                           (list (funcall text "see") '(:type "image") '(:type "audio")))))
+    (should (equal "[image] see" (harness-agent--blocks-text (list '(:type "image") (funcall text "see")))))
+    (should (equal "alone" (harness-agent--blocks-text (list (funcall text "alone")))))
+    (should (equal "" (harness-agent--blocks-text (list '(:type "other")))))))
+
+(ert-deftest harness-agent-prompt-with-a-file-and-a-task-reads-cleanly-in-the-transcript ()
+  "A message with a file and a task attached shows the words, then the task's text.
+The blocks are what the harness makes of what the chat sends: the file's
+reference is in the words, so its name is not added, and the task's text
+is marked as an attachment's.  The model still gets the file, and the
+task's text as a block of its own, without the mark."
+  (harness-agent-test-with
+    (let ((id (harness-agent-test-session))
+          (file (expand-file-name "notes.el" dir))
+          (requests nil))
+      (with-temp-file file (insert "(message \"hi\")\n"))
+      (cl-letf* ((orig (symbol-function 'harness-method/provider/complete))
+                 ((symbol-function 'harness-method/provider/complete)
+                  (lambda (req) (push req requests) (funcall orig req))))
+        (harness-test-await
+         (harness-call 'agent/prompt id
+                       (list (list :type "text" :text "see @notes.el and @task:t-1")
+                             (list :type "file" :path file :mime "text/plain" :name "notes.el" :size 16)
+                             (list :type "text" :text "Task t-1, attached: Fix\nPrompt:\nDo it" :attached t)))))
+      (let ((node (car (harness-call 'session/nodes id))))
+        (should (equal "see @notes.el and @task:t-1\n\nTask t-1, attached: Fix\nPrompt:\nDo it"
+                       (plist-get node :content)))
+        ;; The mark stays on the block, for whoever draws it.
+        (should (equal '(nil nil t) (mapcar (lambda (b) (plist-get b :attached)) (plist-get node :blocks)))))
+      (let ((user (car (plist-get (car (last requests)) :messages))))
+        (should (equal '("text" "text" "text") (mapcar (lambda (b) (plist-get b :type)) (plist-get user :content))))
+        (should (equal (list "see @notes.el and @task:t-1"
+                             (format "Attached file: %s (16 bytes)" file)
+                             "Task t-1, attached: Fix\nPrompt:\nDo it")
+                       (mapcar (lambda (b) (plist-get b :text)) (plist-get user :content))))
+        ;; Nothing of the mark reaches the model.
+        (should-not (cl-some (lambda (b) (plist-member b :attached)) (plist-get user :content)))))))
 
 (ert-deftest harness-agent-send-queue-numbers-images-across-messages ()
   "Queued messages sent together number their images across the message.

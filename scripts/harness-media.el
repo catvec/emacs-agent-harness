@@ -1226,6 +1226,8 @@ The handle is the one the approval message names."
     ("Cache the catalogue" . harness-media--question-script)
     ("docs/api.md" . harness-media--api-guide-script)
     ("one time in ten" . harness-media--flaky-script)
+    ("type hints to acme/db.py" . harness-media--queue-script)
+    ("sqlite3.Row factory" . harness-media--queue-steered)
     ("reviewed your work" . harness-media--task-slow-again)
     ("hmac" . harness-media--task-constant-time)
     ("requires-python" . harness-media--task-python)
@@ -2975,6 +2977,150 @@ progress."
     (harness-media--to-bottom buffer)
     (harness-media--capture "attachments")))
 
+;;;; The compose box: its references, the queue, the region
+
+(defvar harness-chat--queue)
+(defvar harness-compose-attachments)
+(defvar harness-compose-start)
+
+(defun harness-media-shot-compose-chips ()
+  "The compose box of a chat whose message names what it attaches.
+An image, a file of the project and a task, each by its reference in
+the text, and every reference the same chip: the image's thumbnail, or
+the icon of the file or the task, then its name as a link.  The lines
+above the box list them too.  The box gets back what it held, for the
+pictures that show it after this one."
+  (harness-media--reset-layout)
+  (let* ((buffer (harness-media--open-chat (plist-get harness-media--world :ratelimit) 'full))
+         (png (car (harness-media--attachments-make-media)))
+         (task (plist-get (plist-get harness-media--world :tasks) :slow))
+         (saved (with-current-buffer buffer (cons (harness-compose-text) harness-compose-attachments))))
+    (harness-media--settle 1)
+    (with-current-buffer buffer
+      (setq harness-compose-attachments nil)
+      (harness-compose-set
+       (format (concat "Over the limit a client gets the page in  and no Retry-After header. "
+                       "The limiter is @acme/ratelimit.py: log each 429 the way @task:%s did, "
+                       "and send the header.")
+               task))
+      ;; The image's token goes where point is, as when it is pasted there.
+      (when png
+        (goto-char harness-compose-start)
+        (search-forward "the page in ")
+        (harness-compose-add-attachment png))
+      ;; The text names the file and the task already: they keep those references.
+      (harness-compose-add-attachment (harness-media--path "acme/ratelimit.py"))
+      (harness-compose-attach-task task)
+      (harness-media--wait (lambda () (harness-compose--attached-p (concat "task:" task))) 15 "the task to attach")
+      (harness-compose-redraw))
+    (harness-media--settle 1)
+    (harness-media--fit 22 22 26)
+    (harness-media--to-bottom buffer)
+    (harness-media--capture "compose-chips")
+    (with-current-buffer buffer
+      (harness-compose-set (car saved))
+      (setq harness-compose-attachments (cdr saved))
+      (harness-compose-redraw))))
+
+(defun harness-media--queue-steered (_request)
+  "The queue picture's turn once the message that steers it reached the model.
+It thinks on that message, then holds: the turn runs while the picture is
+taken, so a message sent next waits for a step that never comes."
+  (list (harness-media--think "Rows keep their `sqlite3.Row` factory, so `query` returns `list[sqlite3.Row]`; `connect` returns the connection. Now the signatures.")
+        (list :type 'hold)))
+
+(defun harness-media--queue-script (request)
+  "The session of the queue picture: the checks first, then on, held.
+The message sent right after the first one reaches the model at the
+step after the checks, or with the first request when that has not gone
+out yet (`harness-media--queue-steered' answers it then); either way
+REQUEST's turn holds once it has it."
+  (append (list (harness-media--think "A baseline first: what the tests pass to `query` tells me its types.")
+                (harness-media--tool "bash" :command "python3 -m unittest -v 2>&1 | tail -n 3"))
+          (harness-media--queue-steered request)))
+
+(defun harness-media--delivered-p (id text)
+  "Non-nil when TEXT, a message steering session ID's turn, reached the model."
+  (cl-some (lambda (n) (and (eq (plist-get n :kind) 'user)
+                            (equal (plist-get n :content) text)
+                            (plist-get (plist-get n :meta) :delivered-after)))
+           (harness-call 'session/nodes id)))
+
+(defun harness-media-shot-chat-queue ()
+  "A chat whose turn runs, with messages in every state of their sending.
+One sent while the checks ran steered the turn at its next step: its
+line says \"delivered\".  One sent since waits for the next step, and
+says \"sent\".  Two more are queued for the next turn, each drawn as a
+message of the user's, a dim \"queued\" and its [send now], [edit] and
+[×] beside the name, above the line saying what the turn does.  The
+session is made here and deleted after, so no other picture shows it,
+and it comes after the usage pictures, which would count its usage."
+  (let ((id (harness-media--new-session :name "Type the database module" :model "claude:claude-opus-5-5"
+                                        :permission-mode 'auto))
+        (steer "Keep the sqlite3.Row factory: the handlers index rows by column name."))
+    (harness-call 'agent/prompt id "Add type hints to acme/db.py, then run mypy and the tests.")
+    ;; Sent while the turn runs, it steers it: the model gets it at its next step.
+    (harness-call 'agent/prompt id steer)
+    (harness-media--wait (lambda () (harness-media--delivered-p id steer)) 20 "the message to reach the model")
+    ;; The turn holds once it has it; a message sent now waits.
+    (harness-media--settle 1)
+    (harness-call 'agent/prompt id "And no new dependencies, please.")
+    (harness-call 'agent/prompt id "Then do the same for acme/products.py." '(:queue t))
+    (harness-call 'agent/prompt id "Write the commit message in the imperative." '(:queue t))
+    (let ((buffer (harness-media--chat-shot id "acme/db.py")))
+      (harness-media--wait (lambda () (with-current-buffer buffer (= (length harness-chat--queue) 2)))
+                           10 "the queue to show")
+      (harness-media--expand buffer "bash"))
+    ;; Fitted again, the queue drawn and the checks' output shown.
+    (harness-media--chat-shot id "acme/db.py")
+    (harness-media--capture "chat-queue")
+    (harness-call 'agent/cancel id)
+    (harness-media--wait (lambda () (not (harness-call 'agent/running id))) 15 "the turn to end")
+    (harness-call 'session/delete id)))
+
+(defun harness-media-shot-prompt-region ()
+  "Code selected in a file, and C-c h > on it (`harness-prompt-region').
+The newest session of the project, made for the picture, gets it in its
+box: where it comes from, the file and its lines, then the code in a
+fenced block, point under it for the request.  The selection shows still,
+for the picture.  The session is deleted after."
+  (let ((id (harness-media--new-session :name "Explain the token bucket" :model "claude:claude-opus-5-5"
+                                        :permission-mode 'accept-edits)))
+    (harness-media--reset-layout)
+    (harness-media--show-file "acme/ratelimit.py" "^class TokenBucket")
+    (let ((listed nil))
+      (harness-ui-refresh-sessions (lambda (_) (setq listed t)))
+      (harness-media--wait (lambda () listed) 10 "the session list"))
+    (let* ((code (selected-window))
+           (file (window-buffer code))
+           (beg (progn (goto-char (point-min)) (re-search-forward "^    def take") (line-beginning-position)))
+           (end (progn (re-search-forward "^        return max.*$") (point))))
+      (set-mark beg)
+      (goto-char end)
+      (activate-mark)
+      (harness-prompt-region)
+      (let ((buffer (harness-media--wait
+                     (lambda ()
+                       (let ((chat (harness-chat--buffer-for id)))
+                         (and (buffer-live-p chat)
+                              (with-current-buffer chat
+                                (and harness-compose-start (string-search "```python" (harness-compose-text))))
+                              chat)))
+                     20 "the region in the session's box")))
+        (harness-media--settle 1)
+        ;; The selection, as it was, beside the box that got it.
+        (with-current-buffer file
+          (set-marker (mark-marker) beg)
+          (setq mark-active t))
+        (set-window-point code end)
+        (setq highlight-nonselected-windows t)
+        (harness-media--fit 26 26 30)
+        (harness-media--to-bottom buffer)
+        (harness-media--capture "prompt-region")
+        (setq highlight-nonselected-windows nil)
+        (with-current-buffer file (deactivate-mark))))
+    (harness-call 'session/delete id)))
+
 (defvar harness-directory)
 (defvar harness-ui-version--report)
 (defvar harness-ui-version--checking)
@@ -3009,6 +3155,7 @@ afterwards."
     ("chat-permission" . harness-media-shot-chat-permission)
     ("chat-question" . harness-media-shot-chat-question)
     ("attachments" . harness-media-shot-attachments)
+    ("compose-chips" . harness-media-shot-compose-chips)
     ("tasks" . harness-media-shot-tasks)
     ("tasks-search" . harness-media-shot-tasks-search)
     ("quick-search" . harness-media-shot-quick-search)
@@ -3036,6 +3183,9 @@ afterwards."
     ;; A live sub-agent and the long command it runs: after the usage
     ;; pictures, whose numbers its session would join.
     ("notes" . harness-media-shot-notes)
+    ;; Sessions of their own too, made and deleted for the picture.
+    ("chat-queue" . harness-media-shot-chat-queue)
+    ("prompt-region" . harness-media-shot-prompt-region)
     ;; After every picture of usage: its session's usage would count there.
     ("chat-cowboy" . harness-media-shot-chat-cowboy)
     ;; Last: it sets a limit, starts a task and queues four, which every

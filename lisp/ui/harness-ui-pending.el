@@ -29,6 +29,12 @@
 ;; Changing the store runs `harness-ui-pending-changed-hook' with the
 ;; session id: hosts redraw (the chat its tail, the popout its content),
 ;; and a popout with nothing left closes itself.
+;;
+;; A panel's keys -- a question's digits, a permission's y, s, a, n and N
+;; -- act with point on the panel.  In the compose box they type, so each
+;; panel is a panel of the box (`harness-compose-panel'): its C-c . reads
+;; a key and presses it on the nearest panel that has it
+;; (`harness-compose-panel-key'), and every panel says so in a dim line.
 
 ;;; Code:
 
@@ -713,8 +719,10 @@ out when they are just where it runs."
                     (and cwd about)))))
 
 (defun harness-ui-pending--decorate (start end pid map)
-  "Make START..END the panel of request PID, with keymap MAP."
-  (add-text-properties start end (list 'harness-ui-pending pid))
+  "Make START..END the panel of request PID, with keymap MAP.
+It is a panel of the compose box too: \\<harness-compose-map>\\[harness-compose-panel-key] in the box presses
+the panel's keys from there."
+  (add-text-properties start end (list 'harness-ui-pending pid 'harness-compose-panel pid))
   (add-face-text-property start end 'harness-ui-panel-face t)
   (harness-ui-add-keymap start end map))
 
@@ -743,6 +751,9 @@ out when they are just where it runs."
                                           :help (format "%s (%s)" (harness-ui-pending-answer-help r option) (nth 1 o)))
                 " " (harness-ui-kbd (nth 1 o)) "  ")))
     (insert "\n")
+    ;; The keys above type in the compose box: this is how to press one there.
+    (when-let* ((key (nth 1 (car buttons))))
+      (insert "   " (harness-compose-panel-hint key) "\n"))
     (harness-ui-pending--decorate start (point) pid (harness-ui-pending--permission-map r))))
 
 ;;;;; A long input, whole
@@ -1169,14 +1180,17 @@ Options with diagrams get the area showing one of them under them."
             "\n")
     (when (plist-get r :options)
       (insert "\n" (harness-ui-pending-question-body session-id r)))
+    ;; The digits above type in the compose box: the hint says how to press one there.
     (insert (cond ((not (plist-get r :options))
                    (propertize "   type your answer below\n" 'face 'harness-dim-face))
                   ((harness-ui-pending--diagrams r)
                    (concat "\n   " (harness-ui-kbd "C-c C-f")
                            (propertize " next diagram, " 'face 'harness-dim-face)
                            (harness-ui-kbd "C-c C-b")
-                           (propertize " previous\n   or type another answer below\n" 'face 'harness-dim-face)))
-                  (t (propertize "\n   or type another answer below\n" 'face 'harness-dim-face))))
+                           (propertize " previous\n   or type another answer below · " 'face 'harness-dim-face)
+                           (harness-compose-panel-hint "1") "\n"))
+                  (t (concat (propertize "\n   or type another answer below · " 'face 'harness-dim-face)
+                             (harness-compose-panel-hint "1") "\n"))))
     (harness-ui-pending--decorate start (point) pid (harness-ui-pending--question-map r))))
 
 (defvar harness-ui-pending-panel-functions nil

@@ -1077,6 +1077,43 @@ harness's too, so the model never sees either, and comes once."
         (should (eq 'running (plist-get (harness-call 'session/get id) :status))))
       (should (equal '(running blocked running) (reverse statuses))))))
 
+(ert-deftest harness-session-queue-take-some-items ()
+  "Taking some queued items leaves the others queued, and says what is left.
+The items come in queue order, whatever order the ids are given in, as a
+list or a vector; an id with no item is skipped.  The session is
+announced changed only when something was taken."
+  (harness-session-test-with
+    (let* ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id))
+           (qid (lambda (text) (plist-get (harness-call 'session/queue id text) :id)))
+           (a (funcall qid "first"))
+           (b (funcall qid "second"))
+           (c (funcall qid "third"))
+           (d (funcall qid "fourth"))
+           (left nil)
+           (changed 0)
+           (texts (lambda (items) (mapcar (lambda (it) (plist-get it :text)) items))))
+      (harness-on 'session/queue-changed (lambda (_ items) (push (funcall texts items) left)))
+      (harness-on 'session/changed (lambda (&rest _) (cl-incf changed)))
+      (should (equal '("first" "third") (funcall texts (harness-call 'session/queue-take id (list c "nope" a)))))
+      (should (equal '(("second" "fourth")) left))
+      (should (= 1 changed))
+      (should (equal '("second" "fourth") (funcall texts (plist-get (harness-call 'session/get id) :queue))))
+      (should (equal (list b d) (mapcar (lambda (it) (plist-get it :id))
+                                        (plist-get (harness-call 'session/get id) :queue))))
+      ;; A vector of ids, as JSON may give them.
+      (should (equal '("fourth") (funcall texts (harness-call 'session/queue-take id (vector d)))))
+      (should (equal '(("second") ("second" "fourth")) left))
+      ;; Nothing taken: no news, and the others stay.
+      (setq left nil changed 0)
+      (should (null (harness-call 'session/queue-take id (list "nope" a))))
+      (should (null left))
+      (should (= 0 changed))
+      (should (equal '("second") (funcall texts (plist-get (harness-call 'session/get id) :queue))))
+      ;; Without ids, everything goes.
+      (should (equal '("second") (funcall texts (harness-call 'session/queue-take id))))
+      (should (null (plist-get (harness-call 'session/get id) :queue)))
+      (should (null (harness-call 'session/queue-take id))))))
+
 (ert-deftest harness-session-sender-persists-and-reads-in-text ()
   "A message the user did not write keeps its sender through a restart,
 and so does a queued one; the searchable transcript says who sent it."

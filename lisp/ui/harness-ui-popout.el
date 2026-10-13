@@ -34,9 +34,12 @@
 ;; the frame allows, which Emacs's image keys zoom.
 ;;
 ;; On the content, `q' closes the popout and `g' draws it again; in the
-;; box, the keys are the box's, and C-c C-c sends it.  C-g closes the
-;; popout once it has nothing else to quit.  Text typed in the box of a
-;; popout that closes is kept for the next time its KEY shows.
+;; box, the keys are the box's, and C-c C-c sends it.  The content is a
+;; panel of the box (`harness-compose-panel-key'), as the panels of a
+;; request it draws are: C-c . and a key presses that key on it from the
+;; box, where q and g type.  C-g closes the popout once it has nothing
+;; else to quit.  Text typed in the box of a popout that closes is kept
+;; for the next time its KEY shows.
 ;;
 ;; Views offer one key to pop out the item at point (`harness-ui-popout-at-point',
 ;; SPC on the task board): the functions on
@@ -141,7 +144,9 @@ They sit under the keymaps the content brings, which win.")
   "Major mode of a popout: one item of a session or task, and maybe a box.
 \\<harness-ui-popout-content-map>On the content \\[harness-ui-popout-quit] closes it and \\[harness-ui-popout-redraw] draws it again; with a
 box, other typing there goes into the box.
-\\<harness-ui-popout-mode-map>In the box \\[harness-ui-popout-submit] sends what it holds.
+\\<harness-ui-popout-mode-map>In the box \\[harness-ui-popout-submit] sends what it holds, and \\<harness-compose-map>\\[harness-compose-panel-key] and then a key presses
+that key of the content, or of the request panel in it: a question's digits,
+a permission's y and n.
 
 \\{harness-ui-popout-mode-map}"
   (setq buffer-read-only nil)
@@ -158,6 +163,7 @@ box, other typing there goes into the box.
         (". q" "Close" harness-ui-popout-quit)
         (". g" "Draw again" harness-ui-popout-redraw)
         ("C-c C-c" "Send the box" harness-ui-popout-submit)
+        ("C-c ." "A key of the panel above, from the box" harness-compose-panel-key)
         ("C-c >" "Quote reply: region or message" compose-quote-reply)
         ("M-RET" "Split a quote to answer inline" compose-quote-split)
         ("C-c [" "Elide part of a quote: [...]" compose-quote-elide)]))
@@ -201,6 +207,19 @@ A popout opened from another one, which closing shows again, has a
         (put-text-property pos next 'keymap (if existing (make-composed-keymap (list existing map)) map))
         (setq pos next)))))
 
+(defun harness-ui-popout--mark-panels (start end)
+  "Make the content from START to END a panel of the compose box.
+\\<harness-compose-map>\\[harness-compose-panel-key] in the box presses the content's keys, q and g, from there,
+as it presses those of a request's panel.
+The panels the content drew itself keep their own names, a request's id:
+only the text between them, and around, is the popout's."
+  (let ((pos start))
+    (while (< pos end)
+      (let ((next (or (next-single-property-change pos 'harness-compose-panel nil end) end)))
+        (unless (get-text-property pos 'harness-compose-panel)
+          (put-text-property pos next 'harness-compose-panel 'popout))
+        (setq pos next)))))
+
 (defun harness-ui-popout--insert-content ()
   "Insert the content at point: what the render function draws, keys added."
   (let ((start (point)))
@@ -210,6 +229,7 @@ A popout opened from another one, which closing shows again, has a
                                  'face 'harness-tool-error-face))))
     (unless (bolp) (insert "\n"))
     (harness-ui-popout--add-keymap start (point) harness-ui-popout-content-map)
+    (harness-ui-popout--mark-panels start (point))
     (put-text-property start (point) 'read-only t)
     ;; Typing just after the content goes to the box, not into the content.
     (put-text-property (max start (1- (point))) (point) 'rear-nonsticky t)))
@@ -220,7 +240,8 @@ A popout opened from another one, which closing shows again, has a
     (let ((start (point)))
       (harness-compose-insert-attachments)
       (put-text-property start (point) 'read-only t))
-    (harness-compose-insert nil "C-c C-c sends, RET newline, C-c C-a attaches")))
+    (harness-compose-insert nil (format "C-c C-c sends, RET newline, C-c C-a attaches a file or task, %s KEY: a key of the panel above"
+                                        (harness-compose-panel-keys)))))
 
 (defun harness-ui-popout--forget-box ()
   "Drop the box's overlays and markers: this draw has no box."

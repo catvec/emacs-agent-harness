@@ -25,9 +25,12 @@
 ;; not now: the message waits, and goes with the next one.  The keys
 ;; work while point is on the panel, a click on a choice from anywhere;
 ;; digits pick an option as on any question, and text typed in the box
-;; answers it too ("transcript", "always brief").  Whatever is chosen,
-;; the model can search and read the conversation left out with the
-;; session_history tool, which the panel says when the session has it.
+;; answers it too ("transcript", "always brief"); in the box, where the
+;; keys type, C-c . and a key press it on the panel
+;; (`harness-compose-panel-key'), which the panel's last line says.
+;; Whatever is chosen, the model can search and read the conversation
+;; left out with the session_history tool, which the panel says when
+;; the session has it.
 ;;
 ;; The cache panel (harness-ui-cache.el) stays away while the question
 ;; waits: the question says all it would, and more.
@@ -39,6 +42,7 @@
 (require 'harness-core)
 (require 'harness-util)
 (require 'harness-ui)
+(require 'harness-ui-compose)           ; `harness-compose-panel-hint'
 (require 'harness-ui-pending)
 
 (defgroup harness-ui-cowboy nil
@@ -277,7 +281,11 @@ price of carrying on is on its row below."
                    'face 'harness-dim-face 'wrap-prefix "   ")
      "")
    (propertize "   or type a choice below: “transcript”, “always brief”\n"
-               'face 'harness-dim-face 'wrap-prefix "   ")))
+               'face 'harness-dim-face 'wrap-prefix "   ")
+   ;; The keys above type in the compose box: this is how to press one there.
+   (propertize (concat "   " (harness-compose-panel-hint (char-to-string (cadr (car harness-ui-cowboy-keys))))
+                       "\n")
+               'wrap-prefix "   ")))
 
 (defun harness-ui-cowboy--paint-prefixes (string face)
   "Return STRING with its wrap prefixes in FACE, as its text is.

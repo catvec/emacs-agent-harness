@@ -2152,13 +2152,23 @@ FROM, when non-nil, is who sent it, when that was not the user (see
     (harness-session--touch s)
     (harness-session-queue s)))
 
-(harness-defmethod session/queue-take (id)
-  "Return and clear the queued items of session ID."
+(harness-defmethod session/queue-take (id &optional qids)
+  "Return and remove the queued items of session ID, in queue order.
+Without QIDS every item goes and the queue is cleared.  With QIDS, a
+list of item ids (a vector of them works too, as JSON may give one),
+only those items go and the others stay queued: that is how one queued
+message is sent now (`agent/send-queue').  An id with no item is
+skipped.  `session/queue-changed' tells what is left, and the session
+is touched only when something was taken."
   (let* ((s (harness-session--get id))
-         (items (harness-session-queue s)))
-    (setf (harness-session-queue s) nil)
+         (queue (harness-session-queue s))
+         (wanted (and qids (append qids nil)))
+         (items (if qids
+                    (cl-remove-if-not (lambda (it) (member (plist-get it :id) wanted)) queue)
+                  queue)))
     (when items
-      (harness-emit 'session/queue-changed id nil)
+      (setf (harness-session-queue s) (cl-remove-if (lambda (it) (memq it items)) queue))
+      (harness-emit 'session/queue-changed id (harness-session-queue s))
       (harness-session--touch s))
     items))
 

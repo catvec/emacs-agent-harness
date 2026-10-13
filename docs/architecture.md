@@ -1171,8 +1171,11 @@ redact).
 - `session/queue ID TEXT &optional ATTACHMENTS FROM` (FROM, when
   non-nil, is who sent it, not the user: the item keeps it as `:from'),
   `session/queue-update ID QID TEXT`,
-  `session/queue-remove ID QID`, `session/queue-take ID` → items, cleared.
-  Event `session/queue-changed ID ITEMS`.
+  `session/queue-remove ID QID`, `session/queue-take ID &optional QIDS`
+  → the items taken, in queue order, removed from the queue: all of
+  them, or with QIDS (a list of item ids, or a vector) only those, the
+  others staying queued.  Event `session/queue-changed ID ITEMS` (what
+  is left).
 - `session/pending-add ID REQUEST` → id; `session/pending-resolve ID PID ANSWER`;
   `session/pending ID`.  Event `session/pending-changed ID ITEMS`.
   Status becomes `blocked` while anything is pending.
@@ -2882,9 +2885,16 @@ non-interactive session it stays a denial.
   `agent/activity` value, `(:phase compacting)` say) for a turn still
   held by its gate: the cowboy module's compaction before the message.
   The turn sets its own when it starts and clears it when it ends.
-- `agent/send-queue SESSION-ID` — sends every queued item as one turn;
-  the message is the user's when any item is, else from the first
-  item's sender.
+- `agent/send-queue SESSION-ID &optional QIDS` — sends the queued items
+  as one turn: every item, or with QIDS (a list of item ids) only
+  those, which sends one message now and leaves the others queued for
+  the turn that sends the queue (a QIDS naming nothing queued any more
+  starts nothing: `(:stop-reason nothing-queued)`).  While a turn runs
+  the items steer it, like any message sent then.  The message is the
+  user's when any item is, else from the first item's sender.  An
+  attachment of an item that carries its own `:text` and no `:path` -- a
+  task, say -- goes to the model as that text
+  (`harness-attachments-to-blocks`).
 - Sync filter `agent/message` (value the message's blocks; args SID
   and `(:from FROM :steering BOOL)`) on every message as it is
   delivered: when it starts a turn or steers one, a queued message when
@@ -2982,6 +2992,10 @@ non-interactive session it stays a denial.
   Steering is drained at every boundary (each tool result and each
   step), so it is delivered once; a model that stops with steering
   waiting gets one more step with it as the newest user message.
+  Taking steering marks each of its nodes `:delivered-after` the newest
+  node that is not steering, whether the model's place for the message
+  moves (`session/messages`) or not, which is how a UI tells a message
+  the model has from one that still waits for its next step.
   A turn has no step limit: long unattended work is the point, and the
   loop ends when the model stops, the provider errors or hits its
   output limit, the user cancels, or an `agent/step` filter (a merge
@@ -8147,8 +8161,40 @@ holds back node updates, which the fetched nodes carry, but applies
 the session record and the activity as they come: a status, queue or
 prompt that changed meanwhile is not lost.
 
-Chat buffer (`harness-ui-chat`): transcript region (read-only) + queue
-list + attachments row + compose region at the bottom.  Rendering is
+A message waiting for the next turn is drawn as the user message it
+will be once sent, by the code that draws the transcript's
+(`harness-chat--render-user`): the session's queue item is read as the
+node the agent will record (`harness-queued-message-node` in
+`harness-util`, which shares the agent's `harness-blocks-text` and
+`harness-attachments-to-blocks`), so its text, references and
+attachments look as they will.  Only its sender line differs: a dim
+"queued", so a waiting message never reads as sent, then `[send now]`
+(`harness-chat-send-queued`, which sends that message alone through
+`agent/send-queue` with its `:qids`), `[edit]` and `[×]`
+(`harness-chat--queued-note`).  The queued messages come first in the
+tail, the newest of the conversation, and the activity line goes under
+them (`harness-chat--activity-position`); `harness-chat-send-queue`
+sends every one.  The tooltip of `[send now]` says what sending does:
+while a turn runs the message steers it and the model gets it at its
+next step, otherwise it goes out as a turn of its own; the queue is
+drawn again when a turn begins or ends (`harness-chat--queue-stale-p`).
+A long queued message shows a page at a time, as a long message of the
+transcript does (`harness-chat--queued-blocks`).  A sent
+message leaves the queue for the transcript, and while the turn it
+steers goes on its sender line gives its state in a word
+(`harness-chat--delivery-note`, its tooltip saying what the word
+means): "sent" until the turn takes it (the node update marking it
+`:delivered-after`), then "delivered".  Once the turn is over the note
+goes, unless the model never got the message (the turn was cancelled)
+and nothing answered it: "not delivered", and the next turn reads it.
+Which blocks may carry a note is worked out from the end of the
+transcript back to the message that began the turn last
+(`harness-chat--sending-candidates`), after a load and when a user
+message arrives or a turn begins or ends, never from a message alone: a
+loaded transcript is not whole until its last block is in.
+
+Chat buffer (`harness-ui-chat`): transcript region (read-only) + queued
+messages + attachments row + compose region at the bottom.  Rendering is
 incremental (append and in-place update by node id using markers);
 older history renders in chunks on demand so a million-token session
 stays snappy.  A message longer than `harness-chat--message-limit`
@@ -8647,12 +8693,14 @@ with `:bottom` the growing box keeps its last line on the window's last
 line, in a window shorter than the buffer too, a board under a BTW say,
 by scrolling that never moves point out of the box), a prompt that is a
 field of its own (`C-a` stops after it, so
-`C-a C-k` clears the line), the placeholder, @file and /skill
-completion, attachments (`C-c C-a`, pasting `C-y`, drag and
-drop), skill expansion (`harness-compose-with-expanded-text`) and ACP
-attachment blocks.  `harness-compose-insert` takes `:face`, the box's
-background (`harness-compose-face` by default) and `:accent`, the face
-of the prompt and of the bar down the box's left edge, through which a
+`C-a C-k` clears the line), the placeholder, @file, @task: and /skill
+completion, attachments of files, images and tasks (`C-c C-a`, pasting
+`C-y`, drag and drop) with a chip in the text for each, skill expansion
+(`harness-compose-with-expanded-text`) and ACP attachment blocks, the
+keys of the panels above it pressed from the box (`C-c .`), and `M-<`
+and `M->` that stay in the box.  `harness-compose-insert` takes `:face`,
+the box's background (`harness-compose-face` by default) and `:accent`,
+the face of the prompt and of the bar down the box's left edge, through which a
 host whose box does something else than compose -- the task board's,
 which sends to a session -- marks it; `harness-compose-bar` draws that
 same bar on the host's own lines around the box.  Without either
@@ -8700,41 +8748,101 @@ attaches them too (`harness-compose-yank-media`).  The box binds no
 `C-c C-v`: in a chat that is the review banner's [Verify], so the two
 never fight, and other MIME types are chosen from with
 `M-x harness-compose-attach-clipboard`.
-Image tokens: an image attached however (`harness-compose--attach`) gets
-a `:label`, "image 1", and its token, `[image 1]`, goes into the text
-where point is in the box, else at its end (a download's always at the
-end, as it lands later), kept apart from the words around it.  The
-token is plain text, so it survives redraws, drafts, queueing and
-editing a queued item like the rest of the message; an overlay per
-token (`harness-compose--show-tokens`) shows it as a chip: a thumbnail
-a line high in its `before-string` (an image inside a `display` string
-would not draw) and the token as a link in its `display`, which the
-command loop's point adjustment makes point step over whole.  After
-every command `harness-compose--sync-tokens` makes text and attachments
-agree: what is left of a token cut short goes too, an image whose
-tokens are all gone is detached and kept in `harness-compose--detached`,
-and one kept there whose token is back (undo, yank, typing) comes back
-in label order; × deletes an image's tokens with it.  New text
-(`harness-compose-set`, `harness-compose-insert` with TEXT) forgets the
-kept images.  Numbers never change once given, since a sentence names
-them: a new image takes one more than the highest attached, so deleting
-the last frees its number and one in the middle leaves a gap, and each
-message starts at 1.  Unlabelled images (a draft from before) and other
-files take no part.  The attachment lines stay, each image's led by its
-token, since they also show files that are no images, downloads in
-flight, size, the larger thumbnail and ×.  `harness-compose-attachment-block`
+Inline chips and tokens: an attachment gets a token in the text, where
+point is in the box, else at its end (a download's always at the end, as
+it lands later), kept apart from the words around it
+(`harness-compose--label`).  An image attached however
+(`harness-compose--attach`) gets a `:label`, "image 1", and its token is
+`[image 1]`.  A file gets its @ reference as `:ref` -- the name `@`
+completed when that names the file, else its path in the project, else
+under `~` or absolute (`harness-compose--file-ref`) -- and its token is
+`@` and that; a path with a space would end the reference, so such a
+file has no token and takes no part.  A task has `:ref` "task:ID", so
+its token is `@task:ID`.  The token is plain text, so it survives
+redraws, drafts, queueing and editing a queued item like the rest of the
+message, and a reference typed or completed in the box is the token of
+its attachment all the same.  One function draws every kind
+(`harness-compose--inline-chip`), so the three look and act alike: an
+overlay per token (`harness-compose--show-tokens`) whose `before-string`
+leads with what it is -- an image's thumbnail a line high (an image
+inside a `display` string would not draw), the icon of a file or a task
+(`harness-icon-file`, `harness-icon-task`) -- and whose `display` is the
+token as a link in `harness-compose-token-face`
+(`harness-compose--chip-text`): `[image 1]`, a file's `@` and its name
+without directories, shortened in the middle to 32 characters, a task's
+`@task:ID` and its title cut at 32.  The command loop's point adjustment
+makes point step over it whole.  `harness-compose--chip-map` gives all of
+them the same clicks: mouse-1 and mouse-2 open the attachment
+(`harness-compose-open-attachment`: a video or a sound in the media
+module's player, any other file in a buffer, a task its session's chat
+or else its card on the board, `harness-ui-tasks-show-task`), and
+mouse-3 pops up a menu of `harness-compose--chip-actions` -- Open,
+Remove from the message, Copy the path (the id, for a task); the tooltip
+says what it is, and that deleting the token removes the attachment.
+After every command `harness-compose--sync-tokens` makes text and
+attachments agree: what is left of a token cut short goes too, an
+attachment whose tokens are all gone is detached and kept in
+`harness-compose--detached` (with its place in the list), and one kept
+there whose token is back (undo, yank, typing) comes back in its place;
+× on the attachment's line and the menu's Remove delete its tokens with
+it (`harness-compose-remove-attachment`, which takes a file's path, a
+task's `task:ID` or the attachment).  New text (`harness-compose-set`,
+`harness-compose-insert` with TEXT) forgets the kept ones.  An image's
+number never changes once given, since a sentence names it: a new image
+takes one more than the highest attached, so deleting the last frees its
+number and one in the middle leaves a gap, and each message starts at 1.
+Unlabelled images (a draft from before) take no part.  The attachment
+lines stay, each image's led by its token, since they also show files
+with no token, downloads in flight, size, the larger thumbnail and ×; a
+task's reads "ID · Title (state)".  `harness-compose-attachment-block`
 puts the label in the ACP image block's `_harness.label`;
 `harness-acp--block-from-acp` makes it the block's `:label`, which
-`harness-agent-attachments-to-blocks` keeps for queued messages and
+`harness-attachments-to-blocks` keeps for queued messages and
 tasks.  `harness-agent--prepare-content` puts a text block of the token
 right before each labelled image of a user message for every provider
 (Copilot also names the image's blob after it), and
-`harness-agent--blocks-text` leaves out the image placeholder of a
-labelled image the text names already.  Queued items sent as one
-message number their images on across it (`harness-agent--queue-blocks`,
-tokens rewritten with them).  The chat styles the tokens of a user
-message's labelled images in its text and puts each image's token over
-it (`harness-chat--mark-image-tokens`, `harness-chat--blocks-string`).
+`harness-blocks-text` leaves out the image placeholder of a
+labelled image the text names already, and a file's `@name` when the
+text has an @ reference to it (`harness-names-file-p`), so a
+file the box referenced is not named twice in the transcript.  These
+three live in `harness-util` (the agent's old names are aliases of
+them): the chat reads a queued message with them as the agent will
+record it (`harness-queued-message-node`).  Queued
+items sent as one message number their images on across it
+(`harness-agent--queue-blocks`, tokens rewritten with them).  The chat
+styles the references of what a user message attached in its text -- the
+tokens of labelled images, the @ references of files attached, @task:
+ones -- in the face of the box's chips, with a tooltip saying what they
+are, and puts each image's token over it
+(`harness-chat--mark-references`, `harness-chat--blocks-string`).
+Tasks: `harness-compose-attach-task` attaches a task of the box's
+project, given its id or its record, or read with completion by title
+(`harness-compose-read-task`).  `C-c C-a` takes `task:ID`
+(`harness-compose-add-attachment`), `@task:` completes the project's
+task ids in the box, each with its title and column, the one chosen
+becoming the attachment, and `@` on a card of the task board does it for
+that card's task (`harness-ui-tasks-attach`).  The tasks are listed from
+`_harness/task/list` along with the files (`harness-compose-fetch-tasks`),
+never waited for: a task not listed yet is attached when the list
+comes, its reference at the end of the box.  The attachment has no file:
+`:task` is the id, `:name` the title, `:session`, `:state` the column,
+`:mime` `text/x-harness-task`, and `:text` what the model reads of it
+(`harness-compose--task-text`) -- id and title, column and state,
+priority, session and branch, the prompt cut at 3000 characters and
+where to read more with the task tools.  An attachment that has a `:text`
+and no `:path` goes as a text block of that text:
+`harness-compose-attachment-block` makes the ACP prompt block of it, and
+`harness-attachments-to-blocks` the block of a queued message or a
+task's prompt, so the task goes wherever attachments do and nothing
+needs a file.  The block is marked as an attachment's text -- the ACP
+block's `_harness.attached`, which `harness-acp--block-from-acp` keeps
+as the block's `:attached`, as it does an image's label -- so that
+`harness-blocks-text` puts it after the user's words, a paragraph
+of its own, instead of running it on from them; the model gets it as a
+block of its own without the mark (`harness-agent--prepare-block`).  `harness-compose-without-references` takes a task whose
+reference the text holds with the files it names: an answer to a
+question carries no attachment, and what the text names goes as the
+reference.
 Undo in the box: hosts draw with undo off, so what they draw above the
 box moves its text but not the positions its undo entries record, and
 undoing right after attaching (its line drawn above the box) would
@@ -8836,6 +8944,79 @@ variable buffer-local, so loading the compose box sets such a buffer up
 for quoting and moves its `harness-compose-quote-function` to
 `compose-quote-function`.  The function `harness-compose-quote` and the
 text property of that name are gone: nothing reads the property.
+
+A panel's key, from the box: what sits above the box and binds keys of
+its own -- a question's digits, a permission's y, s, a, n and N, the
+cache panel's and the model-switch banner's choices, the task board's F
+and the other keys of its cards, a popout's q and g -- acts while point
+is on it, and in the box the same keys type (`harness-compose--pre-command`
+sends typing from outside the box into it, unless the key is a command
+where it is typed).  `C-c .` (`harness-compose-panel-key`, in
+`harness-compose-map`: `.` is free after `C-c` in every host, and the
+harness menu already writes a view's plain keys behind a dot, ". F") is
+the one way to press one from there.  It reads a key sequence and finds
+the panel above the box that binds it, runs the command with point on
+that panel, as its keymap would, and puts point back in the box at the
+same offset in it, whatever the command redrew (answering a question
+draws the panels and the box again).  The host says which text is a
+panel with a `harness-compose-panel` property, valued with something
+that names it: a request's id for the pending panels
+(`harness-ui-pending--decorate`), `cache`, `switch`, `board`, `popout`
+(`harness-ui-popout--mark-panels`, which leaves the names of the panels
+the content drew itself alone); neighbouring text with an `equal` value
+is one panel, however many pieces the host drew it in.  A panel's keys
+are those of its own `keymap` or `local-map` property, never what the
+buffer's modes bind.  The panel nearest above the box that binds the key
+wins; a numeric argument takes the Nth up.  A key bound to a command
+that acts on what is at point, and says so with a
+`harness-compose-acts-p` property (the board's keys for a task, an
+option a question has not), is no key to press from the box when that
+finds nothing at the panel's start: that is said, and nothing runs, as
+is no panel having the key.  The panels say how to press theirs:
+`harness-compose-panel-hint` is the dim "from the box: C-c . 1" line a
+permission's panel (with its first answer's key), a question's (the
+digit 1), the cache panel, the cold-cache question and the model-switch
+banner each carry, `harness-compose-panel-keys` is where the box binds
+the command so that a rebinding is followed, the tooltips of the chat's,
+the popout's and the board's boxes name it (a board's empty box in its
+hint too), and the harness menu lists it among the commands of each.
+
+The top and the bottom of the box: `M-<` and `M->` in `harness-compose-map`
+run `harness-compose-beginning-of-buffer` and
+`harness-compose-end-of-buffer`, as do the remappings of
+`beginning-of-buffer` and `end-of-buffer`, so `C-<home>` and the rest
+follow (a minor mode's remap of the command outranks a major mode's,
+but not a binding of the key to a command of our own, as with `C-y`).
+In the box, short of its edge, they leave the mark where point was and
+go to the box's start or end, as the buffer commands do for the buffer;
+at the edge already, from outside the box, or with a prefix argument
+they are the buffer's own, so a second press goes on to the top or the
+bottom of the buffer: the transcript above the box is read, not edited,
+and what to move over in the box is the box.
+
+Prompting with the region: `harness-prompt-region` (`C-c h >`, bound in
+`harness-ui-map` when the chat module is ready, and `>` in the harness
+menu; autoloaded) starts a message with the active region of any buffer,
+not only a harness one.  In a buffer with a live compose box -- a chat,
+the board, a popout -- it is `harness-compose-quote-reply` of the
+region.  Anywhere else the text goes into the box of the newest session
+of the buffer's project (`harness-chat--project-sessions`; with a prefix
+argument one chosen among them or a new one,
+`harness-chat--read-prompt-session`; a project with no session gets one
+through `harness-new-session`, whose CALLBACK is called with the new
+session's buffer once it shows) as the start of a message
+(`harness-chat--region-prompt`): a line saying where it comes from --
+the file's path relative to the project root, else abbreviated, with its
+lines, or the buffer's name --, then the text, in a fenced code block in
+the buffer's language (`harness-chat--code-language`; the fence longer
+than any run of backticks in the text) when the buffer is a `prog-mode`
+or `conf-mode` one, otherwise as a Markdown quote
+(`harness-compose-quote-string`).  Blank lines around the text are left
+out, and the lines named are those of what is left.  The chat is shown
+and selected, the text appended to the box under a draft, a blank line
+apart, with another blank line after it and point there, ready for the
+request (`harness-chat--append-to-box`); a box not drawn yet keeps the
+text for when it is.
 
 Dragging images out (`harness-ui-drag`): the images the UI shows -- the
 transcript's (`harness-chat--image-string`, `harness-ui-image-string`),
@@ -9210,7 +9391,15 @@ permission, and a compose box that submits a task, edits a pending one,
 messages a task's session, answers its question or takes the feedback
 that sends a task back from review (`C-g` leaves an edit, message,
 answer or feedback for a new task again: a question stays waiting,
-never cancelled).  The same box does all of these, so what `C-c C-c`
+never cancelled).  The board is a panel of the box
+(`harness-compose-panel` `board`): its letters type in the box, so
+`C-c . F` and the rest press them from there -- the empty box and the
+prompt's tooltip say so -- while a key for the task at point, which
+needs a card, says it has nothing to act on from the box.  `@` on a
+card (`harness-ui-tasks-attach`) attaches that card's task to the box
+(`harness-compose-attach-task`), whatever the box is for: a new task, a
+message, feedback; an answer, which is text only, carries the
+reference.  The same box does all of these, so what `C-c C-c`
 will do is made plain: a box that sends to an existing session -- a
 message, an answer, feedback on a write-up, or feedback that sends a
 task back from review -- wears the message colours
@@ -10293,7 +10482,10 @@ the owner keeps there survives: whoever owns the item passes a TITLE and
 a RENDER, and with `:compose' the shared compose box under the content,
 whose C-c C-c gives the owner the text and attachments.  `q' closes it,
 `g' draws it again, and C-g closes it once there is nothing else to
-quit; `harness-ui-popout-at-point-functions' lets a view pop out the item
+quit; the content is a panel of the box (`harness-compose-panel`
+`popout`, the panels the content drew keeping their own names), so
+`C-c . q` and `C-c . g` press those keys from the box, where they type;
+`harness-ui-popout-at-point-functions' lets a view pop out the item
 at point with one key), media
 (`harness-ui-media`: inline images, audio record/playback with svg
 meters, video posters that play the video, and the attachments a tool

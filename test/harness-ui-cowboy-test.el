@@ -114,6 +114,8 @@ its key, its button, its cost and what it does, the default marked."
                            " (session_history).")
                    (nth 12 lines)))
     (should (equal "   or type a choice below: “transcript”, “always brief”" (nth 13 lines)))
+    ;; The keys type in the compose box: the last line says how to press one from there.
+    (should (equal "   from the box: C-c . b" (nth 14 lines)))
     ;; Every character belongs to the panel, amber.
     (should (equal "p1" (get-text-property 0 'harness-ui-cowboy-panel string)))
     (should (equal "p1" (get-text-property (1- (length string)) 'harness-ui-cowboy-panel string)))
@@ -223,6 +225,24 @@ falls back to the choices' own words, with no costs."
     (should (member "    t  Transcript file  the conversation goes to a file the model reads as it needs · the default"
                     lines))
     (should-not (cl-some (lambda (l) (string-match-p "session_history" l)) lines))))
+
+(ert-deftest harness-ui-cowboy-panel-is-a-panel-of-the-compose-box ()
+  "The panel is one of the compose box, where its keys type.
+C-c . and a key press it from there (`harness-compose-panel-key'): all of
+the panel is named by the request, and the keys the panel binds are the
+ones that find a command on it, a capital's included."
+  (harness-test-reset-bus)
+  (harness-test-load-module 'ui)
+  (with-temp-buffer
+    (let ((harness-ui-session-id "s1"))
+      (should (harness-ui-cowboy--insert-panel (harness-ui-cowboy-test--record))))
+    (should (cl-loop for i from (point-min) below (point-max)
+                     always (equal "p1" (get-text-property i 'harness-compose-panel))))
+    (dolist (key '("b" "s" "t" "f" "c" "q" "B" "T" "3"))
+      (should (commandp (harness-compose--panel-command key (point-min)))))
+    ;; Q, like any key it has no command for, is no key of the panel.
+    (should-not (harness-compose--panel-command "Q" (point-min)))
+    (should-not (harness-compose--panel-command "x" (point-min)))))
 
 (ert-deftest harness-ui-cowboy-keys-answer ()
   "A choice's key answers with it, its capital always; q holds; the

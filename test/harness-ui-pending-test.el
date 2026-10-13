@@ -1202,5 +1202,147 @@ the notes when it opens, and its [Undo] takes the rule back."
             (should (equal '((:tool "t_deploy" :behavior allow)) (gethash sid harness-perms--session-rules)))
             (should (funcall find buf "for this session  [Undo]"))))))))
 
+;;;; A panel's key, from the box
+
+;; The digits of a question and the keys of a permission type in the
+;; compose box, as every printable key does there.  C-c . reads a key and
+;; presses it on the panel above the box that has it (the compose box's
+;; `harness-compose-panel-key'); every panel says so.
+
+(defvar harness-compose-start)
+
+(defun harness-ui-pending-test-chat (sid)
+  "Open the chat of SID, wait until it has drawn, and return its buffer."
+  (let ((buf (harness-chat-buffer sid)))
+    (harness-test-wait (lambda () (with-current-buffer buf (and (not harness-chat--loading) harness-compose-end)))
+                       5 "the chat to load")
+    buf))
+
+(defun harness-ui-pending-test-panel-key (keys &optional n)
+  "Call `harness-compose-panel-key' with N, the keys KEYS typed after it."
+  (cl-letf (((symbol-function 'read-key-sequence) (lambda (&rest _) keys)))
+    (harness-compose-panel-key n)))
+
+(defun harness-ui-pending-test-panel-text (pid)
+  "Return the text of the panel PID in the current buffer, without properties.
+That is what `harness-compose-panel' names PID."
+  (apply #'string (cl-loop for i from (point-min) below (point-max)
+                           when (equal pid (get-text-property i 'harness-compose-panel))
+                           collect (char-after i))))
+
+(ert-deftest harness-ui-pending-panel-keys-can-be-pressed-from-the-popouts-box ()
+  "C-c . in the box of a popout presses a key of the panel above that has it.
+The newest request is the nearest to the box, and a numeric argument
+takes the Nth up.  The draft stays in the box and so does point, at the
+offset it had, whatever the popout drew again when a request left."
+  (harness-ui-pending-test-with
+    (let* ((sid (harness-ui-pending-test-session "Asker"))
+           (key (list 'pending sid))
+           (answers (lambda () harness-ui-pending-test-answers)))
+      (harness-ui-pending-test-record-answers)
+      (harness-ui-pending-sync
+       sid (list (list :id "q1" :kind "question"
+                       :payload (list :question "Which colour?" :options '("red" "green" "blue")))
+                 (harness-ui-pending-test-item 'tool)
+                 (harness-ui-pending-test-item 'jail)))
+      (harness-ui-pending-popout sid)
+      (with-current-buffer (harness-ui-popout-buffer key)
+        (should (harness-compose-live-p))
+        (goto-char harness-compose-end)
+        (insert "draft")
+        (goto-char (+ harness-compose-start 2))
+        (should (eq 'harness-compose-panel-key (key-binding (kbd "C-c ."))))
+        ;; Every request is a panel of the box, named by its id.
+        (dolist (pid '("q1" "tool" "jail"))
+          (should (string-match-p "\n" (harness-ui-pending-test-panel-text pid))))
+        ;; The second panel up that takes y: the tool call's, not the jail's.
+        (execute-kbd-macro (kbd "C-u 2 C-c . y"))
+        (harness-test-wait (lambda () (funcall answers)) 5 "the tool call answered")
+        (should (equal (list 'permission sid "tool" "allow-once") (car (funcall answers))))
+        (should (equal "draft" (harness-compose-text)))
+        (should (= (point) (+ harness-compose-start 2)))
+        ;; Then the nearest, the jail's.
+        (execute-kbd-macro (kbd "C-c . y"))
+        (harness-test-wait (lambda () (= 2 (length (funcall answers)))) 5 "the jail's prompt answered")
+        (should (equal (list 'permission sid "jail" "allow-once") (car (funcall answers))))
+        (should (= (point) (+ harness-compose-start 2)))
+        ;; Only the question is left: it has no y, nor a fourth option.
+        (let ((err (should-error (harness-ui-pending-test-panel-key "y") :type 'user-error)))
+          (should (equal "No panel above the box has y" (cadr err))))
+        (let ((err (should-error (harness-ui-pending-test-panel-key "4") :type 'user-error)))
+          (should (string-match-p "\\`4 has nothing to act on from the box" (cadr err))))
+        (should (= 2 (length (funcall answers))))
+        ;; Its second option answers it.
+        (execute-kbd-macro (kbd "C-c . 2"))
+        (harness-test-wait (lambda () (= 3 (length (funcall answers)))) 5 "the question answered")
+        (should (equal (list 'question sid "q1" "green") (car (funcall answers))))))))
+
+(ert-deftest harness-ui-pending-panel-keys-can-be-pressed-from-the-chats-box ()
+  "C-c . answers a question of the chat from its box, the draft and point kept.
+The chat draws its tail again when the question goes, with point on the
+panel; it ends back in the box at the offset it had."
+  (harness-ui-pending-test-with
+    (let* ((sid (harness-ui-pending-test-session "Chatty"))
+           (buf (harness-ui-pending-test-chat sid)))
+      (harness-ui-pending-test-record-answers)
+      (harness-ui-pending-sync
+       sid (list (list :id "q1" :kind "question"
+                       :payload (list :question "Which colour?" :options '("red" "green" "blue")))))
+      (with-current-buffer buf
+        (should (string-match-p "from the box: C-c \\. 1" (buffer-string)))
+        (goto-char harness-compose-end)
+        (insert "draft here")
+        (goto-char (+ harness-compose-start 4))
+        (save-window-excursion
+          ;; Keys reach the buffer of the selected window.
+          (set-window-buffer nil buf)
+          (execute-kbd-macro (kbd "C-c . 3")))
+        ;; The question left the tail, the panel with it.
+        (should-not (harness-ui-pending-items sid))
+        (should-not (text-property-not-all (point-min) (point-max) 'harness-compose-panel nil))
+        (should (equal "draft here" (harness-compose-text)))
+        (should (= (point) (+ harness-compose-start 4))))
+      (harness-test-wait (lambda () harness-ui-pending-test-answers) 5 "the question answered")
+      (should (equal (list 'question sid "q1" "blue") (car harness-ui-pending-test-answers))))))
+
+(ert-deftest harness-ui-pending-panels-say-how-to-press-their-keys-from-the-box ()
+  "A request's panel says what the key to press its keys from the box is.
+It is a permission's y, a question's first option; a question to type
+the answer to has no keys.  The panel's text is all the panel's, under
+the request's id."
+  (harness-ui-pending-test-with
+    (let ((sid (harness-ui-pending-test-session)))
+      (harness-ui-pending-sync
+       sid (list (harness-ui-pending-test-item 'tool)
+                 (list :id "q1" :kind "question"
+                       :payload (list :question "Which?" :options '("a" "b")))
+                 (list :id "q2" :kind "question"
+                       :payload (list :question "Name?" :options nil))
+                 (list :id "q3" :kind "question"
+                       :payload (list :question "Which layout?" :options '("Left" "Right")
+                                      :diagrams '((:type "ascii" :text "[left]") (:type "ascii" :text "[right]"))))))
+      (with-temp-buffer
+        (let ((harness-ui-session-id sid))
+          (harness-ui-pending-insert-panels sid))
+        ;; All the text of a panel is the panel's, and nothing else is.
+        (should (cl-loop for i from (point-min) below (point-max)
+                         always (equal (get-text-property i 'harness-ui-pending)
+                                       (get-text-property i 'harness-compose-panel))))
+        (should (string-match-p "^   from the box: C-c \\. y\n" (harness-ui-pending-test-panel-text "tool")))
+        (should (string-match-p "or type another answer below · from the box: C-c \\. 1\n"
+                                (harness-ui-pending-test-panel-text "q1")))
+        (should (string-match-p "or type another answer below · from the box: C-c \\. 1\n"
+                                (harness-ui-pending-test-panel-text "q3")))
+        (should (string-match-p "next diagram" (harness-ui-pending-test-panel-text "q3")))
+        (should-not (string-match-p "from the box" (harness-ui-pending-test-panel-text "q2")))
+        ;; The hint is dim, its key a key.
+        (let ((face-p (lambda (pos face)
+                        (let ((faces (get-text-property pos 'face)))
+                          (if (listp faces) (memq face faces) (eq face faces))))))
+          (goto-char (point-min))
+          (search-forward "from the box: ")
+          (should (funcall face-p (- (point) 3) 'harness-dim-face))
+          (should (funcall face-p (point) 'harness-ui-key-face)))))))
+
 (provide 'harness-ui-pending-test)
 ;;; harness-ui-pending-test.el ends here

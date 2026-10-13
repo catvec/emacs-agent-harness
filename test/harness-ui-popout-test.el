@@ -351,5 +351,63 @@ shows the other one there again, where it was."
         (harness-ui-popout-at-point)
         (should (equal '(second first) asked))))))
 
+(ert-deftest harness-ui-popout-box-presses-a-key-of-the-content ()
+  "C-c . in a popout's box presses q or g on its content, and says so.
+The content is a panel of the box (`harness-compose-panel-key') but for
+the panels its owner drew and named: its text keeps those names.  The
+popout's keys type in the box otherwise.  The box's tooltip names the key."
+  (harness-ui-popout-test-with
+    (let* ((draws 0)
+           (closed 0)
+           (buffer (harness-ui-popout-show
+                    '(test panel) "Panel"
+                    (lambda ()
+                      (cl-incf draws)
+                      (insert "Before\n"
+                              (propertize "Owner's panel\n" 'harness-compose-panel "request-1")
+                              "After\n"))
+                    :compose (lambda () #'ignore)
+                    :on-close (lambda () (cl-incf closed)))))
+      (with-selected-window (get-buffer-window buffer)
+        (with-current-buffer buffer
+          ;; What the owner named is its own; the rest of the content is the popout's.
+          (should (eq 'popout (get-text-property (point-min) 'harness-compose-panel)))
+          (should (equal "request-1" (get-text-property (+ (point-min) (length "Before\n")) 'harness-compose-panel)))
+          (should (eq 'popout (get-text-property (- harness-compose-start 3) 'harness-compose-panel)))
+          (should-not (get-text-property (1- harness-compose-start) 'harness-compose-panel))
+          (should (eq 'harness-compose-panel-key (key-binding (kbd "C-c ."))))
+          ;; The tooltip of the box's prompt names the key.
+          (should (string-match-p "C-c \\. KEY: a key of the panel above"
+                                  (get-text-property (1- harness-compose-start) 'help-echo)))
+          (goto-char harness-compose-end)
+          (insert "draft")
+          (goto-char (+ harness-compose-start 2))
+          ;; Typing q and g in the box types them.
+          (execute-kbd-macro "qg")
+          (should (equal "drqgaft" (harness-compose-text)))
+          ;; g draws the content again, and point is back in the box.
+          (execute-kbd-macro (kbd "C-c . g"))
+          (should (= 2 draws))
+          (should (equal "drqgaft" (harness-compose-text)))
+          (should (= (point) (+ harness-compose-start 4)))
+          ;; q closes the popout, which keeps the draft.
+          (execute-kbd-macro (kbd "C-c . q"))))
+      (should-not (buffer-live-p buffer))
+      (should (= 1 closed))
+      (should (equal "drqgaft" (with-current-buffer (harness-ui-popout-show
+                                                     '(test panel) "Panel" (lambda () (insert "Item\n"))
+                                                     :compose (lambda () #'ignore))
+                                 (harness-compose-text)))))))
+
+(ert-deftest harness-ui-popout-menu-lists-the-panel-key ()
+  "The popout's entry in the menu lists the key to press a key of its content."
+  (harness-ui-popout-test-with
+    (let* ((entries (cl-loop for column in (cdr (get 'harness-ui-popout-mode 'harness-menu-group))
+                             append (cl-loop for item across column
+                                             when (and (consp item) (stringp (car item))) collect item)))
+           (item (cl-find "C-c ." entries :key #'car :test #'equal)))
+      (should item)
+      (should (eq 'harness-compose-panel-key (nth 2 item))))))
+
 (provide 'harness-ui-popout-test)
 ;;; harness-ui-popout-test.el ends here

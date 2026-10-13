@@ -313,10 +313,14 @@ module leaves the entry out, so the menu is unharmed."
       (should (string-match-p "C-c C-c +Send" text))
       (should (string-match-p "C-c C-q +Queue for next turn" text))
       (should (string-match-p "C-c C-k +Cancel turn" text))
-      (should (string-match-p "C-c C-a +Attach file" text))
+      (should (string-match-p "C-c C-a +Attach file or task" text))
       ;; Pasting is C-y; C-c C-v is the review banner's [Verify].
       (should (string-match-p "C-y +Paste; an image attaches" text))
       (should (string-match-p "C-c > +Quote reply: region or message" text))
+      ;; A key of a panel above the box, which types there, and the box's own M-< and M->.
+      (should (string-match-p "C-c \\. +A key of the panel above, from the box" text))
+      (should (string-match-p "M-< +Top of the box, then the buffer" text))
+      (should (string-match-p "M-> +Bottom of the box, then the buffer" text))
       ;; Answering a quote inline: the keys of `compose-quote-inline-mode'.
       (should (string-match-p "M-RET +Split a quote to answer inline" text))
       (should (string-match-p "C-c \\[ +Elide part of a quote: \\[\\.\\.\\.\\]" text))
@@ -1606,6 +1610,35 @@ host, and no TRAMP connection is opened for it."
                            (pop sent)))
             (should (string-match-p "Moved .*Far to /srv/other/\\'" (pop said)))))
       (delete-directory base t))))
+
+(ert-deftest harness-ui-new-session-hands-the-buffer-to-its-callback ()
+  "The harness makes a new session and the UI shows it a moment later.
+The callback, when there is one, is called with the buffer shown, in
+the position asked for; without one the session is just shown."
+  (let ((sent nil) (shown nil) (got nil))
+    (cl-letf (((symbol-function 'harness-ui-call)
+               (lambda (method params callback &optional _on-error)
+                 (push (cons method params) sent)
+                 (funcall callback (list :sessionId "s-new"))))
+              ((symbol-function 'harness-ui-refresh-sessions)
+               (lambda (&optional callback) (when callback (funcall callback nil))))
+              ((symbol-function 'harness-ui-display-session)
+               (lambda (id &optional position _frame) (push (list id position) shown) 'the-buffer)))
+      (harness-new-session "/tmp/proj/" 'right (lambda (buffer) (setq got buffer)))
+      (should (eq 'the-buffer got))
+      (should (equal '(("s-new" right)) shown))
+      (should (equal "session/new" (car (car sent))))
+      (should (equal "/tmp/proj/" (plist-get (cdr (car sent)) :cwd)))
+      (setq got nil shown nil)
+      (harness-new-session "/tmp/proj/")
+      (should-not got)
+      (should (equal '(("s-new" nil)) shown)))))
+
+(ert-deftest harness-ui-menu-offers-prompting-with-the-region ()
+  "The menu has > from any buffer: prompt a session with the region."
+  (harness-ui-test-with-menu-buffer #'fundamental-mode
+    (should (fboundp 'harness-prompt-region))
+    (should (string-match-p "> +Prompt with the region" (harness-ui-test-menu)))))
 
 (ert-deftest harness-ui-tool-outcome-tells-denied-from-failed ()
   "A refused call is `denied' whatever else its result says; one that

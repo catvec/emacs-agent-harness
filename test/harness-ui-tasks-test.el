@@ -892,6 +892,52 @@ user's that the turn takes with the ask_user result.  The box empties."
           (should (equal (plist-get result :id) (plist-get (plist-get steering :meta) :delivered-after)))
           (should-not (string-match-p "Attached file" (format "%S" nodes))))))))
 
+(declare-function harness-ui-task-title "harness-ui")
+(declare-function harness-ui-tasks--task "harness-ui-tasks")
+
+(ert-deftest harness-ui-tasks-at-attaches-the-task-at-point ()
+  "@ on a card attaches its task to the box; off a card @ types.
+The task's reference, @task:ID, goes into the box and its line above
+it, once however often @ is pressed.  A new task submitted with it
+gives its model the task as text: its id, title and prompt.  The keys
+go through the command loop."
+  (harness-ui-tasks-test-with
+    (harness-ui-tasks-test--type-and-submit board "Alpha: fix the login form")
+    (harness-ui-tasks-test--wait-text board "Completed  1")
+    (let ((alpha (harness-ui-tasks-test--card-id board "Alpha")))
+      (with-current-buffer board
+        (should (eq board (window-buffer (selected-window))))
+        (harness-ui-tasks-test--goto-card board "Alpha")
+        (should (eq 'harness-ui-tasks-attach (key-binding "@")))
+        (let ((title (harness-ui-task-title (harness-ui-tasks--task))))
+          (execute-kbd-macro "@")
+          (should (equal (concat "@task:" alpha " ") (harness-compose-text)))
+          (should (equal (list alpha) (mapcar (lambda (a) (plist-get a :task)) harness-compose-attachments)))
+          (should (save-excursion (goto-char (point-min))
+                                  (search-forward (concat alpha " · " title) harness-compose-start t))))
+        ;; Once is enough.
+        (harness-ui-tasks-test--goto-card board "Alpha")
+        (execute-kbd-macro "@")
+        (should (equal (concat "@task:" alpha " ") (harness-compose-text)))
+        (should (= 1 (length harness-compose-attachments)))
+        ;; Off a card, @ types into the box.
+        (goto-char (point-min))
+        (search-forward "nothing working")
+        (should-not (get-text-property (point) 'harness-task-id))
+        (execute-kbd-macro "@")
+        (should (equal (concat "@task:" alpha " @") (harness-compose-text)))
+        (should (= 1 (length harness-compose-attachments)))
+        (harness-compose-set (concat "Bravo: see what @task:" alpha " did"))
+        (harness-ui-tasks-submit)
+        (should-not harness-compose-attachments))
+      (harness-ui-tasks-test--wait-text board "Completed  2")
+      (let* ((bravo (cl-find-if (lambda (task) (string-prefix-p "Bravo" (plist-get task :prompt)))
+                                (harness-call 'task/list default-directory)))
+             (nodes (format "%S" (harness-call 'session/nodes (plist-get bravo :session)))))
+        (should (equal (list alpha) (mapcar (lambda (a) (plist-get a :task)) (plist-get bravo :attachments))))
+        (should (string-search (concat "Task " alpha ", attached: ") nodes))
+        (should (string-search "Prompt:\nAlpha: fix the login form" nodes))))))
+
 ;;;; The box wraps and never scrolls sideways
 
 (defvar harness-compose-overlay)
@@ -1859,7 +1905,7 @@ work's once started.  Submit and Refine keep the task model."
                                     (harness-ui-tasks-test--tail-line board 'work)))
             (should (string-match-p "3 at a time\\'" (harness-ui-tasks-test--tail-line board 'settings)))
             (should-not (string-search "Test-Plan" (harness-ui-tasks-test--tail-line board 'settings)))
-            (should (equal "Describe a task…" (harness-ui-tasks--placeholder))))
+            (should (string-prefix-p "Describe a task…" (harness-ui-tasks--placeholder))))
           ;; Each line's model button sets its own.
           (cl-letf (((symbol-function 'harness-ui-choose-model)
                      (lambda (callback) (funcall callback chosen (harness-ui-model-label chosen)))))
@@ -1975,7 +2021,7 @@ the task's."
                        (harness-ui-tasks-test--tail-buttons board 'settings)))
         (should-not (harness-ui-tasks-test--tail-line board 'step))
         (should-not (harness-ui-tasks-test--tail-line board 'work))
-        (should (equal "Describe a task…" (harness-ui-tasks--placeholder)))
+        (should (string-prefix-p "Describe a task…" (harness-ui-tasks--placeholder)))
         (pcase-dolist (`(,mode ,switch ,placeholder) '((refine t "Jot a task down") (plan nil "Describe a task")))
           (harness-ui-tasks-cycle-mode mode)
           (should (equal (list (intern (format "harness-set-model@%s" mode))
@@ -1995,7 +2041,7 @@ the task's."
                            '((step "the write-up of new tasks") (work "the work of new tasks"))))
             (should (equal (list (concat "Model of " scope) (concat "Thinking level of " scope))
                            (harness-ui-tasks-test--tail-tooltips board key))))
-          (should (equal (concat placeholder harness-ui-tasks--ellipsis) (harness-ui-tasks--placeholder)))
+          (should (string-prefix-p (concat placeholder harness-ui-tasks--ellipsis) (harness-ui-tasks--placeholder)))
           (should (equal (funcall task switch) (harness-ui-tasks-test--tail-buttons board 'settings)))))
       ;; Whom a change is for.  The commands typed in the box set the
       ;; work's model and the task's other settings.  Changing the mode
@@ -5236,6 +5282,85 @@ is on its left changes."
             (should (harness-ui-tasks--aligned-p (1+ time)))
             (should (harness-ui-tasks--aligned-p (1+ zone)))
             (should (harness-ui-tasks--aligned-p (1- (line-end-position))))))))))
+
+;;;; A board key, from the box
+
+(declare-function harness-compose-panel-key "harness-ui-compose")
+(declare-function harness-compose-set "harness-ui-compose")
+(declare-function harness-compose-text "harness-ui-compose")
+
+(ert-deftest harness-ui-tasks-box-presses-a-board-key ()
+  "C-c . in the compose box presses a key of the board, which types there.
+The board is a panel of the box (`harness-compose-panel-key'), up to
+the lines above the box.  F, the fullscreen layout, acts anywhere on
+it; a key for the task at point has none from the box, which is said.
+The draft stays in the box and so does point, where it was."
+  (harness-ui-tasks-test-with
+    (let ((harness-tasks-max-running 0)
+          (where nil))
+      (harness-ui-tasks-test--type-and-submit board "Waiting task")
+      (harness-ui-tasks-test--wait-text board "Pending  1")
+      (with-current-buffer board
+        ;; Keys reach the buffer of the selected window.
+        (should (eq board (window-buffer (selected-window))))
+        (should (eq 'harness-compose-panel-key (key-binding (kbd "C-c ."))))
+        ;; The board region is the panel, and what is below it is not.
+        (should (eq 'board (get-text-property (point-min) 'harness-compose-panel)))
+        (should (eq 'board (get-text-property (1- harness-ui-tasks--list-end) 'harness-compose-panel)))
+        (should-not (get-text-property harness-ui-tasks--list-end 'harness-compose-panel))
+        (should-not (get-text-property (1- harness-compose-start) 'harness-compose-panel))
+        (should-not (get-text-property (point-min) 'harness-task-id))
+        (harness-compose-set "draft")
+        (goto-char (+ harness-compose-start 2))
+        (cl-letf (((symbol-function 'harness-fullscreen)
+                   (lambda () (interactive) (push (point) where))))
+          (execute-kbd-macro (kbd "C-c . F")))
+        ;; It ran with point on the board's start, and point is back in the box.
+        (should (equal (list (point-min)) where))
+        (should (= (point) (+ harness-compose-start 2)))
+        (should (equal "draft" (harness-compose-text)))
+        (should (equal "draft" (buffer-substring-no-properties harness-compose-start harness-compose-end)))
+        ;; Typed in the box, F types.
+        (execute-kbd-macro "F")
+        (should (equal "drFaft" (harness-compose-text)))
+        ;; A key for the task at point has no task from the box; one the
+        ;; board does not bind is no board key.
+        (dolist (keys '("s" "e" "m" "v" "x"))
+          (let ((err (should-error (cl-letf (((symbol-function 'read-key-sequence) (lambda (&rest _) keys)))
+                                     (harness-compose-panel-key))
+                                   :type 'user-error)))
+            (should (string-match-p (format "\\`%s has nothing to act on from the box" keys) (cadr err)))))
+        (let ((err (should-error (cl-letf (((symbol-function 'read-key-sequence) (lambda (&rest _) "h")))
+                                   (harness-compose-panel-key))
+                                 :type 'user-error)))
+          (should (equal "No panel above the box has h" (cadr err))))
+        (should (equal "drFaft" (harness-compose-text)))
+        (should (= (point) (+ harness-compose-start 3)))))))
+
+(ert-deftest harness-ui-tasks-box-says-how-to-press-a-board-key ()
+  "The empty box, the box's tooltip and the menu say how to press a board key."
+  (harness-ui-tasks-test-with
+    (with-current-buffer board
+      (let ((hint "C-c \\. F: a board key from the box"))
+        ;; The empty box that composes a task shows it, in either mode.
+        (should (string-match-p hint (harness-ui-tasks--placeholder)))
+        (should (string-match-p hint (overlay-get harness-compose--placeholder 'before-string)))
+        (setq harness-ui-tasks--mode (quote refine))
+        (should (string-match-p hint (harness-ui-tasks--placeholder)))
+        (setq harness-ui-tasks--mode (quote submit))
+        ;; A box for a message does not take the room, but its tooltip has it.
+        (setq harness-ui-tasks--target '(reply . "t-1"))
+        (should-not (string-match-p "board key" (harness-ui-tasks--placeholder)))
+        (setq harness-ui-tasks--target nil)
+        ;; The tooltip of the prompt, new task or message.
+        (should (string-match-p hint (get-text-property (1- harness-compose-start) 'help-echo)))
+        (harness-ui-tasks--render-tail)
+        (should (string-match-p hint (get-text-property (1- harness-compose-start) 'help-echo))))
+      ;; The menu lists the key among the box's.
+      (let ((entries (cl-loop for column in (cdr (get 'harness-ui-tasks-mode 'harness-menu-group))
+                              append (cl-loop for item across column
+                                              when (and (consp item) (stringp (car item))) collect item))))
+        (should (member '("C-c ." "A board key, from the box" harness-compose-panel-key) entries))))))
 
 (provide 'harness-ui-tasks-test)
 ;;; harness-ui-tasks-test.el ends here

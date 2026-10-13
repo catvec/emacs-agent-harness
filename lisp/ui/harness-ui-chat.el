@@ -11,12 +11,14 @@
 ;;   transcript    one block per node, rendered incrementally with markers
 ;;   top           what `harness-chat-top-functions' draw, first in the
 ;;                 tail: the companion pet, standing on whatever comes next
+;;   queue         messages queued for the next turn, each drawn as the
+;;                 user message it will be, "queued" and its buttons on
+;;                 its sender line
 ;;   activity      while a turn runs, what it does and for how long, on a
 ;;                 background of its own, then a blank line
 ;;   pending panel permission requests and questions waiting for the user;
 ;;                 a question whose options have diagrams shows one of
 ;;                 them at a time, in one place, and switches between them
-;;   queue         messages queued for the next turn
 ;;   todos         the session's todo items, one per line, or folded
 ;;   attachments   chips for files attached to the next message
 ;;   notice        the session was deleted, or is inactive (sending resumes it)
@@ -148,8 +150,8 @@ session follows, a button that opens it."
     (((background dark)) :background "#143c42" :extend t))
   "Background of the pending permission and question panel.
 A cool teal of its own: it stands apart from the transcript's blocks
-and the queue under it, and asks for an answer without the alarm of a
-warning colour." :group 'harness-ui-chat)
+and the queued messages above it, and asks for an answer without the
+alarm of a warning colour." :group 'harness-ui-chat)
 (defface harness-chat-activity-face
   '((((background light)) :background "#efe9f9" :extend t)
     (((background dark)) :background "#2e2942" :extend t))
@@ -208,6 +210,12 @@ thinking between them."
 (defvar-local harness-chat--transcript-start nil "Marker: first block.")
 (defvar-local harness-chat--transcript-end nil "Marker: after the last block.")
 (defvar-local harness-chat--queue nil "Queued items as last rendered.")
+(defvar-local harness-chat--queued-blocks nil
+  "Queue item id -> the block that draws the queued message, or nil.
+A queued message is drawn as the user block it will be once sent
+\(`harness-chat--queued-block').  The blocks are kept from one render of
+the tail to the next, so a long message keeps the part of it it shows
+\(`harness-chat--show-more').")
 (defvar-local harness-chat--pending nil
   "The session's requests, as the pending module last reported them.
 The module owns them (`harness-ui-pending-items'); this mirror is for
@@ -245,6 +253,16 @@ A plist: `:id' the node's id, `:regexp' what to find in it.  See
 (defvar-local harness-chat--generation 0 "Bumped on every reload to drop stale responses.")
 (defvar-local harness-chat--session nil "Last session plist seen, for after deletion.")
 (defvar-local harness-chat--unfinished nil "Ids of tool-call blocks without a result yet.")
+(defvar-local harness-chat--sending nil
+  "Ids of the user blocks that may carry a note about their delivery.
+They are the steering messages (sent while a turn ran) of the turn that
+goes on, or, once it is over, the ones nothing answered.
+`harness-chat--refresh-sending' keeps the list, and draws the blocks
+again as the turn goes on and ends (`harness-chat--delivery-note').")
+(defvar-local harness-chat--queue-running nil
+  "Whether a turn ran when the queue was last drawn.
+The buttons of a queued message say what sending it now does, which
+depends on it (`harness-chat--insert-queue').")
 (defvar-local harness-chat--inactive nil "Non-nil while the session is inactive; sending resumes it.")
 (defvar-local harness-chat--todos nil
   "The session's todo list as last seen: a list of (:text :status).")
@@ -1025,6 +1043,38 @@ images below the text (`harness-chat--blocks-string')."
               (add-face-text-property start (+ start (length token)) 'harness-compose-token-face nil text)
               (setq start (+ start (length token))))))))))
 
+(defun harness-chat--mark-references (text blocks)
+  "Return TEXT with the references of the attachments among BLOCKS styled.
+The tokens of images (`harness-chat--mark-image-tokens'), the @
+references of the files attached -- a file's name, or a path that ends in
+it -- and @task: ones show in the face they have in the compose box
+\(`harness-compose-token-face'), so a reference looks the same before
+and after it is sent.  The tooltip says what it is."
+  (let ((text (copy-sequence (harness-chat--mark-image-tokens text blocks)))
+        (files (delq nil (mapcar (lambda (b)
+                                   (and (equal (harness-chat--str (plist-get b :type)) "file")
+                                        (stringp (plist-get b :path))
+                                        (cons (file-name-nondirectory (plist-get b :path)) (plist-get b :path))))
+                                 blocks)))
+        (case-fold-search nil)
+        (start 0))
+    (while (string-match harness-compose--reference-regexp text start)
+      (let* ((from (1- (match-beginning 1)))
+             (end (match-end 1))
+             (word (match-string 1 text))
+             ;; Punctuation after the reference, ending a sentence or a bracket, is no part of it.
+             (name (replace-regexp-in-string "[]),.;:!?'\"`>}]+\\'" "" word))
+             (task (string-prefix-p "task:" name))
+             (file (and (not task) (assoc (file-name-nondirectory name) files))))
+        (setq start end)
+        (when (or file (and task (> (length name) (length "task:"))))
+          (add-face-text-property from (+ from 1 (length name)) 'harness-compose-token-face nil text)
+          (put-text-property from (+ from 1 (length name)) 'help-echo
+                             (if task (format "task %s" (substring name (length "task:")))
+                               (format "file: %s" (abbreviate-file-name (cdr file))))
+                             text))))
+    text))
+
 (defun harness-chat--blocks-string (blocks)
   "Return the non-text content BLOCKS of a node as a string.
 An image with a label has its token, [image 1], over it, as the text
@@ -1128,11 +1178,17 @@ behind the button `harness-chat--more-button' returns."
     (if (> (length text) limit) (substring text 0 limit) text)))
 
 (defun harness-chat--show-more (id)
-  "Show another page of the message of block ID."
-  (when-let* ((block (gethash id harness-chat--blocks)))
-    (setf (harness-chat-block-shown block)
-          (+ (harness-chat--page-limit block) harness-chat--message-limit))
-    (harness-chat--rerender block)))
+  "Show another page of the message of block ID.
+ID is a node's, or a queued message's (`harness-chat--queued-blocks'),
+which the tail then draws again."
+  (if-let* ((block (gethash id harness-chat--blocks)))
+      (progn (setf (harness-chat-block-shown block)
+                   (+ (harness-chat--page-limit block) harness-chat--message-limit))
+             (harness-chat--rerender block))
+    (when-let* ((queued (and harness-chat--queued-blocks (gethash id harness-chat--queued-blocks))))
+      (setf (harness-chat-block-shown queued)
+            (+ (harness-chat--page-limit queued) harness-chat--message-limit))
+      (harness-chat--render-tail))))
 
 (defun harness-chat--more-button (block)
   "Return BLOCK's button for the rest of its message, or nil.
@@ -1199,20 +1255,111 @@ It names the models and, for a transcript, offers to open the file."
               "")
             "\n")))
 
-(defun harness-chat--render-user (block)
+;;;;; The delivery of a message sent while a turn runs
+
+;; A message sent while a turn runs steers it: its user node is marked
+;; `:steering', and the turn gives it to the model at its next step.
+;; Taking it marks the node `:delivered-after' (`harness-agent--take-steering'),
+;; and that update reaches the chat as any node update.  The sender line
+;; of such a message gives its state in a word while the turn goes on:
+;; "sent", waiting for the model's next step, then "delivered", in the
+;; model's hands.  Once the turn is over there is nothing to say, unless
+;; the model never got it (the turn was cancelled) and nothing answered
+;; it: "not delivered", and the next turn reads it.
+
+(defvar harness-chat--agent-kinds)
+
+(defun harness-chat--steering-p (node)
+  "Non-nil when the user message NODE was sent while a turn ran, to steer it."
+  (harness-json-true-p (plist-get (plist-get node :meta) :steering)))
+
+(defun harness-chat--delivered-p (node)
+  "Non-nil when the steering message NODE reached the model."
+  (let ((after (plist-get (plist-get node :meta) :delivered-after)))
+    (and (stringp after) (not (string-empty-p after)))))
+
+(defun harness-chat--delivery-note (block)
+  "Return the state of the delivery of user BLOCK, as a note, or nil.
+Only a block in `harness-chat--sending' has one, a word: while the turn
+goes on \"sent\" with a yellow circle until the model has the message,
+then \"delivered\" with a green one.  Once the turn is over, a message it
+never delivered is \"not delivered\".  The tooltip says what the state
+means."
+  (when (member (harness-chat-block-id block) harness-chat--sending)
+    (let ((delivered (harness-chat--delivered-p (harness-chat-block-node block))))
+      (cond ((and harness-chat--turn-start delivered)
+             (concat (harness-ui-level-icon 'success) " "
+                     (propertize "delivered" 'face (harness-ui-level-face 'success)
+                                 'help-echo "The model has this message")))
+            (harness-chat--turn-start
+             (concat (harness-ui-level-icon 'caution) " "
+                     (propertize "sent" 'face (harness-ui-level-face 'caution)
+                                 'help-echo "The model gets this message at its next step")))
+            ((not delivered)
+             (propertize "not delivered" 'face 'harness-dim-face
+                         'help-echo "The turn ended before the model got this message; the next turn reads it"))))))
+
+(defun harness-chat--with-note (body note)
+  "Return BODY, the text of a user message, with NOTE on its sender line.
+NOTE goes after the sender's name, two spaces apart; nil leaves BODY as
+it is."
+  (let ((end (string-search "\n" body)))
+    (if (and note end)
+        (concat (substring body 0 end) "  " note (substring body end))
+      body)))
+
+(defun harness-chat--sending-candidates ()
+  "Return the ids of the user blocks that may carry a delivery note now.
+The transcript is read from its end back to the message that began the
+turn last: while a turn goes on the steering messages of it all count,
+and once it is over only those no agent output follows."
+  (let (ids answered)
+    (catch 'turn
+      (dolist (id harness-chat--order)
+        (when-let* ((block (gethash id harness-chat--blocks)))
+          (let ((kind (harness-chat-block-kind block)))
+            (cond ((equal kind "user")
+                   (if (harness-chat--steering-p (harness-chat-block-node block))
+                       (when (or harness-chat--turn-start (not answered)) (push id ids))
+                     (throw 'turn nil)))
+                  ((member kind harness-chat--agent-kinds) (setq answered t)))))))
+    ids))
+
+(defun harness-chat--redraw-sending ()
+  "Work out which user blocks carry a delivery note, and draw them again.
+That is those that had one and those that have one now."
+  (let ((before harness-chat--sending)
+        (after (harness-chat--sending-candidates)))
+    (setq harness-chat--sending after)
+    (dolist (id (cl-union before after :test #'equal))
+      (when-let* ((block (gethash id harness-chat--blocks)))
+        (harness-chat--rerender block)))))
+
+(defun harness-chat--refresh-sending ()
+  "Keep the delivery notes of the user blocks as the turn has them.
+Called when a user message arrives, and when a turn begins or ends: the
+notes follow the turn.  Not while the transcript is being rendered; it
+calls `harness-chat--redraw-sending' itself once the transcript is whole."
+  (unless (or harness-chat--batch harness-chat--loading (null harness-chat--blocks))
+    (harness-chat--redraw-sending)))
+
+(defun harness-chat--render-user (block &optional note)
   "Return the body of user BLOCK.
 A message the user did not write names who sent it instead of the user
 and sits on the system background (see `harness-node-sender').  One
 that handed the conversation over to a model of another provider (see
 `harness-node-handoff') also names the two models and links the
-transcript it points the new model at."
+transcript it points the new model at.  NOTE is what the sender line
+says after the name: by default the state of the message's delivery
+\(`harness-chat--delivery-note').  A queued message is drawn so too,
+NOTE its state and its buttons (`harness-chat--insert-queue')."
   (let* ((node (harness-chat-block-node block))
          (from (harness-node-sender node))
          (handoff (harness-node-handoff node))
          (face (if from 'harness-system-face 'harness-user-face))
          ;; A line break typed in the box is one: a pasted log, or items
          ;; without bullets, keep their lines.
-         (text (harness-chat--mark-image-tokens
+         (text (harness-chat--mark-references
                 (harness-chat--ensure-newline
                  (let ((harness-ui-markdown-hard-breaks t))
                    (harness-chat--render-markdown (harness-chat--page block))))
@@ -1224,7 +1371,9 @@ transcript it points the new model at."
                        (harness-chat--more-line block)
                        (if handoff (harness-chat--handoff-line handoff) "")
                        (harness-chat--blocks-string (plist-get node :blocks)))))
-    (harness-chat--margin (harness-chat--face body face) face
+    (harness-chat--margin (harness-chat--face (harness-chat--with-note body (or note (harness-chat--delivery-note block)))
+                                              face)
+                          face
                           (if from 'harness-system-bar-face 'harness-user-bar-face))))
 
 (defconst harness-chat--agent-kinds '("assistant" "thinking" "tool-call" "tool-result" "plan")
@@ -2358,7 +2507,10 @@ the thinking before its first call and after its last stays out."
 (defun harness-chat--apply-update (update)
   "Apply one session UPDATE to the current buffer."
   (pcase (plist-get update :sessionUpdate)
-    ("_harness/node" (harness-chat--on-node (plist-get update :node)))
+    ("_harness/node" (harness-chat--on-node (plist-get update :node))
+                     ;; A message of the user's may steer the turn that goes on.
+                     (when (equal (harness-chat--str (plist-get (plist-get update :node) :kind)) "user")
+                       (harness-chat--refresh-sending)))
     ("agent_message_chunk" (harness-chat--on-chunk update "assistant"))
     ("agent_thought_chunk" (harness-chat--on-chunk update "thinking"))
     ("_harness/activity" (harness-chat--on-activity (plist-get update :activity)))
@@ -2441,6 +2593,7 @@ the thinking before its first call and after its last stays out."
 (defun harness-chat--on-session (session)
   "React to a fresh SESSION plist."
   (let ((status (plist-get session :status))
+        (was-running harness-chat--turn-start)
         (changed nil))
     (setq harness-chat--session session)
     (when-let* ((cwd (plist-get session :cwd)))
@@ -2457,6 +2610,9 @@ the thinking before its first call and after its last stays out."
            (dolist (id harness-chat--unfinished)
              (when-let* ((b (gethash id harness-chat--blocks))) (harness-chat--rerender b)))
            (setq harness-chat--unfinished nil)))
+    ;; A turn began or ended: the notes on the messages that steer it follow.
+    (unless (eq (and was-running t) (and harness-chat--turn-start t))
+      (harness-chat--refresh-sending))
     ;; The pending module owns the requests; it calls back to redraw the tail
     ;; when they change (see `harness-chat--on-pending-changed').
     (harness-ui-pending-sync (plist-get session :id) (plist-get session :pending))
@@ -2465,6 +2621,9 @@ the thinking before its first call and after its last stays out."
       (setq harness-chat--inactive (equal status "inactive") changed t))
     (unless (equal (plist-get session :queue) harness-chat--queue)
       (setq harness-chat--queue (plist-get session :queue) changed t))
+    ;; The queue's buttons say what sending now does, and a turn running changes it.
+    (when (harness-chat--queue-stale-p)
+      (setq changed t))
     (when (harness-chat--set-todos (plist-get session :todos))
       (setq changed t))
     (if changed
@@ -2488,10 +2647,20 @@ continues, not the branch left behind."
                         (harness-chat--buffer-for (car args)))))
     (with-current-buffer buf
       (pcase event
-        ("agent/turn-started" (setq harness-chat--turn-start (float-time)) (harness-chat--start-spinner))
-        ("agent/turn-ended" (setq harness-chat--turn-start nil))
+        ("agent/turn-started" (setq harness-chat--turn-start (float-time)) (harness-chat--start-spinner)
+                              (harness-chat--turn-changed))
+        ("agent/turn-ended" (setq harness-chat--turn-start nil)
+                            (harness-chat--turn-changed))
         ("session/head-moved" (harness-chat--load t)))
       (force-mode-line-update))))
+
+(defun harness-chat--turn-changed ()
+  "Draw again what depends on a turn running, as one begins or ends.
+That is the notes on the messages that steer it, and the queue, whose
+buttons say what sending a message now does."
+  (harness-chat--refresh-sending)
+  (when (harness-chat--queue-stale-p)
+    (harness-chat--render-tail)))
 
 (defun harness-chat--append-local-block (kind text)
   "Append a block of KIND with TEXT that exists only in this buffer."
@@ -2640,30 +2809,84 @@ The store is the one source of truth; the chat's mirror follows it."
 (defvaralias 'harness-chat-question-map 'harness-ui-pending-question-map)
 (defvaralias 'harness-chat-diagram-question-map 'harness-ui-pending-diagram-map)
 
-;;;; The tail: panel, queue, attachments, compose
+;;;; The tail: queue, panel, attachments, compose
+
+(defun harness-chat--queue-stale-p ()
+  "Non-nil when the queue was drawn for a turn running or not, and that changed.
+Its buttons say what sending a message now does, which depends on it."
+  (and harness-chat--queue
+       (not (eq harness-chat--queue-running (and harness-chat--turn-start t)))))
+
+(defun harness-chat--queued-block (item)
+  "Return the block that draws queued ITEM: the user block it will be once sent.
+Its node is ITEM as `harness-queued-message-node' reads it, the id
+ITEM's.  An item drawn before keeps the part of a long message it
+showed (`harness-chat--queued-blocks')."
+  (let ((block (harness-chat--new-block (harness-queued-message-node item)))
+        (old (and harness-chat--queued-blocks
+                  (gethash (plist-get item :id) harness-chat--queued-blocks))))
+    (when old
+      (setf (harness-chat-block-shown block) (harness-chat-block-shown old)))
+    block))
+
+(defun harness-chat--queued-note (qid running)
+  "Return what the sender line of queued message QID says after the name.
+Its state, \"queued\", after a grey circle (the yellow one of \"sent\"
+and the green one of \"delivered\" come after it, as
+`harness-chat--delivery-note' draws them), then its buttons: [send now]
+sends it at once, the others staying queued; [edit] takes it back into
+the box; [×] drops it.  RUNNING says whether a turn runs, which the
+tooltip of [send now] follows: sent now, the message steers that turn,
+which gives it to the model at its next step, or is a turn of its own."
+  (concat (propertize (harness-ui-icon 'harness-icon-caution) 'face 'harness-dim-face)
+          " "
+          (propertize "queued" 'face 'harness-dim-face
+                      'help-echo "Not sent yet: the model does not have this message")
+          "  "
+          (harness-chat--button "[send now]" (lambda () (harness-chat-send-queued qid))
+                                :help (if running
+                                          "Send this message now: the running turn gets it at its next step. The others stay queued"
+                                        "Send this message now, as a turn of its own. The others stay queued"))
+          " "
+          (harness-chat--button "[edit]" (lambda () (harness-chat-edit-queued qid)) :help "Edit this message")
+          " "
+          (harness-chat--button "[×]" (lambda () (harness-chat-remove-queued qid)) :help "Remove from the queue")))
 
 (defun harness-chat--insert-queue ()
-  "Insert the queued messages list."
-  (when harness-chat--queue
-    (let ((start (point)))
-      (insert (propertize (format " queued for the next turn (%d)  " (length harness-chat--queue)) 'face 'harness-label-face)
-              (harness-chat--button "[Send now]" #'harness-chat-send-queue :help "Send every queued message now")
-              "\n")
-      (dolist (item harness-chat--queue)
-        (let ((qid (plist-get item :id)))
-          (insert "   "
-                  (harness-chat--button "[edit]" (lambda () (harness-chat-edit-queued qid)) :help "Edit this message")
-                  " "
-                  (harness-chat--button "[×]" (lambda () (harness-chat-remove-queued qid)) :help "Remove from the queue")
-                  " "
-                  (propertize (harness-first-line (plist-get item :text) 100) 'wrap-prefix "   ")
-                  (if (plist-get item :attachments)
-                      (propertize (format "  %s%d" (harness-ui-icon 'harness-icon-attach)
-                                          (length (plist-get item :attachments)))
-                                  'face 'harness-dim-face)
-                    "")
-                  "\n")))
-      (add-face-text-property start (point) 'harness-queue-face t))))
+  "Insert the queued messages, each as the user message it will be.
+They come first under the transcript, the newest messages of the
+conversation, and the activity line goes under them
+\(`harness-chat--activity-position').  A queued message is drawn by the
+code that draws the user's messages in the transcript
+\(`harness-chat--render-user'), from the block it will be once sent
+\(`harness-chat--queued-block'): the name, the bar and the background,
+the text and its references, the attachments.  Only its sender line
+differs: after the name it says it is queued and has its buttons
+\(`harness-chat--queued-note').  A blank line follows each, as it
+follows a block of the transcript.  The queue is marked
+`harness-chat-queue', and each message `harness-chat-queued', its id:
+point anywhere on a message finds it (`harness-chat--queued-at-point')."
+  (let ((blocks (make-hash-table :test 'equal))
+        (running (and harness-chat--turn-start t))
+        (start (point)))
+    (setq harness-chat--queue-running running)
+    (dolist (item harness-chat--queue)
+      (let* ((qid (plist-get item :id))
+             (block (harness-chat--queued-block item))
+             (note (harness-chat--queued-note qid running))
+             (text (concat (condition-case err
+                               (harness-chat--render-user block note)
+                             ;; Drawn unformatted, it keeps its buttons.
+                             (error (concat (harness-chat--margin (concat harness-chat-user-label "  " note "\n"))
+                                            (harness-chat--render-failed block err))))
+                           "\n")))
+        (puthash qid block blocks)
+        ;; Point anywhere on the message, [send now] by keyboard or `M-x', finds it.
+        (put-text-property 0 (length text) 'harness-chat-queued qid text)
+        (insert text)))
+    (when (> (point) start)
+      (put-text-property start (point) 'harness-chat-queue t))
+    (setq harness-chat--queued-blocks blocks)))
 
 
 ;;;; The todo list
@@ -2853,6 +3076,16 @@ window's point."
                       nil)))
 
 
+(defun harness-chat--box-help ()
+  "Return the tooltip of the compose box's prompt: its keys, in brief.
+The box's key for a panel's keys (`harness-compose-panel-key') is named
+as the box binds it, with the example of a panel's key after it, as the
+tooltips of the task board's box and a popout's name it.  Attaching
+takes a task as well as a file (task:ID)."
+  (concat "C-c C-c sends, RET newline, C-c C-q queues, C-c C-k cancels, "
+          "C-c C-a attaches a file or task, C-c > quotes, "
+          (harness-compose-panel-keys) " KEY: a key of the panel above"))
+
 (defun harness-chat--render-tail ()
   "Render everything below the transcript, keeping the compose text."
   (harness-chat--with-display (harness-chat--render-tail-1)))
@@ -2870,10 +3103,12 @@ window's point."
       (delete-region harness-chat--transcript-end (point-max))
       (goto-char harness-chat--transcript-end)
       (let ((start (point)))
-        ;; First, so what it draws stands on whatever comes next.
+        ;; First: what `harness-chat-top-functions' draw, so it stands on
+        ;; whatever comes next, then the queued messages, which read as the
+        ;; newest of the conversation.
         (harness-chat--insert-top)
-        (harness-ui-pending-insert-panels harness-ui-session-id)
         (harness-chat--insert-queue)
+        (harness-ui-pending-insert-panels harness-ui-session-id)
 
         (harness-chat--insert-todos)
         (harness-chat--insert-panels)
@@ -2884,8 +3119,7 @@ window's point."
         (when (and harness-chat--inactive (not harness-chat--dead))
           (insert (propertize " This session is inactive. Sending a message resumes it.\n" 'face 'harness-hint-face)))
         (put-text-property start (point) 'read-only t)
-        (harness-compose-insert nil (concat "C-c C-c sends, RET newline, C-c C-q queues, C-c C-k cancels, "
-                                            "C-c C-a attaches, C-c > quotes, M-RET splits a quote"))))
+        (harness-compose-insert nil (harness-chat--box-help))))
     (cond (offset (goto-char (min (+ harness-compose-start offset) harness-compose-end)))
           (in-tail (goto-char harness-compose-end)))
     (dolist (w windows)
@@ -2898,8 +3132,8 @@ window's point."
              (harness-chat--pin-soon (car w)))
             ((< (cdr w) harness-chat--transcript-end)
              (set-window-start (car w) (cdr w) t))))
-    ;; The new tail went in where the activity line was: put it back, under
-    ;; the top of the tail and above the rest.
+    ;; The new tail went in where the activity line was: put it back,
+    ;; under the queued messages and above the rest.
     (harness-chat--refresh-activity)))
 
 (defvar-local harness-chat-placeholder nil
@@ -2943,6 +3177,7 @@ own.  The BTW module says what a side conversation is for with it.")
         harness-chat--stale nil
         harness-chat--order nil
         harness-chat--unfinished nil
+        harness-chat--sending nil
         harness-compose-start nil
         harness-compose-end nil
         harness-chat--transcript-start (copy-marker (point-max))
@@ -2953,10 +3188,15 @@ own.  The BTW module says what a side conversation is for with it.")
   (harness-compose-capture)
   (harness-chat--reset-buffer)
   (unwind-protect
-      (let ((harness-chat--batch t))
-        (dolist (node nodes)
-          (harness-chat--on-node node))
-        (harness-chat--regroup))
+      (progn
+        (let ((harness-chat--batch t))
+          (dolist (node nodes)
+            (harness-chat--on-node node))
+          (harness-chat--regroup))
+        ;; Only the whole transcript tells which messages the turn at its
+        ;; end sent; nothing scrolls, the tail is drawn next.
+        (let ((harness-chat--batch t))
+          (harness-chat--redraw-sending)))
     ;; Whatever happened above, the buffer keeps its panel and compose box.
     (harness-chat--render-top)
     (harness-chat--render-tail)))
@@ -3526,6 +3766,29 @@ A module showing something of its own in this buffer
   (harness-ui-call-turn harness-ui-session-id "_harness/agent/send-queue"
                         (list :session-id harness-ui-session-id) #'ignore))
 
+(defun harness-chat--queued-at-point ()
+  "Return the id of the queued message point is on, else the first one's.
+Point is on a queued message anywhere from its sender line to the blank
+line under it."
+  (or (get-text-property (point) 'harness-chat-queued)
+      (plist-get (car harness-chat--queue) :id)))
+
+(defun harness-chat-send-queued (&optional qid)
+  "Send the queued message QID now; the others stay queued.
+Interactively QID is the queued message point is on, above the compose
+box, else the first one.  While a turn runs the message
+steers it: the model gets it at its next step, and its sender line says
+\"sent\" until then, \"delivered\" after (`harness-chat--delivery-note').
+Otherwise it goes out now, as a turn of its own.  Either way it leaves
+the queue for the transcript."
+  (interactive (list (harness-chat--queued-at-point)))
+  (unless qid (user-error "No queued message to send"))
+  (let ((buf (current-buffer)))
+    (harness-ui-call-turn harness-ui-session-id "_harness/agent/send-queue"
+                          (list :session-id harness-ui-session-id :qids (list qid))
+                          #'ignore
+                          (lambda (err) (harness-chat--report-error buf "send" err)))))
+
 (defun harness-chat-edit-queued (qid)
   "Load queued item QID into the compose box; sending removes it from the queue."
   (interactive (list (plist-get (car harness-chat--queue) :id)))
@@ -3554,7 +3817,8 @@ A module showing something of its own in this buffer
 ;; text), write a long tool input, or wait on a slow tool.  The line is
 ;; an overlay string, so its spinner ticks without editing the buffer.
 ;; Its own background and a blank line under it keep it apart from the
-;; compose box below.
+;; compose box below.  Queued messages read as the newest messages, so
+;; the line goes under them (`harness-chat--activity-position').
 ;;
 ;; What `harness-chat-top-functions' draw -- the companion pet -- goes
 ;; first in the tail, so it stands on the line.  The overlay sits where
@@ -3608,7 +3872,7 @@ The size of the tool input written so far, the latest line a tool reported."
   "Return the activity line due now, or nil unless the session runs.
 A blocked session shows its panel instead.  The line wears
 `harness-chat-activity-face' and a blank line follows it: both keep it
-apart from what comes below, the compose box or the queue."
+apart from what comes below, the compose box or a panel."
   (when (and (equal (plist-get (harness-chat--session) :status) "running")
              (not harness-chat--dead))
     (let* ((activity harness-chat--activity)
@@ -3624,7 +3888,7 @@ apart from what comes below, the compose box or the queue."
                          (propertize (truncate-string-to-width text room nil nil "\N{U+2026}") 'face 'harness-dim-face)
                          "\n")))
       ;; Emacs draws an overlay string over the face of the text it
-      ;; precedes: the box's prompt or the queue, whose background would
+      ;; precedes: the box's prompt or a panel, whose background would
       ;; make the line look like their first.  Both lines are drawn over
       ;; `default' instead, extended: the space after the end of a line
       ;; takes only faces that extend, so the box's would fill it.
@@ -3634,20 +3898,24 @@ apart from what comes below, the compose box or the queue."
         (concat line (propertize "\n" 'face ground))))))
 
 (defun harness-chat--activity-position ()
-  "Return where the activity line goes: under the top of the tail.
+  "Return where the activity line goes: under the top of the tail and the queue.
 That is the end of the transcript, or, when text marked `harness-chat-top'
 starts there (see `harness-chat--insert-top'), the end of that text: what
-`harness-chat-top-functions' drew stands on the line."
+`harness-chat-top-functions' drew stands on the line.  When queued
+messages follow (`harness-chat--insert-queue'), the end of the last of
+them: they read as the newest messages, and the line under them all says
+what the turn does."
   (let ((end (marker-position harness-chat--transcript-end)))
-    (if (get-text-property end 'harness-chat-top)
-        (or (next-single-property-change end 'harness-chat-top) (point-max))
-      end)))
+    (dolist (prop '(harness-chat-top harness-chat-queue))
+      (when (get-text-property end prop)
+        (setq end (or (next-single-property-change end prop) (point-max)))))
+    end))
 
 (defun harness-chat--activity-overlay ()
   "Return the activity line's overlay, empty where the line goes.
 That is `harness-chat--activity-position'.  At the end of the
 transcript, FRONT-ADVANCE and REAR-ADVANCE carry it past blocks
-appended there; under the top of the tail the blocks go in before it,
+appended there; under the top of the tail and the queue the blocks go in before it,
 and the text around carries it along.  A render of the tail takes it
 off its place, and `harness-chat--refresh-activity' puts it back."
   (let ((pos (harness-chat--activity-position))
@@ -4257,6 +4525,12 @@ a seed conversation (`harness-ui-navigable-session-p')."
                      (and current-prefix-arg (harness-ui-read-position))))
   (harness-ui-display-session id position))
 
+(defun harness-chat--project-sessions (root)
+  "Return the sessions of the project at ROOT to open, newest first."
+  (harness-ui-user-sessions (lambda (s)
+                              (and (equal (plist-get s :project) root)
+                                   (harness-ui-navigable-session-p s)))))
+
 ;;;###autoload
 (defun harness-open-latest-session (&optional position)
   "Open the newest session of the current project in POSITION.
@@ -4267,12 +4541,150 @@ seeds has none to open, so a new one starts as it would with no
 session at all."
   (interactive (list (and current-prefix-arg (harness-ui-read-position))))
   (let* ((root (harness-chat--project-root default-directory))
-         (mine (harness-ui-user-sessions (lambda (s)
-                                           (and (equal (plist-get s :project) root)
-                                                (harness-ui-navigable-session-p s))))))
+         (mine (harness-chat--project-sessions root)))
     (if mine
         (harness-open-session (plist-get (car mine) :id) position)
       (harness-new-session root position))))
+
+;;;; Prompting with the region
+
+;; The region of any buffer starts a message.  In a buffer with a compose
+;; box it is quoted there, as `harness-compose-quote-reply' does.  In any
+;; other it is put, with where it comes from, in the box of the newest
+;; session of the buffer's project -- or of a new one -- which opens for
+;; the request.
+
+(defun harness-chat--code-language (&optional mode)
+  "Return the Markdown language tag of major mode MODE, default `major-mode'.
+That is the mode's name without its -mode, or -ts-mode when a
+tree-sitter one: `emacs-lisp-mode' is emacs-lisp, `python-ts-mode'
+python and `c++-mode' c++.  A mode derived from `emacs-lisp-mode', such
+as `lisp-interaction-mode', is emacs-lisp too."
+  (let ((mode (or mode major-mode)))
+    (if (provided-mode-derived-p mode 'emacs-lisp-mode)
+        "emacs-lisp"
+      (let ((name (symbol-name mode)))
+        (if (string-match "\\`\\(.+?\\)\\(?:-ts\\)?-mode\\'" name)
+            (match-string 1 name)
+          name)))))
+
+(defun harness-chat--fence (text language)
+  "Return TEXT as a Markdown code block in LANGUAGE, a string.
+The fence is longer than any run of backticks in TEXT, so nothing in
+TEXT ends the block early."
+  (let ((longest 0) (pos 0))
+    (while (string-match "`+" text pos)
+      (setq longest (max longest (- (match-end 0) (match-beginning 0)))
+            pos (match-end 0)))
+    (let ((fence (make-string (max 3 (1+ longest)) ?`)))
+      (concat fence language "\n" text "\n" fence))))
+
+(defun harness-chat--region-origin (first last root)
+  "Return the line saying where lines FIRST to LAST of this buffer come from.
+A buffer visiting a file names its path, relative to ROOT when inside
+that project, else abbreviated; any other buffer names itself."
+  (if-let* ((file buffer-file-name))
+      (format "From `%s` (%s):"
+              (if (string-prefix-p root (expand-file-name file))
+                  (file-relative-name file root)
+                (abbreviate-file-name file))
+              (if (= first last)
+                  (format "line %d" first)
+                (format "lines %d–%d" first last)))
+    (format "From the buffer `%s`:" (buffer-name))))
+
+(defun harness-chat--region-prompt (beg end root)
+  "Return the start of a message made of the text from BEG to END of this buffer.
+A line says where the text comes from (`harness-chat--region-origin';
+ROOT is the project to name a path in).  Under it comes the text, a
+programming or configuration buffer's in a fenced code block in its
+language and any other's as a Markdown quote.  Blank lines around the
+text are left out; the lines named are those of what is left."
+  (let* ((from (save-excursion (goto-char beg) (skip-chars-forward " \t\n" end) (point)))
+         (to (save-excursion (goto-char end) (skip-chars-backward " \t\n" beg) (point))))
+    (when (>= from to)
+      (user-error "The region is blank: select the text to prompt with"))
+    (let ((text (string-trim (buffer-substring-no-properties beg end) "\\(?:[ \t]*\n\\)+" "[ \t\n]+")))
+      (concat (harness-chat--region-origin (line-number-at-pos from t) (line-number-at-pos (1- to) t) root)
+              "\n\n"
+              (if (derived-mode-p 'prog-mode 'conf-mode)
+                  (harness-chat--fence text (harness-chat--code-language))
+                (harness-compose-quote-string text))))))
+
+(defun harness-chat--prompt-labels (sessions)
+  "Return (LABEL . SESSION) for each of SESSIONS, the labels all different.
+Sessions that share a name are told apart by their ids."
+  (let ((labels (mapcar (lambda (s)
+                          (format "%s  %s" (harness-ui-session-label s)
+                                  (propertize (harness-ui-model-label (plist-get s :model))
+                                              'face 'harness-dim-face)))
+                        sessions)))
+    (cl-mapcar (lambda (s label)
+                 (cons (if (> (cl-count label labels :test #'equal) 1)
+                           (format "%s  %s" label (truncate-string-to-width (plist-get s :id) 8))
+                         label)
+                       s))
+               sessions labels)))
+
+(defun harness-chat--read-prompt-session (sessions)
+  "Read where the region goes: one of SESSIONS, newest first, or a new session.
+Return the session's plist, or nil for a new session."
+  (let* ((new "New session")
+         (table (append (harness-chat--prompt-labels sessions) (list (cons new nil))))
+         (choice (completing-read
+                  "Prompt session: "
+                  ;; In the order given: the newest first, the new session last.
+                  (lambda (string predicate action)
+                    (if (eq action 'metadata)
+                        '(metadata (display-sort-function . identity)
+                                   (cycle-sort-function . identity))
+                      (complete-with-action action table string predicate)))
+                  nil t nil nil (caar table))))
+    (cdr (assoc choice table))))
+
+(defun harness-chat--append-to-box (buffer text)
+  "Put TEXT at the end of the compose box of chat BUFFER, and point after it.
+A blank line comes between a draft in the box and TEXT, and another
+follows TEXT, where the request goes.  Point ends there, the windows of
+BUFFER showing it.  The text is kept for the box when it is not drawn
+yet."
+  (with-current-buffer buffer
+    (let ((draft (string-trim-right (or (harness-compose-text) ""))))
+      (harness-compose-set (concat draft (if (string-empty-p draft) "" "\n\n") text "\n\n")))
+    (harness-chat-scroll-to-bottom)))
+
+;;;###autoload
+(defun harness-prompt-region (&optional choose)
+  "Prompt a session with the region: start a message in its box with it.
+The region of any buffer will do.  In one with a compose box -- a chat,
+the task board, a popout -- it is quoted there, as
+\\[harness-compose-quote-reply] does.  In any other buffer the box of the
+newest session of the buffer's project gets it, as the start of a
+message: a line saying where it comes from -- the file and its lines, or
+the buffer's name -- and the text, in a fenced code block when the
+buffer is for programming or configuration, else as a Markdown quote.
+The project has no session yet: a new one opens for it.  The session's
+chat is shown and selected, point in its box after the text, ready for
+the request; a draft already in the box stays above it.
+
+With a prefix argument CHOOSE, choose the session among the project's,
+or a new one."
+  (interactive "P")
+  (unless (use-region-p)
+    (user-error "Select the text to prompt with first"))
+  (if (harness-compose-live-p)
+      (harness-compose-quote-reply (region-beginning) (region-end))
+    (let* ((root (harness-chat--project-root default-directory))
+           (text (harness-chat--region-prompt (region-beginning) (region-end) root))
+           (sessions (harness-chat--project-sessions root))
+           (session (if (and choose sessions)
+                        (harness-chat--read-prompt-session sessions)
+                      (car sessions)))
+           (seed (lambda (buffer) (harness-chat--append-to-box buffer text))))
+      (deactivate-mark)
+      (if session
+          (funcall seed (harness-ui-display-session (plist-get session :id)))
+        (harness-new-session root nil seed)))))
 
 ;;;; Mode
 
@@ -4327,13 +4739,40 @@ Typing anywhere goes to the box, `?' included, so the harness menu is
 on \\[harness-menu] here, or the [menu] button in the header line.  On
 a request's panel its own keys answer it instead: a question's digits,
 up to its number of options, and a permission's y, s, a, n and N, and
-e when it has a pattern to edit.
+e when it has a pattern to edit.  In the box those keys type, so
+\\[harness-compose-panel-key] and then a key presses it on the nearest panel above the box that
+has it, point coming back to the box (a numeric argument takes the Nth
+panel up): \\[harness-compose-panel-key] 1 picks a question's first option, \\[harness-compose-panel-key] y allows a
+permission.  Each panel says so in a dim line of its own.
+
+\\[harness-compose-beginning-of-buffer] and \\[harness-compose-end-of-buffer] in the box go to its top and its bottom, not the
+buffer's; pressed again, from outside the box or with a prefix argument
+they go on to the buffer's.
 
 \\<harness-chat-mode-map>\\[compose-quote-reply] quotes the region, or the agent's message at point, in
 the box, to reply to it; from the box, the agent's last message.  Answer
 a quote inline, part by part: in a quote in the box,
 \\<compose-quote-inline-mode-map>\\[compose-quote-split] splits it where point is, to answer that part, and
 \\[compose-quote-elide] elides the region, or the rest of the paragraph, as [...].
+\\[harness-prompt-region] does the same for the region, here and in any
+other buffer, where it opens the box of the project's newest session
+with the text and where it comes from.
+
+\\[harness-compose-add-attachment] attaches a file, or a task as task:ID.  The attachment
+has its reference in the text -- [image 1], @notes.txt, @task:ID --
+shown as a chip: a click opens it, mouse-3 offers the rest, and deleting
+the reference removes the attachment.
+
+\\[harness-chat-queue] queues the message for the next turn.  A queued message shows
+above the box as it will in the transcript, its sender line saying
+\"queued\" and holding its buttons: [send now] sends it alone, the
+others staying queued, [edit] takes it back into the box and [×] drops
+it.  The queued messages come last in the conversation, the line saying
+what a running turn does under them.  \\[harness-chat-send-queued] sends the
+queued message point is on, \\[harness-chat-send-queue] every one.
+A message sent while a turn runs, queued or not, gives its state on its
+sender line: \"sent\" until the model has it, then \"delivered\"; \"not
+delivered\" when the turn ended before the model got it.
 
 \\<harness-chat-mode-map>Point moves from block to block without a mouse:
 \\[harness-chat-next-message] and \\[harness-chat-previous-message] go to the next and previous
@@ -4376,15 +4815,18 @@ one summary line is one stop.
        ["Message"
         ("C-c C-c" "Send" harness-chat-send)
         ("C-c C-q" "Queue for next turn" harness-chat-queue)
-        ("C-c C-a" "Attach file" harness-compose-add-attachment)
+        ("C-c C-a" "Attach file or task" harness-compose-add-attachment)
         ("C-y" "Paste; an image attaches" harness-compose-yank)
         ("C-c >" "Quote reply: region or message" compose-quote-reply)
         ("M-RET" "Split a quote to answer inline" compose-quote-split)
-        ("C-c [" "Elide part of a quote: [...]" compose-quote-elide)]
+        ("C-c [" "Elide part of a quote: [...]" compose-quote-elide)
+        ("M-<" "Top of the box, then the buffer" harness-compose-beginning-of-buffer)
+        ("M->" "Bottom of the box, then the buffer" harness-compose-end-of-buffer)]
        ["Agent"
         ("C-c C-y" "Allow request" harness-chat-allow-newest)
         ("C-c C-n" "Deny request" harness-chat-deny-newest)
         ("C-c C-p" "Edit request's pattern" harness-chat-edit-permission-pattern)
+        ("C-c ." "A key of the panel above, from the box" harness-compose-panel-key)
         ("C-c C-f" "Next diagram" harness-chat-next-diagram)
         ("C-c C-b" "Previous diagram" harness-chat-previous-diagram)
         ("C-c C-t" "Show or hide the todo list" harness-chat-toggle-todos)
@@ -4459,11 +4901,14 @@ Point moved onto an option of a question with diagrams shows its diagram."
     (transient-append-suffix 'harness-menu "s" '("o" "Open latest session" harness-open-latest-session))))
 
 (defun harness-chat--init-hooks ()
-  "Add the hooks that came after the module's first version.
+  "Add the hooks and keys that came after the module's first version.
 A reload does not initialise a running module again, so the file adds
 them itself when the module is ready (below)."
   ;; Windows following a streaming chat scroll once per slice of messages.
-  (add-hook 'harness-acp-received-hook #'harness-chat--pin-waiting))
+  (add-hook 'harness-acp-received-hook #'harness-chat--pin-waiting)
+  ;; The region of any buffer starts a message: C-c h > (see
+  ;; `harness-prompt-region'); the harness menu has it too.
+  (define-key harness-ui-map (kbd ">") #'harness-prompt-region))
 
 (harness-define-module 'ui-chat
   :doc "The chat buffer: transcript, pending panel, queue, attachments and compose box."

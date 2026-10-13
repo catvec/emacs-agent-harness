@@ -1281,9 +1281,14 @@ directory as the harness holds it, ending in a slash."
 (defun harness-acp--block-from-acp (block)
   "Turn an ACP prompt content BLOCK into a harness content block.
 An image's `_harness.label', the token naming it in the message's text
-\(image 1 for [image 1]), becomes its `:label'."
+\(image 1 for [image 1]), becomes its `:label'.  A text block with
+`_harness.attached', the text of an attachment such as a task, keeps
+that as `:attached', which sets it apart from the user's words in the
+transcript (`harness-agent--blocks-text')."
   (pcase (plist-get block :type)
-    ("text" (list :type "text" :text (or (plist-get block :text) "")))
+    ("text" (append (list :type "text" :text (or (plist-get block :text) ""))
+                    (and (harness-json-true-p (plist-get (plist-get block :_harness) :attached))
+                         (list :attached t))))
     ("image" (let ((label (plist-get (plist-get block :_harness) :label)))
                (append (list :type "image" :mime (plist-get block :mimeType) :data (plist-get block :data))
                        (and (stringp label) (not (string-empty-p label)) (list :label label)))))

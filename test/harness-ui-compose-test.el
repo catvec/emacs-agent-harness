@@ -10,8 +10,14 @@
 ;; media ring, and C-c C-v is no longer the box's, so a chat's [Verify]
 ;; keeps it.  Typing outside the box goes into it (the keys go through
 ;; the real command loop), except the keys that are commands where they
-;; are typed.  The clipboard and the display are stubbed; downloads go
-;; to a web server in this Emacs.
+;; are typed.  C-c . presses a key on a panel above the box from the
+;; box -- the nearest panel that binds it, or the Nth up with a numeric
+;; argument -- and puts point back in the box; M-< and M-> stay in the
+;; box, going on to the buffer's edges from the box's own.  Every
+;; attachment has a token in the text -- an image [image 1], a file its
+;; @ reference, a task @task:ID -- shown as the same chip, which opens
+;; it; deleting the token detaches it.  The clipboard and the display
+;; are stubbed; downloads go to a web server in this Emacs.
 
 ;;; Code:
 
@@ -23,9 +29,13 @@
 (defvar harness-media-ring-max)
 (defvar compose-quote-inline-hint)
 (defvar-local harness-ui-compose-test--draws 0 "How many times the test host drew.")
+(defvar-local harness-ui-compose-test--panels nil
+  "The panels the test host draws under its line: (NAME TEXT KEYMAP) each.
+The first is the farthest from the box.  The text carries the name as
+its `harness-compose-panel' and the keymap as its `keymap'.")
 
 (defun harness-ui-compose-test--draw ()
-  "Draw the test host: a read-only line, the attachment chips and the box.
+  "Draw the test host: a read-only line, its panels, the attachment chips and the box.
 With undo off, as the hosts draw."
   (cl-incf harness-ui-compose-test--draws)
   (harness-compose-capture)
@@ -34,6 +44,8 @@ With undo off, as the hosts draw."
         (offset (and (harness-compose-in-p) (- (point) harness-compose-start))))
     (erase-buffer)
     (insert (propertize "The transcript.\n" 'read-only t))
+    (pcase-dolist (`(,name ,text ,keymap) harness-ui-compose-test--panels)
+      (insert (propertize text 'harness-compose-panel name 'keymap keymap 'read-only t)))
     (let ((start (point)))
       (harness-compose-insert-attachments)
       (put-text-property start (point) 'read-only t))
@@ -671,13 +683,15 @@ Point starts after the box, where a command loop's hooks move it from."
         (harness-ui-compose-test--command 'harness-compose-yank)
         (should (equal (list one two) (mapcar (lambda (a) (plist-get a :path)) harness-compose-attachments)))
         (should (equal '("image/png" "text/plain") (mapcar (lambda (a) (plist-get a :mime)) harness-compose-attachments)))
-        ;; The image has a token in the text, the other file none.
+        ;; Each has its token in the text: the image its label, the
+        ;; other file its @ reference.
         (should (equal '("image 1" nil) (mapcar (lambda (a) (plist-get a :label)) harness-compose-attachments)))
-        (should (equal "[image 1] " (harness-compose-text)))
+        (should (equal '(nil "two.txt") (mapcar (lambda (a) (plist-get a :ref)) harness-compose-attachments)))
+        (should (equal "[image 1] @two.txt " (harness-compose-text)))
         ;; Files copied are no captures: the ring stays empty.
         (should-not (harness-media-ring-entries))
         (harness-ui-compose-test--command 'harness-compose-yank)
-        (should (equal "[image 1] killed text" (harness-compose-text))))
+        (should (equal "[image 1] @two.txt killed text" (harness-compose-text))))
       ;; A copied web link is text.
       (harness-compose-set "")
       (setq harness-compose-attachments nil)
@@ -743,11 +757,12 @@ The box leaves C-c C-v unbound, so in a chat the review banner's
 The token keeps apart from the words around it and point goes on after
 it.  The image's line in the list leads with the token, its prompt
 block carries its label, and the token shows as a chip.  A file that is
-no image gets no token."
+no image and whose name can be no @ reference, a space in it, gets no
+token."
   (harness-ui-compose-test-with
     (let ((a (plist-get (harness-media-ring-save harness-test-png "image/png") :path))
           (b (plist-get (harness-media-ring-save (concat harness-test-png "b") "image/png") :path))
-          (notes (expand-file-name "notes.txt" dir)))
+          (notes (expand-file-name "my notes.txt" dir)))
       (with-temp-file notes (insert "notes"))
       (harness-compose-set "compare with")
       (goto-char (+ harness-compose-start (length "compare ")))
@@ -855,12 +870,14 @@ The host draws with undo off, so what it draws above the box moves the
 box's text but not the undo entries: they move with the box, and undo
 never reaches the read-only text."
   (harness-ui-compose-test-with
-    (let ((notes (expand-file-name "notes.txt" dir)))
+    ;; A space in its name: the file attaches with no reference in the text.
+    (let ((notes (expand-file-name "my notes.txt" dir)))
       (with-temp-file notes (insert "notes"))
       (goto-char harness-compose-end)
       (execute-kbd-macro "hello")
       ;; A line drawn above the box, as attaching a file draws one.
       (harness-compose-add-attachment notes)
+      (should (equal "hello" (harness-compose-text)))
       (goto-char harness-compose-end)
       ;; C-e first, so the typing is an undo step of its own.
       (execute-kbd-macro (kbd "C-e SPC t h e r e"))
@@ -959,9 +976,10 @@ returned once none was."
 
 (ert-deftest harness-ui-compose-at-completes-paths-out-of-the-project ()
   ;; @ completes a path as well as part of a project file's name, and
-  ;; the file chosen becomes an attachment as a project file does.  A
-  ;; directory stays in the box, for its files to complete next, and so
-  ;; does a completion that may go on.
+  ;; the file chosen becomes an attachment as a project file does, the
+  ;; token staying in the text as its reference, a chip.  A directory
+  ;; stays in the box, for its files to complete next, and so does a
+  ;; completion that may go on.
   (harness-ui-compose-test-with
     (harness-ui-compose-test--files
       (goto-char harness-compose-end)
@@ -977,16 +995,24 @@ returned once none was."
       (let ((capf (harness-compose-completion-at-point)))
         (should (equal '("x.txt") (harness-ui-compose-test--matches "../other/deep/" (nth 2 capf))))
         (harness-ui-compose-test--complete capf "../other/deep/x.txt" 'finished))
-      (should (equal "compare " (harness-compose-text)))
+      ;; The token stays, as typed, a space after it to type on.
+      (should (equal "compare @../other/deep/x.txt " (harness-compose-text)))
+      (should (= (point) harness-compose-end))
       (should (equal (list (expand-file-name "deep/x.txt" other)) (harness-ui-compose-test--paths)))
+      (should (equal "../other/deep/x.txt" (plist-get (car harness-compose-attachments) :ref)))
+      (harness-compose--sync-tokens)
+      (should (equal '("@../other/deep/x.txt")
+                     (mapcar (lambda (o) (buffer-substring-no-properties (overlay-start o) (overlay-end o)))
+                             harness-compose--token-overlays)))
       ;; Under ~: exact, it could go on, so it waits; sole, it attaches.
       (insert "with @~/do")
       (let ((capf (harness-compose-completion-at-point)))
         (should (equal '("doc.txt") (harness-ui-compose-test--matches "~/do" (nth 2 capf))))
         (harness-ui-compose-test--complete capf "~/doc.txt" 'exact))
-      (should (equal "compare with @~/doc.txt" (harness-compose-text)))
+      (should (equal "compare @../other/deep/x.txt with @~/doc.txt" (harness-compose-text)))
+      (should (= 1 (length harness-compose-attachments)))
       (funcall (plist-get (nthcdr 3 (harness-compose-completion-at-point)) :exit-function) "~/doc.txt" 'sole)
-      (should (equal "compare with " (harness-compose-text)))
+      (should (equal "compare @../other/deep/x.txt with @~/doc.txt " (harness-compose-text)))
       ;; Absolute, and a project file as before.
       (insert (concat "@" other "no"))
       (harness-ui-compose-test--complete (harness-compose-completion-at-point) (concat other "notes.md") 'finished)
@@ -994,10 +1020,15 @@ returned once none was."
       (let ((capf (harness-compose-completion-at-point)))
         (should (equal '("lisp/notes-util.el" "notes.txt") (harness-ui-compose-test--matches "nots" (nth 2 capf))))
         (harness-ui-compose-test--complete capf "notes.txt" 'finished))
-      (should (equal "compare with " (harness-compose-text)))
+      (should (equal (concat "compare @../other/deep/x.txt with @~/doc.txt @" other "notes.md @notes.txt ")
+                     (harness-compose-text)))
       (should (equal (list (expand-file-name "deep/x.txt" other) (expand-file-name "doc.txt" home)
                            (expand-file-name "notes.md" other) (expand-file-name "notes.txt" proj))
-                     (harness-ui-compose-test--paths))))))
+                     (harness-ui-compose-test--paths)))
+      ;; Sent, the text keeps the references and each file goes once.
+      (pcase-let ((`(,text . ,atts) (harness-compose-take)))
+        (should (string-suffix-p "@notes.txt" text))
+        (should (equal (harness-ui-compose-test--paths) (mapcar (lambda (a) (plist-get a :path)) atts)))))))
 
 (ert-deftest harness-ui-compose-attach-command-takes-paths ()
   ;; C-c C-a reads a path as well as part of a project file's name,
@@ -1479,6 +1510,632 @@ suppressing typing has it -- types too."
       (should (equal '(act act quit) harness-ui-compose-test--ran))
       (should (equal "kuz" (harness-compose-text)))
       (should (equal "The transcript.\n" (harness-ui-compose-test--transcript))))))
+
+;;;; A panel's key, from the box
+
+(defvar harness-ui-compose-test--pressed nil
+  "What the keys of the test panels did, newest first: (PANEL KEY POINT).")
+
+(defun harness-ui-compose-test--panel-map (name &rest keys)
+  "Return the keymap of the test panel NAME: each of KEYS records its press."
+  (let ((map (make-sparse-keymap)))
+    (dolist (key keys)
+      (define-key map key
+        (lambda () (interactive) (push (list name key (point)) harness-ui-compose-test--pressed))))
+    map))
+
+(defun harness-ui-compose-test--two-panels ()
+  "Return two panels: one, farther from the box and holding a thing, and two.
+Both bind k; one binds z too."
+  (list (list "one" (propertize "Panel one\n" 'harness-ui-compose-test-thing t)
+              (harness-ui-compose-test--panel-map "one" "k" "z"))
+        (list "two" "Panel two\n" (harness-ui-compose-test--panel-map "two" "k"))))
+
+(defun harness-ui-compose-test--panel-key (keys &optional n)
+  "Call `harness-compose-panel-key' with N, the keys KEYS typed after it."
+  (cl-letf (((symbol-function 'read-key-sequence) (lambda (&rest _) keys)))
+    (harness-compose-panel-key n)))
+
+(ert-deftest harness-ui-compose-panel-key-presses-a-key-on-the-panel-above ()
+  "C-c . reads a key and runs it on the nearest panel above the box that binds it.
+The command runs with point on the panel, and point is back in the box,
+at the offset it had, after.  A numeric argument takes the Nth panel up.
+The keys go through the command loop, as typed."
+  (harness-ui-compose-test-with
+    (setq harness-ui-compose-test--panels (harness-ui-compose-test--two-panels))
+    (harness-ui-compose-test--draw)
+    (let* ((one (+ (point-min) (length "The transcript.\n")))
+           (two (+ one (length "Panel one\n")))
+           (harness-ui-compose-test--pressed nil))
+      (should (eq 'harness-compose-panel-key (key-binding (kbd "C-c ."))))
+      (harness-compose-set "draft")
+      (goto-char (+ harness-compose-start 2))
+      ;; k is bound by both: the nearest to the box is two.
+      (execute-kbd-macro (kbd "C-c . k"))
+      (should (equal `(("two" "k" ,two)) harness-ui-compose-test--pressed))
+      (should (= (point) (+ harness-compose-start 2)))
+      (should (equal "draft" (harness-compose-text)))
+      ;; z is bound by one alone.
+      (execute-kbd-macro (kbd "C-c . z"))
+      (should (equal `("one" "z" ,one) (car harness-ui-compose-test--pressed)))
+      ;; With a numeric argument, the second panel up that binds the key.
+      (execute-kbd-macro (kbd "C-u 2 C-c . k"))
+      (should (equal `("one" "k" ,one) (car harness-ui-compose-test--pressed)))
+      (should (= 3 (length harness-ui-compose-test--pressed)))
+      (should (= (point) (+ harness-compose-start 2)))
+      (should (equal "draft" (harness-compose-text)))
+      ;; Typed with point elsewhere, the key presses all the same, and point stays.
+      (goto-char (+ (point-min) 4))
+      (execute-kbd-macro (kbd "C-c . k"))
+      (should (equal `("two" "k" ,two) (car harness-ui-compose-test--pressed)))
+      (should (= (point) (+ (point-min) 4)))
+      ;; Without a box there is nothing to press a key from.
+      (with-temp-buffer
+        (let ((err (should-error (harness-compose-panel-key) :type 'user-error)))
+          (should (equal "No compose box here" (cadr err))))))))
+
+(ert-deftest harness-ui-compose-panel-key-says-when-no-panel-has-the-key ()
+  "A key no panel binds is no key to press, whatever the buffer does with it.
+Typing, the box's own keys and the buffer's are not a panel's; asking for
+more panels than bind the key is said too, and nothing runs."
+  (harness-ui-compose-test-with
+    (setq harness-ui-compose-test--panels (harness-ui-compose-test--two-panels))
+    (harness-ui-compose-test--draw)
+    (harness-compose-set "draft")
+    (goto-char (+ harness-compose-start 2))
+    (let ((harness-ui-compose-test--pressed nil))
+      (dolist (keys '("q" "x" "\C-f" "\r" "\C-c\C-a"))
+        (let ((err (should-error (harness-ui-compose-test--panel-key keys) :type 'user-error)))
+          (should (equal (format "No panel above the box has %s" (key-description keys)) (cadr err)))))
+      (let ((err (should-error (harness-ui-compose-test--panel-key "k" 3) :type 'user-error)))
+        (should (equal "Fewer than 3 panels above the box have k" (cadr err))))
+      (let ((err (should-error (harness-ui-compose-test--panel-key "z" 2) :type 'user-error)))
+        (should (equal "Fewer than 2 panels above the box have z" (cadr err))))
+      (should-not harness-ui-compose-test--pressed)
+      (should (= (point) (+ harness-compose-start 2)))
+      (should (equal "draft" (harness-compose-text))))
+    ;; The prompt says how to get out, and which panel the number asks for.
+    (let ((prompts nil))
+      (cl-letf (((symbol-function 'read-key-sequence)
+                 (lambda (prompt &rest _) (push prompt prompts) "q")))
+        (ignore-errors (harness-compose-panel-key))
+        (ignore-errors (harness-compose-panel-key 2)))
+      (should (equal '("Key for panel 2 above (C-g quits): "
+                       "Key for the panel above (C-g quits): ")
+                     prompts)))))
+
+(ert-deftest harness-ui-compose-panel-key-skips-a-panel-with-nothing-to-act-on ()
+  "A panel's key for what point is on has nothing to act on from the box.
+The panel is passed over for a farther one whose command has; with none
+it is said, and nothing runs."
+  (harness-ui-compose-test-with
+    (let ((panels (harness-ui-compose-test--two-panels))
+          (harness-ui-compose-test--ran nil))
+      (dolist (panel panels)
+        (define-key (nth 2 panel) "i" #'harness-ui-compose-test-act))
+      (setq harness-ui-compose-test--panels panels)
+      (harness-ui-compose-test--draw)
+      (goto-char harness-compose-end)
+      ;; Panel one holds a thing for `i' to act on, panel two none.
+      (execute-kbd-macro (kbd "C-c . i"))
+      (should (equal '(act) harness-ui-compose-test--ran))
+      (let ((inhibit-read-only t))
+        (remove-text-properties (point-min) (point-max) '(harness-ui-compose-test-thing nil)))
+      (let ((err (should-error (harness-ui-compose-test--panel-key "i") :type 'user-error)))
+        (should (string-match-p "\\`i has nothing to act on from the box" (cadr err))))
+      (should (equal '(act) harness-ui-compose-test--ran))
+      (should (= (point) harness-compose-end)))))
+
+(ert-deftest harness-ui-compose-panel-key-returns-point-to-the-box ()
+  "Point ends in the box when the host drew the panels and the box again.
+The command runs with point on the panel, and a host that draws again
+what is below its transcript puts point in the box (a chat does), leaves
+it where the text it was in went (a panel that goes with the answer) or
+after the box (a host that draws the whole buffer): whichever, it goes
+back to its offset in the box.  It stays where a command took it
+elsewhere, when that is above the box and on no panel."
+  (harness-ui-compose-test-with
+    (let ((map (make-sparse-keymap)))
+      ;; As a chat draws its tail: point on a panel goes to the end of the box.
+      (define-key map "r" (lambda ()
+                            (interactive)
+                            (let ((in-tail (not (harness-compose-in-p))))
+                              (harness-ui-compose-test--draw)
+                              (when in-tail (goto-char harness-compose-end)))))
+      ;; As answering a question does: the panel goes, point stays where it began.
+      (define-key map "d" (lambda ()
+                            (interactive)
+                            (let ((inhibit-read-only t))
+                              (delete-region (point) (+ (point) (length "Panel one\n"))))))
+      ;; As a host that draws the whole buffer again does: point ends after the box.
+      (define-key map "n" (lambda () (interactive) (harness-ui-compose-test--draw)))
+      (define-key map "g" (lambda () (interactive) (goto-char (point-min))))
+      (define-key map "e" (lambda () (interactive) (error "Boom")))
+      (setq harness-ui-compose-test--panels (list (list "one" "Panel one\n" map)))
+      (harness-ui-compose-test--draw)
+      (harness-compose-set "draft")
+      (goto-char (+ harness-compose-start 3))
+      (let ((draws harness-ui-compose-test--draws))
+        (execute-kbd-macro (kbd "C-c . r"))
+        (should (> harness-ui-compose-test--draws draws)))
+      (should (= (point) (+ harness-compose-start 3)))
+      (should (equal "draft" (harness-compose-text)))
+      (execute-kbd-macro (kbd "C-c . n"))
+      (should (= (point) (+ harness-compose-start 3)))
+      (should (equal "draft" (harness-compose-text)))
+      ;; A command that fails leaves point in the box too.
+      (let ((err (should-error (harness-ui-compose-test--panel-key "e") :type 'error)))
+        (should (equal "Boom" (cadr err))))
+      (should (= (point) (+ harness-compose-start 3)))
+      ;; Here a command took it elsewhere: the top of the buffer.
+      (execute-kbd-macro (kbd "C-c . g"))
+      (should (= (point) (point-min)))
+      ;; The panel goes, with point where it was.
+      (goto-char (+ harness-compose-start 4))
+      (execute-kbd-macro (kbd "C-c . d"))
+      (should-not (text-property-not-all (point-min) (point-max) 'harness-compose-panel nil))
+      (should (= (point) (+ harness-compose-start 4)))
+      (should (equal "draft" (harness-compose-text))))))
+
+(ert-deftest harness-ui-compose-panel-pieces-with-equal-names-are-one-panel ()
+  "A panel drawn in pieces, their names `equal' but not `eq', is one panel.
+A redraw in place of the options of a question makes such pieces.  The
+panel starts at its first piece, and the pieces are not counted twice."
+  (harness-ui-compose-test-with
+    (let ((map (harness-ui-compose-test--panel-map "one" "k"))
+          (other (harness-ui-compose-test--panel-map "two" "k"))
+          (harness-ui-compose-test--pressed nil))
+      (setq harness-ui-compose-test--panels
+            (list (list (copy-sequence "one") "First piece\n" map)
+                  (list (copy-sequence "one") "Second piece\n" map)
+                  (list "two" "Panel two\n" other)))
+      (harness-ui-compose-test--draw)
+      (let ((one (+ (point-min) (length "The transcript.\n"))))
+        (execute-kbd-macro (kbd "C-c . k"))
+        (should (equal "two" (car (car harness-ui-compose-test--pressed))))
+        (execute-kbd-macro (kbd "C-u 2 C-c . k"))
+        (should (equal `("one" "k" ,one) (car harness-ui-compose-test--pressed)))
+        (let ((err (should-error (harness-ui-compose-test--panel-key "k" 3) :type 'user-error)))
+          (should (equal "Fewer than 3 panels above the box have k" (cadr err))))))))
+
+(ert-deftest harness-ui-compose-panel-key-hint-follows-the-binding ()
+  "The hints name the key where `harness-compose-panel-key' is bound.
+A panel's hint is dim, its key a key, whatever the key it names."
+  (harness-ui-compose-test-with
+    (should (equal "C-c ." (harness-compose-panel-keys)))
+    (let ((hint (harness-compose-panel-hint "y"))
+          (face-p (lambda (string pos face)
+                    (let ((faces (get-text-property pos 'face string)))
+                      (if (listp faces) (memq face faces) (eq face faces))))))
+      (should (equal "from the box: C-c . y" (substring-no-properties hint)))
+      (should (funcall face-p hint 0 'harness-dim-face))
+      (should (funcall face-p hint (string-search "C-c" hint) 'harness-ui-key-face))
+      (should (funcall face-p hint (1- (length hint)) 'harness-ui-key-face)))
+    (let ((old (lookup-key harness-compose-map (kbd "C-c ."))))
+      (unwind-protect
+          (progn
+            (define-key harness-compose-map (kbd "C-c .") nil)
+            (define-key harness-compose-map (kbd "C-c ,") #'harness-compose-panel-key)
+            (should (equal "C-c ," (harness-compose-panel-keys)))
+            (should (equal "from the box: C-c , 1" (substring-no-properties (harness-compose-panel-hint "1")))))
+        (define-key harness-compose-map (kbd "C-c ,") nil)
+        (define-key harness-compose-map (kbd "C-c .") old)))
+    (should (equal "C-c ." (harness-compose-panel-keys)))))
+
+;;;; The top and the bottom of the box
+
+(ert-deftest harness-ui-compose-m-less-and-m-greater-go-to-the-edges-of-the-box ()
+  "M-< and M-> go to the top and the bottom of the box, then of the buffer.
+From outside the box, with an argument and from the edge already they
+are the buffer's, so a second press goes on to the buffer's edge.  The
+mark is left behind as `beginning-of-buffer' leaves it, but for an
+active region.  The keys go through the command loop."
+  (harness-ui-compose-test-with
+    (harness-compose-set "one\ntwo\nthree")
+    (should (eq 'harness-compose-beginning-of-buffer (key-binding (kbd "M-<"))))
+    (should (eq 'harness-compose-end-of-buffer (key-binding (kbd "M->"))))
+    ;; The commands' other keys agree.
+    (should (eq 'harness-compose-beginning-of-buffer (key-binding (kbd "C-<home>"))))
+    (should (eq 'harness-compose-end-of-buffer (key-binding (kbd "C-<end>"))))
+    (goto-char (+ harness-compose-start 5))
+    (execute-kbd-macro (kbd "M-<"))
+    (should (= (point) harness-compose-start))
+    (should (= (mark t) (+ harness-compose-start 5)))
+    ;; From the top of the box: the top of the buffer.
+    (execute-kbd-macro (kbd "M-<"))
+    (should (= (point) (point-min)))
+    ;; Outside the box the bottom is the buffer's.
+    (goto-char (+ (point-min) 3))
+    (execute-kbd-macro (kbd "M->"))
+    (should (= (point) (point-max)))
+    ;; In the box, its bottom; then the buffer's.
+    (goto-char (+ harness-compose-start 5))
+    (execute-kbd-macro (kbd "M->"))
+    (should (= (point) harness-compose-end))
+    (should (= (mark t) (+ harness-compose-start 5)))
+    (execute-kbd-macro (kbd "M->"))
+    (should (= (point) (point-max)))
+    ;; Outside the box the top is the buffer's too.
+    (goto-char (+ harness-compose-start 5))
+    (execute-kbd-macro (kbd "M-<"))
+    (goto-char (+ (point-min) 3))
+    (execute-kbd-macro (kbd "M-<"))
+    (should (= (point) (point-min)))
+    ;; An argument: the buffer's, whatever the box.
+    (goto-char (+ harness-compose-start 5))
+    (execute-kbd-macro (kbd "C-u M-<"))
+    (should (= (point) (point-min)))
+    (goto-char (+ harness-compose-start 5))
+    (execute-kbd-macro (kbd "C-u M->"))
+    (should (= (point) (point-max)))
+    ;; Where the box is empty its edges are one, which is the edge already.
+    (harness-compose-set "")
+    (goto-char harness-compose-start)
+    (execute-kbd-macro (kbd "M->"))
+    (should (= (point) (point-max)))
+    (goto-char harness-compose-start)
+    (execute-kbd-macro (kbd "M-<"))
+    (should (= (point) (point-min)))))
+
+(ert-deftest harness-ui-compose-m-less-leaves-an-active-region-alone ()
+  "With the region active the mark stays where it is, as for `beginning-of-buffer'."
+  (harness-ui-compose-test-with
+    (harness-compose-set "one\ntwo\nthree")
+    (setq-local transient-mark-mode t)
+    (goto-char (+ harness-compose-start 8))
+    (push-mark (+ harness-compose-start 2) t t)
+    (should (region-active-p))
+    (execute-kbd-macro (kbd "M-<"))
+    (should (= (point) harness-compose-start))
+    (should (= (mark t) (+ harness-compose-start 2)))
+    (goto-char (+ harness-compose-start 8))
+    (execute-kbd-macro (kbd "M->"))
+    (should (= (point) harness-compose-end))
+    (should (= (mark t) (+ harness-compose-start 2)))))
+
+;;;; Tokens of files and tasks
+
+(defun harness-ui-compose-test--chip (token)
+  "Return the overlay of the inline chip over TOKEN in the box, or nil."
+  (cl-find token harness-compose--token-overlays
+           :key (lambda (ov) (buffer-substring-no-properties (overlay-start ov) (overlay-end ov)))
+           :test #'equal))
+
+(defun harness-ui-compose-test--chip-shows (ov)
+  "Return what the inline chip OV shows: its icon, if any, then its name."
+  (concat (substring-no-properties (or (overlay-get ov 'before-string) ""))
+          (substring-no-properties (overlay-get ov 'display))))
+
+(defun harness-ui-compose-test--click (ov &optional key)
+  "Click the inline chip OV with KEY, mouse-1 by default, as its keymap has it."
+  (funcall (lookup-key (overlay-get ov 'keymap) (or key [mouse-1])) nil))
+
+(defun harness-ui-compose-test--menu-item (att name)
+  "Return the command of the item NAME in the menu of the inline chip of ATT."
+  (aref (cl-find name (cdr (harness-compose--chip-menu att)) :key (lambda (item) (aref item 0)) :test #'equal)
+        1))
+
+(defmacro harness-ui-compose-test--tasks (&rest body)
+  "Run BODY with the box's project listing two tasks, as the task module would.
+`fix' is the id of the first, working, with a session; `docs' the id of
+the second, waiting, with none.  Listing the tasks again lists those."
+  (declare (indent 0))
+  `(let ((fix "t-1a2b3c4d") (docs "t-5e6f7a8b"))
+     (setq harness-compose--tasks
+           (list (list :id fix :name "Fix the login bug" :prompt "The login form rejects good passwords."
+                       :column 'active :state 'active :priority 'high :session "s-123"
+                       :branch "task/fix-1a2b3c4d")
+                 (list :id docs :name "Write the docs" :prompt "Document the API."
+                       :column 'pending :state 'pending :priority 'medium)))
+     (cl-letf (((symbol-function 'harness-compose-fetch-tasks)
+                (lambda (&optional callback) (when callback (funcall callback)))))
+       ,@body)))
+
+(ert-deftest harness-ui-compose-file-references-are-chips ()
+  "C-c C-a of a project file puts @ and its path in the project where point is.
+The reference is the file's token: a chip shows it, the file's icon
+then @ and its name, which mouse-1 opens.  The file is in the list
+above the box, and the message keeps the reference in its text.  The
+keys go through the command loop."
+  (harness-ui-compose-test-with
+    (harness-ui-compose-test--files
+      (let ((util (expand-file-name "lisp/notes-util.el" proj))
+            (opened nil))
+        (harness-compose-set "see  please")
+        (goto-char (+ harness-compose-start (length "see ")))
+        (harness-ui-compose-test--attaching util (execute-kbd-macro (kbd "C-c C-a")))
+        (should (equal "see @lisp/notes-util.el please" (harness-compose-text)))
+        (should (= (point) (+ harness-compose-start (length "see @lisp/notes-util.el"))))
+        (should (equal (list util) (harness-ui-compose-test--paths)))
+        (should (equal "lisp/notes-util.el" (plist-get (car harness-compose-attachments) :ref)))
+        ;; The list above the box names it too (by its name alone here,
+        ;; the project being in the state directory).
+        (save-excursion
+          (goto-char (point-min))
+          (should (search-forward "notes-util.el (" harness-compose-start t)))
+        ;; Inline: the file's icon, then @ and its name.
+        (let ((ov (harness-ui-compose-test--chip "@lisp/notes-util.el")))
+          (should ov)
+          (should (equal "@lisp/notes-util.el" (overlay-get ov 'harness-compose-token)))
+          (should (equal "@notes-util.el" (substring-no-properties (overlay-get ov 'display))))
+          (should (string-prefix-p (substring-no-properties (harness-ui-icon 'harness-icon-file))
+                                   (harness-ui-compose-test--chip-shows ov)))
+          (should (string-match-p "\\`file: .*/lisp/notes-util\\.el · mouse-1: open"
+                                  (overlay-get ov 'help-echo)))
+          (cl-letf (((symbol-function 'find-file-other-window) (lambda (file &rest _) (setq opened file))))
+            (harness-ui-compose-test--click ov))
+          (should (equal util opened)))
+        ;; Sent, the text keeps the reference, and the file goes once.
+        (pcase-let ((`(,text . ,atts) (harness-compose-take)))
+          (should (equal "see @lisp/notes-util.el please" text))
+          (should (equal (list util) (mapcar (lambda (a) (plist-get a :path)) atts))))))))
+
+(ert-deftest harness-ui-compose-file-references-and-attachments-agree ()
+  "A file's reference and the file come and go together.
+DEL right after the reference deletes the whole of it and detaches the
+file, and undo brings both back; the × of the file's line deletes the
+reference too, and typing the reference back attaches the file again.
+A file whose name has a space can be no reference: it attaches with
+none, the text left as it is.  The keys go through the command loop."
+  (harness-ui-compose-test-with
+    (harness-ui-compose-test--files
+      (let ((notes (expand-file-name "notes.txt" proj))
+            (spaced (expand-file-name "my notes.txt" proj)))
+        (with-temp-file spaced (insert "x"))
+        (goto-char harness-compose-end)
+        (execute-kbd-macro "see ")
+        (harness-ui-compose-test--attaching notes (execute-kbd-macro (kbd "C-c C-a")))
+        (execute-kbd-macro "now")
+        (should (equal "see @notes.txt now" (harness-compose-text)))
+        (should (harness-ui-compose-test--chip "@notes.txt"))
+        ;; DEL right after the reference deletes the whole of it, and the file.
+        (goto-char (+ harness-compose-start (length "see @notes.txt")))
+        (execute-kbd-macro (kbd "DEL"))
+        (should (equal "see  now" (harness-compose-text)))
+        (should-not harness-compose-attachments)
+        (should-not harness-compose--token-overlays)
+        (save-excursion (goto-char (point-min)) (should-not (search-forward "notes.txt" harness-compose-start t)))
+        ;; Undo brings both back.
+        (execute-kbd-macro (kbd "C-/"))
+        (should (equal "see @notes.txt now" (harness-compose-text)))
+        (should (equal (list notes) (harness-ui-compose-test--paths)))
+        (should (equal "notes.txt" (plist-get (car harness-compose-attachments) :ref)))
+        (should (harness-ui-compose-test--chip "@notes.txt"))
+        (should (equal "The transcript.\n" (harness-ui-compose-test--transcript)))
+        ;; The × of its line takes the reference along...
+        (save-excursion
+          (goto-char (point-min))
+          (search-forward "notes.txt (" harness-compose-start)
+          (search-forward "×" harness-compose-start)
+          (push-button (1- (point))))
+        (should (equal "see now" (harness-compose-text)))
+        (should-not harness-compose-attachments)
+        ;; ... and typing it back attaches the file again.
+        (goto-char harness-compose-end)
+        (execute-kbd-macro " @notes.txt")
+        (should (equal (list notes) (harness-ui-compose-test--paths)))
+        (should (harness-ui-compose-test--chip "@notes.txt"))
+        ;; A word typed against it makes another word, which names no file.
+        (execute-kbd-macro "s")
+        (should-not harness-compose-attachments)
+        (execute-kbd-macro (kbd "DEL"))
+        (should (equal (list notes) (harness-ui-compose-test--paths)))
+        ;; A name with a space can be no reference: no token, the text as it was.
+        (harness-ui-compose-test--attaching spaced (execute-kbd-macro (kbd "C-c C-a")))
+        (should (equal "see now @notes.txt" (harness-compose-text)))
+        (should (equal (list notes spaced) (harness-ui-compose-test--paths)))
+        (should-not (plist-get (nth 1 harness-compose-attachments) :ref))
+        (should (= 1 (length harness-compose--token-overlays)))
+        (execute-kbd-macro " both")
+        (should (equal (list notes spaced) (harness-ui-compose-test--paths)))))))
+
+(ert-deftest harness-ui-compose-images-and-files-show-the-same-chip ()
+  "An image's token and a file's reference show as the same chip.
+Both come from `harness-compose--inline-chip', with the same face and
+the same keymap: mouse-1 and mouse-2 open, mouse-3 pops up a menu,
+whose press pops up no other.  The tooltip says what the chip is and
+so.  The menu opens the attachment, removes it, its token too, and
+copies its path."
+  (harness-ui-compose-test-with
+    (harness-ui-compose-test--files
+      (let ((image (plist-get (harness-media-ring-save harness-test-png "image/png") :path))
+            (notes (expand-file-name "notes.txt" proj))
+            (chipped nil))
+        (advice-add 'harness-compose--inline-chip :before
+                    (lambda (_beg _end att) (push (plist-get att :path) chipped))
+                    '((name . harness-ui-compose-test)))
+        (unwind-protect
+            (progn
+              (harness-compose-add-attachment image)
+              (harness-compose-add-attachment notes))
+          (advice-remove 'harness-compose--inline-chip 'harness-ui-compose-test))
+        (should (equal "[image 1] @notes.txt " (harness-compose-text)))
+        (should (member image chipped))
+        (should (member notes chipped))
+        (let ((image-chip (harness-ui-compose-test--chip "[image 1]"))
+              (file-chip (harness-ui-compose-test--chip "@notes.txt")))
+          (dolist (ov (list image-chip file-chip))
+            (let ((map (overlay-get ov 'keymap))
+                  (shown (overlay-get ov 'display)))
+              (should (equal (list 'harness-compose-token-face harness-compose--face)
+                             (get-text-property 0 'face shown)))
+              (should (eq map (get-text-property 0 'keymap shown)))
+              (should (equal (overlay-get ov 'help-echo) (get-text-property 0 'help-echo shown)))
+              (should (string-suffix-p ": open · mouse-3: more · deleting it removes the attachment"
+                                       (overlay-get ov 'help-echo)))
+              (should (commandp (lookup-key map [mouse-1])))
+              (should (eq (lookup-key map [mouse-1]) (lookup-key map [mouse-2])))
+              (should (commandp (lookup-key map [mouse-3])))
+              (should (eq 'ignore (lookup-key map [down-mouse-3])))))
+          (should (equal "[image 1]" (substring-no-properties (overlay-get image-chip 'display))))
+          (should (string-prefix-p "image 1: " (overlay-get image-chip 'help-echo)))
+          (should (string-prefix-p "file: " (overlay-get file-chip 'help-echo)))
+          ;; The menu: each item a command, for `popup-menu'.
+          (let ((att (overlay-get file-chip 'harness-compose-attachment))
+                (kill-ring nil) (kill-ring-yank-pointer nil)
+                (interprogram-cut-function nil) (interprogram-paste-function nil)
+                (opened nil))
+            (should (equal "file" (car (harness-compose--chip-menu att))))
+            (should (equal "image 1" (car (harness-compose--chip-menu (overlay-get image-chip 'harness-compose-attachment)))))
+            (should (equal '("Open" "Remove from the message" "Copy the path")
+                           (mapcar (lambda (item) (aref item 0)) (cdr (harness-compose--chip-menu att)))))
+            (dolist (item (cdr (harness-compose--chip-menu att)))
+              (should (commandp (aref item 1))))
+            (cl-letf (((symbol-function 'find-file-other-window) (lambda (file &rest _) (setq opened file))))
+              (call-interactively (harness-ui-compose-test--menu-item att "Open")))
+            (should (equal notes opened))
+            (call-interactively (harness-ui-compose-test--menu-item att "Copy the path"))
+            (should (equal notes (current-kill 0)))
+            (call-interactively (harness-ui-compose-test--menu-item att "Remove from the message"))
+            (should (equal "[image 1] " (harness-compose-text)))
+            (should (equal (list image) (harness-ui-compose-test--paths)))))))))
+
+(ert-deftest harness-ui-compose-tasks-attach-as-text ()
+  "A task attached puts @task:ID where point is, a chip that opens the task.
+The chip shows the task's icon, its id and title; its line in the list
+its id, title and column, and ×.  The message keeps the reference in
+its text, and the task goes as text: its title, column, priority,
+session and branch, then its prompt, cut when long.  A click opens the
+task's session, or its card on the board while it has none.  Deleting
+the reference detaches the task, and undo brings it back."
+  (harness-ui-compose-test-with
+    (harness-ui-compose-test--tasks
+      (harness-compose-set "look at  first")
+      (goto-char (+ harness-compose-start (length "look at ")))
+      (harness-compose-attach-task fix)
+      (should (equal "look at @task:t-1a2b3c4d first" (harness-compose-text)))
+      (let ((att (car harness-compose-attachments)))
+        (should (equal fix (plist-get att :task)))
+        (should (equal "Fix the login bug" (plist-get att :name)))
+        (should (equal "active" (plist-get att :state)))
+        (should (equal "task:t-1a2b3c4d" (plist-get att :ref)))
+        (should (equal harness-compose-task-mime (plist-get att :mime)))
+        (should-not (plist-get att :path))
+        ;; Attached once.
+        (should (equal '("Task t-1a2b3c4d is attached already")
+                       (harness-ui-compose-test-messages (harness-compose-attach-task fix))))
+        (should (equal "look at @task:t-1a2b3c4d first" (harness-compose-text)))
+        ;; Inline: the task's icon, @task:ID and its title.
+        (let ((ov (harness-ui-compose-test--chip "@task:t-1a2b3c4d")))
+          (should (equal "@task:t-1a2b3c4d Fix the login bug" (substring-no-properties (overlay-get ov 'display))))
+          (should (string-prefix-p (substring-no-properties (harness-ui-icon 'harness-icon-task))
+                                   (harness-ui-compose-test--chip-shows ov)))
+          (should (string-prefix-p "task t-1a2b3c4d: Fix the login bug (active) · mouse-1: open"
+                                   (overlay-get ov 'help-echo))))
+        ;; Its line in the list.
+        (save-excursion
+          (goto-char (point-min))
+          (should (search-forward "t-1a2b3c4d · Fix the login bug (active) ×" harness-compose-start t)))
+        ;; Sent: the reference stays in the text, the task goes as text.
+        (pcase-let ((`(,text . ,atts) (harness-compose-take)))
+          (should (equal "look at @task:t-1a2b3c4d first" text))
+          (should (equal (list att) atts)))
+        (let* ((block (harness-compose-attachment-block att))
+               (text (plist-get block :text)))
+          (should (equal "text" (plist-get block :type)))
+          (dolist (line '("Task t-1a2b3c4d, attached: Fix the login bug\n" "Column: active\n" "Priority: high\n"
+                          "Session: s-123\n" "Branch: task/fix-1a2b3c4d\n"
+                          "Prompt:\nThe login form rejects good passwords.\n" "task_list" "session_read"))
+            (should (string-search line text)))
+          (should-not (string-search "State:" text))
+          (should-not (string-search "cut here" text))
+          ;; It is marked as an attachment's text, which the harness keeps.
+          (should (equal '(:attached t) (plist-get block :_harness)))
+          (let ((read (harness-acp--block-from-acp block)))
+            (should (equal "text" (plist-get read :type)))
+            (should (equal text (plist-get read :text)))
+            (should (eq t (plist-get read :attached))))
+          ;; The agent makes the same block of it.
+          (should (equal (list (harness-acp--block-from-acp block)) (harness-agent-attachments-to-blocks (list att)))))
+        ;; A long prompt is cut, and says so.
+        (let ((text (harness-compose--task-text (list :id "t-long" :name "Long" :prompt (make-string 5000 ?x)))))
+          (should (string-search "[The prompt is cut here: 3000 of its 5000 characters.]" text))
+          (should (string-search (make-string 3000 ?x) text))
+          (should-not (string-search (make-string 3001 ?x) text)))
+        ;; Its menu copies its id.
+        (let ((kill-ring nil) (kill-ring-yank-pointer nil)
+              (interprogram-cut-function nil) (interprogram-paste-function nil))
+          (should (equal "task t-1a2b3c4d" (car (harness-compose--chip-menu att))))
+          (call-interactively (harness-ui-compose-test--menu-item att "Copy the task id"))
+          (should (equal fix (current-kill 0)))))
+      ;; A click opens the task's session; one with none, its card on the board.
+      (harness-compose-attach-task docs)
+      (should (equal "look at @task:t-1a2b3c4d @task:t-5e6f7a8b first" (harness-compose-text)))
+      (let ((shown nil))
+        (cl-letf (((symbol-function 'harness-ui-display-session)
+                   (lambda (id &rest _) (push (list 'session id) shown)))
+                  ((symbol-function 'harness-ui-tasks-show-task)
+                   (lambda (id project) (push (list 'board id project) shown))))
+          (harness-ui-compose-test--click (harness-ui-compose-test--chip "@task:t-1a2b3c4d"))
+          (harness-ui-compose-test--click (harness-ui-compose-test--chip "@task:t-5e6f7a8b") [mouse-2]))
+        (should (equal (list (list 'session "s-123") (list 'board docs (harness-compose--root)))
+                       (nreverse shown))))
+      ;; Removed by its id, its reference goes too.
+      (harness-compose-remove-attachment (concat "task:" docs))
+      (should (equal "look at @task:t-1a2b3c4d first" (harness-compose-text)))
+      (should (equal (list fix) (mapcar (lambda (a) (plist-get a :task)) harness-compose-attachments)))
+      ;; Deleting the reference detaches the task; undo brings it back.
+      (goto-char (+ harness-compose-start (length "look at @task:t-1a2b3c4d")))
+      (execute-kbd-macro (kbd "DEL"))
+      (should (equal "look at  first" (harness-compose-text)))
+      (should-not harness-compose-attachments)
+      (execute-kbd-macro (kbd "C-/"))
+      (should (equal "look at @task:t-1a2b3c4d first" (harness-compose-text)))
+      (should (equal (list fix) (mapcar (lambda (a) (plist-get a :task)) harness-compose-attachments)))
+      ;; A task the project does not list attaches nothing.
+      (should (equal '("No task t-nope in this project")
+                     (harness-ui-compose-test-messages (harness-compose-attach-task "t-nope"))))
+      (should (= 1 (length harness-compose-attachments))))))
+
+(ert-deftest harness-ui-compose-at-task-completes-task-ids ()
+  "@task: completes the id of a task of the project, with its title and column.
+The task chosen is attached, its reference staying in the text, a space
+after it to type on.  The attach command takes task:ID as well, which
+completes the same way, and so does the command attaching a task, by
+its title; an @task: reference names no file."
+  (harness-ui-compose-test-with
+    (harness-ui-compose-test--files
+      (harness-ui-compose-test--tasks
+        (goto-char harness-compose-end)
+        (insert "ask @task:t-1")
+        (let ((capf (harness-compose-completion-at-point)))
+          (should (equal "t-1" (buffer-substring (nth 0 capf) (nth 1 capf))))
+          (should (equal (list fix) (harness-ui-compose-test--matches "t-1" (nth 2 capf))))
+          (should (equal (list docs fix) (all-completions "" (nth 2 capf))))
+          (should (eq 'harness-compose-task (harness-ui-compose-test--category "" (nth 2 capf))))
+          (should (equal "  Fix the login bug  [active]"
+                         (funcall (plist-get (nthcdr 3 capf) :annotation-function) fix)))
+          (harness-ui-compose-test--complete capf fix 'finished))
+        (should (equal "ask @task:t-1a2b3c4d " (harness-compose-text)))
+        (should (= (point) harness-compose-end))
+        (should (equal (list fix) (mapcar (lambda (a) (plist-get a :task)) harness-compose-attachments)))
+        (should (harness-ui-compose-test--chip "@task:t-1a2b3c4d"))
+        (should-not (harness-compose--reference-file (concat "task:" fix) (harness-compose--root)))
+        ;; The attach command's table: after task:, the ids.
+        (let ((table (harness-compose--attach-table)))
+          (should (equal (list fix) (all-completions "task:t-1" table)))
+          (should (equal "task:t-1a2b3c4d" (try-completion "task:t-1" table)))
+          (should (equal '(5 . 0) (completion-boundaries "task:t-1" table nil "")))
+          (should (equal '(6 . 0) (completion-boundaries "@task:t-1" table nil "")))
+          (should (test-completion "task:t-5e6f7a8b" table))
+          (should (eq 'harness-compose-task (harness-ui-compose-test--category "task:" table))))
+        (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "task:t-5e6f7a8b")))
+          (harness-ui-compose-test--command 'harness-compose-add-attachment))
+        (should (equal "ask @task:t-1a2b3c4d @task:t-5e6f7a8b " (harness-compose-text)))
+        (should (equal (list fix docs) (mapcar (lambda (a) (plist-get a :task)) harness-compose-attachments)))
+        ;; By its title: the candidates are the tasks, newest first.
+        (harness-compose-remove-attachment (concat "task:" docs))
+        (let ((offered nil))
+          (cl-letf (((symbol-function 'completing-read)
+                     (lambda (_prompt table &rest _)
+                       (setq offered (all-completions "" table))
+                       "t-5e6f7a8b  Write the docs  [pending]")))
+            (harness-ui-compose-test--command 'harness-compose-attach-task))
+          (should (equal '("t-5e6f7a8b  Write the docs  [pending]" "t-1a2b3c4d  Fix the login bug  [active]")
+                         offered)))
+        (should (equal (list fix docs) (mapcar (lambda (a) (plist-get a :task)) harness-compose-attachments)))
+        ;; Sent, the references attach no file.
+        (should (equal (list fix docs) (mapcar (lambda (a) (plist-get a :task)) (cdr (harness-compose-take)))))))))
 
 (provide 'harness-ui-compose-test)
 ;;; harness-ui-compose-test.el ends here

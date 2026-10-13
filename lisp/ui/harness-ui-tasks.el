@@ -62,8 +62,14 @@
 ;; RET or a click on a task opens its session in full.  F gives the board
 ;; the fullscreen layout: the board stays on the left of the frame and
 ;; the sessions it opens show beside it, until q on the board ends it
-;; (`harness-fullscreen').  b or [BTW] asks about the tasks in a BTW side
-;; conversation over the board, whose agent answers with the task and
+;; (`harness-fullscreen').  The board's letters type in the box, so
+;; C-c . and a letter (C-c . F) presses a board key from there
+;; (`harness-compose-panel-key'; the keys for a task act on a card, which
+;; the box has none of).  @ on a card attaches its task to the box: the
+;; message tells the model what the task is, and @task:ID goes into the
+;; text (`harness-compose-attach-task').
+;; b or [BTW] asks about the tasks in a BTW side conversation over the
+;; board, whose agent answers with the task and
 ;; session tools (`task/btw').  / or [Search] turns the compose box into
 ;; a search box, in colours of its own: a line in words there, which a
 ;; cheap model reads with the board, finds tasks, sessions and commands,
@@ -2455,6 +2461,9 @@ board, so what was skipped is only skipped while both are unchanged."
             (setq harness-ui-tasks--drawn-key (harness-ui-tasks--board-key))))
         (put-text-property (point-min) (point) 'read-only t)
         (put-text-property (point-min) (point) 'keymap harness-ui-tasks-board-map)
+        ;; The board is a panel of the compose box: its C-c . presses the
+        ;; board's keys from there (`harness-compose-panel-key').
+        (put-text-property (point-min) (point) 'harness-compose-panel 'board)
         (harness-ui-tasks--compose-buttons-keymap (point-min) (point)))
       (harness-ui-tasks--restore places)
       (harness-ui-tasks--focus-card)
@@ -2521,6 +2530,17 @@ the request lapses after `harness-ui-tasks--focus-timeout' seconds.")
         (dolist (w (get-buffer-window-list (current-buffer) nil t))
           (set-window-point w (point)))))))
 
+(defun harness-ui-tasks-show-task (id project)
+  "Show the task board of PROJECT, point on the card of task ID.
+The board may still be loading: point goes to the card once it shows
+\(`harness-ui-tasks--focus').  Return the board."
+  (let ((board (harness-tasks project)))
+    (when (buffer-live-p board)
+      (with-current-buffer board
+        (setq harness-ui-tasks--focus (cons id (float-time)))
+        (harness-ui-tasks--focus-card)))
+    board))
+
 (defun harness-ui-tasks--notification-root (notification)
   "Return the main checkout of the project NOTIFICATION is about, or nil.
 The session a notification names, when the harness still has it, says
@@ -2550,11 +2570,7 @@ the task belongs to rather than the one that happened to be current.  On
       (when harness-ui-switch-project-function
         (harness-ignore-errors-logged "switching to the project of a notification's task"
           (harness-ui-switch-to-project (harness-ui-tasks--notification-root notification))))
-      (let ((board (harness-tasks project)))
-        (when (buffer-live-p board)
-          (with-current-buffer board
-            (setq harness-ui-tasks--focus (cons id (float-time)))
-            (harness-ui-tasks--focus-card))))
+      (harness-ui-tasks-show-task id project)
       t)))
 
 (add-hook 'harness-ui-notification-functions #'harness-ui-tasks--on-notification)
@@ -3487,19 +3503,34 @@ the box, or on the same line above it (`harness-ui-tasks--anchor')."
          ((harness-ui-tasks--messaging-p)
           ;; A message to a session, not a task being composed: the box's
           ;; own colours say so, with the band and bar around it.
-          (harness-compose-insert text nil :face 'harness-compose-message-face
+          (harness-compose-insert text (harness-ui-tasks--box-help)
+                                  :face 'harness-compose-message-face
                                   :accent 'harness-compose-message-accent-face))
          ;; A search, not a task either: colours of its own.
          ((harness-ui-tasks--searching-p)
-          (harness-compose-insert text nil :face 'harness-task-search-box-face
+          (harness-compose-insert text (harness-ui-tasks--box-help)
+                                  :face 'harness-task-search-box-face
                                   :accent 'harness-task-search-box-accent-face))
-         (t (harness-compose-insert text))))
+         (t (harness-compose-insert text (harness-ui-tasks--box-help)))))
       (set-marker harness-ui-tasks--list-end list-end)
       (harness-ui-tasks--restore places)
       (set-buffer-modified-p nil))))
 
+(defun harness-ui-tasks--box-key-hint ()
+  "Say how to press a board key from the compose box.
+The board's keys type in the box, so the box's key for a panel's keys
+\(`harness-compose-panel-key') is the way; F, the fullscreen layout, is
+the example, as it acts anywhere on the board."
+  (format "%s F: a board key from the box" (harness-compose-panel-keys)))
+
+(defun harness-ui-tasks--box-help ()
+  "Return the tooltip of the compose box's prompt: its keys, and the board's."
+  (format "C-c C-c submits, RET newline, C-c C-a attaches a file or task, %s" (harness-ui-tasks--box-key-hint)))
+
 (defun harness-ui-tasks--placeholder ()
-  "Return the hint for the empty compose box."
+  "Return the hint for the empty compose box.
+The box that composes a task says how to press a board key too, which
+types in the box otherwise (`harness-ui-tasks--box-key-hint')."
   (pcase harness-ui-tasks--target
     (`(refine . ,id) (concat (if (harness-ui-tasks--duplicate-p (harness-ui-tasks--find id))
                                  "What makes it another task than the one it duplicates"
@@ -3514,11 +3545,12 @@ the box, or on the same line above it (`harness-ui-tasks--anchor')."
                  (format "  (RET: %s)" does)
                "")))
     ((guard (and (null harness-ui-tasks--target) (eq harness-ui-tasks--mode 'refine)))
-     (concat "Jot a task down" harness-ui-tasks--ellipsis))
+     (concat "Jot a task down" harness-ui-tasks--ellipsis
+             "   " (harness-ui-tasks--box-key-hint)))
     (`(edit . ,_) "New prompt…")
     (`(reply . ,_) "Message…")
     (`(answer . ,_) "Answer…")
-    (_ "Describe a task…")))
+    (_ (concat "Describe a task…   " (harness-ui-tasks--box-key-hint)))))
 
 (defun harness-ui-tasks--set-compose (text target)
   "Put TEXT in the compose box for TARGET and move there.
@@ -3948,7 +3980,8 @@ so they type, into the compose box (`harness-compose-acts-p')."
                    harness-ui-tasks-allow harness-ui-tasks-deny harness-ui-tasks-cancel
                    harness-ui-tasks-complete harness-ui-tasks-verify harness-ui-tasks-reject
                    harness-ui-tasks-merge harness-ui-tasks-archive harness-ui-tasks-delete
-                   harness-ui-tasks-raise-priority harness-ui-tasks-lower-priority))
+                   harness-ui-tasks-raise-priority harness-ui-tasks-lower-priority
+                   harness-ui-tasks-attach))
   (put command 'harness-compose-acts-p #'harness-ui-tasks--on-card-p))
 
 ;; Filled at top level, not in the `defvar', so a reload updates the map.
@@ -3974,6 +4007,7 @@ so they type, into the compose box (`harness-compose-acts-p')."
   (define-key map (kbd "n") #'harness-ui-tasks-deny)
   (define-key map (kbd "+") #'harness-ui-tasks-raise-priority)
   (define-key map (kbd "-") #'harness-ui-tasks-lower-priority)
+  (define-key map (kbd "@") #'harness-ui-tasks-attach)
   (define-key map (kbd "u") #'harness-ui-tasks-return-to-pending)
   (define-key map (kbd "P") #'harness-ui-tasks-toggle-queue)
   ;; The project's slots: who holds them, who waits (harness-ui-slots.el).
@@ -4021,6 +4055,10 @@ On the board the keys below act on the board, or on the task whose card
 point is on.  Any other letter goes into the compose box, and so does a
 task's key typed off a card.
 
+In the box, \\<harness-compose-map>\\[harness-compose-panel-key] and then a key presses that key of the board: F, the
+fullscreen layout, say.  The keys for the task at point have no task to
+act on from there.
+
 \\{harness-ui-tasks-board-map}"
   (setq buffer-read-only nil)
   ;; Lines wrap, for the compose box (`harness-compose-setup'): the board
@@ -4062,6 +4100,7 @@ task's key typed off a card.
         (". r" "Refine" harness-ui-tasks-refine)
         (". +" "Raise priority" harness-ui-tasks-raise-priority)
         (". -" "Lower priority" harness-ui-tasks-lower-priority)
+        (". @" "Attach to the box" harness-ui-tasks-attach)
         (". y" "Allow request" harness-ui-tasks-allow)
         (". n" "Deny request" harness-ui-tasks-deny)]
        ["Finish"
@@ -4090,7 +4129,8 @@ task's key typed off a card.
         ("C-c C-c" "Submit" harness-ui-tasks-submit)
         ("C-c C-t" "Submit, Refine or Plan" harness-ui-tasks-cycle-mode)
         ("C-c C-k" "Clear" harness-ui-tasks-compose-reset)
-        ("C-c C-a" "Attach file" harness-compose-add-attachment)
+        ("C-c C-a" "Attach file or task" harness-compose-add-attachment)
+        ("C-c ." "A board key, from the box" harness-compose-panel-key)
         ("C-y" "Paste; an image attaches" harness-compose-yank)]))
 
 (defun harness-ui-tasks--buffer-name (dir)
@@ -4177,6 +4217,15 @@ Without one, return nil if NOERROR is non-nil, else signal a user error."
   (or (let ((id (get-text-property (point) 'harness-task-id)))
         (and id (harness-ui-tasks--find id)))
       (unless noerror (user-error "No task here"))))
+
+(defun harness-ui-tasks-attach ()
+  "Attach the task at point to the board's compose box.
+The message the box sends tells the model what the task is, and its
+reference, @task:ID, goes into the box (`harness-compose-attach-task').
+Off a card, @ types into the box, as the board's other keys for a task
+do."
+  (interactive)
+  (harness-compose-attach-task (harness-ui-tasks--task)))
 
 (defun harness-ui-tasks--on-error (what)
   "Return a handler of a failed request that shows on this board WHAT failed."
@@ -4379,7 +4428,7 @@ naming no plan model, is not sent one to plan: it would start it."
                (buffer (current-buffer))
                ;; The box's own attachments, not the files its @ references
                ;; name: an answer mentioning a file goes as the text it is.
-               (own harness-compose-attachments))
+               (own (harness-compose-without-references harness-compose-attachments text)))
     (setq harness-ui-tasks--error nil
           harness-compose-attachments nil)
     (harness-ui-tasks--set-compose "" nil)

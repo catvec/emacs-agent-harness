@@ -19,24 +19,38 @@
 ;;     it is typed -- a button's, a panel's, the task board's.  A command
 ;;     that acts on what is at point says where that is with a
 ;;     `harness-compose-acts-p' property; elsewhere its key types too;
+;;   - the keys of the panels above the box from the box: a question's
+;;     digits, a permission's y and n, the task board's F type when
+;;     typed in the box, so C-c . reads one key and runs it on the
+;;     nearest panel that binds it, point returning to the box (a
+;;     numeric argument takes the Nth panel up).  A host marks the text
+;;     of a panel with a `harness-compose-panel' property, naming it,
+;;     and says in its hints that C-c . is the way;
+;;   - M-< and M-> go to the top and the bottom of the box, and on to
+;;     those of the buffer from there (or with an argument, or outside
+;;     the box);
 ;;   - a prompt that is a field of its own: C-a stops after it, as in
 ;;     the minibuffer, so C-a C-k clears the box's first line;
 ;;   - @file completion over the project's files, or over the file
 ;;     system for a path (/, ~/, ./, ../); each completed file becomes
-;;     an attachment, and so does the file an @ reference typed out in
-;;     full names, once the message is sent; /skill completion at its
-;;     start; a popup that shows as you type (corfu, company) shows for
-;;     them even while the host redraws around the box;
+;;     an attachment, its @ reference staying in the text, and so does
+;;     the file an @ reference typed out in full names, once the message
+;;     is sent; @task: completion over the project's tasks, the task
+;;     chosen becoming an attachment; /skill completion at its start; a
+;;     popup that shows as you type (corfu, company) shows for them even
+;;     while the host redraws around the box;
 ;;   - attachments: C-c C-a finds a file the same way, by part of a
 ;;     project file's name or by path (C-u C-c C-a: browse the file
-;;     system), C-y pastes what the clipboard holds (an
+;;     system), or a task as task:ID (M-x harness-compose-attach-task
+;;     reads one by its title), C-y pastes what the clipboard holds (an
 ;;     image or copied files go on the media ring; M-x
 ;;     harness-compose-attach-clipboard for other MIME types), files
 ;;     dropped on the window attach;
-;;   - image tokens: an image attached puts its token, [image 1], into
-;;     the text where point is, shown as a chip with its thumbnail, so
-;;     a sentence can name it; deleting the token removes the image (see
-;;     the Image tokens section);
+;;   - tokens: an attachment puts its token into the text where point
+;;     is -- an image [image 1], a file @ and its path, a task
+;;     @task:ID -- shown as a chip a click opens, so a sentence can name
+;;     it; deleting the token removes the attachment (see the Tokens
+;;     section);
 ;;   - the text and attachments, kept across redraws of the host;
 ;;   - long lines that wrap under the text, never scrolling sideways;
 ;;   - the attachments above the box, which a host draws with
@@ -133,11 +147,17 @@ A host sets it through `harness-compose-insert' to mark a box that does
 something else than compose: sending a message to an existing session,
 say.")
 (defvar-local harness-compose--detached nil
-  "Images whose tokens were deleted from the box: an alist label -> attachment.
-A token yanked, typed or undone back brings its image back (see
-`harness-compose--sync-tokens').")
+  "Attachments whose tokens were deleted from the box: (TOKEN ATT INDEX) each.
+TOKEN is what the text held, [image 1] or @notes.txt, and INDEX where
+ATT stood among the attachments.  The token yanked, typed or undone back
+brings ATT back, to where it stood (see `harness-compose--sync-tokens').")
 (defvar-local harness-compose--token-overlays nil
-  "Overlays showing the image tokens of the box as chips.")
+  "Overlays showing the tokens of the box's attachments as chips.")
+(defvar-local harness-compose--tasks nil
+  "The tasks of the box's project, as `_harness/task/list' gives them.
+For @task: completion and `harness-compose-attach-task'; nil without the
+task module.")
+(defvar-local harness-compose--tasks-at nil "Start of the @task: token whose completion last listed the tasks.")
 (defvar-local harness-compose--undo-start nil
   "Where the box started when its undo entries were last lined up with it.
 See `harness-compose--line-up-undo'.")
@@ -167,6 +187,19 @@ See `harness-compose--line-up-undo'.")
   ;; `>' is Markdown's quote, and C-c with a punctuation key is a major
   ;; mode's to bind, the box's hosts all being major modes.
   (define-key map (kbd "C-c >") #'compose-quote-reply)
+  ;; A panel's key from the box, where the key itself types.  `.' is free
+  ;; after C-c in every host: the harness menu writes a view's plain keys
+  ;; behind a dot as well (". F").
+  (define-key map (kbd "C-c .") #'harness-compose-panel-key)
+  ;; The top and the bottom of the box, not of the buffer: what the buffer
+  ;; holds above the box is read, not edited.  The keys are bound, and the
+  ;; commands remapped for C-<home> and the rest: a minor mode's remap of
+  ;; `beginning-of-buffer' outranks a major mode's, but not a binding of
+  ;; the key to a command of our own, as with C-y below.
+  (define-key map (kbd "M-<") #'harness-compose-beginning-of-buffer)
+  (define-key map (kbd "M->") #'harness-compose-end-of-buffer)
+  (define-key map [remap beginning-of-buffer] #'harness-compose-beginning-of-buffer)
+  (define-key map [remap end-of-buffer] #'harness-compose-end-of-buffer)
   ;; C-c C-v, the clipboard's key once, is the review banner's [Verify]
   ;; in a chat; unbound here so a reload frees it there too.  Other
   ;; MIME types are chosen from with M-x harness-compose-attach-clipboard.
@@ -393,13 +426,13 @@ in, `harness-compose-face' by default.  ACCENT, when given, is the face
 of the box's prompt and the bar down its left edge, which marks a box
 that does something else than compose -- sending a message to a session,
 say.  Point ends after the box's final newline.  The tokens of its
-images show as chips (`harness-compose--show-tokens')."
+attachments show as chips (`harness-compose--show-tokens')."
   (dolist (ov (append (list harness-compose-overlay harness-compose--placeholder harness-compose--indent)
                       harness-compose--token-overlays))
     (when ov (delete-overlay ov)))
   (setq harness-compose--token-overlays nil)
   (when text
-    ;; New text: the images its tokens were deleted from go for good.
+    ;; New text: the attachments whose tokens were deleted go for good.
     (setq harness-compose--text text
           harness-compose--detached nil))
   (let* ((background (or face 'harness-compose-face))
@@ -514,6 +547,10 @@ where point is -- a button's RET, a panel's digits, the task board's
 letters -- is not typing, and runs as usual, unless the command has
 nothing to act on there.
 
+In the box the same keys type, whatever panel is above it.  To press
+one on a panel from the box, \\<harness-compose-map>\\[harness-compose-panel-key] reads the key and runs
+it there, as if point were on the panel (`harness-compose-panel-key').
+
 A region reaching outside the box goes before the typing: with
 `delete-selection-mode' the typing would delete it, read-only text and
 all, and fail."
@@ -527,6 +564,172 @@ all, and fail."
       (cl-incf harness-compose--jumps)
       (goto-char harness-compose-end))
     (setq this-command command)))
+
+;;;; A panel's key, from the box
+
+;; A panel above the box -- a question's options, a permission's answers,
+;; the task board -- has keys that act on it while point is on it.  Typed
+;; in the box the same key types (`harness-compose--pre-command'), so
+;; C-c . is the one way to press it from there: it reads a key, finds the
+;; panel that binds it, and runs what the key does on that panel, as
+;; though point were on it, then puts point back in the box.
+;;
+;; The host says which text is a panel with a `harness-compose-panel'
+;; property, valued with something that names it: a request's id, `board',
+;; `popout'.  The text next to it with an `equal' value is part of it,
+;; however many pieces the host drew it in.  A panel's keys are those of
+;; its own `keymap' (or `local-map') property; what the buffer's modes
+;; bind is the buffer's, and no panel's.  The panel is where its text
+;; starts, which is where its keymap and its `harness-compose-acts-p'
+;; commands are asked.
+
+(defun harness-compose-panel-keys ()
+  "Return the key that presses a panel's key from the box, as text.
+That is where `harness-compose-panel-key' is bound in `harness-compose-map',
+so that the hints saying how to reach a panel from the box follow a
+rebinding of it."
+  (substitute-command-keys "\\<harness-compose-map>\\[harness-compose-panel-key]" t))
+
+(defun harness-compose-panel-hint (key)
+  "Return the dim hint saying how to press KEY on a panel from the box.
+It reads \"from the box: \\<harness-compose-map>\\[harness-compose-panel-key] KEY\", the first key being where the
+box binds `harness-compose-panel-key' (`harness-compose-panel-keys').  A
+panel puts it on a line of its own, or after the line telling to type an
+answer below, with a key of its own for KEY: its first option's, say."
+  (concat (propertize "from the box: " 'face 'harness-dim-face)
+          (harness-ui-kbd (format "%s %s" (harness-compose-panel-keys) key))))
+
+(defun harness-compose--panel-before (pos)
+  "Return the panel nearest before POS, as (START . END), or nil.
+That is the one ending at POS or, if the text before POS is no panel,
+the first one to be found going back; see `harness-compose-panel-key'."
+  (let ((end pos) value)
+    (while (and (> end (point-min))
+                (not (setq value (get-char-property (1- end) 'harness-compose-panel))))
+      (setq end (previous-single-char-property-change end 'harness-compose-panel)))
+    (when value
+      (let ((start (previous-single-char-property-change end 'harness-compose-panel)))
+        ;; Pieces of one panel may have values that are `equal' but not `eq'.
+        (while (and (> start (point-min))
+                    (equal value (get-char-property (1- start) 'harness-compose-panel)))
+          (setq start (previous-single-char-property-change start 'harness-compose-panel)))
+        (cons start end)))))
+
+(defun harness-compose--panel-command (keys pos)
+  "Return the command KEYS run on the panel starting at POS, or nil.
+The panel itself binds KEYS, in its `keymap' or `local-map' property, to
+a command that is not typing and not `undefined'."
+  (when (cl-some (lambda (property)
+                   (let ((map (get-char-property pos property)))
+                     (and (keymapp map)
+                          (let ((binding (lookup-key map keys t)))
+                            (and binding (not (numberp binding)))))))
+                 '(keymap local-map))
+    (let ((command (key-binding keys t nil pos)))
+      (and command (commandp command)
+           (not (eq command 'undefined))
+           (not (memq command harness-compose--typing-commands))
+           command))))
+
+(defun harness-compose--on-panel-p (pos)
+  "Non-nil when POS is in a panel, or right after one."
+  (or (get-char-property pos 'harness-compose-panel)
+      (and (> pos (point-min)) (get-char-property (1- pos) 'harness-compose-panel))))
+
+(defun harness-compose--press-on-panel (keys command pos)
+  "Run COMMAND, which KEYS run on the panel starting at POS, with point there.
+Point goes back afterwards: to where it was in the box, at the same
+offset in it, after the host drew the panels and the box again, as
+answering a question does; or, from outside the box, to where it was.  It
+stays where the command left it when that is above the box and on no
+panel -- the command took it elsewhere, as to the transcript -- or in
+another buffer.  Where the text point was on was deleted and drawn again,
+point is where the host left it: in the box or after it, on a panel, or
+at the start of the text that took the panel's place.  The prefix
+argument was the panel's number: the command gets none."
+  (let* ((buffer (current-buffer))
+         (offset (and (harness-compose-in-p) (- (point) harness-compose-start)))
+         (origin (copy-marker (point)))
+         ;; Unmoved, or where a redraw of the panel left it: its start.
+         (start (copy-marker pos)))
+    (unwind-protect
+        (progn
+          (goto-char pos)
+          (setq this-command command)
+          (let ((current-prefix-arg nil)
+                (last-command-event (car (last (listify-key-sequence keys)))))
+            (call-interactively command)))
+      (when (and (buffer-live-p buffer) (eq buffer (current-buffer))
+                 (or (and (harness-compose-live-p) (>= (point) harness-compose-start))
+                     (= (point) start)
+                     (harness-compose--on-panel-p (point))))
+        (cond ((null offset) (goto-char origin))
+              ((harness-compose-live-p)
+               (goto-char (min (+ harness-compose-start offset) harness-compose-end)))))
+      (set-marker origin nil)
+      (set-marker start nil))))
+
+(defun harness-compose-panel-key (&optional n)
+  "Press a key on a panel above the box, from the box.
+The panels are the parts of the buffer above the box that bind keys of
+their own, which type in the box as they do not act there: a question's
+digits, a permission's y and n, the task board's F.  This reads one key
+and runs what it does on the panel nearest above the box that binds it,
+as though point were on the panel, then puts point back in the box.  With
+numeric argument N, it is the Nth such panel up.  \\[keyboard-quit] quits.
+
+A key the panel binds to a command that acts on what point is on, and
+point is on nothing it acts on there -- the board's card keys, an
+option a question has not -- is no key to press from the box: that is
+said, and nothing runs."
+  (interactive "p")
+  (unless (harness-compose-live-p) (user-error "No compose box here"))
+  (let* ((n (max 1 (or n 1)))
+         (keys (read-key-sequence (if (> n 1)
+                                      (format "Key for panel %d above (C-g quits): " n)
+                                    "Key for the panel above (C-g quits): ")))
+         (key (key-description keys))
+         (pos (harness-compose--front))
+         (found 0) (idle nil) (panel nil) (command nil))
+    (while (and (not command) (setq panel (harness-compose--panel-before pos)))
+      (setq pos (car panel))
+      (when-let* ((candidate (harness-compose--panel-command keys pos)))
+        (if (save-excursion (goto-char pos) (harness-compose--idle-p candidate))
+            (setq idle t)
+          (when (= (cl-incf found) n)
+            (setq command candidate)))))
+    (cond (command (harness-compose--press-on-panel keys command pos))
+          ((> found 0) (user-error "Fewer than %d panels above the box have %s" n key))
+          (idle (user-error "%s has nothing to act on from the box: it works on what point is on" key))
+          (t (user-error "No panel above the box has %s" key)))))
+
+;;;; The top and the bottom of the box
+
+(defun harness-compose-beginning-of-buffer (&optional arg)
+  "Move to the top of the compose box; from there, to the top of the buffer.
+In the box, below its first character, this leaves the mark where point
+was and goes to the box's start, as `beginning-of-buffer' does for the
+buffer (no mark with an active region).  Outside the box, at its start
+already, or with a prefix argument ARG, it is `beginning-of-buffer'; so
+a second \\<harness-compose-map>\\[harness-compose-beginning-of-buffer] from the box's top reaches the buffer's."
+  (interactive "^P")
+  (if (and (null arg) (harness-compose-in-p) (> (point) harness-compose-start))
+      (progn (or (region-active-p) (push-mark))
+             (goto-char harness-compose-start))
+    (call-interactively #'beginning-of-buffer)))
+
+(defun harness-compose-end-of-buffer (&optional arg)
+  "Move to the bottom of the compose box; from there, to the bottom of the buffer.
+In the box, above its last character, this leaves the mark where point
+was and goes to the box's end, as `end-of-buffer' does for the buffer
+\(no mark with an active region).  Outside the box, at its end already,
+or with a prefix argument ARG, it is `end-of-buffer'; so a second
+\\<harness-compose-map>\\[harness-compose-end-of-buffer] from the box's bottom reaches the buffer's."
+  (interactive "^P")
+  (if (and (null arg) (harness-compose-in-p) (< (point) harness-compose-end))
+      (progn (or (region-active-p) (push-mark))
+             (goto-char harness-compose-end))
+    (call-interactively #'end-of-buffer)))
 
 (defun harness-compose--before-change (beg end)
   "Note whether the change from BEG to END stays in the box.
@@ -724,7 +927,8 @@ commands, rather than scroll."
 
 (defun harness-compose-set (text)
   "Replace the box's contents with TEXT.
-The images whose tokens were deleted from the old text cannot come back."
+The attachments whose tokens were deleted from the old text cannot come
+back."
   (setq harness-compose--text text
         harness-compose--detached nil)
   (when (harness-compose-live-p)
@@ -744,10 +948,11 @@ The images whose tokens were deleted from the old text cannot come back."
 (defun harness-compose-take ()
   "Return (TEXT . ATTACHMENTS) from the box, or signal when both are empty.
 The files that @ references typed out in TEXT name are attached too,
-after the box's own attachments (`harness-compose--references'); the
-references stay in TEXT.  A link still downloading signals too: the
-message waits for it.  The images are those whose tokens TEXT holds
-\(`harness-compose--sync-tokens'), each with its label."
+after the box's own attachments (`harness-compose--references'), each
+file once; the references stay in TEXT.  A link still downloading
+signals too: the message waits for it.  The attachments with a token
+are those whose tokens TEXT holds (`harness-compose--sync-tokens'): an
+image with its label, a file with its reference, a task."
   (when (harness-compose--sync-tokens) (harness-compose-redraw))
   (let ((text (string-trim (harness-compose-text)))
         (atts harness-compose-attachments))
@@ -755,8 +960,7 @@ message waits for it.  The images are those whose tokens TEXT holds
     (when-let* ((pending (cl-find-if (lambda (a) (plist-get a :pending)) atts)))
       (user-error "%s is still downloading: wait for it, or remove it (×)"
                   (or (plist-get pending :name) "An attachment")))
-    (cons text (append atts (cl-remove-if (lambda (a) (harness-compose--attached-p (plist-get a :path)))
-                                          (harness-compose--references text))))))
+    (cons text (append atts (cl-remove-if #'harness-compose--attached-p (harness-compose--references text))))))
 
 (defun harness-compose-newline ()
   "Insert a newline in the box, or jump there from elsewhere.
@@ -843,20 +1047,28 @@ The box may have been out of sight: its windows follow it again
 (defun harness-compose-attachment-block (att)
   "Return the ACP prompt block for attachment ATT.
 An image's label goes along as `_harness.label', so the model reads its
-token, [image 1], right before it (see `harness-compose--label')."
+token, [image 1], right before it (see `harness-compose--label').  An
+attachment that is text of its own and no file, a task, is that text
+\(`harness-compose--task-text'), marked `_harness.attached' so that the
+transcript sets it apart from the words around it
+\(`harness-acp--block-from-acp', `harness-agent--blocks-text')."
   (let* ((path (plist-get att :path))
          (mime (or (plist-get att :mime) "application/octet-stream"))
          (label (plist-get att :label)))
-    (if (and (string-prefix-p "image/" mime) (file-readable-p path))
-        (append (list :type "image" :mimeType mime
-                      :data (with-temp-buffer
-                              (set-buffer-multibyte nil)
-                              (insert-file-contents-literally path)
-                              (base64-encode-string (buffer-string) t)))
-                (and label (list :_harness (list :label label))))
+    (cond
+     ((and (stringp (plist-get att :text)) (null path))
+      (list :type "text" :text (plist-get att :text) :_harness (list :attached t)))
+     ((and (string-prefix-p "image/" mime) (file-readable-p path))
+      (append (list :type "image" :mimeType mime
+                    :data (with-temp-buffer
+                            (set-buffer-multibyte nil)
+                            (insert-file-contents-literally path)
+                            (base64-encode-string (buffer-string) t)))
+              (and label (list :_harness (list :label label)))))
+     (t
       (list :type "resource_link" :uri (concat "file://" path)
             :name (or (plist-get att :name) (file-name-nondirectory path))
-            :size (plist-get att :size) :mimeType mime))))
+            :size (plist-get att :size) :mimeType mime)))))
 
 ;;;; Finding files
 
@@ -911,23 +1123,29 @@ marginalia) of file names apply to it."
         (funcall files string pred action)))))
 
 (defun harness-compose--attach-table ()
-  "Return the table the attach command reads a file with.
+  "Return the table the attach command reads a file, or a task, with.
 That of @ references (`harness-compose--file-table'), but a leading @,
 typed out of the habit of the box, is ignored: \"@notes\" finds what
-\"notes\" does."
-  (let ((table (harness-compose--file-table)))
+\"notes\" does.  After \"task:\" a task's id completes instead, among
+the project's tasks (`harness-compose--task-table')."
+  (let ((files (harness-compose--file-table))
+        (tasks (harness-compose--task-table)))
     (lambda (string pred action)
-      (if (not (string-prefix-p "@" string))
-          (funcall table string pred action)
-        (let ((name (substring string 1)))
-          (pcase action
-            ;; The @ is out of the field being completed.
-            (`(boundaries . ,_)
-             (let ((inner (funcall table name pred action)))
-               `(boundaries ,(1+ (or (cadr inner) 0)) . ,(cddr inner))))
-            ('nil (let ((found (funcall table name pred nil)))
-                    (if (stringp found) (concat "@" found) found)))
-            (_ (funcall table name pred action))))))))
+      (let* ((skip (if (string-prefix-p "@" string) 1 0))
+             (task (harness-compose--task-name-p (substring string skip)))
+             (skip (if task (+ skip 5) skip))
+             (table (if task tasks files)))
+        (if (= skip 0)
+            (funcall table string pred action)
+          (let ((name (substring string skip)))
+            (pcase action
+              ;; The @ and the task: are out of the field being completed.
+              (`(boundaries . ,_)
+               (let ((inner (funcall table name pred action)))
+                 `(boundaries ,(+ skip (or (cadr inner) 0)) . ,(cddr inner))))
+              ('nil (let ((found (funcall table name pred nil)))
+                      (if (stringp found) (concat (substring string 0 skip) found) found)))
+              (_ (funcall table name pred action)))))))))
 
 (defun harness-compose--local-file (name root)
   "Return NAME, relative to ROOT, absolute when it is a regular file here, or nil.
@@ -951,8 +1169,8 @@ NAME is what follows the @: a file the project lists, or a path
 relative to ROOT, absolute or under ~, of a regular file of this
 machine.  Punctuation ending a sentence or a bracket after it is no
 part of it (\"see @notes.txt.\"), and an @skill: reference names a
-skill, not a file."
-  (unless (string-prefix-p "skill:" name)
+skill, an @task: one a task, not a file."
+  (unless (or (string-prefix-p "skill:" name) (harness-compose--task-name-p name))
     (cl-some (lambda (candidate)
                (cond ((string-empty-p candidate) nil)
                      ((member candidate harness-compose--files) (expand-file-name candidate root))
@@ -971,13 +1189,18 @@ In the order of TEXT, each file once; see
     (mapcar #'harness-compose--file-attachment (nreverse paths))))
 
 (defun harness-compose-without-references (atts text)
-  "Return ATTS without the files the @ references in TEXT name.
+  "Return ATTS without the files and the tasks the @ references in TEXT name.
 ATTS are the attachments `harness-compose-take' returned with TEXT: what
 is left are the box's own, the files attached to it.  For an answer to
-a question, say, whose text goes as it is: a file the text names stays
-its reference, while the box's own attachments go with the answer."
+a question, say, whose text goes as it is: a file or a task the text
+names -- one attached from the box puts its reference there -- stays its
+reference, while the box's own attachments go with the answer."
   (let ((named (mapcar (lambda (att) (plist-get att :path)) (harness-compose--references text))))
-    (cl-remove-if (lambda (att) (member (plist-get att :path) named)) atts)))
+    (cl-remove-if (lambda (att)
+                    (if (plist-get att :task)
+                        (harness-compose--token-spans (concat "@task:" (plist-get att :task)) text)
+                      (member (plist-get att :path) named)))
+                  atts)))
 
 ;;;; Attachments
 
@@ -986,95 +1209,118 @@ its reference, while the box's own attachments go with the answer."
   (or (mailcap-extension-to-mime (file-name-extension path t)) "application/octet-stream"))
 
 (defun harness-compose-read-file (&optional any)
-  "Read a file to attach and return its absolute name.
+  "Read a file to attach and return its absolute name, or a task as task:ID.
 Part of a name finds a project file in any subdirectory, and a path any
 file: absolute, under ~, or relative to the project with ./ or ../,
 completing directory by directory.  It is what @ completes in the box
 \(`harness-compose--file-table'), so the project's files match with
-`flex' unless configured otherwise, and a leading @ is ignored.  A
-directory is no file to attach: choosing one reads again, from inside
-it, and so does an empty answer.  With ANY, or when the project lists
-no files, browse the file system instead.  The project is never listed
-while you wait: a listing still running fills the candidates in when it
-returns."
+`flex' unless configured otherwise, and a leading @ is ignored.  After
+\"task:\" the id of a task of the project completes, which is returned
+as it is, \"task:\" and all.  A directory is no file to attach: choosing
+one reads again, from inside it, and so does an empty answer.  With
+ANY, or when the project lists no files, browse the file system instead.
+The project is never listed while you wait: a listing still running
+fills the candidates in when it returns, and so do the tasks."
   (let ((root (harness-compose--root))
         (listing (harness-compose-fetch-files)))
-    (expand-file-name
-     (if (or any (and (harness-promise-settled-p listing) (null harness-compose--files)))
-         (read-file-name "Attach file: " root nil t)
-       (let ((table (harness-compose--attach-table)) (initial nil) (name nil))
-         (while (progn
-                  (setq name (string-remove-prefix
-                              "@" (completing-read "Attach a project file, or a path (/ ~/ ../): "
-                                                   table nil t initial)))
-                  (let ((file-name-handler-alist nil))
-                    (file-directory-p (expand-file-name name root))))
-           (setq initial (and (not (string-empty-p name)) (file-name-as-directory name))))
-         name))
-     root)))
+    (if (or any (and (harness-promise-settled-p listing) (null harness-compose--files)))
+        (expand-file-name (read-file-name "Attach file: " root nil t) root)
+      (harness-compose-fetch-tasks)
+      (let ((table (harness-compose--attach-table)) (initial nil) (name nil))
+        (while (progn
+                 (setq name (string-remove-prefix
+                             "@" (completing-read "Attach a project file, a path (/ ~/ ../) or task:ID: "
+                                                  table nil t initial)))
+                 (and (not (harness-compose--task-name-p name))
+                      (let ((file-name-handler-alist nil))
+                        (file-directory-p (expand-file-name name root)))))
+          (setq initial (and (not (string-empty-p name)) (file-name-as-directory name))))
+        (if (harness-compose--task-name-p name) name (expand-file-name name root))))))
 
 (defun harness-compose-add-attachment (path &optional mime)
   "Attach the file PATH (with MIME) to the next message.
+Its token goes into the text where point is in the box, else at its end
+\(`harness-compose--label'): an image's [image 1], else @ and the
+file's name, its path in the project or else under ~ or absolute, as a
+chip a click opens; a file whose name has a space attaches without one.
 Interactively, part of its name finds a project file in any
 subdirectory, and a path (/, ~/, ./, ../) any file; with a prefix
 argument, the file system is browsed instead (see
-`harness-compose-read-file')."
+`harness-compose-read-file').  PATH task:ID attaches a task of the
+project instead (`harness-compose-attach-task')."
   (interactive (list (harness-compose-read-file current-prefix-arg)))
-  (let ((path (expand-file-name path)))
-    (harness-compose--attach (harness-compose--file-attachment path mime))
-    (funcall harness-compose-redraw-function)
-    (message "Attached %s" (abbreviate-file-name path))))
+  (if (harness-compose--task-name-p path)
+      (harness-compose-attach-task (substring path 5))
+    (let ((path (expand-file-name path)))
+      (harness-compose--attach (harness-compose--file-attachment path mime))
+      (funcall harness-compose-redraw-function)
+      (message "Attached %s" (abbreviate-file-name path)))))
 
-(defun harness-compose-remove-attachment (path)
-  "Remove the attachment PATH.
-An image's tokens go from the text too, as deleting them would have
-removed it: undoing brings both back (`harness-compose--sync-tokens')."
+(defun harness-compose-remove-attachment (what)
+  "Remove the attachment WHAT: a file's path, a task's task:ID, or itself.
+Its tokens go from the text too -- an image's [image 1], a file's or a
+task's @ reference -- as deleting them would have removed it: undoing
+brings both back (`harness-compose--sync-tokens').  Interactively, the
+attachment is read with completion, a file by its path and a task as
+task:ID."
   (interactive (list (completing-read "Remove attachment: "
-                                      (delq nil (mapcar (lambda (a) (plist-get a :path)) harness-compose-attachments))
+                                      (delq nil (mapcar #'harness-compose--attachment-id harness-compose-attachments))
                                       nil t)))
-  (dolist (att harness-compose-attachments)
-    (when (and (equal (plist-get att :path) path) (plist-get att :label))
-      (harness-compose--keep-aside att)
-      (harness-compose--delete-tokens (plist-get att :label))))
-  (setq harness-compose-attachments
-        (cl-remove path harness-compose-attachments :key (lambda (a) (plist-get a :path)) :test #'equal))
+  (when-let* ((id (harness-compose--what-id what)))
+    (dolist (att harness-compose-attachments)
+      (when-let* ((token (and (equal (harness-compose--attachment-id att) id) (harness-compose--att-token att))))
+        (harness-compose--keep-aside att)
+        (harness-compose--delete-tokens token)))
+    (setq harness-compose-attachments
+          (cl-remove id harness-compose-attachments :key #'harness-compose--attachment-id :test #'equal)))
   (funcall harness-compose-redraw-function))
 
-;;;; Image tokens
+;;;; Tokens
 
-;; An image attached to the box gets a label, "image 1", "image 2"...,
-;; and its token, [image 1], goes into the text: where point is when it
-;; is in the box -- where the image was pasted, dropped or completed --
-;; else at the end.  A sentence can then say which screenshot it means,
-;; and the model reads the same [image 1] right before the image itself,
-;; whose prompt block carries the label (`harness-compose-attachment-block').
-;; The token is text, so it lives through redraws, drafts and queueing
-;; like the rest of the message.  An overlay shows it as a chip: the
-;; image's thumbnail, then the token as a link a click opens, which point
-;; steps over as a whole.
+;; An attachment of the box has a token in its text that names it: an
+;; image its label, [image 1]; a file its @ reference, @ and its path in
+;; the project, else under ~ or absolute; a task @task: and its id.  The
+;; token goes where point is when it is in the box -- where the image
+;; was pasted, the file dropped or completed -- else at the end.  A
+;; sentence can then say which screenshot, file or task it means: the
+;; model reads an image's [image 1] right before the image itself, whose
+;; prompt block carries the label (`harness-compose-attachment-block'),
+;; and a reference where the text has it.  The token is text, so it
+;; lives through redraws, drafts and queueing like the rest of the
+;; message.  An overlay shows it as a chip, the same one for every kind
+;; (`harness-compose--inline-chip'): an image's thumbnail, or the icon
+;; of a file or a task, then the token as a link, which point steps over
+;; as a whole.  A click opens the attachment, mouse-3 offers the rest.
 ;;
-;; After every command the text and the attachments are made to agree
-;; (`harness-compose--sync-tokens'): what is left of a token cut short
-;; (DEL right after it) goes too; an image whose tokens are all gone is
-;; detached, and kept aside, so that its token yanked, typed or undone
-;; back brings it back; the × of its line in the list deletes its tokens.
-;; Only labelled images take part: other files, and images attached
-;; without a label (a draft from before labels), are left alone.
+;; After every command the text and the attachments are made to agree,
+;; token by token (`harness-compose--sync-tokens'): what is left of a
+;; token cut short (DEL right after it) goes too; an attachment whose
+;; tokens are all gone is detached, and kept aside, so that its token
+;; yanked, typed or undone back brings it back; the × of its line in the
+;; list deletes its tokens.  An @ reference is a word of its own, the
+;; way `harness-compose--references' reads one: a letter typed against
+;; it makes another word.  Only attachments with a token take part: a
+;; file whose name can be no reference (it has a space), and what a
+;; draft from before tokens attached, are left alone.
 ;;
-;; A number never changes once given, since a sentence written about
-;; [image 2] must keep meaning that image.  A new image takes the number
-;; after the highest one attached: deleting the last image frees its
-;; number, deleting one in the middle leaves a gap, and every message
-;; starts again at 1.
+;; An image's number never changes once given, since a sentence written
+;; about [image 2] must keep meaning that image.  A new image takes the
+;; number after the highest one attached: deleting the last image frees
+;; its number, deleting one in the middle leaves a gap, and every
+;; message starts again at 1.
 
 (defvar harness-compose-thumbnail-lines)
 
 (defface harness-compose-token-face '((t :inherit link))
-  "An image's token, [image 1], in the compose box and the transcript."
+  "The token of an attachment in the compose box: [image 1], @notes.txt.
+An image's token shows in it in the transcript too."
   :group 'harness-compose)
 
-(defconst harness-compose--token-regexp "\\[\\(image [1-9][0-9]*\\)\\]"
-  "An image's token in the text, [image 1]; group 1 is its label.")
+(harness-ui-define-icon harness-icon-file "file" "▤" "file" "A file attached to a message.")
+(harness-ui-define-icon harness-icon-task "task" "☑" "task" "A task attached to a message.")
+
+(defconst harness-compose--token-max 32
+  "Most characters of a name an inline chip shows: a file's, a task's title.")
 
 (defun harness-compose--image-token (label)
   "Return the token of the image LABEL, as the text holds it."
@@ -1084,6 +1330,73 @@ removed it: undoing brings both back (`harness-compose--sync-tokens')."
   "Non-nil when ATT is an image, which the model gets as one."
   (and (not (plist-get att :pending))
        (string-prefix-p "image/" (or (plist-get att :mime) ""))))
+
+(defun harness-compose--task-name-p (name)
+  "Non-nil when NAME, a reference or an answer to the attach command, is task:ID."
+  (and (stringp name) (string-prefix-p "task:" name)))
+
+(defun harness-compose--att-token (att)
+  "Return the token of attachment ATT in the text, or nil when it has none.
+An image's [image 1], from its label; a file's or a task's @ reference,
+from its `:ref'.  A download under way has none yet."
+  (unless (plist-get att :pending)
+    (cond ((plist-get att :label) (harness-compose--image-token (plist-get att :label)))
+          ((plist-get att :ref) (concat "@" (plist-get att :ref))))))
+
+(defun harness-compose--attachment-id (att)
+  "Return what tells attachment ATT apart: a task's task:ID, else its file's path."
+  (cond ((plist-get att :task) (concat "task:" (plist-get att :task)))
+        ((plist-get att :path) (expand-file-name (plist-get att :path)))))
+
+(defun harness-compose--what-id (what)
+  "Return the id of WHAT: an attachment, a file's path or a task's task:ID.
+See `harness-compose--attachment-id'."
+  (cond ((consp what) (harness-compose--attachment-id what))
+        ((harness-compose--task-name-p what) what)
+        ((stringp what) (expand-file-name what))))
+
+(defun harness-compose--attached-p (what)
+  "Return the attachment WHAT is when it is attached, else nil.
+WHAT is a file's path, a task's task:ID, or an attachment, which counts
+when its file or its task is attached (`harness-compose--attachment-id')."
+  (when-let* ((id (harness-compose--what-id what)))
+    (cl-find id harness-compose-attachments :key #'harness-compose--attachment-id :test #'equal)))
+
+(defun harness-compose--token-spans (token string)
+  "Return where TOKEN stands in STRING: (START . END) offsets, in order.
+An image's token counts wherever it is.  An @ reference counts as a
+word of its own, the way `harness-compose--references' reads one: at
+the start or after a space, and up to a space or the end, but for
+punctuation ending a sentence or a bracket (\"see @notes.txt.\")."
+  (let ((case-fold-search nil) (spans nil) (start 0) (at nil))
+    (if (string-prefix-p "@" token)
+        (let ((re (concat "\\(?:\\`\\|[ \t\n]\\)\\(" (regexp-quote token) "\\)"
+                          "[]),.;:!?'\"`>}]*\\(?:[ \t\n]\\|\\'\\)")))
+          (while (string-match re string start)
+            (push (cons (match-beginning 1) (match-end 1)) spans)
+            (setq start (match-end 1))))
+      (while (setq at (string-search token string start))
+        (push (cons at (+ at (length token))) spans)
+        (setq start (+ at (length token)))))
+    (nreverse spans)))
+
+(defun harness-compose--box-string ()
+  "Return the box's text: the buffer's while the box is drawn, else the kept one."
+  (if (harness-compose-live-p)
+      (buffer-substring-no-properties harness-compose-start harness-compose-end)
+    harness-compose--text))
+
+(defun harness-compose--token-in-box-p (token)
+  "Non-nil when the box's text holds TOKEN (`harness-compose--token-spans')."
+  (and (harness-compose--token-spans token (harness-compose--box-string)) t))
+
+(defun harness-compose--tokened (token)
+  "Return the attachment whose token is TOKEN, or nil."
+  (cl-find token harness-compose-attachments :key #'harness-compose--att-token :test #'equal))
+
+(defun harness-compose--forget-detached (token)
+  "Forget the attachment kept aside under TOKEN, which no longer brings it back."
+  (setq harness-compose--detached (cl-remove token harness-compose--detached :key #'car :test #'equal)))
 
 (defun harness-compose--label-number (label)
   "Return the number of the image LABEL (3 for \"image 3\"), or nil."
@@ -1101,37 +1414,68 @@ removed it: undoing brings both back (`harness-compose--sync-tokens')."
           (1+ (apply #'max 0 (delq nil (mapcar (lambda (a) (harness-compose--label-number (plist-get a :label)))
                                                harness-compose-attachments))))))
 
+(defun harness-compose--file-ref (path &optional name)
+  "Return the @ reference, without its @, that names the file PATH, or nil.
+NAME, when it names PATH -- the name a reference was completed as, a
+path relative to the project, say -- else PATH's own name: its path in
+the project, else under ~ or absolute (`harness-relative-path').  Nil
+when that has a space, which would end the reference, or does not name
+PATH back (`harness-compose--reference-file'): the file has no
+reference then."
+  (let ((root (harness-compose--root))
+        (path (expand-file-name path)))
+    (cl-find-if (lambda (ref)
+                  (and (stringp ref) (not (string-empty-p ref))
+                       (not (string-match-p "[ \t\n\r\f]" ref))
+                       (equal (harness-compose--reference-file ref root) path)))
+                (list name (harness-relative-path root path)))))
+
 (defun harness-compose--label (att &optional at-end)
-  "Return ATT labelled when it is an image, its token put into the box.
-The token goes where point is, or with AT-END at the end of the box
-\(`harness-compose--insert-token').  Anything else, and an image
-labelled already, is returned as it is."
-  (if (or (plist-get att :label) (not (harness-compose--image-attachment-p att)))
-      att
+  "Return ATT with its token, the token put into the box.
+An image gets a label, its token [image 1]; a file an @ reference, when
+its name can be one (`harness-compose--file-ref'); a task has its
+reference, @task:ID, already.  The token goes where point is, or with
+AT-END at the end of the box (`harness-compose--insert-token'), unless
+the box holds it already: a reference typed or completed there.  A
+download under way, and an image labelled already, are returned as
+they are."
+  (cond
+   ((or (plist-get att :pending) (plist-get att :label)) att)
+   ((harness-compose--image-attachment-p att)
     (let ((label (harness-compose--next-label)))
       ;; An image deleted under that number cannot come back now.
-      (setq harness-compose--detached (cl-remove label harness-compose--detached :key #'car :test #'equal))
-      (harness-compose--insert-token label at-end)
-      (append att (list :label label)))))
+      (harness-compose--forget-detached (harness-compose--image-token label))
+      (harness-compose--insert-token (harness-compose--image-token label) at-end)
+      (append att (list :label label))))
+   (t
+    (let* ((ref (and (not (plist-get att :ref)) (not (plist-get att :task)) (plist-get att :path)
+                     (harness-compose--file-ref (plist-get att :path))))
+           (att (if ref (append att (list :ref ref)) att))
+           (token (harness-compose--att-token att)))
+      (when token
+        ;; What was deleted under that token is this attachment now.
+        (harness-compose--forget-detached token)
+        (unless (harness-compose--token-in-box-p token)
+          (harness-compose--insert-token token at-end)))
+      att))))
 
-(defun harness-compose--insert-token (label &optional at-end)
-  "Put the token of the image LABEL into the box.
+(defun harness-compose--insert-token (token &optional at-end)
+  "Put TOKEN, an attachment's, into the box.
 At point when point is in the box, else, or with AT-END, at the end of
 the box, point staying where it was.  A space keeps it apart from the
 words on either side, and follows it at the end of the box, so typing
 goes on after it.  A box not drawn gets it at the end of its text."
-  (let ((token (harness-compose--image-token label)))
-    (if (not (harness-compose-live-p))
-        (setq harness-compose--text
-              (concat harness-compose--text
-                      (and (string-match-p "[^ \t\n]\\'" harness-compose--text) " ")
-                      token " "))
-      (if (and (not at-end) (harness-compose-in-p))
-          (harness-compose--insert-spaced token)
-        (save-excursion
-          (goto-char harness-compose-end)
-          (harness-compose--insert-spaced token)))
-      (harness-compose-update-placeholder))))
+  (if (not (harness-compose-live-p))
+      (setq harness-compose--text
+            (concat harness-compose--text
+                    (and (string-match-p "[^ \t\n]\\'" harness-compose--text) " ")
+                    token " "))
+    (if (and (not at-end) (harness-compose-in-p))
+        (harness-compose--insert-spaced token)
+      (save-excursion
+        (goto-char harness-compose-end)
+        (harness-compose--insert-spaced token)))
+    (harness-compose-update-placeholder)))
 
 (defun harness-compose--insert-spaced (token)
   "Insert TOKEN at point, in the box, apart from the words around it."
@@ -1141,139 +1485,410 @@ goes on after it.  A box not drawn gets it at the end of its text."
   (when (or (= (point) harness-compose-end) (not (memq (char-after) '(?\s ?\t ?\n))))
     (insert " ")))
 
-(defun harness-compose--delete-tokens (label)
-  "Delete the tokens of the image LABEL from the box, a space after each too."
-  (let ((token (harness-compose--image-token label)))
-    (if (not (harness-compose-live-p))
-        (setq harness-compose--text
-              (replace-regexp-in-string (concat (regexp-quote token) " ?") "" harness-compose--text t t))
-      (save-excursion
-        (goto-char harness-compose-start)
-        (while (search-forward token harness-compose-end t)
-          (delete-region (match-beginning 0)
-                         (if (and (< (point) harness-compose-end) (eq (char-after) ?\s)) (1+ (point)) (point)))))
-      (harness-compose-update-placeholder))))
+(defun harness-compose--without-token (token text)
+  "Return TEXT without TOKEN wherever it stands, a space after each too."
+  (dolist (span (reverse (harness-compose--token-spans token text)) text)
+    (let ((end (cdr span)))
+      (setq text (concat (substring text 0 (car span))
+                         (substring text (if (and (< end (length text)) (eq (aref text end) ?\s)) (1+ end) end)))))))
+
+(defun harness-compose--delete-tokens (token)
+  "Delete TOKEN wherever it stands in the box, a space after each too.
+See `harness-compose--token-spans' for where an @ reference stands."
+  (if (not (harness-compose-live-p))
+      (setq harness-compose--text (harness-compose--without-token token harness-compose--text))
+    (let ((start (marker-position harness-compose-start)))
+      ;; From the last, so the offsets of the others hold.
+      (dolist (span (reverse (harness-compose--token-spans token (harness-compose--box-string))))
+        (let ((end (+ start (cdr span))))
+          (delete-region (+ start (car span))
+                         (if (and (< end harness-compose-end) (eq (char-after end) ?\s)) (1+ end) end)))))
+    (harness-compose-update-placeholder)))
 
 (defun harness-compose--keep-aside (att)
-  "Keep ATT, an image whose tokens were deleted, for them to bring back."
-  (setf (alist-get (plist-get att :label) harness-compose--detached nil nil #'equal) att))
+  "Keep ATT, an attachment whose tokens were deleted, for them to bring back.
+Where it stood among the attachments goes with it."
+  (when-let* ((token (harness-compose--att-token att)))
+    (harness-compose--forget-detached token)
+    (push (list token att (or (cl-position att harness-compose-attachments :test #'eq)
+                              (length harness-compose-attachments)))
+          harness-compose--detached)))
 
-(defun harness-compose--reattach (att)
-  "Attach ATT, an image kept aside, again, among the others in label order."
-  (let* ((n (harness-compose--label-number (plist-get att :label)))
-         (at (cl-position-if (lambda (a) (let ((m (harness-compose--label-number (plist-get a :label))))
-                                           (and m n (> m n))))
-                             harness-compose-attachments)))
+(defun harness-compose--reattach (entry)
+  "Attach again the attachment that ENTRY of `harness-compose--detached' keeps.
+It goes back where it stood, as far as the attachments left reach."
+  (let ((at (min (nth 2 entry) (length harness-compose-attachments))))
     (setq harness-compose-attachments
-          (if at
-              (append (seq-take harness-compose-attachments at) (list att) (seq-drop harness-compose-attachments at))
-            (append harness-compose-attachments (list att))))))
-
-(defun harness-compose--labels-in-box ()
-  "Return the labels whose tokens the box holds."
-  (let ((labels nil))
-    (save-excursion
-      (goto-char harness-compose-start)
-      (while (re-search-forward harness-compose--token-regexp harness-compose-end t)
-        (cl-pushnew (match-string-no-properties 1) labels :test #'equal)))
-    labels))
+          (append (seq-take harness-compose-attachments at) (list (nth 1 entry))
+                  (seq-drop harness-compose-attachments at)))))
 
 (defun harness-compose--finish-cut-tokens ()
   "Delete what is left of a token that a command cut short.
 Deleting the character before point right after a token deletes its
 last character, the one after point before it its first: the rest goes
-too, rather than staying as text naming no image."
+too, rather than staying as text naming nothing."
   (dolist (ov harness-compose--token-overlays)
     (when (overlay-buffer ov)
       (let* ((beg (overlay-start ov))
              (end (overlay-end ov))
-             (token (harness-compose--image-token (overlay-get ov 'harness-compose-label)))
+             (token (overlay-get ov 'harness-compose-token))
              (text (buffer-substring-no-properties beg end)))
-        (when (and (< 0 (length text) (length token)) (string-search text token)
+        (when (and token (< 0 (length text) (length token)) (string-search text token)
                    (harness-compose-in-p beg) (harness-compose-in-p end))
           (delete-region beg end))))))
 
 (defun harness-compose--sync-tokens ()
-  "Make the image tokens of the box and its attachments agree; show the tokens.
-What is left of a token a command cut short is deleted.  An image none
-of whose tokens is left is detached and kept aside; one kept aside whose
-token is back is attached again.  Return non-nil when the attachments
-changed, for the caller to redraw them."
+  "Make the tokens of the box and its attachments agree; show the tokens.
+What is left of a token a command cut short is deleted.  An attachment
+none of whose tokens is left is detached and kept aside; one kept aside
+whose token is back is attached again, where it stood.  Return non-nil
+when the attachments changed, for the caller to redraw them."
   (when (and (harness-compose-live-p)
              (or harness-compose--detached harness-compose--token-overlays
-                 (cl-some (lambda (a) (plist-get a :label)) harness-compose-attachments)))
+                 (cl-some #'harness-compose--att-token harness-compose-attachments)))
     (harness-compose--finish-cut-tokens)
-    (let* ((present (harness-compose--labels-in-box))
-           (gone (cl-remove-if-not (lambda (a) (let ((label (plist-get a :label)))
-                                                 (and label (not (member label present)))))
+    (let* ((text (harness-compose--box-string))
+           (gone (cl-remove-if-not (lambda (a) (let ((token (harness-compose--att-token a)))
+                                                 (and token (not (harness-compose--token-spans token text)))))
                                    harness-compose-attachments))
            (changed (and gone t)))
       (dolist (att gone) (harness-compose--keep-aside att))
       (setq harness-compose-attachments (cl-remove-if (lambda (a) (memq a gone)) harness-compose-attachments))
-      (dolist (label present)
-        (when-let* ((att (and (not (harness-compose--labelled label))
-                              (cdr (assoc label harness-compose--detached)))))
-          (setq harness-compose--detached (cl-remove label harness-compose--detached :key #'car :test #'equal))
-          ;; Unless its file was attached again since, under another number.
-          (unless (harness-compose--attached-p (plist-get att :path))
-            (harness-compose--reattach att)
+      ;; Back where they stood: the first in the list first.
+      (dolist (entry (sort (copy-sequence harness-compose--detached) (lambda (a b) (< (nth 2 a) (nth 2 b)))))
+        (when (harness-compose--token-spans (car entry) text)
+          (setq harness-compose--detached (delq entry harness-compose--detached))
+          ;; Unless it was attached again since, under another token.
+          (unless (or (harness-compose--tokened (car entry))
+                      (harness-compose--attached-p (nth 1 entry)))
+            (harness-compose--reattach entry)
             (setq changed t))))
       (harness-compose--show-tokens)
       changed)))
 
 (defun harness-compose--keep-tokens ()
-  "Keep the image tokens and the attachments in step after a command.
+  "Keep the tokens and the attachments in step after a command.
 Runs from `post-command-hook'; see `harness-compose--sync-tokens'."
   (condition-case err
       (when (harness-compose--sync-tokens)
         (harness-compose-redraw))
-    (error (harness-log 'warn "compose: keeping the image tokens failed: %S" err))))
+    (error (harness-log 'warn "compose: keeping the tokens failed: %S" err))))
 
 (defun harness-compose--show-tokens ()
-  "Show the token of each attached image in the box as a chip.
-The chips are made again only when the tokens moved or changed."
+  "Show the token of each attachment in the box as a chip.
+The chips are made again only when the tokens moved or changed.  Of
+two tokens that overlap, the first shows, the longer of two that start
+together."
   (when (harness-compose-live-p)
-    (let ((want nil))
-      (save-excursion
-        (goto-char harness-compose-start)
-        (while (re-search-forward harness-compose--token-regexp harness-compose-end t)
-          (when-let* ((att (harness-compose--labelled (match-string-no-properties 1))))
-            (push (list (match-beginning 0) (match-end 0) att) want))))
-      (setq want (nreverse want))
+    (let ((text (harness-compose--box-string))
+          (start (marker-position harness-compose-start))
+          (want nil) (kept nil) (reach 0))
+      (dolist (att harness-compose-attachments)
+        (when-let* ((token (harness-compose--att-token att)))
+          (dolist (span (harness-compose--token-spans token text))
+            (push (list (+ start (car span)) (+ start (cdr span)) att) want))))
+      (dolist (w (sort want (lambda (a b) (or (< (car a) (car b))
+                                              (and (= (car a) (car b)) (> (cadr a) (cadr b)))))))
+        (when (>= (car w) reach)
+          (push w kept)
+          (setq reach (cadr w))))
+      (setq want (nreverse kept))
       (unless (equal want (mapcar (lambda (ov) (list (overlay-start ov) (overlay-end ov)
                                                      (overlay-get ov 'harness-compose-attachment)))
                                   harness-compose--token-overlays))
         (mapc #'delete-overlay harness-compose--token-overlays)
         (setq harness-compose--token-overlays
-              (mapcar (lambda (w) (apply #'harness-compose--token-overlay w)) want))))))
+              (mapcar (lambda (w) (apply #'harness-compose--inline-chip w)) want))))))
 
-(defun harness-compose--token-overlay (beg end att)
-  "Return the overlay showing the token from BEG to END of the image ATT.
-Its thumbnail, a line high, comes before the token (the cursor shows on
-it when point is before the token), and the token shows as a link a
-click opens.  The token's display is a string, so point never rests
-inside it: the command loop moves it to an edge."
-  (let* ((label (plist-get att :label))
-         (ov (make-overlay beg end nil t nil))
-         (help (format "%s: %s · mouse-1: open · deleting the token removes the image"
-                       label (abbreviate-file-name (plist-get att :path))))
-         (open (lambda (event) (interactive "e") (ignore event) (harness-compose-open-attachment att)))
-         (map (let ((m (make-sparse-keymap))) (define-key m [mouse-1] open) (define-key m [mouse-2] open) m))
-         (props (list 'help-echo help 'mouse-face 'highlight 'keymap map 'pointer 'hand))
-         (thumb (and (display-images-p) (> harness-compose-thumbnail-lines 0)
-                     (harness-compose--image (plist-get att :path) (frame-char-height)))))
-    (overlay-put ov 'harness-compose-label label)
+(defun harness-compose--inline-chip (beg end att)
+  "Return the overlay showing the token from BEG to END of attachment ATT.
+Every kind of attachment shows the same way: what it is first -- an
+image's thumbnail a line high, the icon of a file or a task
+\(`harness-compose--chip-head') -- then its name in
+`harness-compose-token-face' (`harness-compose--chip-text').  mouse-1
+and mouse-2 open it, mouse-3 offers a menu (`harness-compose--chip-map').
+The cursor shows on what comes first when point is before the token.
+The token's display is a string, so point never rests inside it: the
+command loop moves it to an edge."
+  (let* ((ov (make-overlay beg end nil t nil))
+         (props (list 'help-echo (harness-compose--chip-help att) 'mouse-face 'highlight
+                      'keymap (harness-compose--chip-map att) 'pointer 'hand))
+         (head (harness-compose--chip-head att)))
+    (overlay-put ov 'harness-compose-token (buffer-substring-no-properties beg end))
+    (when (plist-get att :label) (overlay-put ov 'harness-compose-label (plist-get att :label)))
     (overlay-put ov 'harness-compose-attachment att)
     (overlay-put ov 'evaporate t)
-    (when thumb
+    (when head
       (overlay-put ov 'before-string
-                   (concat (apply #'propertize thumb 'cursor t 'face harness-compose--face props)
-                           (propertize " " 'face harness-compose--face 'display '(space :width (3))))))
-    (overlay-put ov 'display (apply #'propertize (harness-compose--image-token label)
+                   (concat (apply #'propertize head 'cursor t
+                                  ;; A thumbnail on the box's background, an
+                                  ;; icon in the link's colour, as its name.
+                                  'face (if (plist-get att :label)
+                                            harness-compose--face
+                                          (list 'harness-compose-token-face harness-compose--face))
+                                  props)
+                           (propertize " " 'face harness-compose--face
+                                       'display (if (display-graphic-p) '(space :width (3)) '(space :width 1))))))
+    (overlay-put ov 'display (apply #'propertize (harness-compose--chip-text att)
                                     'face (list 'harness-compose-token-face harness-compose--face)
                                     props))
     (dolist (p (seq-partition props 2)) (overlay-put ov (car p) (cadr p)))
     ov))
+
+(defun harness-compose--chip-head (att)
+  "Return what the inline chip of attachment ATT shows before its name, or nil.
+An image's thumbnail, a line high, where images show (nothing else); a
+task's icon, or a file's."
+  (cond ((plist-get att :label)
+         (and (display-images-p) (> harness-compose-thumbnail-lines 0)
+              (harness-compose--image (plist-get att :path) (frame-char-height))))
+        ((plist-get att :task) (harness-ui-icon 'harness-icon-task))
+        (t (harness-ui-icon 'harness-icon-file))))
+
+(defun harness-compose--chip-text (att)
+  "Return the name the inline chip of attachment ATT shows for its token.
+An image's token, [image 1]; @task: and a task's id, then its title cut
+short; @ and a file's name without its directories, shortened in the
+middle to `harness-compose--token-max' characters."
+  (cond ((plist-get att :label) (harness-compose--image-token (plist-get att :label)))
+        ((plist-get att :task)
+         (let ((title (harness-ui-one-line (or (plist-get att :name) ""))))
+           (concat "@task:" (plist-get att :task)
+                   (if (string-empty-p title) ""
+                     (concat " " (harness-truncate-end title harness-compose--token-max))))))
+        (t (concat "@" (harness-compose--shorten
+                        (replace-regexp-in-string
+                         "[\n\r\t]" " " (file-name-nondirectory (or (plist-get att :ref) (plist-get att :path) "")))
+                        harness-compose--token-max)))))
+
+(defun harness-compose--chip-what (att)
+  "Return what attachment ATT is, in a word or two: image 1, file, task t-1a2b."
+  (cond ((plist-get att :label))
+        ((plist-get att :task) (concat "task " (plist-get att :task)))
+        (t "file")))
+
+(defun harness-compose--chip-help (att)
+  "Return the tooltip of the inline chip of attachment ATT."
+  (harness-ui-one-line
+   (format "%s: %s · mouse-1: open · mouse-3: more · deleting it removes the attachment"
+           (harness-compose--chip-what att)
+           (if (plist-get att :task)
+               (concat (or (plist-get att :name) "")
+                       (and (plist-get att :state) (format " (%s)" (plist-get att :state))))
+             (abbreviate-file-name (or (plist-get att :path) ""))))))
+
+(defun harness-compose--chip-command (fn)
+  "Return a command of a mouse event that calls FN with it, in this buffer.
+The window clicked is selected first, and FN runs in the box's buffer,
+which the chip shows in, whatever buffer is current."
+  (let ((buffer (current-buffer)))
+    (lambda (event)
+      (interactive "e")
+      (let ((window (and (consp event) (posn-window (event-start event)))))
+        (when (window-live-p window) (select-window window)))
+      (when (buffer-live-p buffer)
+        (with-current-buffer buffer (funcall fn event))))))
+
+(defun harness-compose--chip-map (att)
+  "Return the keymap of the chip of attachment ATT, inline in the box.
+mouse-1 and mouse-2 open ATT (`harness-compose-open-attachment');
+mouse-3 pops up the menu of what else there is to do with it
+\(`harness-compose--chip-actions')."
+  (let ((open (harness-compose--chip-command (lambda (_) (harness-compose-open-attachment att))))
+        (menu (harness-compose--chip-command
+               (lambda (event) (popup-menu (harness-compose--chip-menu att) event))))
+        (map (make-sparse-keymap)))
+    (define-key map [mouse-1] open)
+    (define-key map [mouse-2] open)
+    ;; The press would pop up the buffer's context menu.
+    (define-key map [down-mouse-3] #'ignore)
+    (define-key map [mouse-3] menu)
+    map))
+
+(defun harness-compose--chip-actions (att)
+  "Return what the chip of attachment ATT offers: (NAME . FUNCTION) each.
+Open it, remove it from the message, its tokens with it
+\(`harness-compose-remove-attachment'), and copy its file's path, or its
+task's id."
+  (list (cons "Open" (lambda () (harness-compose-open-attachment att)))
+        (cons "Remove from the message" (lambda () (harness-compose-remove-attachment att)))
+        (if (plist-get att :task)
+            (cons "Copy the task id" (lambda ()
+                                       (kill-new (plist-get att :task))
+                                       (message "Copied %s" (plist-get att :task))))
+          (cons "Copy the path" (lambda ()
+                                  (kill-new (plist-get att :path))
+                                  (message "Copied %s" (plist-get att :path)))))))
+
+(defun harness-compose--chip-menu (att)
+  "Return the menu of the chip of attachment ATT, for `popup-menu'.
+Its items run in this buffer, the box's (`harness-compose--chip-actions')."
+  (let ((buffer (current-buffer)))
+    (cons (harness-compose--chip-what att)
+          (mapcar (lambda (action)
+                    (vector (car action)
+                            (lambda ()
+                              (interactive)
+                              (when (buffer-live-p buffer)
+                                (with-current-buffer buffer (funcall (cdr action)))))
+                            t))
+                  (harness-compose--chip-actions att)))))
+
+;;;; Tasks
+
+;; A task of the project attaches to a message as what the model needs
+;; to know of it, as text: its id, title, column, priority, session and
+;; branch, then its prompt (`harness-compose--task-text').  The model
+;; reads the rest with the task tools.  Its token is its reference,
+;; @task:ID, which @task: completes in the box; C-c C-a attaches one as
+;; task:ID, M-x harness-compose-attach-task by its title, and @ on a
+;; card of the task board attaches that card's.  The project's tasks
+;; are listed with the other completions, never waited for: what is not
+;; listed yet fills in when the list comes.
+
+(declare-function harness-ui-tasks-show-task "harness-ui-tasks")
+
+(defconst harness-compose-task-mime "text/x-harness-task"
+  "The MIME type of a task attached to a message.")
+
+(defconst harness-compose--task-prompt-max 3000
+  "Most characters of its prompt a task attached to a message gives the model.")
+
+(defun harness-compose-fetch-tasks (&optional callback)
+  "List the tasks of the box's project again, for @task: and the attach commands.
+In the background: CALLBACK, when given, is called in the box's buffer
+once they are in.  Without the task module there are none."
+  (let ((buf (current-buffer)))
+    (harness-ui-call "_harness/task/list" (list :cwd (harness-compose--root))
+                     (lambda (tasks)
+                       (when (buffer-live-p buf)
+                         (with-current-buffer buf
+                           (harness-compose--arrived 'harness-compose--tasks (append tasks nil))
+                           (when callback (funcall callback)))))
+                     #'ignore)))
+
+(defun harness-compose--task (id)
+  "Return the task ID of the box's project, as last listed, or nil."
+  (cl-find id harness-compose--tasks :key (lambda (task) (plist-get task :id)) :test #'equal))
+
+(defun harness-compose--task-column (task)
+  "Return the column TASK shows in on the task board, as a string."
+  (format "%s" (or (plist-get task :column) (plist-get task :state) "")))
+
+(defun harness-compose--task-text (task)
+  "Return what the model reads of TASK attached to a message.
+Its id and title, column and state, priority, session and branch, then
+its prompt, cut at `harness-compose--task-prompt-max' characters, and
+where to read more."
+  (let* ((prompt (string-trim (or (plist-get task :prompt) "")))
+         (cut (> (length prompt) harness-compose--task-prompt-max))
+         (field (lambda (name value)
+                  (let ((value (and value (format "%s" value))))
+                    (and value (not (string-empty-p value)) (format "%s: %s\n" name value))))))
+    (concat
+     (format "Task %s, attached: %s\n" (plist-get task :id) (harness-ui-task-title task))
+     (funcall field "Column" (harness-compose--task-column task))
+     (and (not (equal (format "%s" (plist-get task :state)) (harness-compose--task-column task)))
+          (funcall field "State" (plist-get task :state)))
+     (funcall field "Priority" (plist-get task :priority))
+     (funcall field "Session" (plist-get task :session))
+     (funcall field "Branch" (plist-get task :branch))
+     "Prompt:\n"
+     (if cut (substring prompt 0 harness-compose--task-prompt-max) prompt) "\n"
+     (and cut (format "[The prompt is cut here: %d of its %d characters.]\n"
+                      harness-compose--task-prompt-max (length prompt)))
+     "The task tools tell more: task_list shows the task, session_read reads its session.")))
+
+(defun harness-compose--task-attachment (task)
+  "Return the attachment of TASK, a task record: text for the model, no file."
+  (let ((id (plist-get task :id)))
+    (list :task id :name (harness-ui-task-title task) :session (plist-get task :session)
+          :state (harness-compose--task-column task) :mime harness-compose-task-mime
+          :ref (concat "task:" id) :text (harness-compose--task-text task))))
+
+(defun harness-compose--task-annotator ()
+  "Return the annotation function of task ids: each task's title and column."
+  (let ((buf (current-buffer)))
+    (lambda (id)
+      (when-let* ((task (and (buffer-live-p buf) (with-current-buffer buf (harness-compose--task id)))))
+        (format "  %s  [%s]" (harness-ui-task-title task) (harness-compose--task-column task))))))
+
+(defun harness-compose--task-table ()
+  "Return the completion table of the ids of the project's tasks, newest first.
+The tasks are read each time the table is asked, as they arrive in the
+background (`harness-compose-fetch-tasks'); each id is annotated with
+its task's title and column."
+  (let ((buf (current-buffer))
+        (annotate (harness-compose--task-annotator)))
+    (lambda (string pred action)
+      (if (eq action 'metadata)
+          `(metadata (category . harness-compose-task)
+                     (annotation-function . ,annotate)
+                     (display-sort-function . identity)
+                     (cycle-sort-function . identity))
+        (complete-with-action action
+                              (and (buffer-live-p buf)
+                                   (reverse (mapcar (lambda (task) (plist-get task :id))
+                                                    (buffer-local-value 'harness-compose--tasks buf))))
+                              string pred)))))
+
+(defun harness-compose-read-task ()
+  "Read a task of the box's project and return its id.
+The candidates are \"ID  Title  [column]\", newest first, and fill in
+as the list of tasks arrives: it is never waited for.  An id typed out
+is taken as it is, after @task: or task: as well."
+  (harness-compose-fetch-tasks)
+  (let* ((buf (current-buffer))
+         (table (lambda (string pred action)
+                  (if (eq action 'metadata)
+                      '(metadata (category . harness-compose-task)
+                                 (display-sort-function . identity)
+                                 (cycle-sort-function . identity))
+                    (complete-with-action
+                     action
+                     (and (buffer-live-p buf)
+                          (mapcar (lambda (task)
+                                    (format "%s  %s  [%s]" (plist-get task :id) (harness-ui-task-title task)
+                                            (harness-compose--task-column task)))
+                                  (reverse (buffer-local-value 'harness-compose--tasks buf))))
+                     string pred))))
+         (answer (car (split-string (completing-read "Attach task: " table nil nil)))))
+    (unless answer (user-error "No task given"))
+    (string-remove-prefix "task:" (string-remove-prefix "@" answer))))
+
+(defun harness-compose-attach-task (task)
+  "Attach TASK, a task of the box's project, to the next message.
+TASK is its id, or its record.  The model gets the task as text: its
+title, column, session, branch and prompt (`harness-compose--task-text').
+Its reference, @task:ID, goes into the box where point is, unless the
+box holds it already, as a chip a click opens: the task's session, or
+its card on the task board.  A task not listed yet is attached once
+the list comes, its reference at the end of the box.  Interactively,
+the task is read with completion (`harness-compose-read-task')."
+  (interactive (list (harness-compose-read-task)))
+  (let ((record (if (stringp task) (harness-compose--task task) task)))
+    (if record
+        (if (not (harness-compose--attach (harness-compose--task-attachment record)))
+            (message "Task %s is attached already" (plist-get record :id))
+          (funcall harness-compose-redraw-function)
+          (message "Attached task %s" (plist-get record :id)))
+      (harness-compose-fetch-tasks
+       (lambda ()
+         (let ((record (harness-compose--task task)))
+           (cond ((null record) (message "No task %s in this project" task))
+                 ((harness-compose--attach (harness-compose--task-attachment record) t)
+                  (funcall harness-compose-redraw-function)
+                  (message "Attached task %s" task)))))))))
+
+(defun harness-compose--open-task (att)
+  "Open the task ATT is: its session's chat, else its card on the task board."
+  (let ((session (plist-get att :session)))
+    (cond ((and (stringp session) (not (string-empty-p session)))
+           (harness-ui-display-session session))
+          ((fboundp 'harness-ui-tasks-show-task)
+           (harness-ui-tasks-show-task (plist-get att :task) (harness-compose--root)))
+          (t (user-error "Task %s has no session yet, and the task board is not loaded"
+                         (plist-get att :task))))))
 
 ;;;; Undo
 
@@ -1376,7 +1991,7 @@ Return a promise settled once the list is in place."
                   (lambda (err) (harness-log 'warn "compose: listing project files failed: %s" (harness-error-message err))))))
 
 (defun harness-compose-fetch-completions ()
-  "Prefetch project files and skill names for completion."
+  "Prefetch project files, skill names and the project's tasks for completion."
   (let ((buf (current-buffer)))
     (harness-compose-fetch-files)
     (harness-ui-call "_harness/skills/list" (list :cwd (harness-compose--project))
@@ -1385,7 +2000,8 @@ Return a promise settled once the list is in place."
                          (with-current-buffer buf
                            (harness-compose--arrived 'harness-compose--skills
                                                      (mapcar (lambda (s) (plist-get s :name)) skills)))))
-                     #'ignore)))
+                     #'ignore)
+    (harness-compose-fetch-tasks)))
 
 (defun harness-compose--arrived (var value)
   "Set VAR, a completion source of the box, to VALUE.
@@ -1424,34 +2040,81 @@ it once it has."
                                             (ensure-list var))))
                               string pred)))))
 
+(defun harness-compose--space-after-token ()
+  "Put a space after the token just completed before point, unless one follows.
+Typing goes on after it then, rather than against it, which would make
+another word of it."
+  (unless (and (< (point) harness-compose-end) (memq (char-after) '(?\s ?\t ?\n)))
+    (insert " ")))
+
 (defun harness-compose--attach-token (name root)
   "Attach the file the @ token NAME, just completed before point, names.
-The token goes, its file taking its place among the attachments.  A
-project file's name attaches its file; a path (relative to ROOT) only a
-regular file of this machine: a directory stays in the box, for its
-files to complete next."
+The token stays, as the file's reference, and a space after it: NAME
+when it names the file back, else the file's own reference
+\(`harness-compose--file-ref').  An image's token gives way to its
+label, [image 1]; so does the token of a file whose name can be no
+reference, which attaches without one.  A project file's name attaches
+its file; a path (relative to ROOT) only a regular file of this
+machine: a directory stays in the box, for its files to complete next."
   (when-let* ((path (if (harness-compose--path-p name)
                         (harness-compose--local-file name root)
                       (expand-file-name name root))))
     (let* ((end (point))
-           (start (- end (length name) 1)))
-      (when (and (harness-compose-in-p start)
-                 (equal (buffer-substring-no-properties start end) (concat "@" name)))
-        (delete-region start end)))
-    (harness-compose-add-attachment path)))
+           (start (- end (length name) 1))
+           (here (and (harness-compose-in-p start)
+                      (equal (buffer-substring-no-properties start end) (concat "@" name))))
+           (att (harness-compose--file-attachment path))
+           (ref (and here (not (harness-compose--image-attachment-p att))
+                     (harness-compose--file-ref path name))))
+      (cond (ref
+             ;; Completed as another name of the file: that one is its reference.
+             (unless (equal ref name)
+               (delete-region start end)
+               (insert "@" ref))
+             (harness-compose--space-after-token)
+             (setq att (append att (list :ref ref))))
+            (here (delete-region start end)))
+      (when (harness-compose--attach att)
+        (funcall harness-compose-redraw-function)
+        (message "Attached %s" (abbreviate-file-name path))))))
+
+(defun harness-compose--attach-task-token (id)
+  "Attach the task ID, whose @task: token was just completed before point.
+The token stays, as the task's reference, and a space after it."
+  (harness-compose--space-after-token)
+  (harness-compose-attach-task id))
 
 (defun harness-compose-completion-at-point ()
-  "Complete @files and /skills in the box.
+  "Complete @files, @task: ids and /skills in the box.
 An @ completes a project file by part of its name, or any file by its
 path (see `harness-compose--file-table'); a completed file becomes an
-attachment.  A / at the start of the box completes a skill, or a
-command of the box (`harness-compose-commands').  The sigil is what
-starts completion, the way an LSP trigger character does: popups that
-wait for a few characters show right after it."
-  (let ((file (harness-compose--capf-bounds ?@))
-        (skill (harness-compose--capf-bounds ?/))
-        (root (harness-compose--root)))
+attachment, its token staying as its reference.  After @task: the id
+of a task of the project completes, annotated with its title and
+column, and the task chosen becomes an attachment
+\(`harness-compose-attach-task').  A / at the start of the box completes
+a skill, or a command of the box (`harness-compose-commands').  The
+sigil is what starts completion, the way an LSP trigger character does:
+popups that wait for a few characters show right after it."
+  (let* ((file (harness-compose--capf-bounds ?@))
+         (task (and file (harness-compose--task-name-p
+                          (buffer-substring-no-properties (car file) (cdr file)))))
+         (skill (harness-compose--capf-bounds ?/))
+         (root (harness-compose--root)))
     (cond
+     (task
+      ;; A new @task: token lists the tasks again, as one for files does.
+      (unless (eql (car file) harness-compose--tasks-at)
+        (setq harness-compose--tasks-at (car file))
+        (harness-compose-fetch-tasks))
+      (list (+ (car file) (length "task:")) (cdr file) (harness-compose--task-table)
+            :exclusive 'no
+            :company-prefix-length t
+            :annotation-function (harness-compose--task-annotator)
+            :company-kind (lambda (_) 'reference)
+            :exit-function
+            (lambda (id status)
+              (when (memq status '(finished sole))
+                (harness-compose--attach-task-token id)))))
      (file
       ;; A new @ token refreshes the list, so files created since the
       ;; buffer opened show up once the listing returns.
@@ -1531,7 +2194,14 @@ ROOM, in pixels, is how wide the chip may show: the name is shortened
 in the middle as much as that needs, and a thumbnail takes a third of
 it at most.  Without ROOM the name is whole.  The tooltip leads with
 the file's whole path.  The thumbnail and the name drag the file into
-another application (`harness-ui-drag-source')."
+another application (`harness-ui-drag-source').  A task has a chip of
+its own (`harness-compose--task-chip')."
+  (if (plist-get att :task)
+      (harness-compose--task-chip att room)
+    (harness-compose--file-chip att room)))
+
+(defun harness-compose--file-chip (att &optional room)
+  "Return the chip of ATT, a file attached, as `harness-compose--chip' does."
   (let* ((path (plist-get att :path))
          (size (harness-format-bytes (plist-get att :size)))
          (help (harness-ui-one-line
@@ -1549,9 +2219,11 @@ another application (`harness-ui-drag-source')."
                            " ")
                  ""))
          (remove (concat " " (propertize (buttonize "×" (lambda (_) (harness-compose-remove-attachment path)) nil
-                                                    (if (plist-get att :label)
-                                                        "Remove this image, and its token from the text"
-                                                      "Remove this attachment"))
+                                                    (cond ((plist-get att :label)
+                                                           "Remove this image, and its token from the text")
+                                                          ((plist-get att :ref)
+                                                           "Remove this file, and its reference from the text")
+                                                          (t "Remove this attachment")))
                                          'face 'harness-dim-face)))
          ;; An image leads with its token, as the text shows it.
          (token (if (plist-get att :label)
@@ -1572,10 +2244,43 @@ another application (`harness-ui-drag-source')."
              path)
             remove)))
 
+(defun harness-compose--task-chip (att &optional room)
+  "Return the chip of ATT, a task attached, in the list above the box.
+The task's icon, then \"ID · Title (state)\", which a click opens
+\(`harness-compose-open-attachment'), and × removing it, its reference
+with it.  ROOM, in pixels, is how wide the chip may show: the title is
+shortened as much as that needs."
+  (let* ((id (plist-get att :task))
+         (state (plist-get att :state))
+         (help (harness-ui-one-line
+                (string-join (delq nil (list (concat "task " id) (plist-get att :name) state
+                                             (if (plist-get att :session) "mouse-1: open its session"
+                                               "mouse-1: show it on the task board")))
+                             " · ")))
+         (open (lambda (&rest _) (interactive) (harness-compose-open-attachment att)))
+         (head (concat (harness-ui-icon 'harness-icon-task) " "))
+         (remove (concat " " (propertize (buttonize "×" (lambda (_) (harness-compose-remove-attachment att)) nil
+                                                    "Remove this task, and its reference from the text")
+                                         'face 'harness-dim-face)))
+         (label (lambda (title)
+                  (buttonize (concat id " · " title (if state (format " (%s)" state) "")) open nil help)))
+         (title (harness-ui-one-line (or (plist-get att :name) ""))))
+    (concat head
+            (funcall label (if room
+                               (harness-compose--fit title (- room (harness-compose--pixels head)
+                                                              (harness-compose--pixels remove))
+                                                     label)
+                             title))
+            remove)))
+
 (defun harness-compose-open-attachment (att)
-  "Open attachment ATT: a video or a sound in the player, anything else in Emacs."
+  "Open attachment ATT: a video or a sound in the player, anything else in Emacs.
+A task opens its session's chat, or shows its card on the task board
+while it has no session (`harness-compose--open-task')."
   (let ((path (plist-get att :path)))
-    (cond ((not (file-exists-p path)) (user-error "%s is gone" (abbreviate-file-name path)))
+    (cond ((plist-get att :task) (harness-compose--open-task att))
+          ((null path) (user-error "%s is no file to open" (or (plist-get att :name) "This attachment")))
+          ((not (file-exists-p path)) (user-error "%s is gone" (abbreviate-file-name path)))
           ((and (string-match-p "\\`\\(?:video\\|audio\\)/" (or (plist-get att :mime) ""))
                 (fboundp 'harness-ui-media-open))
            (harness-ui-media-open path))
@@ -1699,11 +2404,6 @@ while the download goes on."
   "Redraw the box, through its host."
   (funcall harness-compose-redraw-function))
 
-(defun harness-compose--attached-p (path)
-  "Non-nil when the file PATH is attached."
-  (and path (cl-find (expand-file-name path) harness-compose-attachments
-                     :key (lambda (a) (plist-get a :path)) :test #'equal)))
-
 (defun harness-compose--file-attachment (path &optional mime)
   "Return the attachment of the file PATH, of the MIME type MIME."
   (let ((path (expand-file-name path)))
@@ -1711,12 +2411,14 @@ while the download goes on."
           :mime (or mime (harness-compose--mime-of path))
           :name (file-name-nondirectory path))))
 
-(defun harness-compose--attach (att)
-  "Add the attachment ATT, unless its file is attached already; no redraw.
-An image gets a label, its token going into the box where point is
-\(`harness-compose--label').  Return non-nil when it was added."
-  (unless (harness-compose--attached-p (plist-get att :path))
-    (setq harness-compose-attachments (append harness-compose-attachments (list (harness-compose--label att))))
+(defun harness-compose--attach (att &optional at-end)
+  "Add the attachment ATT, unless its file or its task is attached already.
+No redraw.  Its token goes into the box where point is, or with AT-END
+at its end (`harness-compose--label'): an image's label, a file's or a
+task's @ reference.  Return non-nil when it was added."
+  (unless (harness-compose--attached-p att)
+    (setq harness-compose-attachments
+          (append harness-compose-attachments (list (harness-compose--label att at-end))))
     t))
 
 (defun harness-compose--downloads-directory ()
@@ -2244,8 +2946,9 @@ a yank of media, run `yank-pop' as it runs without the box."
              (label (cl-some (lambda (a) (plist-get a :label)) gone)))
         (setq harness-compose-attachments (cl-remove-if (lambda (a) (memq a gone)) harness-compose-attachments))
         (dolist (a gone)
-          (when (and (plist-get a :label) (not (equal (plist-get a :label) label)))
-            (harness-compose--delete-tokens (plist-get a :label))))
+          (when-let* ((token (and (not (and label (equal (plist-get a :label) label)))
+                                  (harness-compose--att-token a))))
+            (harness-compose--delete-tokens token)))
         (setq harness-compose--yanked (list :paths (harness-compose--attach-captures
                                                     (list (if label (append entry (list :label label)) entry))
                                                     t)
@@ -2253,7 +2956,7 @@ a yank of media, run `yank-pop' as it runs without the box."
               this-command 'harness-compose-yank)
         ;; A capture attached already has a token of its own.
         (when (and label (not (harness-compose--labelled label)))
-          (harness-compose--delete-tokens label)
+          (harness-compose--delete-tokens (harness-compose--image-token label))
           (harness-compose-redraw))
         (message "Media ring %d/%d: %s%s" (1+ index) (length entries) (plist-get entry :name)
                  (if (= 1 (length entries)) " (the only capture)" ""))))))
@@ -2351,7 +3054,7 @@ Runs from `post-command-hook'."
     (error (harness-log 'warn "compose: following the token failed: %S" err))))
 
 ;; Boxes set up before a reload follow their tokens and fit their
-;; attachments to their windows too, keep their image tokens and
+;; attachments to their windows too, keep the tokens of their
 ;; attachments in step and their undo entries lined up, and those kept
 ;; at the bottom count their changes.  They quote with compose-quote too:
 ;; in the box, and finding the message at point as their host's function
@@ -2376,6 +3079,7 @@ Runs from `post-command-hook'."
 
 (add-to-list 'completion-category-defaults '(harness-compose-file (styles flex)))
 (add-to-list 'completion-category-defaults '(harness-compose-skill (styles basic flex)))
+(add-to-list 'completion-category-defaults '(harness-compose-task (styles basic substring)))
 
 (harness-define-module 'ui-compose
   :doc "The compose box shared by chat buffers and the task board."

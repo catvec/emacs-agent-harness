@@ -21,10 +21,12 @@
 ;;
 ;; The banner's options work as a question's do: each names its key, the
 ;; keys answer while point is on the banner, and a click answers from
-;; anywhere.  Choosing runs `handoff/switch' (`handoff/switch-all' for a
-;; batch) through the UI connection, and the banner goes away.  A batch
-;; names the sessions that lose their conversation and says how many
-;; change in all.
+;; anywhere.  In the compose box the keys type; C-c . and a key press it
+;; on the banner from there (`harness-compose-panel-key'), which the
+;; banner's last line says.  Choosing runs `handoff/switch'
+;; (`handoff/switch-all' for a batch) through the UI connection, and the
+;; banner goes away.  A batch names the sessions that lose their
+;; conversation and says how many change in all.
 ;;
 ;; A harness with no chat buffer to show (a switch asked for outside the
 ;; UI, or over ACP) cannot use the banner; the minibuffer question of
@@ -47,6 +49,7 @@
 (declare-function harness-chat--kbd "harness-ui-chat" (key))
 (declare-function harness-chat--face "harness-ui-chat" (string face))
 (declare-function harness-chat--buffer-for "harness-ui-chat" (sid))
+(declare-function harness-compose-panel-hint "harness-ui-compose" (key))
 
 (defgroup harness-ui-switch nil
   "Choosing how to hand a conversation over when the model changes."
@@ -216,6 +219,15 @@ the cache panel draws it again the moment the cache lapses."
                  "\n")))
      choices)))
 
+(defun harness-ui-switch--box-hint ()
+  "Return the line saying how to press an option's key from the compose box.
+The options' keys type in the box: its key for a panel's keys does what
+they do (`harness-compose-panel-hint'), the first option's key the
+example."
+  (propertize (concat "   " (harness-compose-panel-hint (char-to-string (car (car harness-ui--handoff-choices))))
+                      "\n")
+              'wrap-prefix "   "))
+
 (defun harness-ui-switch--banner (prompt)
   "Return the banner asking how to hand over, as PROMPT says."
   (let* ((buffer (current-buffer))
@@ -227,8 +239,11 @@ the cache panel draws it again the moment the cache lapses."
                   "\n"
                   (harness-ui-switch--rows (harness-ui-switch--facts prompt))
                   "\n"
-                  (harness-ui-switch--options buffer prompt))))
-    (add-text-properties 0 (length string) (list 'harness-ui-switch-panel t) string)
+                  (harness-ui-switch--options buffer prompt)
+                  (harness-ui-switch--box-hint))))
+    ;; A panel of the compose box too: C-c . presses its keys from there.
+    (add-text-properties 0 (length string) (list 'harness-ui-switch-panel t 'harness-compose-panel 'switch)
+                         string)
     (harness-ui-with-keymap string (harness-ui-switch--keymap buffer prompt))
     (harness-chat--face string 'harness-chat-switch-face)))
 

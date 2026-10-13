@@ -714,15 +714,24 @@ While a compaction the panel started runs, the line says so."
           (case-fold-search nil)
           (chosen nil))
       ;; Nobody to ask (no session here): the kinds, and the free one's cost.
+      ;; The line under them says how to press a key from the compose box.
       (should (equal (concat "   Compact it first   b  Brief summary   s  Summary   t  Transcript file (free)"
-                             "   f  Fresh start (free)   c  Cut old context (free)\n")
+                             "   f  Fresh start (free)   c  Cut old context (free)\n"
+                             "   from the box: C-c . b\n")
                      (substring-no-properties (harness-ui-cache--offer state))))
       (setq harness-ui-cache--estimate (cons state harness-ui-cache-test--estimate))
       (let ((line (harness-ui-cache--offer state)))
         (should (equal (concat "   Compact it first   b  Brief summary (~$0.011)   s  Summary (~$0.463)"
                                "   t  Transcript file (free)   f  Fresh start (free)"
-                               "   c  Cut old context (free)\n")
+                               "   c  Cut old context (free)\n"
+                               "   from the box: C-c . b\n")
                        (substring-no-properties line)))
+        ;; Both lines are a panel of the compose box (`harness-compose-panel-key'),
+        ;; and the keys answer on either.
+        (should (cl-loop for i from 0 below (length line)
+                         always (eq 'cache (get-text-property i 'harness-compose-panel line))))
+        (should (eq (lookup-key (get-text-property 0 'keymap line) "t")
+                    (lookup-key (get-text-property (string-match "from the box" line) 'keymap line) "t")))
         ;; Each key on the line compacts as its kind, and so does a click.
         (cl-letf (((symbol-function 'harness-ui-cache--compact) (lambda (_buffer kind) (push kind chosen))))
           (dolist (key '("b" "s" "t" "f" "c"))
@@ -1061,6 +1070,40 @@ the conversation is compacted, as nothing of it is cached any more."
       (harness-test-wait (lambda () (string-match-p "context compacted into a transcript file"
                                                     (harness-ui-cache-test--text buffer)))
                          5 "the compaction in the chat"))))
+
+(ert-deftest harness-ui-cache-panel-keys-can-be-pressed-from-the-box ()
+  "The offer's keys type in the compose box; C-c . and a key press it there.
+The offer says so under its buttons.  The draft stays in the box and so
+does point, at the offset it had, though the tail is drawn again."
+  (harness-ui-cache-test-with
+    (harness-test-load-module 'compaction)
+    (harness-test-load-module 'ui-compact)
+    (let* ((harness-cache-ttl 1)
+           (sid (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir) :model "demo:scripted")
+                           :id))
+           (buffer (harness-ui-cache-test--open sid)))
+      (harness-ui-cache-test--send buffer "first")
+      (harness-test-wait (lambda () (harness-ui-cache-test--shows-p buffer)) 10 "the cache panel")
+      (should (string-match-p "\n   from the box: C-c \\. b\n" (harness-ui-cache-test--text buffer)))
+      (with-current-buffer buffer
+        (goto-char harness-compose-end)
+        (insert "draft")
+        (goto-char (+ harness-compose-start 2))
+        ;; Typed in the box, t types.
+        (execute-kbd-macro "t")
+        (should (equal "drtaft" (harness-compose-text)))
+        (goto-char (+ harness-compose-start 2))
+        ;; Pressed from it, t compacts as a transcript file.
+        (execute-kbd-macro (kbd "C-c . t"))
+        (should (string-match-p "\n   Compacting the conversation into a transcript file…\n"
+                                (harness-ui-cache-test--text buffer)))
+        (should (equal "drtaft" (harness-compose-text)))
+        (should (= (point) (+ harness-compose-start 2))))
+      (harness-test-wait (lambda () (not (harness-ui-cache-test--shows-p buffer))) 5 "the panel to go")
+      (should (equal "transcript"
+                     (harness-node-compaction-kind
+                      (cl-find 'compaction (harness-call 'session/nodes sid) :key (lambda (n) (plist-get n :kind))))))
+      (with-current-buffer buffer (should (equal "drtaft" (harness-compose-text)))))))
 
 (ert-deftest harness-ui-cache-timer-goes-with-the-buffer ()
   "Killing a chat buffer stops its cache timer."

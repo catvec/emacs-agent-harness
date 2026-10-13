@@ -631,6 +631,115 @@ VALUE may have travelled over JSON, as a string."
                  ((and value (symbolp value) (not (memq value '(t :false :null)))) value))))
     (and (memq s '(done undone)) s)))
 
+;;;; Messages
+;;
+;; A message is content blocks: text, images, files, and the text of an
+;; attachment such as a task.  The compose box's attachments become
+;; blocks through `harness-attachments-to-blocks', and the node that
+;; records a user message reads as the text `harness-blocks-text' makes
+;; of its blocks, keeping those that are not text.  The agent records
+;; messages so (harness-agent.el); a UI that draws a message before it
+;; goes -- a queued one -- reads it as the same node
+;; (`harness-queued-message-node'), so it looks as it will once sent.
+
+(defun harness-image-label (block)
+  "Return the label of image BLOCK (image 1), or nil when it has none.
+The compose box labels the images it attaches and puts their tokens,
+[image 1], in the message's text."
+  (let ((label (and (equal (plist-get block :type) "image") (plist-get block :label))))
+    (and (stringp label) (not (string-empty-p label)) label)))
+
+(defun harness-names-file-p (text name)
+  "Non-nil when TEXT holds an @ reference to a file called NAME.
+That is a word of its own starting with @, whose last part is NAME:
+@notes.el, @lisp/notes.el or @~/work/notes.el, but for punctuation
+ending a sentence or a bracket after it, as the compose box reads one."
+  (and (stringp name) (not (string-empty-p name))
+       (let ((case-fold-search nil))
+         (string-match-p (concat "\\(?:\\`\\|[ \t\n]\\)@\\(?:[^ \t\n]*/\\)?" (regexp-quote name)
+                                 "[]),.;:!?'\"`>}]*\\(?:[ \t\n]\\|\\'\\)")
+                         text))))
+
+(defun harness-attached-text-p (block)
+  "Non-nil when BLOCK is the text of an attachment, such as a task attached.
+The compose box marks it (`harness-compose-attachment-block'), and so does
+`harness-attachments-to-blocks'."
+  (and (equal (plist-get block :type) "text") (plist-get block :attached)))
+
+(defun harness-blocks-text (blocks)
+  "Return the plain text of BLOCKS for a transcript node.
+An image reads [image], or its token, [image 1], when it has a label;
+nothing when the text holds its token already, as the compose box's
+does.  A file reads @ and its name, nothing when the text has an @
+reference to it already, as the compose box's does.  The text of an
+attachment (`harness-attached-text-p') follows the rest, a paragraph
+apart, rather than running on from the user's words."
+  (let* ((attached (cl-remove-if-not #'harness-attached-text-p blocks))
+         (blocks (cl-remove-if #'harness-attached-text-p blocks))
+         (text (mapconcat (lambda (b) (if (equal (plist-get b :type) "text") (or (plist-get b :text) "") ""))
+                          blocks " "))
+         (words (mapconcat
+                 #'identity
+                 (delq nil (mapcar (lambda (b)
+                                     (pcase (plist-get b :type)
+                                       ("text" (plist-get b :text))
+                                       ("file" (let ((name (file-name-nondirectory (or (plist-get b :path) ""))))
+                                                 (unless (harness-names-file-p text name)
+                                                   (format "@%s" name))))
+                                       ("image" (let ((label (harness-image-label b)))
+                                                  (cond ((null label) "[image]")
+                                                        ((string-search (format "[%s]" label) text) nil)
+                                                        (t (format "[%s]" label)))))
+                                       ("audio" "[audio]")
+                                       (_ "")))
+                                   blocks))
+                 " ")))
+    (mapconcat #'identity
+               (cl-remove-if #'string-empty-p
+                             (cons words (delq nil (mapcar (lambda (b) (plist-get b :text)) attached))))
+               "\n\n")))
+
+(defun harness-attachments-to-blocks (attachments)
+  "Turn ATTACHMENTS, attachment plists, into content blocks.
+An image keeps its `:label', which its token in the text names.  An
+attachment that carries its own `:text' and no `:path' -- a task the
+user attached, say, which is described rather than stored in a file --
+is that text as a text block, none when the text is blank, marked
+`:attached' so that the transcript sets it apart from the user's words
+\(`harness-blocks-text')."
+  (delq nil
+        (mapcar (lambda (a)
+                  (let ((mime (or (plist-get a :mime) "")))
+                    (cond ((and (stringp (plist-get a :text)) (null (plist-get a :path)))
+                           (unless (harness-string-blank-p (plist-get a :text))
+                             (list :type "text" :text (plist-get a :text) :attached t)))
+                          ((string-prefix-p "image/" mime)
+                           (append (list :type "image" :mime mime :path (plist-get a :path))
+                                   (and (stringp (plist-get a :label)) (list :label (plist-get a :label)))))
+                          ((string-prefix-p "audio/" mime)
+                           (list :type "audio" :mime mime :path (plist-get a :path)))
+                          (t (list :type "file" :path (plist-get a :path) :size (plist-get a :size)
+                                   :mime mime :name (plist-get a :name))))))
+                attachments)))
+
+(defun harness-queued-message-node (item)
+  "Return the user node queued ITEM will be once sent, to draw it before.
+ITEM is a message waiting in a session's queue (`session/queue'): its
+`:text', then its `:attachments' as blocks, read as the agent records a
+message (`harness-blocks-text'), and its `:from' when the user did not
+write it.  The node has ITEM's `:id'.  The images of messages sent
+together are numbered across them as they go (`agent/send-queue'):
+ITEM alone keeps its own numbers, as the user wrote them."
+  (let* ((text (or (plist-get item :text) ""))
+         (blocks (append (unless (harness-string-blank-p text) (list (list :type "text" :text text)))
+                         (harness-attachments-to-blocks (plist-get item :attachments))))
+         (from (plist-get item :from)))
+    (append (list :id (plist-get item :id) :kind 'user :content (harness-blocks-text blocks)
+                  ;; As the agent's node: the blocks, unless they are all text.
+                  :blocks (unless (cl-every (lambda (b) (equal (plist-get b :type) "text")) blocks)
+                            blocks))
+            (and (harness-sender-kind from) (list :meta (list :from from))))))
+
 ;;;; Paths
 
 (defun harness-path-normalize (path)

@@ -152,6 +152,13 @@
             (should (string-match-p (regexp-quote option) text)))
           (dolist (key '("c" "n" "t" "s" "q"))
             (should (string-match-p (format "[ ]%s[ ]" key) text)))
+          ;; The keys type in the compose box: the banner's last line says
+          ;; how to press one from there, and all of it is a panel of the box.
+          (should (string-match-p "\n   from the box: C-c \\. c\n" text))
+          (let ((start (harness-ui-switch--banner-pos)))
+            (should (cl-loop for i from start
+                               below (next-single-property-change start 'harness-ui-switch-panel nil (point-max))
+                             always (eq 'switch (get-text-property i 'harness-compose-panel)))))
           ;; The banner stands out with its own background.
           (should (cl-some (lambda (f) (eq f 'harness-chat-switch-face))
                            (let ((faces (get-text-property heading 'face)))
@@ -183,6 +190,33 @@
                          5 "the banner to go")
       (should (equal "demo:scripted" (plist-get (harness-call 'session/get sid) :model)))
       (should-not (cl-find-if #'harness-node-handoff (harness-call 'session/nodes sid))))))
+
+(ert-deftest harness-ui-switch-banner-keys-can-be-pressed-from-the-box ()
+  "The banner's keys type in the compose box; C-c . and a key press it there.
+The draft stays in the box and so does point, at the offset it had,
+though the banner goes and the tail is drawn again."
+  (harness-ui-switch-test-with
+    (let* ((sid (harness-ui-switch-test--session))
+           (chat (harness-ui-switch-test--chat sid)))
+      (harness-ui-switch-test--choose-hosted (lambda () (harness-set-model sid)))
+      (harness-ui-switch-test--wait-text chat "Switch model")
+      (with-current-buffer chat
+        (goto-char harness-compose-end)
+        (insert "draft")
+        (goto-char (+ harness-compose-start 2))
+        ;; Typed in the box, q types.
+        (execute-kbd-macro "q")
+        (should (equal "drqaft" (harness-compose-text)))
+        (should (harness-ui-switch--banner-pos))
+        (goto-char (+ harness-compose-start 2))
+        ;; Pressed from it, q cancels the switch.
+        (execute-kbd-macro (kbd "C-c . q")))
+      (harness-test-wait (lambda () (not (string-match-p "Switch model" (harness-ui-switch-test--text chat))))
+                         5 "the banner to go")
+      (should (equal "demo:scripted" (plist-get (harness-call 'session/get sid) :model)))
+      (with-current-buffer chat
+        (should (equal "drqaft" (harness-compose-text)))
+        (should (= (point) (+ harness-compose-start 2)))))))
 
 (ert-deftest harness-ui-switch-no-chat-asks-in-the-minibuffer ()
   "Without a chat buffer the switch asks in the minibuffer, as before."
