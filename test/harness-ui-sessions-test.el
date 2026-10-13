@@ -3104,6 +3104,149 @@ it opens the list as ever."
         (should (equal '("busy") (harness-ui-sessions-test--shown)))
         (should (equal " [Pause] [project]" (harness-ui-sessions-test--mode-line)))))))
 
+;;;; The footer
+
+(defun harness-ui-sessions-test--after-rows ()
+  "Return the text of the list buffer after its last line of a session."
+  (with-current-buffer harness-ui-sessions--buffer-name
+    (let ((end (point-max)))
+      (while (and (> end (point-min)) (not (get-text-property (1- end) 'tabulated-list-id)))
+        (setq end (1- end)))
+      (buffer-substring-no-properties end (point-max)))))
+
+(ert-deftest harness-ui-sessions-footer-goes-under-the-last-row ()
+  "What the footer functions return comes once, in order, under the last row.
+After the line saying what that session waits on, when it is blocked.
+A function that moves point or signals an error spoils nothing, and
+the footer is no session's: RET and the row commands find none there."
+  (harness-ui-sessions-test-with-repo
+    (harness-ui-sessions-test--add "busy" root :status "running" :updated 300)
+    (harness-ui-sessions-test--add "idle" root :updated 200)
+    (let* ((seen nil)
+           (harness-ui-sessions-footer-functions
+            (list (lambda () "FIRST\n")
+                  (lambda () nil)
+                  (lambda () "")
+                  (lambda () (error "A broken footer"))
+                  (lambda () (push (current-buffer) seen) (goto-char (point-min)) "MOVED\n")
+                  (lambda () "SECOND"))))
+      (let ((default-directory root)) (harness-sessions))
+      (with-current-buffer harness-ui-sessions--buffer-name
+        ;; Once, whole lines, in order, under the last row.
+        (should (equal "FIRST\nMOVED\nSECOND\n" (harness-ui-sessions-test--after-rows)))
+        (should (equal '("busy" "idle") (mapcar #'car tabulated-list-entries)))
+        ;; Called in the list's buffer, each time it was printed.
+        (should seen)
+        (should (cl-every (lambda (buffer) (eq buffer (current-buffer))) seen))
+        (should (= 1 (save-excursion (goto-char (point-min)) (how-many "FIRST"))))
+        (should (get-text-property (- (point-max) (length "FIRST\nMOVED\nSECOND\n") 1) 'tabulated-list-id))
+        ;; No session's.
+        (goto-char (point-max))
+        (forward-line -1)
+        (should (looking-at "SECOND"))
+        (should-not (tabulated-list-get-id))
+        (should-not (get-text-property (point) 'tabulated-list-entry))
+        (should-error (harness-ui-sessions-open) :type 'user-error)
+        (should-error (harness-ui-sessions-cancel) :type 'user-error))
+      ;; A blocked session last: its request line first, then the footer,
+      ;; which the permission keys do not reach.
+      (harness-ui-sessions-test--blocked "asks" root "permission" :updated 100)
+      (harness-ui-sessions--redraw)
+      (with-current-buffer harness-ui-sessions--buffer-name
+        (should (equal '("busy" "idle" "asks") (mapcar #'car tabulated-list-entries)))
+        (should (equal "    [Allow] [Deny]  needs your permission · Bash: rm -rf build/"
+                       (harness-ui-sessions-test--line "asks")))
+        (should (equal "FIRST\nMOVED\nSECOND\n" (harness-ui-sessions-test--after-rows)))
+        (should (= 1 (save-excursion (goto-char (point-min)) (how-many "FIRST"))))
+        (let ((footer (- (point-max) (length "FIRST\nMOVED\nSECOND\n"))))
+          (should (equal "asks" (tabulated-list-get-id (1- footer))))
+          (should-not (get-text-property footer 'keymap))
+          (should-not (tabulated-list-get-id footer)))))))
+
+(ert-deftest harness-ui-sessions-footer-follows-the-last-row-of-a-sort ()
+  "A column's sort prints the list without `harness-ui-sessions--print'.
+The footer is under the last row of the order the rows were sorted
+into, each time, and still once."
+  (harness-ui-sessions-test-with-repo
+    (harness-ui-sessions-test--add "alpha" root :updated 100)
+    (harness-ui-sessions-test--add "beta" root :updated 300)
+    (harness-ui-sessions-test--add "gamma" root :updated 200)
+    (let ((harness-ui-sessions-footer-functions (list (lambda () "FOOTER\n"))))
+      (let ((default-directory root)) (harness-sessions))
+      (with-current-buffer harness-ui-sessions--buffer-name
+        (cl-flet ((order ()
+                    ;; The rows in the buffer, top to bottom, and what is under the last.
+                    (let ((ids nil))
+                      (goto-char (point-min))
+                      (while (not (eobp))
+                        (when-let* ((id (tabulated-list-get-id)))
+                          (unless (equal id (car ids)) (push id ids)))
+                        (forward-line 1))
+                      (nreverse ids))))
+          ;; The list's own order: the most recently updated first.
+          (should (equal '("beta" "gamma" "alpha") (order)))
+          (should (equal "FOOTER\n" (harness-ui-sessions-test--after-rows)))
+          ;; Sorted by name, then back to front.
+          (tabulated-list-sort 1)
+          (should (equal '("alpha" "beta" "gamma") (order)))
+          (should (equal "FOOTER\n" (harness-ui-sessions-test--after-rows)))
+          (should (= 1 (save-excursion (goto-char (point-min)) (how-many "FOOTER"))))
+          (tabulated-list-sort 1)
+          (should (equal '("gamma" "beta" "alpha") (order)))
+          (should (equal "FOOTER\n" (harness-ui-sessions-test--after-rows)))
+          (should (= 1 (save-excursion (goto-char (point-min)) (how-many "FOOTER"))))
+          ;; The footer follows the last of a print, not of the one before.
+          (should (equal "alpha" (tabulated-list-get-id (- (point-max) (length "FOOTER\n") 1)))))))))
+
+(ert-deftest harness-ui-sessions-footer-shows-with-no-row ()
+  "The footer shows when no session does, under the banner of the blocked
+filter, if that is on."
+  (harness-ui-sessions-test-with-repo
+    (harness-ui-sessions-test--add "busy" root :status "running")
+    (let ((harness-ui-sessions-footer-functions (list (lambda () "FOOTER\n"))))
+      (let ((default-directory root)) (harness-sessions))
+      (with-current-buffer harness-ui-sessions--buffer-name
+        (should (equal "FOOTER\n" (harness-ui-sessions-test--after-rows)))
+        ;; Nothing the filter lets through.
+        (harness-ui-sessions-filter "nothing like it")
+        (should-not (harness-ui-sessions-test--shown))
+        (should (equal "FOOTER\n" (harness-ui-sessions-test--text)))
+        (should-not (tabulated-list-get-id (point-min)))
+        ;; With the banner of the blocked filter above it.
+        (harness-ui-sessions-toggle-blocked)
+        (should (string-match-p
+                 "\\` .+ No session waits for you in this project matching /nothing like it  \\[Show all\\] b\nFOOTER\n\\'"
+                 (harness-ui-sessions-test--text)))
+        ;; Rows come back, and the footer goes under them.
+        (harness-ui-sessions-filter "")
+        (harness-ui-sessions-toggle-blocked)
+        (should (equal '("busy") (harness-ui-sessions-test--shown)))
+        (should (equal "FOOTER\n" (harness-ui-sessions-test--after-rows)))))))
+
+(ert-deftest harness-ui-sessions-redraw-prints-the-list-again ()
+  "`harness-ui-sessions-redraw' draws the footer anew, each window keeping
+its point on its session, and does nothing while there is no list."
+  (harness-ui-sessions-test-with-repo
+    (let* ((words "one\n")
+           (harness-ui-sessions-footer-functions (list (lambda () words))))
+      (harness-ui-sessions-redraw)
+      (should-not (get-buffer harness-ui-sessions--buffer-name))
+      (harness-ui-sessions-test--add "busy" root :updated 200)
+      (harness-ui-sessions-test--add "idle" root :updated 100)
+      (let ((default-directory root)) (harness-sessions))
+      (with-current-buffer harness-ui-sessions--buffer-name
+        (harness-ui-sessions-test--goto "idle")
+        (should (equal "one\n" (harness-ui-sessions-test--after-rows)))
+        (setq words "two\nlines\n")
+        ;; Not by itself: the list is drawn again when asked to be.
+        (should (equal "one\n" (harness-ui-sessions-test--after-rows)))
+        (harness-ui-sessions-redraw)
+        (should (equal "two\nlines\n" (harness-ui-sessions-test--after-rows)))
+        (should (equal "idle" (tabulated-list-get-id)))
+        (setq words nil)
+        (harness-ui-sessions-redraw)
+        (should (equal "" (harness-ui-sessions-test--after-rows)))))))
+
 ;;;; The fullscreen layout
 
 (ert-deftest harness-ui-sessions-is-an-overview ()

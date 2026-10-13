@@ -1652,6 +1652,66 @@ the buffer -- and laid out on every redisplay -- until then."
         (should-not (line))
         (with-current-buffer buf (should-not harness-chat--activity))))))
 
+(ert-deftest harness-ui-chat-activity-line-stands-under-the-top-of-the-tail ()
+  "The activity line goes under what the top functions draw, above the rest.
+Its overlay sits where that text ends, through renders of the tail and
+blocks appended to the transcript or drawn again.  Once nothing draws
+there it is at the end of the transcript, as it was before the hook."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid))
+           (top "TOP LINE\n"))
+      (with-current-buffer buf
+        (cl-flet* ((place ()
+                     (let ((ov harness-chat--activity-overlay))
+                       (and ov (overlay-buffer ov) (= (overlay-start ov) (overlay-end ov))
+                            (overlay-start ov))))
+                   (end () (marker-position harness-chat--transcript-end))
+                   (under () (+ (end) (length top)))
+                   (line () (harness-ui-chat-test-activity-line buf)))
+          ;; Nothing above it: at the end of the transcript.
+          (harness-ui-chat-test-set-status buf "running")
+          (should (line))
+          (should (= (end) (place)))
+          ;; Something drawn there: the line goes under it.
+          (add-hook 'harness-chat-top-functions (lambda () top) nil t)
+          (harness-chat--render-tail)
+          (should (line))
+          (should (get-text-property (end) 'harness-chat-top))
+          (should (= (under) (place)))
+          ;; Nothing else in the tail: right above the box.
+          (should (= (under) (overlay-start harness-compose-overlay)))
+          ;; Above the todo list, which comes after it.
+          (harness-call 'session/set-todos sid '((:id "1" :text "Survey the project" :status "in-progress")))
+          (harness-test-wait (lambda () harness-chat--todos) 5 "the todo list to show")
+          (should (< (under) (harness-ui-chat-test-find buf "Todo list") harness-compose-start))
+          (should (= (under) (place)))
+          (should (line))
+          ;; Through another render, a block appended and one drawn again,
+          ;; and as the line itself is drawn again.
+          (harness-chat--render-tail)
+          (should (= (under) (place)))
+          (harness-chat--apply-update (list :sessionUpdate "_harness/node"
+                                            :node (list :id "n-a" :kind "assistant" :content "Done")))
+          (should (= (under) (place)))
+          (harness-chat--rerender (gethash "n-a" harness-chat--blocks))
+          (should (= (under) (place)))
+          (harness-chat--refresh-activity)
+          (should (= (under) (place)))
+          (should (line))
+          ;; The line is one overlay: no second one was left behind.
+          (should (= 1 (length (cl-remove-if-not (lambda (ov) (overlay-get ov 'harness-chat-activity))
+                                                  (overlays-in (point-min) (point-max))))))
+          ;; Nothing drawn there any more: back at the end of the transcript.
+          (setq-local harness-chat-top-functions nil)
+          (harness-chat--render-tail)
+          (should-not (text-property-any (point-min) (point-max) 'harness-chat-top t))
+          (should (= (end) (place)))
+          (harness-chat--apply-update (list :sessionUpdate "_harness/node"
+                                            :node (list :id "n-b" :kind "assistant" :content "More")))
+          (should (= (end) (place)))
+          (should (line)))))))
+
 (ert-deftest harness-ui-chat-note-under-a-running-call ()
   "A running call shows the note the activity carries for it.
 The note goes under the call's own block -- a sub-agent's work, the
@@ -4299,6 +4359,59 @@ buttons in it work.  Clearing the hook takes the panel away again."
         (setq-local harness-chat-panel-functions nil)
         (harness-chat--render-tail)
         (should-not (harness-ui-chat-test-find buf "review banner"))))))
+
+(ert-deftest harness-ui-chat-top-functions-draw-first-in-the-tail ()
+  "A buffer-local top function puts its lines first below the transcript.
+They come before the request waiting for you, the todo list and the
+panels, read-only and marked, on the window's own background rather
+than the panel's.  A string without a final newline gets one, nil and
+an empty string add nothing, a function that signals an error draws
+nothing and takes no other line nor the box with it, and clearing the
+hook takes the lines away."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid)))
+      (harness-call 'session/set-todos sid '((:id "1" :text "Survey the project" :status "in-progress")))
+      (harness-call 'session/pending-add sid
+                    (list :id "pre" :kind 'permission
+                          :payload (list :tool "bash" :title "Bash: echo" :kind 'exec
+                                         :input '(:command "echo"))))
+      (harness-test-wait (lambda () (with-current-buffer buf (and harness-chat--todos harness-chat--pending)))
+                         5 "the todo list and the request to show")
+      (with-current-buffer buf
+        (cl-flet ((start (text) (- (harness-ui-chat-test-find buf text) (length text))))
+          ;; Nothing marks the buffer while no function draws.
+          (should-not (text-property-any (point-min) (point-max) 'harness-chat-top t))
+          (add-hook 'harness-chat-top-functions (lambda () "TOP LINE\n") t t)
+          (add-hook 'harness-chat-top-functions (lambda () nil) t t)
+          (add-hook 'harness-chat-top-functions (lambda () "") t t)
+          (add-hook 'harness-chat-top-functions (lambda () (error "A broken top")) t t)
+          (add-hook 'harness-chat-top-functions (lambda () "LAST LINE") t t)
+          (add-hook 'harness-chat-panel-functions (lambda () " a panel\n") nil t)
+          (harness-chat--render-tail)
+          (let* ((top (start "TOP LINE"))
+                 (end (+ (start "LAST LINE") (length "LAST LINE\n"))))
+            ;; First below the transcript, whole lines, in order.
+            (should (= top (marker-position harness-chat--transcript-end)))
+            (should (equal "TOP LINE\nLAST LINE\n" (buffer-substring-no-properties top end)))
+            ;; All of it marked and read-only, and not a character more.
+            (should-not (text-property-not-all top end 'harness-chat-top t))
+            (should-not (text-property-not-all top end 'read-only t))
+            (should-not (get-text-property end 'harness-chat-top))
+            (should-not (get-text-property (1- top) 'harness-chat-top))
+            ;; No background of its own, where a panel has its colour.
+            (should-not (harness-ui-chat-test-face-at top 'harness-chat-panel-face))
+            (should (harness-ui-chat-test-face-at (start " a panel") 'harness-chat-panel-face))
+            ;; The request, the todo list and the panel come after, then the box.
+            (should (< end (start "Permission") (start "Todo list") (start " a panel")
+                       harness-compose-start)))
+          ;; Clearing the hook takes the lines away; the rest stays.
+          (setq-local harness-chat-top-functions nil)
+          (harness-chat--render-tail)
+          (should-not (harness-ui-chat-test-find buf "TOP LINE"))
+          (should-not (text-property-any (point-min) (point-max) 'harness-chat-top t))
+          (should (< (marker-position harness-chat--transcript-end) (start "Permission")
+                     (start "Todo list") harness-compose-start)))))))
 
 (ert-deftest harness-ui-chat-send-function-takes-the-message ()
   "A buffer-local send function takes the box's message, not the session.

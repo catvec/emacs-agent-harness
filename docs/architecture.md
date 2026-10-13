@@ -8148,15 +8148,24 @@ less]`.  Which requests show whole is the request's state, like the
 diagram shown, so the chat and the popout agree, and point stays on
 the toggle through the redraw.  A module hosted by a chat buffer can
 put a read-only panel of its own above the box with
-`harness-chat-panel-functions` (the companion pet's figure goes there
-too; a function cannot move point, where its panel goes) and take the
-box's message with `harness-chat-send-function`.  A module can draw a
-kind of request its own way: `harness-ui-pending-panel-functions` is
-tried first for every request record, in the chat and in the popout,
-and a function that inserts the panel (decorating it with
-`harness-ui-pending-decorate`, the request's id and a keymap) returns
-non-nil, so the ordinary panel is not drawn too;
-`harness-ui-pending-session` names the session of the buffer drawing.
+`harness-chat-panel-functions` (a function cannot move point, where its
+panel goes) and take the box's message with `harness-chat-send-function`.
+It can also draw lines first in the chat's tail with
+`harness-chat-top-functions` (the companion pet's figure goes there):
+right below the transcript, above the activity line, the pending
+requests, the queue, the todo list and the panels, so what they draw
+stands on whichever of those shows first, and on the compose box when
+none does.  The strings go as they are, whole lines, read-only and
+without the panel's background (`harness-chat--insert-top`, which marks
+them with the text property `harness-chat-top`); a function that signals
+draws nothing, as decoration must not take the box down with it.  A
+module can draw a kind of request its own way:
+`harness-ui-pending-panel-functions` is tried first for every request
+record, in the chat and in the popout, and a function that inserts the
+panel (decorating it with `harness-ui-pending-decorate`, the request's
+id and a keymap) returns non-nil, so the ordinary panel is not drawn
+too; `harness-ui-pending-session` names the session of the buffer
+drawing.
 Cold-cache question (`harness-ui-cowboy`, module `ui-cowboy`): the
 harness's question about a cold prompt cache (see cowboy) as a panel of
 its own, in the switch banner's amber (`harness-ui-cowboy-face`): a
@@ -8313,7 +8322,13 @@ tool call (with the size of its input so far), running one (with the
 last line it reported), checking its permission, or compacting, behind
 a spinner.  It is an overlay string redrawn by the spinner's timer, so
 it ticks without editing the buffer; a blocked session shows its panel
-instead.  The mode line's spinner gives the phase only in its tooltip:
+instead.  The overlay sits, empty, where the line goes
+(`harness-chat--activity-position`): the end of the transcript, or,
+where `harness-chat-top-functions` drew something (the pet's figure,
+which then stands on the line), the end of that text, which the property
+`harness-chat-top` marks.  A render of the tail takes the overlay off
+its place and `harness-chat--refresh-activity` puts it back.  The mode
+line's spinner gives the phase only in its tooltip:
 this line is where it shows.  It has a background of
 its own (`harness-chat-activity-face`) and a blank line under it, which
 set it apart from the compose box: an overlay string is drawn over the
@@ -9317,7 +9332,7 @@ Companion pet (`harness-ui-pet`, `C-c h z`, `harness-pet`, menu `z`):
 the buffer `*harness pet*`, and a few places besides.  Before it
 hatches: the egg, [Hatch it] (`h`) and what hatching does.  After: a
 card with its stars, rarity and species, the creature in its rarity's
-colour (`harness-ui-pet-art SPECIES EYE HAT FRAME`, five lines, three
+colour (`harness-ui-pet-art SPECIES EYE HAT FRAME`: five lines, three
 frames per species, the hat centred on the head) beside its five stats
 as meters, below it in a window too narrow for both, its name (gold
 when shiny) and personality, its level with an experience meter, and
@@ -9328,21 +9343,188 @@ speaks and, when `harness-pet-overrides` sets any, which attributes are
 set by hand.  Prose is filled to the window and drawn again when its width
 changes.  The header line has [Pet] (`p`, `SPC`), [Rename] (`r`),
 [Mute]/[Unmute] (`m`), [Release] (`R`, asks first) and [Turn off]
-(`O`), or [Hatch] and [Turn off], and `g`, `q`.  Turned off (the VIEW's
+(`O`), or [Hatch] and [Turn off], and `g`, `q`; `s` spins the pet
+(`harness-ui-pet-spin`, "Spin it" in the harness menu behind `.`; a 3D
+turn, below), with no segment of its own.  Turned off (the VIEW's
 `:enabled` false), the buffer shows the pet asleep, its eyes shut, and
 [Turn it on] (`O` too); both set `harness-pet-enabled` through
 `_harness/config/set` with the global scope, as the settings page does.
-The places besides, those `harness-ui-pet-places` names (`chat` and
-`board` by default), show only while the pet is on and hatched, and
-their hooks are set only then (`harness-ui-pet--wire`):
 
-- `chat`: its figure in the bottom right corner of a chat, right above
-  the compose box (`harness-chat-panel-functions`), as Claude Code's
-  companion sits beside its prompt; not in BTW chats.  The whole
-  creature (`harness-ui-pet--sprite`, the art's blank lines and margin
-  trimmed, its lines padded to one width) is as many lines as it is
-  tall, its name beside its eyes in bold, in its rarity's colour (gold
-  when shiny).  What it last said about the session replaces the name: a
+The art is plain strings, no image files.  `harness-ui-pet--sprites`
+gives each species three frames of five lines, `{E}` standing for the
+eyes and the first line blank, for the hat to take; the FRAME of
+`harness-ui-pet-art` is taken modulo the number of them.  Frame 0 is
+the creature at rest, 1 and 2 the others it moves between
+(`harness-ui-pet--fidget` is the order it goes through them as it
+speaks), and a frame may draw something above the head where the hat
+goes, a "z z".  `harness-ui-pet--heads` is the column a species's head
+is centred on, for its hat; `harness-ui-pet--faces` its face on one
+line.  An eye or a face character the font cannot draw is an ASCII one
+instead (`harness-ui-pet--eye-fallbacks`,
+`harness-ui-pet--face-fallbacks`), so the lines keep their columns.
+
+A spin is a real 3D turn, not text: a low-poly model of the creature,
+its hat on its head, turns once about its vertical axis and is drawn at
+run time as SVG images.  Two files of lisp/ui do it, and each loads as a
+module of its own, as every file there does: `harness-ui-pet-3d`, the
+renderer, and `harness-ui-pet-models`, the data, where nothing runs.
+They need nothing of the harness UI (the renderer only `cl-lib` and
+`subr-x`), and the requires go one way: `harness-ui-pet`, then
+`harness-ui-pet-3d`, then `harness-ui-pet-models`.
+
+`harness-ui-pet-models` has a model for each of the 18 species: an alist
+from a species (a symbol, as `harness-ui-pet--sprites` names it) to a
+plist.  `:palette` is the model's own colours, (NAME . "#rrggbb"), to
+which every model adds `eye`, `shine` and `blush`
+(`harness-ui-pet-3d-shared-colors`).  `:head` is (X Y Z RADIUS): the top
+of the head, where a hat sits, and the head's radius, by which a hat is
+scaled.  `:start` is the degrees the model is turned at rest, 0 facing
+the viewer, -90 the viewer's left and 90 the right, so that it faces as
+the species's text art does: the duck, the snail and the turtle -90, the
+goose 90, the rest 0.  `:parts` is what it is made of.  The units are
+the model's own, the renderer fits it to its box: the feet on y = 0, +y
+up, the creature facing +z, toward the viewer at angle 0, and +x the
+viewer's right.  A part is (KIND KEY VALUE...), and every kind is a
+closed mesh with outward normals: `ball`, an ellipsoid (`:size` R or
+(RX RY RZ), `:half` for the half above its centre, closed by a flat
+disk, `:sides` the segments around), `box` (`:size` its half extents),
+`tube`, a frustum along y (`:radius` below, `:top` above, 0 for a cone,
+`:height`, `:sides`) and `ring`, a torus around y (`:radius` to the
+middle of its tube, `:thickness` the tube's own radius, `:sides`).
+Every kind takes `:at`, its centre; `:turn`, degrees about x, then y,
+then z, about that centre; `:color`, a palette key, a shared colour's
+name or a literal "#rrggbb"; `:mirror`, which adds a copy across x = 0
+with its turn mirrored to match; `:detail`, for a small feature, an eye,
+a nostril, a spot, which shows over what it sits on and hides nothing;
+and `:flat`, for a part that is not shaded, the shine in an eye or a
+blush.  The hats are `harness-ui-pet-hat-models`, an alist from a hat's
+name, one of those of `harness-ui-pet--hats` (`crown`, `tophat`,
+`propeller`, `halo`, `wizard`, `beanie` and `tinyduck`), to a plist with
+its `:parts`, in units of the head's radius and around the model's
+`:head` point as the origin: the renderer scales a hat by that radius and
+moves it there, so each sits on any head.  A species or a hat is a
+symbol or a string, as the pet's view has them; no hat, or one not
+known, draws none.
+
+`harness-ui-pet-3d` turns a model into a picture.  A model and hat are
+built into a mesh once (`harness-ui-pet-3d--mesh-of`, kept by model in
+`harness-ui-pet-3d--meshes`): each part becomes flat polygons with
+outward normals, turned and placed, with its `:mirror` copy and the
+hat's parts, scaled and moved to `:head`, beside them.  A face with
+every corner inside the volume of another part (a ball, half ball, box
+or tube, not a ring nor a detail) is left out, since it can never be
+seen; one only partly inside stays, or a hole would open along the seam
+where two parts meet.  What a frame runs is only the transform for its
+angle: the model turns about y by its `:start` plus the angle, and the
+camera looks down on it `harness-ui-pet-3d--tilt` (14) degrees, with no
+perspective.  Faces that look away are dropped.  The rest are shaded
+flat by a light from the upper left front (`harness-ui-pet-3d--light`):
+a face's colour is multiplied by 0.58 + 0.47 N.L, N its normal and L the
+light's direction, N.L never below 0, at most 1.05 in all, each channel
+at most 255, or by 1 for a `:flat` part.
+
+The order they are drawn in is that of a BSP tree, built with the mesh
+(`harness-ui-pet-3d--order-tree`), not a sort: sorted by the depth of
+their middles, faces went wrong wherever two parts run into each other,
+as at every neck, leg and tail, the body showing in front of the head it
+is behind.  Each node of the tree is the plane of a face; the faces in
+front of the plane, on the side its normal points to, and those behind
+it are each a tree of their own, and a face that crosses the plane is
+cut in two along it (`harness-ui-pet-3d--cut`), the new corners added to
+the mesh's points.  A face behind a plane cannot hide one in front of it
+from a viewer in front of it, and the view has no perspective, so which
+side of a plane the viewer is on is the sign of N.E, E the way to the
+viewer in the model's space: the tree serves every angle, and a view
+walks it back to front, at each node the far side, the faces in the
+plane, then the near side (`harness-ui-pet-3d--draw-order`).  No face is
+then drawn before one that hides it.  To keep the cuts few, a node takes
+the plane, of `harness-ui-pet-3d--split-tries` (8) faces it tries spread
+over those left, that runs through parts with the fewest faces, a part
+counting as the ball it lies in; the rest of a convex part (a ball, a
+box, a tube) lies behind each of its own planes, and a part whose ball is
+wholly on one side of a plane is all on that side, so only the parts a
+plane runs through are looked at face by face.  The faces of a species
+and its hat, its details aside, come to 150 to 2,300 polygons so, the
+tree built in 5 to 50 milliseconds.
+
+The `:detail` faces are not in the tree.  For each view, those that look
+at the viewer go down it as if `harness-ui-pet-3d--detail-bias` (0.06
+units) nearer the viewer, which is each plane taken that much further
+from it, and does not move them on the screen; they are cut where they
+cross a plane, stay where they land, in a side of a node that has no
+node, and are drawn at that point of the walk, part after part in the
+order the model names them.  So an eye sunk a little into a head shows
+whole, as it would standing out of it by that much, and a spot on a
+plate thicker than that never shows through it from behind.
+
+`harness-ui-pet-3d-svg MODEL HAT ANGLE WIDTH HEIGHT` writes that as an
+SVG document, WIDTH by HEIGHT pixels, on a transparent background: one
+`<polygon>` a face, or a piece of one that was cut, filled with its
+shaded colour and stroked in the same colour, 0.6 px wide with round
+joins, so that no seams show between neighbours, the coordinates rounded
+to a tenth of a pixel and the string built directly.  MODEL is a species
+or a plist, HAT a hat's name or nil, and ANGLE the degrees added to the
+model's `:start`.
+
+The fit is that of a whole turn, the hat included, and the same at every
+angle, so the model never grows, shrinks or slides as it turns.  The
+scale is the tighter of two: across, the greatest distance of any vertex
+from the vertical axis, the radius of the bounding cylinder of the turn;
+and down, the least and the greatest height any vertex reaches on the
+screen as it turns.  The model is centred across, its lowest point
+`harness-ui-pet-3d--margin` (4%) of the height above the bottom, and
+fills `harness-ui-pet-3d--fill` (92%) of the box, across or down.
+
+`harness-ui-pet-3d-frame SPECIES HAT STEP WIDTH HEIGHT` is step STEP of
+a turn as an image.  A turn is `harness-ui-pet-3d-count` (24) steps and
+step K is the SVG of K x 360 / 24 degrees, through `create-image` with
+`:ascent 'center` and `:scale 1`.  Images are kept by their model, hat,
+step and size (`harness-ui-pet-3d--frames`), the table emptied once it
+holds more than 256 (`harness-ui-pet-3d-clear` empties it and the
+meshes), so a turn is drawn once and shown from then on: a mesh takes a
+few tens of milliseconds the first time, a picture a few.  It is nil for
+a species with no model and where this Emacs cannot show an SVG.  A
+step shows for `harness-ui-pet-3d-tick` (0.09) seconds.
+
+For a look without images there is a text map.
+`harness-ui-pet-3d-preview MODEL HAT ANGLE COLS ROWS` draws the same
+picture on cells twice as tall as wide, as a terminal's are, each the
+letter of the colour of the polygon drawn last over its middle, or `.`
+where there is none, with a legend line under the map saying which
+letter is which colour and how many cells it has (with SHADE, a digit
+from 0 to 9 for the light instead).  A polygon holds the points it winds
+round, SVG's nonzero rule (`harness-ui-pet-3d--point-in-polygon-p`), so
+the map shows what the SVG does even where rounding turned a corner of a
+cut polygon back on itself.  `harness-ui-pet-3d-print-previews` prints
+such maps from a batch Emacs, `harness-ui-pet-3d-stats` counts a model's
+faces before and after the hidden ones go and the polygons they are cut
+into, and
+`harness-ui-pet-3d-problems` lists what is wrong with a model or a hat by
+the numbers: a part of a kind or with a key it does not know, a colour
+that is not known or is nearly black but the eyes', a `:head` that is not
+four numbers, more than `harness-ui-pet-3d--max-faces` (600) faces and a
+part that floats free of the rest.
+
+The places besides, those `harness-ui-pet-places` names (`chat`,
+`board` and `sessions` by default), show only while the pet is on and
+hatched, and their hooks are set only then (`harness-ui-pet--wire`):
+
+- `chat`: its figure in the bottom right corner of a chat, first in the
+  chat's tail (`harness-chat-top-functions`, `harness-ui-pet--panel`), so
+  it stands on whatever comes first below the transcript: the activity
+  line while a turn runs, a request waiting for the user, the queue, the
+  todo list or a panel (`harness-chat-panel-functions`), and on the
+  compose box when none shows, as Claude Code's companion sits beside its
+  prompt; not in BTW chats.  The activity line goes under it, its overlay
+  where the text marked `harness-chat-top` ends
+  (`harness-chat--activity-position`).  The figure was among the chat's
+  panels once, and `harness-ui-pet--wire` still takes it off that hook, so
+  a reload forgets that.  The whole creature (`harness-ui-pet--sprite`,
+  the art's blank lines and margin trimmed, its lines padded to one
+  width) is as many lines as it is tall, the chat having no lines of its
+  own for it to share, its name beside its eyes in bold, in its rarity's
+  colour (gold when shiny).  What it last said about the session
+  replaces the name: a
   speech bubble on its left (`harness-ui-pet--bubble`, box-drawing
   characters when the font has them all, else ASCII), its words centred
   on the creature's eyes.  The bubble is joined to the creature (`├─`) at
@@ -9358,11 +9540,10 @@ their hooks are set only then (`harness-ui-pet--wire`):
   scale, its newline taking that column (`harness-ui-pet--pixels`:
   measured in a window showing the buffer, without selecting it, so a
   timer run with a daemon's terminal frame selected measures right and
-  point stays where the chat draws).  Every row has
+  point stays where the chat draws).  Every row, its newline too, has
   `harness-pet-figure-face` (fixed pitch) and `default` under its own
-  faces, so the chat's panel colour does not show behind it; and as
-  nothing is past its lines' ends, where the panel's `:extend` would show
-  it, not there either.  How it fits is `harness-ui-pet--fit`, from the
+  faces, so it stands on the window's own background, whatever a chat
+  puts behind its panels.  How it fits is `harness-ui-pet--fit`, from the
   narrowest and shortest of the windows showing the buffer.  A window
   narrower than `harness-ui-pet--whole-columns` (40) or shorter than
   `harness-ui-pet--min-lines` (20) gets the pet's face on one line
@@ -9382,6 +9563,22 @@ their hooks are set only then (`harness-ui-pet--wire`):
   lines it is taller than they are, and its bubble goes beside its upper
   rows.  The rows on the board's lines have `harness-pet-figure-face`
   alone, so the band of a box that messages a session shows through.
+- `sessions`: the same figure under the session list's last row, from
+  `harness-ui-sessions-footer-functions`
+  (`harness-ui-pet--sessions-footer`), with what it said last about
+  anything, as on the board (`harness-ui-pet--latest-saying`, place
+  `sessions`).  A blank line comes first, so it stands apart from the
+  rows; then the creature, right-aligned, as many lines as it is tall
+  with its bubble beside it, the list having no lines of its own to
+  share either, on `harness-pet-figure-face` and `default` as in a chat.
+  The list is printed again whenever sessions change and, while any
+  streams, at most every half second, and each print asks for the figure,
+  whose lines cost a measurement in pixels.  So `harness-ui-pet--draw`
+  keeps the lines it drew (`harness-ui-pet--lines-kept`, buffer-local)
+  with the spec and faces they were drawn for, and returns the same ones
+  while those are equal.  A narrow or short window gets the face, as
+  anywhere.
+  It is no session's: RET and the row commands find none on its lines.
 - `chat-header`: its face on one line (`harness-ui-pet-face SPECIES EYE
   BLINK`, after Claude Code's, `(·>` for a duck) in its rarity's colour,
   from `harness-chat-header-end-functions` at priority 2, so it goes
@@ -9396,32 +9593,168 @@ their hooks are set only then (`harness-ui-pet--wire`):
 They draw from the pet as this Emacs last heard of it
 (`harness-ui-pet--current`), asked for as the module starts and on every
 connect, then followed through `pet/changed`, and `config/changed` of a
-`harness-pet-` option.  Each chat and board notes what its figure shows
-(`harness-ui-pet--panel-shown`: the look, the words, the fit and the
-pixels of a column), and `harness-ui-pet--sync-panels` draws it again
-only where that would change -- a chat's tail through
+`harness-pet-` option.  Each chat, board and session list notes what its
+figure shows (`harness-ui-pet--panel-shown`: the look, the words, the
+fit and the pixels of a column), and `harness-ui-pet--sync-panels` draws
+it again only where that would change -- a chat's tail through
 `harness-compose-redraw-function` once the chat has drawn its compose
-box, a board's tail lines through `harness-ui-tasks-redraw-tail-lines`
--- after `pet/changed` (what it says comes with one),
-`agent/turn-started` and a change of places, and, 0.1 s after things
-settle, as windows change size (`window-size-change-functions`, while it
-sits in chats; a board fits its tail itself), buffer
+box, a board's tail lines through `harness-ui-tasks-redraw-tail-lines`,
+the session list through `harness-ui-sessions-redraw` -- after
+`pet/changed` (what it says comes with one), `agent/turn-started` and a
+change of places, and, 0.1 s after things settle, as windows change size
+(`window-size-change-functions`, while it sits in chats or under the
+list; a board fits its tail itself), buffer
 (`window-buffer-change-functions`) or text scale (`text-scale-mode-hook`).
 A buffer no window shows is drawn again only when what its figure shows
 changes, not for want of room: the window that shows it next fits it.
-No timer runs for it otherwise.  This Emacs tells the harness where the
-pet is on screen (`_harness/pet/watch`, client `HOST:PID`) whenever that
-changes.  It is t while the buffer is on screen, or a board while the
-pet sits on boards.  With `chat`, it is otherwise the ids of the
-sessions whose chats are on screen, so the pet speaks about those
-sessions only.  It is sent from `window-buffer-change-functions` while
-the buffer lives or the pet sits in chats or on boards, as the buffer is
-killed, and after every connect.  Animations -- the egg wobbling then cracking
-and sparkles as it hatches, hearts as it is petted, a fidget as it
-speaks (after the sparkles, when its first words come while it
-hatches) -- are a few frames each on one timer that stops with the
-last frame or as soon as the buffer is off screen, so nothing runs
-while nothing happens; `harness-ui-pet-animations` nil keeps it still.
+No periodic timer draws it; only its moving, below, has timers.
+
+This Emacs tells the harness where the pet is on screen
+(`_harness/pet/watch`, client `HOST:PID`) whenever that changes
+(`harness-ui-pet--seen`).  It is t while the buffer is on screen, or a
+board while the pet sits on boards, or the session list while it sits
+there.  With `chat`, it is otherwise the ids of the sessions whose chats
+are on screen, so the pet speaks about those sessions only.  It is sent
+from `window-buffer-change-functions` while the buffer lives or the pet
+sits in chats, on boards or under the list, as the buffer is killed, and
+after every connect.
+
+A figure has frames besides the creature at rest, all drawn to its
+geometry, so one can take another's place on screen.  FRAME, of
+`harness-ui-pet--figure-art` and `harness-ui-pet--sprite`, is nil or 0
+for the creature at rest, 1 or 2 for its other frames and `blink` for it
+at rest with its eyes shut.  Every frame has the same lines (the hat
+line is the rest frame's, so what a frame draws above the head, a
+"z z", shows on the card only), the same margin (the smallest any frame
+has) and, padded, the same width (the widest line of any frame,
+`harness-ui-pet--figure-width`).  Each row of the creature is marked
+with its number from the top, 0, as the text property
+`harness-ui-pet-row`; the face on one line is the row `face`
+(`harness-ui-pet--face-row`).  A frame is drawn once for a look, an eye
+as drawn and a frame, and kept (`harness-ui-pet--sprite-cache`, emptied
+past 64 entries); its rows are shared, so do not change them.  What a
+figure shows (`harness-ui-pet--show-frame`) may also be `(spin . K)`, the
+Kth step of the spin's turn, K from 0 to `harness-ui-pet-3d-count` minus
+1 (`harness-ui-pet--spin-frame-p`): that is a picture, not lines of
+art, and the sprite has none of it.
+
+Animations in the pet's buffer -- the egg wobbling then cracking and
+sparkles as it hatches, hearts as it is petted, a fidget as it speaks
+(after the sparkles, when its first words come while it hatches), and a
+spin at `s` (`harness-ui-pet--spin-turns` (2) turns of
+`harness-ui-pet-3d-count` pictures each; it too waits for the hatching to
+end) -- are a few frames each, `harness-ui-pet--next` the frame after
+one, on one timer (`harness-ui-pet--timer`) that stops with the last
+frame or as soon as the buffer is off screen; each frame draws the card
+again.  A frame lasts `harness-ui-pet--pace` seconds:
+`harness-ui-pet--tick` (0.18) for the others, `harness-ui-pet-3d-tick`
+(0.09) for the spin, the timer made again at the pace of the animation
+that plays next.  The card's spin puts the picture of its step, cut to
+the card's font for the creature (`harness-pet-art-face`), over the
+creature's lines (`harness-ui-pet--card-turn`,
+`harness-ui-pet--card-line` and, for the slices, below): each line from
+the first the creature is on to the last shows its band of the picture
+instead of its text, after the blank columns all the lines start with,
+which stay as they are, so the card keeps its layout and the stats
+beside it stay put.  Where the card cannot show a turn, `s` does not
+start one (below).
+
+The figures in chats, on boards and under the list move too, without
+being drawn again (`harness-ui-pet--play`).  A beat is a list of frames,
+one shown a tick (`harness-ui-pet--beat-frames`), each ending at rest,
+frame 0: `blink` (the eyes shut for a tick), `twice`, `wiggle` (frame 1
+and back, twice), `fidget` (`harness-ui-pet--fidget`; `pet/said` plays it
+wherever a figure is on screen, as it does on the card) and `spin` (one
+turn: the steps `(spin . 0)` to `(spin . 23)`, `harness-ui-pet-3d-count`
+of them, then the creature at rest; `s` plays it too).  Idle, the
+figures wait a random 6 to 14 seconds (`harness-ui-pet--idle-gap`) on
+one one-shot timer (`harness-ui-pet--idle-timer`), then play a beat
+picked by weight (`harness-ui-pet--idle-beats`: blink 55, twice 12,
+wiggle 25, spin 2).  The spin is the rare one: the weights add up to 94
+and a wait is 10 seconds on average, so a spin comes one beat in 47,
+about every eight minutes while a figure on screen can show it.  Where
+no figure on screen is whole, a face on one line, there is only a blink
+or two (`harness-ui-pet--pick-beat`), as a face moves for a blink only.
+A beat plays on a repeating timer (`harness-ui-pet--beat-timer`, every
+`harness-ui-pet--pace` seconds: `harness-ui-pet--tick`, or
+`harness-ui-pet-3d-tick` for a spin) that exists only while it plays (a
+spin, the longest, is 25 ticks, a little over two seconds), so outside a
+beat only the one-shot timer exists.
+
+Showing a frame swaps the `display` property of each run of text marked
+`harness-ui-pet-row` (`harness-ui-pet--show-frame`,
+`harness-ui-pet--show-here`) for the last columns, as many as the run is
+wide, of the same row of the frame; the display string has the run's
+other properties, its colour, hovering and click, and at rest the
+property goes.  The host buffer's text is never edited or drawn again,
+and this is done in `with-silent-modifications`, so
+`buffer-chars-modified-tick`, the undo list, the modified flag and point
+stay as they were, and typing and scrolling are no slower; a frame is a
+few property changes and the redisplay of a few lines.  The runs are
+found from the buffer's end, as far as the figure's top row, and kept
+until text is inserted or deleted (`harness-ui-pet--runs`, by
+`buffer-chars-modified-tick`: a change of properties leaves them be).
+
+A step of the spin is shown as a picture, in slices over those runs.
+The image (`harness-ui-pet--turn-picture`: `harness-ui-pet-3d-frame` of
+the pet's species and hat at that step) covers the whole creature: the
+figure's width in pixels, the columns of its rows (they are padded to
+one width) times the pixels a column takes, by as many rows as the
+creature has, each as high as a line of the figure's font.  That is
+`harness-ui-pet--cell`: the ascent and the descent of the font the
+figure's faces draw, measured in the window that shows the buffer, so a
+scaled text scales it, which is what a line takes, the figure being fixed
+pitch.  Each run gets as its `display` the band of the picture its row is,
+`((slice X Y W H) IMAGE)` (`harness-ui-pet--slice`): row N is the band
+that starts N lines down, one line high, and as the image has `:ascent
+'center` the slice covers its line exactly, with no gap between rows and
+no line taller than it was.  A run shorter than the figure is wide is
+the creature's part of the row a speech bubble's joint runs along
+(`harness-ui-pet--rows`: the joint takes the blanks the creature has at
+the start of that row, and its characters are marked
+`harness-ui-pet-joint`).  The model is not bound to those blanks, so
+while a picture shows, its band also covers the joint's last columns, as
+many as the run is short of the figure's width
+(`harness-ui-pet--reach`).  The whole band shows, no pixel of the model
+is hidden under the joint's glyphs, and the joint ends a few columns
+before the model.  No text is edited, and at rest the `display` goes as
+it does for the other frames, so those columns show the joint again.  The face on one line never turns, and a buffer that
+cannot show the picture shows the creature at rest for the step.
+
+The spin is left out where it cannot show.  `harness-ui-pet--spin-block
+SPECIES` says why, for the buffer it is asked in: `frame` when the
+buffer's frame is not a graphical one, `svg` when it is but this Emacs
+shows no SVG images (together `harness-ui-pet--graphic-p`:
+`display-graphic-p` of the frame that shows the buffer, else the
+selected one, and `image-type-available-p` of `svg`), `model` when
+`harness-ui-pet-3d-model` has none for the species, and nil when the
+spin can show.  A figure can show it (`harness-ui-pet--spinner-p`) when
+it is the whole creature (`harness-ui-pet--whole-p`) and nothing blocks
+it.  `harness-ui-pet--pick-beat` leaves `spin` out of the beats of an
+idle moment unless some figure on screen can, so on a terminal the
+pet only blinks, wiggles and fidgets, and `harness-ui-pet--play` of a
+`spin` does nothing unless one can either.  `s` asks the same of the
+pet's own buffer (`harness-ui-pet--spin-refused`), and when it cannot,
+says why in the echo area with the pet's name, "Mochi spins only in a
+graphical frame", "... only where Emacs shows SVG images" or "... has no
+3D model to spin yet", and does nothing.
+
+A figure moves while a window of a visible frame shows it
+(`harness-ui-pet--figure-buffers`); the buffers a frame moved are put
+back at rest as the beat ends, on screen or not
+(`harness-ui-pet--moved`).  Nothing runs while nothing moves:
+`harness-ui-pet--animating-p` wants `harness-ui-pet-animations`, the pet
+on and hatched, and a figure on screen; `harness-ui-pet--arm` waits for
+the next idle beat while it holds, and otherwise stands still
+(`harness-ui-pet--still`: both timers cancelled, the beat forgotten, the
+figures at rest).  It is asked after anything that may change which
+figures are on screen -- `harness-ui-pet--sync-panels`, the window hook
+`harness-ui-pet--on-window-buffer`, and the setter of
+`harness-ui-pet-animations`, which stops everything at once when set to
+nil -- and a timer that finds otherwise stops everything itself.  One
+that signals stops the figures first (`harness-ui-pet--guarding`), so a
+repeating timer does not signal on every tick.  A figure drawn anew is
+at rest.
 
 Cost display: whatever shows what a session cost goes through
 `harness-ui-format-spend`.  That is a price when calls are billed per
@@ -9500,6 +9833,19 @@ turn: the list loads the tasks with `_harness/task/list` and follows
 `task/changed` and `task/deleted`.  SPC on a session pops out what it
 waits on (a session that waits on nothing leaves SPC scrolling), its
 status cell's tooltip says so (`harness-ui-sessions-requests`).
+
+A module draws under the rows through `harness-ui-sessions-footer-functions`,
+each function returning a string of whole lines, or nil, called whenever
+the list is printed: the printer (`harness-ui-sessions--print-entry`)
+inserts them after the last row of the print, whichever column the rows
+are sorted by, and after the line saying what that session waits on, and
+`harness-ui-sessions--print` where there is no row at all; they are no
+session's, their lines carry no `tabulated-list-id`, so `RET` and the row
+commands find none there, and a function that signals draws nothing; the
+companion pet's figure sits there, and `harness-ui-sessions-redraw`
+prints the list again, each window keeping its point on its session, when
+what a function would draw changes.
+
 
 Its columns are one spec (`harness-ui-sessions--columns`), from which
 the header, the rows and the sorts are made: the status icon, which is

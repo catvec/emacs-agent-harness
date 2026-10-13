@@ -9,6 +9,8 @@
 ;;                 `harness-chat-header-functions' put in front (a BTW's
 ;;                 buttons); what the buffer shows already, it leaves out
 ;;   transcript    one block per node, rendered incrementally with markers
+;;   top           what `harness-chat-top-functions' draw, first in the
+;;                 tail: the companion pet, standing on whatever comes next
 ;;   activity      while a turn runs, what it does and for how long, on a
 ;;                 background of its own, then a blank line
 ;;   pending panel permission requests and questions waiting for the user;
@@ -254,7 +256,10 @@ A plist: `:id' the node's id, `:regexp' what to find in it.  See
   "Tool call id -> the note the running turn's activity gives the call.
 The note is drawn under the call's own block (see `harness-chat--note-lines').")
 (defvar-local harness-chat--activity-overlay nil
-  "Overlay at the end of the transcript whose `before-string' is the activity line.")
+  "Overlay whose `before-string' is the activity line.
+It is empty and sits at `harness-chat--activity-position': the end of
+the transcript, or the end of what `harness-chat-top-functions' drew
+there.")
 
 ;;;; Small helpers
 
@@ -2786,6 +2791,38 @@ the one in progress in bold and the rest dim.  A list longer than
   (setq harness-chat--todos-collapsed (not harness-chat--todos-collapsed))
   (harness-chat--render-tail))
 
+(defvar harness-chat-top-functions nil
+  "Functions putting something at the top of the tail, first below the transcript.
+Each is called without arguments in the chat buffer on every render of
+the tail and returns a string of whole lines, or nil for nothing.  The
+strings go in order, read-only and without the panel background, above
+the activity line, the pending requests, the queue, the todo list and
+the panels: what they draw stands on whichever of those comes first,
+or on the compose box when none shows.  A function that signals an
+error draws nothing: what it draws is decoration, which must not take
+the compose box down with it.  Add to it buffer-locally, with a symbol,
+so a reload redefines it.  The companion pet sits there this way.")
+
+(defun harness-chat--insert-top ()
+  "Insert what `harness-chat-top-functions' return, in order, as they are.
+Unlike a panel's (`harness-chat--insert-panels'), a string gets no
+background of its own: what it draws keeps the window's.  A string that
+does not end in a newline gets one, so the top is whole lines.  All of
+it is marked `harness-chat-top', which is how the activity line finds
+where it ends (`harness-chat--activity-position').  A function cannot
+move point, where its lines go: it may measure text in a window, which
+takes the window's point.  One that signals an error draws nothing."
+  (let ((start (point)))
+    (run-hook-wrapped 'harness-chat-top-functions
+                      (lambda (fn)
+                        (when-let* ((text (ignore-errors (save-excursion (funcall fn)))))
+                          (unless (string-empty-p text)
+                            (insert text)
+                            (unless (eq (char-before) ?\n) (insert "\n"))))
+                        nil))
+    (when (> (point) start)
+      (put-text-property start (point) 'harness-chat-top t))))
+
 (defvar harness-chat-panel-functions nil
   "Functions putting a panel of their own below the transcript.
 Each is called without arguments in the chat buffer on every render of
@@ -2833,6 +2870,8 @@ window's point."
       (delete-region harness-chat--transcript-end (point-max))
       (goto-char harness-chat--transcript-end)
       (let ((start (point)))
+        ;; First, so what it draws stands on whatever comes next.
+        (harness-chat--insert-top)
         (harness-ui-pending-insert-panels harness-ui-session-id)
         (harness-chat--insert-queue)
 
@@ -2859,7 +2898,8 @@ window's point."
              (harness-chat--pin-soon (car w)))
             ((< (cdr w) harness-chat--transcript-end)
              (set-window-start (car w) (cdr w) t))))
-    ;; The new tail went in where the activity line was: put it back above.
+    ;; The new tail went in where the activity line was: put it back, under
+    ;; the top of the tail and above the rest.
     (harness-chat--refresh-activity)))
 
 (defvar-local harness-chat-placeholder nil
@@ -3515,6 +3555,12 @@ A module showing something of its own in this buffer
 ;; an overlay string, so its spinner ticks without editing the buffer.
 ;; Its own background and a blank line under it keep it apart from the
 ;; compose box below.
+;;
+;; What `harness-chat-top-functions' draw -- the companion pet -- goes
+;; first in the tail, so it stands on the line.  The overlay sits where
+;; that text ends, which a property marks
+;; (`harness-chat--activity-position'): where there is none, at the end
+;; of the transcript.
 
 (defun harness-chat--spinner-frame ()
   "Return the current frame of the running spinner."
@@ -3587,10 +3633,24 @@ apart from what comes below, the compose box or the queue."
         (add-face-text-property 0 (length line) ground t line)
         (concat line (propertize "\n" 'face ground))))))
 
+(defun harness-chat--activity-position ()
+  "Return where the activity line goes: under the top of the tail.
+That is the end of the transcript, or, when text marked `harness-chat-top'
+starts there (see `harness-chat--insert-top'), the end of that text: what
+`harness-chat-top-functions' drew stands on the line."
+  (let ((end (marker-position harness-chat--transcript-end)))
+    (if (get-text-property end 'harness-chat-top)
+        (or (next-single-property-change end 'harness-chat-top) (point-max))
+      end)))
+
 (defun harness-chat--activity-overlay ()
-  "Return the activity line's overlay, empty at the end of the transcript.
-FRONT-ADVANCE and REAR-ADVANCE carry it past blocks appended there."
-  (let ((pos (marker-position harness-chat--transcript-end))
+  "Return the activity line's overlay, empty where the line goes.
+That is `harness-chat--activity-position'.  At the end of the
+transcript, FRONT-ADVANCE and REAR-ADVANCE carry it past blocks
+appended there; under the top of the tail the blocks go in before it,
+and the text around carries it along.  A render of the tail takes it
+off its place, and `harness-chat--refresh-activity' puts it back."
+  (let ((pos (harness-chat--activity-position))
         (ov harness-chat--activity-overlay))
     (if (and ov (overlay-buffer ov))
         (unless (and (= pos (overlay-start ov)) (= pos (overlay-end ov)))

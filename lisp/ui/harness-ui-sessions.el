@@ -111,6 +111,11 @@
 ;; the mode line's notifier opens the list on the sessions waiting for
 ;; you, in every project (`harness-sessions-waiting').
 ;;
+;; Other modules may draw something under the rows, as the companion pet
+;; does (`harness-ui-sessions-footer-functions').  It follows the last
+;; row, whichever column the rows are sorted by, and is no session's: RET
+;; and the row commands find none there.
+;;
 ;; A project includes its linked git worktrees: a session there (a
 ;; task's, a sub-agent's) has the worktree as its `:project', and is
 ;; listed with the main checkout that worktree belongs to.
@@ -629,6 +634,44 @@ It has the buttons answering R, then says what R is, under the name."
             " " (harness-ui-kbd "b")
             "\n")))
 
+;;;; The footer
+;;
+;; A module may draw something under the rows -- the companion pet
+;; stands there -- through `harness-ui-sessions-footer-functions'.  The
+;; printer puts it after the last row, so it comes back whenever the list
+;; is printed, as a column's sort prints it (`tabulated-list-sort' calls
+;; `tabulated-list-print', not `harness-ui-sessions--print'); with no row
+;; to print after, `harness-ui-sessions--print' puts it there.  It is no
+;; session's: its lines carry no `tabulated-list-id'.
+
+(defvar harness-ui-sessions-footer-functions nil
+  "Functions drawing something under the rows of the session list.
+Each is called without arguments in the list's buffer whenever the list
+is printed, and returns a string of whole lines, or nil for nothing.
+The strings go in order under the last row, after the line saying what
+that session waits on, and show with no row at all too.  They are no
+session's: RET and the row commands find none there.  A function cannot
+move point, where its lines go: it may measure text in a window, which
+takes the window's point.  One that signals an error draws nothing.  The
+companion pet sits there this way; when what a function draws changes,
+`harness-ui-sessions-redraw' prints the list again.")
+
+(defvar-local harness-ui-sessions--last-id nil
+  "The id of the last row of the print under way, which the footer follows.
+Found at the print's first row, once a print, rather than at each row.")
+
+(defun harness-ui-sessions--insert-footer ()
+  "Insert at point what `harness-ui-sessions-footer-functions' return, in order.
+A string that does not end in a newline gets one, so the footer is
+whole lines."
+  (run-hook-wrapped 'harness-ui-sessions-footer-functions
+                    (lambda (fn)
+                      (when-let* ((text (ignore-errors (save-excursion (funcall fn)))))
+                        (unless (string-empty-p text)
+                          (insert text)
+                          (unless (eq (char-before) ?\n) (insert "\n"))))
+                      nil)))
+
 (defun harness-ui-sessions--print-entry (id cols)
   "Print the row of session ID, with the columns COLS, and what it waits on.
 This is the list's `tabulated-list-printer'.  The banner of the blocked
@@ -637,9 +680,16 @@ mark (`harness-ui-sessions-mark-face') in place of the padding space,
 which keeps the row's text properties, `tabulated-list-id' above all.  A
 blocked session gets the line of what it waits on under its row
 \(`harness-ui-sessions--request-line'), which is the session's too: RET
-opens it, SPC pops its request out, and it is not marked."
+opens it, SPC pops its request out, and it is not marked.
+Under the last row, and its line, goes the footer
+\(`harness-ui-sessions-footer-functions')."
   (when (and harness-ui-sessions--blocked-only (bobp))
     (insert (harness-ui-sessions--banner)))
+  ;; The entries are printed in order, sorted or not, so the first row says
+  ;; which is the last.
+  (let ((entries (and (listp tabulated-list-entries) tabulated-list-entries)))
+    (when (equal id (car (car entries)))
+      (setq harness-ui-sessions--last-id (car (car (last entries))))))
   (let ((start (point)))
     (tabulated-list-print-entry id cols)
     (when (and harness-ui-sessions--marked (gethash id harness-ui-sessions--marked))
@@ -652,15 +702,28 @@ opens it, SPC pops its request out, and it is not marked."
         (insert (harness-ui-sessions--request-line id r))
         (add-text-properties line (point) (list 'tabulated-list-id id 'tabulated-list-entry cols)))
       (when (equal (plist-get r :kind) "permission")
-        (harness-ui-add-keymap start (point) harness-ui-sessions-permission-map)))))
+        (harness-ui-add-keymap start (point) harness-ui-sessions-permission-map))))
+  (when (equal id harness-ui-sessions--last-id)
+    (harness-ui-sessions--insert-footer)))
 
 (defun harness-ui-sessions--print ()
-  "Print the list, the banner of the blocked filter even with no row to show."
+  "Print the list.
+With no row to show, the printer has none to put the banner of the blocked
+filter above or the footer under: they go in here."
   (tabulated-list-print t)
-  (when (and harness-ui-sessions--blocked-only (= (point-min) (point-max)))
+  (unless tabulated-list-entries
     (let ((inhibit-read-only t))
-      (insert (harness-ui-sessions--banner))
+      (goto-char (point-max))
+      (when harness-ui-sessions--blocked-only
+        (insert (harness-ui-sessions--banner)))
+      (harness-ui-sessions--insert-footer)
       (set-buffer-modified-p nil))))
+
+(defun harness-ui-sessions-redraw ()
+  "Print the session list again, when it exists, as the sessions are now.
+For a module whose `harness-ui-sessions-footer-functions' would draw
+something else now.  Each window keeps its point on its session."
+  (harness-ui-sessions--redraw))
 
 (defun harness-ui-sessions--position (id)
   "Return where the row of session ID starts, else the first row, else `point-min'."

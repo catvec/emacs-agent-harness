@@ -113,9 +113,10 @@ OpenAI-compatible APIs and AWS Bedrock.
   your own load beside them, and the whole harness reloads in place
   without losing running sessions.
 - **A companion pet.** Hatch a small creature of a random species and
-  rarity. It sits by the compose box of your chats and of the task
-  board, and now and then has a word to say about your work. One switch
-  turns it off everywhere.
+  rarity. It stands at the bottom of your chats, of the task board and
+  of the session list, blinks and wiggles now and then, once in a while
+  turns around as a little 3D model of itself, and has a word to say
+  about your work. One switch turns it off everywhere.
 
 ## Screenshots
 
@@ -2732,44 +2733,69 @@ first ran a harness with Insights. Set
 there is an egg: press `h` to hatch it. It hatches into one of 18
 species, from common to legendary (one in a hundred), sometimes with a
 hat and, rarely, shiny, with five stats. The cheapest model of your
-provider names it and gives it a personality.
+provider names it and gives it a personality. Each species is drawn in
+a few lines of text, and is also built as a small low-poly 3D model, its
+hat included, which it turns around as a rare treat (below).
 
 Once it hatched, it keeps you company in other places too:
 
-- **Chats.** The whole creature sits in the bottom right corner, right
-  above the compose box, as Claude Code's companion sits beside its
-  prompt. It is drawn in its rarity's colour, with its name beside its
-  eyes, and takes only as many lines as it is tall. What it last said
-  about the session shows in a speech bubble on its left, joined to it,
-  until the session's next turn starts. The bubble widens rather than
-  grow taller than the creature. Hovering names the pet, and a click
-  opens its buffer. Side conversations (BTW) go without it.
+- **Chats.** The whole creature sits in the bottom right corner, on top
+  of whatever comes first below the transcript: the activity line while
+  the agent works ("Thinking…"), a request waiting for you, the queue or
+  the todo list. When none of those shows, it sits on the compose box,
+  as Claude Code's companion sits beside its prompt. It is drawn in its
+  rarity's colour, with its name beside its eyes, and takes only as many
+  lines as it is tall. What it last said about the session shows in a
+  speech bubble on its left, joined to it, until the session's next turn
+  starts. The bubble widens rather than grow taller than the creature.
+  Hovering names the pet, and a click opens its buffer. Side
+  conversations (BTW) go without it.
 - **The task board.** It sits in the board's bottom right corner in the
   same way, with the last thing it said about anything. The compose
   label and settings lines narrow to make room for its bottom rows, so
   it adds only a few lines of its own. Each task that gets done gives it
   experience.
+- **The session list.** It stands under the last row, after a blank
+  line, at the right, with the last thing it said about anything. It is
+  no session's: `RET` and the row commands find nothing there.
 - **Small windows.** A window narrower than 40 columns or shorter than
   20 lines shows its face on one line instead, as in `(·>`. The face
-  comes with its name or the first few of its words. Set
-  `harness-ui-pet-figure` to `face` to get that everywhere.
+  comes with its name or the first few of its words, and only blinks:
+  there is no more of it to move. Set `harness-ui-pet-figure` to `face`
+  to get that everywhere.
 - **Header lines, if you want them.** Its face on one line, as in `(·>`,
   can end each chat's header line (`chat-header`), where it blinks now
   and then while the session works. Its face and name can also show in
   the board's header line (`board-header`). Either is the first thing to
   go when the window is narrow.
 
-`harness-ui-pet-places` chooses among these places: `chat` and `board`
-by default, `chat-header` and `board-header` too if you add them. nil
-keeps the pet to its own buffer. `harness-ui-pet-figure` chooses how it
-shows by the compose boxes: `whole` (the default) or `face`.
+`harness-ui-pet-places` chooses among these places: `chat`, `board` and
+`sessions` by default, `chat-header` and `board-header` too if you add
+them. nil keeps the pet to its own buffer. `harness-ui-pet-figure`
+chooses how it shows in the chats, on the board and under the session
+list: `whole` (the default) or `face`.
 
-While it is on screen (its buffer, the task board, or a chat whose
-session it would talk about), it now and then says a line. It may
-comment on the message you just sent, on a test run that failed or on a
-big change. It always answers when you call it by name in a message or
-pet it (`p`). It grows a level as you work. `r` renames it, `m` mutes it
-and `R` lets it go, after which the next egg hatches another.
+While it is on screen (its buffer, the task board, the session list, or
+a chat whose session it would talk about), it now and then says a line.
+It may comment on the message you just sent, on a test run that failed
+or on a big change. It always answers when you call it by name in a
+message or pet it (`p`). It grows a level as you work. `r` renames it,
+`m` mutes it, `s` spins it and `R` lets it go, after which the next egg
+hatches another.
+
+It moves, too. Every 6 to 14 seconds the pet in a chat, on the board or
+under the session list blinks, blinks twice or wiggles, and it fidgets
+for a moment as it says something. Each of these is a few frames that
+stop on their own. Rarely, about once in eight minutes while it is on
+screen, it turns once around instead: for two seconds its drawing gives
+way to a low-poly 3D model of it, flat-shaded like a toy and wearing its
+hat, which the harness draws as it goes. That needs a graphical Emacs
+frame that can show SVG images: in a terminal the pet only blinks,
+wiggles and fidgets, and a figure that is just a face never turns. `s`
+in the pet's buffer spins it whenever you like, twice there and once in
+its figures on screen elsewhere; where it cannot, the echo area says
+why. Nothing moves while the pet is off screen, and
+`harness-ui-pet-animations` set to nil keeps it still.
 
 It costs little. It never asks a model anything about what is not on
 screen, nor while it is muted. It comments unasked at most once a minute
@@ -2777,8 +2803,15 @@ screen, nor while it is muted. It comments unasked at most once a minute
 (`harness-pet-chance`). It then asks a cheap model (`harness-pet-model`)
 for one short line, with no thinking and no context from your project
 beyond the last few messages. Nothing runs while nothing happens: the
-creature by a compose box is drawn again only when it changes, says
-something else, or has more or less room.
+creature in a chat, on the board or under the list is drawn again only
+when it changes, says something else, or has more or less room, and
+never to make it move. A frame changes how a few of the buffer's lines
+are displayed, without editing its text, so typing and scrolling stay as
+quick. That is a frame every 0.18 seconds while one of its moves plays,
+or every 0.09 seconds for a turn, a couple of seconds at most, and a
+move comes every 6 to 14 seconds. The 24 pictures of a turn are drawn
+the first time it plays, a few milliseconds each, and kept. Once no pet
+is on screen, or animations are off, its timers go.
 
 Want a particular pet? `harness-pet-overrides` sets any of its
 attributes by hand, over what it hatched with: its name and
@@ -2805,7 +2838,8 @@ altogether, press `O` in its buffer, click [Turn off] there, or set
 `harness-pet-enabled` to nil (also on the settings page). It then shows
 nowhere else, grows no more and asks no model anything. Its buffer only
 says it is asleep and offers to turn it on again, as it was. To remove
-the code itself, add `pet` and `ui-pet` to `harness-disabled-modules`.
+the code itself, add `pet`, `ui-pet`, `ui-pet-3d` and `ui-pet-models` to
+`harness-disabled-modules`.
 
 ## Configuration
 
