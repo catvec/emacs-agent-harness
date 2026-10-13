@@ -36,6 +36,7 @@
 (defvar harness-supervisor--held)
 (defvar harness-supervisor--spawns)
 (defvar harness-supervisor--raised)
+(defvar harness-supervisor--blocks-hand-in)
 (defvar harness-tools)
 (defvar harness-sessions)
 (defvar harness-agent--turns)
@@ -82,6 +83,9 @@
 (declare-function harness-supervisor--outstanding "harness-supervisor")
 (declare-function harness-supervisor--stop-outstanding "harness-supervisor")
 (declare-function harness-supervisor--send "harness-supervisor")
+(declare-function harness-supervisor--open-steps "harness-supervisor")
+(declare-function harness-supervisor--finished-p "harness-supervisor")
+(declare-function harness-supervisor--with "harness-supervisor")
 (declare-function harness-tools-agent-context-limit "harness-tools-agent")
 (declare-function harness-tasks--forget-stores "harness-tasks")
 (declare-function harness-tasks--naming-pool-new "harness-tasks")
@@ -3849,6 +3853,147 @@ did not answer would make \"the judge was never asked\" mean nothing."
         (should-not (harness-call 'permission/pending sid))
         (should-not (funcall probe))))))
 
+;;;; Handing the work in
+;;
+;; A task's supervisor hands the work in as done only once it is: the
+;; permission gate refuses hand_in while a step of its plans is open.
+;; These tests call the tool in a session that is no task's, so a
+;; hand-in the gate lets by fails in the tool itself, saying so.
+
+(defconst harness-supervisor-plan-test-hand-in
+  '(:problem "The parser breaks on nested quotes." :summary "The parser is fixed."
+    :evidence ("Read the diff: it does what the plan said."))
+  "The input of a hand_in call that hands the work in as done.")
+
+(defun harness-supervisor-plan-test-hand-in (sid &rest input)
+  "Call hand_in in session SID with INPUT before the fields of a hand-in as done; return the result."
+  (harness-supervisor-plan-test-run sid "hand_in" (append input harness-supervisor-plan-test-hand-in)))
+
+(defun harness-supervisor-plan-test-let-by-p (result)
+  "Non-nil when RESULT is that of a hand_in the gate let by, in a session that is no task's."
+  (and (not (plist-get result :denied))
+       (string-match-p "this session is no task" (plist-get result :content))))
+
+(ert-deftest harness-supervisor-plan-the-steps-that-block-a-hand-in ()
+  "A step blocks a hand-in while it is pending or running, or once it did not get done.
+A step that did not get done stops blocking once a plan made after it
+ended replaces it; a plan made while it still ran does not.  One stored
+before steps kept when they ended counts any later plan.  A step that is
+done or superseded never blocks."
+  (harness-supervisor-plan-test-with
+    (let* ((old (list :id "p-old" :created 100.0
+                      :steps (list (list :id "a" :state "done" :ended 110.0)
+                                   (list :id "b" :state "superseded")
+                                   (list :id "c" :state "failed" :ended 120.0)
+                                   (list :id "d" :state "interrupted" :ended 130.0)
+                                   (list :id "e" :state "cancelled")
+                                   (list :id "f" :state "failed" :ended 250.0)
+                                   (list :id "g" :state "running"))))
+           (new (list :id "p-new" :created 200.0
+                      :steps (list (list :id "h" :state "done" :ended 210.0)
+                                   (list :id "i" :state "failed" :ended 220.0)
+                                   (list :id "j" :state "pending" :after '("i")))))
+           (ids (lambda (plans)
+                  (mapcar (lambda (pair) (format "%s/%s" (plist-get (car pair) :id) (plist-get (cdr pair) :id)))
+                          (harness-supervisor--open-steps plans)))))
+      ;; c, d and e ended before the new plan was made, f after it; the new plan's failure stands.
+      (should (equal '("p-old/f" "p-old/g" "p-new/i" "p-new/j") (funcall ids (list old new))))
+      ;; Alone, the old plan has nothing to replace its failures.
+      (should (equal '("p-old/c" "p-old/d" "p-old/e" "p-old/f" "p-old/g") (funcall ids (list old))))
+      ;; A plan without the time it was made replaces whatever came before it.
+      (should (equal '("p-old/g" "p-new/i" "p-new/j")
+                     (funcall ids (list old (harness-supervisor--with new :created nil)))))
+      ;; Nothing blocks when every step is done or superseded, as when the plan finished.
+      (let ((finished (list :id "p-1" :created 1.0
+                            :steps (list (list :id "a" :state "done") (list :id "b" :state "superseded")))))
+        (should (harness-supervisor--finished-p finished))
+        (should-not (funcall ids (list finished))))
+      (should-not (funcall ids nil)))))
+
+(ert-deftest harness-supervisor-plan-a-hand-in-as-done-is-refused-while-a-step-is-open ()
+  "The gate refuses hand_in for good while a step failed, is held, or runs, naming each.
+It says the ways on.  Handing in as needing no merge is refused the
+same; giving the task up with cannot_continue is not, and neither is the
+hand-in of a session that does not supervise."
+  (harness-supervisor-plan-test-with-modules (tools-handin)
+    (let ((sid (harness-supervisor-plan-test-session)))
+      (harness-supervisor-plan-test-failure-fixture sid)
+      (harness-supervisor-plan-test-wait-state sid "s1" "failed")
+      (harness-supervisor-plan-test-wait-reports sid 1)
+      (harness-supervisor-plan-test-wait-idle sid)
+      (let* ((plan-id (plist-get (harness-supervisor-plan-test-plan sid) :id))
+             (result (harness-supervisor-plan-test-hand-in sid))
+             (text (plist-get result :content)))
+        (should (plist-get result :is-error))
+        (should (plist-get result :denied))
+        (should (string-prefix-p
+                 (format (concat "Denied: supervisor mode: the work is not done, so the task cannot be handed in as done:"
+                                 " step s1 (Title of s1) of plan %s failed;"
+                                 " step s2 (Title of s2) of plan %s is pending, waiting for s1;"
+                                 " step s3 (Title of s3) of plan %s is still running;"
+                                 " step s4 (Title of s4) of plan %s is pending, waiting for s2, s3."
+                                 " Run a step that did not get done again with retry_step (on a higher tier if its"
+                                 " model was not up to it), or replace it with a new plan (submit_plan)."
+                                 " A step that runs, or waits to start, is reported to you when it ends: wait for it,"
+                                 " ending this turn with no_plan_needed."
+                                 " If the task cannot be finished, call hand_in with cannot_continue true and say"
+                                 " what blocks it.")
+                         plan-id plan-id plan-id plan-id)
+                 text)))
+      ;; The failure is reported to a session that is no task's without a word of hand_in.
+      (should-not (string-match-p "hand_in" (car (harness-supervisor-plan-test-reports sid))))
+      (should (plist-get (harness-supervisor-plan-test-hand-in sid :no_merge t) :denied))
+      (should (harness-supervisor-plan-test-let-by-p (harness-supervisor-plan-test-hand-in sid :cannot_continue t)))
+      ;; A session that works hands-on hands in as it likes.
+      (harness-call 'supervisor/set sid :false)
+      (should (harness-supervisor-plan-test-let-by-p (harness-supervisor-plan-test-hand-in sid)))
+      ;; Nothing was run again or decided for the steps.
+      (should (equal '("failed" "pending" "running" "pending")
+                     (mapcar (lambda (id) (harness-supervisor-plan-test-state sid id)) '("s1" "s2" "s3" "s4"))))
+      (should (numberp (plist-get (harness-supervisor-plan-test-step sid "s1") :ended)))
+      (should-not (plist-get (harness-supervisor-plan-test-step sid "s3") :ended))
+      ;; Deleting the supervisor cancels the worker that is still working.
+      (let ((worker (plist-get (harness-supervisor-plan-test-step sid "s3") :session)))
+        (harness-call 'session/delete sid)
+        (harness-test-wait (lambda () (not (harness-call 'agent/running worker))) 10 "the worker to stop")))))
+
+(ert-deftest harness-supervisor-plan-a-new-plan-replaces-only-the-failures-it-was-made-after ()
+  "A plan made after a step failed replaces it; a step of an older plan that fails later blocks again.
+A retry that gets that step done lets the hand-in by."
+  (harness-supervisor-plan-test-with-modules (tools-handin)
+    (let ((harness-agent--cancel-grace 0.05)
+          (sid (harness-supervisor-plan-test-session)))
+      (harness-supervisor-plan-test-fail-first sid (harness-supervisor-plan-test-step-input "s1"))
+      (should (string-match-p "step s1 (Title of s1) of plan p-[a-z0-9]+ failed"
+                              (plist-get (harness-supervisor-plan-test-hand-in sid) :content)))
+      ;; A new plan, made since s1 failed, replaces it; its step a1 runs until it is cancelled.
+      (harness-supervisor-plan-test-behave "a1" 'hold)
+      (harness-supervisor-plan-test-submit sid (harness-supervisor-plan-test-step-input "a1"))
+      (let ((worker (harness-test-wait
+                     (lambda () (let ((w (plist-get (harness-supervisor-plan-test-step sid "a1" 1) :session)))
+                                  (and w (harness-call 'session/exists-p w) (harness-call 'agent/running w) w)))
+                     10 "the worker of a1 to run")))
+        (let ((text (plist-get (harness-supervisor-plan-test-hand-in sid) :content)))
+          (should (string-match-p "step a1 (Title of a1) of plan p-[a-z0-9]+ is still running\\." text))
+          (should-not (string-match-p "step s1 " text)))
+        ;; A plan made while a1 still runs does not replace it when it then fails.
+        (harness-supervisor-plan-test-submit sid (harness-supervisor-plan-test-step-input "b1"))
+        (harness-supervisor-plan-test-wait-state sid "b1" "done" 2)
+        (harness-call 'agent/cancel worker)
+        (harness-supervisor-plan-test-wait-state sid "a1" "failed" 1)
+        (harness-supervisor-plan-test-wait-idle sid)
+        (should (< (plist-get (harness-supervisor-plan-test-plan sid 2) :created)
+                   (plist-get (harness-supervisor-plan-test-step sid "a1" 1) :ended)))
+        (let ((text (plist-get (harness-supervisor-plan-test-hand-in sid) :content)))
+          (should (string-match-p "step a1 (Title of a1) of plan p-[a-z0-9]+ failed\\." text))
+          (should-not (string-match-p "step [sb]1 " text))))
+      ;; Run again, a1 gets done, and nothing blocks the hand-in any more.
+      (should-not (plist-get (harness-supervisor-plan-test-retry-step sid "a1") :is-error))
+      (harness-supervisor-plan-test-wait-state sid "a1" "done" 1)
+      (harness-supervisor-plan-test-wait-idle sid)
+      (should (equal "failed" (harness-supervisor-plan-test-state sid "s1" 0)))
+      (should (harness-supervisor-plan-test-let-by-p (harness-supervisor-plan-test-hand-in sid))))))
+
 ;;;; A task's supervisor
 
 (defmacro harness-supervisor-plan-test-with-tasks (&rest body)
@@ -3879,6 +4024,15 @@ A task's session supervises, and a finished task waits for review."
 (defun harness-supervisor-plan-test-task (id)
   "Return task ID."
   (harness-call 'task/get id))
+
+(defun harness-supervisor-plan-test--hand-in-on-report ()
+  "Have a supervisor hand its work in when it is told its plan is finished.
+hand_in needs the problem as well as the summary and the evidence."
+  (setq harness-supervisor-plan-test--on-report
+        (lambda (_text)
+          (harness-supervisor-plan-test-call
+           "hand_in" '(:problem "The parser breaks on nested quotes." :summary "The parser is fixed."
+                       :evidence ("Read the diff: it does what the plan said."))))))
 
 (ert-deftest harness-supervisor-plan-a-task-waits-for-its-workers-and-the-supervisor-hands-it-in ()
   "submit_plan ends the turn but not the task; the finished plan wakes the supervisor, whose hand_in ends it."
@@ -3927,28 +4081,147 @@ A task's session supervises, and a finished task waits for review."
         (should (cl-find "hand_in" (harness-supervisor-plan-test-nodes sid 'tool-call)
                          :key (lambda (n) (plist-get n :tool)) :test #'equal))))))
 
-(ert-deftest harness-supervisor-plan-a-task-stays-active-while-a-failed-step-waits-for-the-supervisor ()
-  "A failure wakes the supervisor of a task; held steps do not keep the task waiting on their own."
+;; A failed step blocks the hand-in: the supervisor of these tests hands
+;; the work in on every report, the failure's too, is refused, and then
+;; does what the test says (`harness-supervisor-plan-test--on-refusal').
+
+(defun harness-supervisor-plan-test-results-of (sid tool)
+  "Return the results of the calls of TOOL in session SID's transcript, oldest first."
+  (let ((ids (mapcar (lambda (n) (plist-get n :call-id))
+                     (cl-remove-if-not (lambda (n) (equal tool (plist-get n :tool)))
+                                       (harness-supervisor-plan-test-nodes sid 'tool-call)))))
+    (cl-remove-if-not (lambda (n) (member (plist-get n :call-id) ids))
+                      (harness-supervisor-plan-test-nodes sid 'tool-result))))
+
+(defun harness-supervisor-plan-test--refused-p (request)
+  "Non-nil when REQUEST's last message holds a hand-in the gate refused.
+Any of its results counts, not only its last block: a note the harness
+adds to a denial, such as a non-interactive session's, comes after it."
+  (cl-some (lambda (block)
+             (and (equal (plist-get block :type) "tool_result")
+                  (string-prefix-p "Denied: supervisor mode: the work is not done"
+                                   (format "%s" (plist-get block :content)))))
+           (plist-get (car (last (plist-get request :messages))) :content)))
+
+(defun harness-supervisor-plan-test--on-refusal (script name input)
+  "Return a provider script whose supervisor calls NAME with INPUT on a refused hand-in.
+Any other request is answered as SCRIPT does."
+  (lambda (request)
+    (let ((events (funcall script request)))
+      (if (and (eq 'main (plist-get (plist-get request :session) :kind))
+               (harness-supervisor-plan-test--refused-p request))
+          (harness-supervisor-plan-test-call name input)
+        events))))
+
+(defun harness-supervisor-plan-test--fail-s1-task (name input)
+  "Submit a supervising task whose step s1 fails, holding s2; return (TASK SESSION).
+The supervisor hands the work in on each report, and when that is
+refused it calls NAME with INPUT."
+  (harness-supervisor-plan-test--hand-in-on-report)
+  (setq harness-supervisor-plan-test--plan
+        (harness-supervisor-plan-test-plan-input
+         (harness-supervisor-plan-test-step-input "s1")
+         (harness-supervisor-plan-test-step-input "s2" :after '("s1"))))
+  (setq harness-provider-demo-script-override
+        (harness-supervisor-plan-test--on-refusal harness-provider-demo-script-override name input))
+  (let ((id (plist-get (harness-call 'task/submit default-directory "Fix the parser") :id)))
+    (list id (plist-get (harness-supervisor-plan-test-task id) :session))))
+
+(defun harness-supervisor-plan-test--check-refused (sid results)
+  "Check that RESULTS, the results of session SID's hand_in calls, start with a refusal for s1.
+s1 of the first plan failed and s2 waits for it; a second hand_in went through."
+  (let ((plan-id (plist-get (harness-supervisor-plan-test-plan sid 0) :id)))
+    (should (= 2 (length results)))
+    (should (plist-get (nth 0 results) :is-error))
+    (should (string-prefix-p
+             (format (concat "Denied: supervisor mode: the work is not done, so the task cannot be handed in as done:"
+                             " step s1 (Title of s1) of plan %s failed;"
+                             " step s2 (Title of s2) of plan %s is pending, waiting for s1."
+                             " Run a step that did not get done again with retry_step (on a higher tier if its"
+                             " model was not up to it), or replace it with a new plan (submit_plan)."
+                             " If the task cannot be finished, call hand_in with cannot_continue true and say"
+                             " what blocks it.")
+                     plan-id plan-id)
+             (plist-get (nth 0 results) :output)))
+    (should-not (plist-get (nth 1 results) :is-error))))
+
+(ert-deftest harness-supervisor-plan-a-task-with-a-failed-step-is-not-handed-in-as-done ()
+  "A failure wakes the supervisor of a task, whose hand_in is then refused: the task stays out of review.
+The report says the step blocks hand_in, and the refusal names it, the
+step held on it and the ways on.  Held steps do not keep the task
+waiting on their own.  Giving the task up with cannot_continue goes
+through, and puts it before the user instead of in review."
+  (harness-supervisor-plan-test-with-tasks
+    (let ((reviews nil))
+      (harness-on 'task/review (lambda (task) (push (plist-get task :id) reviews)))
+      (harness-supervisor-plan-test-behave "s1" 'error)
+      (pcase-let ((`(,id ,sid) (harness-supervisor-plan-test--fail-s1-task
+                                "hand_in" '(:problem "The parser breaks on nested quotes."
+                                            :summary "Step s1 failed twice: the parser is not fixed."
+                                            :cannot_continue t))))
+        ;; The failure reaches the supervisor as a turn, even though the first one ended.
+        (harness-test-wait (lambda () (eq 'cannot-continue (plist-get (harness-supervisor-plan-test-task id) :outcome)))
+                           15 "the task to wait for the user")
+        (harness-supervisor-plan-test-wait-idle sid)
+        (let ((reports (harness-supervisor-plan-test-reports sid)))
+          (should (= 1 (length reports)))
+          (should (string-match-p "step s1 .* failed" (car reports)))
+          (should (string-suffix-p (concat "\n" harness-supervisor--blocks-hand-in) (car reports))))
+        (harness-supervisor-plan-test--check-refused sid (harness-supervisor-plan-test-results-of sid "hand_in"))
+        (let ((task (harness-supervisor-plan-test-task id)))
+          (should (eq 'active (plist-get task :state)))
+          (should (eq 'needs-input (plist-get task :column)))
+          (should (harness-json-true-p (plist-get (plist-get task :report) :cannot-continue)))
+          (should (equal "Step s1 failed twice: the parser is not fixed." (plist-get (plist-get task :report) :summary)))
+          (should-not (plist-get task :waiting)))
+        (should-not reviews)
+        (should (equal "failed" (harness-supervisor-plan-test-state sid "s1")))
+        (should (equal "pending" (harness-supervisor-plan-test-state sid "s2")))))))
+
+(ert-deftest harness-supervisor-plan-a-task-is-handed-in-once-a-retry-got-the-failed-step-done ()
+  "Refused, the supervisor retries the failed step; once the plan has finished, hand_in goes through."
+  (harness-supervisor-plan-test-with-tasks
+    (harness-supervisor-plan-test-behave "s1" 'error "Fixed the parser.")
+    (pcase-let ((`(,id ,sid) (harness-supervisor-plan-test--fail-s1-task
+                              "retry_step" '(:step "s1" :reason "its worker failed"))))
+      (harness-test-wait (lambda () (eq 'review (plist-get (harness-supervisor-plan-test-task id) :state))) 20
+                         "the task to be in review")
+      (harness-supervisor-plan-test--check-refused sid (harness-supervisor-plan-test-results-of sid "hand_in"))
+      (let ((report (plist-get (harness-supervisor-plan-test-task id) :report)))
+        (should (equal "The parser is fixed." (plist-get report :summary)))
+        (should-not (plist-get report :missing)))
+      (should (equal '("done" "done") (list (harness-supervisor-plan-test-state sid "s1")
+                                            (harness-supervisor-plan-test-state sid "s2"))))
+      (should (= 2 (plist-get (harness-supervisor-plan-test-step sid "s1") :attempts)))
+      (let ((reports (harness-supervisor-plan-test-reports sid)))
+        (should (= 2 (length reports)))
+        (should (string-match-p "step s1 .* failed" (nth 0 reports)))
+        (should (string-match-p "finished\\. All 2 steps are done" (nth 1 reports)))))))
+
+(ert-deftest harness-supervisor-plan-a-task-is-handed-in-once-a-new-plan-replaced-the-failed-step ()
+  "Refused, the supervisor makes a new plan; once that has finished, hand_in goes through.
+A plan made after a step failed replaces it: the failed step stays as it
+was, and the one held on it is superseded."
   (harness-supervisor-plan-test-with-tasks
     (harness-supervisor-plan-test-behave "s1" 'error)
-    (setq harness-supervisor-plan-test--plan
-          (harness-supervisor-plan-test-plan-input
-           (harness-supervisor-plan-test-step-input "s1")
-           (harness-supervisor-plan-test-step-input "s2" :after '("s1"))))
-    (setq harness-supervisor-plan-test--on-report
-          (lambda (_text)
-            (harness-supervisor-plan-test-call
-             "hand_in" '(:problem "The parser breaks on nested quotes." :summary "The step failed; handing in what there is." :evidence ("Step s1 failed twice.")))))
-    (let* ((id (plist-get (harness-call 'task/submit default-directory "Fix the parser") :id))
-           (sid (plist-get (harness-supervisor-plan-test-task id) :session)))
-      ;; The failure reaches the supervisor as a turn, even though the first one ended.
-      (harness-test-wait (lambda () (eq 'review (plist-get (harness-supervisor-plan-test-task id) :state))) 15
+    (pcase-let ((`(,id ,sid) (harness-supervisor-plan-test--fail-s1-task
+                              "submit_plan" (harness-supervisor-plan-test-plan-input
+                                             (harness-supervisor-plan-test-step-input
+                                              "t1" :prompt "Fix the parser in smaller steps.")))))
+      (harness-test-wait (lambda () (eq 'review (plist-get (harness-supervisor-plan-test-task id) :state))) 20
                          "the task to be in review")
+      (harness-supervisor-plan-test--check-refused sid (harness-supervisor-plan-test-results-of sid "hand_in"))
+      (should (equal "The parser is fixed." (plist-get (plist-get (harness-supervisor-plan-test-task id) :report)
+                                                       :summary)))
+      (should (equal '("failed" "superseded") (list (harness-supervisor-plan-test-state sid "s1" 0)
+                                                    (harness-supervisor-plan-test-state sid "s2" 0))))
+      (should (equal "done" (harness-supervisor-plan-test-state sid "t1" 1)))
+      (should (< (plist-get (harness-supervisor-plan-test-step sid "s1" 0) :ended)
+                 (plist-get (harness-supervisor-plan-test-plan sid 1) :created)))
       (let ((reports (harness-supervisor-plan-test-reports sid)))
-        (should (= 1 (length reports)))
-        (should (string-match-p "step s1 .* failed" (car reports))))
-      (should (equal "pending" (harness-supervisor-plan-test-state sid "s2")))
-      (should-not (plist-get (harness-supervisor-plan-test-task id) :waiting)))))
+        (should (= 2 (length reports)))
+        (should (string-match-p "step s1 .* failed" (nth 0 reports)))
+        (should (string-match-p "finished\\. Its one step is done" (nth 1 reports)))))))
 
 ;;;; A task sent back to the queue while its workers run
 ;;
@@ -4002,15 +4275,6 @@ cleared so that no later request submits it again."
     (should (harness-call 'agent/running worker))
     (should (string-match-p "\\`Supervisor plan: 1 step running" (harness-call 'agent/outstanding sid)))
     (list task sid worker)))
-
-(defun harness-supervisor-plan-test--hand-in-on-report ()
-  "Have a supervisor hand its work in when it is told its plan is finished.
-hand_in needs the problem as well as the summary and the evidence."
-  (setq harness-supervisor-plan-test--on-report
-        (lambda (_text)
-          (harness-supervisor-plan-test-call
-           "hand_in" '(:problem "The parser breaks on nested quotes." :summary "The parser is fixed."
-                       :evidence ("Read the diff: it does what the plan said."))))))
 
 (defun harness-supervisor-plan-test--check-carried-on (task sid worker opening why)
   "Check that TASK, which carried on in session SID after its worker was stopped, is done.

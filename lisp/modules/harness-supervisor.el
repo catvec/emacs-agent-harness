@@ -142,14 +142,15 @@
 ;; :created :fork-tokens :steps', a step `:id :title :prompt :tier
 ;; :reason :context :after :model :state :session :attempts :result
 ;; :error', `:thinking' when its tier names a level, and, once it ran,
-;; `:worker-model' (the model of its worker) and, once it started again,
-;; `:previous'.  A step of a plan stored before the tiers were renamed has
-;; mundane or standard as its tier, which read as simple and medium.  A
-;; step whose tier found no model keeps `:model-fallback', the reason
-;; (`unknown', `unlisted' or `none'), and runs on the supervisor's own
-;; model.  A step is pending, running, done, failed, interrupted,
-;; cancelled or superseded: a new plan supersedes the steps of the earlier
-;; ones that have not started, and their running steps finish as usual.
+;; `:worker-model' (the model of its worker), `:ended' (when its last
+;; attempt ended) and, once it started again, `:previous'.  A step of a
+;; plan stored before the tiers were renamed has mundane or standard as
+;; its tier, which read as simple and medium.  A step whose tier found
+;; no model keeps `:model-fallback', the reason (`unknown', `unlisted'
+;; or `none'), and runs on the supervisor's own model.  A step is
+;; pending, running, done, failed, interrupted, cancelled or superseded:
+;; a new plan supersedes the steps of the earlier ones that have not
+;; started, and their running steps finish as usual.
 ;;
 ;; What the supervisor hears.  A step that is done is a hint, and starts
 ;; the steps that waited for it.  A step that did not get done -- its
@@ -165,6 +166,20 @@
 ;; one that arrives while the turn that submitted the plan is ending would
 ;; be lost with it, so it waits for the turn's end.  `retry_step' runs a
 ;; step again on a new worker, and does not end the turn.
+;;
+;; A task's supervisor hands the work in as done only once it is.  The
+;; stage at 8 refuses, for good, a `hand_in' without `cannot_continue'
+;; while a step of the session's plans is open
+;; (`harness-supervisor--open-steps'): pending or running, or ended
+;; without being done -- failed, interrupted or cancelled -- until
+;; `retry_step' gets it done or a plan submitted after it ended replaces
+;; it, which is what a step keeps `:ended' for.  The refusal names the
+;; open steps and the ways on: run one again, replace it with a new plan,
+;; wait for one that runs, or give the task up with `hand_in' and
+;; `cannot_continue', which is never refused.  The user can still approve
+;; the refused call in the chat, as any denial.  The report of a step
+;; that did not get done tells a task's supervisor so, and so does its
+;; system prompt.
 ;;
 ;; Work that runs outside the turn is `agent/outstanding' for the tasks
 ;; module, which keeps the task of the session working, with a line of what
@@ -483,32 +498,42 @@ tools.  A nil SESSION is the catalogue of every tool, which stays whole."
   "Put the change in a step of your plan (submit_plan), for a worker to make, or ask the user to switch supervisor mode off with the supervisor button in the chat header."
   "What a supervising session is told when a call is denied.")
 
-(defun harness-supervisor--denial (reason)
-  "Return the decision that denies a call for good, because of REASON."
+(defun harness-supervisor--denial (reason &optional hint)
+  "Return the decision that denies a call for good, because of REASON.
+HINT says what to do instead, `harness-supervisor--deny-hint' unless
+given."
   (list :behavior 'deny :final t
         :reason (format "supervisor mode: %s" reason)
-        :hint harness-supervisor--deny-hint))
+        :hint (or hint harness-supervisor--deny-hint)))
 
 (defun harness-supervisor--refusal (request)
   "Return the decision that denies REQUEST in a supervising session, or nil.
 A call is refused when the session supervises and the tool is not on
-the allowlist, or is bash and the sandbox cannot confine the command."
+the allowlist, or is bash and the sandbox cannot confine the command.
+A `hand_in' that hands a task in as done is refused while a step of the
+session's plans is not done (`harness-supervisor--hand-in-refusal')."
   (let* ((session (plist-get request :session))
          (tool (plist-get request :tool))
          (dir (or (car (plist-get request :paths)) (harness-supervisor--dir session))))
-    (when (and (harness-supervisor--session-p session)
-               (not (harness-supervisor--tool-allowed-p tool dir)))
-      (harness-supervisor--denial
-       (if (equal tool "bash")
-           (format "bash runs only read-only and offline here, which needs the sandbox, and the sandbox cannot confine commands in %s"
-                   (or dir "this session's directory"))
-         (format "this session plans and delegates, so it may not use %s" tool))))))
+    (when (harness-supervisor--session-p session)
+      (if (not (harness-supervisor--tool-allowed-p tool dir))
+          (harness-supervisor--denial
+           (if (equal tool "bash")
+               (format "bash runs only read-only and offline here, which needs the sandbox, and the sandbox cannot confine commands in %s"
+                       (or dir "this session's directory"))
+             (format "this session plans and delegates, so it may not use %s" tool)))
+        (and (equal tool "hand_in")
+             (harness-supervisor--hand-in-refusal session (plist-get request :input)))))))
 
 (defun harness-supervisor--gate (decision next request)
   "Deny a call a supervising session may not make, then go on with NEXT.
 A `permission/decide' stage at 8, before the jail, the mode and the
 judge: DECISION is the current value and REQUEST the call.  The denial
 is final, so no permission mode, rule or answer lets the call run.
+Besides the tools a supervising session may not use, it refuses the
+`hand_in' that would hand a task in as done while a step of the
+session's plans is not done (`harness-supervisor--hand-in-refusal'),
+which the user can still approve in the chat, as any denial.
 Calls of a session that does not supervise go on as they were.  A call
 this stage cannot check is denied too: it fails closed, since a handler
 that signals would be skipped, and the call would then be decided as if
@@ -1509,7 +1534,8 @@ still write its answer."
 ;;
 ;;   plan  (:id :title :summary :node :call-id :created :fork-tokens :steps)
 ;;   step  (:id :title :prompt :tier :reason :context :after :model :thinking
-;;          :state :session :attempts :result :error :worker-model :previous)
+;;          :state :session :attempts :result :error :worker-model :ended
+;;          :previous)
 ;;
 ;; `:node' and `:call-id' are the fork point of the plan: the call that
 ;; submitted it, which every fork step forks the supervisor at.
@@ -1522,6 +1548,10 @@ still write its answer."
 ;; worker's final reply when it is done.  `:thinking' is the level the
 ;; step's tier names, which its worker runs at.  `:worker-model' is the
 ;; model that worker was made for, which `retry_step' may change.
+;; `:ended' is when the step's last attempt ended, done or not, as a
+;; float time, which a step that runs has none of: a step that did not
+;; get done stops blocking a hand-in once a plan made after it ended
+;; replaces it (`harness-supervisor--replaced-p').
 ;; A step that started again has `:previous', the attempt before:
 ;; (:attempt N :session SESSION :model MODEL :error TEXT).
 
@@ -1599,11 +1629,14 @@ The call is (:session SUPERVISOR :call-id ID :started TIME), SUPERVISOR
 the session whose transcript shows it (see
 `harness-supervisor--open-call').")
 
+(defun harness-supervisor--session-plans (session)
+  "Return the plans of SESSION, a session plist, oldest first."
+  (let ((plans (plist-get (plist-get session :ext) harness-supervisor--plans-key)))
+    (and (consp plans) (consp (car plans)) plans)))
+
 (defun harness-supervisor--plans (session-id)
   "Return the plans of session SESSION-ID, oldest first."
-  (let ((plans (plist-get (plist-get (harness-call 'session/get session-id) :ext)
-                          harness-supervisor--plans-key)))
-    (and (consp plans) (consp (car plans)) plans)))
+  (harness-supervisor--session-plans (harness-call 'session/get session-id)))
 
 (defun harness-supervisor--plan (plans plan-id)
   "Return the plan whose id is PLAN-ID among PLANS, or nil."
@@ -2463,10 +2496,11 @@ is not waiting to start, or to start again, is left alone: promises
 that settled already call back at once, so a step can have been started
 by the time its turn comes.
 
-A step that starts again loses its session and its error, which belong
-to the attempt before; when that attempt had a worker, the step keeps
-it as `:previous' (`harness-supervisor--previous-attempt'), which the
-new worker is told of (`harness-supervisor--worker-text').
+A step that starts again loses its session, its error and the time it
+ended (`:ended'), which belong to the attempt before; when that attempt
+had a worker, the step keeps it as `:previous'
+\(`harness-supervisor--previous-attempt'), which the new worker is told
+of (`harness-supervisor--worker-text').
 
 The worker is made for this attempt only: should the step be
 interrupted while it is made (`harness-supervisor--stop-outstanding'),
@@ -2479,7 +2513,7 @@ nothing (`harness-supervisor--making-p')."
         (puthash (harness-supervisor--step-key session-id plan-id step-id) t harness-supervisor--live)
         (apply #'harness-supervisor--update-step session-id plan-id step-id
                :state "running" :attempts attempt
-               :session nil :result nil :error nil :worker-model nil
+               :session nil :result nil :error nil :worker-model nil :ended nil
                (let ((previous (harness-supervisor--previous-attempt old)))
                  (and previous (list :previous previous))))
         (let ((plan (harness-supervisor--plan (harness-supervisor--plans session-id) plan-id)))
@@ -2801,10 +2835,18 @@ that turn would not take it, and goes out when the turn is over."
   "Return TEXT cut to LIMIT characters, or nil when it says nothing."
   (and (stringp text) (not (string-blank-p text)) (harness-truncate-middle (string-trim text) limit)))
 
-(defun harness-supervisor--failure-text (session-id plan step)
+(defconst harness-supervisor--blocks-hand-in
+  "A step that did not get done blocks hand_in, which is refused until a retry gets the step done or a new plan replaces it. If the task cannot be finished, call hand_in with cannot_continue true and say what blocks it."
+  "What a report of a step that did not get done tells a task's supervisor.
+See `harness-supervisor--hand-in-refusal'.")
+
+(defun harness-supervisor--failure-text (session-id plan step &optional together)
   "Return the report to SESSION-ID that STEP of PLAN did not get done.
 It names the step, its tier and model, what went wrong, the steps held
-on it, and the ways on."
+on it, and the ways on.  To the supervisor of a task it says too that
+the step blocks `hand_in' (`harness-supervisor--blocks-hand-in'),
+unless TOGETHER: the report is one of several in a message that says
+it once (`harness-supervisor--interrupted-text')."
   (let* ((id (plist-get step :id))
          (state (plist-get step :state))
          (held (cl-remove-if-not (lambda (s) (harness-supervisor--state-p s "pending"))
@@ -2841,15 +2883,26 @@ on it, and the ways on."
              ;; An interruption says nothing about the model.
              (if (equal state "interrupted")
                  "to run it again"
-               "(on a higher tier, up to hard, if its model was not up to it)")))))
+               "(on a higher tier, up to hard, if its model was not up to it)"))
+     (and (not together) (harness-supervisor--task-p session-id)
+          (concat "\n" harness-supervisor--blocks-hand-in)))))
+
+(defun harness-supervisor--settled-p (step)
+  "Non-nil when STEP leaves nothing to do: it is done, or superseded.
+A step a later plan superseded never runs.  Any other step is pending,
+running, or ended without being done: failed, interrupted or cancelled.
+`harness-supervisor--finished-p' and `harness-supervisor--open-steps'
+both go by it."
+  (harness-supervisor--state-p step "done" "superseded"))
 
 (defun harness-supervisor--finished-p (plan)
   "Non-nil when nothing is left to do in PLAN: every step is done or superseded.
 No step is pending or running, and none failed, was interrupted or
-cancelled.  A step a later plan superseded never runs."
+cancelled (`harness-supervisor--settled-p'), and one at least is done.
+A step a later plan superseded never runs."
   (let ((steps (plist-get plan :steps)))
     (and steps
-         (cl-every (lambda (step) (harness-supervisor--state-p step "done" "superseded")) steps)
+         (cl-every #'harness-supervisor--settled-p steps)
          (cl-some (lambda (step) (harness-supervisor--state-p step "done")) steps))))
 
 (defun harness-supervisor--finished-text (session-id plan)
@@ -2894,7 +2947,7 @@ that step ends."
   (when (harness-call 'session/exists-p session-id)
     (let ((step (harness-supervisor--update-step
                  session-id plan-id step-id
-                 :state "done" :error nil
+                 :state "done" :error nil :ended (float-time)
                  :result (harness-supervisor--cut (harness-supervisor--last-reply worker-id)
                                                   harness-supervisor--result-limit))))
       (when step
@@ -2918,7 +2971,8 @@ end of its worker changes nothing and reports nothing."
     (when (gethash key harness-supervisor--live)
       (remhash key harness-supervisor--live)
       (when (harness-call 'session/exists-p session-id)
-        (let ((step (harness-supervisor--update-step session-id plan-id step-id :state state :error error)))
+        (let ((step (harness-supervisor--update-step session-id plan-id step-id
+                                                     :state state :error error :ended (float-time))))
           (when step
             ;; The call's result joins the call before the report.
             (harness-supervisor--close-call session-id step state error)
@@ -2926,6 +2980,94 @@ end of its worker changes nothing and reports nothing."
              session-id
              (harness-supervisor--failure-text
               session-id (harness-supervisor--plan (harness-supervisor--plans session-id) plan-id) step))))))))
+
+;;;; The plan engine: handing a task in
+;;
+;; A task's supervisor hands the work in as done only once it is: while
+;; a step of its plans is open the permission gate refuses `hand_in'
+;; (`harness-supervisor--refusal').  Giving the task up, `hand_in' with
+;; `cannot_continue', is never refused.
+
+(defun harness-supervisor--replaced-p (plans plan step)
+  "Non-nil when a plan of PLANS submitted after STEP of PLAN ended replaces it.
+STEP ended without being done.  A plan made since is the supervisor's
+decision about it, whatever that plan does, as it was made knowing the
+step did not get done.  A plan made before the step ended is not, even
+when it is later than PLAN: the step still ran when it was made, and its
+end is news the supervisor has not decided on.  A step stored without
+`:ended', from before steps kept when they ended, counts any plan later
+than PLAN, and so does a plan without `:created'."
+  (let ((ended (plist-get step :ended)))
+    (cl-some (lambda (later)
+               (let ((created (plist-get later :created)))
+                 (or (not (numberp ended)) (not (numberp created)) (> created ended))))
+             (cdr (memq plan plans)))))
+
+(defun harness-supervisor--open-steps (plans)
+  "Return the steps of PLANS that leave the work not done, as (PLAN . STEP).
+Those are the steps that are not settled (`harness-supervisor--settled-p'):
+a step pending or running, and a step that ended without being done --
+failed, interrupted or cancelled -- until `retry_step' gets it done or
+a plan submitted since replaces it (`harness-supervisor--replaced-p').
+They come in plan order, the oldest plan first.  While there is one,
+the task of the session cannot be handed in as done
+\(`harness-supervisor--hand-in-refusal')."
+  (cl-loop for plan in plans
+           append (cl-loop for step in (plist-get plan :steps)
+                           unless (or (harness-supervisor--settled-p step)
+                                      (and (not (harness-supervisor--state-p step "pending" "running"))
+                                           (harness-supervisor--replaced-p plans plan step)))
+                           collect (cons plan step))))
+
+(defun harness-supervisor--open-step-text (plan step)
+  "Return how STEP of PLAN stands, as a refused hand-in names an open step."
+  (format "step %s of plan %s %s"
+          (harness-supervisor--step-name step) (plist-get plan :id)
+          (pcase (plist-get step :state)
+            ("running" "is still running")
+            ("pending"
+             (let ((waits (cl-remove-if (lambda (id) (harness-supervisor--state-p
+                                                      (harness-supervisor--step plan id) "done"))
+                                        (plist-get step :after))))
+               (if waits (format "is pending, waiting for %s" (string-join waits ", ")) "is pending")))
+            ("failed" "failed")
+            ("interrupted" "was interrupted")
+            ("cancelled" "was cancelled")
+            (state (format "is %s" state)))))
+
+(defun harness-supervisor--hand-in-hint (open)
+  "Return what to do instead of a hand-in refused for OPEN, the open steps.
+OPEN is a list of (PLAN . STEP).  A step that did not get done is run
+again or replaced; one that runs, or waits to start, is waited for;
+and a task that cannot be finished is given up, which is never refused."
+  (let ((ended (cl-some (lambda (pair) (not (harness-supervisor--state-p (cdr pair) "pending" "running")))
+                        open))
+        (going (cl-some (lambda (pair) (or (harness-supervisor--state-p (cdr pair) "running")
+                                           (harness-supervisor--waiting-p (car pair) (cdr pair))))
+                        open)))
+    (string-join
+     (delq nil
+           (list (and ended "Run a step that did not get done again with retry_step (on a higher tier if its model was not up to it), or replace it with a new plan (submit_plan).")
+                 (and going "A step that runs, or waits to start, is reported to you when it ends: wait for it, ending this turn with no_plan_needed.")
+                 "If the task cannot be finished, call hand_in with cannot_continue true and say what blocks it."))
+     " ")))
+
+(defun harness-supervisor--hand-in-refusal (session input)
+  "Return the decision that refuses SESSION's `hand_in' with INPUT, or nil.
+SESSION is the plist of a supervising session.  A hand-in as done --
+INPUT without `:cannot_continue' true, `:no_merge' or not -- is refused
+for good while a step of the session's plans is open
+\(`harness-supervisor--open-steps'): the work it hands in is not done.
+The refusal names each open step and how it stands, and the ways on
+\(`harness-supervisor--hand-in-hint').  A task given up, with
+`:cannot_continue', goes through: it says the work is not done."
+  (unless (harness-json-true-p (plist-get input :cannot_continue))
+    (when-let* ((open (harness-supervisor--open-steps (harness-supervisor--session-plans session))))
+      (harness-supervisor--denial
+       (format "the work is not done, so the task cannot be handed in as done: %s."
+               (mapconcat (lambda (pair) (harness-supervisor--open-step-text (car pair) (cdr pair)))
+                          open "; "))
+       (harness-supervisor--hand-in-hint open)))))
 
 ;;;; The plan engine: submit_plan
 
@@ -3238,7 +3380,7 @@ and nothing starts.  Return the keys of the steps (see
     (setq stopped (nreverse stopped))
     (dolist (entry stopped)
       (harness-supervisor--update-step session-id (nth 1 (car entry)) (nth 2 (car entry))
-                                       :state "interrupted" :error why))
+                                       :state "interrupted" :error why :ended (float-time)))
     (dolist (entry stopped)
       (let* ((plan (harness-supervisor--plan (harness-supervisor--plans session-id) (nth 1 (car entry))))
              (step (harness-supervisor--step plan (nth 2 (car entry))))
@@ -3279,7 +3421,9 @@ KEYS are the steps' `harness-supervisor--step-key's, WHY the reason.  A
 first part says the plan's workers were stopped, why, and that nothing
 goes on by itself; then each step is reported as a failure is
 \(`harness-supervisor--failure-text'), between blank lines, as
-`harness-supervisor--flush' joins the reports it holds."
+`harness-supervisor--flush' joins the reports it holds.  To the
+supervisor of a task the report ends saying, once, that the steps block
+`hand_in' (`harness-supervisor--blocks-hand-in')."
   (let* ((plans (harness-supervisor--plans session-id))
          (found (delq nil (mapcar (lambda (key) (harness-supervisor--find-step plans (nth 2 key) (nth 1 key)))
                                   keys)))
@@ -3291,8 +3435,10 @@ goes on by itself; then each step is reported as a failure is
              (string-remove-suffix "." why)
              (if (= n 1) "the step" "each step"))
      (mapconcat (lambda (pair)
-                  (concat "\n\n" (harness-supervisor--failure-text session-id (car pair) (cdr pair))))
-                found ""))))
+                  (concat "\n\n" (harness-supervisor--failure-text session-id (car pair) (cdr pair) t)))
+                found "")
+     (and found (harness-supervisor--task-p session-id)
+          (concat "\n\n" harness-supervisor--blocks-hand-in)))))
 
 (defun harness-supervisor--stop-outstanding (value session-id reason)
   "Interrupt the running steps of SESSION-ID's plans, for REASON; say so in VALUE.
@@ -3391,7 +3537,8 @@ expensive turn they did not ask for."
     (dolist (ids interrupted)
       (harness-supervisor--update-step session-id (car ids) (cdr ids)
                                        :state "interrupted"
-                                       :error "the harness stopped while the worker was running"))
+                                       :error "the harness stopped while the worker was running"
+                                       :ended (float-time)))
     (let ((task (harness-supervisor--task-p session-id)))
       (dolist (ids interrupted)
         (let* ((plan (harness-supervisor--plan (harness-supervisor--plans session-id) (car ids)))
@@ -3436,7 +3583,7 @@ prompt cache: nothing in it names a session, a directory or a count."
    "- Every turn ends on a decision: "
    (string-join harness-supervisor-decision-tools ", ")
    ". Use submit_plan when the work changes files, and no_plan_needed when you answered a question, there is nothing to do, or the plan is still running.\n"
-   "- In a task, the last step commits (git add -A && git commit). Once the plan has finished and you checked the result, call hand_in; review feedback means a new plan to fix it."))
+   "- In a task, the last step commits (git add -A && git commit). Once the plan has finished and you checked the result, call hand_in; review feedback means a new plan to fix it. A step that failed, was interrupted or was cancelled blocks hand_in until retry_step gets it done or a new plan replaces it, and so does a step still pending or running: the work is not done. If the task cannot be finished, call hand_in with cannot_continue true and say what blocks it."))
 
 (defun harness-supervisor--system-prompt (prompt session)
   "Give a supervising SESSION the Supervisor mode section in place of Planning.

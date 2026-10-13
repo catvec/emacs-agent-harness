@@ -2171,7 +2171,11 @@ or model is coordination, like session_send, and is one."
                         "task_control" "session_send" "session_control" "you answered a question"
                         "the plan is still running"
                         "In a task, the last step commits (git add -A && git commit)"
-                        "review feedback means a new plan to fix it"))
+                        "review feedback means a new plan to fix it"
+                        "A step that failed, was interrupted or was cancelled blocks hand_in"
+                        "until retry_step gets it done or a new plan replaces it"
+                        "a step still pending or running"
+                        "call hand_in with cannot_continue true"))
         (ert-info (needle)
           (should (string-match-p needle prompt)))))))
 
