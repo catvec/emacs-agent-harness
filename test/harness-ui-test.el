@@ -540,41 +540,33 @@ bottom side window and leaves the other windows alone."
         (should (eq window (selected-window)))
         (should-not (get-buffer-window view))))))
 
-;;;; Showing a view in a frame
+;;;; Where a window prefix says
+;;
+;; Emacs's window prefixes -- C-x 4 4, C-x 5 5, C-x t t -- say where the
+;; next command's buffer shows.  The keys go through the command loop
+;; (`execute-kbd-macro'), as typed keys do, so a prefix's action lasts
+;; until the command after it is over, as it does for the user.
 
-(defvar harness-ui-views)
-(declare-function harness-ui-read-frame "harness-ui")
-(declare-function harness-ui-read-view "harness-ui")
-(declare-function harness-ui--event-frame "harness-ui")
-(declare-function harness-ui--frame-label "harness-ui")
-(declare-function harness-ui-open-view-in-frame "harness-ui")
+(declare-function harness-ui-display-override-p "harness-ui")
+(declare-function harness-ui-display-later "harness-ui")
+(declare-function harness-switch-session "harness-ui")
+(declare-function tab-bar--current-tab-index "tab-bar")
+(declare-function tab-bar-select-tab "tab-bar")
+(declare-function tab-bar-close-tab "tab-bar")
+(defvar tab-bar-tabs-function)
 
-(ert-deftest harness-ui-read-frame-defaults-to-the-selected-frame ()
-  "The frame to show a view in is read, the selected one offered first."
-  (let (offered)
-    (cl-letf (((symbol-function 'completing-read)
-               (lambda (_prompt collection &rest _)
-                 (setq offered (mapcar #'car collection))
-                 (caar collection))))
-      (should (eq (selected-frame) (harness-ui-read-frame))))
-    (should (equal (harness-ui--frame-label (selected-frame)) (car offered)))))
+(defmacro harness-ui-test-with-keys (bindings &rest body)
+  "Run BODY with BINDINGS, a list of (KEY . COMMAND), over the buffers' keys.
+The global map stays below them, with its window prefixes."
+  (declare (indent 1))
+  `(let ((overriding-local-map (make-sparse-keymap)))
+     (dolist (binding ,bindings)
+       (define-key overriding-local-map (kbd (car binding)) (cdr binding)))
+     ,@body))
 
-(ert-deftest harness-ui-event-frame-reads-the-mouse-events-frame ()
-  "A mouse event names its window's frame; a plain key names the selected one."
-  (let ((last-input-event (list 'mouse-1 (list (selected-window) 0 '(0 . 0) 0 nil 0 '(0 . 0) nil '(0 . 0) '(1 . 1)))))
-    (should (eq (selected-frame) (harness-ui--event-frame)))))
-
-(ert-deftest harness-ui-read-view-offers-only-the-views-that-are-defined ()
-  "A view whose module is off is not offered, and the choice is returned."
-  (let (offered)
-    (cl-letf (((symbol-function 'harness-ui--command-available-p)
-               (lambda (command) (eq command 'harness-tasks)))
-              ((symbol-function 'completing-read)
-               (lambda (_prompt collection &rest _)
-                 (setq offered (mapcar #'car collection))
-                 "Task board")))
-      (should (eq 'harness-tasks (cdr (harness-ui-read-view)))))
-    (should (equal '("Task board") offered))))
+(defun harness-ui-test--view-command (buffer)
+  "Return a command showing BUFFER as a view command shows its view."
+  (lambda () (interactive) (harness-ui-display-view buffer)))
 
 (ert-deftest harness-ui-display-view-shows-in-the-frame-given ()
   "The frame argument is the frame the view shows in, and its position is set."
@@ -585,36 +577,106 @@ bottom side window and leaves the other windows alone."
       (should (eq view (window-buffer (get-buffer-window view frame))))
       (should (eq 'right (buffer-local-value 'harness-ui-position view))))))
 
-(ert-deftest harness-ui-open-view-in-frame-shows-the-view-there ()
-  "The command runs the view's opener with FRAME selected and current.
-The view replaces whatever the frame shows in its position, even when
-the command is invoked from another buffer."
+(ert-deftest harness-ui-window-prefix-shows-a-view-in-another-window ()
+  "C-x 4 4 before a view command shows the view in another window.
+Not in its position, a side window, but where the prefix says, as any
+buffer would: a window of its own, selected.  The position the view had
+is kept for the next time, and the prefix is spent once the command is
+over, so the next buffer goes to its position again."
   (harness-ui-test-with-views
-    (let* ((frame (selected-frame))
-           (harness-ui-open-session-function (lambda (_id) other-session)))
-      (harness-ui-display-buffer session 'right)
-      (should (eq session (window-buffer (get-buffer-window session frame))))
-      (switch-to-buffer "*scratch*")
-      (harness-ui-open-view-in-frame frame (cons "View" (lambda () (harness-ui-display-view view))))
-      (should (eq view (window-buffer (get-buffer-window view frame))))
-      (should-not (get-buffer-window session frame)))))
+    (with-current-buffer view (setq-local harness-ui-position 'left))
+    (let ((main (selected-window)))
+      (harness-ui-test-with-keys (list (cons "C-c v" (harness-ui-test--view-command view)))
+        (execute-kbd-macro (kbd "C-x 4 4 C-c v")))
+      (let ((window (get-buffer-window view)))
+        (should window)
+        (should-not (eq main window))
+        (should-not (window-parameter window 'window-side))
+        (should (eq window (selected-window)))
+        (should (eq 'left (buffer-local-value 'harness-ui-position view))))
+      ;; Spent with the command, nothing left pending.
+      (should-not (harness-ui-display-override-p))
+      (should-not (car display-buffer-overriding-action))
+      (harness-ui-display-view other-session 'right)
+      (should (eq 'right (window-parameter (get-buffer-window other-session) 'window-side))))))
 
-(ert-deftest harness-ui-open-view-in-frame-is-bound-in-the-map ()
-  (should (eq 'harness-ui-open-view-in-frame (lookup-key harness-ui-map (kbd "X")))))
+(ert-deftest harness-ui-window-prefix-shows-a-view-in-a-new-frame ()
+  "C-x 5 5 before a view command shows the view in a new frame.
+A batch Emacs makes no frame, so the frame made is the selected one, and
+what counts is that one was asked for and the view shows in it."
+  (harness-ui-test-with-views
+    (let* ((made 0)
+           (pop-up-frame-function (lambda () (cl-incf made) (selected-frame))))
+      (with-current-buffer view (setq-local harness-ui-position 'right))
+      (harness-ui-test-with-keys (list (cons "C-c v" (harness-ui-test--view-command view)))
+        (execute-kbd-macro (kbd "C-x 5 5 C-c v")))
+      (should (= 1 made))
+      (should (eq view (window-buffer (selected-window))))
+      (should-not (window-parameter (selected-window) 'window-side))
+      (should (eq 'right (buffer-local-value 'harness-ui-position view))))))
 
-(ert-deftest harness-ui-open-view-in-frame-reads-a-frame-and-a-view ()
-  "The command reads the frame and the view, and shows the view there."
-  (let ((answers (list (harness-ui--frame-label (selected-frame)) "Log"))
-        (log (get-buffer harness-log-buffer-name)))
-    (unwind-protect
-        (progn
-          (cl-letf (((symbol-function 'completing-read)
-                     (lambda (_prompt &rest _) (pop answers))))
-            (call-interactively #'harness-ui-open-view-in-frame))
-          (should (get-buffer-window log (selected-frame))))
-      (let ((window (get-buffer-window log (selected-frame))))
-        (when (window-live-p window) (delete-window window)))
-      (when (buffer-live-p log) (kill-buffer log)))))
+(ert-deftest harness-ui-window-prefix-shows-a-view-in-a-new-tab ()
+  "C-x t t before a view command shows the view in a new tab."
+  (require 'tab-bar)
+  (harness-ui-test-with-views
+    (let ((tabs (length (funcall tab-bar-tabs-function)))
+          (mode (bound-and-true-p tab-bar-mode)))
+      (unwind-protect
+          (progn
+            (harness-ui-test-with-keys (list (cons "C-c v" (harness-ui-test--view-command view)))
+              (execute-kbd-macro (kbd "C-x t t C-c v")))
+            (should (= (1+ tabs) (length (funcall tab-bar-tabs-function))))
+            (should (eq view (window-buffer (selected-window)))))
+        (while (> (length (funcall tab-bar-tabs-function)) tabs)
+          (tab-bar-close-tab))
+        (unless mode (tab-bar-mode -1))))))
+
+(ert-deftest harness-ui-window-prefix-holds-for-a-session-shown-later ()
+  "A session shown once the harness answers goes where the prefix said.
+C-c h s reads the session once the session list is fetched, when the
+prefix's command is over: the prefix's action and the frame the command
+ran in are taken as it runs (`harness-ui-display-later'), and the session
+shows with them."
+  (harness-ui-test-with-views
+    (let* ((pending nil)
+           (frames nil)
+           (display (symbol-function 'harness-ui-display-session))
+           (harness-ui-open-session-function (lambda (_id) session)))
+      (cl-letf (((symbol-function 'harness-ui-refresh-sessions)
+                 (lambda (&optional callback) (setq pending callback)))
+                ((symbol-function 'harness-ui-read-session)
+                 (lambda (&rest _) (list :id "sid")))
+                ((symbol-function 'harness-ui-display-session)
+                 (lambda (id &optional position frame)
+                   (push frame frames)
+                   (funcall display id position frame))))
+        (harness-ui-test-with-keys (list (cons "C-c s" #'harness-switch-session))
+          (execute-kbd-macro (kbd "C-x 4 4 C-c s")))
+        ;; The command is over and its prefix spent; the harness answers now.
+        (should-not (harness-ui-display-override-p))
+        (should-not (get-buffer-window session))
+        (funcall pending nil))
+      (should (equal (list (selected-frame)) frames))
+      (let ((window (get-buffer-window session)))
+        (should window)
+        (should-not (window-parameter window 'window-side))
+        (should (eq window (selected-window))))
+      ;; Spent there too: the next session goes to its position.
+      (should-not (harness-ui-display-override-p))
+      (harness-ui-display-buffer other-session 'right)
+      (should (eq 'right (window-parameter (get-buffer-window other-session) 'window-side))))))
+
+(ert-deftest harness-ui-display-later-without-a-prefix ()
+  "Shown later with no prefix before the command, a buffer goes to its position.
+The frame the command ran in is given to the function that shows it."
+  (harness-ui-test-with-views
+    (let ((later (harness-ui-display-later))
+          given)
+      (funcall later (lambda (frame)
+                       (setq given frame)
+                       (harness-ui-display-buffer session 'right frame)))
+      (should (eq (selected-frame) given))
+      (should (eq 'right (window-parameter (get-buffer-window session) 'window-side))))))
 
 ;;;; The fullscreen layout of an overview
 
@@ -713,11 +775,80 @@ and \"two\", `one' and `two'."
               ;; The anchor never shows beside itself.
               (should (eq child-buf (harness-ui--fullscreen-session main-buf (selected-frame)))))
             (harness-ui-quit-view)
+            (should-not (harness-ui--fullscreen-layout))
+            ;; Without the layout, shown in the `fullscreen' position (C-u
+            ;; C-c h s, say), it starts the layout as its anchor too.
+            (harness-ui-display-buffer main-buf 'fullscreen)
+            (let ((layout (harness-ui--fullscreen-layout)))
+              (should layout)
+              (should (eq main-buf (window-buffer (harness-ui--fullscreen-overview layout))))
+              (should (eq child-buf (window-buffer main-window))))
+            (harness-ui-quit-view)
             (should-not (harness-ui--fullscreen-layout)))
         (remhash "main" harness-ui--sessions)
         (remhash "child" harness-ui--sessions)
         (kill-buffer main-buf)
         (kill-buffer child-buf)))))
+
+(ert-deftest harness-ui-fullscreen-a-main-session-opened-takes-the-slot ()
+  "A main session opened while the layout lasts takes the slot; the anchor stays.
+A main session can anchor the layout, but only F makes it the anchor.
+Opened from the overview -- RET or a click on the board, which go
+through `harness-ui-session-opener' -- visited, as RET on the session
+list, a session link or a notification do, or shown without a position,
+as C-c h s does, it shows beside the anchor like any session: a task's
+session is a main session, and it never takes the board's place.  An
+anchor shown again keeps the anchor side."
+  (harness-ui-test-with-fullscreen
+    (let* ((main-buf (get-buffer-create "*harness: fullscreen main*"))
+           (harness-ui-open-session-function
+            (lambda (id) (pcase id ("one" one) ("two" two) ("main" main-buf))))
+           (harness-ui-switch-project-function nil)
+           (main (selected-window)))
+      (unwind-protect
+          (progn
+            (puthash "main" (list :id "main" :updated 10) harness-ui--sessions)
+            (with-current-buffer main-buf
+              (setq-local harness-ui-session-id "main")
+              (setq-local major-mode 'harness-chat-mode))
+            (should (harness-ui-anchor-p main-buf))
+            (harness-ui-display-view view 'fullscreen)
+            (let ((anchor (get-buffer-window view)))
+              (should (eq one (window-buffer main)))
+              ;; Opened from the overview.
+              (select-window anchor)
+              (funcall (with-current-buffer view (harness-ui-session-opener)) "main")
+              (should (eq main-buf (window-buffer main)))
+              (should (eq main (selected-window)))
+              (should (eq view (window-buffer anchor)))
+              (should (eq anchor (harness-ui--fullscreen-overview (harness-ui--fullscreen-layout))))
+              (should (eq 'fullscreen (buffer-local-value 'harness-ui-position main-buf)))
+              ;; Visited from the overview.
+              (harness-ui-display-buffer one)
+              (select-window anchor)
+              (with-current-buffer view (harness-ui-visit-session "main"))
+              (should (eq main-buf (window-buffer main)))
+              (should (eq view (window-buffer anchor)))
+              ;; Shown without a position, or in the `fullscreen' one.
+              (harness-ui-display-buffer two)
+              (harness-ui-display-session "main")
+              (should (eq main-buf (window-buffer main)))
+              (harness-ui-display-buffer two)
+              (harness-ui-display-session "main" 'fullscreen)
+              (should (eq main-buf (window-buffer main)))
+              (should (eq view (window-buffer anchor)))
+              (should (= 2 (length (window-list))))
+              ;; F in it makes it the anchor, and shown again it stays there.
+              (select-window main)
+              (with-current-buffer main-buf (harness-fullscreen))
+              (should (eq main-buf (window-buffer anchor)))
+              (should-not (eq main-buf (window-buffer main)))
+              (harness-ui-display-session "main")
+              (should (eq main-buf (window-buffer anchor)))
+              (should-not (eq main-buf (window-buffer main)))
+              (should (eq anchor (selected-window)))))
+        (remhash "main" harness-ui--sessions)
+        (kill-buffer main-buf)))))
 
 (ert-deftest harness-ui-fullscreen-width-clamps ()
   "The anchor width is clamped so the slot keeps a usable width."
@@ -1041,6 +1172,134 @@ showed gets back the position it had before the layout."
       (should-not (harness-ui--fullscreen-layout))
       (harness-ui-display-buffer one 'slot)
       (should (eq 'right (window-parameter (get-buffer-window one) 'window-side))))))
+
+;; Window prefixes and the layout (see "Where a window prefix says").
+
+(ert-deftest harness-ui-window-prefix-opens-a-session-elsewhere ()
+  "C-x 4 4 before opening a session from a view shows it in another window.
+The fullscreen layout is left as it is: the anchor keeps its side and
+the slot its session, and the session opened next takes the slot again."
+  (harness-ui-test-with-fullscreen
+    (let ((main (selected-window)))
+      (harness-ui-display-view view 'fullscreen)
+      (let ((anchor (get-buffer-window view))
+            (open (lambda () (interactive) (funcall (harness-ui-session-opener) "two"))))
+        (should (eq one (window-buffer main)))
+        (select-window anchor)
+        (harness-ui-test-with-keys (list (cons "C-c o" open))
+          (execute-kbd-macro (kbd "C-x 4 4 C-c o")))
+        (let ((window (get-buffer-window two)))
+          (should window)
+          (should-not (memq window (list anchor main)))
+          (should (eq window (selected-window))))
+        (should (eq one (window-buffer main)))
+        (should (eq view (window-buffer anchor)))
+        (should (eq anchor (harness-ui--fullscreen-overview (harness-ui--fullscreen-layout))))
+        ;; The prefix is spent with the command: nothing is left pending
+        ;; to take the next buffer Emacs shows.
+        (should-not (harness-ui-display-override-p))
+        ;; Without a prefix, the slot again.
+        (select-window anchor)
+        (harness-ui-test-with-keys (list (cons "C-c o" open))
+          (execute-kbd-macro (kbd "C-c o")))
+        (should (eq two (window-buffer main)))
+        (should (eq view (window-buffer anchor)))))))
+
+(ert-deftest harness-ui-window-prefix-starts-the-layout-in-a-new-tab ()
+  "C-x t t before F lays the layout out in a new tab; this tab stays as it was.
+F run in a buffer that anchors nothing takes the overview shown last,
+which shows in the new tab and anchors the layout there, the session it
+names beside it."
+  (require 'tab-bar)
+  (harness-ui-test-with-fullscreen
+    (let ((tabs (length (funcall tab-bar-tabs-function)))
+          (here (tab-bar--current-tab-index))
+          (mode (bound-and-true-p tab-bar-mode)))
+      (unwind-protect
+          (progn
+            (harness-ui-display-view view 'right)
+            (select-window (get-buffer-window file))
+            (harness-ui-test-with-keys (list (cons "C-c F" #'harness-fullscreen))
+              (execute-kbd-macro (kbd "C-x t t C-c F")))
+            (should (= (1+ tabs) (length (funcall tab-bar-tabs-function))))
+            (should-not (= here (tab-bar--current-tab-index)))
+            (should-not (harness-ui-display-override-p))
+            (let* ((layout (harness-ui--fullscreen-layout))
+                   (anchor (and layout (harness-ui--fullscreen-overview layout))))
+              (should layout)
+              (should (eq view (window-buffer anchor)))
+              (should (eq 'left (window-parameter anchor 'window-side)))
+              (should (eq anchor (selected-window)))
+              (should (eq one (window-buffer (harness-ui--fullscreen-window layout)))))
+            ;; The tab F ran in shows what it showed.
+            (tab-bar-select-tab (1+ here))
+            (should (eq file (window-buffer (selected-window))))
+            (should (eq 'right (window-parameter (get-buffer-window view) 'window-side))))
+        (tab-bar-select-tab (1+ here))
+        (while (> (length (funcall tab-bar-tabs-function)) tabs)
+          (tab-bar-close-tab (+ 2 here)))
+        (unless mode (tab-bar-mode -1))))))
+
+(ert-deftest harness-ui-window-prefix-on-the-anchor-lays-it-out-in-a-new-tab ()
+  "C-x t t before F on the anchor lays it out in a new tab, not ending it here.
+F on the anchor ends the layout; after the prefix it shows the anchor
+in a new tab and starts the layout there instead, the anchor's session
+beside it, and the tab it ran in still shows the layout as it was."
+  (require 'tab-bar)
+  (harness-ui-test-with-fullscreen
+    (let ((tabs (length (funcall tab-bar-tabs-function)))
+          (here (tab-bar--current-tab-index))
+          (mode (bound-and-true-p tab-bar-mode))
+          (main (selected-window)))
+      (unwind-protect
+          (progn
+            (harness-ui-display-view view 'fullscreen)
+            (let ((anchor (get-buffer-window view)))
+              (should (eq one (window-buffer main)))
+              (select-window anchor)
+              (harness-ui-test-with-keys (list (cons "C-c F" #'harness-fullscreen))
+                (execute-kbd-macro (kbd "C-x t t C-c F")))
+              (should (= (1+ tabs) (length (funcall tab-bar-tabs-function))))
+              (should-not (= here (tab-bar--current-tab-index)))
+              (should-not (harness-ui-display-override-p))
+              (let* ((layout (harness-ui--fullscreen-layout))
+                     (laid (and layout (harness-ui--fullscreen-overview layout))))
+                (should layout)
+                (should-not (eq anchor laid))
+                (should (eq view (window-buffer laid)))
+                (should (eq 'left (window-parameter laid 'window-side)))
+                (should (eq laid (selected-window)))
+                (should (eq one (window-buffer (harness-ui--fullscreen-window layout)))))
+              ;; The tab F ran in shows the layout as it was.
+              (tab-bar-select-tab (1+ here))
+              (should (eq 'left (window-parameter (get-buffer-window view) 'window-side)))
+              (should-not (window-parameter (get-buffer-window one) 'window-side))))
+        (tab-bar-select-tab (1+ here))
+        (while (> (length (funcall tab-bar-tabs-function)) tabs)
+          (tab-bar-close-tab (+ 2 here)))
+        (unless mode (tab-bar-mode -1))))))
+
+(ert-deftest harness-ui-window-prefix-on-the-anchor-lays-it-out-in-a-new-frame ()
+  "C-x 5 5 before F on the anchor lays it out in a new frame, not ending it here.
+A batch Emacs makes no frame, so the frame made is the selected one:
+what counts is that one was asked for and the anchor is laid out in it,
+rather than F ending the layout."
+  (harness-ui-test-with-fullscreen
+    (let* ((made 0)
+           (pop-up-frame-function (lambda () (cl-incf made) (selected-frame)))
+           (main (selected-window)))
+      (harness-ui-display-view view 'fullscreen)
+      (select-window (get-buffer-window view))
+      (harness-ui-test-with-keys (list (cons "C-c F" #'harness-fullscreen))
+        (execute-kbd-macro (kbd "C-x 5 5 C-c F")))
+      (should (= 1 made))
+      (should-not (harness-ui-display-override-p))
+      (let* ((layout (harness-ui--fullscreen-layout))
+             (anchor (and layout (harness-ui--fullscreen-overview layout))))
+        (should layout)
+        (should (eq view (window-buffer anchor)))
+        (should (eq 'left (window-parameter anchor 'window-side)))
+        (should (eq one (window-buffer main)))))))
 
 (ert-deftest harness-ui-bury-outside-the-fullscreen-layout ()
   (harness-ui-test-with-fullscreen
@@ -1448,7 +1707,7 @@ session chosen, and a cache of nothing else reads as no sessions."
           (cl-letf (((symbol-function 'harness-ui-refresh-sessions)
                      (lambda (&optional callback) (when callback (funcall callback nil))))
                     ((symbol-function 'harness-ui-display-session)
-                     (lambda (id &optional _position) (setq shown id))))
+                     (lambda (id &rest _) (setq shown id))))
             (harness-switch-session))
           (should (equal "main-1" shown)))
         (should (equal '("main-1" "sub-1")
@@ -3147,7 +3406,7 @@ session pass; without it every session, seeds included, is offered."
               ((symbol-function 'completing-read)
                (lambda (_prompt collection &rest _) (setq seen collection) (caar collection)))
               ((symbol-function 'harness-ui-display-session)
-               (lambda (id &optional _position) (setq displayed id))))
+               (lambda (id &rest _) (setq displayed id))))
       (harness-switch-session)
       (should (equal "worker" displayed))
       (should (= 1 (length seen))))))

@@ -3402,6 +3402,89 @@ q on the board ends it.  C-c C-z does q's job from the compose box."
                 (should (eq 'full (buffer-local-value 'harness-ui-position board))))))
         (mapc (lambda (entry) (kill-buffer (cdr entry))) sessions)))))
 
+(declare-function harness-ui-anchor-p "harness-ui")
+(declare-function harness-ui--fullscreen-leave "harness-ui")
+(declare-function harness-ui-session "harness-ui")
+
+(ert-deftest harness-ui-tasks-fullscreen-opens-sessions-beside-the-board ()
+  "In the fullscreen layout a task's session opens beside the board, every time.
+A task's session is a main session, which could anchor a layout of its
+own, but opened from the board -- RET on a card, or a click on it -- it
+takes the slot, and the board keeps the anchor side.  After C-x 4 4,
+RET opens it in another window instead, and the layout stays as it was."
+  (harness-ui-tasks-test-with
+    (let* ((sessions nil)
+           (harness-ui-open-session-function
+            (lambda (id)
+              (or (cdr (assoc id sessions))
+                  (let ((buf (get-buffer-create (format "*harness: fake session %s*" id))))
+                    ;; What a chat buffer is to the layout: a session's conversation.
+                    (with-current-buffer buf
+                      (setq-local harness-ui-session-id id)
+                      (setq-local major-mode 'harness-chat-mode))
+                    (push (cons id buf) sessions)
+                    buf))))
+           (main (get-buffer-window board)))
+      (unwind-protect
+          (progn
+            (harness-ui-tasks-test--type-and-submit board "First task")
+            (harness-ui-tasks-test--wait-text board "Completed  1")
+            (harness-ui-tasks-test--type-and-submit board "Second task")
+            (harness-ui-tasks-test--wait-text board "Completed  2")
+            (let* ((tasks (buffer-local-value 'harness-ui-tasks--tasks board))
+                   (session-of (lambda (prompt)
+                                 (plist-get (cl-find prompt tasks :key (lambda (task) (plist-get task :prompt))
+                                                     :test #'equal)
+                                            :session)))
+                   (first (funcall session-of "First task"))
+                   (second (funcall session-of "Second task"))
+                   (first-buf (funcall harness-ui-open-session-function first))
+                   (second-buf (funcall harness-ui-open-session-function second)))
+              ;; The tasks' sessions are main sessions the UI knows.
+              (harness-ui-refresh-sessions)
+              (harness-test-wait (lambda () (and (harness-ui-session first) (harness-ui-session second)))
+                                 5 "the tasks' sessions to be known")
+              (should (harness-ui-anchor-p first-buf))
+              ;; F with the first task at point: its session beside the board.
+              (with-selected-window main
+                (goto-char (point-min))
+                (search-forward "First task")
+                (harness-fullscreen))
+              (let ((anchor (get-buffer-window board)))
+                (should (harness-ui--overview-window-p anchor))
+                (should (eq first-buf (window-buffer main)))
+                ;; RET on the second task: its session takes the slot.
+                (select-window anchor)
+                (goto-char (point-min))
+                (search-forward "Second task")
+                (execute-kbd-macro (kbd "RET"))
+                (should (eq second-buf (window-buffer main)))
+                (should (eq board (window-buffer anchor)))
+                (should (harness-ui--overview-window-p anchor))
+                ;; A click on the first task's card: the same.
+                (select-window anchor)
+                (goto-char (point-min))
+                (search-forward "First task")
+                (harness-test-click (point))
+                (should (eq first-buf (window-buffer main)))
+                (should (eq board (window-buffer anchor)))
+                (should (harness-ui--overview-window-p anchor))
+                ;; C-x 4 4 RET: another window, the layout as it was.
+                (select-window anchor)
+                (goto-char (point-min))
+                (search-forward "Second task")
+                (execute-kbd-macro (kbd "C-x 4 4 RET"))
+                (let ((window (get-buffer-window second-buf)))
+                  (should window)
+                  (should-not (memq window (list anchor main))))
+                (should (eq first-buf (window-buffer main)))
+                (should (eq board (window-buffer anchor)))
+                (should (harness-ui--overview-window-p anchor))
+                ;; The prefix is spent with the command.
+                (should-not (car display-buffer-overriding-action)))))
+        (ignore-errors (harness-ui--fullscreen-leave))
+        (mapc (lambda (entry) (kill-buffer (cdr entry))) sessions)))))
+
 (declare-function harness-toggle-supervisor "harness-ui-supervisor")
 (declare-function harness-ui-tasks--supervisor-p "harness-ui-tasks")
 

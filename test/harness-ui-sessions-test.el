@@ -3551,6 +3551,70 @@ aside."
       (should-not (tabulated-list-get-id))
       (should (equal "new" (harness-ui-sessions--overview-session))))))
 
+(declare-function harness-ui--fullscreen-overview "harness-ui")
+
+(ert-deftest harness-ui-sessions-fullscreen-opens-sessions-beside-the-list ()
+  "In the fullscreen layout RET opens a session beside the list, which stays.
+A listed session with no parent could anchor a layout of its own, but
+opened from the list it takes the slot, every time.  After C-x 4 4, RET
+opens it in another window instead, and the layout stays as it was."
+  (harness-ui-sessions-test-with-repo
+    (harness-ui-sessions-test--add "old" root :updated 100)
+    (harness-ui-sessions-test--add "new" root :updated 300)
+    (let* ((buffers nil)
+           (file (get-buffer-create "*harness-ui-sessions-test file*"))
+           (harness-ui-switch-project-function nil)
+           (harness-ui-open-session-function
+            (lambda (id)
+              (or (cdr (assoc id buffers))
+                  (let ((buf (get-buffer-create (format "*harness: sessions test %s*" id))))
+                    ;; What a chat buffer is to the layout: a session's conversation.
+                    (with-current-buffer buf
+                      (setq-local harness-ui-session-id id)
+                      (setq-local major-mode 'harness-chat-mode))
+                    (push (cons id buf) buffers)
+                    buf)))))
+      (unwind-protect
+          (let ((main (progn (delete-other-windows) (switch-to-buffer file) (selected-window)))
+                (list (let ((default-directory root)) (harness-sessions) (get-buffer harness-ui-sessions--buffer-name))))
+            (with-current-buffer list
+              (harness-ui-sessions-test--goto "new")
+              (harness-fullscreen))
+            (let ((anchor (harness-ui--fullscreen-overview (harness-ui--fullscreen-layout)))
+                  (old (funcall harness-ui-open-session-function "old"))
+                  (new (funcall harness-ui-open-session-function "new")))
+              (should (eq list (window-buffer anchor)))
+              (should (eq new (window-buffer main)))
+              (should (harness-ui-anchor-p old))
+              ;; RET on the other session: it takes the slot.
+              (select-window anchor)
+              (harness-ui-sessions-test--goto "old")
+              (execute-kbd-macro (kbd "RET"))
+              (should (eq old (window-buffer main)))
+              (should (eq list (window-buffer anchor)))
+              (should (eq anchor (harness-ui--fullscreen-overview (harness-ui--fullscreen-layout))))
+              ;; And back.
+              (select-window anchor)
+              (harness-ui-sessions-test--goto "new")
+              (execute-kbd-macro (kbd "RET"))
+              (should (eq new (window-buffer main)))
+              (should (eq list (window-buffer anchor)))
+              ;; C-x 4 4 RET: another window, the layout as it was.
+              (select-window anchor)
+              (harness-ui-sessions-test--goto "old")
+              (execute-kbd-macro (kbd "C-x 4 4 RET"))
+              (let ((window (get-buffer-window old)))
+                (should window)
+                (should-not (memq window (list anchor main))))
+              (should (eq new (window-buffer main)))
+              (should (eq list (window-buffer anchor)))
+              ;; The prefix is spent with the command.
+              (should-not (car display-buffer-overriding-action))))
+        (ignore-errors (harness-ui--fullscreen-leave))
+        (ignore-errors (delete-other-windows))
+        (mapc (lambda (entry) (kill-buffer (cdr entry))) buffers)
+        (kill-buffer file)))))
+
 (ert-deftest harness-ui-sessions-waiting-shows-beside-the-anchor ()
   "With the fullscreen layout on, the waiting list shows in the slot.
 It does not take the anchor's place: `harness-sessions-waiting' passes

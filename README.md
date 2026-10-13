@@ -391,7 +391,7 @@ default), or nil for nowhere.
 | `C-c h a` | `harness-tasks` | Show the task board |
 | `C-c h /` | `harness-quick-search` | Quick search: find a command, a session or a task in words; on the task board, in its compose box (see [Quick search](#quick-search)) |
 | `C-c h F` | `harness-fullscreen` | Start or end the fullscreen layout: the task board, session list or a main session on one side, a session beside it |
-| `C-c h X` | `harness-ui-open-view-in-frame` | Open a view — the board, the session list, the settings page — in a frame you choose |
+| `C-x 4 4` / `C-x 5 5` / `C-x t t` | Emacs's `other-window-prefix` / `other-frame-prefix` / `other-tab-prefix` | Before a command that shows a view or a session — `C-c h a`, `C-c h s`, `RET` or a click on a task or session — show it in another window, a new frame or a new tab, as for any buffer |
 | `C-c h t` | `harness-tree` | Show the conversation tree |
 | `C-c h f` | `harness-fork-session` | Fork the current session |
 | `C-c h b` | `harness-btw` | Open a BTW side conversation (`C-u`: on a model of your choice) |
@@ -454,6 +454,16 @@ With a prefix argument (`C-u`), the commands that open a session ask
 where to show it: `right` (the default, see
 `harness-ui-default-position`), `left`, `bottom`, `full`, `other` or
 `fullscreen` (see [Fullscreen overviews](#fullscreen-overviews)).
+
+Emacs's own window prefixes work on them as on any buffer: `C-x 4 4`
+before a command that shows a view or a session — `C-c h a`, `C-c h l`,
+`C-c h s`, or `RET` and a click on a task or session — shows it in
+another window, `C-x 5 5` in a new frame and `C-x t t` in a new tab,
+and `C-x 4 1` in the selected window. Without one, a view or a session
+shows in the frame you run the command in: click a frame, then press
+`C-c h a` to open the board there. A session you pick from a list the
+harness still has to fetch (`C-c h s`) goes to the frame, and the
+window, frame or tab, you asked for, though it shows a moment later.
 
 ### Quick search
 
@@ -2572,7 +2582,11 @@ stays on one side of the frame — the left by default, the right with
 it: the one already in sight, else the task or session at point, else
 the anchor's most recent child for a session, else the most recent one.
 Every session you open while the layout lasts takes the slot beside the
-anchor, and so does anything else the harness shows without a position.
+anchor, however you open it — `RET` or a click on the board or the
+session list, `C-c h s`, a notification — and so does anything else the
+harness shows without a position. A main session is no exception: it
+takes the anchor side only when you press `F` on it, so the board or
+list you opened it from stays in sight.
 
 - A main session is one with no parent session: the root of its forks,
   sub-agents and BTW conversations. Put one in the layout and its most
@@ -2606,10 +2620,12 @@ anchor, and so does anything else the harness shows without a position.
   own windows back — the layout is dropped and the buffers it showed
   get back the positions they had before it, rather than staying marked
   fullscreen with no layout to show in.
-- `C-c h X` (`harness-ui-open-view-in-frame`) opens a view in a frame
-  you choose, offering the frame of your last mouse click first: click a
-  frame and open the board or the settings page there without going to
-  the frame where the view already shows.
+- A window prefix sends what you open elsewhere and leaves the layout as
+  it is: `C-x 4 4 RET` on a task shows its session in another window,
+  `C-x 5 5` in a new frame, `C-x t t` in a new tab. `C-x 5 5 C-c h F`
+  (or `C-x t t`) starts the layout in a new frame (or tab) instead of
+  this one. A view opens in the frame you run its command in, so click
+  a frame and press `C-c h a` to open the board there.
 - `fullscreen` is a position too, so `C-u C-c h a` and then `fullscreen`
   opens the board in the layout.
 

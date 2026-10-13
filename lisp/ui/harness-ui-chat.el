@@ -4223,7 +4223,9 @@ conversation in between is stepped over: a fork made through a seed is
 the seed's child, and this leads to the nearest ancestor that is not a
 seed (`harness-chat--parent-id').  The window that shows the parent
 already is selected when there is one; a parent in no window opens
-where this session is shown.  A session that was not started from
+where this session is shown.  After a window prefix -- `C-x 4 4',
+`C-x 5 5', `C-x t t' -- it opens where the prefix says instead
+\(`harness-ui-display-override-p').  A session that was not started from
 another, or whose parent the harness no longer has, says so instead."
   (interactive)
   (let ((id (harness-chat--parent-id)))
@@ -4237,7 +4239,9 @@ another, or whose parent the harness no longer has, says so instead."
     (unless harness-ui-open-session-function
       (user-error "No chat module loaded"))
     (let ((buffer (funcall harness-ui-open-session-function id)))
-      (if-let* ((window (get-buffer-window buffer)))
+      ;; After a window prefix (C-x 4 4, C-x 5 5) the parent shows where
+      ;; it says, though a window shows it already.
+      (if-let* ((window (and (not (harness-ui-display-override-p)) (get-buffer-window buffer))))
           (progn (select-window window) buffer)
         (harness-ui-display-buffer buffer harness-ui-position)))))
 

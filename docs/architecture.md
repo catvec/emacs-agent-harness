@@ -8778,11 +8778,27 @@ BTW overlay keep their own windows.  `harness-ui-display-buffer` and
 `harness-ui-display-view` take a frame (the selected one by default):
 the buffer shown in the position of that frame is the one replaced, one
 shown in the same position in another frame is left alone, and the
-frame's own fullscreen layout is the one consulted.  The
-`harness-ui-open-view-in-frame` command (`C-c h X`, via
-`harness-ui-read-frame` and `harness-ui-views`) shows a view in a frame
-chosen with completion, the frame of the last mouse event first.
-`harness-ui-view-p` says whether a buffer is a harness view -- a
+frame's own fullscreen layout is the one consulted.  There is no frame
+chooser of the harness's own: a view or session shows in the selected
+frame, and Emacs's window prefixes send it elsewhere, as for any
+buffer.  `C-x 4 4`, `C-x 5 5`, `C-x t t` and `C-x 4 1` bind
+`display-buffer-overriding-action` until the next command is over
+(`display-buffer-override-next-command`); while it is pending
+(`harness-ui-display-override-p`) `harness-ui-display-buffer` skips
+positions and the layout and shows the buffer with `pop-to-buffer`
+(`harness-ui--display-overridden`), leaving its `harness-ui-position`
+as it was, so the next showing goes to its position again.
+`harness-ui-session-opener`, `harness-ui-visit-session` (which then
+skips its project switch and its "already in sight" shortcut),
+`harness-up-to-parent` and `harness-fullscreen` honour it too.  A
+command that shows its buffer only once the harness answers --
+`harness-switch-session`, `harness-new-session`, `harness-fork-session`
+-- takes the selected frame and a copy of the pending action when it
+runs (`harness-ui-display-later`) and shows the buffer with them, the
+copy bound again only when the original is spent by then
+(`harness-ui--call-with-display-override`), so a session picked from a
+list fetched later still goes to the frame, window or tab it was asked
+for.  `harness-ui-view-p` says whether a buffer is a harness view -- a
 harness buffer that is not a session's conversation -- and such a view
 is what `q` buries (`harness-ui-quit-view`), which the view major modes
 get from the shared `harness-ui-view-map`.
@@ -8798,10 +8814,21 @@ The slot shows the session in sight, else the one the anchor names (the
 overview function's, at point or the most recent, or a main session's
 most recently updated child, BTW conversations aside).  While the
 layout lasts the `fullscreen` position is the default: sessions and
-views shown without a position take the slot, an anchor takes the
+views shown without a position take the slot, an overview takes the
 anchor side, and `left` and `right` are the slot too, so the frame
 never grows a second skinny column; the `slot` position means the slot
-when there is a layout.  A window a popup was displayed in is not taken
+when there is a layout.  Once the layout is on, a main session takes
+the anchor side only when `harness-fullscreen` puts it there
+(`harness-ui--show-anchor`, the ANCHOR argument of
+`harness-ui--display-fullscreen`): opened from the board or the session
+list, visited, or shown by `C-c h s`, it takes the slot like any
+session, so the overview it was opened from stays -- a task's session
+is a main session -- while the anchor's own buffer keeps the anchor
+side when shown again.  Without a layout, a main session shown in the
+`fullscreen` position starts one as its anchor, as an overview does.  After `C-x 5 5` or `C-x t t`
+`harness-fullscreen` shows the anchor in the new frame or tab and
+starts the layout there (`harness-ui--fullscreen-elsewhere`), rather
+than ending or changing this frame's.  A window a popup was displayed in is not taken
 for the slot (`harness-ui--popup-window-p`).  The layout is kept per
 frame in a weak table (`harness-ui--fullscreen-layouts`), with the
 window configuration from before it.  `harness-ui-bury` (`C-c C-z` in a

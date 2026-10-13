@@ -22,7 +22,8 @@
 ;; - faces and icons;
 ;; - window positions: one session per preset position, replacing, and
 ;;   the fullscreen layout, an overview such as the task board on the
-;;   left of the frame and the session it inspects beside it;
+;;   left of the frame and the session it inspects beside it; Emacs's
+;;   window prefixes (C-x 4 4, C-x 5 5, C-x t t) win over both;
 ;; - the prefix keymap, the global minor mode and the transient menu,
 ;;   which also lists the commands of the buffer it is opened from, as
 ;;   that buffer's modes list them in their `harness-menu-group'.
@@ -2969,41 +2970,51 @@ position in another frame is left alone."
 FRAME is the frame to show it in, the selected one by default, so a view
 or session showing in another frame does not capture this showing and
 the frame's own fullscreen layout is the one used.  In a frame with the
-fullscreen layout POSITION defaults to the layout: an anchor takes the
-anchor side, anything else the slot beside it.  `left' and `right' are
-the slot too, so the frame does not grow a second skinny column beside
-the anchor, and `slot' means the slot when the frame has the layout,
-else `harness-ui-default-position'.  A `bottom' position and the
-layout's own windows keep their place."
-  (let* ((frame (or frame (selected-frame)))
-         (layout (harness-ui--fullscreen-layout frame))
-         (position (or position
-                       (and layout 'fullscreen)
-                       harness-ui-default-position)))
-    (harness-ui--in-frame
-     frame
-     (lambda ()
-       (cond
-        ((and layout (memq position '(left right)))
-         (harness-ui--show-in-layout-slot layout buffer)
-         (setq position 'fullscreen))
-        ((eq position 'slot)
-         (if layout
-             (progn (harness-ui--show-in-layout-slot layout buffer)
-                    (setq position 'fullscreen))
-           (setq position harness-ui-default-position)
-           (harness-ui--display-buffer-position buffer position frame)))
-        ((eq position 'fullscreen)
-         (harness-ui--display-fullscreen buffer))
-        (t (harness-ui--display-buffer-position buffer position frame)))))
-    (with-current-buffer buffer (setq-local harness-ui-position position))
-    buffer))
+fullscreen layout POSITION defaults to the layout: an overview such as
+the task board takes the anchor side, anything else -- a session, a main
+session too -- the slot beside it (`harness-ui--display-fullscreen').
+`left' and `right' are the slot too, so the frame does not grow a second
+skinny column beside the anchor, and `slot' means the slot when the
+frame has the layout, else `harness-ui-default-position'.  A `bottom'
+position and the layout's own windows keep their place.
 
-(defun harness-ui-display-session (id &optional position)
-  "Display session ID in POSITION using `harness-ui-open-session-function'."
+A window prefix typed before the command -- `C-x 4 4', `C-x 5 5',
+`C-x t t' and their like (`harness-ui-display-override-p') -- wins over
+all of that: BUFFER shows where the prefix says, as any buffer would,
+and keeps the position it had (`harness-ui--display-overridden')."
+  (if (harness-ui-display-override-p)
+      (harness-ui--display-overridden buffer frame)
+    (let* ((frame (or frame (selected-frame)))
+           (layout (harness-ui--fullscreen-layout frame))
+           (position (or position
+                         (and layout 'fullscreen)
+                         harness-ui-default-position)))
+      (harness-ui--in-frame
+       frame
+       (lambda ()
+         (cond
+          ((and layout (memq position '(left right)))
+           (harness-ui--show-in-layout-slot layout buffer)
+           (setq position 'fullscreen))
+          ((eq position 'slot)
+           (if layout
+               (progn (harness-ui--show-in-layout-slot layout buffer)
+                      (setq position 'fullscreen))
+             (setq position harness-ui-default-position)
+             (harness-ui--display-buffer-position buffer position frame)))
+          ((eq position 'fullscreen)
+           (harness-ui--display-fullscreen buffer))
+          (t (harness-ui--display-buffer-position buffer position frame)))))
+      (with-current-buffer buffer (setq-local harness-ui-position position))
+      buffer)))
+
+(defun harness-ui-display-session (id &optional position frame)
+  "Display session ID in POSITION using `harness-ui-open-session-function'.
+FRAME is the frame to show it in, the selected one by default
+\(see `harness-ui-display-buffer')."
   (unless harness-ui-open-session-function
     (user-error "No chat module loaded"))
-  (harness-ui-display-buffer (funcall harness-ui-open-session-function id) position))
+  (harness-ui-display-buffer (funcall harness-ui-open-session-function id) position frame))
 
 (defun harness-ui-display-view (buffer &optional position frame)
   "Show BUFFER, a harness view such as the session list, in POSITION.
@@ -3012,8 +3023,10 @@ share positions with sessions: a view replaces the session shown
 in its position and a session opened there replaces the view.  Without
 POSITION the view returns to the position it had last, else
 `harness-ui-default-position'; in a frame with the fullscreen layout it
-shows beside the anchor, or as the anchor when it is one.  Small
-transient windows (menus, help, the BTW overlay) do not go through here."
+shows beside the anchor, or as the anchor when it is an overview.  After
+a window prefix such as `C-x 4 4', `C-x 5 5' or `C-x t t' it shows where
+the prefix says instead (`harness-ui-display-buffer').  Small transient
+windows (menus, help, the BTW overlay) do not go through here."
   (harness-ui-display-buffer buffer (or position
                                         (and (harness-ui--fullscreen-layout frame) 'fullscreen)
                                         (buffer-local-value 'harness-ui-position buffer)
@@ -3025,106 +3038,120 @@ transient windows (menus, help, the BTW overlay) do not go through here."
 Call this when the command runs and the returned function later, from
 an asynchronous callback: the session takes POSITION, by default the
 current buffer's position (replacing the view) -- in a frame with the
-fullscreen layout, the window beside the anchor -- and opens from the
-window selected now even when another frame is selected by then."
+fullscreen layout, the slot beside the anchor, the anchor staying put --
+and opens from the window selected now even when another frame is
+selected by then.  A window prefix typed before the command, such as
+`C-x 4 4', `C-x 5 5' or `C-x t t', says where it opens instead, even
+from a callback (`harness-ui--call-with-display-override')."
   (let ((position (or position
                       (and (harness-ui--fullscreen-layout) 'fullscreen)
                       harness-ui-position
                       harness-ui-default-position))
-        (window (selected-window)))
+        (window (selected-window))
+        (override (harness-ui--display-override)))
     (lambda (id)
       (when (window-live-p window) (select-window window))
-      (harness-ui-display-session id position))))
+      (harness-ui--call-with-display-override
+       override (lambda () (harness-ui-display-session id position))))))
 
 (defun harness-ui-read-position ()
   "Read a position name with completion."
   (intern (completing-read "Position: " (mapcar (lambda (p) (symbol-name (car p))) harness-ui-positions) nil t)))
 
-;;;; Showing a view in a frame
+;;;; Where a window prefix says
 ;;
-;; A view follows the buffer, so with two frames -- the board in one and a
-;; session you are reading in the other -- there was no way to say which
-;; frame a view should open in: the commands act on the frame Emacs has
-;; selected, which is not always the one you clicked.  The command here
-;; takes the frame instead, offering the frame of the last mouse click
-;; first, so a click in the frame you mean and then the command opens a
-;; view there.  The display functions take the frame too, so a view already
-;; on screen in another frame does not capture the showing.
+;; Emacs lets a prefix command say where the next command's buffer is to
+;; show: `C-x 4 4' (`other-window-prefix') in another window, `C-x 5 5'
+;; (`other-frame-prefix') in a new frame, `C-x t t' (`other-tab-prefix')
+;; in a new tab, `C-x 4 1' (`same-window-prefix') in the selected window,
+;; the windmove display commands in the window in a direction.  Each
+;; leaves a display action in `display-buffer-overriding-action' until
+;; the command after it is over (`display-buffer-override-next-command').
+;; A harness buffer shown then -- a view such as the task board, a
+;; session opened from the board or the session list -- goes where that
+;; action says, as any buffer would (`harness-ui-display-buffer'): the
+;; harness's positions and the fullscreen layout are for when nothing
+;; said where.
+;;
+;; A command that shows its buffer later, once the harness answers it,
+;; takes a copy of the action as it runs, with the frame it runs in, and
+;; shows the buffer with them (`harness-ui-display-later'): by then the
+;; prefix's command is over and its action gone, and another frame may be
+;; selected.
 
-(defun harness-ui--frame-label (frame)
-  "Return the name FRAME is offered under in `harness-ui-read-frame'.
-Its `name' frame parameter when it has one, else \"frame N\", its place
-in `frame-list'."
-  (let ((name (frame-parameter frame 'name)))
-    (if (and (stringp name) (not (string-empty-p name)))
-        name
-      (format "frame %d" (1+ (or (cl-position frame (frame-list) :test #'eq) 0))))))
+(defun harness-ui-display-override-p ()
+  "Non-nil when a window prefix said where the next buffer is to show.
+That is a display action pending in `display-buffer-overriding-action',
+as `C-x 4 4' (`other-window-prefix'), `C-x 5 5' (`other-frame-prefix'),
+`C-x t t' (`other-tab-prefix'), `C-x 4 1' (`same-window-prefix') and the
+windmove display commands leave one for the command after them.  The
+harness then shows its buffer through that action, as any buffer is
+shown, rather than in a position of its own (`harness-ui-display-buffer')."
+  (let ((action display-buffer-overriding-action))
+    (and (consp action) (or (car action) (cdr action)) t)))
 
-(defun harness-ui--event-frame ()
-  "Return the frame of the window the last input event was in, or nil.
-A mouse click carries the window it was in, whose frame is the one the
-click meant even before Emacs selects it."
-  (let ((posn (ignore-errors (event-start last-input-event))))
-    (when-let* ((window (and posn (posn-window posn))))
-      (and (window-live-p window) (window-frame window)))))
+(defun harness-ui--display-override ()
+  "Return a copy of the display action a window prefix left pending, or nil.
+See `harness-ui-display-override-p'.  The copy outlives the command that
+takes it: the prefix's action takes itself out of
+`display-buffer-overriding-action' once the command after the prefix is
+over, while the copy keeps the action's functions."
+  (when (harness-ui-display-override-p)
+    (cons (copy-sequence (car display-buffer-overriding-action))
+          (copy-sequence (cdr display-buffer-overriding-action)))))
 
-(defun harness-ui-read-frame ()
-  "Read a frame to show a harness view in, the selected one by default.
-The frame of the last mouse event is offered first when there is one, so
-a click in a frame and then this command means that frame; the selected
-frame is offered first otherwise, and an empty answer takes it."
-  (let* ((frames (frame-list))
-         (first (or (harness-ui--event-frame) (selected-frame)))
-         (ordered (cons first (delq first (copy-sequence frames))))
-         (table (mapcar (lambda (frame) (cons (harness-ui--frame-label frame) frame)) ordered)))
-    (cdr (assoc (completing-read "Frame: " table nil t nil nil (caar table)) table))))
+(defun harness-ui--display-override-pending-p (override)
+  "Non-nil when OVERRIDE, a copy of a display action, is pending still.
+That is while the command that took the copy runs: the functions of
+OVERRIDE are in `display-buffer-overriding-action' yet."
+  (let ((action display-buffer-overriding-action))
+    (and (consp action)
+         (cl-every (lambda (function) (memq function (car action))) (car override))
+         (equal (cdr override) (cdr action)))))
 
-(defun harness-ui-display-chosen-session ()
-  "Read a session and show it where views show (`harness-ui-display-view')."
-  (interactive)
-  (harness-ui-refresh-sessions
-   (lambda (_)
-     (let ((session (harness-ui-read-session "Session: ")))
-       (harness-ui-display-session (plist-get session :id))))))
+(defun harness-ui--call-with-display-override (override function)
+  "Call FUNCTION with OVERRIDE, a display action copied earlier, pending again.
+OVERRIDE is what `harness-ui--display-override' returned as a command
+ran, nil when no window prefix came before it; FUNCTION, of no
+arguments, shows a buffer, which then goes where OVERRIDE says.  In the
+command that took the copy the action is pending still and is left as
+it is: a prefix's action takes itself out once it has shown a buffer,
+and a copy put in its place would leave the original pending.  Return
+what FUNCTION returns."
+  (if (or (null override) (harness-ui--display-override-pending-p override))
+      (funcall function)
+    (let ((display-buffer-overriding-action override))
+      (funcall function))))
 
-(defvar harness-ui-views
-  '(("Task board" . harness-tasks)
-    ("Session list" . harness-sessions)
-    ("Settings" . harness-settings)
-    ("Usage" . harness-usage)
-    ("Insights" . harness-insights)
-    ("Worktrees" . harness-worktrees)
-    ("Version" . harness-version)
-    ("Conversation tree" . harness-tree)
-    ("Companion pet" . harness-pet)
-    ("Log" . harness-show-log)
-    ("Session…" . harness-ui-display-chosen-session))
-  "The harness views `harness-ui-read-view' offers, as (LABEL . COMMAND).
-COMMAND shows the view; a view whose module is off, so its command is not
-defined, is not offered.")
+(defun harness-ui-display-later ()
+  "Return a function that shows a buffer where this command would show it now.
+Call this as a command runs, and the function it returns later, from an
+asynchronous callback, with a function SHOW of one argument, a frame,
+that shows a buffer in that frame (`harness-ui-display-session' takes
+one).  SHOW gets the frame selected now, unless that frame is gone, and
+runs with the display action of a window prefix pending again when one
+was pending now -- `C-x 4 4', `C-x 5 5', `C-x t t' before the command
+\(see `harness-ui-display-override-p').  By the time the harness answers,
+the prefix's command is over and another frame may be selected, but the
+buffer goes where the command was asked to show it.  The returned
+function returns what SHOW returns."
+  (let ((frame (selected-frame))
+        (override (harness-ui--display-override)))
+    (lambda (show)
+      (harness-ui--call-with-display-override
+       override (lambda () (funcall show (if (frame-live-p frame) frame (selected-frame))))))))
 
-(defun harness-ui-read-view ()
-  "Read a harness view to show, among those whose command is defined.
-Return the chosen view, a (LABEL . COMMAND) of `harness-ui-views'; an
-empty answer takes the first offered."
-  (let* ((offered (cl-remove-if-not (lambda (view) (harness-ui--command-available-p (cdr view)))
-                                    harness-ui-views))
-         (choice (completing-read "View: " offered nil t nil nil (caar offered))))
-    (assoc choice offered)))
-
-;;;###autoload
-(defun harness-ui-open-view-in-frame (frame view)
-  "Show a harness VIEW in FRAME, wherever the view is shown now.
-FRAME is read with `harness-ui-read-frame', the frame of the last mouse
-event first, and VIEW, a (LABEL . COMMAND) of `harness-ui-views', with
-`harness-ui-read-view'.  The view opens in FRAME even when the same
-buffer shows in another frame, and FRAME's own fullscreen layout is
-respected: an anchor takes the anchor side there, anything else the slot
-beside it."
-  (interactive (list (harness-ui-read-frame) (harness-ui-read-view)))
-  ;; Called as a function, not as a command: the command's own prefix
-  ;; argument is not the view's, so a `C-u C-c h X' asks for no position.
-  (harness-ui--in-frame frame (lambda () (funcall (cdr view)))))
+(defun harness-ui--display-overridden (buffer &optional frame)
+  "Show BUFFER where the pending window prefix says, and select it.
+That is the display action of `C-x 4 4', `C-x 5 5', `C-x t t' and their
+like (see `harness-ui-display-override-p'): another window, a new frame
+or tab, as for any buffer, and a new frame gets the input focus.  FRAME,
+the selected one by default, is the frame it starts from.  The position
+BUFFER had is left as it was, and so is the fullscreen layout: the
+prefix said where to show it this once.  Return BUFFER."
+  (harness-ui--in-frame (or frame (selected-frame))
+                        (lambda () (pop-to-buffer buffer)))
+  buffer)
 
 ;;;; Visiting a session in its project
 ;;
@@ -3306,27 +3333,36 @@ the project's workspace; a workspace showing nothing yet, a new one,
 has its window taken instead (`full').  A switch replaces the frame's
 windows with the project's, so the frame's fullscreen layout is dropped
 with it -- the layout belongs to the workspace left behind -- and the
-buffers it showed get back the positions they had before it."
+buffers it showed get back the positions they had before it.  In a
+frame with the fullscreen layout the session takes the slot beside the
+anchor, which stays put.
+
+A window prefix typed before the command -- `C-x 4 4', `C-x 5 5',
+`C-x t t' and their like (`harness-ui-display-override-p') -- says where
+the session shows instead: there, without a project switch, even when a
+window shows it already."
   (unless harness-ui-open-session-function
     (user-error "No chat module loaded"))
-  (let* ((here (or position
-                   (and (harness-ui--fullscreen-layout) 'fullscreen)
-                   harness-ui-position
-                   harness-ui-default-position))
-         (switched (harness-ui-switch-to-session-project id))
-         (position (cond ((null switched) here)
-                         (position)
-                         ((eq switched 'blank) 'full))))
-    (when switched
-      ;; The switch put the project's windows in the frame, so the layout's
-      ;; saved configuration is the workspace's left behind: drop it, and
-      ;; the anchors it showed get back the positions they had before it.
-      (harness-ui--fullscreen-drop (selected-frame)))
-    (let* ((buffer (funcall harness-ui-open-session-function id))
-           (window (get-buffer-window buffer)))
-      (if (window-live-p window)
-          (progn (select-window window) buffer)
-        (harness-ui-display-buffer buffer position)))))
+  (if (harness-ui-display-override-p)
+      (harness-ui-display-buffer (funcall harness-ui-open-session-function id))
+    (let* ((here (or position
+                     (and (harness-ui--fullscreen-layout) 'fullscreen)
+                     harness-ui-position
+                     harness-ui-default-position))
+           (switched (harness-ui-switch-to-session-project id))
+           (position (cond ((null switched) here)
+                           (position)
+                           ((eq switched 'blank) 'full))))
+      (when switched
+        ;; The switch put the project's windows in the frame, so the layout's
+        ;; saved configuration is the workspace's left behind: drop it, and
+        ;; the anchors it showed get back the positions they had before it.
+        (harness-ui--fullscreen-drop (selected-frame)))
+      (let* ((buffer (funcall harness-ui-open-session-function id))
+             (window (get-buffer-window buffer)))
+        (if (window-live-p window)
+            (progn (select-window window) buffer)
+          (harness-ui-display-buffer buffer position))))))
 
 ;;;; Fullscreen layout
 ;;
@@ -3663,16 +3699,28 @@ showed.  Return the anchor's window."
             ((eq (window-buffer slot) anchor) (harness-ui--show-previous slot anchor))))
     window))
 
-(defun harness-ui--display-fullscreen (buffer)
+(defun harness-ui--display-fullscreen (buffer &optional anchor)
   "Show BUFFER in the fullscreen layout of the selected frame, and select it.
-An anchor takes the anchor side of the frame, starting the layout when
-the frame has none; anything else takes the slot beside the anchor, or
-without the layout the selected window, as in the `full' position."
-  (let ((layout (harness-ui--fullscreen-layout)))
+An anchor (`harness-ui-anchor-p') -- an overview such as the task board,
+or a main session -- takes the anchor side of the frame, starting the
+layout when the frame has none.  Once the layout is on, an overview
+still takes the anchor side, but a main session does so only with ANCHOR
+non-nil, as `harness-fullscreen' asks for it (`harness-ui--show-anchor'):
+a session shown otherwise -- opened from the anchor, a main session most
+of all, as a task's session is, or from anywhere else while the layout
+lasts -- takes the slot beside the anchor, so the anchor stays put.  The
+anchor's own buffer keeps the anchor side.  Without the layout, a buffer
+that does not anchor one takes the selected window, as in the `full'
+position."
+  (let* ((layout (harness-ui--fullscreen-layout))
+         (window (and layout (harness-ui--fullscreen-overview layout)))
+         (anchor (if layout
+                     (or (harness-ui-overview-p buffer)
+                         (and anchor (harness-ui-anchor-p buffer)))
+                   (harness-ui-anchor-p buffer))))
     (cond
-     ((and layout (harness-ui-anchor-p buffer))
-      (let ((window (harness-ui--fullscreen-overview layout))
-            (slot (harness-ui--fullscreen-window layout)))
+     ((and layout (or anchor (eq (window-buffer window) buffer)))
+      (let ((slot (harness-ui--fullscreen-window layout)))
         (unless (eq (window-buffer window) buffer)
           ;; The anchor this one replaces is out of the layout now: give
           ;; it back the position it had before the layout, so it is not
@@ -3685,7 +3733,7 @@ without the layout the selected window, as in the `full' position."
         (when (eq (window-buffer slot) buffer)
           (harness-ui--show-previous slot buffer))
         (select-window window)))
-     ((harness-ui-anchor-p buffer)
+     (anchor
       (select-window (harness-ui--fullscreen-enter buffer)))
      (layout
       (let ((slot (harness-ui--fullscreen-window layout)))
@@ -3721,16 +3769,49 @@ With BURY the anchor goes out of sight too."
             (harness-ui--show-previous window anchor)))
         (bury-buffer-internal anchor)))))
 
+(defun harness-ui--show-anchor (buffer &optional shown)
+  "Make BUFFER the anchor of the selected frame's fullscreen layout; select it.
+BUFFER is an anchor (`harness-ui-anchor-p'): an overview, or a main
+session, which takes the anchor side of a layout already on only this
+way, as `harness-fullscreen' asks for it -- a session shown otherwise
+takes the slot (`harness-ui--display-fullscreen').  A frame without the
+layout gets it.  After a window prefix -- `C-x 5 5' or `C-x t t' before
+`harness-fullscreen' (`harness-ui-display-override-p') -- BUFFER shows
+where the prefix says first, and the layout is that frame's; SHOWN
+non-nil says it was just shown so, the frame it went to being the
+selected one.  Return BUFFER."
+  (when (and (not shown) (harness-ui-display-override-p))
+    (harness-ui--display-overridden buffer))
+  (harness-ui--display-fullscreen buffer t)
+  (with-current-buffer buffer (setq-local harness-ui-position 'fullscreen))
+  buffer)
+
+(defun harness-ui--fullscreen-elsewhere (here)
+  "Lay out the anchor of HERE where a window prefix says, as `harness-fullscreen'.
+The anchor is HERE when it is one (`harness-ui-anchor-p'), else an
+overview shown last in the selected frame: it shows where the prefix
+says -- a new frame, say -- and the layout starts there.  Without one the
+task board of this project, else the session list, is made, shown there
+by its own command, and laid out the same way."
+  (if-let* ((anchor (or (and (harness-ui-anchor-p here) here)
+                        (cl-find-if #'harness-ui-overview-p (buffer-list (selected-frame))))))
+      (harness-ui--show-anchor anchor)
+    (harness-ui--show-anchor (cond ((fboundp 'harness-tasks) (harness-tasks))
+                                  ((fboundp 'harness-sessions) (harness-sessions))
+                                  (t (user-error "No anchor to show")))
+                            t)))
+
 ;;;###autoload
 (defun harness-fullscreen ()
   "Start or end the fullscreen layout of an anchor in the selected frame.
 The anchor -- the task board, the session list, or a main session that
 has no parent -- takes the configured side of the frame
-(`harness-ui-fullscreen-side'), and the session you inspect shows beside
+\(`harness-ui-fullscreen-side'), and the session you inspect shows beside
 it: the one in sight, else the anchor's choice, the session at point,
 the anchor's most recent child, or the most recent.  The sessions you
-open from the anchor take its place, and so does anything else shown
-without a position while the layout lasts.
+open from the anchor take the slot beside it, main sessions too, and so
+does anything else shown without a position while the layout lasts: the
+anchor stays put.
 
 \\<harness-chat-mode-map>Burying the buffer beside the anchor
 \(`harness-ui-bury', \\[harness-ui-bury] in a session) brings back what was there
@@ -3741,18 +3822,20 @@ anchor, that one takes the anchor side instead.
 
 Without the layout, the anchor is this buffer when it is one, else an
 overview shown last, else the task board of this project, else the
-session list."
+session list.  After `C-x 5 5' (`other-frame-prefix') or `C-x t t'
+\(`other-tab-prefix') that anchor shows in a new frame or tab instead,
+and the layout starts there, whatever this frame shows."
   (interactive)
   (let ((layout (harness-ui--fullscreen-layout))
         (here (current-buffer)))
     (cond
+     ((harness-ui-display-override-p) (harness-ui--fullscreen-elsewhere here))
      ((and layout (harness-ui-anchor-p here) (not (harness-ui--overview-window-p (selected-window))))
-      (harness-ui-display-buffer here 'fullscreen))
+      (harness-ui--show-anchor here))
      (layout (harness-ui--fullscreen-leave))
-     ((harness-ui-anchor-p here) (harness-ui-display-buffer here 'fullscreen))
+     ((harness-ui-anchor-p here) (harness-ui--show-anchor here))
      ((cl-find-if #'harness-ui-overview-p (buffer-list (selected-frame)))
-      (harness-ui-display-buffer (cl-find-if #'harness-ui-overview-p (buffer-list (selected-frame)))
-                                 'fullscreen))
+      (harness-ui--show-anchor (cl-find-if #'harness-ui-overview-p (buffer-list (selected-frame)))))
      ((fboundp 'harness-tasks) (harness-tasks nil 'fullscreen))
      ((fboundp 'harness-sessions) (harness-sessions nil 'fullscreen))
      (t (user-error "No anchor to show")))))
@@ -3810,26 +3893,38 @@ That is the root of the project `default-directory' is in, else
 
 ;;;###autoload
 (defun harness-new-session (directory &optional position)
-  "Start a new session in DIRECTORY and show it in POSITION."
+  "Start a new session in DIRECTORY and show it in POSITION.
+It shows once the harness has made it, in the frame this command ran in,
+and where a window prefix typed before the command says -- `C-x 4 4',
+`C-x 5 5', `C-x t t' (`harness-ui-display-later')."
   (interactive (list (read-directory-name "Session directory: " (harness-ui--default-directory) nil t)
                      (and current-prefix-arg (harness-ui-read-position))))
-  (harness-ui-call "session/new" (list :cwd (expand-file-name directory)
-                                       ;; Rooted here, where the user's project setup lives.
-                                       :_harness (list :project (harness-files-project-root directory)))
-                   (lambda (result)
-                     (harness-ui-refresh-sessions
-                      (lambda (_) (harness-ui-display-session (plist-get result :sessionId) position))))))
+  (let ((later (harness-ui-display-later)))
+    (harness-ui-call "session/new" (list :cwd (expand-file-name directory)
+                                         ;; Rooted here, where the user's project setup lives.
+                                         :_harness (list :project (harness-files-project-root directory)))
+                     (lambda (result)
+                       (harness-ui-refresh-sessions
+                        (lambda (_)
+                          (funcall later (lambda (frame)
+                                           (harness-ui-display-session (plist-get result :sessionId)
+                                                                       position frame)))))))))
 
 ;;;###autoload
 (defun harness-switch-session (&optional position)
   "Switch to another session, replacing the one in POSITION.
 A seed conversation is not offered: it is a shared prompt cache, not a
-conversation to open (`harness-ui-navigable-session-p')."
+conversation to open (`harness-ui-navigable-session-p').  The session
+read shows in the frame this command ran in, and where a window prefix
+typed before the command says -- `C-x 4 4', `C-x 5 5', `C-x t t' --
+though it is read once the session list is fetched
+\(`harness-ui-display-later')."
   (interactive (list (and current-prefix-arg (harness-ui-read-position))))
-  (harness-ui-refresh-sessions
-   (lambda (_)
-     (let ((s (harness-ui-read-session "Switch to session: " #'harness-ui-navigable-session-p)))
-       (harness-ui-display-session (plist-get s :id) position)))))
+  (let ((later (harness-ui-display-later)))
+    (harness-ui-refresh-sessions
+     (lambda (_)
+       (let ((s (harness-ui-read-session "Switch to session: " #'harness-ui-navigable-session-p)))
+         (funcall later (lambda (frame) (harness-ui-display-session (plist-get s :id) position frame))))))))
 
 ;;;; Session settings
 
@@ -4646,14 +4741,22 @@ worktrees, task sessions and sessions merges are queued into."
 
 ;;;###autoload
 (defun harness-fork-session (&optional session-id position)
-  "Fork SESSION-ID (default the current session) and open the fork in POSITION."
+  "Fork SESSION-ID (default the current session) and open the fork in POSITION.
+The fork shows in the frame this command ran in, and where a window
+prefix typed before the command says -- `C-x 4 4', `C-x 5 5', `C-x t t'
+\(`harness-ui-display-later')."
   (interactive (list nil (and current-prefix-arg (harness-ui-read-position))))
-  (let ((sid (or session-id (harness-ui-current-session-id))))
+  (let ((sid (or session-id (harness-ui-current-session-id)))
+        (later (harness-ui-display-later)))
     (harness-ui-call "_harness/session/fork" (list :id sid :kind "fork")
                      (lambda (child)
                        (harness-ui-refresh-sessions
                         (lambda (_)
-                          (harness-ui-display-session (plist-get child :id) (or position harness-ui-position))
+                          (funcall later
+                                   (lambda (frame)
+                                     (harness-ui-display-session (plist-get child :id)
+                                                                 (or position harness-ui-position)
+                                                                 frame)))
                           (message "Forked session %s" (substring (plist-get child :id) 0 8))))))))
 
 ;;;###autoload
@@ -4717,7 +4820,10 @@ The log is a harness view like any other: its own mode
 (define-key harness-ui-map (kbd "I") #'harness-set-non-interactive-all)
 (define-key harness-ui-map (kbd "F") #'harness-fullscreen)
 (define-key harness-ui-map (kbd "W") #'harness-move-session)
-(define-key harness-ui-map (kbd "X") #'harness-ui-open-view-in-frame)
+;; X opened a view in a frame read with completion; Emacs's own window
+;; prefixes do that now (C-x 5 5 C-c h a), so a reload unbinds it.
+(when (eq (lookup-key harness-ui-map (kbd "X")) 'harness-ui-open-view-in-frame)
+  (define-key harness-ui-map (kbd "X") nil t))
 
 (defvar harness-ui-view-map
   (let ((map (make-sparse-keymap)))
@@ -5100,8 +5206,7 @@ leaves the buffer's commands out, never the whole menu."
      harness-version :if (lambda () (harness-ui--command-available-p 'harness-version)))
     ("R" "Reload harness" harness-reload)
     ("U" "Update harness" harness-update)
-    ("L" "Log" harness-show-log)
-    ("X" "Open a view in a frame…" harness-ui-open-view-in-frame)]]
+    ("L" "Log" harness-show-log)]]
   ;; The commands of the buffer the menu is opened from, when its modes
   ;; list some in their `harness-menu-group'.
   [:class transient-columns
