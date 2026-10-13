@@ -1296,6 +1296,16 @@ An image's `_harness.label', the token naming it in the message's text
      (list :type "text" :text (or (plist-get (plist-get block :resource) :text) "")))
     (other (list :type "text" :text (format "[unsupported content block: %s]" other)))))
 
+(defun harness-acp-blocks-from-acp (blocks)
+  "Turn ACP content BLOCKS, as a prompt holds them, into harness content blocks.
+What `session/prompt' sends `agent/prompt' (see
+`harness-acp--block-from-acp'); an entry that is no block is left out.
+A client answering a question with files attached sends them so too,
+as ACP blocks in the reply to `_harness/ask_user', or as these blocks
+over `_harness/question/answer'."
+  (delq nil (mapcar (lambda (b) (and (consp b) (keywordp (car b)) (harness-acp--block-from-acp b)))
+                    (if (vectorp blocks) (append blocks nil) blocks))))
+
 (defun harness-acp--stop-result (result)
   "Map the agent's turn RESULT (:stop-reason …) to an ACP prompt result."
   (let* ((reason (harness-acp--sym (plist-get result :stop-reason)))
@@ -1655,6 +1665,22 @@ outcome.  A shell command's request carries where it runs in
                         (list :behavior 'deny :scope 'once))))
          (harness-acp--call-safely 'permission/answer sid pid answer))))))
 
+(defun harness-acp--question-answer (result)
+  "Return what `question/answer' gets of RESULT, a reply to `_harness/ask_user'.
+RESULT is {answer} or {answer, attachments}: the text, and the files
+the user attached to it as ACP content blocks, as a `session/prompt'
+carries them (an image's data in base64, its token's label in
+`_harness.label').  With attachments the answer is (:answer TEXT
+:blocks BLOCKS), the harness's blocks of them, which go to the model
+with it; without, the text alone, as it always was."
+  (let* ((answer (plist-get result :answer))
+         (atts (plist-get result :attachments))
+         ;; An in-process client's reply is not JSON: its array may be a vector.
+         (atts (if (vectorp atts) (append atts nil) atts)))
+    (if (and (consp atts) (proper-list-p atts))
+        (list :answer answer :blocks (harness-acp-blocks-from-acp atts))
+      answer)))
+
 (defun harness-acp--on-question-asked (sid pending)
   "Ask the connected clients to answer PENDING question of session SID.
 `diagrams', when the options have them, holds one per option:
@@ -1663,7 +1689,9 @@ here, on the harness's machine: a client that cannot read it asks for
 the image with `_harness/question/image' (`question/image').  `cowboy'
 marks the harness's question about a cold prompt cache and says what
 each choice costs (see harness-cowboy.el); a client that knows it
-draws its own panel, any other shows the question and its options."
+draws its own panel, any other shows the question and its options.
+The reply is {answer}, with `attachments' when the user attached files
+to it (see `harness-acp--question-answer')."
   (let* ((payload (or (plist-get pending :payload) pending))
          (pid (plist-get pending :id)))
     (harness-acp--request-clients
@@ -1674,7 +1702,7 @@ draws its own panel, any other shows the question and its options."
              (and (plist-get payload :diagrams) (list :diagrams (plist-get payload :diagrams)))
              (and (plist-get payload :cowboy) (list :cowboy (plist-get payload :cowboy))))
      (lambda (result)
-       (harness-acp--call-safely 'question/answer sid pid (plist-get result :answer))))))
+       (harness-acp--call-safely 'question/answer sid pid (harness-acp--question-answer result))))))
 
 (defun harness-acp--subscribe ()
   "Subscribe the named event handlers; safe to call repeatedly."

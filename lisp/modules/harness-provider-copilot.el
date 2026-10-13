@@ -1009,14 +1009,21 @@ answers the CLI."
 Each of IMAGES is (:mime MIME :data BASE64 :name FILENAME), a picture
 the model is to see.  Its entry is (:data BASE64 :mimeType MIME :type
 \"image\" :description NAME), the SDK's `ToolBinaryResult'; the
-description, the file's name, is left out when there is none.  An
-element with no data or no media type is left out: the model is given
-only what the CLI can hand it as an image."
+description, the file's name, is left out when there is none.  An image
+with a `:label' (image 1), one a message of the user's attached that
+the result carries, whose text names it by its token, [image 1], is
+described by its label instead, as the blob of a message's image is
+named (`harness-provider-copilot--image-attachment').  An element with
+no data or no media type is left out: the model is given only what the
+CLI can hand it as an image."
   (delq nil
         (mapcar (lambda (image)
-                  (let ((data (plist-get image :data))
-                        (mime (plist-get image :mime))
-                        (name (plist-get image :name)))
+                  (let* ((data (plist-get image :data))
+                         (mime (plist-get image :mime))
+                         (label (plist-get image :label))
+                         (name (if (and (stringp label) (not (string-empty-p label)))
+                                   label
+                                 (plist-get image :name))))
                     (when (and (stringp data) (not (string-empty-p data))
                                (stringp mime) (not (string-empty-p mime)))
                       (append (list :data data :mimeType mime :type "image")

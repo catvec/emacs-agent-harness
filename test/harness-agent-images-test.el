@@ -263,6 +263,162 @@ The node still keeps the image, for a model that reads them later."
                              "\n\n<user_message>\nand mind the margins\n</user_message>")
                      (plist-get (car harness-agent-images-test-responses) :content))))))
 
+;;;; Images a steering message attached
+
+(defun harness-agent-images-test--steer-once (id blocks result)
+  "Have the `look' tool send BLOCKS to session ID once, then return RESULT.
+BLOCKS reach the running turn as a message of the user's, which steers
+it; any later call just returns RESULT."
+  (let ((sent nil))
+    (setq harness-agent-images-test-result
+          (lambda (_)
+            (unless sent
+              (setq sent t)
+              (harness-call 'agent/prompt id blocks))
+            result))))
+
+(defun harness-agent-images-test--steering (text &rest images)
+  "Return the blocks of a message of TEXT that attached IMAGES."
+  (cons (list :type "text" :text text) images))
+
+(ert-deftest harness-agent-images-hosted-steering-image-goes-with-the-result ()
+  "A message sent while a hosted loop works hands it its images with the result.
+The text reaches the model inside the tool result, as <user_message>;
+the image the message attached goes with that result too, labelled with
+the token its text names it by, or the model reads of an [image 1] it
+never sees.  An image of the message's own data goes as it is; one that
+names a file is read."
+  (harness-agent-images-test-with
+    (let ((id (harness-agent-images-test-session "hosted:eyes")))
+      (harness-agent-images-test--steer-once
+       id (harness-agent-images-test--steering
+           "in [image 1] the button is cut off, unlike [image 2]"
+           (list :type "image" :mime "image/png" :data harness-agent-images-test-b64 :label "image 1")
+           (list :type "image" :mime "image/png" :path png :label "image 2"))
+       (harness-tool-ok "listed"))
+      (should (eq 'end-turn (harness-agent-images-test-run id)))
+      (should (= 1 (length harness-agent-images-test-requests)))
+      (let ((response (car harness-agent-images-test-responses)))
+        (should (equal (concat "listed\n\n<user_message>\n"
+                               "in [image 1] the button is cut off, unlike [image 2]"
+                               "\n</user_message>")
+                       (plist-get response :content)))
+        (should (equal (list (list :mime "image/png" :data harness-agent-images-test-b64
+                                   :name "image 1" :label "image 1")
+                             (list :mime "image/png" :data harness-agent-images-test-b64
+                                   :name "shot.png" :label "image 2"))
+                       (plist-get response :images))))
+      ;; The transcript keeps the message whole, its images on its node.
+      (let ((node (car (cl-remove-if-not (lambda (n) (plist-get (plist-get n :meta) :steering))
+                                         (harness-call 'session/nodes id)))))
+        (should (equal '("text" "image" "image")
+                       (mapcar (lambda (b) (plist-get b :type)) (plist-get node :blocks))))))))
+
+(ert-deftest harness-agent-images-hosted-steering-image-follows-the-results-own ()
+  "A result's own images go first, then those of the message it carries.
+An image without a label goes without one."
+  (harness-agent-images-test-with
+    (let ((id (harness-agent-images-test-session "hosted:eyes")))
+      (harness-agent-images-test--steer-once
+       id (harness-agent-images-test--steering
+           "and this one" (list :type "image" :mime "image/png" :data "QUJD"))
+       (harness-agent-images-test--look png))
+      (should (eq 'end-turn (harness-agent-images-test-run id)))
+      (let ((response (car harness-agent-images-test-responses)))
+        (should (equal "Image shot.png attached.\n\n<user_message>\nand this one [image]\n</user_message>"
+                       (plist-get response :content)))
+        (should (equal (list (list :mime "image/png" :data harness-agent-images-test-b64 :name "shot.png")
+                             (list :mime "image/png" :data "QUJD" :name "image"))
+                       (plist-get response :images)))))))
+
+(ert-deftest harness-agent-images-hosted-steering-image-that-cannot-go-is-noted ()
+  "A blind model is told only the user sees the message's images; none go.
+For a model that reads them, one whose file is gone, or of a type no
+provider takes as an image, is left out and the text says so."
+  (harness-agent-images-test-with
+    (let ((id (harness-agent-images-test-session "hosted:blind")))
+      (harness-agent-images-test--steer-once
+       id (harness-agent-images-test--steering
+           "see [image 1]" (list :type "image" :mime "image/png" :path png :label "image 1"))
+       (harness-tool-ok "listed"))
+      (harness-agent-images-test-counting-reads reads
+        (should (eq 'end-turn (harness-agent-images-test-run id)))
+        (should (= 0 reads)))
+      (let ((response (car harness-agent-images-test-responses)))
+        (should-not (plist-member response :images))
+        (should (equal (concat "listed\n\n<user_message>\nsee [image 1]\n</user_message>"
+                               "\n\n[This model does not read images: only the user sees the images their message attached.]")
+                       (plist-get response :content)))))
+    (setq harness-agent-images-test-responses nil)
+    (let ((id (harness-agent-images-test-session "hosted:eyes"))
+          (gone (expand-file-name "gone.png" dir)))
+      (harness-agent-images-test--steer-once
+       id (harness-agent-images-test--steering
+           "see [image 1], [image 2] and [image 3]"
+           (list :type "image" :mime "image/png" :path gone :label "image 1")
+           (list :type "image" :mime "image/svg+xml" :data "PHN2Zz4=" :label "image 2")
+           (list :type "image" :mime "image/png" :path png :label "image 3"))
+       (harness-tool-ok "listed"))
+      (should (eq 'end-turn (harness-agent-images-test-run id)))
+      (let ((response (car harness-agent-images-test-responses)))
+        (should (equal (list (list :mime "image/png" :data harness-agent-images-test-b64
+                                   :name "shot.png" :label "image 3"))
+                       (plist-get response :images)))
+        (should (equal (concat "listed\n\n<user_message>\nsee [image 1], [image 2] and [image 3]\n</user_message>"
+                               (format "\n\n[The image [image 1] the user attached could not be sent: %s is gone.]" gone)
+                               "\n\n[The image [image 2] the user attached could not be sent: the model takes no image of type image/svg+xml.]")
+                       (plist-get response :content)))))))
+
+(ert-deftest harness-agent-images-hosted-steering-images-wait-out-a-failed-call ()
+  "A failed call's result is text: steering with images waits for the next boundary.
+Here that is the next step, whose request ends with the message, its
+image in it, as the trailing user message a hosted loop sends.  Its
+text is not sent twice, nor before the image."
+  (harness-agent-images-test-with
+    (let ((id (harness-agent-images-test-session "hosted:eyes")))
+      (harness-agent-images-test--steer-once
+       id (harness-agent-images-test--steering
+           "look at [image 1]"
+           (list :type "image" :mime "image/png" :data harness-agent-images-test-b64 :label "image 1"))
+       (harness-tool-error "could not look"))
+      (should (eq 'end-turn (harness-agent-images-test-run id)))
+      (should (= 2 (length harness-agent-images-test-requests)))
+      (let ((first (car harness-agent-images-test-responses)))
+        (should (equal "could not look" (plist-get first :content)))
+        (should-not (plist-member first :images)))
+      (should-not (cl-some (lambda (r) (string-search "user_message" (plist-get r :content)))
+                           harness-agent-images-test-responses))
+      ;; The second request ends with the message, image and all.
+      (let* ((request (cadr harness-agent-images-test-requests))
+             (last (car (last (plist-get request :messages)))))
+        (should (eq 'user (plist-get last :role)))
+        (should (equal (list (list "text" "look at [image 1]") (list "text" "[image 1]")
+                             (list "image" harness-agent-images-test-b64))
+                       (mapcar (lambda (b) (list (plist-get b :type)
+                                                 (or (plist-get b :text) (plist-get b :data))))
+                               (plist-get last :content))))))))
+
+(ert-deftest harness-agent-images-native-steering-image-is-in-the-next-request ()
+  "A loop the harness runs gets a steering message's images with the message.
+The next request puts the message after the result that delivered it,
+each labelled image after its token, as a message sent first would be."
+  (harness-agent-images-test-with
+    (let ((id (harness-agent-images-test-session "native:eyes")))
+      (harness-agent-images-test--steer-once
+       id (harness-agent-images-test--steering
+           "look at [image 1]"
+           (list :type "image" :mime "image/png" :path png :label "image 1"))
+       (harness-tool-ok "listed"))
+      (should (eq 'end-turn (harness-agent-images-test-run id)))
+      (let* ((request (cadr harness-agent-images-test-requests))
+             (last (car (last (plist-get request :messages)))))
+        (should (equal (list (list "tool_result" "listed") (list "text" "look at [image 1]")
+                             (list "text" "[image 1]") (list "image" harness-agent-images-test-b64))
+                       (mapcar (lambda (b) (list (plist-get b :type)
+                                                 (or (plist-get b :text) (plist-get b :data)
+                                                     (plist-get b :content))))
+                               (plist-get last :content))))))))
+
 (ert-deftest harness-agent-images-hosted-failed-call-and-odd-images-send-none ()
   "A failed call hands the model no image, nor does one that is no image.
 Such a result is text for the provider, and the transcript names none:

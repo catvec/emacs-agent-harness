@@ -407,6 +407,19 @@ base64 `data', `mimeType', `type' \"image\" and the file's name as its
     (should (equal [(:data "R0lG" :mimeType "image/gif" :type "image" :description "x.gif")]
                    (plist-get result :binaryResultsForLlm)))))
 
+(ert-deftest harness-provider-copilot-tool-result-describes-the-users-images-by-label ()
+  "An image a message of the user's attached is described by its label.
+The result carries the message (steering), whose text names the image
+by its token, [image 1]; the tool's own images keep their file's name."
+  (harness-provider-copilot-test--setup)
+  (should (equal [(:data "QUJD" :mimeType "image/png" :type "image" :description "a.png")
+                  (:data "REVG" :mimeType "image/png" :type "image" :description "image 1")]
+                 (plist-get (harness-provider-copilot-tool-result
+                             '(:content "text" :is-error nil
+                               :images ((:mime "image/png" :data "QUJD" :name "a.png")
+                                        (:mime "image/png" :data "REVG" :name "shot.png" :label "image 1"))))
+                            :binaryResultsForLlm))))
+
 (ert-deftest harness-provider-copilot-tool-result-leaves-out-images-it-cannot-send ()
   "An image without data or a media type is left out, and the rest go.
 The CLI hands the model only an image it has data and a media type

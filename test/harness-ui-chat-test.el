@@ -4326,13 +4326,55 @@ to a waiting question still goes through the question instead."
         (should-error (harness-chat-send) :type 'user-error)
         ;; A waiting question wins over the send function.
         (cl-letf (((symbol-function 'harness-chat--answer-question)
-                   (lambda (pid answer) (push (list pid answer) answers)))
+                   (lambda (pid answer &optional atts) (push (list pid answer atts) answers)))
                   ((symbol-function 'harness-chat--remove-pending) #'ignore))
           (harness-chat--add-pending (list :id "q1" :kind "question" :question "Which?"))
           (harness-ui-chat-test-type buf "red")
           (harness-chat-send))
-        (should (equal '(("q1" "red")) answers))
+        (should (equal '(("q1" "red" nil)) answers))
         (should (= 1 (length sent)))))))
+
+(declare-function harness-compose--root "harness-ui-compose")
+(declare-function harness-compose--references "harness-ui-compose" (text))
+
+(ert-deftest harness-ui-chat-answer-takes-the-boxs-attachments ()
+  "An answer typed in the box takes the box's own attachments with it.
+A screenshot the answer names by its token goes, under its label; a
+file an @ reference names stays the reference in the text.  The box
+empties, attachments and all."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid))
+           (png (expand-file-name "shot.png" (harness-test-temp-dir)))
+           (answers nil))
+      (let ((coding-system-for-write 'binary)) (write-region harness-test-png nil png nil 'silent))
+      (with-temp-file (expand-file-name "notes.txt" (with-current-buffer buf (harness-compose--root)))
+        (insert "Some notes\n"))
+      (with-current-buffer buf
+        ;; The reference names a file, which the message would attach.
+        (should (equal '("notes.txt") (mapcar (lambda (a) (plist-get a :name))
+                                              (harness-compose--references "see @notes.txt and"))))
+        (cl-letf (((symbol-function 'harness-chat--active-question) (lambda () (list :id "q1")))
+                  ((symbol-function 'harness-ui-pending-answer-question)
+                   (lambda (session-id pid answer &optional _on-error atts)
+                     (push (list session-id pid answer atts) answers))))
+          (harness-ui-chat-test-type buf "see @notes.txt and")
+          (harness-compose-add-attachment png)
+          (harness-ui-chat-test-type buf "where it is cut off")
+          (harness-chat-send))
+        (should (equal "" (harness-compose-text)))
+        (should-not harness-compose-attachments))
+      (should (= 1 (length answers)))
+      (pcase-let ((`(,s ,pid ,answer ,atts) (car answers)))
+        (should (equal sid s))
+        (should (equal "q1" pid))
+        (should (equal "see @notes.txt and [image 1] where it is cut off" answer))
+        (should (equal (list (list png "image/png" "image 1"))
+                       (mapcar (lambda (a) (list (plist-get a :path) (plist-get a :mime) (plist-get a :label)))
+                               atts))))
+      ;; Nothing went to the session as a message of its own.
+      (accept-process-output nil 0.2)
+      (should-not (harness-call 'session/nodes sid)))))
 
 (ert-deftest harness-ui-chat-shows-the-path-after-a-checkout ()
   "A chat whose session's head moves shows the path to the new head.

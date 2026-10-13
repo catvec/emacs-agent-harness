@@ -362,13 +362,27 @@ request does not offer is refused: its key does nothing else instead."
       (harness-ui-pending-remove session-id pid)
       (message "%s" (harness-ui-pending--message-for r option)))))
 
-(defun harness-ui-pending-answer-question (session-id pid answer &optional on-error)
+(defun harness-ui-pending-answer-question (session-id pid answer &optional on-error attachments)
   "Answer question PID of SESSION-ID with ANSWER.
-ON-ERROR is as for `harness-ui-pending-answer-permission'."
+ON-ERROR is as for `harness-ui-pending-answer-permission'.
+ATTACHMENTS, the files the user attached to the answer (attachment
+plists, as a compose box holds them), go with it: the harness sends
+them to the model with the answer, so a screenshot its text names by
+its token, [image 1], is one the model sees (`question/answer').  They
+go as a message's do (`harness-compose-attachment-block'), an image
+with its bytes, so a harness on another machine gets it too."
   (when-let* ((r (harness-ui-pending-record session-id pid)))
-    (unless (harness-ui-pending--respond r (list :answer answer))
-      (harness-ui-call "_harness/question/answer"
-                       (list :session-id session-id :pid pid :answer answer) #'ignore on-error))
+    ;; Lists, never empty, which encode as arrays: the in-process
+    ;; connection hands the values over as they are.
+    (let ((blocks (mapcar #'harness-compose-attachment-block attachments)))
+      (unless (harness-ui-pending--respond
+               r (append (list :answer answer) (and blocks (list :attachments blocks))))
+        (harness-ui-call "_harness/question/answer"
+                         (list :session-id session-id :pid pid
+                               :answer (if blocks
+                                           (list :answer answer :blocks (harness-acp-blocks-from-acp blocks))
+                                         answer))
+                         #'ignore on-error)))
     (harness-ui-pending-remove session-id pid)))
 
 (defun harness-ui-pending--respond (r value)
@@ -1315,14 +1329,16 @@ request is answered from the session's pending list instead.")
 
 (defun harness-ui-pending--popout-submit (session-id)
   "Return what the popout box of SESSION-ID sends with, or nil for no box.
-A question is answered with the typed text; otherwise there is no box."
+A question is answered with the typed text and the files attached to
+it, a screenshot the text names by its token among them, which reach
+the model with the answer; otherwise there is no box."
   (when (harness-ui-pending-question session-id)
     (lambda (text atts)
-      ;; An answer mentioning a file with @ goes as the text it is.
-      (when (harness-compose-without-references atts text)
-        (user-error "Answers cannot carry attachments"))
       (let ((q (harness-ui-pending-question session-id)))
-        (if q (harness-ui-pending-answer-question session-id (plist-get q :id) text)
+        (if q
+            ;; An answer mentioning a file with @ goes as the text it is.
+            (harness-ui-pending-answer-question session-id (plist-get q :id) text nil
+                                                (harness-compose-without-references atts text))
           (user-error "No question is waiting"))))))
 
 (defun harness-ui-pending--popout-render (session-id)
@@ -1421,12 +1437,13 @@ so.  Signal a user error when it waits on no permission request."
   (let ((r (harness-ui-pending--first-of-kind session-id "permission")))
     (harness-ui-pending-answer-permission session-id (plist-get r :id) option on-error)))
 
-(defun harness-ui-pending-answer-first-question (session-id answer &optional on-error)
+(defun harness-ui-pending-answer-first-question (session-id answer &optional on-error attachments)
   "Answer the question SESSION-ID waits on first with ANSWER.
 ON-ERROR is as for `harness-ui-pending-answer-first-permission'.  Signal
-a user error when it waits on no question."
+a user error when it waits on no question.  ATTACHMENTS go with the
+answer (see `harness-ui-pending-answer-question')."
   (let ((r (harness-ui-pending--first-of-kind session-id "question")))
-    (harness-ui-pending-answer-question session-id (plist-get r :id) answer on-error)
+    (harness-ui-pending-answer-question session-id (plist-get r :id) answer on-error attachments)
     (message "Answered: %s" answer)))
 
 (defconst harness-ui-pending-view-answers '("allow-once" "deny-once")

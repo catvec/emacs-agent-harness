@@ -921,20 +921,26 @@ Each of IMAGES is (:mime MIME :data BASE64 :name FILENAME), a picture
 the model is to see.  The block is (:type \"image\" :data BASE64
 :mimeType MIME), the MCP shape; the CLI puts it into the tool_result it
 sends the model as an image.  The name is for the user and goes
-nowhere.  An element with no data or no media type is left out: the
-API refuses an image whose media type does not match its data, and the
-conversation would carry that image for good.  IMAGES that is not a
-list of elements is dropped, logged: the text of the result is what
-matters most, and it must go out."
+nowhere.  An image with a `:label' (image 1), one a message of the
+user's attached that the result carries, whose text names it by its
+token, comes after a text block of that token, [image 1], so the model
+can tell which image a sentence means.  An element with no data or no
+media type is left out: the API refuses an image whose media type does
+not match its data, and the conversation would carry that image for
+good.  IMAGES that is not a list of elements is dropped, logged: the
+text of the result is what matters most, and it must go out."
   (condition-case err
-      (delq nil
-            (mapcar (lambda (image)
-                      (let ((data (plist-get image :data))
-                            (mime (plist-get image :mime)))
-                        (when (and (stringp data) (not (string-empty-p data))
-                                   (stringp mime) (not (string-empty-p mime)))
-                          (list :type "image" :data data :mimeType mime))))
-                    images))
+      (apply #'append
+             (mapcar (lambda (image)
+                       (let ((data (plist-get image :data))
+                             (mime (plist-get image :mime))
+                             (label (plist-get image :label)))
+                         (when (and (stringp data) (not (string-empty-p data))
+                                    (stringp mime) (not (string-empty-p mime)))
+                           (append (and (stringp label) (not (string-empty-p label))
+                                        (list (list :type "text" :text (format "[%s]" label))))
+                                   (list (list :type "image" :data data :mimeType mime))))))
+                     images))
     (error
      (harness-log 'warn "provider-claude: dropped the images of a tool result: %s"
                   (harness-error-short-message err))

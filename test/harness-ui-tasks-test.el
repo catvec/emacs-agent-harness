@@ -845,22 +845,24 @@ task's, and those two): a waiting task's settings are its session's."
               (should (= 1 escapes)))
           (define-key global-map [remap keyboard-quit] old))))))
 
-(declare-function harness-compose-remove-attachment "harness-ui-compose")
 (declare-function harness-compose-set "harness-ui-compose")
 
 (ert-deftest harness-ui-tasks-answer-mentioning-a-file-goes-as-text ()
   "An answer naming a file with @ goes as the text it is.
-An attachment of the box's own still cannot go with an answer, and the
-box keeps what it holds."
+The box's own attachments go with it: a screenshot the answer names by
+its token reaches the model with the answer, in a message of the
+user's that the turn takes with the ask_user result.  The box empties."
   (harness-ui-tasks-test-with
     (let ((harness-provider-demo-script-override
            '((:type tool-call :id "demo-q" :name "ask_user"
                     :input (:question "Which file?" :options ("notes.txt" "none")))
              (:type text :delta "Noted.")
              (:type done :stop-reason end-turn)))
-          (notes (expand-file-name "notes.txt" dir)))
+          (notes (expand-file-name "notes.txt" dir))
+          (png (expand-file-name "shot.png" dir)))
       (harness-test-load-module 'tools-agent)
       (with-temp-file notes (insert "Some notes\n"))
+      (let ((coding-system-for-write 'binary)) (write-region harness-test-png nil png nil 'silent))
       (harness-ui-tasks-test--type-and-submit board "Pick a file")
       (harness-ui-tasks-test--wait-text board "Requires your input  1\\(.\\|\n\\)*has a question for you")
       (let ((sid (plist-get (car (harness-call 'task/list default-directory)) :session)))
@@ -869,19 +871,26 @@ box keeps what it holds."
           (search-forward "Pick a file")
           (harness-ui-tasks-reply)
           (should (eq 'answer (car harness-ui-tasks--target)))
-          (harness-compose-add-attachment notes)
-          (harness-compose-set "this one")
-          (should-error (harness-ui-tasks-submit) :type 'user-error)
-          (should (equal "this one" (harness-compose-text)))
-          (should (= 1 (length harness-compose-attachments)))
-          (harness-compose-remove-attachment notes)
-          (harness-compose-set "@notes.txt")
+          (goto-char harness-compose-end)
+          (insert "@notes.txt, as")
+          (harness-compose-add-attachment png)
+          (goto-char harness-compose-end)
+          (insert "shows")
           (harness-ui-tasks-submit)
+          (should (equal "" (harness-compose-text)))
           (should-not harness-compose-attachments))
         (harness-test-wait (lambda () (null (harness-call 'question/pending sid))) 5 "the question to be answered")
         (harness-ui-tasks-test--wait-text board "Completed  1")
-        (should (string-match-p "@notes\\.txt" (format "%S" (harness-call 'session/nodes sid))))
-        (should-not (string-match-p "Attached file" (format "%S" (harness-call 'session/nodes sid))))))))
+        (let* ((nodes (harness-call 'session/nodes sid))
+               (result (cl-find-if (lambda (n) (eq (plist-get n :kind) 'tool-result)) nodes))
+               (steering (cl-find-if (lambda (n) (plist-get (plist-get n :meta) :steering)) nodes)))
+          (should (equal "@notes.txt, as [image 1] shows" (plist-get result :output)))
+          ;; The screenshot, with the answer; the file the text names is no attachment.
+          (should (equal (list (list :type "image" :mime "image/png"
+                                     :data (base64-encode-string harness-test-png t) :label "image 1"))
+                         (plist-get steering :blocks)))
+          (should (equal (plist-get result :id) (plist-get (plist-get steering :meta) :delivered-after)))
+          (should-not (string-match-p "Attached file" (format "%S" nodes))))))))
 
 ;;;; The box wraps and never scrolls sideways
 

@@ -23,6 +23,10 @@
 ;; on an image gives): a hosted loop is handed them with the result, a
 ;; native one reads them from the transcript with its next request, and
 ;; only a model that reads images is sent any (see "Images tools return").
+;; The images a steering message attached go the same way: a hosted loop
+;; gets them with the tool result that carries the message's text, each
+;; after its token ([image 1]), and a native one with the message itself
+;; in its next request (see `harness-agent--with-steering').
 ;;
 ;; A provider may run a tool of its own in place of a harness tool (see
 ;; `tools/builtin'): Claude Code's web search for web_search, say.  It
@@ -109,9 +113,20 @@ They are what the providers take as an image of a tool result.")
   "Return what a tool result says of its image, the file at PATH, once unreadable."
   (format "\n\n[The image this call returned (%s) is gone; read the file again to see it.]" path))
 
+(defconst harness-agent--steering-no-vision-note
+  "\n\n[This model does not read images: only the user sees the images their message attached.]"
+  "Added after a steering message whose images go to a model that cannot read them.")
+
+(defun harness-agent--steering-image-note (image why)
+  "Return what a tool result says of IMAGE, a steering message's, that did not go.
+WHY says what stopped it."
+  (let ((label (harness-agent--image-label image)))
+    (format "\n\n[The image %sthe user attached could not be sent: %s.]"
+            (if label (format "[%s] " label) "") why)))
+
 (cl-defstruct (harness-agent-turn (:copier nil))
   session-id promise handle (steps 0) cancelled
-  steering                              ; pending (:node ID :text TEXT), oldest first
+  steering                              ; pending (:node ID :text TEXT [:images IMAGES]), oldest first
   text-node text-buf think-node think-buf
   step-nodes                            ; the nodes this step wrote, for a retry
   (pending 0) waiting-done stop-reason error hosted last-usage started
@@ -858,20 +873,30 @@ none leaves the message as it was, so a message is never emptied."
   (or (harness-run-filter 'agent/message blocks session-id (list :from from :steering steering))
       blocks))
 
+(defun harness-agent--message-images (blocks)
+  "Return the image blocks of BLOCKS, a message: the pictures it attached.
+Each is (:type \"image\" :mime MIME) with `:data', base64, or a `:path'
+to read, and a `:label' when the message's text names it by its token."
+  (cl-remove-if-not (lambda (b) (equal (plist-get b :type) "image")) blocks))
+
 (defun harness-agent--record-steering (turn blocks from)
   "Record BLOCKS, a message from FROM, as steering of the running TURN.
 The message is a user node marked `:steering' (and `:from', when FROM is
 who sent it: see `agent/prompt') and waits for the next step boundary,
-which delivers it once (`harness-agent--take-steering').  Return the
-node."
+which delivers it once (`harness-agent--take-steering').  The pending
+entry keeps the message's text and its images, which a hosted loop is
+handed with the tool result that delivers it
+\(`harness-agent--with-steering').  Return the node."
   (let* ((text (harness-agent--blocks-text blocks))
+         (images (harness-agent--message-images blocks))
          (node (harness-call 'session/append (harness-agent-turn-session-id turn)
                              (list :kind 'user :content text
                                    :blocks (unless (harness-agent--only-text-p blocks) blocks)
                                    :meta (append (list :steering t) (and from (list :from from)))))))
     (setf (harness-agent-turn-steering turn)
           (append (harness-agent-turn-steering turn)
-                  (list (list :node (plist-get node :id) :text text))))
+                  (list (append (list :node (plist-get node :id) :text text)
+                                (and images (list :images images))))))
     node))
 
 (harness-defmethod agent/prompt (session-id blocks &optional opts)
@@ -1060,12 +1085,15 @@ the state."
         (harness-agent--update-activity sid '(:phase waiting))
         (setf (harness-agent-turn-handle turn) (harness-call 'provider/complete request)))))))
 
-(defun harness-agent--take-steering (turn)
-  "Deliver the pending steering of TURN: clear it and return its text.
+(defun harness-agent--take-pending (turn)
+  "Deliver the pending steering of TURN: clear it and return its entries.
 Return nil when nothing is pending.  Every boundary takes it, so a
 message is delivered once.  Each one is recorded as delivered after the
 newest node that is not one of them, which is where `session/messages'
-puts it for the model, rather than where it was sent mid-step."
+puts it for the model, rather than where it was sent mid-step.  An
+entry is (:node ID :text TEXT), with `:images' when the message attached
+any (see `harness-agent--record-steering'); a turn running across a
+reload may still hold bare texts."
   (when-let* ((pending (harness-agent-turn-steering turn)))
     (setf (harness-agent-turn-steering turn) nil)
     (condition-case err
@@ -1073,8 +1101,21 @@ puts it for the model, rather than where it was sent mid-step."
                                        (delq nil (mapcar (lambda (p) (and (consp p) (plist-get p :node)))
                                                          pending)))
       (error (harness-log 'warn "agent: recording delivered steering failed: %S" err)))
-    ;; A turn running across a reload may still hold bare texts.
-    (mapconcat (lambda (p) (if (stringp p) p (plist-get p :text))) pending "\n\n")))
+    pending))
+
+(defun harness-agent--steering-text (pending)
+  "Return the text of PENDING, steering entries: one paragraph each."
+  (mapconcat (lambda (p) (if (stringp p) p (plist-get p :text))) pending "\n\n"))
+
+(defun harness-agent--steering-images (pending)
+  "Return the images PENDING, steering entries, attached, oldest first."
+  (cl-loop for p in pending when (consp p) append (plist-get p :images)))
+
+(defun harness-agent--take-steering (turn)
+  "Deliver the pending steering of TURN: clear it and return its text.
+Return nil when nothing is pending.  See `harness-agent--take-pending'."
+  (when-let* ((pending (harness-agent--take-pending turn)))
+    (harness-agent--steering-text pending)))
 
 (defun harness-agent--mark-delivered (sid ids)
   "Mark the steering nodes IDS of session SID as delivered now.
@@ -1217,18 +1258,40 @@ ending the turn, and neither may wait on it."
     (harness-agent--try (format "writing the %s node of %s" kind (harness-agent-turn-session-id turn))
       (harness-agent--finalize turn kind))))
 
-(defun harness-agent--with-steering (turn content)
-  "Return tool result CONTENT carrying the pending steering of TURN.
+(defun harness-agent--with-steering (turn content &optional sid failed)
+  "Return (CONTENT . IMAGES): tool result CONTENT with TURN's pending steering.
 The result is a step boundary, so this delivers that steering: a hosted
 loop reads it in the content, a native one with its next request.
+
+SID, the session's id, says the loop is hosted.  Its model then gets
+the images the steering messages attached with the result: IMAGES, in
+the shape `harness-agent--respond' takes, each labelled with the token
+the message's text names it by (see
+`harness-agent--hosted-steering-images'), and CONTENT ends with a note
+of each that could not go.  Without SID IMAGES is nil: a native loop's
+next request carries each message whole, its images with it.
+
+FAILED says the call failed.  A provider takes the result of one as
+text, so steering with images waits for the next boundary, whole, when
+the loop is hosted: the next result, or the next step's request, which
+ends with the messages, their images in them.  Content that is no text
+\(nil aside) takes no steering either, which waits the same way.
+
 Never signals: should the steering not be added, CONTENT goes out as it
 is, for the result must reach the provider."
   (or (harness-agent--try "adding steering to a tool result"
-        (let ((steer (harness-agent--take-steering turn)))
-          (if steer
-              (concat content "\n\n<user_message>\n" steer "\n</user_message>")
-            content)))
-      content))
+        (if (or (not (or (null content) (stringp content)))
+                (and sid failed (harness-agent--steering-images (harness-agent-turn-steering turn))))
+            (cons content nil)
+          (let ((pending (harness-agent--take-pending turn)))
+            (if (null pending)
+                (cons content nil)
+              (let* ((images (and sid (harness-agent--steering-images pending)))
+                     (shown (and images (harness-agent--hosted-steering-images sid images))))
+                (cons (concat content "\n\n<user_message>\n" (harness-agent--steering-text pending)
+                              "\n</user_message>" (car shown))
+                      (cdr shown)))))))
+      (cons content nil)))
 
 (defun harness-agent--respond-with-fallback (respond what message fallback)
   "Give the provider MESSAGE, about WHAT, through RESPOND; never signal.
@@ -1255,8 +1318,11 @@ logged and given up.  Return non-nil when MESSAGE itself went out."
 (defun harness-agent--respond (respond name content is-error &optional images)
   "Send CONTENT, the result of the call of tool NAME, through RESPOND.
 IS-ERROR marks a failed call.  IMAGES, when given, are the pictures the
-model is to see with it, each (:mime MIME :data BASE64 :name FILENAME):
-they go as the result's `:images'.  Never signals: a result the
+model is to see with it, each (:mime MIME :data BASE64 :name FILENAME),
+and `:label' (image 1) for one a message of the user's attached, whose
+text names it by its token, [image 1]: they go as the result's
+`:images', and the provider puts each label by its image (see
+`harness-agent--hosted-steering-images').  Never signals: a result the
 provider cannot take is answered with one saying that the harness could
 not send it, so that the model hears of the call all the same (see
 `harness-agent--respond-with-fallback'); that one is text alone, even
@@ -1277,11 +1343,8 @@ FILENAME), the shape of `harness-agent--respond's IMAGES; NOTE then
 says of each that cannot that it is gone.  Any other model gets no
 SENT and a NOTE saying that only the user sees the image.  NOTE is
 text to add to the result's content, or nil for none.  The model is the
-one the running step went to, which a switch of the session's model
-leaves be until the next step."
-  (if (not (harness-agent--vision-p
-            (list :model (or (gethash sid harness-agent--step-models)
-                             (plist-get (harness-call 'session/get sid) :model)))))
+one the running step went to (`harness-agent--step-vision-p')."
+  (if (not (harness-agent--step-vision-p sid))
       (cons harness-agent--no-vision-note nil)
     (let (sent notes)
       (dolist (image images)
@@ -1292,6 +1355,59 @@ leaves be until the next step."
                           :name (file-name-nondirectory path))
                     sent)
             (push (harness-agent--image-gone-note path) notes))))
+      (cons (and notes (apply #'concat (nreverse notes))) (nreverse sent)))))
+
+(defun harness-agent--step-vision-p (sid)
+  "Non-nil when the model SID's running step went to reads images.
+A switch of the session's model leaves that one be until the next step;
+without a step, the session's own model."
+  (harness-agent--vision-p
+   (list :model (or (gethash sid harness-agent--step-models)
+                    (plist-get (harness-call 'session/get sid) :model)))))
+
+(defun harness-agent--hosted-steering-images (sid images)
+  "Return (NOTE . SENT): what SID's hosted loop is told of steering IMAGES.
+IMAGES are the pictures the messages a tool result delivers attached
+\(`harness-agent--message-images'): image blocks with base64 `:data'
+or a `:path' to read, each with its `:label' when the message's text
+names it by its token.  The text reaches the model inside the result,
+so the images go with the result too, or the model would read of an
+image it never sees.
+
+For a model that reads images SENT holds each that can go, as
+\(:mime MIME :data BASE64 :name NAME) with its `:label', the shape of
+`harness-agent--respond's IMAGES, in the order the messages attached
+them; NOTE then says of each that cannot why: its file is gone, or its
+type is none a provider takes as an image
+\(`harness-agent--image-mimes').  Any other model gets no SENT and a
+NOTE saying that only the user sees the images.  NOTE is text to add
+after the steering, or nil for none.  The model is the one the running
+step went to (`harness-agent--step-vision-p')."
+  (if (not (harness-agent--step-vision-p sid))
+      (cons harness-agent--steering-no-vision-note nil)
+    (let (sent notes)
+      (dolist (image images)
+        (let* ((path (plist-get image :path))
+               (mime (or (plist-get image :mime) "image/png"))
+               (given (plist-get image :data))
+               (data (cond ((not (member mime harness-agent--image-mimes)) nil)
+                           ((and (stringp given) (not (string-empty-p given))) given)
+                           (t (harness-agent--image-data path))))
+               (label (harness-agent--image-label image)))
+          (cond
+           (data (push (append (list :mime mime :data data
+                                     :name (cond ((stringp path) (file-name-nondirectory path))
+                                                 (label)
+                                                 (t "image")))
+                               (and label (list :label label)))
+                       sent))
+           ((not (member mime harness-agent--image-mimes))
+            (push (harness-agent--steering-image-note
+                   image (format "the model takes no image of type %s" mime))
+                  notes))
+           (t (push (harness-agent--steering-image-note
+                     image (if (stringp path) (format "%s is gone" path) "it holds no data"))
+                    notes)))))
       (cons (and notes (apply #'concat (nreverse notes))) (nreverse sent)))))
 
 (defun harness-agent--call-title (name input)
@@ -1390,17 +1506,20 @@ logged, short, and the ones after it still run."
                                 (harness-agent--try (format "reading the images of %s" name)
                                   (when-let* ((wanted (harness-agent--result-images result)))
                                     (harness-agent--hosted-images sid wanted)))))
-                    (content (harness-agent--with-steering
+                    ;; Steering rides on the result: (CONTENT . IMAGES),
+                    ;; the images its messages attached for a hosted loop.
+                    (steered (harness-agent--with-steering
                               turn (let ((text (plist-get result :content)))
                                      (if (and (car shown) (or (null text) (stringp text)))
                                          (concat text (car shown))
-                                       text)))))
+                                       text))
+                              (and respond sid) (plist-get result :is-error))))
                (when rnode
                  (harness-agent--try (format "announcing the result of %s" name)
                    (harness-emit 'agent/tool-result sid rnode)))
                (when respond
-                 (harness-agent--respond respond name content (plist-get result :is-error)
-                                         (cdr shown))))
+                 (harness-agent--respond respond name (car steered) (plist-get result :is-error)
+                                         (append (cdr shown) (cdr steered)))))
            ;; Whatever went wrong above, the call is over.
            (cl-decf (harness-agent-turn-pending turn))
            (if (plist-get result :end-turn)
@@ -1418,7 +1537,8 @@ logged, short, and the ones after it still run."
                (harness-agent--try (format "recording the failure of %s" name)
                  (harness-call 'session/append sid
                                (list :kind 'tool-result :call-id call-id :output msg :is-error t)))
-               (let ((content (harness-agent--with-steering turn msg)))
+               ;; A failed call's result is text: steering with images waits.
+               (let ((content (car (harness-agent--with-steering turn msg (and respond sid) t))))
                  (when respond (harness-agent--respond respond name content t))))
            (cl-decf (harness-agent-turn-pending turn))
            (harness-agent--maybe-continue turn)))))))

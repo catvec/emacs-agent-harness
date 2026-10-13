@@ -7,7 +7,10 @@
 ;;
 ;; - `ask_user' blocks the turn on a pending question and resolves when
 ;;   a UI answers it through `question/answer'.  Its options may each
-;;   have a diagram (ASCII art or an image), all of them or none.
+;;   have a diagram (ASCII art or an image), all of them or none.  An
+;;   answer may carry files the user attached to it, a screenshot its
+;;   text names as [image 1]: they reach the model with the answer, as a
+;;   message of the user's the waiting turn takes as steering.
 ;;   `question/ask' asks the same kind of question for the harness
 ;;   itself, with no tool call behind it (the cowboy module asks what
 ;;   to do about a cold prompt cache this way).
@@ -202,26 +205,78 @@ saying what to fix, and asks nothing."
         ((null answer) "")
         (t (format "%s" answer))))
 
+(defun harness-tools-agent--answer-blocks (answer)
+  "Return the content blocks of the files the user attached to ANSWER, or nil.
+That is a plist ANSWER's `:blocks', content blocks as `agent/prompt'
+takes them: an image is (:type \"image\" :mime MIME :data BASE64), with
+`:label' (image 1) when the answer's text names it by its token, [image
+1].  One that is no block, with no `:type', is left out."
+  (when (and (consp answer) (keywordp (car answer)))
+    (let* ((blocks (plist-get answer :blocks))
+           ;; A vector from a caller in this Emacs, an array not parsed.
+           (blocks (if (vectorp blocks) (append blocks nil) blocks)))
+      (and (proper-list-p blocks)
+           (cl-remove-if-not (lambda (b) (and (consp b) (keywordp (car b)) (stringp (plist-get b :type))))
+                             blocks)))))
+
+(defun harness-tools-agent--answer-without-blocks (answer)
+  "Return ANSWER without its `:blocks', for the records and the event.
+The session's pending list and `question/answered', which every client
+hears, get the answer's text, never the bytes of the files attached."
+  (if (and (consp answer) (keywordp (car answer)) (plist-member answer :blocks))
+      (harness-plist-remove answer :blocks)
+    answer))
+
+(defun harness-tools-agent--deliver-blocks (session-id blocks)
+  "Send BLOCKS, the files attached to an answer, to SESSION-ID's model.
+They go as a message of the user's that holds them alone, sent before
+the answer settles its question: the turn waiting on the question takes
+it as steering, so it reaches the model with the answer -- a hosted
+loop gets its images with the ask_user result, a native one the message
+right after that result (see `harness-agent--with-steering').  The
+answer's text names an image by its token, [image 1], and the message
+carries the image under that label, the token before it.  Only a
+running turn is sent them, never one they would start on their own;
+without the agent nothing is sent, and a failure to send is logged: the
+answer goes all the same."
+  (when (and blocks (harness-method-exists-p 'agent/prompt)
+             (harness-method-exists-p 'agent/running)
+             (harness-call 'agent/running session-id))
+    (condition-case err
+        (harness-call 'agent/prompt session-id blocks)
+      (error (harness-log 'warn "tools-agent: sending the attachments of an answer in %s failed: %s"
+                          session-id (harness-error-short-message err))))))
+
 (defun harness-tools-agent--settle-question (session-id pid answer &optional dismissed)
   "Resolve pending question PID of SESSION-ID with ANSWER.
 DISMISSED non-nil says nobody answered: the question was dismissed.
-Return non-nil when a continuation was waiting."
-  (let ((entry (gethash pid harness-tools-agent--questions)))
+The files ANSWER attached to an ask_user call's question go to the model
+first, with it (`harness-tools-agent--deliver-blocks').  Return non-nil
+when a continuation was waiting."
+  (let ((entry (gethash pid harness-tools-agent--questions))
+        (blocks (and (not dismissed) (harness-tools-agent--answer-blocks answer)))
+        (answer (harness-tools-agent--answer-without-blocks answer)))
     (harness-call 'session/pending-resolve session-id pid answer)
     (when entry
       (remhash pid harness-tools-agent--questions)
       (if (plist-get entry :on-answer)
           (funcall (plist-get entry :on-answer) (harness-tools-agent--answer-text answer) dismissed)
+        (harness-tools-agent--deliver-blocks session-id blocks)
         (funcall (plist-get entry :resolve) (harness-tool-ok (harness-tools-agent--answer-text answer))))
       (harness-emit 'question/answered session-id pid answer)
       t)))
 
 (harness-defmethod question/answer (session-id pid answer)
   "Answer pending question PID of SESSION-ID with ANSWER.
-ANSWER is a string or a plist (:answer STRING).  The waiting ask_user
-call returns the text as its result; a question the harness asked
-\(`question/ask') gets the text.  Return non-nil when a question was
-waiting."
+ANSWER is a string or a plist (:answer STRING), with `:blocks' for the
+files the user attached to the answer: content blocks as `agent/prompt'
+takes them, an image's with its base64 `:data' and the `:label' its
+token in the text names (image 1 for [image 1]).  The waiting ask_user
+call returns the text as its result, and the files reach the model
+with it, as a message of the user's that holds them, which the turn
+takes with the answer (`harness-tools-agent--deliver-blocks').  A
+question the harness asked (`question/ask') gets the text alone.
+Return non-nil when a question was waiting."
   (harness-tools-agent--settle-question session-id pid answer))
 
 (harness-defmethod question/cancel (session-id pid)

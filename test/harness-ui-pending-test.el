@@ -280,6 +280,50 @@ blocked; a request still answered on its own connection uses RESPOND."
         (harness-call 'acp/stop)
         (setq harness-ui-connection-address nil)))))
 
+(ert-deftest harness-ui-pending-answers-carry-their-attachments ()
+  "The files attached to an answer go with it, an image with its bytes.
+Through the function that holds the request the reply carries them as
+ACP content blocks, as a prompt does; over `question/answer' they are
+the harness's blocks of them.  Either way an image keeps its label, so
+the model reads the token its text names it by, [image 1], before it."
+  (harness-ui-pending-test-with
+    (let* ((sid (harness-ui-pending-test-session "Attacher"))
+           (png (harness-ui-pending-test-png dir "shot.png"))
+           (att (list :path png :mime "image/png" :size (length harness-test-png)
+                      :name "shot.png" :label "image 1"))
+           (data (base64-encode-string harness-test-png t))
+           (drawn (list sid))
+           (drawn-p (lambda (session-id) (member session-id drawn)))
+           (answers nil)
+           (respond (lambda (r) (push r answers) t)))
+      (harness-ui-pending-test-record-answers)
+      (add-hook 'harness-ui-pending-drawn-predicates drawn-p)
+      (unwind-protect
+          (progn
+            (should (harness-ui-pending--on-question
+                     (list :sessionId sid :requestId "q0" :question "Which?" :options '("yes" "no"))
+                     respond))
+            (harness-ui-pending-answer-question sid "q0" "like [image 1]" nil (list att))
+            (should (equal (list (list :answer "like [image 1]"
+                                       :attachments (list (list :type "image" :mimeType "image/png" :data data
+                                                                :_harness (list :label "image 1")))))
+                           answers))
+            ;; One the session's own list holds goes over `question/answer'.
+            (harness-ui-pending-test-question sid "q1")
+            (harness-ui-pending-answer-question sid "q1" "like [image 1]" nil (list att))
+            (harness-test-wait (lambda () harness-ui-pending-test-answers) 5 "the answer over ACP")
+            (should (equal (list 'question sid "q1"
+                                 (list :answer "like [image 1]"
+                                       :blocks (list (list :type "image" :mime "image/png" :data data
+                                                           :label "image 1"))))
+                           (car harness-ui-pending-test-answers)))
+            ;; Without attachments, the text alone, as before.
+            (harness-ui-pending-test-question sid "q2")
+            (harness-ui-pending-answer-question sid "q2" "plain")
+            (harness-test-wait (lambda () (= 2 (length harness-ui-pending-test-answers))) 5 "the plain answer")
+            (should (equal (list 'question sid "q2" "plain") (car harness-ui-pending-test-answers))))
+        (remove-hook 'harness-ui-pending-drawn-predicates drawn-p)))))
+
 ;;;; The popout
 
 (ert-deftest harness-ui-pending-popup-shows-its-request-and-answers-it ()
@@ -362,27 +406,39 @@ they do in the transcript, every line indented under \"Question\"."
 
 (ert-deftest harness-ui-pending-popup-answer-mentioning-a-file-is-text ()
   "An answer naming a file with @ goes as the text it is.
-An attachment of the box's own still cannot go with an answer."
+The box's own attachments go with it: a screenshot its text names by
+its token reaches the model with the answer, its bytes and its label."
   (harness-ui-pending-test-with
     (let* ((sid (harness-ui-pending-test-session "Free text"))
-           (key (list 'pending sid)))
+           (key (list 'pending sid))
+           (png (harness-ui-pending-test-png dir "shot.png")))
       (harness-ui-pending-test-record-answers)
       (with-temp-file (expand-file-name "notes.txt" dir) (insert "Some notes\n"))
-      (with-temp-file (expand-file-name "other.txt" dir) (insert "Other notes\n"))
       (harness-ui-pending-sync sid (list (list :id "q1" :kind "question"
                                                :payload (list :question "Which file?" :options nil))))
       (harness-ui-pending-popout sid)
       (with-current-buffer (harness-ui-popout-buffer key)
-        (harness-compose-add-attachment (expand-file-name "other.txt" dir))
-        (goto-char harness-compose-end)
-        (insert "@notes.txt")
-        (should-error (harness-ui-popout-submit) :type 'user-error)
-        (should-not harness-ui-pending-test-answers)
         (goto-char harness-compose-end)
         (insert "@notes.txt")
         (harness-ui-popout-submit))
       (harness-test-wait (lambda () harness-ui-pending-test-answers) 5 "the typed answer")
-      (should (equal (list 'question sid "q1" "@notes.txt") (car harness-ui-pending-test-answers))))))
+      (should (equal (list 'question sid "q1" "@notes.txt") (car harness-ui-pending-test-answers)))
+      ;; Asked again, answered with a screenshot.
+      (harness-ui-pending-sync sid (list (list :id "q2" :kind "question"
+                                               :payload (list :question "Which looks wrong?" :options nil))))
+      (harness-ui-pending-popout sid)
+      (with-current-buffer (harness-ui-popout-buffer key)
+        (goto-char harness-compose-end)
+        (insert "@notes.txt, and this:")
+        (harness-compose-add-attachment png)
+        (harness-ui-popout-submit))
+      (harness-test-wait (lambda () (= 2 (length harness-ui-pending-test-answers))) 5 "the answer with an image")
+      (should (equal (list 'question sid "q2"
+                           (list :answer "@notes.txt, and this: [image 1]"
+                                 :blocks (list (list :type "image" :mime "image/png"
+                                                     :data (base64-encode-string harness-test-png t)
+                                                     :label "image 1"))))
+                     (car harness-ui-pending-test-answers))))))
 
 (ert-deftest harness-ui-pending-popup-learns-a-cached-sessions-request ()
   "A popout shows a request the store has only heard of from the session.

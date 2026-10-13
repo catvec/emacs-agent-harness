@@ -661,6 +661,24 @@ file's name (`:name') is for the UI and goes nowhere in the block."
                      (:type "image" :data "R0hJ" :mimeType "image/webp"))
                    (harness-provider-claude-test--answer-content (car lines))))))
 
+(ert-deftest harness-provider-claude-tools-call-labels-the-users-images ()
+  "An image with a label comes after a text block of its token.
+That is an image a message of the user's attached, which the result
+carries to the model (steering): its text names it by its token, [image
+2], and the model must tell which image the sentence means.  An image
+without a label, the tool's own, goes alone as before."
+  (harness-provider-claude-test--setup)
+  (let ((lines (harness-provider-claude-test--answer-lines
+                (list (list :content "listed\n\n<user_message>\nsee [image 2]\n</user_message>" :is-error nil
+                            :images (list (list :mime "image/png" :data "QUJD" :name "a.png")
+                                          (list :mime "image/png" :data "REVG" :name "image 2"
+                                                :label "image 2")))))))
+    (should (equal '((:type "text" :text "listed\n\n<user_message>\nsee [image 2]\n</user_message>")
+                     (:type "image" :data "QUJD" :mimeType "image/png")
+                     (:type "text" :text "[image 2]")
+                     (:type "image" :data "REVG" :mimeType "image/png"))
+                   (harness-provider-claude-test--answer-content (car lines))))))
+
 (ert-deftest harness-provider-claude-tools-call-answers-once-with-images ()
   "`:respond' answers once, whether or not the first answer held images."
   (harness-provider-claude-test--setup)

@@ -2862,9 +2862,10 @@ non-interactive session it stays a denial.
 
 - `agent/prompt SESSION-ID BLOCKS &optional OPTS` → promise of
   `(:stop-reason …)`.  Idle session: starts a turn.  Running session:
-  steering — the text is queued and injected at the next step boundary
-  (appended to the next tool result, or sent as the next user turn if
-  the model stops first), and only once.  OPTS `:queue` true only
+  steering — the message is queued and injected at the next step boundary
+  (appended to the next tool result, a hosted loop handed its images
+  with that result, or sent as the next user turn if the model stops
+  first), and only once.  OPTS `:queue` true only
   queues, even while a turn runs.  OPTS `:from`, when the user is not
   the sender, is the sender plist (see "Node") kept on the message's
   node (and on a queued item).  An empty message is refused, and so is
@@ -3016,6 +3017,22 @@ non-interactive session it stays a denial.
   sent none from the transcript, having been handed each once; neither
   are a summary or a title (compaction and naming), which are written
   from words (`harness-agent-strip-result-images`).
+- Images a steering message holds (attached in the box while the turn
+  runs, or to an answer, see `question/answer`) reach the model as
+  those of a message sent first would.  A native loop gets the message,
+  images and all, in its next request, each image after its token.  A
+  hosted loop hears steering only as text inside the next tool result
+  (`<user_message>…</user_message>`, `harness-agent--with-steering`), so
+  it is handed the message's images with that result, after the
+  result's own: each of IMAGES then carries the `:label` its token in
+  the text names (image 1 for `[image 1]`), which Claude Code sends as
+  a text block of the token right before the image and Copilot names
+  the image's blob after (`harness-agent--hosted-steering-images`).  A
+  model that does not read images is told that only the user sees them,
+  and an image that cannot go (its file gone, a type no provider takes)
+  is named in the text with why.  A call that failed hands no images,
+  so a message with images waits for the next result, or for the next
+  user turn.
 - Each step reads the session's model afresh: a model switch reaches a
   running turn at its next step, never mid-step.  The step sends only
   the provider state its model can continue and drops one of another
@@ -6245,7 +6262,7 @@ TRAMP prefixes come from the session host):
 | `web_search` | Web search | query, count | net |
 | `web_fetch` | Fetch page | url, max_chars | net |
 | `emacs_messages` | Emacs messages | count | read (needs no approval: `harness-perms--inspection-tools`) |
-| `ask_user` | Question | question, options (strings, or `{label, diagram}` / `{label, image}` objects: every option has a diagram or none does), allow_free_text | meta (answered with `question/answer SID PID ANSWER`; event `question/asked`; the harness asks its own questions the same way, with no tool call, through `question/ask`) |
+| `ask_user` | Question | question, options (strings, or `{label, diagram}` / `{label, image}` objects: every option has a diagram or none does), allow_free_text | meta (answered with `question/answer SID PID ANSWER`, the files attached to the answer going to the model with it; event `question/asked`; the harness asks its own questions the same way, with no tool call, through `question/ask`) |
 | `request_directory_access` | Request access | path, reason | meta (perms module; decided only by the user's answer to a directory prompt, in every mode) |
 | `rerun_approved` | Rerun approved call | handle | meta (perms module; runs the denied call the user approved by hand with `permission/approve-denied`, exactly as it was denied and with no permission check (`tools/execute-approved`); a handle the user has not approved, one this session does not know, and one already rerun are refused) |
 | `session_info` | Session info | — | read (needs no approval: `harness-perms--inspection-tools`) |
@@ -6740,6 +6757,19 @@ set up; `always`; or `never`.  The session then has no `web_search` of
 the harness's, and the provider's searches show as `web_search` calls.
 Corporate mode leaves both searches on and turns `web_fetch` off (see
 tools).
+
+An answer may carry the files the user attached to it, a screenshot its
+text names by its token (`[image 1]`) say: `question/answer`'s ANSWER is
+then `(:answer TEXT :blocks BLOCKS)`, BLOCKS content blocks as
+`agent/prompt` takes them (an image with its base64 `:data` and its
+`:label`).  The ask_user call returns TEXT, and BLOCKS go to the session
+just before, as a message of the user's that holds them alone
+(`harness-tools-agent--deliver-blocks`): the turn waiting on the
+question takes it as steering with the result (see agent), so the
+model sees the screenshot with the answer, its token before it.  Only a
+running turn is sent them, never one they would start; the session's
+pending list and `question/answered` keep the answer without them, and
+a question the harness asked (below) gets the text alone.
 
 The harness asks the user its own questions the way ask_user does, with
 no tool call behind them: `question/ask SESSION-ID REQUEST ON-ANSWER`
@@ -7444,7 +7474,16 @@ a shell command runs; `paths`: what the call is about, see perms) →
 `_harness:{pattern}` when the client answers a request about a path
 outside the allowed directories for another glob pattern than its
 `_harness.pattern` (only such a request has one, see perms),
-and `_harness/ask_user {sessionId, requestId, question, options, diagrams, cowboy}` → `{answer}`.
+and `_harness/ask_user {sessionId, requestId, question, options, diagrams, cowboy}` → `{answer}`,
+or `{answer, attachments}` when the user attached files to the answer:
+`attachments` are ACP content blocks, as a `session/prompt`'s `prompt`
+holds them (an image's bytes in base64 `data`, the label its token in
+the answer names in `_harness.label`), which `question/answer` gets as
+the harness's blocks (`harness-acp-blocks-from-acp`) and sends the
+model with the answer; a client answering over
+`_harness/question/answer` instead sends `{answer, blocks}`, those
+blocks.  The bytes go, not a path, so a client on another machine
+answers with a screenshot too.
 Its `options` are the answers' labels; `cowboy`, on the harness's own
 question about a cold prompt cache (see cowboy), says what each choice
 costs, for a client that draws more than the question; `diagrams`, present when the
@@ -8586,9 +8625,13 @@ reference typed out in full, or pasted, names its file all the same:
 `harness-compose-take` attaches the regular files the references in the
 text name (`@skill:` ones and missing files aside, trailing punctuation
 tolerated) and leaves the references in the text.  An answer to a
-question, on the board or in a popout, carries no attachment: there a
-file the text names goes as its reference
-(`harness-compose-without-references`).
+question, in a chat, on the board or in a popout, carries the box's own
+attachments, a screenshot its text names by its token among them,
+while a file the text names stays its reference
+(`harness-compose-without-references`): `harness-ui-pending-answer-question`
+sends them as `harness-compose-attachment-block` makes a message's, an
+image with its bytes, and the harness hands them to the model with the
+answer (see `question/answer`).
 
 Quoting to reply is the `compose-quote` library's (lisp/vendor/compose-quote;
 see Vendored libraries), which knows nothing of the harness: the box is

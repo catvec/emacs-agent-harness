@@ -11,6 +11,8 @@
 (defvar harness-tools-agent--children)
 (defvar harness-tools--watchers)
 (declare-function harness-provider-demo--last-user-text "harness-provider-demo")
+(declare-function harness-tools-agent--answer-blocks "harness-tools-agent" (answer))
+(declare-function harness-tools-agent--answer-without-blocks "harness-tools-agent" (answer))
 
 (defmacro harness-tools-agent-test-with (&rest body)
   "Load the state layer with the demo provider and the meta tools, run BODY."
@@ -278,6 +280,91 @@ and the caller hears the answer, or that it was dismissed."
       (let ((result (cl-find-if (lambda (n) (eq (plist-get n :kind) 'tool-result)) (harness-call 'session/nodes sid))))
         (should (equal "blue" (plist-get result :output))))
       (should (eq 'idle (plist-get (harness-call 'session/get sid) :status))))))
+
+(ert-deftest harness-tools-agent-answer-attachments-reach-the-model ()
+  "The files attached to an answer reach the model with it.
+The answer's text, naming the screenshot by its token, is the ask_user
+result; the screenshot goes as a message of the user's that the turn
+takes with that result, so the next request carries it right after the
+result, its token before it, as a message sent first would.  The
+pending list and the event every client hears keep the text, never the
+screenshot's bytes."
+  (harness-tools-agent-test-with
+    (let* ((sid (harness-tools-agent-test-session))
+           (data (base64-encode-string harness-test-png t))
+           (requests nil)
+           (heard nil))
+      (harness-on 'question/answered (lambda (_s _pid answer) (push answer heard)))
+      (harness-on 'session/pending-resolved (lambda (_s _item answer) (push answer heard)))
+      (cl-letf* ((orig (symbol-function 'harness-method/provider/complete))
+                 ((symbol-function 'harness-method/provider/complete)
+                  (lambda (req) (push req requests) (funcall orig req))))
+        (let ((p (harness-call 'agent/prompt sid "ask me")))
+          (harness-test-wait (lambda () (harness-call 'question/pending sid)) 5 "question during turn")
+          (let ((pid (plist-get (car (harness-call 'question/pending sid)) :id)))
+            (should (harness-call 'question/answer sid pid
+                                  (list :answer "like [image 1]"
+                                        :blocks (list (list :type "image" :mime "image/png" :data data
+                                                            :label "image 1"))))))
+          (should (eq 'end-turn (plist-get (harness-test-await p) :stop-reason)))))
+      (should (equal '((:answer "like [image 1]") (:answer "like [image 1]")) heard))
+      (let* ((nodes (harness-call 'session/nodes sid))
+             (result (cl-find-if (lambda (n) (eq (plist-get n :kind) 'tool-result)) nodes))
+             (steering (cl-find-if (lambda (n) (plist-get (plist-get n :meta) :steering)) nodes)))
+        (should (equal "like [image 1]" (plist-get result :output)))
+        ;; The image's message, delivered with the answer.
+        (should (equal "[image 1]" (plist-get steering :content)))
+        (should (equal (plist-get result :id) (plist-get (plist-get steering :meta) :delivered-after)))
+        (should (equal (list (list :type "image" :mime "image/png" :data data :label "image 1"))
+                       (plist-get steering :blocks))))
+      ;; The request after the answer: the result, then the image.
+      (let ((content (plist-get (car (last (plist-get (car requests) :messages))) :content)))
+        (should (equal '("tool_result" "text" "image") (mapcar (lambda (b) (plist-get b :type)) content)))
+        (should (equal "like [image 1]" (plist-get (nth 0 content) :content)))
+        (should (equal "[image 1]" (plist-get (nth 1 content) :text)))
+        (should (equal data (plist-get (nth 2 content) :data)))))))
+
+(ert-deftest harness-tools-agent-answer-without-attachments-sends-no-message ()
+  "Only an ask_user call a turn waits on sends the files of its answer.
+An answer of text alone, or whose blocks are none, is only the answer;
+so is one to a call no turn runs, which a message would start a turn
+for, and one to a question the harness asked, which takes the text."
+  (harness-tools-agent-test-with
+    (let ((sid (harness-tools-agent-test-session))
+          (image '(:type "image" :mime "image/png" :data "iVBO" :label "image 1"))
+          (prompts nil)
+          (heard nil))
+      (should-not (harness-tools-agent--answer-blocks "green"))
+      (should-not (harness-tools-agent--answer-blocks '(:answer "green")))
+      (should-not (harness-tools-agent--answer-blocks '(:answer "green" :blocks nil)))
+      (should-not (harness-tools-agent--answer-blocks '(:answer "green" :blocks ("junk" (:mime "image/png")))))
+      (should (equal (list image) (harness-tools-agent--answer-blocks (list :answer "x" :blocks (list 7 image)))))
+      (should (equal '(:answer "x") (harness-tools-agent--answer-without-blocks (list :answer "x" :blocks (list image)))))
+      (should (equal "x" (harness-tools-agent--answer-without-blocks "x")))
+      (cl-letf* ((orig (symbol-function 'harness-method/agent/prompt))
+                 ((symbol-function 'harness-method/agent/prompt)
+                  (lambda (&rest args) (push args prompts) (apply orig args))))
+        ;; In a turn, an answer whose blocks are none.
+        (let ((p (harness-call 'agent/prompt sid "ask me")))
+          (harness-test-wait (lambda () (harness-call 'question/pending sid)) 5 "question during turn")
+          (should (harness-call 'question/answer sid (plist-get (car (harness-call 'question/pending sid)) :id)
+                                '(:answer "green" :blocks ("junk" (:mime "image/png")))))
+          (should (eq 'end-turn (plist-get (harness-test-await p) :stop-reason))))
+        (should (= 1 (length prompts)))
+        (should-not (cl-find-if (lambda (n) (plist-get (plist-get n :meta) :steering))
+                                (harness-call 'session/nodes sid)))
+        ;; A call no turn runs.
+        (let ((p (harness-tools-agent-test-run sid "ask_user" '(:question "Which colour?"))))
+          (harness-test-wait (lambda () (harness-call 'question/pending sid)) 5 "pending question")
+          (should (harness-call 'question/answer sid (plist-get (car (harness-call 'question/pending sid)) :id)
+                                (list :answer "green" :blocks (list image))))
+          (should (equal "green" (plist-get (harness-test-await p) :content))))
+        ;; The harness's own question.
+        (let ((pid (harness-call 'question/ask sid '(:question "Which way?")
+                                 (lambda (text _dismissed) (push text heard)))))
+          (should (harness-call 'question/answer sid pid (list :answer "left" :blocks (list image))))
+          (should (equal '("left") heard))))
+      (should (= 1 (length prompts))))))
 
 (ert-deftest harness-tools-agent-plan-records-and-hints ()
   (harness-tools-agent-test-with

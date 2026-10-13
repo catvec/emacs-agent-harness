@@ -2527,9 +2527,11 @@ continues, not the branch left behind."
   "Return the newest pending question record of this session, if any."
   (harness-ui-pending-question harness-ui-session-id))
 
-(defun harness-chat--answer-question (pid answer)
-  "Answer question PID of this session with ANSWER."
-  (harness-ui-pending-answer-question harness-ui-session-id pid answer))
+(defun harness-chat--answer-question (pid answer &optional attachments)
+  "Answer question PID of this session with ANSWER.
+ATTACHMENTS, the files attached to it in the box, go with it to the
+model (see `harness-ui-pending-answer-question')."
+  (harness-ui-pending-answer-question harness-ui-session-id pid answer nil attachments))
 
 (defun harness-chat--answer-permission (pid option)
   "Answer permission PID of this session with OPTION."
@@ -3411,7 +3413,10 @@ connected again still runs its turn, as the redrawn transcript shows."
 
 (defun harness-chat-send ()
   "Send the compose box, or answer the active question with it.
-While the agent is running the message steers the current turn.
+While the agent is running the message steers the current turn.  An
+answer takes the box's attachments with it: a screenshot its text names
+by its token, [image 1], reaches the model with the answer.  The files
+its @ references name stay references in its text, as an answer's do.
 A module showing something of its own in this buffer
 \(`harness-chat-send-function') gets the box instead of the session."
   (interactive)
@@ -3419,7 +3424,10 @@ A module showing something of its own in this buffer
         (typed (string-trim (harness-compose-text))))
     (cond
      ((and question (not (string-empty-p typed)))
-      (harness-chat--answer-question (plist-get question :id) typed)
+      ;; Taken, so the tokens and the images agree and no download is
+      ;; still on its way; the box's own attachments go with the answer.
+      (let ((text (car (harness-chat--take-message))))
+        (harness-chat--answer-question (plist-get question :id) text harness-compose-attachments))
       (harness-chat--clear-compose))
      ;; A module whose panel owns the box takes its text.
      (harness-chat-send-function

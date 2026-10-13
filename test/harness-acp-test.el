@@ -989,6 +989,41 @@ request for one alike; a payload listing fewer narrows them."
           (should (equal '("A" "B") (plist-get params :options)))
           (should (equal diagrams (plist-get params :diagrams))))))))
 
+(ert-deftest harness-acp-local-ask-user-answer-carries-attachments ()
+  "A reply to `_harness/ask_user' with attachments answers with them.
+They are ACP content blocks, as a prompt's are, an image with its data
+and its token's label; `question/answer' gets (:answer TEXT :blocks
+BLOCKS), the harness's blocks of them, which it sends the model.  A
+reply with none answers with the text alone, as before."
+  (harness-acp-test-with
+    (let* ((conn (harness-acp-test-connect))
+           (sid (harness-acp-test-new-session conn))
+           (recorded nil)
+           (atts (list (list :type "image" :mimeType "image/png" :data "iVBO" :_harness (list :label "image 1"))
+                       "junk"
+                       (list :type "resource_link" :uri "file:///tmp/notes.txt" :name "notes.txt"
+                             :size 5 :mimeType "text/plain")))
+           (blocks (list (list :type "image" :mime "image/png" :data "iVBO" :label "image 1")
+                         (list :type "file" :path "/tmp/notes.txt" :size 5 :mime "text/plain" :name "notes.txt"))))
+      (should (equal blocks (harness-acp-blocks-from-acp atts)))
+      (harness-register-method 'question/answer
+                               (lambda (s pid answer) (push (list s pid answer) recorded) t))
+      (dolist (case (list (list "q1" (list :answer "like [image 1]" :attachments atts)
+                                (list :answer "like [image 1]" :blocks blocks))
+                          (list "q2" (list :answer "plain" :attachments nil) "plain")
+                          (list "q3" (list :answer "plain" :attachments []) "plain")))
+        (harness-emit 'question/asked sid
+                      (list :id (car case) :kind 'question
+                            :payload (list :question "Which one?" :options '("a" "b"))))
+        (harness-test-wait (lambda () (cl-find-if (lambda (m) (equal (car case) (plist-get (nth 1 m) :requestId)))
+                                                  harness-acp-test-messages)))
+        (funcall (nth 2 (cl-find-if (lambda (m) (equal (car case) (plist-get (nth 1 m) :requestId)))
+                                    harness-acp-test-messages))
+                 (nth 1 case))
+        (harness-test-wait (lambda () (assoc-default (car case) (mapcar #'cdr recorded))))
+        (should (equal (list sid (car case) (nth 2 case))
+                       (cl-find (car case) recorded :key #'cadr :test #'equal)))))))
+
 (ert-deftest harness-acp-local-request-without-client-stays-pending ()
   (harness-acp-test-with
     (let* ((warned nil)

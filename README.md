@@ -631,6 +631,10 @@ attachment lines above the box stay, each image's leading with its
 token, since they also hold files that are not images, downloads still
 on their way, and the larger thumbnail, size and `×`. In the transcript
 the tokens keep their look, and each image has its token over it.
+A message you send while the agent works takes its images along the
+same way, whichever provider runs the session: Claude Code and Copilot,
+which hear such a message inside the next tool result, are handed its
+images with that result, each after its token.
 
 Permission requests and questions from the agent appear inline above
 the compose box. An indicator in the mode line, visible from any buffer,
@@ -847,7 +851,10 @@ the prompt cache with it. The result of a call whose image went says so,
 and the model can read the file again.
 
 A digit answers a question with that option; any other answer goes in
-the compose box. When the options are easier to compare by sight, such
+the compose box. An answer typed there takes the box's attachments with
+it, in a chat, a popout or on the task board: "it looks like [image 1]"
+with a screenshot attached reaches the model with the screenshot. When
+the options are easier to compare by sight, such
 as layouts or architectures, the agent can give each one a diagram,
 ASCII art or an image. The diagrams share one area under the options
 and show one at a time. Switch between them with the tabs above the

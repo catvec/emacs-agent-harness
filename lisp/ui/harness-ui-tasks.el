@@ -3373,16 +3373,15 @@ its line to the search instead (`harness-ui-tasks-search-submit')."
   (pcase-let* ((`(,text . ,atts) (harness-compose-take))
                (target harness-ui-tasks--target)
                (refine harness-ui-tasks--refine)
-               (buffer (current-buffer)))
-    ;; The box's own attachments, not the files its @ references name:
-    ;; an answer mentioning a file goes as the text it is.
-    (when (and (eq (car target) 'answer) harness-compose-attachments)
-      (user-error "Answers cannot carry attachments"))
+               (buffer (current-buffer))
+               ;; The box's own attachments, not the files its @ references
+               ;; name: an answer mentioning a file goes as the text it is.
+               (own harness-compose-attachments))
     (setq harness-ui-tasks--error nil
           harness-compose-attachments nil)
     (harness-ui-tasks--set-compose "" nil)
     (if (eq (car target) 'answer)
-        (harness-ui-tasks--answer (harness-ui-tasks--find (cdr target)) text)
+        (harness-ui-tasks--answer (harness-ui-tasks--find (cdr target)) text own)
       (unless target
         (push text harness-ui-tasks--submitting)
         (harness-ui-tasks--render))
@@ -3672,14 +3671,16 @@ shows its report instead, through the shared
     (unless (harness-ui-popout-try-at-point)
       (user-error "This task is not waiting on anything"))))
 
-(defun harness-ui-tasks--answer (task answer)
+(defun harness-ui-tasks--answer (task answer &optional attachments)
   "Answer the question TASK's session is waiting on with ANSWER.
 As every view answers it (`harness-ui-pending-answer-first-question'),
-but a failure shows on the board."
+but a failure shows on the board.  ATTACHMENTS, the files attached to
+the answer, go with it to the model."
   (unless (plist-get task :session) (user-error "No question is waiting"))
   (setq harness-ui-tasks--error nil)
   (harness-ui-pending-answer-first-question (plist-get task :session) answer
-                                            (harness-ui-tasks--on-error "Answering")))
+                                            (harness-ui-tasks--on-error "Answering")
+                                            attachments))
 
 (defun harness-ui-tasks--permission (option)
   "Answer the permission request of the task at point with OPTION.

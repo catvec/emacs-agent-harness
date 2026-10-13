@@ -972,9 +972,10 @@ In the order of TEXT, each file once; see
 
 (defun harness-compose-without-references (atts text)
   "Return ATTS without the files the @ references in TEXT name.
-ATTS are the attachments `harness-compose-take' returned with TEXT.
-For what can only be text, an answer to a question say: a file the text
-names goes as its reference, while any other attachment cannot go."
+ATTS are the attachments `harness-compose-take' returned with TEXT: what
+is left are the box's own, the files attached to it.  For an answer to
+a question, say, whose text goes as it is: a file the text names stays
+its reference, while the box's own attachments go with the answer."
   (let ((named (mapcar (lambda (att) (plist-get att :path)) (harness-compose--references text))))
     (cl-remove-if (lambda (att) (member (plist-get att :path) named)) atts)))
 
