@@ -2844,7 +2844,7 @@ window's point."
           (insert (propertize " This session is inactive. Sending a message resumes it.\n" 'face 'harness-hint-face)))
         (put-text-property start (point) 'read-only t)
         (harness-compose-insert nil (concat "C-c C-c sends, RET newline, C-c C-q queues, C-c C-k cancels, "
-                                            "C-c C-a attaches, C-c > quotes"))))
+                                            "C-c C-a attaches, C-c > quotes, M-RET splits a quote"))))
     (cond (offset (goto-char (min (+ harness-compose-start offset) harness-compose-end)))
           (in-tail (goto-char harness-compose-end)))
     (dolist (w windows)
@@ -4116,7 +4116,7 @@ See `harness-chat-next-action'."
 That is the response, plan or thinking point is on; anywhere else -- a
 tool call, the user's message, the compose box -- the response or plan
 nearest above point, so the agent's last one from the box.  The chat's
-`harness-compose-quote-function', for \\[harness-compose-quote-reply]."
+`compose-quote-function', for \\[compose-quote-reply]."
   (let* ((id (get-text-property (point) 'harness-chat-node))
          (here (and id (gethash id harness-chat--blocks))))
     (or (and here (member (harness-chat-block-kind here) '("assistant" "plan" "thinking"))
@@ -4257,10 +4257,13 @@ a request's panel its own keys answer it instead: a question's digits,
 up to its number of options, and a permission's y, s, a, n and N, and
 e when it has a pattern to edit.
 
-\\[harness-compose-quote-reply] quotes the region, or the agent's message at point, in
-the box, to reply to it; from the box, the agent's last message.
+\\<harness-chat-mode-map>\\[compose-quote-reply] quotes the region, or the agent's message at point, in
+the box, to reply to it; from the box, the agent's last message.  Answer
+a quote inline, part by part: in a quote in the box,
+\\<compose-quote-inline-mode-map>\\[compose-quote-split] splits it where point is, to answer that part, and
+\\[compose-quote-elide] elides the region, or the rest of the paragraph, as [...].
 
-Point moves from block to block without a mouse:
+\\<harness-chat-mode-map>Point moves from block to block without a mouse:
 \\[harness-chat-next-message] and \\[harness-chat-previous-message] go to the next and previous
 real message -- what you or the agent wrote, plans included -- past
 thinking and tool calls;
@@ -4282,7 +4285,7 @@ one summary line is one stop.
                          :placeholder #'harness-chat--placeholder
                          :redraw #'harness-chat--render-tail
                          :bottom t)
-  (setq-local harness-compose-quote-function #'harness-chat--quote-at-point
+  (setq-local compose-quote-function #'harness-chat--quote-at-point
               harness-compose-commands (mapcar #'car harness-chat-commands))
   (add-hook 'post-command-hook #'harness-chat--post-command nil t)
   (add-hook 'window-buffer-change-functions #'harness-chat--on-window-buffer-change nil t)
@@ -4303,7 +4306,9 @@ one summary line is one stop.
         ("C-c C-q" "Queue for next turn" harness-chat-queue)
         ("C-c C-a" "Attach file" harness-compose-add-attachment)
         ("C-y" "Paste; an image attaches" harness-compose-yank)
-        ("C-c >" "Quote reply: region or message" harness-compose-quote-reply)]
+        ("C-c >" "Quote reply: region or message" compose-quote-reply)
+        ("M-RET" "Split a quote to answer inline" compose-quote-split)
+        ("C-c [" "Elide part of a quote: [...]" compose-quote-elide)]
        ["Agent"
         ("C-c C-y" "Allow request" harness-chat-allow-newest)
         ("C-c C-n" "Deny request" harness-chat-deny-newest)

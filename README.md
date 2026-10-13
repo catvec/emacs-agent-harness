@@ -143,6 +143,8 @@ OpenAI-compatible APIs and AWS Bedrock.
 | A search in words, typed in the board's own box: the board shows what it is about, and acts | |
 | ![The Insights report over 30 days: the totals, the summary the model wrote, and the messages by hour of day and by weekday](docs/media/insights.png) | ![The Insights report further down: the busiest sessions, each tool's calls and failures, the permission decisions and the tasks](docs/media/insights-activity.png) |
 | Insights: a month of work, summed up by your model | The sessions, tools, permissions and tasks behind it |
+| ![A chat whose agent replied in three paragraphs, the reply quoted in the compose box with C-c > and answered inline: the middle of the long paragraph elided as [...], the quote split in two with an answer under each part](docs/media/quote-reply.png) | |
+| Answering a reply inline: `C-c >` quotes it, `C-c [` elides what you skip as `[...]`, `M-RET` splits the quote to answer a part | |
 
 ## Requirements
 
@@ -556,10 +558,28 @@ number of options, and a permission's `y`, `s`, `a`, `n` and `N`, and
 | `C-c C-s` | Search the transcript |
 | `C-c C-t` | Show or hide the session's todo list |
 | `C-c C-w` | Copy the last reply |
+| `C-c >` | Quote, to reply: the selected text, or the agent's reply or plan at point (elsewhere the one above it, from the box the last), goes in the compose box as a Markdown quote, point under it. A selection keeps its code blocks, inline code and links as Markdown, and leaves out what a fold hides. It is the [compose-quote](lisp/vendor/compose-quote/README.md) library's command (see *Answering inline*, below) |
+| `M-RET` | In a quote in the compose box: split it where point is, to answer that part: the quote above, an empty line for your answer, the quote below |
+| `C-c [` | In a quote in the compose box: elide the region, or the rest of its paragraph from point (with `C-u`, the rest of the quote), leaving `[...]`, so a bit of front matter stays for context |
 | `C-c >` | Quote, to reply: the selected text, or the agent's reply or plan at point (elsewhere the one above it, from the box the last), goes in the compose box as a Markdown quote, point under it. A selection keeps its code blocks, inline code and links as Markdown, and leaves out what a fold hides |
 | `C-c C-e` | Jump to the bottom; while the window is scrolled away from it, the header line shows `↓ newer messages`, which does the same |
 | `C-c C-r` | Redraw the buffer |
 | `C-c C-z` | Bury the session: its window shows the buffer it showed before (a side window closes) |
+
+**Answering inline.** A long message is seldom answered by one reply.
+`C-c >` puts it in the box as a quote; once point is in a quote the echo
+area names the two keys that take it apart (`compose-quote-inline-hint`
+turns that off). `M-RET` splits the quote where point is: the part above
+stays a quote, the empty line it opens is for your answer to that part,
+and the quote goes on below it. `C-c [` cuts what you do not answer down
+to `[...]`, so a bit of its front matter stays for context while the
+rest goes. What you send is the box as it stands, the quotes and your
+answers one under the other, and one undo undoes a split or an elision.
+These keys are the [compose-quote](lisp/vendor/compose-quote/README.md)
+library's, which the harness vendors in `lisp/vendor/compose-quote`. It
+needs nothing of the harness and works in any Emacs buffer, a mail reply
+too: `(add-hook 'message-mode-hook #'compose-quote-mode)` gives
+`message-mode` the same three keys.
 
 Drag a file from your file browser onto a chat or the task board and it
 attaches. Drag a *link* — an image from a web page, a video, any address
@@ -3433,6 +3453,11 @@ ACP, so it works the same with a local or a remote harness.
 | Tools | `tools` `tools-fs` `tools-shell` `tools-ssh` `tools-emacs` `tools-web` `tools-agent` `tools-sessions` `tools-events` `tools-notify` |
 | User interface | `ui` `ui-chat` `ui-compose` `ui-compact` `ui-cowboy` `ui-sessions` `ui-tasks` `ui-tree` `ui-notify` `ui-usage` `ui-worktree` `ui-merge` `ui-children` `ui-btw` `ui-media` `ui-dirs` `ui-config` `ui-qr` `ui-remote` `ui-supervisor` `ui-secrets` |
 
+Beside the modules, `lisp/vendor` holds libraries the harness ships that
+need nothing of it, and may be used without it: `compose-quote`, which
+the compose box quotes with, is the first. See
+[lisp/vendor/README.md](lisp/vendor/README.md).
+
 ### Modules of your own
 
 Your own modules load beside the harness's, from the directories you
@@ -3535,11 +3560,19 @@ scripts/test.sh test/harness-core-test.el    # run one suite (optionally with an
 scripts/lint.sh [--checkdoc]                 # byte-compile every file out of tree
 scripts/dev.sh start                         # start a clean development Emacs
 scripts/media.sh [NAME...]                   # take the screenshots in docs/media again
+make -C lisp/vendor/compose-quote test       # a vendored library's own tests, on their own
 ```
 
 Tests that talk to real models run only when `HARNESS_INTEGRATION=1` is
 set. See [docs/dev-loop.md](docs/dev-loop.md) for the full workflow.
 
+The libraries vendored in `lisp/vendor` have suites of their own.
+`scripts/test.sh` runs them with the harness's, and `scripts/lint.sh`
+compiles their sources with the rest. A library needs nothing of the
+harness, so its suite also runs on its own, in an Emacs with nothing but
+its directory on the load path: `make -C lisp/vendor/compose-quote test`.
+[lisp/vendor/README.md](lisp/vendor/README.md) has the rules, and how to
+take a library from a repository of its own.
 A test run is minutes and an edit is seconds, so a run is never worth
 repeating just to look at it. While you work, run only the suites your
 change touches (`scripts/test.sh --changed` picks them, or name the

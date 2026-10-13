@@ -484,5 +484,58 @@ Its markers read as variables, so only the load would fail."
     (should (= 1 (length (plist-get (harness-test-await (harness--update-checkout clone) 60) :commits))))
     (should (file-exists-p (expand-file-name "lisp/modules/harness-doc.el" clone)))))
 
+;;;; Vendored libraries
+
+(ert-deftest harness-update-refuses-a-vendored-library-that-does-not-compile ()
+  "A library under lisp/vendor is checked like the harness's own files.
+One that does not compile refuses the update, named by its path in the
+tree.  Its tests are not compiled: the harness never loads them."
+  (harness-update-test-with-clone
+    (let ((head (harness-update-test--git clone "rev-parse" "HEAD"))
+          (temporary-file-directory (file-name-as-directory (expand-file-name "tmp" base))))
+      (make-directory temporary-file-directory)
+      (harness-update-test--commit upstream "lisp/vendor/broken/broken.el"
+                                   ";;; -*- lexical-binding: t -*-\n(defun broken ()\n  (list 1\n"
+                                   "Vendor a library that does not compile")
+      (let ((problem (harness-update-test--failure (harness--update-checkout clone))))
+        (should (string-match-p "is broken, so it was not installed" problem))
+        (should (string-match-p "lisp/vendor/broken/broken\\.el: End of file during parsing" problem)))
+      (should (equal head (harness-update-test--git clone "rev-parse" "HEAD")))
+      (should-not (file-exists-p (expand-file-name "lisp/vendor/broken/broken.el" clone)))
+      ;; The checked-out copy and its compiled files are gone.
+      (should-not (directory-files temporary-file-directory nil directory-files-no-dot-files-regexp))
+      ;; Fixed upstream, the next update goes through, though the library's
+      ;; test file next to it would not compile either.
+      (harness-update-test--commit upstream "lisp/vendor/broken/broken.el"
+                                   ";;; -*- lexical-binding: t -*-\n(defun broken () (list 1))\n"
+                                   "Fix the library")
+      (harness-update-test--commit upstream "lisp/vendor/broken/broken-test.el"
+                                   ";;; -*- lexical-binding: t -*-\n(ert-deftest broken-test ()\n  (should (broken)\n"
+                                   "Add a test that does not compile")
+      (should (= 3 (length (plist-get (harness-test-await (harness--update-checkout clone) 60) :commits))))
+      (should (equal (harness-update-test--git upstream "rev-parse" "HEAD")
+                     (harness-update-test--git clone "rev-parse" "HEAD")))
+      (should (file-exists-p (expand-file-name "lisp/vendor/broken/broken-test.el" clone))))))
+
+(ert-deftest harness-update-check-finds-the-vendored-libraries ()
+  "The check has the vendored libraries' directories on its load path.
+A file of the harness requires a library by its name, as the compose box
+requires compose-quote, and a library requires another file of its own
+directory; neither compiles unless the directory is on the path."
+  (harness-update-test-with-clone
+    (harness-update-test--commit upstream "lisp/vendor/lib/lib-util.el"
+                                 ";;; -*- lexical-binding: t -*-\n(defun lib-util () 1)\n(provide 'lib-util)\n"
+                                 "Vendor a library's helper")
+    (harness-update-test--commit upstream "lisp/vendor/lib/lib.el"
+                                 (concat ";;; -*- lexical-binding: t -*-\n"
+                                         "(require 'lib-util)\n(defun lib () (lib-util))\n(provide 'lib)\n")
+                                 "Vendor a library")
+    (harness-update-test--commit upstream "lisp/ui/harness-ui-uses-lib.el"
+                                 (concat ";;; -*- lexical-binding: t -*-\n"
+                                         "(require 'lib)\n(defun harness-ui-uses-lib () (lib))\n")
+                                 "Use it")
+    (should (= 3 (length (plist-get (harness-test-await (harness--update-checkout clone) 60) :commits))))
+    (should (file-exists-p (expand-file-name "lisp/ui/harness-ui-uses-lib.el" clone)))))
+
 (provide 'harness-update-test)
 ;;; harness-update-test.el ends here

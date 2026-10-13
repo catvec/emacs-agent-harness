@@ -23,6 +23,7 @@
 (defvar mwheel-scroll-down-function)
 (defvar harness-perms-rules)
 (defvar harness-perms--session-rules)
+(defvar compose-quote-inline-hint)
 (declare-function harness-provider-claude-close-all "harness-provider-claude")
 (declare-function harness-perms--add-rule-noted "harness-perms")
 (declare-function harness-ui-session-live "harness-ui")
@@ -2196,7 +2197,7 @@ the quote, ready for the reply."
       (let ((buf (harness-ui-chat-test-open sid))
             (fixed "> Fixed **the parser**: it was `parse-it`.\n\n"))
         (with-current-buffer buf
-          (should (eq 'harness-compose-quote-reply (key-binding (kbd "C-c >"))))
+          (should (eq 'compose-quote-reply (key-binding (kbd "C-c >"))))
           ;; From the box: the last message.
           (should (equal '("> Run them:\n>\n> ```sh\n> make test\n> ```\n>\n> They pass.\n\n" . t)
                          (harness-ui-chat-test-quote buf harness-compose-end)))
@@ -2224,6 +2225,53 @@ the quote, ready for the reply."
             (should (string-match-p "^> .*thinking (6 words)$" text))
             (should (string-match-p "^> Fixed the parser: it was `parse-it`$" text))
             (should-not (string-match-p "drops the last token" text))))))))
+
+(ert-deftest harness-ui-chat-quote-answers-inline ()
+  "A chat's box answers a quote of the agent's message inline, like any box.
+With point in the quote the library's inline mode is on: M-RET splits the
+quote there, for an answer to the part above, and C-c [ elides the rest of
+the paragraph as [...].  Out of the quote, in the transcript, the mode is
+off.  The transcript is left as it was."
+  (harness-ui-chat-test-with
+    (let ((sid (harness-ui-chat-test-session))
+          (compose-quote-inline-hint nil)
+          (inhibit-message t))
+      (harness-call 'session/append sid '(:kind user :content "status?"))
+      (harness-call 'session/append sid '(:kind assistant :content "The build is green. The deploy is pending."))
+      (let* ((buf (harness-ui-chat-test-open sid))
+             (green (harness-ui-chat-test-find buf "The build is green.")))
+        (with-current-buffer buf
+          (save-window-excursion
+            (set-window-buffer nil buf)
+            (let ((transcript (buffer-substring-no-properties (point-min) (harness-compose--front))))
+              (should compose-quote-mode)
+              (should-not compose-quote-inline-mode)
+              ;; From the box: the agent's last message, quoted.
+              (goto-char harness-compose-end)
+              (execute-kbd-macro (kbd "C-c >"))
+              (should (equal "> The build is green. The deploy is pending.\n\n" (harness-compose-text)))
+              (should-not compose-quote-inline-mode)
+              ;; After "green.": split the quote there, and answer.
+              (goto-char (+ harness-compose-start (length "> The build is green.")))
+              (execute-kbd-macro (kbd "C-b C-f"))
+              (should compose-quote-inline-mode)
+              (execute-kbd-macro (kbd "M-RET"))
+              (should (equal "> The build is green.\n\n\n\n> The deploy is pending.\n\n" (harness-compose-text)))
+              (should (= (point) (+ harness-compose-start (length "> The build is green.\n\n"))))
+              (should-not compose-quote-inline-mode)
+              (execute-kbd-macro "Good.")
+              (should (equal "> The build is green.\n\nGood.\n\n> The deploy is pending.\n\n" (harness-compose-text)))
+              ;; Elide the second part, from "pending": the rest of its paragraph.
+              (goto-char (+ harness-compose-start (length "> The build is green.\n\nGood.\n\n> The deploy is ")))
+              (execute-kbd-macro (kbd "C-b C-f"))
+              (should compose-quote-inline-mode)
+              (execute-kbd-macro (kbd "C-c ["))
+              (should (equal "> The build is green.\n\nGood.\n\n> The deploy is [...]\n\n" (harness-compose-text)))
+              ;; In the transcript, the same words as the quote's: not a quote.
+              (goto-char green)
+              (execute-kbd-macro (kbd "C-f"))
+              (should-not compose-quote-inline-mode)
+              (should (equal transcript (buffer-substring-no-properties (point-min) (harness-compose--front)))))))))))
 
 ;;;; Queue
 

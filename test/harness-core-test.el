@@ -721,6 +721,180 @@ edit, naming the file, and picks up a good one."
         (delete-directory tree t)
         (delete-directory config t)))))
 
+;;;; Vendored libraries
+
+(ert-deftest harness-vendored-directories-lists-the-libraries ()
+  "Each subdirectory of lisp/vendor is a library, listed sorted and absolute.
+A plain file there, such as the README, and a hidden directory are not
+libraries; a tree without lisp/vendor has none.  The harness's own tree
+is the default."
+  (let ((root (harness-test-temp-dir)))
+    (unwind-protect
+        (progn
+          (should-not (harness--vendored-directories root))
+          (make-directory (expand-file-name "lisp" root))
+          (should-not (harness--vendored-directories root))
+          (dolist (name '("lisp/vendor/b" "lisp/vendor/a" "lisp/vendor/.hidden"))
+            (make-directory (expand-file-name name root) t))
+          (with-temp-file (expand-file-name "lisp/vendor/README.md" root)
+            (insert "# Vendored libraries\n"))
+          (should (equal (list (expand-file-name "lisp/vendor/a" root)
+                               (expand-file-name "lisp/vendor/b" root))
+                         (harness--vendored-directories root)))
+          (let ((harness-directory root))
+            (should (equal (harness--vendored-directories root) (harness--vendored-directories)))))
+      (delete-directory root t))))
+
+(ert-deftest harness-vendored-directories-are-on-the-load-path ()
+  "`harness--setup-load-path' puts each vendored library's directory on `load-path'.
+A library is found by its name there, ahead of the directories of the
+user's own modules, which stay last."
+  (let* ((libraries (harness--vendored-directories))
+         (config (harness-test-temp-dir))
+         (mine (expand-file-name "my-modules" config))
+         (user-emacs-directory config)
+         (harness-extra-module-directories '("my-modules"))
+         ;; This Emacs's, without the libraries' directories.
+         (load-path (cl-remove-if (lambda (dir) (and (stringp dir) (member (directory-file-name dir) libraries)))
+                                  load-path)))
+    ;; None found would pass the checks below without checking anything.
+    (should (member "compose-quote" (mapcar #'file-name-nondirectory libraries)))
+    (unwind-protect
+        (progn
+          (make-directory mine t)
+          (should-not (cl-intersection libraries load-path :test #'equal))
+          (harness--setup-load-path)
+          (dolist (dir libraries)
+            (should (member dir load-path))
+            (should (< (cl-position dir load-path :test #'equal)
+                       (cl-position mine load-path :test #'equal))))
+          (should (equal mine (car (last load-path))))
+          (should (equal (expand-file-name "lisp/vendor/compose-quote/" harness-directory)
+                         (file-name-directory (locate-library "compose-quote")))))
+      (delete-directory config t))))
+
+(ert-deftest harness-loading-harness-el-finds-the-vendored-libraries ()
+  "An Emacs that only loads harness.el has the vendored libraries on its load path.
+So does the harness process, and so does a harness older than this one
+when it checks an update: it loads the new harness.el before it compiles
+the files of the new tree, and the compose box requires `compose-quote'."
+  (let ((emacs (expand-file-name invocation-name invocation-directory))
+        (expected (expand-file-name "lisp/vendor/compose-quote/compose-quote.el" harness-test-root)))
+    (with-temp-buffer
+      (let* ((status (call-process emacs nil t nil "-Q" "--batch"
+                                   "-l" (expand-file-name "harness.el" harness-test-root)
+                                   "--eval" "(princ (locate-library \"compose-quote\"))"))
+             (output (buffer-string)))
+        (ert-info (output)
+          (should (eql 0 status))
+          (should (equal (file-truename expected)
+                         (file-truename (car (last (split-string output "\n" t)))))))))))
+
+(ert-deftest harness-library-files-are-there ()
+  "Every library file the harness loads exists, the vendored compose-quote among them.
+The compose box quotes with it, so it loads compiled at start and again
+at every reload, as the harness's other libraries do."
+  (dolist (file harness--library-files)
+    (should (file-regular-p (harness--path file))))
+  (should (member "lisp/vendor/compose-quote/compose-quote.el" harness--library-files)))
+
+(ert-deftest harness-auto-reload-watches-the-vendored-libraries ()
+  "`harness-auto-reload-mode' watches each vendored library's directory.
+A change to a library reloads the harness like one to a module."
+  (let ((watched nil)
+        (harness--watches nil))
+    (cl-letf (((symbol-function 'file-notify-add-watch)
+               (lambda (dir _flags _callback) (push dir watched) dir))
+              ((symbol-function 'file-notify-rm-watch) #'ignore))
+      (unwind-protect
+          (progn
+            (harness-auto-reload-mode 1)
+            (should (harness--vendored-directories))
+            (dolist (dir (harness--vendored-directories))
+              (should (member dir watched)))
+            ;; Beside the harness's own directories.
+            (should (member (harness--path "lisp/ui") watched)))
+        (harness-auto-reload-mode -1)))))
+
+(ert-deftest harness-loader-loads-vendored-libraries ()
+  "A library file under lisp/vendor loads compiled at start and again at a reload.
+Its directory is on `load-path', so a module can require another file of
+the library, and a library that does not compile refuses the reload."
+  (harness-test-reset-bus)
+  (let* ((dir (harness-test-temp-dir))
+         (lib (expand-file-name "lisp/vendor/vlib/vlib.el" dir))
+         (moddir (expand-file-name "lisp/modules" dir))
+         (version (lambda (n)
+                    (harness-core-test--write-elisp lib `(defun vlib-answer () ,n) '(provide 'vlib)))))
+    (make-directory moddir t)
+    (funcall version 1)
+    (harness-core-test--write-elisp (expand-file-name "lisp/vendor/vlib/vlib-extra.el" dir)
+                                    '(defun vlib-extra-answer () 10)
+                                    '(provide 'vlib-extra))
+    (harness-core-test--write-elisp (expand-file-name "harness-vuser.el" moddir)
+                                    '(require 'vlib-extra)
+                                    '(harness-define-module 'vuser)
+                                    '(harness-register-method 'vuser/answer
+                                                              (lambda () (+ (vlib-answer) (vlib-extra-answer))))
+                                    '(provide 'harness-vuser))
+    (unwind-protect
+        (cl-letf (((symbol-function 'harness--path)
+                   (lambda (rel) (expand-file-name rel dir))))
+          (let ((harness-module-directories '("lisp/modules"))
+                (harness--core-files nil)
+                (harness--library-files '("lisp/vendor/vlib/vlib.el"))
+                (harness-process nil)
+                (load-path load-path))
+            (should (harness-start))
+            (should (equal 11 (harness-call 'vuser/answer)))
+            (should (funcall (if (fboundp 'compiled-function-p) #'compiled-function-p #'byte-code-function-p)
+                             (symbol-function 'vlib-answer)))
+            ;; Broken, it refuses the reload and the old definitions stay.
+            (with-temp-file lib (insert "(defun vlib-answer () (oops"))
+            (let ((problems (plist-get (harness--reload) :refused)))
+              (should (equal 1 (length problems)))
+              (should (string-prefix-p "vlib.el: " (car problems))))
+            (should (equal 11 (harness-call 'vuser/answer)))
+            ;; Updated, the reload loads it again.
+            (funcall version 2)
+            (should (harness-reload))
+            (should (equal 12 (harness-call 'vuser/answer)))))
+      (fmakunbound 'vlib-answer)
+      (fmakunbound 'vlib-extra-answer)
+      (setq features (cl-remove-if (lambda (f) (memq f '(vlib vlib-extra harness-vuser))) features))
+      (delete-directory dir t))))
+
+(ert-deftest harness-vendored-libraries-stand-alone ()
+  "A vendored library needs nothing of the harness.
+No Emacs Lisp file of one, its name or its text, mentions the harness,
+and the suites of its tests pass in an Emacs with only the library's own
+directory on `load-path', which knows nothing of the harness."
+  (let ((libraries (harness--vendored-directories))
+        (emacs (expand-file-name invocation-name invocation-directory))
+        (suites 0))
+    ;; None found would pass the checks below without checking anything.
+    (should libraries)
+    (dolist (dir libraries)
+      (let ((mentions nil))
+        (dolist (file (directory-files dir t "\\.el\\'"))
+          (when (string-match-p "harness" (file-name-nondirectory file))
+            (push (file-name-nondirectory file) mentions))
+          (with-temp-buffer
+            (insert-file-contents file)
+            (let ((case-fold-search t))
+              (while (re-search-forward "harness" nil t)
+                (push (format "%s:%d" (file-name-nondirectory file) (line-number-at-pos)) mentions)))))
+        (should-not mentions))
+      (dolist (suite (directory-files dir t "-test\\.el\\'"))
+        (with-temp-buffer
+          (let* ((status (call-process emacs nil t nil "-Q" "--batch" "-L" dir "-l" suite
+                                       "-f" "ert-run-tests-batch-and-exit"))
+                 (output (buffer-string)))
+            (ert-info ((format "%s:\n%s" (file-name-nondirectory suite) output))
+              (should (eql 0 status)))
+            (cl-incf suites)))))
+    (should (> suites 0))))
+
 (ert-deftest harness-core-describe-modules-lists-every-emacs ()
   "`harness-describe-modules' lists the modules of this Emacs, then of others.
 A module from outside the harness's tree names its file, and a failed

@@ -675,7 +675,7 @@ sends is the quote and the reply."
                                                       (harness-ui-btw-test--buffer-text buffer)))
                            5 "the answer in the BTW")
         (with-selected-window window
-          (should (eq 'harness-compose-quote-reply (key-binding (kbd "C-c >"))))
+          (should (eq 'compose-quote-reply (key-binding (kbd "C-c >"))))
           (execute-kbd-macro (kbd "C-c >"))
           (should (equal "> Two tasks are in progress.\n\n" (harness-compose-text)))
           (should (= (point) harness-compose-end))

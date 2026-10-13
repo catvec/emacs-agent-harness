@@ -70,6 +70,7 @@ The pictures, by the name `scripts/media.sh` takes:
 | `insights` | The Insights report over 30 days of every project: the totals, the summary the scripted model wrote, the messages by hour and weekday | `harness-media-shot-insights` |
 | `insights-activity` | The same report further down: the busiest sessions, the tools, the permission decisions and the tasks | `harness-media-shot-insights-activity` |
 | `chat-cowboy` | A chat whose prompt cache went cold yesterday, `orders.py` beside it: another session's message waits while the panel asks what goes first, each choice with its cost | `harness-media-shot-chat-cowboy` |
+| `quote-reply` | A chat whose agent replied in three paragraphs, `acme/webhooks.py` beside it: the reply quoted in the box with `C-c >`, the middle of its long paragraph elided with `C-c [` (`[...]`), the quote split with `M-RET` and an answer typed under each part, point in the box | `harness-media-shot-quote-reply` |
 | `notes` | A session's chat after its `spawn_agent` call started a sub-agent, and the sub-agent's chat beside it: the sub-agents panel above the session's compose box lists the child running, with its name as a link, how long its turn has gone on and what it does now, and the note under the child's `bash` call says it is still running | `harness-media-shot-notes` |
 | `chat-denied` | A session's chat whose `bash` call its own rule refuses: the denial names the handle, and the call offers `[Approve]`, the user's yes, which no mode, rule or judge can deny | `harness-media-shot-chat-denied` |
 | `chat-denied-approved` | The same chat after the user approved that call: it reads user-approved, the agent's `rerun_approved` call under it ran the very command, with the handle linking the two | `harness-media-shot-chat-denied-approved` |
@@ -105,6 +106,12 @@ Both answer every request from a script (see below).  Their tool calls
 go through the real agent loop, permissions and tools, run on the demo
 project, so every tool output in the pictures is genuine.  Nothing
 calls a model or the network.
+
+Two modules are off, so that nothing outside the world reaches a
+picture: `recap`, whose lines are written by a model (the pictures get
+hand-written ones), and `tool-slots-load`, which on a busy machine tells
+every active chat "Tool slots reduced from 18 to 5: system load 1.8x".
+A run of the pictures does not depend on how loaded the machine is.
 
 **The world** (`harness-media--build-world`):
 
@@ -242,6 +249,14 @@ the world as below.
   round, from the message that started it to the compose box.
 - `harness-media--expand` unfolds a tool call in a chat and
   `harness-media--to-bottom` scrolls a chat to its compose box.
+- `harness-media--keys` presses keys in the selected window through the
+  command loop, as a user's keyboard would, and `harness-media--type`
+  types a text, so a picture shows what keys do and not only what a
+  function leaves behind.  `quote-reply` quotes, elides and splits that
+  way.  Select the window first and check the buffer after each step
+  (`harness-media--box-expect` does it for a compose box): a key that did
+  nothing then fails the run, not the picture.  A prompt would wait for
+  a keyboard nobody is at, so press no key that asks.
 - `harness-media--world` holds the ids of what the world made: the
   sessions `:ratelimit`, `:fork`, `:btw`, `:permission`, `:question`,
   `:guide` and `:flaky`, and `:tasks`, a plist of task ids.

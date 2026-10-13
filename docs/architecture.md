@@ -339,6 +339,54 @@ A minimal pair, in `~/.config/emacs/harness-modules/`, with
 (test/harness-server-test.el) runs such a pair, one module in each
 process.
 
+## Vendored libraries
+
+A directory of `lisp/vendor`, `lisp/vendor/NAME/`, holds a library the
+harness ships without owning it: laid out as the repository of its own it
+can become (its source, tests, README and LICENSE), and written to work
+without the harness.  The first is `compose-quote`, which the compose
+box quotes with (see Compose box).  lisp/vendor/README.md is the
+guide; the contract is this:
+
+- A library needs nothing of the harness and never mentions it: no
+  `harness` name, no `(require 'harness-...)`, not in a comment or a
+  docstring either.  The dependency runs one way.  What joins the two
+  lives in the harness's own files, which set the library's variables
+  and bind its commands: the compose box sets
+  `compose-quote-source-function` to `harness-ui-markdown-source`, say.
+  `harness-vendored-libraries-stand-alone` (test/harness-core-test.el)
+  reads every `.el` file of every library for the word, and runs each
+  of its `*-test.el` suites in an Emacs with only the library's own
+  directory on `load-path`.
+- harness.el puts each directory of `lisp/vendor` on `load-path` as it
+  loads (`harness--vendored-directories`), and `harness--setup-load-path`
+  does so again when the harness starts or reloads.  So any Emacs that
+  loads harness.el finds the libraries: the tests, the harness process,
+  and the update check of a harness older than this one, which loads the
+  new harness.el before it compiles the new tree.  A running harness
+  older than this one, reloading after an update, compiles every file
+  with the `load-path` it has before it loads the new harness.el:
+  harness-ui-compose.el therefore looks for `compose-quote` beside
+  itself when `locate-library` does not find it.
+- A library the harness needs at start is in `harness--library-files`
+  (compose-quote is, last): it loads compiled before any module, and
+  `harness-reload` checks it compiles and loads it again.  One that is
+  only on `load-path` loads from its source on its first `require` and is
+  not reloaded.  `harness-auto-reload-mode` watches the directories.
+- The update check (`harness--verify-program`) has the libraries'
+  directories on its `load-path` and compiles every `.el` file of a
+  library but its tests (`NAME-test.el`), reporting one by its path in the
+  tree, so a library that does not compile refuses an update like any
+  other file.  `scripts/lint.sh` does the same.
+- `scripts/test.sh` runs `lisp/vendor/*/*-test.el` with the harness's
+  suites, each in a clean Emacs with the harness loaded; a library's own
+  `make test` runs its suite alone, as it will run in its repository.
+- A library moves to a repository of its own with `git subtree split`
+  and is taken from there with `git subtree add --squash`; later
+  `git subtree pull --squash` and `push` keep the two together.  The
+  steps that were tested, and the table recording each library's
+  upstream and vendored commit, are in lisp/vendor/README.md.
+
 ## Data shapes
 
 All shapes are keyword plists (the JSON convention in harness-util:
@@ -8491,27 +8539,72 @@ question, on the board or in a popout, carries no attachment: there a
 file the text names goes as its reference
 (`harness-compose-without-references`).
 
-Quoting to reply: `C-c >` in the box's keymap
-(`harness-compose-quote-reply`) puts what a reply answers in the box as
-a Markdown quote, its lines after "> ", with point under it, a blank
-line apart.  A region over the host's text quotes what it selects as it
-shows, read back into Markdown by `harness-ui-markdown-source`, which
-undoes the renderer from the faces and properties it left: fenced code
-gets its fences back, its language from the label line above the
-block, code spans their backticks, links their `[label](url)`, bullets
-their `-` and the quote bar its `>`, while invisible text -- a folded
-block's body -- is left out.  Only the part of a region above the box
-counts, quoted at the box's end; a region within the box turns into a
-quote where it is.  Without a region the message at point is quoted
-whole, as written, at point in the box or else at its end (the box's
-windows follow it there).  Which message that is the host says: text
-it marks with a `harness-compose-quote` property, a string, is quoted
-as that Markdown (a report's summary carries it, into the chat's review
-banner too), and elsewhere the buffer-local
-`harness-compose-quote-function` returns it -- the chat's
-`harness-chat--quote-at-point` the response, plan or thinking point is
-on, else the nearest response or plan above point, so the last one from
-the box; a report popout's its summary.
+Quoting to reply is the `compose-quote` library's (lisp/vendor/compose-quote;
+see Vendored libraries), which knows nothing of the harness: the box is
+only the composition it quotes into.  `C-c >` in the box's keymap is
+`compose-quote-reply`; it puts what a reply answers in the box as a
+Markdown quote, its lines after "> ", with point under it, a blank line
+apart (`compose-quote-insert`, `compose-quote-string`).
+`harness-compose-setup` makes its buffer a quoting one
+(`harness-compose--setup-quoting`, which turns `compose-quote-mode` on)
+by setting what the library asks of a host:
+
+- `compose-quote-area-function` is `harness-compose--quote-area`, the
+  box as the composition: (START END FRONT), the box's text and FRONT,
+  where the box starts with its prompt (`harness-compose--front`); nil
+  without a box.  Only the part of a region above FRONT counts, quoted
+  at the box's end, and a region within the box turns into a quote where
+  it is.
+- `compose-quote-source-function` is `harness-ui-markdown-source`, which
+  reads the text of a region over the host's transcript back into
+  Markdown as it shows.  It undoes the renderer from the faces and
+  properties it left: fenced code gets its fences back, its language
+  from the label line above the block, code spans their backticks,
+  links their `[label](url)`, bullets their `-` and the quote bar its
+  `>`, while invisible text -- a folded block's body -- is left out.
+- Without a region the message at point is quoted whole, as written, at
+  point in the box or else at its end.  Which message that is the host
+  says: text it marks with a `compose-quote` property, a string, is
+  quoted as that Markdown (a report's summary carries it,
+  `harness-ui-report--insert-message`, into the chat's review banner
+  too), and elsewhere the buffer-local `compose-quote-function` returns
+  it -- the chat's `harness-chat--quote-at-point` the response, plan or
+  thinking point is on, else the nearest response or plan above point,
+  so the last one from the box; a report popout's
+  `harness-ui-report--quote` its summary.
+- `compose-quote-insert-hook` has `harness-compose--quoted` on it in the
+  box's buffer: the box may be out of sight, so it counts a jump
+  (`harness-compose--jumps`), which makes its windows follow it again,
+  and it updates the placeholder.
+
+Answering inline: `compose-quote-mode` also keeps `compose-quote-inline-mode`
+on while point is in a quote in the box, and off elsewhere (on
+`post-command-hook`).  A quote is a run of lines of the box that start
+with `>`, so one typed or pasted in counts as much as one `C-c >` put
+there, and a `>` line of the transcript never does.  In a quote `M-RET`
+(`compose-quote-split`) splits it where point is -- the part above, an
+empty line for the answer to it, the part below -- and `C-c [`
+(`compose-quote-elide`) replaces the region, or the rest of the
+paragraph from point (with a prefix argument, the rest of the quote),
+with `[...]` (`compose-quote-elision`), so a bit of front matter stays
+for context.  Both are edits of the box's text, one undo each, and what
+is sent is the text as it stands.  The echo area names the keys as point
+enters a quote (`compose-quote-inline-hint`).  The harness menu lists
+the keys for the chat and the popout.  The inline mode's map binds those
+two keys and nothing else: it outranks the host's map while point is in
+a quote, so any other key it took -- `C-c .`, say, which a host may bind
+for the box -- would stop working there
+(`harness-ui-compose-quote-leaves-the-box-keys` checks every key of the
+box).
+
+The harness's own quoting names are obsolete aliases of the library's:
+`harness-compose-quote-reply`, `harness-compose-quote-string` and
+`harness-compose-quote-function`.  The alias of the variable cannot be
+made in a harness reloaded from before the library, where chats have the
+variable buffer-local, so loading the compose box sets such a buffer up
+for quoting and moves its `harness-compose-quote-function` to
+`compose-quote-function`.  The function `harness-compose-quote` and the
+text property of that name are gone: nothing reads the property.
 
 Dragging images out (`harness-ui-drag`): the images the UI shows -- the
 transcript's (`harness-chat--image-string`, `harness-ui-image-string`),

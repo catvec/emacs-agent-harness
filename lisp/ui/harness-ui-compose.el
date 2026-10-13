@@ -10,7 +10,9 @@
 ;;   - multi-line editing: RET and C-j insert a newline, a placeholder
 ;;     shows while the box is empty;
 ;;   - quoting to reply: C-c > quotes the region, or the message at
-;;     point, in the box as Markdown, point under it for the reply;
+;;     point, in the box as Markdown, point under it for the reply, with
+;;     the compose-quote library; in a quote in the box M-RET splits it,
+;;     to answer the part above, and C-c [ elides part of it as [...];
 ;;   - typing anywhere in the buffer goes into the box: a printable
 ;;     character (or a yank) with point outside it moves point to the
 ;;     end of the box and types there, unless the key is a command where
@@ -73,6 +75,25 @@
 (require 'harness-ui-drag)
 (require 'harness-ui-markdown)
 
+;; compose-quote is in lisp/vendor/compose-quote, which the harness puts
+;; on `load-path' (`harness--setup-load-path').  A harness older than
+;; that directory, reloading after an update, first checks that this
+;; file compiles with the `load-path' it has, before it loads the
+;; harness.el that adds the directory.  So when the library is not found,
+;; look for it beside the file being compiled or loaded.
+(defvar byte-compile-current-file)
+(eval-and-compile
+  (unless (or (featurep 'compose-quote) (locate-library "compose-quote"))
+    (when-let* ((file (or (and (boundp 'byte-compile-current-file)
+                               (stringp byte-compile-current-file)
+                               byte-compile-current-file)
+                          load-file-name
+                          buffer-file-name))
+                (dir (expand-file-name "../vendor/compose-quote/" (file-name-directory file)))
+                ((file-directory-p dir)))
+      (add-to-list 'load-path dir))))
+(require 'compose-quote)
+
 ;;;; State
 
 (defvar-local harness-compose-start nil "Marker: first character of the compose box.")
@@ -93,7 +114,9 @@ The chat sets them from `harness-chat-commands'.")
   "Counts the changes to the buffer outside the box, which may move it.
 See `harness-compose--outside-tick'.")
 (defvar-local harness-compose--typed 0 "Counts the changes confined to the box.")
-(defvar-local harness-compose--jumps 0 "Counts the keys that sent typing from outside the box into it.")
+(defvar-local harness-compose--jumps 0
+  "Counts the times typing, or a quote, was sent from outside the box into it.
+The box may be out of sight then: its windows follow it again.")
 (defvar-local harness-compose--seen-tick nil
   "`buffer-chars-modified-tick' after the last change the change hooks saw.")
 (defvar-local harness-compose--box-change nil "Non-nil while a change confined to the box is under way.")
@@ -143,7 +166,7 @@ See `harness-compose--line-up-undo'.")
   (define-key map (kbd "C-c C-a") #'harness-compose-add-attachment)
   ;; `>' is Markdown's quote, and C-c with a punctuation key is a major
   ;; mode's to bind, the box's hosts all being major modes.
-  (define-key map (kbd "C-c >") #'harness-compose-quote-reply)
+  (define-key map (kbd "C-c >") #'compose-quote-reply)
   ;; C-c C-v, the clipboard's key once, is the review banner's [Verify]
   ;; in a chat; unbound here so a reload frees it there too.  Other
   ;; MIME types are chosen from with M-x harness-compose-attach-clipboard.
@@ -180,6 +203,7 @@ window the ones that must stay on one line."
   (setq-local truncate-lines nil
               word-wrap t
               truncate-partial-width-windows nil)
+  (harness-compose--setup-quoting)
   (add-hook 'pre-redisplay-functions #'harness-compose-unscroll nil t)
   (add-hook 'window-size-change-functions #'harness-compose--on-resize nil t)
   (setq-local hl-line-range-function #'harness-compose-hl-line-range)
@@ -746,49 +770,19 @@ Jumping drops the region, which would reach outside the box."
 ;;;; Quoting
 
 ;; C-c > quotes in the box, as Markdown, what the reply answers: the
-;; region, or else the message at point.  Which message that is the host
-;; says, as text it marks with a `harness-compose-quote' property -- a
-;; string, the Markdown the text was rendered from -- or, for the rest of
-;; the buffer, with `harness-compose-quote-function'.
-
-(defvar-local harness-compose-quote-function nil
-  "Function returning the Markdown of the message at point to quote, or nil.
-Called with no arguments, in the buffer, point where
-\\[harness-compose-quote-reply] was typed, when there is no region and no
-`harness-compose-quote' property at point.  A host that shows messages
-sets it; the chat's returns the agent's message at point, else the one
-above it.")
-
-(defun harness-compose-quote-string (text)
-  "Return TEXT as a Markdown block quote: every line after \"> \".
-Blank lines around TEXT and spaces at the ends of lines are dropped; a
-blank line within TEXT reads \">\", which keeps the quote one block."
-  (mapconcat (lambda (line)
-               (let ((line (string-trim-right line)))
-                 (if (string-empty-p line) ">" (concat "> " line))))
-             (split-string (string-trim-left (string-trim-right text) "\\(?:[ \t]*\n\\)+") "\n")
-             "\n"))
-
-(defun harness-compose-quote (text)
-  "Quote TEXT in the box as Markdown, ready to reply under it.
-The quote goes at point in the box, else at its end, a blank line apart
-from the text before it.  A blank line follows it, which Markdown needs
-between a quote and what is not part of it, and point ends after that,
-where the reply goes; from outside the box, that takes point into it."
-  (unless (harness-compose-live-p) (user-error "No compose box here"))
-  (when (string-blank-p text) (user-error "Nothing to quote"))
-  (deactivate-mark)
-  (unless (harness-compose-in-p)
-    ;; The box may be out of sight: its windows follow it again.
-    (cl-incf harness-compose--jumps)
-    (goto-char harness-compose-end))
-  (let ((before (buffer-substring-no-properties harness-compose-start (point))))
-    (insert (cond ((or (string-empty-p before) (string-suffix-p "\n\n" before)) "")
-                  ((string-suffix-p "\n" before) "\n")
-                  (t "\n\n"))
-            (harness-compose-quote-string text)
-            "\n\n"))
-  (harness-compose-update-placeholder))
+;; region, or else the message at point.  The compose-quote library does
+;; it, the box being the composition it quotes into
+;; (`harness-compose--quote-area'): its prompt is the front of it, so a
+;; region reaching in from above counts up to the prompt and is quoted at
+;; the box's end.  What the region selects above the box is read back
+;; into Markdown, the renderer undone, with `harness-ui-markdown-source'
+;; (`compose-quote-source-function').  Which message is at point the host
+;; says, as text it marks with a `compose-quote' property -- a string,
+;; the Markdown the text was rendered from -- or, for the rest of the
+;; buffer, with `compose-quote-function'.  In a quote in the box the
+;; library's inline mode answers it part by part: M-RET splits it where
+;; point is, C-c [ elides part of it as [...].  That mode binds nothing
+;; else, so the box's own keys work in a quote too.
 
 (defun harness-compose--front ()
   "Return where the box starts, its prompt included."
@@ -796,48 +790,39 @@ where the reply goes; from outside the box, that takes point into it."
       (min (overlay-start harness-compose-overlay) harness-compose-start)
     harness-compose-start))
 
-(defun harness-compose-quote-reply (&optional beg end)
-  "Quote the region, or the message at point, in the box, to reply to it.
-The quote is Markdown, its lines after \"> \", and point ends under it,
-after a blank line, ready for the reply (`harness-compose-quote').
-Interactively, BEG and END are the region's, while it is active.
+(defun harness-compose--quote-area ()
+  "Return where the box composes a reply, or nil without a box.
+That is (START END FRONT), the box's text and where it starts with its
+prompt: the `compose-quote-area-function' of the box's buffer."
+  (and (harness-compose-live-p)
+       (list harness-compose-start harness-compose-end (harness-compose--front))))
 
-A region quotes the text it selects as it shows, read back into
-Markdown as far as can be (`harness-ui-markdown-source'): code keeps its
-fences and links their targets, while text hidden in a folded block is
-left out.  Only the part above the box counts, quoted at the end of the
-box; a region in the box turns into a quote where it is.
+(defun harness-compose--quoted ()
+  "Follow a quote that went into the box, point under it.
+The box may have been out of sight: its windows follow it again
+\(`harness-compose--jumps').  The placeholder goes.  On
+`compose-quote-insert-hook' in the box's buffer."
+  (cl-incf harness-compose--jumps)
+  (harness-compose-update-placeholder))
 
-Without a region the message at point is quoted whole, as it was
-written, at point in the box or else at its end.  The buffer says which
-message that is: the text at point names it with a
-`harness-compose-quote' property, else `harness-compose-quote-function'
-finds it; in a chat, the agent's message at point or, anywhere else,
-the one above."
-  (interactive (and (use-region-p) (list (region-beginning) (region-end))))
-  (unless (harness-compose-live-p) (user-error "No compose box here"))
-  (let ((front (harness-compose--front)))
-    (cond
-     ((and beg end (< beg front))
-      (let ((text (harness-ui-markdown-source beg (min end front))))
-        ;; Not where the region ends in the box: it reached in from above.
-        (when (harness-compose-in-p) (goto-char harness-compose-end))
-        (harness-compose-quote text)))
-     ((and beg end (< (max beg harness-compose-start) (min end harness-compose-end)))
-      (let* ((beg (max beg harness-compose-start))
-             (end (min end harness-compose-end))
-             (text (buffer-substring-no-properties beg end)))
-        (when (string-blank-p text) (user-error "Nothing to quote"))
-        (delete-region beg end)
-        (goto-char beg)
-        (harness-compose-quote text)))
-     (t
-      (let ((text (or (get-char-property (point) 'harness-compose-quote)
-                      (and harness-compose-quote-function
-                           (funcall harness-compose-quote-function)))))
-        (unless (and (stringp text) (not (string-blank-p text)))
-          (user-error "Nothing to quote here: select the text to quote"))
-        (harness-compose-quote text))))))
+(defun harness-compose--setup-quoting ()
+  "Make this buffer quote in its box, with compose-quote."
+  (setq-local compose-quote-area-function #'harness-compose--quote-area
+              compose-quote-source-function #'harness-ui-markdown-source)
+  (add-hook 'compose-quote-insert-hook #'harness-compose--quoted nil t)
+  ;; Its post-command tracking turns the inline mode on in a quote of the
+  ;; box, and off elsewhere.
+  (compose-quote-mode 1))
+
+;; Quoting was the box's own once: the library's names took over.
+(define-obsolete-function-alias 'harness-compose-quote-reply #'compose-quote-reply "3.0.0")
+(define-obsolete-function-alias 'harness-compose-quote-string #'compose-quote-string "3.0.0")
+;; Emacs cannot make a buffer-local variable an alias, and this is one in
+;; a harness reloading, from before the change, in the Emacs it ran in
+;; (the chats set it).  There the alias waits for the next start.
+(condition-case nil
+    (define-obsolete-variable-alias 'harness-compose-quote-function 'compose-quote-function "3.0.0")
+  (error nil))
 
 (defun harness-compose-skill-reference-p (text)
   "Non-nil when TEXT references a skill by /name or @skill:name."
@@ -2367,7 +2352,9 @@ Runs from `post-command-hook'."
 ;; Boxes set up before a reload follow their tokens and fit their
 ;; attachments to their windows too, keep their image tokens and
 ;; attachments in step and their undo entries lined up, and those kept
-;; at the bottom count their changes.
+;; at the bottom count their changes.  They quote with compose-quote too:
+;; in the box, and finding the message at point as their host's function
+;; did, under its old name.
 (dolist (buf (buffer-list))
   (with-current-buffer buf
     (when (memq #'harness-compose-completion-at-point completion-at-point-functions)
@@ -2375,7 +2362,13 @@ Runs from `post-command-hook'."
       (add-hook 'post-command-hook #'harness-compose--keep-tokens nil t)
       (add-hook 'before-change-functions #'harness-compose--line-up-undo nil t)
       (add-hook 'pre-command-hook #'harness-compose--line-up-undo nil t)
-      (add-hook 'window-size-change-functions #'harness-compose--on-resize nil t))
+      (add-hook 'window-size-change-functions #'harness-compose--on-resize nil t)
+      (unless (eq compose-quote-area-function #'harness-compose--quote-area)
+        (let ((function (and (local-variable-p 'harness-compose-quote-function)
+                             (symbol-value 'harness-compose-quote-function))))
+          (harness-compose--setup-quoting)
+          (when (and function (not compose-quote-function))
+            (setq-local compose-quote-function function)))))
     (when (memq #'harness-compose-pad-window pre-redisplay-functions)
       (add-hook 'before-change-functions #'harness-compose--before-change nil t)
       (add-hook 'after-change-functions #'harness-compose--after-change nil t))))

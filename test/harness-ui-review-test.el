@@ -431,7 +431,7 @@ the quote."
         (should (with-current-buffer popout (harness-compose-live-p)))
         (with-selected-window (get-buffer-window popout)
           (goto-char harness-compose-end)
-          (should (eq 'harness-compose-quote-reply (key-binding (kbd "C-c >"))))
+          (should (eq 'compose-quote-reply (key-binding (kbd "C-c >"))))
           (execute-kbd-macro (kbd "C-c >"))
           (should (equal quoted (harness-compose-text)))
           (should (= (point) harness-compose-end)))))))

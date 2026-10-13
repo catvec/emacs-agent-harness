@@ -107,7 +107,10 @@ layout: half the frame keeps the board's cards whole.")
 (declare-function harness-chat-block-node "harness-ui-chat")
 (declare-function harness-chat-block-collapsed "harness-ui-chat")
 (declare-function harness-compose-set "harness-ui-compose")
+(declare-function harness-compose-text "harness-ui-compose")
 (declare-function harness-compose-repad "harness-ui-compose")
+(defvar harness-compose-start)
+(defvar harness-compose-end)
 (declare-function harness-tasks "harness-ui-tasks")
 (declare-function harness-ui-tasks-requests "harness-ui-tasks")
 (declare-function harness-ui-tasks-open "harness-ui-tasks")
@@ -1212,6 +1215,7 @@ The handle is the one the approval message names."
     ("OpenAPI" . harness-media--task-openapi)
     ("Let a sub-agent run" . harness-media--notes-script)
     ("Run the project's check suite" . harness-media--notes-child-script)
+    ("dropped after one try" . harness-media--quote-script)
     ;; The denied call and the user's approval of it.
     ("baseline" . harness-media--baseline-denied-script)
     ("The user approved the denied call" . harness-media--rerun-approved-script)
@@ -2095,6 +2099,99 @@ started, and a note goes with its call."
       (harness-media--settle 1)
       (harness-media--capture "notes"))))
 
+;;;; Answering a reply inline
+
+(defconst harness-media--quote-question
+  "Failed webhooks are dropped after one try. How should we retry them?"
+  "What the quote-reply picture's session is asked; its script answers it.")
+
+(defun harness-media--quote-script (_request)
+  "The reply the quote-reply picture answers inline: three paragraphs.
+The first is short, the second long enough to elide the middle of, the
+third a question for the user."
+  (list
+   (harness-media--say "Yes, and the request path can stay as it is: `notify()` already returns the URLs that failed, so `create_order()` can keep those deliveries and try them again later, each time a little further apart.
+
+Keep each failed delivery in a `webhook_retries` table: the order, the URL, how many attempts it had and when the next one is due. A background thread, started with the application, wakes every ten seconds, takes the rows that are due and posts them again with the same 5 second timeout, waiting 1, 2, 4, 8 minutes and so on between attempts. Once an hour has passed since the order was placed, a delivery that still fails is marked as given up, so a subscriber that is gone for good costs a row, not a thread.
+
+One decision is yours: should a delivery that gave up be reported somewhere, or only logged?")))
+
+(defun harness-media--keys (keys)
+  "Press KEYS, a `kbd' string, in the selected window, as a user would.
+They go through the command loop, so the keymaps, the minor modes and
+their hooks act as they do for a user at the keyboard."
+  (execute-kbd-macro (kbd keys))
+  (harness-media--settle 0.2))
+
+(defun harness-media--type (text)
+  "Type TEXT in the selected window, a key a character."
+  (execute-kbd-macro text)
+  (harness-media--settle 0.2))
+
+(defun harness-media--box-goto (regexp &optional end)
+  "Move point to where REGEXP matches in the compose box, or to its END.
+Signal an error naming the box's text when it does not match: the keys
+before did not do what the picture needs."
+  (goto-char harness-compose-start)
+  (unless (re-search-forward regexp harness-compose-end t)
+    (error "The compose box does not match %S: %S" regexp (harness-compose-text)))
+  (goto-char (if end (match-end 0) (match-beginning 0))))
+
+(defun harness-media--box-expect (regexp)
+  "Signal an error unless the text of the compose box matches REGEXP."
+  (unless (string-match-p regexp (harness-compose-text))
+    (error "The compose box does not match %S: %S" regexp (harness-compose-text))))
+
+(defun harness-media-shot-quote-reply ()
+  "A reply of the agent's quoted in the compose box and answered inline.
+The session is asked how to retry failed webhooks and answers in three
+paragraphs.  Then, with the keys a user presses in the box: C-c > quotes
+the whole reply; C-SPC at the start of the long paragraph's middle and
+C-c [ at its end elide it as [...], keeping the front and the end of
+that paragraph for context; M-RET splits the quote after the paragraph,
+for an answer typed under what is above; and the last paragraph, the
+question, is answered under it.  Point ends in the box, after the second
+answer.  The session is made here and deleted after, so no other
+picture shows it."
+  (let ((id (harness-media--new-session :name "Design the webhook retries"
+                                        :model "claude:claude-opus-5-5"
+                                        :permission-mode 'accept-edits)))
+    (harness-media--prompt id harness-media--quote-question)
+    (let* ((buffer (harness-media--chat-shot id "acme/webhooks.py"))
+           (chat (get-buffer-window buffer))
+           (code (car (delq chat (window-list nil 'nomini)))))
+      (select-window chat)
+      (with-current-buffer buffer
+        ;; From the box, C-c > quotes the agent's last reply, whole.
+        (goto-char harness-compose-end)
+        (harness-media--keys "C-c >")
+        (harness-media--box-expect "\\`> Yes, and the request path")
+        ;; The middle of the long paragraph: from "A background thread"
+        ;; through "between attempts."  The region is the user's, from
+        ;; C-SPC to where point is.
+        (harness-media--box-goto "A background thread")
+        (harness-media--keys "C-SPC")
+        (harness-media--box-goto "between attempts\\." t)
+        (unless (region-active-p) (error "C-SPC did not start a region"))
+        (harness-media--keys "C-c [")
+        (harness-media--box-expect "is due\\. \\[\\.\\.\\.\\] Once an hour")
+        ;; M-RET at the end of that paragraph splits the quote there: the
+        ;; question stays a quote of its own, and point is on the empty
+        ;; line between them.
+        (harness-media--box-goto "not a thread\\." t)
+        (harness-media--keys "M-RET")
+        (harness-media--box-expect "not a thread\\.\n\n\n\n> One decision is yours")
+        (harness-media--type "Agreed, but give up after six hours, not one: our partners' maintenance windows are long.")
+        ;; The question, answered under it.
+        (goto-char harness-compose-end)
+        (harness-media--type "Only logged for now. One warning when a delivery gives up is enough.")
+        (harness-media--box-expect "long\\.\n\n> One decision is yours.*\n\nOnly logged for now\\."))
+      ;; The box has grown: the frame fits the chat as it stands.
+      (harness-media--fit (max (harness-media--text-lines chat) (harness-media--text-lines code)) 30)
+      (harness-media--to-bottom buffer)
+      (harness-media--capture "quote-reply"))
+    (harness-call 'session/delete id)))
+
 (defun harness-media--text-lines (window)
   "Return how many lines the text of WINDOW's buffer takes in WINDOW.
 Images taller than a line count as they are drawn; the padding that
@@ -2828,7 +2925,9 @@ afterwards."
     ;; And after that one: these make sessions of their own, whose usage
     ;; would count in the usage pictures' totals.
     ("chat-denied" . harness-media-shot-chat-denied)
-    ("chat-denied-approved" . harness-media-shot-chat-denied-approved))
+    ("chat-denied-approved" . harness-media-shot-chat-denied-approved)
+    ;; Likewise: it asks a session of its own, deleted after the picture.
+    ("quote-reply" . harness-media-shot-quote-reply))
   "Every picture, as (NAME . FUNCTION), in the order they are taken.")
 
 ;;;; Entry point
@@ -2866,9 +2965,13 @@ afterwards."
         harness-policy-file nil
         harness-process nil
         ;; Every agent is scripted, so recaps are seeded for the pictures
-        ;; instead (`harness-media--seed-recaps').
+        ;; instead (`harness-media--seed-recaps').  A busy machine --
+        ;; this run's own, or whatever else it is doing -- would have
+        ;; `tool-slots-load' note "Tool slots reduced from 18 to 5" in
+        ;; every active chat, and push the top of a picture off: the
+        ;; pictures do not depend on the machine's load.
         harness-disabled-modules '(provider-claude provider-copilot provider-openai provider-bedrock provider-demo
-                                                   recap))
+                                                   recap tool-slots-load))
   (harness-media--harness-origins)
   (require 'harness)
   (unless (harness-start) (error "The harness did not start cleanly"))

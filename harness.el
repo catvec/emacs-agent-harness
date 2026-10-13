@@ -16,6 +16,11 @@
 ;; Modules of the user's own live in `harness-extra-module-directories',
 ;; outside the harness's tree, and load beside its own.
 ;;
+;; Libraries that are not the harness's -- compose-quote, which the
+;; compose box quotes with -- live under lisp/vendor, a directory each,
+;; laid out as their own repositories would be (lisp/vendor/README.md).
+;; Their directories are on `load-path' from the moment this file loads.
+;;
 ;; Start it with `harness-start'.  Reload it after editing the sources
 ;; with `harness-reload': each file is checked and compiled first and
 ;; the running instance is only touched when all of them pass, so a
@@ -56,6 +61,23 @@ run the old harness.el with every other file new."
                                  (locate-library "harness") default-directory))
   "Directory containing harness.el, symbolic links followed.
 See `harness--source-directory'.")
+
+(defun harness--vendored-directories (&optional root)
+  "Return the directories of the libraries vendored under ROOT, sorted.
+ROOT is the harness's tree, `harness-directory' by default.  Each
+subdirectory of its lisp/vendor holds one library, laid out as its own
+repository would be and needing nothing of the harness (see
+lisp/vendor/README.md).  The result is absolute names without a
+trailing slash, nil when there is no lisp/vendor; a hidden directory
+holds no library.
+
+This file calls it as it loads, to put the libraries on `load-path', so
+it comes before `harness--path'."
+  (let ((vendor (expand-file-name "lisp/vendor" (or root harness-directory))))
+    (when (file-directory-p vendor)
+      (sort (cl-loop for dir in (directory-files vendor t "\\`[^.]")
+                     when (file-directory-p dir) collect (directory-file-name dir))
+            #'string<))))
 
 (defgroup harness nil
   "Emacs native agent harness."
@@ -132,7 +154,8 @@ every file (see `harness--compiled-fresh-p').")
                                   "lisp/harness-redaction.el"
                                   "lisp/harness-emacs-endpoint.el"
                                   "lisp/harness-notifications-desktop.el" "lisp/harness-server.el"
-                                  "lisp/harness-revision.el" "lisp/harness-slots.el")
+                                  "lisp/harness-revision.el" "lisp/harness-slots.el"
+                                  "lisp/vendor/compose-quote/compose-quote.el")
   "Libraries loaded after the core files and before any module, in order.
 Both sides of the process split use them: the UI requires them all, and
 the harness process's modules require harness-policy (the settings an
@@ -147,9 +170,22 @@ hold work back to so many at once (the tool slots, the task board's
 title requests).  They are loaded compiled as the core files are and
 every `harness-reload' loads them again, so a reloaded module never
 calls a library function as it was before the update; they define no
-macros, so a change to one does not recompile the modules.")
+macros, so a change to one does not recompile the modules.
+
+The last is vendored (lisp/vendor/README.md): compose-quote, which the
+compose box quotes with.  Listed here it loads compiled at start, and
+`harness-reload' checks it compiles and loads it again, as it does
+the others.")
 
 (add-to-list 'load-path (expand-file-name "lisp" harness-directory))
+;; The libraries vendored under lisp/vendor go on `load-path' as this file
+;; loads, not only when the harness starts: an Emacs that merely loads
+;; harness.el must find them.  That is the harness process, the tests,
+;; and above all the check of an update by a harness older than this
+;; one, which loads the new harness.el and then compiles every file of
+;; the new tree, where the compose box requires `compose-quote'.
+(dolist (dir (harness--vendored-directories))
+  (add-to-list 'load-path dir))
 (require 'harness-core)
 (require 'harness-util)
 (require 'harness-revision)
@@ -167,10 +203,14 @@ An entry that is not absolute is relative to `user-emacs-directory'."
 
 (defun harness--setup-load-path ()
   "Put the harness's directories on `load-path', and the user's module ones.
+The harness's are lisp/, the module directories and the directory of
+each library vendored under lisp/vendor (`harness--vendored-directories').
 The harness's go first, the user's last, so that a file of the user's
 never shadows a library."
   (dolist (dir (append '("lisp" "lisp/modules" "lisp/ui") harness-module-directories))
     (add-to-list 'load-path (harness--path dir)))
+  (dolist (dir (harness--vendored-directories (harness--path ".")))
+    (add-to-list 'load-path dir))
   (dolist (dir (harness--extra-module-directories))
     (add-to-list 'load-path dir t)))
 
@@ -469,12 +509,14 @@ seconds after the last such event; lock and flycheck files do not."
 
 (define-minor-mode harness-auto-reload-mode
   "Reload the harness whenever one of its source files changes on disk.
-The modules of `harness-extra-module-directories' count as its sources."
+The libraries vendored under lisp/vendor and the modules of
+`harness-extra-module-directories' count as its sources."
   :global t :group 'harness
   (dolist (w harness--watches) (ignore-errors (file-notify-rm-watch w)))
   (setq harness--watches nil)
   (when harness-auto-reload-mode
     (dolist (full (append (mapcar #'harness--path (cons "." (cons "lisp" harness-module-directories)))
+                          (harness--vendored-directories (harness--path "."))
                           (harness--extra-module-directories)))
       (when (file-directory-p full)
         (push (file-notify-add-watch full '(change) #'harness--auto-reload-callback)
@@ -558,13 +600,25 @@ such as a configuration's, is that repository's to update."
   "Return a form that checks the harness sources in TREE, compiling into OUT.
 `emacs --batch -Q' evaluates it on a version about to be installed.  It
 loads harness.el first, into an Emacs as fresh as one starting up, then
-byte-compiles every source file.  It prints a line for each file that
-does not load or compile, or has a merge conflict marker in its code,
-and exits non-zero when there is one.  The markers need a check of
-their own: a conflict between two balanced sides compiles, its markers
-read as variables, and fails only as it runs.  The form uses nothing of
-the harness, so that any version can check any other."
+byte-compiles every source file: the harness-NAME.el files under lisp/,
+and the .el files, their tests (NAME-test.el) aside, of the libraries
+vendored under lisp/vendor, whose directories it puts on `load-path'
+beside the harness's.  It prints a line for each file that does not
+load or compile, or has a merge conflict marker in its code, naming it
+by its path in TREE, and exits non-zero when there is one.  The markers
+need a check of their own: a conflict between two balanced sides
+compiles, its markers read as variables, and fails only as it runs.  The
+form uses nothing of the harness, so that any version can check any
+other: it finds the vendored directories itself, as
+`harness--vendored-directories' does."
   `(let ((problems nil)
+         ;; The directories of the libraries vendored in TREE, sorted.
+         (vendored
+          (let ((vendor (expand-file-name "lisp/vendor" ,tree)) (dirs nil))
+            (when (file-directory-p vendor)
+              (dolist (dir (directory-files vendor t "\\`[^.]"))
+                (when (file-directory-p dir) (push dir dirs))))
+            (nreverse dirs)))
          (conflict-line
           (lambda (file)
             (with-temp-buffer
@@ -589,12 +643,23 @@ the harness, so that any version can check any other."
      (make-directory ,out t)
      (dolist (dir '("" "lisp" "lisp/modules" "lisp/ui"))
        (push (expand-file-name dir ,tree) load-path))
+     (dolist (dir vendored)
+       (push dir load-path))
      (setq byte-compile-dest-file-function
            (lambda (file) (expand-file-name (concat (file-name-nondirectory file) "c") ,out)))
-     (dolist (file (cons (expand-file-name "harness.el" ,tree)
-                         (and (file-directory-p (expand-file-name "lisp" ,tree))
-                              (directory-files-recursively (expand-file-name "lisp" ,tree)
-                                                           "\\`harness-.*\\.el\\'"))))
+     (dolist (file (append
+                    (list (expand-file-name "harness.el" ,tree))
+                    (and (file-directory-p (expand-file-name "lisp" ,tree))
+                         (directory-files-recursively (expand-file-name "lisp" ,tree)
+                                                      "\\`harness-.*\\.el\\'"))
+                    ;; A vendored library's files do not start with "harness-".
+                    ;; Its tests are not part of what the harness runs.
+                    (let ((files nil))
+                      (dolist (dir vendored)
+                        (dolist (f (directory-files dir t "\\`[^.].*\\.el\\'"))
+                          (unless (string-match-p "-test\\.el\\'" f)
+                            (push f files))))
+                      (nreverse files))))
        (let* ((name (file-relative-name file ,tree))
               (problem
                (condition-case err

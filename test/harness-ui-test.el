@@ -316,6 +316,9 @@ module leaves the entry out, so the menu is unharmed."
       ;; Pasting is C-y; C-c C-v is the review banner's [Verify].
       (should (string-match-p "C-y +Paste; an image attaches" text))
       (should (string-match-p "C-c > +Quote reply: region or message" text))
+      ;; Answering a quote inline: the keys of `compose-quote-inline-mode'.
+      (should (string-match-p "M-RET +Split a quote to answer inline" text))
+      (should (string-match-p "C-c \\[ +Elide part of a quote: \\[\\.\\.\\.\\]" text))
       (should-not (string-match-p "C-c C-v" text))
       (should-not (string-match-p "Task board" text)))))
 
@@ -415,7 +418,13 @@ leave free.  None is left out by the menu."
                                 ;; session waiting on a tool call.
                                 (and (eq mode 'harness-ui-tasks-mode) harness-ui-tasks-board-map)
                                 (and (eq mode 'harness-ui-sessions-mode) harness-ui-sessions-permission-map)
-                                (and (eq mode 'harness-ui-popout-mode) harness-ui-popout-content-map))))
+                                (and (eq mode 'harness-ui-popout-mode) harness-ui-popout-content-map)
+                                ;; Answering a quote in the compose box inline:
+                                ;; the keys of the library's mode, which is on
+                                ;; while point is in a quote of the box.
+                                (and (memq mode '(harness-chat-mode harness-ui-popout-mode))
+                                     (boundp 'compose-quote-inline-mode-map)
+                                     (symbol-value 'compose-quote-inline-mode-map)))))
           (keys nil))
       (dolist (column columns)
         (dolist (item (append column nil))

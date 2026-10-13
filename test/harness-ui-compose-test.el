@@ -21,6 +21,7 @@
 (defvar harness-media-ring)
 (defvar harness-media-ring--loaded)
 (defvar harness-media-ring-max)
+(defvar compose-quote-inline-hint)
 (defvar-local harness-ui-compose-test--draws 0 "How many times the test host drew.")
 
 (defun harness-ui-compose-test--draw ()
@@ -41,7 +42,9 @@ With undo off, as the hosts draw."
 
 (defmacro harness-ui-compose-test-with (&rest body)
   "Run BODY in a buffer hosting a compose box, shown in the selected window.
-`dir' is the project and the state directory."
+`dir' is the project and the state directory.  The echo area is not
+told which keys answer a quote inline (`compose-quote-inline-hint'),
+which batch Emacs would print."
   (declare (indent 0))
   `(harness-test-with-temp-state
      (harness-test-reset-bus)
@@ -50,6 +53,7 @@ With undo off, as the hosts draw."
          (harness-test-load-module m)))
      (setq harness-media-ring nil harness-media-ring--loaded nil)
      (let ((harness-acp-token nil)
+           (compose-quote-inline-hint nil)
            (default-directory dir)
            (buf (generate-new-buffer "*compose test*")))
        (unwind-protect
@@ -1091,8 +1095,8 @@ The key goes through the command loop, as typed."
   "Every line of a quote follows \"> \".  Blank lines around the text go,
 and spaces ending a line; a blank line within it is a bare \">\", so the
 quote stays one block.  Indentation stays, as code needs."
-  (should (equal "> one\n>\n>   two" (harness-compose-quote-string "\n \none  \n\t\n  two\n\n")))
-  (should (equal "> one" (harness-compose-quote-string "one"))))
+  (should (equal "> one\n>\n>   two" (compose-quote-string "\n \none  \n\t\n  two\n\n")))
+  (should (equal "> one" (compose-quote-string "one"))))
 
 (ert-deftest harness-ui-compose-quote-reply-quotes-the-region ()
   "C-c > quotes the region in the box, as Markdown, point under the quote.
@@ -1101,7 +1105,7 @@ line follows it, so what is typed next is the reply.  Point jumps into
 the box, which its windows follow.  A region reaching into the box
 quotes its part above the box; one in the box becomes a quote in place."
   (harness-ui-compose-test-with
-    (should (eq 'harness-compose-quote-reply (key-binding (kbd "C-c >"))))
+    (should (eq 'compose-quote-reply (key-binding (kbd "C-c >"))))
     (let ((jumps harness-compose--jumps))
       ;; "transcript", of "The transcript.\n".
       (should (equal "> transcript\n\n" (harness-ui-compose-test--quote (+ (point-min) 4) (+ (point-min) 14))))
@@ -1123,32 +1127,239 @@ quotes its part above the box; one in the box becomes a quote in place."
 
 (ert-deftest harness-ui-compose-quote-reply-without-a-region ()
   "Without a region C-c > quotes the message at point, whole, as written.
-Text marked with a `harness-compose-quote' property says which, else
-the host's `harness-compose-quote-function'; with neither, nothing is
+Text marked with a `compose-quote' property says which, else
+the host's `compose-quote-function'; with neither, nothing is
 quoted.  The quote goes at point in the box, else at its end."
   (harness-ui-compose-test-with
     (goto-char (point-min))
-    (should-error (harness-compose-quote-reply) :type 'user-error)
+    (should-error (compose-quote-reply) :type 'user-error)
     (should (equal "" (harness-compose-text)))
-    (setq-local harness-compose-quote-function
+    (setq-local compose-quote-function
                 (lambda () (and (< (point) harness-compose-start) "The **transcript**.")))
     (goto-char (point-min))
     (should (equal "> The **transcript**.\n\n" (harness-ui-compose-test--quote)))
     (should (= (point) harness-compose-end))
     ;; The function said nothing in the box.
-    (should-error (harness-compose-quote-reply) :type 'user-error)
+    (should-error (compose-quote-reply) :type 'user-error)
     ;; Marked text wins.
     (harness-compose-set "")
     (let ((inhibit-read-only t))
-      (put-text-property (point-min) (+ (point-min) 3) 'harness-compose-quote "*The*"))
+      (put-text-property (point-min) (+ (point-min) 3) 'compose-quote "*The*"))
     (goto-char (1+ (point-min)))
     (should (equal "> *The*\n\n" (harness-ui-compose-test--quote)))
     ;; In the box, at point.
     (harness-compose-set "Before\nAfter")
-    (setq-local harness-compose-quote-function (lambda () "Quoted"))
+    (setq-local compose-quote-function (lambda () "Quoted"))
     (goto-char (+ harness-compose-start (length "Before\n")))
     (should (equal "Before\n\n> Quoted\n\nAfter" (harness-ui-compose-test--quote)))
     (should (= (point) (+ harness-compose-start (length "Before\n\n> Quoted\n\n"))))))
+
+(defun harness-ui-compose-test--keys (keys)
+  "Type KEYS, as `kbd' reads them, through the command loop.
+The messages of the commands, \"Undo\" say, are not shown."
+  (let ((inhibit-message t))
+    (execute-kbd-macro (kbd keys))))
+
+(defun harness-ui-compose-test--box-keys ()
+  "Return the keys of the box, each with what it runs at point.
+They are the key sequences `harness-compose-map' binds, as vectors, and
+\\`C-c .', which a host may bind for the box."
+  (let ((keys (list (key-parse "C-c ."))))
+    (cl-labels ((walk (map prefix)
+                  (map-keymap (lambda (event binding)
+                                (unless (consp event)
+                                  (let ((key (vconcat prefix (vector event))))
+                                    (cond ((keymapp binding) (walk binding key))
+                                          (binding (push key keys))))))
+                              map)))
+      (walk harness-compose-map []))
+    (mapcar (lambda (key) (cons key (key-binding key))) (delete-dups keys))))
+
+(ert-deftest harness-ui-compose-quote-inline-mode-follows-point ()
+  "The inline mode is on while point is in a quote in the box, and off elsewhere.
+\\`C-c >' quotes two lines into the box.  Point moving up into the quote
+turns `compose-quote-inline-mode' on, which binds \\`M-RET' and \\`C-c ['
+and leaves every other key of the box as it was; out of it, onto the
+empty line under the quote or into the transcript, it is off.  A line of
+the read-only transcript that starts with \">\" is not a quote of the
+box: the mode stays off there."
+  (harness-ui-compose-test-with
+    (let ((inhibit-read-only t))
+      (save-excursion
+        (goto-char (point-min))
+        (insert (propertize "> The transcript's own.\nAlpha beta.\nGamma delta.\n" 'read-only t))))
+    (should-not compose-quote-inline-mode)
+    (should-not (key-binding (kbd "C-c [")))
+    (let ((alpha (+ (point-min) (length "> The transcript's own.\n"))))
+      (should (equal "> Alpha beta.\n> Gamma delta.\n\n"
+                     (harness-ui-compose-test--quote alpha (+ alpha (length "Alpha beta.\nGamma delta."))))))
+    ;; Under the quote.
+    (should (= (point) harness-compose-end))
+    (should-not compose-quote-inline-mode)
+    ;; The blank line between, then the quote's last line and its first.
+    (harness-ui-compose-test--keys "C-p")
+    (should-not compose-quote-inline-mode)
+    (harness-ui-compose-test--keys "C-p")
+    (should (equal "> Gamma delta." (buffer-substring-no-properties (line-beginning-position) (line-end-position))))
+    (should compose-quote-inline-mode)
+    (should (eq 'compose-quote-split (key-binding (kbd "M-RET"))))
+    (should (eq 'compose-quote-elide (key-binding (kbd "C-c ["))))
+    (should (eq 'compose-quote-reply (key-binding (kbd "C-c >"))))
+    (harness-ui-compose-test--keys "C-p")
+    (should compose-quote-inline-mode)
+    ;; Up into the transcript.
+    (harness-ui-compose-test--keys "C-p")
+    (should (equal "The transcript." (buffer-substring-no-properties (line-beginning-position) (line-end-position))))
+    (should-not compose-quote-inline-mode)
+    (should-not (key-binding (kbd "C-c [")))
+    ;; The transcript's ">" line is not the box's.
+    (goto-char (point-min))
+    (harness-ui-compose-test--keys "C-f")
+    (should (equal "> The transcript's own." (buffer-substring-no-properties (line-beginning-position) (line-end-position))))
+    (should-not compose-quote-inline-mode)
+    (harness-ui-compose-test--keys "C-n")
+    (should-not compose-quote-inline-mode)
+    ;; Back down into the box and its quote.
+    (goto-char harness-compose-start)
+    (harness-ui-compose-test--keys "C-f")
+    (should compose-quote-inline-mode)))
+
+(ert-deftest harness-ui-compose-quote-leaves-the-box-keys ()
+  "In a quote in the box, the box's keys do what they do out of one.
+`compose-quote-inline-mode' binds \\`M-RET' and \\`C-c [', and its map
+outranks the host's while point is in a quote: it shadows no other key
+of the box, \\`C-c .' included, which a host may bind for the box."
+  (harness-ui-compose-test-with
+    (let ((outside (harness-ui-compose-test--box-keys))
+          (own (mapcar #'key-parse '("M-RET" "M-<return>" "C-c ["))))
+      (should (assoc (key-parse "C-c >") outside))
+      (should-not compose-quote-inline-mode)
+      (harness-compose-set "> The release is ready.")
+      (goto-char harness-compose-start)
+      (harness-ui-compose-test--keys "C-f")
+      (should compose-quote-inline-mode)
+      (dolist (key outside)
+        (unless (member (car key) own)
+          (should (equal (cons (key-description (car key)) (cdr key))
+                         (cons (key-description (car key)) (key-binding (car key))))))))))
+
+(ert-deftest harness-ui-compose-quote-answers-inline-in-the-box ()
+  "In a quote in the box \\`M-RET' splits it, to answer, and \\`C-c [' elides.
+\\`M-RET' with point mid-way in a quoted line splits the quote there:
+its second half starts the second quote, and point is on the empty line
+between them, a blank line from each, where the answer is typed.
+\\`C-c [' elides the region inside the quote as [...], and without a
+region the rest of the paragraph.  Undo brings the text back, each time."
+  (harness-ui-compose-test-with
+    (let* ((head "> The release is ready. Two things are open.\n")
+           (tail "> The changelog still lists the old flag, and the migration has no test.")
+           (text (concat head ">\n" tail)))
+      (harness-compose-set text)
+      ;; After "ready.", mid-way in the first line.
+      (goto-char (+ harness-compose-start (length "> The release is ready.")))
+      (harness-ui-compose-test--keys "C-b C-f")
+      (should compose-quote-inline-mode)
+      (harness-ui-compose-test--keys "M-RET")
+      (let ((split (concat "> The release is ready.\n\n\n\n> Two things are open.\n>\n" tail)))
+        (should (equal split (harness-compose-text)))
+        (should (= (point) (+ harness-compose-start (length "> The release is ready.\n\n"))))
+        (should-not compose-quote-inline-mode)
+        ;; The answer goes between them.
+        (execute-kbd-macro "Good news.")
+        (let ((answered (concat "> The release is ready.\n\nGood news.\n\n> Two things are open.\n>\n" tail)))
+          (should (equal answered (harness-compose-text)))
+          ;; The region, from "still" to the end of the last line.
+          (let ((still (+ harness-compose-start (length "> The release is ready.\n\nGood news.\n\n> Two things are open.\n>\n> The changelog "))))
+            (goto-char still)
+            (harness-ui-compose-test--keys "C-b C-f")
+            (should compose-quote-inline-mode)
+            (setq-local transient-mark-mode t)
+            (goto-char harness-compose-end)
+            (push-mark still t t)
+            (harness-ui-compose-test--keys "C-c ["))
+          (should (equal (concat "> The release is ready.\n\nGood news.\n\n> Two things are open.\n>\n"
+                                 "> The changelog [...]")
+                         (harness-compose-text)))
+          (should-not (region-active-p))
+          (harness-ui-compose-test--keys "C-/")
+          (should (equal answered (harness-compose-text)))
+          ;; Without a region: the rest of the paragraph from point.
+          (goto-char (+ harness-compose-start (length "> The release is ready.\n\nGood news.\n\n> Two ")))
+          (harness-ui-compose-test--keys "C-b C-f")
+          (should compose-quote-inline-mode)
+          (harness-ui-compose-test--keys "C-c [")
+          (should (equal (concat "> The release is ready.\n\nGood news.\n\n> Two [...]\n>\n" tail)
+                         (harness-compose-text)))
+          (harness-ui-compose-test--keys "C-/")
+          (should (equal answered (harness-compose-text))))))
+    (should (equal "The transcript.\n" (harness-ui-compose-test--transcript)))))
+
+(ert-deftest harness-ui-compose-quote-keeps-the-names-it-had ()
+  "The box quotes with the library; the names it quoted with remain as aliases.
+\\`C-c >' is `compose-quote-reply', which `harness-compose-quote-reply' now
+names, as `harness-compose-quote-string' names `compose-quote-string'
+and `harness-compose-quote-function' `compose-quote-function'."
+  (harness-ui-compose-test-with
+    (should (eq 'compose-quote-reply (key-binding (kbd "C-c >"))))
+    (should (eq (indirect-function 'compose-quote-reply)
+                (indirect-function 'harness-compose-quote-reply)))
+    (should (eq (indirect-function 'compose-quote-string)
+                (indirect-function 'harness-compose-quote-string)))
+    (should (get 'harness-compose-quote-reply 'byte-obsolete-info))
+    (should (equal "> one\n>\n> two" (harness-compose-quote-string "one\n\ntwo")))
+    (should (eq 'compose-quote-function (indirect-variable 'harness-compose-quote-function)))
+    ;; What a host sets under the old name, the library finds.
+    (setq-local harness-compose-quote-function (lambda () "Old host"))
+    (should (functionp compose-quote-function))
+    (should (equal "> Old host\n\n" (harness-ui-compose-test--quote)))))
+
+(ert-deftest harness-ui-compose-reload-moves-an-old-box-to-compose-quote ()
+  "A harness reloading in the Emacs that ran it from before compose-quote still works.
+That Emacs has a box set up the old way, its host's function for the
+message at point under the old name, local in the buffer.  Emacs cannot
+make a variable that is buffer-local an alias, so the file loads without
+that alias, and carries on: the old box quotes in its box as a new one
+does, the inline mode follows point in it, and its host's function is
+found under the new name.  A fresh Emacs plays the old one, since this
+one has the new file loaded."
+  (let* ((dir (file-name-as-directory (make-temp-file "harness-compose-reload-" t)))
+         (script (expand-file-name "old-state.el" dir))
+         (emacs (expand-file-name invocation-name invocation-directory)))
+    (unwind-protect
+        (progn
+          (with-temp-file script
+            (insert ";;; -*- lexical-binding: t -*-\n")
+            (dolist (form '((defvar-local harness-compose-quote-function nil)
+                            (defvar old-chat (generate-new-buffer "old chat"))
+                            ;; A box set up before: its host's function, local.
+                            (with-current-buffer old-chat
+                              (setq-local harness-compose-quote-function (lambda () "the old host's message"))
+                              (add-hook 'completion-at-point-functions 'harness-compose-completion-at-point nil t))
+                            ;; The reload.
+                            (require 'harness-ui-compose)
+                            (with-current-buffer old-chat
+                              (princ (format "mode=%S area=%S carried=%S hook=%S aliased=%S\n"
+                                             compose-quote-mode compose-quote-area-function
+                                             (and (functionp compose-quote-function) (funcall compose-quote-function))
+                                             (and (memq 'harness-compose--quoted compose-quote-insert-hook) t)
+                                             (eq 'compose-quote-function (indirect-variable 'harness-compose-quote-function)))))))
+              (prin1 form (current-buffer))
+              (terpri (current-buffer))))
+          (let ((process-environment (cons (concat "HOME=" (directory-file-name dir)) process-environment))
+                (default-directory dir))
+            (with-temp-buffer
+              (let ((status (call-process emacs nil t nil "--batch" "-Q"
+                                          "-L" harness-test-root
+                                          "-L" (expand-file-name "lisp" harness-test-root)
+                                          "-L" (expand-file-name "lisp/modules" harness-test-root)
+                                          "-L" (expand-file-name "lisp/ui" harness-test-root)
+                                          "-l" script)))
+                (ert-info ((buffer-string))
+                  (should (eql 0 status))
+                  (should (string-match-p
+                           (regexp-quote "mode=t area=harness-compose--quote-area carried=\"the old host's message\" hook=t aliased=nil")
+                           (buffer-string))))))))
+      (delete-directory dir t))))
 
 ;;;; Typing outside the box
 

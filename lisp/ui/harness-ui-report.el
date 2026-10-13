@@ -437,16 +437,16 @@ The renderer drops the last newline; what follows starts a line of its own."
 
 (defun harness-ui-report--insert-message (text)
   "Insert TEXT, a message the session wrote in Markdown, rendered.
-\\[harness-compose-quote-reply] on it quotes TEXT whole, as written,
+\\[compose-quote-reply] on it quotes TEXT whole, as written,
 wherever it shows: the popout, or the banner of the task's session."
   (let ((start (point)))
     (harness-ui-report--insert-markdown text)
-    (put-text-property start (point) 'harness-compose-quote text)))
+    (put-text-property start (point) 'compose-quote text)))
 
 (defun harness-ui-report--quote ()
   "Return the message this popout's report shows, to quote, or nil.
 The summary, or the last message of a round that handed none in: the
-popout's `harness-compose-quote-function', so \\[harness-compose-quote-reply]
+popout's `compose-quote-function', so \\[compose-quote-reply]
 quotes it from the box too."
   (let ((summary (plist-get (harness-ui-report--report harness-ui-report--task) :summary)))
     (and (stringp summary) (not (harness-string-blank-p summary)) summary)))
@@ -632,7 +632,7 @@ box's placeholder."
 (defun harness-ui-report--insert-buffer (task)
   "Insert TASK's report in the current popout, and name it in its header."
   (harness-ui-report--insert task)
-  (setq-local harness-compose-quote-function #'harness-ui-report--quote)
+  (setq-local compose-quote-function #'harness-ui-report--quote)
   (force-mode-line-update))
 
 ;;;; In the session
