@@ -2024,15 +2024,18 @@ INPUT is the tool call's input plist and CTX its context."
   (harness-tools-sessions--tasks-p)
   (let* ((prompt (or (plist-get input :prompt) ""))
          (cwd (or (plist-get input :cwd) (plist-get ctx :cwd)))
+         (plan (harness-json-true-p (plist-get input :plan)))
          (refine (harness-json-true-p (plist-get input :refine)))
          (main-tree (harness-json-true-p (plist-get input :main_tree)))
          (opts (append (and (plist-get input :model) (list :model (plist-get input :model)))
                        (and (plist-get input :thinking) (list :thinking (plist-get input :thinking)))
                        (and (plist-get input :priority) (list :priority (plist-get input :priority)))
                        (and main-tree (list :main-tree t))
-                       (and refine (list :refine t))))
+                       (and refine (list :refine t))
+                       (and plan (list :plan t))))
          (task (harness-call 'task/submit cwd prompt opts)))
-    (harness-tool-ok (concat (cond (refine "Added to the backlog; an agent is writing it up.\n")
+    (harness-tool-ok (concat (cond (plan "Added to the backlog; an agent is planning it.\n")
+                                   (refine "Added to the backlog; an agent is writing it up.\n")
                                    (main-tree "Submitted to the project's main tree.\n")
                                    (t "Submitted.\n"))
                              (harness-tools-sessions--task-line task))
@@ -2040,7 +2043,7 @@ INPUT is the tool call's input plist and CTX its context."
 
 (harness-define-tool "task_submit"
   :label "Submit task"
-  :description "Add a task to the task board. The task runs in its own session (in a git project, in a fresh worktree whose branch is merged back through the merge queue) with the task defaults for permissions; it starts when its project has a free slot (the limit on running tasks applies to each project separately, and counts only the tasks' own top-level sessions at work: sub-agents, forks and the merge queue never take a slot), and waiting tasks take free slots by priority: high before medium (the default) before low, oldest first among equals. While the project's queue is suspended (task_control suspend-queue) nothing starts it on its own; the task waits until the queue is resumed or someone starts it with task_control start. By default finished work waits in review until the user verifies it (task_control verify) or sends it back (task_control reject). With refine=true it goes to the backlog instead: an agent briefly writes it up, read-only, and it waits in pending until someone starts it (task_control start), which is how to record work for later. With main_tree=true it works in the project's main checkout instead of a worktree: no branch, nothing merges, and its changes take effect in the checkout itself -- for work that has to touch it, such as cleaning up uncommitted changes. Returns the task id; follow it with task_wait or task_list."
+  :description "Add a task to the task board. The task runs in its own session (in a git project, in a fresh worktree whose branch is merged back through the merge queue) with the task defaults for permissions; it starts when its project has a free slot (the limit on running tasks applies to each project separately, and counts only the tasks' own top-level sessions at work: sub-agents, forks and the merge queue never take a slot), and waiting tasks take free slots by priority: high before medium (the default) before low, oldest first among equals. While the project's queue is suspended (task_control suspend-queue) nothing starts it on its own; the task waits until the queue is resumed or someone starts it with task_control start. By default finished work waits in review until the user verifies it (task_control verify) or sends it back (task_control reject). With refine=true it goes to the backlog instead: an agent briefly writes it up, read-only, and it waits in pending until someone starts it (task_control start), which is how to record work for later. With plan=true it is planned instead: an agent on the provider's hard model reads the code, read-only, and writes a detailed plan for a medium model, which then does the work once someone starts the task (model and thinking, when given, are that work's). With main_tree=true it works in the project's main checkout instead of a worktree: no branch, nothing merges, and its changes take effect in the checkout itself -- for work that has to touch it, such as cleaning up uncommitted changes. Returns the task id; follow it with task_wait or task_list."
   :schema '(:type "object"
             :properties (:prompt (:type "string" :description "What the task should do; self-contained, the task does not see this conversation.")
                          :cwd (:type "string" :description "Project directory (default: this session's).")
@@ -2049,11 +2052,40 @@ INPUT is the tool call's input plist and CTX its context."
                          :priority (:type "string" :enum ("low" "medium" "high")
                                     :description "Where it waits when its project's slots are full: high starts before medium, medium before low (default medium).")
                          :refine (:type "boolean" :description "Write it up for the backlog instead of starting it (default false).")
+                         :plan (:type "boolean" :description "Have a strong model plan it, read-only, for a medium model to carry out; it waits in the backlog until started (default false).")
                          :main_tree (:type "boolean" :description "Work in the project's main checkout, with no worktree and nothing to merge (default false)."))
             :required ("prompt"))
   :kind 'meta
   :subject (lambda (input) (harness-first-line (plist-get input :prompt) 60))
   :handler #'harness-tools-sessions--task-submit)
+
+(defun harness-tools-sessions--submit-task-plan (input ctx)
+  "Handler of submit_task_plan: hand INPUT's plan in for the task being planned.
+CTX is the call's context.  The plan becomes the task's prompt and the
+task waits in the backlog (`task/hand-in-plan'); the answer ends the
+turn.  A call from a session that plans no task, or with a blank title
+or plan, is an error that ends nothing."
+  (harness-tools-sessions--tasks-p)
+  (let* ((sid (plist-get ctx :session-id))
+         (task (harness-call 'task/hand-in-plan sid (or (plist-get input :title) "")
+                             (or (plist-get input :plan) ""))))
+    (harness-tool-ok
+     (concat "Plan handed in: the task waits in the backlog until the engineer starts it, "
+             "and the agent that carries it out gets the plan as its prompt. This ends your turn.\n"
+             (harness-tools-sessions--task-line task))
+     :end-turn t
+     :meta (list :task-id (plist-get task :id)))))
+
+(harness-define-tool "submit_task_plan"
+  :label "Hand in the plan"
+  :description "Hand in the plan for the task this session plans, and end the turn. The plan becomes the task's prompt for the agent that carries it out -- on a cheaper, medium model, which never sees this conversation -- and the task waits in the backlog until the engineer starts it. title is a short imperative title. plan is the plan in concise markdown: the goal and why; the context the other agent needs (key files, functions, conventions, related tasks and how to coordinate with them); the steps in order, each concrete enough to do without planning again; how to verify the work (tests to add or update, checks to run); and open questions or assumptions, if any. When the engineer sends feedback, call it again with the complete updated plan."
+  :schema '(:type "object"
+            :properties (:title (:type "string" :description "A short imperative title for the task.")
+                         :plan (:type "string" :description "The plan, in markdown, for the agent that carries it out."))
+            :required ("title" "plan"))
+  :kind 'meta
+  :subject (lambda (input) (harness-first-line (or (plist-get input :title) (plist-get input :plan)) 60))
+  :handler #'harness-tools-sessions--submit-task-plan)
 
 (defun harness-tools-sessions--task-queue (input ctx action)
   "Suspend or resume the pending queue ACTION names, for task_control.

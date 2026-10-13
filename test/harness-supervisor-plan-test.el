@@ -198,7 +198,7 @@ message that follows a result: providers join the two."
 ;;;; Fixtures
 
 (defconst harness-supervisor-plan-test-modules
-  '(store project config provider provider-demo tools session agent tools-agent seed supervisor)
+  '(store project config provider provider-demo tools session agent tools-agent seed readonly supervisor)
   "The modules every test loads.")
 
 (defun harness-supervisor-plan-test--tier-model (_model &optional tier)

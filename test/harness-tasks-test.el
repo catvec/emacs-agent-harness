@@ -1665,6 +1665,352 @@ judge decides the work's calls."
       (should (eq 'allow (plist-get (funcall decide "bash" 'exec) :behavior)))
       (should judged))))
 
+;;;; Plan mode: a strong model plans, a medium one does the work
+;;
+;; Submitted with :plan, a task is planned by a read-only session on the
+;; hard tier of the task model's provider, which hands the plan in with
+;; submit_task_plan; the work then runs on the medium tier.
+
+(defvar harness-tasks--plan-tier)
+(defvar harness-tasks--plan-work-tier)
+(defvar harness-tasks--plan-tool-calls)
+(defvar harness-tasks-refine-model)
+(defvar harness-tasks-refine-thinking)
+(defvar harness-tasks-thinking)
+(defvar harness-tasks--plan-prompt)
+(defvar harness-tasks--plan-reminder)
+(defvar harness-tasks--plan-start-message)
+(defvar harness-tasks--plan-hint)
+(defvar harness-tasks--refine-prompt)
+(defvar harness-tools-agent-planning-section)
+(declare-function harness-tasks--plan-model "harness-tasks")
+(declare-function harness-tasks--plan-thinking "harness-tasks")
+(declare-function harness-tasks--plan-work "harness-tasks")
+(declare-function harness-tasks--refine-settings "harness-tasks")
+(declare-function harness-provider-demo--complete "harness-provider-demo")
+(declare-function harness-provider-demo--last-user-text "harness-provider-demo")
+
+(defconst harness-tasks-test-plan-title "Fix nested quotes in the parser")
+
+(defconst harness-tasks-test-plan
+  "## Goal\nNested quotes parse.\n\n## Steps\n1. Handle them in `parse-args'.\n\n## Verify\nThe quote tests pass.")
+
+(defun harness-tasks-test-plan-script (request)
+  "Hand the plan in when REQUEST plans a task; otherwise just work."
+  (if (string-match-p "^## Task planning" (or (plist-get request :system) ""))
+      `((:type tool-call :id "p1" :name "submit_task_plan"
+               :input (:title ,harness-tasks-test-plan-title :plan ,harness-tasks-test-plan))
+        (:type text :delta "Handed in.")
+        (:type done :stop-reason end-turn))
+    harness-tasks-test-script))
+
+(defmacro harness-tasks-test-with-plans (&rest body)
+  "Run BODY in `harness-tasks-test-with', set up for Plan mode.
+Provider `test-plan' plays the demo's scripts.  Its hard tier is its
+model big, at high thinking, its medium tier mid, and the task model is
+its small.  The readonly module holds a plan read-only, and the session
+tools give it `submit_task_plan'."
+  (declare (indent 0))
+  `(harness-tasks-test-with
+     (harness-test-load-module 'readonly)
+     (harness-test-load-module 'tools-sessions)
+     (unwind-protect
+         (progn
+           (harness-define-provider 'test-plan
+             :complete #'harness-provider-demo--complete
+             :tiers '(:hard (:model "big" :thinking "high") :medium "mid")
+             :models (lambda ()
+                       (harness-resolved
+                        (mapcar (lambda (name) (list :name name :thinking-levels '("low" "medium" "high")))
+                                '("big" "mid" "small")))))
+           (let ((harness-tasks-model "test-plan:small"))
+             ,@body))
+       (remhash 'test-plan harness-providers)
+       (harness-provider--forget 'test-plan))))
+
+(defun harness-tasks-test-plan-submit (prompt &rest opts)
+  "Submit PROMPT to be planned, with OPTS besides; return the task id."
+  (plist-get (harness-call 'task/submit default-directory prompt (append (list :plan t) opts)) :id))
+
+(defun harness-tasks-test-steering (sid)
+  "The steering messages of session SID, oldest first."
+  (cl-remove-if-not (lambda (n) (and (eq (plist-get n :kind) 'user)
+                                     (plist-get (plist-get n :meta) :steering)))
+                    (harness-call 'session/nodes sid)))
+
+(ert-deftest harness-tasks-plan-hands-in-then-waits ()
+  "A planned task is planned on the hard tier, read-only, and waits in the
+backlog with the plan; started, it works on the medium tier from it."
+  (harness-tasks-test-with-plans
+    (let ((harness-tasks-max-running nil)
+          (harness-provider-demo-script-override #'harness-tasks-test-plan-script))
+      (let* ((id (harness-tasks-test-plan-submit "  the parser chokes on nested quotes  "))
+             (task (harness-tasks-test-task id))
+             (sid (plist-get task :session)))
+        (should (eq 'refining (plist-get task :state)))
+        (should (eq 'backlog (plist-get task :column)))
+        (should (eq t (plist-get task :plan)))
+        (should (equal "the parser chokes on nested quotes" (plist-get task :note)))
+        ;; The work is to run on the medium tier, the model the plan is for.
+        (should (equal "test-plan:mid" (plist-get task :model)))
+        (let ((session (harness-call 'session/get sid)))
+          ;; Planned on the hard tier, at the level the provider runs it,
+          ;; asking with nobody to ask: reads only.
+          (should (equal "test-plan:big" (plist-get session :model)))
+          (should (equal "high" (plist-get session :thinking)))
+          (should (eq 'ask (plist-get session :permission-mode)))
+          (should (plist-get session :non-interactive))
+          (let ((prompt (harness-run-filter 'agent/system-prompt "" session)))
+            (should (string-match-p "^## Task planning" prompt))
+            (should-not (string-match-p "## Task refinement" prompt)))
+          ;; Only the reading tools, the plan's own and the todo list.
+          (let ((tools (harness-run-filter 'agent/tools
+                                           '("read_file" "grep" "write_file" "edit_file" "hand_in"
+                                             "web_fetch" "web_search" "submit_task_plan" "todo_write")
+                                           session)))
+            (should (equal '("read_file" "grep" "web_search" "submit_task_plan" "todo_write") tools))))
+        (harness-tasks-test-wait-state id 'pending)
+        (setq task (harness-tasks-test-task id))
+        (should (equal (concat harness-tasks-test-plan-title "\n\n" harness-tasks-test-plan)
+                       (plist-get task :prompt)))
+        (should (plist-get task :refined))
+        (should (eq 'backlog (plist-get task :column)))
+        (should-not (plist-get task :outcome))
+        ;; The plan shows in the transcript as a plan does.
+        (let ((plan (cl-find 'plan (harness-call 'session/nodes sid) :key (lambda (n) (plist-get n :kind)))))
+          (should (equal harness-tasks-test-plan (plist-get plan :content)))
+          (should (equal harness-tasks-test-plan-title (plist-get plan :title))))
+        ;; Free slots do not start it; the user does.
+        (harness-tasks--schedule)
+        (should (eq 'pending (harness-tasks-test-state id)))
+        (harness-call 'task/start id)
+        (harness-tasks-test-wait-state id 'done)
+        (let ((session (harness-call 'session/get sid)))
+          (should (equal "test-plan:mid" (plist-get session :model)))
+          (should (eq 'auto (plist-get session :permission-mode)))
+          (should-not (equal "high" (plist-get session :thinking)))
+          (should-not (string-match-p "## Task planning" (harness-run-filter 'agent/system-prompt "" session)))
+          ;; A started task has every tool again, and not the plan's.
+          (should (equal '("write_file" "hand_in")
+                         (harness-run-filter 'agent/tools '("write_file" "hand_in" "submit_task_plan") session))))
+        ;; The work starts from the plan, then the request it came from.
+        (let ((start (cadr (harness-tasks-test-user-texts sid))))
+          (should (string-prefix-p harness-tasks--plan-start-message start))
+          (should (string-match-p (regexp-quote harness-tasks-test-plan) start))
+          (should (string-match-p "^> the parser chokes on nested quotes$" start)))))))
+
+(ert-deftest harness-tasks-plan-models ()
+  "The models and thinking levels of a plan and of the work after it.
+By default they are tiers of the task model's provider, else that
+model; a task's own choices win, and `task/settings' reports what a new
+task would get."
+  (harness-tasks-test-with-plans
+    (let ((task (list :cwd default-directory)))
+      (should (equal "test-plan:big" (harness-tasks--plan-model task)))
+      (should (equal "high" (harness-tasks--plan-thinking task)))
+      (should (equal '("test-plan:mid" . nil) (harness-tasks--plan-work task)))
+      ;; The task's own model is the one whose provider's tiers count:
+      ;; the demo provider's one model is every tier of its own.
+      (should (equal "demo:scripted" (harness-tasks--plan-model (list :model "demo:scripted"))))
+      (should (equal '("demo:scripted" . nil) (harness-tasks--plan-work (list :model "demo:scripted"))))
+      ;; Without a level of the tier's, the task's own, else the task default.
+      (should (equal "low" (harness-tasks--plan-thinking (list :model "demo:scripted" :thinking "low"))))
+      (let ((harness-tasks-thinking "medium"))
+        (should (equal "medium" (harness-tasks--plan-thinking (list :model "demo:scripted")))))
+      ;; A tier the provider has no model for leaves the task's own:
+      ;; none of test-plan's models has a price to rank it by.
+      (let ((harness-tasks--plan-tier 'frontier) (harness-tasks--plan-work-tier 'simple))
+        (should (equal "test-plan:small" (harness-tasks--plan-model task)))
+        (should (equal '(nil . nil) (harness-tasks--plan-work task))))
+      ;; Without a model, no tier either.
+      (let ((harness-tasks-model nil) (harness-model nil))
+        (should-not (harness-tasks--plan-model (list :cwd default-directory)))
+        (should (equal '(nil . nil) (harness-tasks--plan-work (list :cwd default-directory))))))
+    ;; What the board shows above a new task.
+    (let ((settings (harness-call 'task/settings default-directory)))
+      (should (equal "test-plan:small" (plist-get settings :model)))
+      (should (equal "test-plan:small" (plist-get settings :refine-model)))
+      (should (equal "low" (plist-get settings :refine-thinking)))
+      (should (equal "test-plan:big" (plist-get settings :plan-model)))
+      (should (equal "high" (plist-get settings :plan-thinking)))
+      (should (equal "test-plan:mid" (plist-get settings :plan-work-model))))
+    (let ((harness-tasks-refine-model "demo:scripted") (harness-tasks-refine-thinking "low"))
+      (let ((settings (harness-call 'task/settings default-directory)))
+        (should (equal "demo:scripted" (plist-get settings :refine-model)))
+        (should (equal "low" (plist-get settings :refine-thinking)))))
+    ;; A task submitted with models of its own keeps them: the work's,
+    ;; and the plan's (or a write-up's).
+    (let ((harness-tasks-max-running 0)
+          (harness-provider-demo-script-override '((:type text :delta "Thinking about it"))))
+      (let ((id (harness-tasks-test-plan-submit "own models" :model "test-plan:small" :thinking "low"
+                                                :refine-model "demo:scripted" :refine-thinking "high")))
+        (should (equal "test-plan:small" (plist-get (harness-tasks-test-task id) :model)))
+        (should (equal "low" (plist-get (harness-tasks-test-task id) :thinking)))
+        (let ((session (harness-tasks-test-session id)))
+          (should (equal "demo:scripted" (plist-get session :model)))
+          (should (equal "high" (plist-get session :thinking))))
+        (harness-call 'task/cancel id))
+      (let* ((id (plist-get (harness-call 'task/submit default-directory "brief"
+                                          (list :refine t :refine-model "demo:scripted"))
+                            :id))
+             (task (harness-tasks-test-task id)))
+        (should-not (plist-get task :plan))
+        (should (equal "demo:scripted" (plist-get (harness-tasks-test-session id) :model)))
+        ;; A brief write-up's work keeps the task model.
+        (should-not (plist-get task :model))
+        (harness-call 'task/cancel id)))))
+
+(ert-deftest harness-tasks-plan-only-reads ()
+  "A plan reads, and hands itself in; nothing else, whatever would ask.
+Read-only bash runs where the sandbox confines it.  A brief write-up
+cannot hand in a plan."
+  (harness-tasks-test-with-plans
+    (harness-test-load-module 'perms)
+    ;; The real permission chain, without this suite's allow-everything stage.
+    (dolist (stage (gethash 'permission/decide harness--filters))
+      (unless (symbolp (cdr stage)) (harness-remove-filter 'permission/decide (cdr stage))))
+    (let* ((harness-provider-demo-script-override #'harness-tasks-test-plan-script)
+           (id (harness-tasks-test-plan-submit "the parser chokes on nested quotes"))
+           (confined nil)
+           (decide (lambda (task-id tool kind &rest paths)
+                     (let ((sid (harness-tasks-test-session-id task-id)))
+                       (harness-test-await
+                        (harness-run-filter-async 'permission/decide (list :behavior 'ask)
+                                                  (list :session (harness-call 'session/get sid) :tool tool
+                                                        :kind kind :input nil :paths paths
+                                                        :call-id (harness-short-id))))))))
+      (harness-register-method 'sandbox/confined-p (lambda (_dir) confined))
+      (harness-tasks-test-wait-state id 'pending)
+      ;; The plan's own tool is allowed, though ask mode would ask.
+      (should (eq 'allow (plist-get (funcall decide id "submit_task_plan" 'meta) :behavior)))
+      (should (eq 'allow (plist-get (funcall decide id "read_file" 'read (expand-file-name "f" default-directory))
+                                    :behavior)))
+      ;; Anything else is denied, for good, with the plan's hint.
+      (let ((d (funcall decide id "write_file" 'write (expand-file-name "f" default-directory))))
+        (should (eq 'deny (plist-get d :behavior)))
+        (should (plist-get d :final))
+        (should (string-match-p "plan mode: this session plans the task" (plist-get d :reason)))
+        (should (equal harness-tasks--plan-hint (plist-get d :hint))))
+      ;; Bash only where the sandbox confines it, and then it runs.
+      (let ((d (funcall decide id "bash" 'exec)))
+        (should (eq 'deny (plist-get d :behavior)))
+        (should (string-match-p "needs the sandbox" (plist-get d :reason))))
+      (setq confined t)
+      (should (eq 'allow (plist-get (funcall decide id "bash" 'exec) :behavior)))
+      (should (equal '(:read-only t :network nil)
+                     (harness-run-filter 'tools/sandbox-options nil (harness-tasks-test-session-id id))))
+      ;; A brief write-up hands no plan in.
+      (let* ((harness-provider-demo-script-override
+              `((:type text :delta ,harness-tasks-test-write-up) (:type done :stop-reason end-turn)))
+             (brief (harness-tasks-test-refine "a brief one")))
+        (harness-tasks-test-wait-state brief 'pending)
+        (should (eq 'deny (plist-get (funcall decide brief "submit_task_plan" 'meta) :behavior)))
+        (should-not (member "submit_task_plan"
+                            (harness-run-filter 'agent/tools '("read_file" "submit_task_plan")
+                                                (harness-tasks-test-session brief))))
+        (should-error (harness-call 'task/hand-in-plan (harness-tasks-test-session-id brief) "T" "plan"))))))
+
+(ert-deftest harness-tasks-plan-told-to-hand-in ()
+  "A plan that keeps reading is nudged at its budget, then every half budget."
+  (harness-tasks-test-with-plans
+    (let ((harness-tasks--plan-tool-calls 4)
+          (harness-provider-demo-script-override
+           `(,@(mapcar (lambda (n) `(:type tool-call :id ,(format "r%d" n) :name "peek" :input (:n ,n)))
+                       (number-sequence 1 7))
+             (:type tool-call :id "p1" :name "submit_task_plan"
+                    :input (:title ,harness-tasks-test-plan-title :plan ,harness-tasks-test-plan))
+             (:type done :stop-reason end-turn))))
+      (let* ((id (harness-tasks-test-plan-submit "a curious idea"))
+             (sid (harness-tasks-test-session-id id)))
+        (harness-tasks-test-wait-state id 'pending)
+        (should (string-prefix-p harness-tasks-test-plan-title (plist-get (harness-tasks-test-task id) :prompt)))
+        (let ((steers (harness-tasks-test-steering sid)))
+          (should (equal '("4 tool calls so far" "6 tool calls so far")
+                         (mapcar (lambda (n) (car (split-string (plist-get n :content) ":"))) steers)))
+          (should (string-match-p "submit_task_plan" (plist-get (car steers) :content)))
+          (should (equal (harness-sender-system "tasks") (harness-node-sender (car steers)))))))))
+
+(ert-deftest harness-tasks-plan-sent-back-to-hand-in ()
+  "A plan that stops without handing itself in is sent back, twice at most.
+Then its last reply is the plan, as a write-up's is.  A reply refusing
+the task as a duplicate is not sent back."
+  (harness-tasks-test-with-plans
+    ;; It never hands in: two reminders, then the reply stands.
+    (let ((harness-provider-demo-script-override
+           '((:type text :delta "Plan: do it carefully") (:type done :stop-reason end-turn))))
+      (let* ((id (harness-tasks-test-plan-submit "an idea"))
+             (sid (harness-tasks-test-session-id id)))
+        (harness-tasks-test-wait-state id 'pending)
+        (should (equal "Plan: do it carefully" (plist-get (harness-tasks-test-task id) :prompt)))
+        (let ((steers (harness-tasks-test-steering sid)))
+          (should (= 2 (length steers)))
+          (dolist (steer steers)
+            (should (equal harness-tasks--plan-reminder (plist-get steer :content)))
+            (should (equal (harness-sender-system "tasks") (harness-node-sender steer)))))))
+    ;; Reminded once, it hands the plan in.
+    (let* ((reminded nil)
+           (harness-provider-demo-script-override
+            (lambda (request)
+              (if (string-match-p (regexp-quote harness-tasks--plan-reminder)
+                                  (harness-provider-demo--last-user-text request))
+                  (progn (setq reminded t) (harness-tasks-test-plan-script request))
+                '((:type text :delta "I would rather chat") (:type done :stop-reason end-turn))))))
+      (let ((id (harness-tasks-test-plan-submit "another idea")))
+        (harness-tasks-test-wait-state id 'pending)
+        (should reminded)
+        (should (= 1 (length (harness-tasks-test-steering (harness-tasks-test-session-id id)))))
+        (should (equal (concat harness-tasks-test-plan-title "\n\n" harness-tasks-test-plan)
+                       (plist-get (harness-tasks-test-task id) :prompt)))))
+    ;; A duplicate is refused, not reminded.
+    (let ((harness-provider-demo-script-override
+           '((:type text :delta "Duplicate of t-abc12345\n\nThe board has it.") (:type done :stop-reason end-turn))))
+      (let ((id (harness-tasks-test-plan-submit "a third idea")))
+        (harness-test-wait (lambda () (eq 'duplicate (plist-get (harness-tasks-test-task id) :outcome)))
+                           5 "the refusal")
+        (should-not (harness-tasks-test-steering (harness-tasks-test-session-id id)))))))
+
+(ert-deftest harness-tasks-plan-feedback-replans ()
+  "Feedback on a planned task goes to the session that planned it, which
+hands in the whole plan again: the new one replaces the old."
+  (harness-tasks-test-with-plans
+    (let ((harness-provider-demo-script-override
+           ;; The plan is for what the last message asked.
+           (lambda (request)
+             `((:type tool-call :id "p1" :name "submit_task_plan"
+                      :input (:title "Do it"
+                              :plan ,(concat "For: " (harness-provider-demo--last-user-text request))))
+               (:type done :stop-reason end-turn)))))
+      (let* ((id (harness-tasks-test-plan-submit "an idea"))
+             (sid (harness-tasks-test-session-id id)))
+        (harness-tasks-test-wait-state id 'pending)
+        (should (equal "Do it\n\nFor: an idea" (plist-get (harness-tasks-test-task id) :prompt)))
+        (harness-call 'task/prompt id "mention the docs too")
+        (harness-test-wait (lambda () (equal "Do it\n\nFor: mention the docs too"
+                                             (plist-get (harness-tasks-test-task id) :prompt)))
+                           5 "the new plan")
+        (should (eq 'pending (harness-tasks-test-state id)))
+        (should (plist-get (harness-tasks-test-task id) :backlog))
+        (should (= 2 (cl-count 'plan (harness-call 'session/nodes sid) :key (lambda (n) (plist-get n :kind)))))
+        ;; It planned on the hard tier both times.
+        (should (equal "test-plan:big" (plist-get (harness-call 'session/get sid) :model)))))))
+
+(ert-deftest harness-tasks-write-ups-replace-the-planning-section ()
+  "A write-up or a plan reads only, so the Planning section, about plans
+and sub-agents of its own, gives way to the section saying what it does."
+  (harness-tasks-test-with-plans
+    (harness-test-load-module 'tools-agent)
+    (let ((harness-provider-demo-script-override '((:type text :delta "Thinking about it"))))
+      (let ((plan (harness-tasks-test-plan-submit "an idea"))
+            (brief (harness-tasks-test-refine "a brief one")))
+        (dolist (case `((,plan "## Task planning") (,brief "## Task refinement")))
+          (let ((prompt (harness-run-filter 'agent/system-prompt "Base."
+                                            (harness-tasks-test-session (car case)))))
+            (should (string-prefix-p "Base." prompt))
+            (should (string-match-p (concat "^" (cadr case)) prompt))
+            (should-not (string-search harness-tools-agent-planning-section prompt))))
+        (harness-call 'task/cancel plan)
+        (harness-call 'task/cancel brief)))))
+
 ;;;; Duplicates: the write-up looks at the board first
 
 (defvar harness-tasks--refine-anyway-text)
@@ -1828,6 +2174,27 @@ Written up all the same, it goes to the backlog."
               (result (harness-tasks-test--node sid (lambda (n) (eq (plist-get n :kind) 'tool-result)))))
           (should search)
           (should (string-match-p (concat (regexp-quote id) " .*(this task)") (plist-get result :output))))))))
+
+(ert-deftest harness-tasks-demo-plans-a-task ()
+  "The demo provider plans a task as a real planner would: the board,
+the project, then the plan handed in with submit_task_plan.  Feedback
+goes into the plan it hands in again."
+  (harness-tasks-test-with-plans
+    (let* ((harness-provider-demo-script-override nil)
+           (id (harness-tasks-test-plan-submit "add a csv export to the reports"))
+           (sid (harness-tasks-test-session-id id)))
+      (harness-tasks-test-wait-state id 'pending)
+      (let ((prompt (plist-get (harness-tasks-test-task id) :prompt)))
+        (should (string-prefix-p "Add a csv export to the reports\n\n## Goal\nadd a csv export to the reports" prompt))
+        (should (string-match-p "^## Steps$" prompt)))
+      (should (harness-tasks-test--node sid (lambda (n) (and (eq (plist-get n :kind) 'tool-call)
+                                                             (equal "task_list" (plist-get n :tool))))))
+      ;; The plan shows in its transcript.
+      (should (harness-tasks-test--node sid (lambda (n) (eq (plist-get n :kind) 'plan))))
+      (harness-call 'task/prompt id "and a json one")
+      (harness-test-wait (lambda () (string-match-p "## Also\nand a json one"
+                                                    (plist-get (harness-tasks-test-task id) :prompt)))
+                         5 "the plan again"))))
 
 (ert-deftest harness-tasks-backlog-survives-a-restart ()
   "A written-up task waits in the backlog across a restart; nothing starts it."

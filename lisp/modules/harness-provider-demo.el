@@ -30,6 +30,9 @@
 ;; refinement section) instead looks at the board with task_list, takes
 ;; a quick look at the project and writes it up -- or, when another task
 ;; on the board asks for it in the same words, refuses it as a duplicate.
+;; One planning a task (the task planning section, Plan mode) does the
+;; same, but hands a plan in with submit_task_plan
+;; (`harness-provider-demo--plan').
 ;; A search, the task board's or the harness-wide one, gets the JSON a
 ;; search model answers with: the tasks, sessions and commands matched
 ;; from the words of the query (`harness-provider-demo--search'),
@@ -177,9 +180,9 @@ user wrote."
   "Return the events the demo plays for REQUEST.
 `harness-provider-demo-script-override' wins when set.  Otherwise the
 system prompt picks a script for a request to name a session, write a
-task up, search a task board, name the companion pet, give it its
-lines, write the Insights report or judge how a session starts; else
-the last user message picks one (see the Commentary)."
+task up, plan one, search a task board, name the companion pet, give
+it its lines, write the Insights report or judge how a session starts;
+else the last user message picks one (see the Commentary)."
   (let ((text (downcase (harness-provider-demo--last-user-text request)))
         (cwd (or (plist-get (plist-get request :session) :cwd) default-directory)))
     (cond
@@ -188,6 +191,8 @@ the last user message picks one (see the Commentary)."
      (harness-provider-demo-script-override harness-provider-demo-script-override)
      ((string-prefix-p "You write short titles" (or (plist-get request :system) ""))
       (harness-provider-demo--title request))
+     ((string-match-p "^## Task planning" (or (plist-get request :system) ""))
+      (harness-provider-demo--plan request cwd))
      ((string-match-p "^## Task refinement" (or (plist-get request :system) ""))
       (harness-provider-demo--write-up request cwd))
      ((string-prefix-p "You are the search box" (or (plist-get request :system) ""))
@@ -451,6 +456,38 @@ spacing; nil when there is none, or no task board."
                              (equal key (funcall words (plist-get task :prompt))))))
                   (ignore-errors (harness-call 'task/list (or (plist-get session :cwd) default-directory)))))))
 
+(defun harness-provider-demo--backlog-request (request)
+  "Return what a backlog write-up or plan REQUEST asks for, as a plist.
+`:note' is the first message, the request it is written from; `:title'
+its first line, capitalised; `:feedback' the last message after it,
+if any; `:same', another task on the board that asks for the note in
+the same words, the first time only (see
+`harness-provider-demo--same-task'); and `:search', the look at the
+board that both prompts ask for first."
+  (let* ((texts (cl-loop for m in (plist-get request :messages)
+                         when (eq (plist-get m :role) 'user)
+                         append (cl-loop for b in (plist-get m :content)
+                                         when (equal (plist-get b :type) "text") collect (plist-get b :text))))
+         (note (string-trim (or (car texts) "the task")))
+         (feedback (and (cdr texts) (string-trim (car (last texts)))))
+         (line (or (car (split-string note "\n" t)) "The task")))
+    (list :note note :feedback feedback
+          :title (truncate-string-to-width (concat (upcase (substring line 0 1)) (substring line 1)) 60)
+          :same (and (not feedback) (harness-provider-demo--same-task request note))
+          :search '(:type tool-call :id "demo-r0" :name "task_list" :input (:include_archived t :limit 50)))))
+
+(defun harness-provider-demo--refusal (same search)
+  "Return the script that refuses a backlog task as a duplicate of SAME.
+SEARCH is the look at the board that found it."
+  `((:type thinking :delta "A task for the backlog: first a look at the board for the same one.")
+    ,search
+    (:type text :delta ,(format "Duplicate of %s\n\nThe board has this already: %s (%s) asks for it in the same words."
+                                (plist-get same :id)
+                                (concat "“" (harness-first-line (plist-get same :prompt) 60) "”")
+                                (plist-get same :column)))
+    (:type usage :input 600 :output 40 :cache-read 300 :cost 0.0012 :context 800)
+    (:type done :stop-reason end-turn)))
+
 (defun harness-provider-demo--write-up (request cwd)
   "Return the script that writes a backlog task up for REQUEST in CWD.
 It looks at the board first, as the refinement prompt asks.  The title
@@ -458,35 +495,49 @@ comes from the first message, the note it is written from; a later
 message is feedback and lands under Also.  A note another task on the
 board has in the same words is refused as a duplicate of it, the first
 time."
-  (let* ((texts (cl-loop for m in (plist-get request :messages)
-                         when (eq (plist-get m :role) 'user)
-                         append (cl-loop for b in (plist-get m :content)
-                                         when (equal (plist-get b :type) "text") collect (plist-get b :text))))
-         (note (string-trim (or (car texts) "the task")))
-         (feedback (and (cdr texts) (string-trim (car (last texts)))))
-         (title (let ((line (car (split-string note "\n" t))))
-                  (concat (upcase (substring line 0 1)) (substring line 1))))
-         (same (and (not feedback) (harness-provider-demo--same-task request note)))
-         (search '(:type tool-call :id "demo-r0" :name "task_list" :input (:include_archived t :limit 50))))
-    (if same
-        `((:type thinking :delta "A task for the backlog: first a look at the board for the same one.")
-          ,search
-          (:type text :delta ,(format "Duplicate of %s\n\nThe board has this already: %s (%s) asks for it in the same words."
-                                      (plist-get same :id)
-                                      (concat "“" (harness-first-line (plist-get same :prompt) 60) "”")
-                                      (plist-get same :column)))
-          (:type usage :input 600 :output 40 :cache-read 300 :cost 0.0012 :context 800)
-          (:type done :stop-reason end-turn))
+  (let* ((asked (harness-provider-demo--backlog-request request))
+         (feedback (plist-get asked :feedback)))
+    (if (plist-get asked :same)
+        (harness-provider-demo--refusal (plist-get asked :same) (plist-get asked :search))
       `((:type thinking :delta "A task for the backlog: a look at the board and the project, then the write-up.")
-        ,search
+        ,(plist-get asked :search)
         (:type tool-call :id "demo-r1" :name "list_dir" :input (:path ,cwd))
-        (:type text :delta ,(concat (truncate-string-to-width title 60) "\n\n"
-                                    "**What and why.** " note "\n\n"
+        (:type text :delta ,(concat (plist-get asked :title) "\n\n"
+                                    "**What and why.** " (plist-get asked :note) "\n\n"
                                     "**Change.** The demo provider does not read code; a real agent names the files and functions here.\n\n"
                                     "**Done when.** The behaviour above works and the test suite passes.\n\n"
                                     "**Open questions.** None for the demo."
                                     (if feedback (concat "\n\n**Also.** " feedback) "")))
         (:type usage :input 700 :output 120 :cache-read 300 :cost 0.002 :context 900)
+        (:type done :stop-reason end-turn)))))
+
+(defun harness-provider-demo--plan (request cwd)
+  "Return the script that plans a backlog task for REQUEST in CWD (Plan mode).
+It looks at the board and the project, as the planning prompt asks,
+then hands the plan in with submit_task_plan, which ends the turn.  The
+title comes from the first message, the note it is written from; a
+later message is feedback, which the plan takes in under Also.  A note
+another task on the board has in the same words is refused as a
+duplicate of it, the first time."
+  (let* ((asked (harness-provider-demo--backlog-request request))
+         (feedback (plist-get asked :feedback)))
+    (if (plist-get asked :same)
+        (harness-provider-demo--refusal (plist-get asked :same) (plist-get asked :search))
+      `((:type thinking :delta "A task to plan: the board first, then the code, then the decisions.")
+        ,(plist-get asked :search)
+        (:type tool-call :id "demo-p1" :name "list_dir" :input (:path ,cwd))
+        (:type text :delta "I know enough to plan it.")
+        ;; Before the plan: handing it in ends the turn, and the rest
+        ;; of the script with it.
+        (:type usage :input 1400 :output 320 :cache-read 600 :cost 0.009 :context 1800)
+        (:type tool-call :id "demo-p2" :name "submit_task_plan"
+               :input (:title ,(plist-get asked :title)
+                       :plan ,(concat "## Goal\n" (plist-get asked :note) "\n\n"
+                                      "## Context\nThe demo provider does not read code; a real planner names the files, functions and conventions here.\n\n"
+                                      "## Steps\n1. Make the change where the code calls for it.\n2. Add a test that shows it works.\n\n"
+                                      "## Verify\nRun the project's checks: the new test passes.\n\n"
+                                      "## Open questions\nNone for the demo."
+                                      (if feedback (concat "\n\n## Also\n" feedback) ""))))
         (:type done :stop-reason end-turn)))))
 
 (defconst harness-provider-demo--pet-lines

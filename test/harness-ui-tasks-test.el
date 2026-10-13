@@ -1143,11 +1143,11 @@ box alone again."
                  (harness-ui-tasks-test--laid-out
                   (lambda () (insert "u") (harness-compose-pad-window window)))))))))
 
-;;;; Submit or Refine: the backlog
+;;;; Submit, Refine or Plan: the backlog
 
-(defvar harness-ui-tasks--refine)
+(defvar harness-ui-tasks--mode)
 (defvar harness-ui-tasks--settings)
-(declare-function harness-ui-tasks-toggle-refine "harness-ui-tasks")
+(declare-function harness-ui-tasks-cycle-mode "harness-ui-tasks")
 (declare-function harness-ui-tasks-refine "harness-ui-tasks")
 (declare-function harness-ui-tasks-start "harness-ui-tasks")
 (declare-function harness-ui-tasks--task "harness-ui-tasks")
@@ -1161,18 +1161,19 @@ box alone again."
     (buffer-substring-no-properties harness-ui-tasks--list-end (point-max))))
 
 (defun harness-ui-tasks-test--modes-shown (board)
-  "Which of Submit and Refine BOARD shows above its compose box."
+  "Which of Submit, Refine and Plan BOARD shows above its compose box."
   (with-current-buffer board
     (let ((head (buffer-substring-no-properties harness-ui-tasks--list-end
                                                 (overlay-start harness-compose-overlay))))
-      (seq-filter (lambda (mode) (string-search mode head)) '("Submit" "Refine")))))
+      (seq-filter (lambda (mode) (string-search mode head)) '("Submit" "Refine" "Plan")))))
 
 (defun harness-ui-tasks-test--toggle (board)
-  "Where BOARD's Submit / Refine toggle is: the start of its label."
+  "Where BOARD's Submit / Refine / Plan toggle is: the start of its label."
   (with-current-buffer board
     (save-excursion
       (goto-char harness-ui-tasks--list-end)
-      (re-search-forward "Submit\\|Refine" (overlay-start harness-compose-overlay))
+      (let ((case-fold-search nil))
+        (re-search-forward "Submit\\|Refine\\|Plan" (overlay-start harness-compose-overlay)))
       (match-beginning 0))))
 
 (defun harness-ui-tasks-test--goto-card (board text)
@@ -1617,20 +1618,20 @@ tests that check a card's detail line show it first."
              (:type done :stop-reason end-turn))))
       (with-current-buffer board
         (harness-test-wait (lambda () harness-ui-tasks--settings) 5 "the settings")
-        (should-not harness-ui-tasks--refine)
+        (should (eq 'submit harness-ui-tasks--mode))
         ;; The toggle shows only the current mode, then the next task's priority.
         (should (string-match-p "New task +. Submit +medium priority\n" (harness-ui-tasks-test--tail-text board)))
         (should (equal '("Submit") (harness-ui-tasks-test--modes-shown board)))
         (goto-char harness-compose-end)
-        (should (eq 'harness-ui-tasks-toggle-refine (key-binding (kbd "C-c C-t"))))
-        (harness-ui-tasks-toggle-refine)
-        (should harness-ui-tasks--refine)
+        (should (eq 'harness-ui-tasks-cycle-mode (key-binding (kbd "C-c C-t"))))
+        (harness-ui-tasks-cycle-mode)
+        (should (eq 'refine harness-ui-tasks--mode))
         (should (equal '("Refine") (harness-ui-tasks-test--modes-shown board)))
-        (should (string-match-p "an agent writes it up" (harness-ui-tasks-test--tail-text board)))
+        (should (string-prefix-p " refine " (harness-ui-tasks-test--tail-line board 'step)))
         (insert "the parser chokes on nested quotes")
         (harness-ui-tasks-submit)
         ;; The toggle stays on Refine for the next one.
-        (should harness-ui-tasks--refine))
+        (should (eq 'refine harness-ui-tasks--mode)))
       (harness-ui-tasks-test--wait-text
        board "Backlog  1\\(.\\|\n\\)*Fix nested quotes in the parser")
       (harness-ui-tasks-test--show-subtitle board "Fix nested quotes in the parser")
@@ -1649,10 +1650,13 @@ tests that check a card's detail line show it first."
         (should (eq 'harness-ui-tasks-refine (key-binding (kbd "r"))))
         (harness-ui-tasks-start))
       (harness-ui-tasks-test--wait-text board "Completed  1")
-      ;; Back to Submit with a click on the toggle, a task starts at once again.
+      ;; Back to Submit with two clicks on the toggle, past Plan, a task
+      ;; starts at once again.
       (with-current-buffer board
         (push-button (harness-ui-tasks-test--toggle board))
-        (should-not harness-ui-tasks--refine)
+        (should (eq 'plan harness-ui-tasks--mode))
+        (push-button (harness-ui-tasks-test--toggle board))
+        (should (eq 'submit harness-ui-tasks--mode))
         (should (equal '("Submit") (harness-ui-tasks-test--modes-shown board))))
       (harness-ui-tasks-test--type-and-submit board "Straight to work")
       (harness-ui-tasks-test--wait-text board "Completed  2"))))
@@ -1662,7 +1666,7 @@ tests that check a card's detail line show it first."
   (harness-ui-tasks-test-with
     (let ((harness-provider-demo-script-override
            '((:type text :delta "First write-up") (:type done :stop-reason end-turn))))
-      (with-current-buffer board (harness-ui-tasks-toggle-refine))
+      (with-current-buffer board (harness-ui-tasks-cycle-mode 'refine))
       (harness-ui-tasks-test--type-and-submit board "An idea")
       (harness-ui-tasks-test--wait-text board "Backlog  1\\(.\\|\n\\)*First write-up")
       (let ((harness-provider-demo-script-override
@@ -1682,7 +1686,7 @@ tests that check a card's detail line show it first."
   (harness-ui-tasks-test-with
     (let ((harness-provider-demo-script-override
            '((:type text :delta "oops") (:type done :stop-reason error :error "boom"))))
-      (with-current-buffer board (harness-ui-tasks-toggle-refine))
+      (with-current-buffer board (harness-ui-tasks-cycle-mode 'refine))
       (harness-ui-tasks-test--type-and-submit board "Shaky idea")
       (harness-ui-tasks-test--wait-text board "Requires your input  1\\(.\\|\n\\)*write-up stopped: error")
       (harness-ui-tasks-test--goto-card board "Shaky idea")
@@ -1711,7 +1715,7 @@ tests that check a card's detail line show it first."
       (setq harness-provider-demo-script-override
             `((:type text :delta ,(format "Duplicate of %s\n\nThe board has it already." fid))
               (:type done :stop-reason end-turn)))
-      (with-current-buffer board (harness-ui-tasks-toggle-refine))
+      (with-current-buffer board (harness-ui-tasks-cycle-mode 'refine))
       (harness-ui-tasks-test--type-and-submit board "export the reports as csv")
       (harness-ui-tasks-test--wait-text
        board "Requires your input  1\\(.\\|\n\\)*duplicate of .CSV export.")
@@ -1733,14 +1737,15 @@ tests that check a card's detail line show it first."
         (harness-ui-tasks-test--wait-text board "Backlog  1\\(.\\|\n\\)*Export the reports as CSV")))))
 
 (ert-deftest harness-ui-tasks-toggle-shows-the-current-mode ()
-  "The toggle is one button naming the current mode; a click switches to the other."
+  "The toggle is one button naming the current mode; a click switches to the next."
   (harness-ui-tasks-test-with
     (with-current-buffer board
       (harness-test-wait (lambda () harness-ui-tasks--settings) 5 "the settings")
-      (pcase-dolist (`(,refine ,mode ,does ,other)
-                     '((nil "Submit" "starts at once" "Refine")
-                       (t "Refine" "an agent writes the task up" "Submit")))
-        (should (eq refine harness-ui-tasks--refine))
+      (pcase-dolist (`(,symbol ,mode ,does ,other)
+                     '((submit "Submit" "starts at once" "Refine")
+                       (refine "Refine" "an agent writes the task up" "Plan")
+                       (plan "Plan" "an agent plans the task" "Submit")))
+        (should (eq symbol harness-ui-tasks--mode))
         (should (equal (list mode) (harness-ui-tasks-test--modes-shown board)))
         (let* ((pos (harness-ui-tasks-test--toggle board))
                (help (get-text-property pos 'help-echo)))
@@ -1751,7 +1756,12 @@ tests that check a card's detail line show it first."
           (should (string-search (concat "click or C-c C-t to switch to " other) help))
           (push-button pos))
         (should (equal (list other) (harness-ui-tasks-test--modes-shown board))))
-      (should-not harness-ui-tasks--refine))))
+      (should (eq 'submit harness-ui-tasks--mode))
+      ;; With a prefix argument the mode is read.
+      (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "Plan")))
+        (let ((current-prefix-arg '(4)))
+          (call-interactively #'harness-ui-tasks-cycle-mode)))
+      (should (eq 'plan harness-ui-tasks--mode)))))
 
 (ert-deftest harness-ui-tasks-toggle-fits-the-window ()
   "The New task line, toggle included, fits a narrow window like the rest of the tail."
@@ -1763,8 +1773,8 @@ tests that check a card's detail line show it first."
             (harness-test-wait (lambda () harness-ui-tasks--settings) 5 "the settings")
             (set-window-buffer side board)
             (set-window-buffer window (get-buffer-create "*scratch*"))
-            (should-not harness-ui-tasks--refine)
-            (dolist (mode '("Submit" "Refine"))
+            (should (eq 'submit harness-ui-tasks--mode))
+            (dolist (mode '("Submit" "Refine" "Plan"))
               (harness-ui-tasks--refit-tail)
               ;; Only the current mode shows, whole.
               (should (equal (list mode) (harness-ui-tasks-test--modes-shown board)))
@@ -1774,12 +1784,247 @@ tests that check a card's detail line show it first."
                   (should (< (string-width (buffer-substring (point) (line-end-position)))
                              (window-body-width side)))
                   (forward-line 1)))
-              ;; Toggling switches it to the other mode.
-              (harness-ui-tasks-toggle-refine))
-            (should-not harness-ui-tasks--refine)
+              ;; Toggling switches it to the next mode.
+              (harness-ui-tasks-cycle-mode))
+            (should (eq 'submit harness-ui-tasks--mode))
             (should (equal '("Submit") (harness-ui-tasks-test--modes-shown board))))
         (delete-window side)
         (set-window-buffer window board)))))
+
+;;;; Plan: a strong model plans, a cheaper one works
+
+(defvar harness-providers)
+(defvar harness-ui-tasks--new)
+(declare-function harness-provider--forget "harness-provider")
+(declare-function harness-provider-demo--complete "harness-provider-demo")
+(declare-function harness-ui-tasks--step-line "harness-ui-tasks")
+
+(defun harness-ui-tasks-test--push-tail-button (board id)
+  "Push BOARD's button named ID above the compose box."
+  (with-current-buffer board
+    (save-excursion
+      (goto-char harness-ui-tasks--list-end)
+      (let ((match (text-property-search-forward 'harness-task-button id #'eq)))
+        (should match)
+        (push-button (prop-match-beginning match))))))
+
+(defun harness-ui-tasks-test--tail-line (board key)
+  "The line above BOARD's compose box named KEY, as plain text."
+  (with-current-buffer board
+    (save-excursion
+      (goto-char harness-ui-tasks--list-end)
+      (let ((match (text-property-search-forward 'harness-task-tail key #'eq)))
+        (and match (string-trim-right (buffer-substring-no-properties (prop-match-beginning match)
+                                                                      (prop-match-end match))))))))
+
+(ert-deftest harness-ui-tasks-plan-mode ()
+  "Plan: the plan and the work each have a line of models above the box.
+A button on a line sets its own model; the task is planned on the
+plan's, read-only, waits in the Backlog with the plan, and works on the
+work's once started.  Submit and Refine keep the task model."
+  (harness-ui-tasks-test-with
+    (harness-test-load-module 'readonly)
+    (harness-test-load-module 'tools-sessions)
+    (unwind-protect
+        (let ((harness-tasks-model "test-plan:small")
+              (chosen nil)
+              (harness-provider-demo-script-override
+               (lambda (request)
+                 (if (string-match-p "^## Task planning" (or (plist-get request :system) ""))
+                     '((:type tool-call :id "p1" :name "submit_task_plan"
+                              :input (:title "Fix nested quotes" :plan "1. Handle them in parse-args."))
+                       (:type done :stop-reason end-turn))
+                   '((:type text :delta "Working on it.") (:type done :stop-reason end-turn))))))
+          (harness-define-provider 'test-plan
+            :complete #'harness-provider-demo--complete
+            :tiers '(:hard "big" :medium "mid")
+            :models (lambda () (harness-resolved (mapcar (lambda (name) (list :name name)) '("big" "mid" "small")))))
+          (with-current-buffer board
+            ;; The board's settings came before the provider: again.
+            (setq harness-ui-tasks--new nil)
+            (harness-ui-tasks--fetch board)
+            (harness-test-wait (lambda () (plist-get harness-ui-tasks--new :plan-model)) 5 "the plan's model")
+            (should (equal "test-plan:big" (plist-get harness-ui-tasks--new :plan-model)))
+            (should (equal "test-plan:mid" (plist-get harness-ui-tasks--new :plan-work-model)))
+            (should (equal "test-plan:small" (plist-get harness-ui-tasks--new :refine-model)))
+            ;; Submit has the one line, of the work on the task model.
+            (should (equal "" (harness-ui-tasks--step-line)))
+            (should (string-match-p "\\` small (Test-Plan) · " (harness-ui-tasks-test--tail-line board 'settings)))
+            (harness-ui-tasks-cycle-mode 'plan)
+            (should (string-match-p "\\` plan  big (Test-Plan) · [^ ]+ default\\'"
+                                    (harness-ui-tasks-test--tail-line board 'step)))
+            ;; The work's line has its model and thinking level alone;
+            ;; the task's settings and the limit are on the line below.
+            (should (string-match-p "\\` work  mid (Test-Plan) · [^ ]+ default\\'"
+                                    (harness-ui-tasks-test--tail-line board 'work)))
+            (should (string-match-p "3 at a time\\'" (harness-ui-tasks-test--tail-line board 'settings)))
+            (should-not (string-search "Test-Plan" (harness-ui-tasks-test--tail-line board 'settings)))
+            (should (equal "Describe a task…" (harness-ui-tasks--placeholder))))
+          ;; Each line's model button sets its own.
+          (cl-letf (((symbol-function 'harness-ui-choose-model)
+                     (lambda (callback) (funcall callback chosen (harness-ui-model-label chosen)))))
+            (setq chosen "test-plan:mid")
+            (harness-ui-tasks-test--push-tail-button board 'harness-set-model@plan)
+            (setq chosen "test-plan:big")
+            (harness-ui-tasks-test--push-tail-button board 'harness-set-model))
+          (with-current-buffer board
+            (should (equal "test-plan:mid" (plist-get harness-ui-tasks--new :plan-model)))
+            (should (equal "test-plan:big" (plist-get harness-ui-tasks--new :plan-work-model)))
+            (should (equal "test-plan:small" (plist-get harness-ui-tasks--new :model)))
+            (should (string-match-p "\\` plan  mid " (harness-ui-tasks-test--tail-line board 'step)))
+            (should (string-match-p "\\` work  big " (harness-ui-tasks-test--tail-line board 'work))))
+          ;; Planned on the plan's model, then waiting in the Backlog.
+          (harness-ui-tasks-test--type-and-submit board "the parser chokes on nested quotes")
+          (harness-ui-tasks-test--wait-text board "Backlog  1\\(.\\|\n\\)*Fix nested quotes")
+          (let* ((task (car (harness-call 'task/list default-directory)))
+                 (sid (plist-get task :session)))
+            (should (eq t (plist-get task :plan)))
+            (should (equal "test-plan:big" (plist-get task :model)))
+            (should (equal "test-plan:mid" (plist-get (harness-call 'session/get sid) :model)))
+            (should (equal "Fix nested quotes\n\n1. Handle them in parse-args." (plist-get task :prompt)))
+            (should (string-match-p "planned " (harness-ui-tasks-test--card-text board "Fix nested quotes")))
+            (harness-ui-tasks-test--show-subtitle board "Fix nested quotes")
+            (harness-ui-tasks-test--wait-text board "planned, start it when ready")
+            ;; Started, it works on the work's model.
+            (harness-ui-tasks-test--goto-card board "Fix nested quotes")
+            (with-current-buffer board (harness-ui-tasks-start))
+            (harness-ui-tasks-test--wait-text board "Completed  1")
+            (should (equal "test-plan:big" (plist-get (harness-call 'session/get sid) :model))))
+          ;; The mode stays; Refine has its write-up's line, and its
+          ;; work the task model.
+          (with-current-buffer board
+            (should (eq 'plan harness-ui-tasks--mode))
+            (harness-ui-tasks-cycle-mode 'refine)
+            (should (string-match-p "\\` refine  small (Test-Plan) · [^ ]+ low\\'"
+                                    (harness-ui-tasks-test--tail-line board 'step)))
+            (should (string-match-p "\\` work    small " (harness-ui-tasks-test--tail-line board 'work)))))
+      (remhash 'test-plan harness-providers)
+      (harness-provider--forget 'test-plan))))
+
+(defun harness-ui-tasks-test--tail-buttons (board key)
+  "The ids of the buttons on BOARD's line above the compose box named KEY, in order."
+  (with-current-buffer board
+    (save-excursion
+      (goto-char harness-ui-tasks--list-end)
+      (when-let* ((match (text-property-search-forward 'harness-task-tail key #'eq)))
+        (let ((pos (prop-match-beginning match))
+              (end (prop-match-end match))
+              (ids nil))
+          (while (< pos end)
+            (when-let* ((id (get-text-property pos 'harness-task-button)))
+              (push id ids))
+            (setq pos (or (next-single-property-change pos 'harness-task-button nil end) end)))
+          (nreverse ids))))))
+
+(defun harness-ui-tasks-test--tail-tooltips (board key)
+  "The tooltips of the buttons on BOARD's line above the compose box named KEY."
+  (with-current-buffer board
+    (save-excursion
+      (goto-char harness-ui-tasks--list-end)
+      (when-let* ((match (text-property-search-forward 'harness-task-tail key #'eq)))
+        (let ((pos (prop-match-beginning match))
+              (end (prop-match-end match))
+              (tips nil))
+          (while (< pos end)
+            (when (get-text-property pos 'harness-task-button)
+              (push (get-text-property pos 'help-echo) tips))
+            (setq pos (or (next-single-property-change pos 'harness-task-button nil end) end)))
+          (nreverse tips))))))
+
+(defun harness-ui-tasks-test--tail-loose-text (board key)
+  "The text of BOARD's line KEY that no button holds, separators and spaces left out."
+  (with-current-buffer board
+    (save-excursion
+      (goto-char harness-ui-tasks--list-end)
+      (when-let* ((match (text-property-search-forward 'harness-task-tail key #'eq)))
+        (let ((pos (prop-match-beginning match))
+              (end (prop-match-end match))
+              (text ""))
+          (while (< pos end)
+            (let ((next (or (next-single-property-change pos 'harness-task-button nil end) end)))
+              (unless (get-text-property pos 'harness-task-button)
+                (setq text (concat text (buffer-substring-no-properties pos next))))
+              (setq pos next)))
+          (replace-regexp-in-string "[ ·\n]+" "" text))))))
+
+(ert-deftest harness-ui-tasks-a-step-sets-its-model-and-thinking-alone ()
+  "A step of a new task has a model and a thinking level of its own, no more.
+In Refine and Plan the write-up or the plan, then the work, each have a
+line with its name and those two buttons alone: no sentence says what
+the mode does, there or in the box's placeholder, and changing the
+mode says nothing either -- the toggle's tooltip does.  What the whole
+task works with -- permission mode, interactive, supervisor mode, where
+it works -- is on one line below them, which ends with how many tasks
+work at once and has no model or thinking level.  Submit's one step has
+its two at the start of that line.  The setting commands say whom a
+change is for: a step's model and thinking level are its own, the rest
+the task's."
+  (harness-ui-tasks-test-with
+    (with-current-buffer board
+      (harness-test-wait (lambda () harness-ui-tasks--settings) 5 "the board's settings")
+      ;; A git project, where the worktree switch shows; this test's dir is not one.
+      (setq harness-ui-tasks--settings (plist-put (copy-sequence harness-ui-tasks--settings) :worktrees t))
+      (goto-char (point-max))
+      (let* ((sup (harness-ui-tasks--supervisor-p))
+             (task (lambda (switch)
+                     (append '(harness-set-permission-mode harness-toggle-non-interactive)
+                             (and switch sup '(harness-toggle-supervisor))
+                             '(harness-ui-tasks-toggle-main-tree harness-ui-tasks-set-max-running)))))
+        (harness-ui-tasks-cycle-mode 'submit)
+        (should (equal (append '(harness-set-model harness-set-thinking) (funcall task t))
+                       (harness-ui-tasks-test--tail-buttons board 'settings)))
+        (should-not (harness-ui-tasks-test--tail-line board 'step))
+        (should-not (harness-ui-tasks-test--tail-line board 'work))
+        (should (equal "Describe a task…" (harness-ui-tasks--placeholder)))
+        (pcase-dolist (`(,mode ,switch ,placeholder) '((refine t "Jot a task down") (plan nil "Describe a task")))
+          (harness-ui-tasks-cycle-mode mode)
+          (should (equal (list (intern (format "harness-set-model@%s" mode))
+                               (intern (format "harness-set-thinking@%s" mode)))
+                         (harness-ui-tasks-test--tail-buttons board 'step)))
+          (should (string-prefix-p (format " %s " mode) (harness-ui-tasks-test--tail-line board 'step)))
+          (should (equal '(harness-set-model harness-set-thinking)
+                         (harness-ui-tasks-test--tail-buttons board 'work)))
+          (should (string-prefix-p " work " (harness-ui-tasks-test--tail-line board 'work)))
+          ;; Each step's line is its name and its two buttons: nothing more.
+          (should (equal (symbol-name mode) (harness-ui-tasks-test--tail-loose-text board 'step)))
+          (should (equal "work" (harness-ui-tasks-test--tail-loose-text board 'work)))
+          ;; Their tooltips name the setting and the step, and say no more.
+          (pcase-dolist (`(,key ,scope)
+                         (if (eq mode 'plan)
+                             '((step "the plan of new tasks") (work "the work of new planned tasks"))
+                           '((step "the write-up of new tasks") (work "the work of new tasks"))))
+            (should (equal (list (concat "Model of " scope) (concat "Thinking level of " scope))
+                           (harness-ui-tasks-test--tail-tooltips board key))))
+          (should (equal (concat placeholder harness-ui-tasks--ellipsis) (harness-ui-tasks--placeholder)))
+          (should (equal (funcall task switch) (harness-ui-tasks-test--tail-buttons board 'settings)))))
+      ;; Whom a change is for.  The commands typed in the box set the
+      ;; work's model and the task's other settings.  Changing the mode
+      ;; says nothing.
+      (let ((said nil)
+            (model (plist-get harness-ui-tasks--new :plan-work-model)))
+        (cl-letf (((symbol-function 'harness-ui-choose-model)
+                   (lambda (callback) (funcall callback model "the same model")))
+                  ((symbol-function 'completing-read) (lambda (&rest _) "YOLO"))
+                  ((symbol-function 'message)
+                   (lambda (format &rest args)
+                     (when format (push (apply #'format-message format args) said)))))
+          (harness-set-model)
+          (harness-set-permission-mode)
+          (harness-toggle-non-interactive)
+          (harness-ui-tasks-test--push-tail-button board 'harness-set-model@plan)
+          (harness-ui-tasks-cycle-mode 'refine)
+          (harness-set-model)
+          (harness-ui-tasks-cycle-mode 'submit)
+          (harness-set-model))
+        (should (equal '("Model → the same model (for the work of new planned tasks)"
+                         "Permission mode → YOLO (for new tasks)"
+                         "Non-interactive on (for new tasks)"
+                         "Model → the same model (for the plan of new tasks)"
+                         "Model → the same model (for the work of new tasks)"
+                         "Model → the same model (for new tasks)")
+                       (reverse said)))
+        (should (equal "yolo" (plist-get harness-ui-tasks--new :permission-mode)))
+        (should (harness-json-true-p (plist-get harness-ui-tasks--new :non-interactive)))))))
 
 ;;;; Sending to a session is not composing a task
 
@@ -2157,7 +2402,8 @@ argument says which way to turn it, and turning it on asks nothing."
 It is the harness option, saved for every project, and a higher limit
 starts the waiting tasks at once.  No limit shows as \"all at once\",
 an answer that is no number changes nothing, and so does the limit
-there is now.  Refine, whose tasks wait for you anyway, shows none."
+there is now.  Refine and Plan show it too, for the work their tasks
+lead to."
   (harness-ui-tasks-test-with
     (let ((harness-tasks-max-running 0)
           (saved nil)
@@ -2229,12 +2475,15 @@ there is now.  Refine, whose tasks wait for you anyway, shows none."
           (let ((line (harness-ui-tasks--new-settings-line 30)))
             (should (<= (string-width line) 30))
             (should-not (string-search "4 at a time" line))))
-        ;; Refine starts nothing by itself: no limit to show.
+        ;; Refine and Plan show it too: what they write up takes no
+        ;; slot, but the work does once it starts, as the tooltip says.
         (with-current-buffer board
-          (harness-ui-tasks-toggle-refine)
-          (should-not (harness-ui-tasks-test--limit board))
-          (should (string-search "an agent writes it up" (harness-ui-tasks-test--tail-text board)))
-          (harness-ui-tasks-toggle-refine))
+          (dolist (mode '(refine plan))
+            (harness-ui-tasks-cycle-mode mode)
+            (should (harness-ui-tasks-test--limit board))
+            (should (string-search "takes no slot" (nth 1 (harness-ui-tasks-test--limit board))))
+            (should (string-prefix-p (format " %s " mode) (harness-ui-tasks-test--tail-line board 'step))))
+          (harness-ui-tasks-cycle-mode 'submit))
         (harness-ui-tasks-test--limit-says board "4 at a time")))))
 
 ;;;; In the merge queue
@@ -3543,7 +3792,7 @@ backlog task stays where it is."
       ;; A queued task (0 at a time, so it waits) and one for the backlog.
       (harness-ui-tasks-test--type-and-submit board "Waits for a slot")
       (harness-ui-tasks-test--wait-text board "Pending  1\\(.\\|\n\\)*Waits for a slot")
-      (with-current-buffer board (harness-ui-tasks-toggle-refine))
+      (with-current-buffer board (harness-ui-tasks-cycle-mode 'refine))
       (harness-ui-tasks-test--type-and-submit board "jot the lexer down")
       (harness-ui-tasks-test--wait-text board "Backlog  1\\(.\\|\n\\)*Fix the lexer")
       (let ((text (harness-ui-tasks-test--board-text board)))
@@ -3580,7 +3829,7 @@ backlog task stays where it is."
     (let ((harness-tasks-max-running 0)
           (harness-provider-demo-script-override
            '((:type text :delta "Fix the lexer\n\nIt drops the last token.") (:type done :stop-reason end-turn))))
-      (with-current-buffer board (harness-ui-tasks-toggle-refine))
+      (with-current-buffer board (harness-ui-tasks-cycle-mode 'refine))
       (harness-ui-tasks-test--type-and-submit board "jot the lexer down")
       (harness-ui-tasks-test--wait-text board "Backlog  1\\(.\\|\n\\)*Fix the lexer")
       ;; The card offers the queue first, and the board key does the same.
@@ -3666,6 +3915,13 @@ the wire gives them, symbols as strings."
     (should (string-match-p "waits in the suspended queue"
                             (harness-ui-tasks--sent-back-message '(:state "pending" :queue-suspended t))))))
 
+(defun harness-ui-tasks-test--supervisor-switch-p (board)
+  "Non-nil when the lines above BOARD's compose box have the supervisor switch."
+  (with-current-buffer board
+    (save-excursion
+      (goto-char harness-ui-tasks--list-end)
+      (and (text-property-search-forward 'harness-task-button 'harness-toggle-supervisor #'eq) t))))
+
 (defvar harness-tasks-lend-blocked-slot-after)
 (declare-function harness-ui-tasks--loan-fact "harness-ui-tasks")
 
@@ -3738,7 +3994,9 @@ to Pending, saying why it waits, and no card speaks of a loan any more."
   "The settings line turns supervisor mode for the next task.
 The button appears only while the harness has the supervisor module,
 and a task submitted with the setting keeps it (the session of one that
-starts with it is checked in the supervisor suite)."
+starts with it is checked in the supervisor suite).  It is on the
+task's settings line in Submit and Refine, never in Plan, whose task
+works hands-on; each mode shows its own lines alone."
   (harness-ui-tasks-test-with
     (let ((harness-tasks-max-running 0))
       ;; Without the supervisor module: no setting, no button.
@@ -3778,7 +4036,40 @@ starts with it is checked in the supervisor suite)."
                          (harness-call 'task/list default-directory))))
         (should (= 2 (length ids)))
         (should (cl-every (lambda (id) (eq :false (plist-get (harness-call 'task/get id) :supervisor)))
-                          ids))))))
+                          ids)))
+      ;; Each mode shows its own lines alone: Submit the task's, Refine
+      ;; and Plan their own step's and the work's above it.  A planned
+      ;; task works hands-on, its plan made already (its session is
+      ;; checked in the supervisor suite), so Plan has no supervisor switch,
+      ;; the switch's command says why rather than change what the task
+      ;; would not be sent, and the task goes without the setting.  The
+      ;; work of Submit and Refine may supervise, and keeps it.
+      (with-current-buffer board
+        (harness-ui-tasks--render-tail)
+        (push-button (harness-ui-tasks-test--tail-button board "hands-on"))
+        (should (harness-json-true-p (plist-get harness-ui-tasks--new :supervisor)))
+        (goto-char (point-max))
+        (pcase-dolist (`(,mode ,step ,switch) '((submit nil t) (refine "refine" t) (plan "plan" nil)))
+          (harness-ui-tasks-cycle-mode mode)
+          (let ((step-line (harness-ui-tasks-test--tail-line board 'step))
+                (tail (harness-ui-tasks-test--tail-text board)))
+            (if step
+                (should (string-prefix-p (concat " " step " ") step-line))
+              (should-not step-line))
+            (dolist (other '("refine" "plan"))
+              (unless (equal other step)
+                (should-not (string-match-p (format "^ %s " other) tail))))
+            (should (eq switch (harness-ui-tasks-test--supervisor-switch-p board)))
+            (unless switch
+              (should-not (string-match-p "supervisor\\|hands-on" tail)))))
+        (let ((err (should-error (harness-toggle-supervisor) :type 'user-error)))
+          (should (string-match-p "planned task works hands-on" (cadr err))))
+        (should (harness-json-true-p (plist-get harness-ui-tasks--new :supervisor)))
+        (should-not (plist-member (harness-ui-tasks--new-opts 'plan) :supervisor))
+        (should (eq t (plist-get (harness-ui-tasks--new-opts 'refine) :supervisor)))
+        (should (eq t (plist-get (harness-ui-tasks--new-opts 'submit) :supervisor)))
+        (harness-ui-tasks-cycle-mode 'submit)
+        (should (harness-ui-tasks-test--supervisor-switch-p board))))))
 
 ;;;; One-shot and sticky submit modes, and what a card stopped part way offers
 
@@ -4275,6 +4566,11 @@ Pushed, they are not held down and not turned away when pushed again."
         (should-not harness-ui-tasks--pressed)
         (should-not (eq 'harness-task-button-pressed-face
                         (get-text-property (harness-ui-tasks-test--toggle board) 'face)))
+        ;; Submit, Refine and Plan: pushed again, not turned away, and
+        ;; it takes three pushes to come back round.
+        (push-button (harness-ui-tasks-test--toggle board))
+        (should-not (equal mode (harness-ui-tasks-test--modes-shown board)))
+        (should-not harness-ui-tasks--pressed)
         (push-button (harness-ui-tasks-test--toggle board))
         (should (equal mode (harness-ui-tasks-test--modes-shown board)))
         (should-not harness-ui-tasks--pressed)))))

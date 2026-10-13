@@ -3935,9 +3935,10 @@ settings that are not one session's: VALUES is a plist with a session's
 setting keys (`:model' `:thinking' `:permission-mode' `:non-interactive'
 `:supervisor'), SET-FN a function of KEY and VALUE storing one, and
 CONTEXT the words saying whom it applies to (\"for new tasks\" without
-them).  The task board uses it so the same commands set up the next
-task, and the session list so they change every marked session.  When
-it is nil or returns nil, the commands use `harness-ui-current-session-id'.")
+them), as `harness-ui--setting-set' takes it.  The task board uses it so
+the same commands set up the next task, and the session list so they
+change every marked session.  When it is nil or returns nil, the
+commands use `harness-ui-current-session-id'.")
 
 (defun harness-ui--setting-target (session-id)
   "Return what the setting commands change.
@@ -3954,10 +3955,15 @@ SESSION-ID when given, else the buffer's target, else a chosen session."
   "Set KEY to VALUE on TARGET and say LABEL when it is done.
 A non-string TARGET is (VALUES SET-FN &optional CONTEXT): VALUES is
 what the setting commands read, SET-FN applies the change, and CONTEXT
-names who it applies to (\"for new tasks\" without one)."
+names who it applies to (\"for new tasks\" without one): a string, or
+a function of KEY returning one, for a target whose settings are not
+all for the same thing -- a step of a new task has a model and a
+thinking level of its own, and shares the task's other settings."
   (if (not (stringp target))
-      (progn (funcall (nth 1 target) key value)
-             (message "%s (%s)" label (or (nth 2 target) "for new tasks")))
+      (let ((context (nth 2 target)))
+        (funcall (nth 1 target) key value)
+        (message "%s (%s)" label (or (if (functionp context) (funcall context key) context)
+                                     "for new tasks")))
     (pcase key
       (:model (harness-ui-call "session/set_model" (list :sessionId target :modelId value)
                                (lambda (_) (message "%s" label))))

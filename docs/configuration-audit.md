@@ -317,6 +317,7 @@ marked *done* were fixed, the rest are recommendations, not changes.
 | `usage` dashboard and budgets | One page: a budget is a line on the dashboard, not a second feature. Already so |
 | Task mode and sessions | One is a view of the other, sharing the session composer; the design doc already requires reuse rather than a second implementation |
 | `harness-tasks-refine-model`/`-thinking` | A second model knob for the write-up step. It is a real choice (cheap model for a summary), but the next such knob should be a parameter of the refine session, not a new global |
+| Plan mode's plan and work models | Done as that row asks: no new global. The plan's and the work's model and thinking are parameters of each task (`task/submit`'s `:refine-model`/`:refine-thinking` and `:model`/`:thinking`, set by the board's step lines), and their defaults -- the hard and medium tiers of the task model's provider, the 40-call budget -- are constants (`harness-tasks--plan-tier`, `harness-tasks--plan-work-tier`, `harness-tasks--plan-tool-calls`) |
 
 The general recommendation: before adding a tool or a command, check
 whether an existing one can take a parameter; before adding a setting,

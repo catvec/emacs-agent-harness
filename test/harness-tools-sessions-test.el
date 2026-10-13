@@ -1410,6 +1410,44 @@ the handler moves nothing the user did not confirm."
       (harness-tools-sessions-test-ok me "task_wait" (list :task_id id :until "done"))
       (should (eq 'done (plist-get (harness-call 'task/get id) :state))))))
 
+(ert-deftest harness-tools-sessions-task-planned-for-the-backlog ()
+  "task_submit with plan has the task planned for the backlog.
+The session planning it hands the plan in with submit_task_plan, which
+ends its turn; a session that plans no task, or a blank plan, is refused."
+  (harness-tools-sessions-test-with
+    (let* ((harness-tasks-max-running nil)
+           (harness-provider-demo-script-override
+            '((:type tool-call :id "p1" :name "submit_task_plan"
+                     :input (:title "Fix the lexer" :plan "1. Keep the last token.\n2. Test it."))
+              (:type text :delta "Never said: the plan ended the turn.")
+              (:type done :stop-reason end-turn)))
+           (me (harness-tools-sessions-test-session))
+           (submitted (harness-tools-sessions-test-run me "task_submit" '(:prompt "lexer eats a token" :plan t)))
+           (id (plist-get (plist-get submitted :meta) :task-id)))
+      (should-not (plist-get submitted :is-error))
+      (should (string-match-p "planning it" (plist-get submitted :content)))
+      (should (eq t (plist-get (harness-call 'task/get id) :plan)))
+      (should (string-match-p "Done waiting" (harness-tools-sessions-test-ok me "task_wait" (list :task_id id))))
+      (let* ((task (harness-call 'task/get id))
+             (sid (plist-get task :session))
+             (nodes (harness-call 'session/nodes sid)))
+        (should (eq 'pending (plist-get task :state)))
+        (should (eq 'backlog (plist-get task :column)))
+        (should (equal "Fix the lexer\n\n1. Keep the last token.\n2. Test it." (plist-get task :prompt)))
+        (should (string-match-p "Plan handed in"
+                                (plist-get (cl-find 'tool-result nodes :key (lambda (n) (plist-get n :kind)))
+                                           :output)))
+        (should-not (cl-find "Never said: the plan ended the turn." nodes
+                             :key (lambda (n) (plist-get n :content)) :test #'equal))
+        ;; A blank plan is no plan.
+        (let ((blank (harness-tools-sessions-test-run sid "submit_task_plan" '(:title "Fix the lexer" :plan " "))))
+          (should (plist-get blank :is-error))
+          (should (string-match-p "plan is empty" (plist-get blank :content)))))
+      ;; A session that plans no task has nothing to hand in.
+      (let ((other (harness-tools-sessions-test-run me "submit_task_plan" '(:title "T" :plan "P"))))
+        (should (plist-get other :is-error))
+        (should (string-match-p "plans no task" (plist-get other :content)))))))
+
 (ert-deftest harness-tools-sessions-task-list-separates-the-backlog ()
   "task_list tells a backlog task from a queued pending one.
 The backlog has its own column and says so on its state line; the

@@ -634,6 +634,25 @@ the enabled and disabled lists filter them as they do the harness's own."
                              (harness--module-files))))))
       (delete-directory config t))))
 
+(ert-deftest harness-loader-loads-supervisor-mode-and-readonly-by-default ()
+  "By default supervisor mode loads, beside the readonly module it shares.
+The task board's write-ups and plans use that module too, so it loads
+on its own, and taking supervisor mode's two modules out leaves it in."
+  (let* ((harness-enabled-modules t)
+         (harness-disabled-modules (eval (car (get 'harness-disabled-modules 'standard-value)) t))
+         (harness-extra-module-directories nil)
+         (harness-process nil)
+         (harness-module-directories '("lisp/modules" "lisp/ui"))
+         (files (harness--module-files)))
+    (should-not harness-disabled-modules)
+    (dolist (file '("lisp/modules/harness-supervisor.el" "lisp/ui/harness-ui-supervisor.el"
+                    "lisp/modules/harness-readonly.el" "lisp/modules/harness-tasks.el"))
+      (should (member (harness--path file) files)))
+    (let ((harness-disabled-modules '(supervisor ui-supervisor)))
+      (let ((files (harness--module-files)))
+        (should-not (member (harness--path "lisp/modules/harness-supervisor.el") files))
+        (should (member (harness--path "lisp/modules/harness-readonly.el") files))))))
+
 (ert-deftest harness-loader-starts-and-reloads-extra-modules ()
   "Modules of `harness-extra-module-directories' start and reload as the harness's own.
 They load compiled and record their source, not that compiled copy.

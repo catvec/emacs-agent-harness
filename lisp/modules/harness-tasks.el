@@ -268,6 +268,7 @@
 (require 'harness-redaction)
 (require 'harness-priority)
 (require 'harness-slots)
+(require 'harness-readonly)
 
 (defcustom harness-tasks-max-running nil
   "Tasks of each project that may work at once; the rest wait as pending.
@@ -434,6 +435,97 @@ A write-up should be quick, so the default thinks little."
   "Tool calls a write-up may make before the agent is told to finish it.
 The agent is steered once, to write the task up with what it knows; nil
 never tells it.  It keeps a backlog write-up brief.")
+
+;;;; Plan mode
+;;
+;; A task submitted to be planned (`task/submit' with `:plan', the
+;; board's Plan mode) is a backlog task whose write-up is a plan: a
+;; session on a strong model (the hard tier of the task model's
+;; provider, `harness-tasks--plan-tier') reads the code and the board,
+;; makes the decisions, and hands in a plan (`submit_task_plan',
+;; `task/hand-in-plan') that a cheaper model carries out once the task
+;; starts (the medium tier, `harness-tasks--plan-work-tier').  It is
+;; supervisor mode's idea -- the strong model decides, a cheaper one
+;; works -- without its workers: one plan, one session doing it.  It
+;; sits beside supervisor mode, which leaves a planned task's work
+;; hands-on, its plan being made (`harness-supervisor--task-value').
+;;
+;; Both models are the task's to choose: `:refine-model' and
+;; `:refine-thinking' plan it, `:model' and `:thinking' do the work, as
+;; the board's lines above its compose box set them.  The tiers are only
+;; the defaults, and no option: a model per task is the parameter (see
+;; docs/configuration-audit.md).
+;;
+;; Like every write-up the planning session only reads: the readonly
+;; module (harness-readonly.el) holds it to the reading tools and
+;; read-only, offline bash (`harness-tasks--readonly-policy'), and the
+;; write-up gate denies whatever would ask.  Its turn is held to a soft
+;; budget of `harness-tasks--plan-tool-calls', steered to hand the plan
+;; in at that many calls and every half budget after, and a turn that
+;; stops without handing in a plan (or refusing the task as a duplicate)
+;; is sent back to do so, twice at most (`harness-tasks--plan-stop').
+
+(defconst harness-tasks--plan-tier 'hard
+  "The tier of the task model's provider that plans a task by default.
+Claude's is Opus (see `harness-model-tiers').  A provider without a
+model for it plans on the task's own model, and a task submitted with
+a write-up model of its own (`:refine-model') plans on that.")
+
+(defconst harness-tasks--plan-work-tier 'medium
+  "The tier of the task model's provider a planned task works on by default.
+The plan is written for it: Claude's is Sonnet.  A provider without a
+model for it works on the task model, and a task submitted with a model
+of its own (`:model') keeps it.")
+
+(defconst harness-tasks--plan-tool-calls 40
+  "Tool calls a plan may make before the agent is told to hand it in.
+A soft budget: at this many calls the session that plans a task is
+steered to hand its plan in with what it knows, and again every half
+budget after that (at 40, 60, 80 and so on).  It is a nudge and never a
+stop; nil never tells it.  Supervisor plans took 61 tool calls at the
+median before their plan, gathering everything for their workers; since
+those workers read the code they change, a supervisor is nudged at 30
+\(`harness-supervisor-step-budget').  A plan reads for the same reason
+only what its decisions need, but it settles the whole approach for one
+medium session rather than splitting the work, so it gets a little more.")
+
+(defconst harness-tasks--plan-prompt
+  "## Task planning
+This session plans a task for the backlog: the engineer described it, and another agent -- on a cheaper, medium model, which will not see this conversation -- will carry the plan out later.  Do not do the task: plan it, so that the other agent does not have to make the hard decisions again.  Your tokens are the expensive ones: every call you make reads this whole conversation again on the strong model, so spend them on the decisions, not on details the other agent finds for itself when it reads the code it changes.
+- First, a quick search for related tasks: call task_list once with include_archived true and limit 50, the project's most recent tasks (the line of this one says \"(this task)\").  Read a task's session with session_read only when its line leaves you unsure what it changes.
+- If a task there already asks for exactly the same feature or fix -- the same change, not merely a related one -- refuse this one instead of planning it: your final message is then a first line \"Duplicate of ID\", ID being that task's id, and after a blank line a short message for the engineer saying which task it is (its title and where it stands) and what makes it the same.  Once the engineer asks for the plan anyway, plan it.  A related task is no reason to refuse: the ones that work in the same code area go in the plan, with how to coordinate with them (check where each stands, message its session while it is at work, build on its commits rather than redo them).
+- Then read what the decisions need -- where the work goes, the code it changes and what calls it, the tests and the project's conventions -- and no more.  You only read: your tools change nothing, bash (when you have it) runs read-only and offline, and nobody answers questions, so put what you cannot settle in the plan as an open question or an assumption.
+- Make the decisions yourself: the approach, the data and control flow, the edge cases, what to test.  Name the files and functions to change and say how each changes; sketch the shape of new code only where a decision depends on it, never the whole change.
+- Keep the reading to what the plan needs: about 40 tool calls is plenty, and you are told when you have made that many.
+- Hand the plan in with submit_task_plan: a short imperative title, and the plan in concise markdown, a ticket a medium model can carry out on its own -- the goal and why; the decisions you made and the constraints; the context it needs (key files, functions, conventions, related tasks); the steps, in order, each concrete enough to do without planning again; how to verify the work (the tests to add or update, the checks to run, what to show); and open questions or assumptions, if any.  Write it at the length the work needs, no longer and no shorter.  The plan becomes the task's prompt, and the task waits in the backlog until the engineer starts it.
+- When the engineer replies, take it as feedback on the plan and hand in the complete updated plan with submit_task_plan."
+  "System prompt section of a session that plans a backlog task (Plan mode).
+The plan it hands in with `submit_task_plan' becomes the task's
+prompt, so it asks for one complete, self-contained plan, written for
+a medium model.  Like the write-up's (`harness-tasks--refine-prompt')
+it has the agent look for related tasks first, and refuse a task the
+board has already with a reply whose first line is \"Duplicate of
+ID\" (see `harness-tasks--refusal').")
+
+(defconst harness-tasks--plan-tool "submit_task_plan"
+  "The tool a planning session hands its plan in with.
+See `task/hand-in-plan', and harness-tools-sessions.el for the tool.")
+
+(defconst harness-tasks--plan-hint
+  "You only read here: put the change in the plan, for the agent that carries it out, and hand the plan in with submit_task_plan."
+  "Hint of a call denied because the session that plans a task only reads.")
+
+(defconst harness-tasks--plan-reminder
+  "Plan mode: end this turn by handing the plan in with submit_task_plan (a short title and the plan, in markdown). If the board has this task already, reply instead with a first line \"Duplicate of ID\" and a short note for the engineer."
+  "What a planning session that stopped without handing a plan in is told.")
+
+(defconst harness-tasks--plan-max-reminders 2
+  "Most times a planning turn is sent back to hand its plan in.")
+
+(defconst harness-tasks--plan-start-message
+  "Start working on this task now, following the plan below.  A stronger model wrote it earlier, reading the code without changing any of it; that is over, so change files, run commands and so on as the plan says.  It made the hard decisions: keep to them.  Where the code shows the plan to be wrong or out of date, do what it is after, and say what you did differently and why when you hand the work in.  If it names related tasks, see where they stand now and coordinate with them as it says before you change the same code."
+  "Opening of the message that starts a planned task's work.
+The plan follows it, then the request it was written from.")
 
 ;;;; Recaps
 
@@ -892,6 +984,12 @@ write-up from work waiting for a slot: `harness-tasks--to-pending'
 clears it."
   (or (eq (plist-get task :state) 'refining)
       (and (eq (plist-get task :state) 'pending) (harness-tasks--backlog-p task))))
+
+(defun harness-tasks--plan-p (task)
+  "Non-nil when TASK's write-up is a plan (Plan mode, `task/submit' with `:plan').
+Its session plans it on a strong model, and its work runs on the model
+the plan is written for (see Plan mode above)."
+  (harness-json-true-p (plist-get task :plan)))
 
 (defun harness-tasks--written-up-p (task)
   "Non-nil when TASK's prompt is a write-up of the request in `:note'.
@@ -1412,15 +1510,21 @@ task the merge queue reported merged."
 
 (defun harness-tasks--system-prompt (prompt session)
   "Tell a task's SESSION what its turns are for (PROMPT filter).
-Before the task starts they write it up (`harness-tasks--refine-prompt');
-afterwards they learn how to hand the finished work in, and, in a
-worktree, how it reaches the main branch -- or, in the main tree
-\(`harness-tasks--main-tree-p'), that the work takes effect there."
+Before the task starts they write it up (`harness-tasks--refine-prompt')
+or plan it (`harness-tasks--plan-prompt'), a section that takes the
+place of the Planning one, about tools a read-only session does not
+have (`harness-readonly-system-prompt'); afterwards they learn how to
+hand the finished work in, and, in a worktree, how it reaches the main
+branch -- or, in the main tree \(`harness-tasks--main-tree-p'), that the
+work takes effect there."
   (let ((task (harness-tasks--by-session (plist-get session :id))))
     (cond
+     ((and task (harness-tasks--refinement-p task) (harness-tasks--plan-p task)
+           (not (harness-string-blank-p harness-tasks--plan-prompt)))
+      (harness-readonly-system-prompt prompt harness-tasks--plan-prompt))
      ((and task (harness-tasks--refinement-p task)
            (not (harness-string-blank-p harness-tasks--refine-prompt)))
-      (concat prompt "\n\n" harness-tasks--refine-prompt "\n"))
+      (harness-readonly-system-prompt prompt harness-tasks--refine-prompt))
      ((not task) prompt)
      (t
       (concat prompt "\n\n## Task mode\n"
@@ -2805,12 +2909,15 @@ so no idle session is left behind."
 
 (defun harness-tasks--start-text (task)
   "Return the message that starts the work of backlog TASK.
+A planned task's opens with `harness-tasks--plan-start-message', any
+other's with `harness-tasks--start-message'.
 It carries the write-up in full, as edited since, so the work never
 depends on the provider remembering the refinement (after moving into a
 worktree it does not), and the request it was written from, quoted."
   (let ((prompt (plist-get task :prompt))
         (note (plist-get task :note)))
-    (concat harness-tasks--start-message "\n\n" prompt
+    (concat (if (harness-tasks--plan-p task) harness-tasks--plan-start-message harness-tasks--start-message)
+            "\n\n" prompt
             (if (and note (not (equal (string-trim note) (string-trim prompt))))
                 (concat "\n\n---\nIt was written up from this request (the write-up above takes precedence):\n\n"
                         (harness-tasks--quote note))
@@ -3253,27 +3360,102 @@ That is once it made `harness-tasks--refine-tool-calls' tool calls.")
 (defvar harness-tasks--refine-calls (make-hash-table :test 'equal)
   "Session id -> tool calls of the write-up turn running in it.")
 
-(defun harness-tasks--on-tool-call (session-id &rest _)
+(defun harness-tasks--plan-enough-text (n)
+  "Return the message that tells a planning turn of N tool calls to hand in."
+  (format "%d tool calls so far: that is enough looking around. Hand the plan in now with submit_task_plan, with what you know, and put what you could not settle in it as open questions." n))
+
+(defun harness-tasks--on-tool-call (session-id &optional node &rest _)
   "Count the tool calls of a write-up in SESSION-ID; tell it to finish in time.
-At `harness-tasks--refine-tool-calls' calls it is steered to write up now."
-  (when-let* ((limit harness-tasks--refine-tool-calls)
-              (task (harness-tasks--by-session session-id))
+NODE is the call's transcript node.  A brief write-up is steered once,
+at `harness-tasks--refine-tool-calls' calls, to write up now.  A plan is
+steered to hand itself in at `harness-tasks--plan-tool-calls' calls and
+every half budget after that (`harness-readonly-budget-point-p'): a
+nudge, never a stop -- and none on the call that hands the plan in."
+  (when-let* ((task (harness-tasks--by-session session-id))
               ((eq (plist-get task :state) 'refining)))
     (let ((n (1+ (gethash session-id harness-tasks--refine-calls 0))))
       (puthash session-id n harness-tasks--refine-calls)
-      (when (= n limit)
-        (harness-catch (harness-call-async 'agent/prompt session-id harness-tasks--refine-enough-text
-                                           (harness-tasks--from-harness))
+      (when-let* ((text (if (harness-tasks--plan-p task)
+                            (and (not (equal (plist-get node :tool) harness-tasks--plan-tool))
+                                 (harness-readonly-budget-point-p n harness-tasks--plan-tool-calls)
+                                 (harness-tasks--plan-enough-text n))
+                          (and harness-tasks--refine-tool-calls (= n harness-tasks--refine-tool-calls)
+                               harness-tasks--refine-enough-text))))
+        (harness-catch (harness-call-async 'agent/prompt session-id text (harness-tasks--from-harness))
                        #'ignore)))))
+
+(defun harness-tasks--base-model (task)
+  "Return the model TASK's work would run on without a plan.
+That is TASK's `:model', else `harness-tasks-model', else what its
+directory configures; nil when none says."
+  (or (plist-get task :model) harness-tasks-model
+      (harness-tasks--config 'harness-model (plist-get task :cwd))))
+
+(defun harness-tasks--tier-model (tier model)
+  "Return the model of TIER of MODEL's provider, or nil.
+TIER is `simple', `medium', `hard' or `frontier' (`provider/tier-model')
+and MODEL, a task's model, names the provider.  Nil when that provider
+has no model for TIER, or there is no MODEL to ask about."
+  (when (and tier (stringp model) (not (harness-string-blank-p model))
+             (harness-method-exists-p 'provider/tier-model))
+    (let ((found (condition-case err
+                     (harness-call 'provider/tier-model model tier)
+                   (error (harness-log 'warn "tasks: no %s model for %s: %s" tier model
+                                       (harness-error-message err))
+                          nil))))
+      (and (stringp found) (not (harness-string-blank-p found)) found))))
+
+(defun harness-tasks--tier-thinking (tier model)
+  "Return the thinking level MODEL's provider runs its TIER model at, or nil.
+Only a provider that says names one (`provider/tier-thinking'), as
+DeepSeek runs its one model at a level per tier; Claude does not."
+  (and tier (stringp model) (harness-method-exists-p 'provider/tier-thinking)
+       (let ((level (ignore-errors (harness-call 'provider/tier-thinking model tier))))
+         (and (stringp level) (not (harness-string-blank-p level)) level))))
+
+(defun harness-tasks--plan-model (task)
+  "Return the model that plans TASK by default: the plan tier of its model.
+That is `harness-tasks--plan-tier' of the provider of TASK's model
+\(`harness-tasks--base-model'), else that model itself."
+  (let ((base (harness-tasks--base-model task)))
+    (or (harness-tasks--tier-model harness-tasks--plan-tier base) base)))
+
+(defun harness-tasks--plan-thinking (task)
+  "Return the thinking level TASK is planned at by default, or nil.
+That is the level the provider runs the plan's tier at, else TASK's
+own, else `harness-tasks-thinking'."
+  (or (harness-tasks--tier-thinking harness-tasks--plan-tier (harness-tasks--base-model task))
+      (plist-get task :thinking) harness-tasks-thinking))
+
+(defun harness-tasks--plan-work (task)
+  "Return (MODEL . THINKING), what a planned TASK's work runs on by default.
+The model is `harness-tasks--plan-work-tier' of the provider of the task
+model, nil when it has none (the task model then stands); the thinking
+level is the one that provider runs the tier at, else nil."
+  (let ((base (harness-tasks--base-model task)))
+    (cons (harness-tasks--tier-model harness-tasks--plan-work-tier base)
+          (harness-tasks--tier-thinking harness-tasks--plan-work-tier base))))
 
 (defun harness-tasks--refine-settings (task)
   "Return the `session/create' settings of the session refining TASK.
 Ask mode allows reads, and non-interactive the session never waits for
 the user; whatever would ask `harness-tasks--write-up-gate' denies with
 a hint, which keeps a write-up a write-up.  The task context limit
-rides along, so a write-up that reads a lot compacts sooner too."
-  (let ((model (or harness-tasks-refine-model (plist-get task :model) harness-tasks-model))
-        (thinking (or harness-tasks-refine-thinking (plist-get task :thinking) harness-tasks-thinking)))
+rides along, so a write-up that reads a lot compacts sooner too.  The
+model and thinking level are the task's own for its write-up
+\(`:refine-model', `:refine-thinking'), else, for a plan, those of
+`harness-tasks--plan-model' and `harness-tasks--plan-thinking', and for
+a brief write-up `harness-tasks-refine-model' and
+`harness-tasks-refine-thinking', else the task's."
+  (let* ((plan (harness-tasks--plan-p task))
+         (model (or (plist-get task :refine-model)
+                    (if plan
+                        (harness-tasks--plan-model task)
+                      (or harness-tasks-refine-model (plist-get task :model) harness-tasks-model))))
+         (thinking (or (plist-get task :refine-thinking)
+                       (if plan
+                           (harness-tasks--plan-thinking task)
+                         (or harness-tasks-refine-thinking (plist-get task :thinking) harness-tasks-thinking)))))
     (append (list :permission-mode 'ask :non-interactive t)
             (and model (list :model model))
             (and thinking (list :thinking thinking))
@@ -3284,21 +3466,116 @@ rides along, so a write-up that reads a lot compacts sooner too."
   "Write the task up from what you can read; put what you could not check in the write-up as an open question."
   "Hint of a call denied because a backlog write-up only reads.")
 
+(defun harness-tasks--write-up-allows (task request)
+  "Return the decision that lets REQUEST, a call of TASK's write-up, run, or nil.
+Two calls that would ask are the write-up's own: the plan a planning
+session hands in (`harness-tasks--plan-tool'), and bash while the
+readonly module holds the session (`harness-tasks--readonly-policy')
+and the sandbox confines the command, which then runs read-only and
+offline (harness-readonly.el)."
+  (let ((tool (plist-get request :tool))
+        (session (plist-get request :session)))
+    (cond
+     ((and (equal tool harness-tasks--plan-tool) (harness-tasks--plan-p task))
+      (list :behavior 'allow :reason "handing the plan in is what this session is for"))
+     ((and (equal tool "bash") (harness-module-ready-p 'readonly)
+           (harness-readonly-session-p session)
+           (harness-readonly-confined-p (or (car (plist-get request :paths)) (harness-readonly-dir session))))
+      (list :behavior 'allow :reason "a write-up's commands run read-only and offline in the sandbox")))))
+
 (defun harness-tasks--write-up-gate (decision next request)
   "Keep the turns that write a backlog task up read-only.
 A `permission/decide' stage at 25, after the mode and its rules and
 before the auto-mode judge: a call of such a turn (see
 `harness-tasks--refinement-p') still undecided there would ask the
 user, or, the session being non-interactive, go to the judge.  It is
-denied instead, for good.  DECISION is the current value and NEXT
+denied instead, for good -- unless it is the write-up's own
+\(`harness-tasks--write-up-allows'): a plan handed in, or a command the
+sandbox holds read-only.  DECISION is the current value and NEXT
 continues the chain with REQUEST's decision."
   (let ((task (and (eq (plist-get decision :behavior) 'ask)
                    (harness-tasks--by-session (plist-get (plist-get request :session) :id)))))
-    (funcall next (if (and task (harness-tasks--refinement-p task))
-                      (list :behavior 'deny :final t
-                            :reason "this session writes a backlog task up rather than doing it, so it only reads"
-                            :hint harness-tasks--write-up-hint)
-                    decision))))
+    (funcall next (cond
+                   ((not (and task (harness-tasks--refinement-p task))) decision)
+                   ((harness-tasks--write-up-allows task request))
+                   (t (list :behavior 'deny :final t
+                            :reason (if (harness-tasks--plan-p task)
+                                        "this session plans the task rather than doing it, so it only reads"
+                                      "this session writes a backlog task up rather than doing it, so it only reads")
+                            :hint (if (harness-tasks--plan-p task)
+                                      harness-tasks--plan-hint
+                                    harness-tasks--write-up-hint)))))))
+
+;;;; Read-only write-ups
+
+(defun harness-tasks--readonly-policy (session)
+  "Return the read-only policy of SESSION when it writes a task up or plans it.
+The readonly module (harness-readonly.el) then offers it only the
+reading tools -- and `submit_task_plan' and `todo_write' when it plans --
+and bash only read-only and offline where the sandbox confines it, and
+denies anything else for good.  `web_fetch' is left out: in the
+write-up's ask mode it would only be refused (`web_search' never asks).
+Nil for any other session."
+  (when-let* ((task (harness-tasks--by-session (plist-get session :id)))
+              ((harness-tasks--refinement-p task)))
+    (if (harness-tasks--plan-p task)
+        (list :tools (list harness-tasks--plan-tool "todo_write") :except '("web_fetch")
+              :label "plan mode" :doing "plans the task for another agent to carry out"
+              :hint harness-tasks--plan-hint)
+      (list :except '("web_fetch")
+            :label "write-up" :doing "writes the task up for the backlog"
+            :hint harness-tasks--write-up-hint))))
+
+(defun harness-tasks--tools (names session)
+  "Offer `submit_task_plan' among NAMES only to a SESSION that plans a task.
+An `agent/tools' filter.  The catalogue (SESSION nil) keeps every tool."
+  (if (and session (member harness-tasks--plan-tool names)
+           (not (when-let* ((task (harness-tasks--by-session (plist-get session :id))))
+                  (and (harness-tasks--refinement-p task) (harness-tasks--plan-p task)))))
+      (remove harness-tasks--plan-tool names)
+    names))
+
+;;;; Handing a plan in
+
+(defvar harness-tasks--plans-submitted (make-hash-table :test 'equal)
+  "Session id -> t once its running turn handed a plan in (`task/hand-in-plan').
+The end of that turn then leaves the task as the plan made it, in the
+backlog, rather than taking its last reply for a write-up.")
+
+(defvar harness-tasks--plan-reminders (make-hash-table :test 'equal)
+  "Session id -> times its running planning turn was sent back to hand its plan in.")
+
+(defun harness-tasks--plan-stop-answer (value session)
+  "Return what the `agent/stop' chain goes on with for the stop VALUE of SESSION.
+A session planning a task whose turn stopped without handing a plan in
+\(`task/hand-in-plan') or refusing the task as a duplicate is sent back
+with `harness-tasks--plan-reminder', at most
+`harness-tasks--plan-max-reminders' times a turn; after that its last
+reply is taken for the plan, as a write-up's is.  Any other value goes
+through unchanged."
+  (let* ((sid (plist-get session :id))
+         (task (and sid (harness-tasks--by-session sid))))
+    (cond
+     ((not (and (harness-json-true-p (plist-get value :stop))
+                task (eq (plist-get task :state) 'refining) (harness-tasks--plan-p task)
+                (not (gethash sid harness-tasks--plans-submitted))
+                (not (harness-tasks--refusal (harness-tasks--last-reply sid)))))
+      value)
+     ((< (gethash sid harness-tasks--plan-reminders 0) harness-tasks--plan-max-reminders)
+      (cl-incf (gethash sid harness-tasks--plan-reminders 0))
+      (list :stop nil :message harness-tasks--plan-reminder
+            :from (plist-get (harness-tasks--from-harness) :from)))
+     (t value))))
+
+(defun harness-tasks--plan-stop (value next session)
+  "Send a planning model that stopped without a plan back (`agent/stop').
+VALUE and SESSION are the filter's, and NEXT continues the chain with
+the answer of `harness-tasks--plan-stop-answer'.  A failure here lets
+the model stop: the reminder only nudges."
+  (funcall next (condition-case err
+                    (harness-tasks--plan-stop-answer value session)
+                  (error (harness-log 'error "tasks: the plan's stop rule failed: %S" err)
+                         value))))
 
 (defun harness-tasks--refine-failed (id err)
   "Record ERR as the reason task ID's refinement stopped."
@@ -3404,7 +3681,9 @@ exactly one task of TASK's project.  Return nil when it names no task."
 
 (defun harness-tasks--finish-refinement (id reason)
   "Make the reply that ended task ID's refinement turn (with REASON) its prompt.
-A complete turn puts the task in the backlog, unless its reply refuses
+A plan handed in during the turn (`task/hand-in-plan') put the task in
+the backlog already, and stands.  Otherwise a complete turn puts the
+task in the backlog, unless its reply refuses
 the task as a duplicate (`harness-tasks--refusal').  That, like any
 other end, leaves it refining with an outcome, in front of the user: a
 refusal is `duplicate', with `:duplicate-of' the task it names (nil
@@ -3412,12 +3691,18 @@ when it names none) and its message as `:error'.  Only a reply naming a
 task of this harness, or what looks like one of its ids, refuses: a
 write-up that merely opens \"Duplicate of a task …\" is a write-up."
   (let* ((task (harness-tasks--get id))
-         (reply (and (eq reason 'end-turn) (plist-get task :session)
-                     (harness-tasks--last-reply (plist-get task :session))))
+         (sid (plist-get task :session))
+         (handed-in (and sid (gethash sid harness-tasks--plans-submitted)))
+         (reply (and (not handed-in) (eq reason 'end-turn) sid
+                     (harness-tasks--last-reply sid)))
          (refusal (and reply (harness-tasks--refusal reply)))
          (of (and refusal (harness-tasks--duplicate-of task (car refusal))))
          (refuse (and refusal (or of (string-match-p "\\`t-[A-Za-z0-9]+\\'" (car refusal))))))
+    (when sid (remhash sid harness-tasks--plans-submitted))
     (cond
+     ;; The plan was handed in during the turn (`task/hand-in-plan'): the
+     ;; task is in the backlog with it, whatever the turn did after.
+     (handed-in nil)
      ((harness-string-blank-p reply)
       (harness-tasks--set id :state 'refining :duplicate-of nil
                           :outcome (if (eq reason 'end-turn) 'error reason)
@@ -3523,6 +3808,8 @@ task's worktree is locked again for the new work.  A task that waited
 in the queue is no longer waiting: why it did (`:return-reason') is
 forgotten."
   (remhash session-id harness-tasks--refine-calls)
+  (remhash session-id harness-tasks--plans-submitted)
+  (remhash session-id harness-tasks--plan-reminders)
   (when-let* ((task (harness-tasks--by-session session-id)))
     (remhash (plist-get task :id) harness-tasks--starting)
     (remhash (plist-get task :id) harness-tasks--waking)
@@ -3589,6 +3876,7 @@ returned task is left out of the scheduling pass after such a turn
 too, so that the reports of the work stopped with its return, refused
 while it waits, do not start it again: the return starts nothing."
   (remhash session-id harness-tasks--refine-calls)
+  (remhash session-id harness-tasks--plan-reminders)
   (when-let* ((task (harness-tasks--by-session session-id)))
     (let ((id (plist-get task :id))
           (waiting nil)
@@ -3794,6 +4082,12 @@ directory's `harness-non-interactive' is on.  With `:refine'
 the task goes to the backlog instead: an agent writes it up (state
 refining), then it waits in the backlog until `task/start' -- unless the
 agent finds the board has it already, and refuses it as a duplicate.
+With `:plan' (which implies `:refine') the write-up is a plan: an agent
+on a strong model (the hard tier of the task model's provider) reads
+the code and hands in a plan for a cheaper model, which the task's work
+then runs on -- `:model' and `:thinking' when given, else the medium
+tier (see Plan mode above).  `:refine-model' and `:refine-thinking' set
+the model and thinking level of the write-up or plan itself.
 A refined task keeps `:main-tree' for when it finally starts.
 Either way the task is named from PROMPT at once, beside everything
 else (see Titles above): its `:name' comes while it waits, and its
@@ -3801,7 +4095,8 @@ session takes it."
   (when (harness-string-blank-p prompt) (error "A task needs a prompt"))
   (harness-tasks--load)
   (let* ((cwd (file-name-as-directory (expand-file-name cwd)))
-         (refine (harness-json-true-p (plist-get opts :refine)))
+         (plan (harness-json-true-p (plist-get opts :plan)))
+         (refine (or plan (harness-json-true-p (plist-get opts :refine))))
          (main-tree (and (harness-json-true-p (plist-get opts :main-tree)) t))
          ;; The priority is the session's, which the task gets now: the
          ;; priority plugin reads the name (and refuses one no level
@@ -3833,6 +4128,19 @@ session takes it."
     (if refine
         (setq task (append task (list :backlog t :note (string-trim prompt))))
       (setq task (append task (list :queued-at created))))
+    (dolist (key '(:refine-model :refine-thinking))
+      (let ((value (plist-get opts key)))
+        (when (and (stringp value) (not (harness-string-blank-p value)))
+          (setq task (plist-put task key (string-trim value))))))
+    (when plan
+      (setq task (plist-put task :plan t))
+      ;; The work runs on the model the plan is written for, unless the
+      ;; submitter named one.
+      (pcase-let ((`(,model . ,thinking) (harness-tasks--plan-work task)))
+        (when (and model (not (plist-get task :model)))
+          (setq task (plist-put task :model model)))
+        (when (and thinking (not (plist-get task :thinking)))
+          (setq task (plist-put task :thinking thinking)))))
     (harness-tasks--put task)
     ;; Its session from the start, holding the task's priority; before
     ;; the naming request goes out, so the session leaves its naming to
@@ -3864,6 +4172,33 @@ It must be open, not a task already and not a conversation about the board."
   (and (not (eq (plist-get session :status) 'inactive))
        (not (harness-tasks--by-session (plist-get session :id)))
        (not (harness-tasks--btw-p session))))
+
+(harness-defmethod task/hand-in-plan (session-id title plan)
+  "Hand in PLAN, titled TITLE, for the task SESSION-ID plans; return the task.
+SESSION-ID is the session planning a backlog task (Plan mode, see
+`harness-tasks--plan-p').  The plan, opened by its title, becomes the
+task's prompt, and the task waits in the backlog until `task/start', as
+a written-up one does; the end of the running turn leaves it so.  The
+plan shows in the session's transcript as the `plan' tool shows one.
+Signals when the session plans no task, or TITLE or PLAN is blank.
+The `submit_task_plan' tool calls this (harness-tools-sessions.el)."
+  (let ((task (harness-tasks--by-session session-id)))
+    (unless (and task (harness-tasks--refinement-p task) (harness-tasks--plan-p task))
+      (error "This session plans no task: submit_task_plan is for the session that plans a backlog task"))
+    (when (harness-string-blank-p plan)
+      (error "The plan is empty: write it, in markdown"))
+    (when (harness-string-blank-p title)
+      (error "The title is empty: give the task a short imperative title"))
+    (let ((title (harness-first-line (string-trim title)))
+          (plan (string-trim plan))
+          (id (plist-get task :id)))
+      (harness-tasks--set id :state 'pending :backlog t :prompt (concat title "\n\n" plan)
+                          :refined (float-time) :outcome nil :error nil :duplicate-of nil)
+      (puthash session-id t harness-tasks--plans-submitted)
+      (harness-call 'session/set-plan session-id plan)
+      (harness-call 'session/append session-id (list :kind 'plan :content plan :title title))
+      (harness-call 'session/hint session-id "Plan handed in: the task waits in the Backlog until it is started")
+      (harness-call 'task/get id))))
 
 (harness-defmethod task/adoptable (&optional cwd)
   "Return the open sessions of CWD's project (every project without CWD) that
@@ -3971,8 +4306,19 @@ a setting of its own would get, `harness-supervisor-tasks';
 review, else false (not nil, which JSON could not tell from a harness
 that does not say): `harness-tasks-require-verification'.
 `:queue-suspended' is t while the project's pending queue is suspended
-\(`task/suspend-queue')."
-  (let ((root (and cwd (harness-tasks--project cwd))))
+\(`task/suspend-queue').  The models and thinking levels a new task's
+write-up would get are there too, resolved for the project's task
+model: `:refine-model' and `:refine-thinking' for a brief write-up
+\(Refine), `:plan-model' and `:plan-thinking' for a plan (Plan), and
+`:plan-work-model' and `:plan-work-thinking' for the work after a
+plan.  That work runs hands-on, whatever `:supervisor' says, unless the
+task was given a setting of its own (the supervisor module's
+`harness-supervisor--task-value')."
+  (let* ((root (and cwd (harness-tasks--project cwd)))
+         (model (or harness-tasks-model (harness-tasks--config 'harness-model root)))
+         (thinking (or harness-tasks-thinking (harness-tasks--config 'harness-thinking root)))
+         (proto (list :model model :thinking thinking :cwd root))
+         (work (harness-tasks--plan-work proto)))
     (append
      (list :max-running harness-tasks-max-running
            :queue-suspended (if (harness-tasks--suspended-p root) t :false)
@@ -3981,9 +4327,15 @@ that does not say): `harness-tasks-require-verification'.
                                      (harness-json-true-p (harness-tasks--config 'harness-non-interactive root)))
                                  t)
            :require-verification (if harness-tasks-require-verification t :false)
-           :model (or harness-tasks-model (harness-tasks--config 'harness-model root))
-           :thinking (or harness-tasks-thinking (harness-tasks--config 'harness-thinking root))
-           :worktrees (and root (harness-tasks--git-p root) t))
+           :model model
+           :thinking thinking
+           :worktrees (and root (harness-tasks--git-p root) t)
+           :refine-model (or harness-tasks-refine-model model)
+           :refine-thinking (or harness-tasks-refine-thinking thinking)
+           :plan-model (harness-tasks--plan-model proto)
+           :plan-thinking (harness-tasks--plan-thinking proto)
+           :plan-work-model (or (car work) model)
+           :plan-work-thinking (or (cdr work) thinking))
      ;; A harness without the supervisor module has no such setting to
      ;; report, and its tasks work as they always did.
      (and (boundp 'harness-supervisor-tasks)
@@ -4776,14 +5128,28 @@ up again, merges in flight are queued again and waiting tasks start."
   (harness-add-filter 'naming/system-prompt #'harness-tasks--naming-prompt 60)
   (harness-add-filter 'naming/auto-p #'harness-tasks--auto-name-p)
   (harness-add-filter 'permission/decide #'harness-tasks--write-up-gate 25)
+  (harness-tasks--hook-write-ups)
   (harness-add-filter 'agent/message #'harness-tasks--on-message)
   ;; First of the gates: a turn it refuses needs no compaction or fallback.
   (harness-add-filter 'agent/before-turn #'harness-tasks--before-turn 2)
   (harness-add-filter 'session/before-move #'harness-tasks--before-move)
   (harness-tasks--pick-up))
 
+(defun harness-tasks--hook-write-ups ()
+  "Hold write-ups and plans read-only, and plans to handing themselves in.
+The read-only policy goes to the readonly module
+\(`harness-tasks--readonly-policy'), the tool filter offers the plan's
+own tool to planning sessions alone, and the stop rule sends a planning
+turn that stopped without a plan back (`harness-tasks--plan-stop')."
+  (harness-readonly-register 'tasks #'harness-tasks--readonly-policy)
+  (harness-add-filter 'agent/tools #'harness-tasks--tools 50)
+  (harness-add-filter 'agent/stop #'harness-tasks--plan-stop))
+
 (defun harness-tasks--shutdown ()
-  "Write what waits to be written, and drop the timers of blocked tasks."
+  "Write what waits to be written, stop holding write-ups read-only, and drop the timers of blocked tasks."
+  (harness-readonly-unregister 'tasks)
+  (harness-remove-filter 'agent/tools #'harness-tasks--tools)
+  (harness-remove-filter 'agent/stop #'harness-tasks--plan-stop)
   (maphash (lambda (_ timer) (cancel-timer timer)) harness-tasks--lend-timers)
   (clrhash harness-tasks--lend-timers)
   (harness-tasks-flush))
@@ -4818,6 +5184,7 @@ up again, merges in flight are queued again and waiting tasks start."
   (harness-on 'session/status #'harness-tasks--on-session-status)
   (harness-run-soon #'harness-tasks--arm-lend-timers)
   (harness-add-filter 'permission/decide #'harness-tasks--write-up-gate 25)
+  (harness-tasks--hook-write-ups)
   (harness-add-filter 'agent/message #'harness-tasks--on-message)
   (harness-add-filter 'agent/before-turn #'harness-tasks--before-turn 2)
   (harness-add-filter 'session/before-move #'harness-tasks--before-move)

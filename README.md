@@ -55,7 +55,9 @@ OpenAI-compatible APIs and AWS Bedrock.
 - **Task board.** Run tasks in parallel, each in its own session and git
   worktree, review the results, and merge them back through a merge
   queue. A per-project limit on running tasks starts the waiting ones
-  by priority (low, medium, high).
+  by priority (low, medium, high). A task can start at once (Submit),
+  be written up by an agent first (Refine), or be planned first by a
+  strong model, read-only, for a cheaper one to carry out (Plan).
 - **Quick search.** Say what you want -- "how do I attach a file?",
   "where did I debug the merge queue?", "the task about the docs" -- and
   a cheap model finds the command to run, the session to open, at the
@@ -1731,9 +1733,11 @@ call to one anyway, in every permission mode.
   of its own, set on the task board's settings line for the next task,
   or with `C-c h V` in the session list on the sessions of the tasks you
   marked (see [Session list](#session-list)): its session then starts
-  with that, whatever the setting says. Sub-agents, BTW side
-  conversations and the harness's own model calls never supervise, and a
-  fork starts as its parent is.
+  with that, whatever the setting says. A task planned in the board's
+  [Plan mode](#task-board) works hands-on, unjudged, unless it carries a
+  mode of its own: a strong model planned it already. Sub-agents, BTW
+  side conversations and the harness's own model calls never supervise,
+  and a fork starts as its parent is.
 
 - **The session judge.** Under `auto` the harness asks
   `harness-supervisor-judge-model` (by default the session provider's
@@ -2195,22 +2199,66 @@ your checkout itself can be submitted to the **main tree** instead (the
 `own worktree` / `main tree` switch below).
 
 - Write a task in the compose box at the bottom of the board and press
-  `C-c C-c` to submit it. `C-c C-t` switches the box between **Submit**,
-  which starts the task at once, and **Refine**, which has an agent
-  write the task up first. A refined task waits in *Backlog*, across
-  restarts, until you start it with `s`. *Pending* holds only the tasks
+  `C-c C-c` to submit it. `C-c C-t` cycles the box through three modes
+  (`C-u C-c C-t` asks for one by name;
+  `harness-ui-tasks-refine-by-default` picks the board's first):
+  - **Submit** starts the task at once.
+  - **Refine** has an agent write the task up first, briefly: it reads
+    as much of the code as it needs to name the files and functions,
+    changes nothing, and turns a sentence into a task description.
+  - **Plan** has a strong model -- the hard tier of the task model's
+    provider, Opus for Claude (see [Model tiers](#model-tiers)) -- read
+    the code, make the decisions and hand in a plan
+    (`submit_task_plan`) written for a cheaper model, the medium tier
+    (Sonnet), which carries it out once the task starts. The planning
+    session only reads, as a supervisor does: it gets the reading tools
+    alone, its shell runs read-only and offline, anything that would
+    ask you is denied, and it is told to hand the plan in after about 40
+    tool calls. A turn that ends without a plan is sent back, twice at
+    most, to hand one in. The plan becomes the task's prompt and its
+    session's plan, and a reply to the planning session is feedback it
+    answers with a new plan. Plan is there beside
+    [supervisor mode](#supervisor-mode), not instead of it: a planned
+    task's work runs hands-on, since its plan is made already, while
+    the work of a submitted or refined task supervises or not as its
+    switch says.
+
+  A refined or planned task waits in *Backlog*, across restarts, until
+  you start it with `s`. *Pending* holds only the tasks
   waiting for a slot, which the queue starts by itself as slots free;
   *Backlog* is its own section, and the queue never starts one of
   those: `Q` on a backlog card (or its [Queue it] button) puts it back
   in *Pending*, where it starts by itself as soon as a slot frees, and
-  `s` starts it at once. Refining looks at the board
+  `s` starts it at once. Refining and planning look at the board
   first: a task it already has is refused rather than written up (drop
-  it, or write it up anyway), and the write-up names the tasks working
-  on the same code, to coordinate with instead of redoing their work.
+  it, or write it up anyway), and the write-up or plan names the tasks
+  working on the same code, to coordinate with instead of redoing their
+  work.
+- The lines above the compose box are the current mode's alone. A step
+  of a task has a model and a thinking level of its own, and nothing
+  else. In Refine and Plan a line per step says which model does it, at
+  which thinking level: first `refine` or `plan`, which write the task
+  up or plan it, then `work`, which does it once you start it. Below
+  them one line holds what the whole task works with, whatever step it
+  is in -- permission mode, interactive or not, supervisor mode, where
+  it works -- and ends with how many tasks work at once. Submit has
+  that line alone, starting with the work's model and thinking level.
+  Click a model or a thinking level to change it for the board's new
+  tasks.
+  Refine writes up on `harness-tasks-refine-model` (the task's own
+  model when nil) at `harness-tasks-refine-thinking`, and works on the
+  task model. Plan plans on the hard tier and works on the medium tier
+  of the task model's provider, falling back on the task model where
+  the provider names no model for a tier; the choices travel with each
+  task (`task_submit`'s `plan` does the same for an agent), so the tiers
+  are only defaults, not options.
 - `harness-tasks-max-running` limits how many of a project's tasks work
   at once (nil, the default, means no limit). The settings line above
-  the compose box ends with it, as `N at a time`, or `all at once`
-  without a limit: click it to set another, a number or `no limit`.
+  the compose box ends with it in every mode, as
+  `N at a time`, or `all at once` without a limit: click it to set
+  another, a number or `no limit`. A write-up or a plan takes no slot:
+  the limit counts the tasks at work, and a refined or planned task
+  takes one only once you start it.
   Like turning review off, that sets the option for every project and
   saves it for later sessions. Raising the limit starts waiting tasks
   at once, and lowering it stops no task at work; at `0` no task starts
@@ -2295,13 +2343,17 @@ your checkout itself can be submitted to the **main tree** instead (the
   of the task at point. New tasks run in auto mode and are interactive
   unless your configuration says otherwise, so a request that needs
   you, such as access to another directory, waits for you in *Requires
-  your input* instead of being denied. While the supervisor module is
+  your input* instead of being denied. In Refine and Plan the model
+  and thinking level these set are the `work` line's, and the message
+  says so; the `refine` or `plan` line's are set by a click on them.
+  While the supervisor module is
   loaded the settings line also shows a `supervisor` / `hands-on`
   switch, the same one a session's header has: it sets
   [supervisor mode](#supervisor-mode) for the task about to be
-  submitted. To change many tasks at once, mark their sessions in the
-  session list and use the same keys there (see
-  [Session list](#session-list)).
+  submitted. Plan has none, as a planned task works hands-on: there
+  `C-c h V` says so instead of changing anything. To change many tasks
+  at once, mark their sessions in the session list and use the same keys
+  there (see [Session list](#session-list)).
 - The `own worktree` / `main tree` switch beside those settings, in a
   git project, picks where the next task works: **own worktree**, on its
   own branch, merged back when it is done, or **main tree**, the
@@ -2323,7 +2375,7 @@ your checkout itself can be submitted to the **main tree** instead (the
   below); the only other task stopped to free a slot is one working in
   a slot lent while its lender waited on you, once you answer, whatever
   the priorities. A backlog task still waits for you to start it. The
-  `medium priority` button beside the Submit / Refine switch sets the
+  `medium priority` button beside the Submit / Refine / Plan switch sets the
   next task's (a click cycles it through high and low);
   `+` and `-` on a card raise and lower that task's — the session's it
   already has, waiting or not — to reorder the
@@ -2559,8 +2611,8 @@ your checkout itself can be submitted to the **main tree** instead (the
 - A cheap model titles a task like a ticket as soon as you submit it,
   from its prompt, so the board and `task_list` show that title, not the
   raw prompt, even while the task waits for a slot; the card's second
-  line then shows the prompt. A refined task is titled from what you
-  wrote, the same way. When the task starts, its session takes the
+  line then shows the prompt. A refined or planned task is titled from
+  what you wrote, the same way. When the task starts, its session takes the
   title rather than being named again, and shows in the session list
   (`C-c h l`) under it, of kind task. Nothing waits for the title: a
   task whose naming fails starts all the same, and its session is named
@@ -3144,16 +3196,17 @@ cached for it, so a changed URL or model list shows at once.
 ### Model tiers
 
 Some calls get their model from the harness rather than from you: the
-auto-mode judge, a session's title, a brief summary, the workers of a
-supervisor's plan. The harness picks such a model by tier, from the
+auto-mode judge, a session's title, a brief summary, the plan and the
+work of a task in the board's Plan mode (until you pick others), the
+workers of a supervisor's plan. The harness picks such a model by tier, from the
 provider the session is on. Each provider names a model for each of four
 tiers, weakest first:
 
 | Tier | For | Claude | DeepSeek |
 |---|---|---|---|
 | simple | Small, well-specified work, and the harness's own calls: the judge, titles, summaries | Haiku | Flash, low thinking |
-| medium | Everyday work: the steps of a supervisor's plan | Sonnet | Flash, high thinking |
-| hard | The strongest model the harness picks: what a supervisor plans on, and a step retried after its worker was not up to it | Opus | Flash, max thinking |
+| medium | Everyday work: a planned task's work, the steps of a supervisor's plan | Sonnet | Flash, high thinking |
+| hard | The strongest model the harness picks: what a task in Plan mode and a supervisor plan on, and a step retried after its worker was not up to it | Opus | Flash, max thinking |
 | frontier | The very top model. Only you pick it; the harness never does | Fable | none |
 
 A tier names a model (a name, id or regexp of the provider's
@@ -3551,7 +3604,7 @@ ACP, so it works the same with a local or a remote harness.
 
 | Area | Modules |
 |---|---|
-| Core | `config` `project` `store` `session` `agent` `perms` `sandbox` `secrets` `redact` `usage` `compaction` `cowboy` `handoff` `naming` `judge` `skills` `worktree` `merge` `tasks` `notifications` `tasks-notify` `supervisor` `seed` `acp` `acp-remote` |
+| Core | `config` `project` `store` `session` `agent` `perms` `sandbox` `secrets` `redact` `usage` `compaction` `cowboy` `handoff` `naming` `judge` `skills` `worktree` `merge` `tasks` `notifications` `tasks-notify` `readonly` `supervisor` `seed` `acp` `acp-remote` |
 | Providers | `provider` `provider-claude` `provider-copilot` `provider-openai` `provider-deepseek` `provider-bedrock` `provider-demo` |
 | Tools | `tools` `tools-fs` `tools-shell` `tools-ssh` `tools-emacs` `tools-web` `tools-agent` `tools-sessions` `tools-events` `tools-notify` |
 | User interface | `ui` `ui-chat` `ui-compose` `ui-compact` `ui-cowboy` `ui-sessions` `ui-tasks` `ui-slots` `ui-tree` `ui-notify` `ui-usage` `ui-worktree` `ui-merge` `ui-children` `ui-btw` `ui-media` `ui-dirs` `ui-config` `ui-qr` `ui-remote` `ui-supervisor` `ui-secrets` |

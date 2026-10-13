@@ -30,6 +30,7 @@
 (defvar harness-supervisor--calls)
 (defvar harness-supervisor--configured)
 (defvar harness-supervisor--raised)
+(defvar harness-readonly--policies)
 (defvar harness-tasks--table)
 (defvar harness-tasks--starting)
 (defvar harness-tasks--naming)
@@ -50,6 +51,7 @@
 (declare-function harness-provider-demo--script "harness-provider-demo")
 (declare-function harness-agent--system-prompt "harness-agent")
 (declare-function harness-supervisor--budget-point-p "harness-supervisor")
+(declare-function harness-readonly--gate "harness-readonly")
 (declare-function harness-supervisor--on-task-changed "harness-supervisor")
 (declare-function harness-supervisor--shutdown "harness-supervisor")
 (declare-function harness-supervisor--init "harness-supervisor")
@@ -96,7 +98,7 @@ gets a plain answer that stops the turn.")
   (list (list :type 'tool-call :id (format "call-%s" (harness-short-id 4)) :name name :input input)))
 
 (defconst harness-supervisor-test-modules
-  '(store project config provider provider-demo tools session agent tools-agent supervisor)
+  '(store project config provider provider-demo tools session agent tools-agent readonly supervisor)
   "The modules every test loads.")
 
 (defmacro harness-supervisor-test-with-modules (extra &rest body)
@@ -1297,6 +1299,42 @@ A write-up only reads, so it never supervises (see
       (should (eq :false (harness-supervisor-test-get sid)))
       (harness-supervisor-test-wait-task id 'done))))
 
+(ert-deftest harness-supervisor-a-planned-task-works-hands-on ()
+  "A planned task (the board's Plan mode) works hands-on, unjudged.
+A strong model planned it already, reading only, for the model its work
+runs on, so a supervisor would only plan it again: neither
+`harness-supervisor-tasks' nor its judge decide.  A setting the task was
+submitted with still wins, as any task's does."
+  (harness-supervisor-test-with-tasks
+    (setq harness-supervisor-tasks 'auto
+          harness-provider-demo-script-override #'harness-supervisor-test--answer)
+    (let* ((id (plist-get (harness-call 'task/submit default-directory "plan the parser" '(:plan t)) :id))
+           (sid (harness-supervisor-test-task-session id)))
+      (harness-test-wait (lambda () (eq 'pending (plist-get (harness-supervisor-test-task id) :state))) 30
+                         "the plan to be handed in")
+      ;; Planning only reads, as any write-up: no setting, no judge.
+      (let ((ext (harness-supervisor-test-ext sid)))
+        (should-not (plist-member ext :supervisor))
+        (should (eq t (plist-get ext :supervisor-write-up))))
+      (setq harness-supervisor-test--requests nil)
+      (harness-call 'task/start id)
+      (should (eq :false (harness-supervisor-test-get sid)))
+      (should-not (harness-supervisor-test-judge-mark sid))
+      (should-not (plist-member (harness-supervisor-test-ext sid) :supervisor-write-up))
+      (harness-supervisor-test-wait-task id 'done)
+      (should-not (harness-supervisor-test-judge-requests))
+      (should (eq :false (harness-supervisor-test-get sid))))
+    ;; Submitted to supervise all the same, it does.
+    (setq harness-supervisor-tasks nil)
+    (let* ((id (plist-get (harness-call 'task/submit default-directory "plan the lexer" '(:plan t :supervisor t))
+                          :id))
+           (sid (harness-supervisor-test-task-session id)))
+      (harness-test-wait (lambda () (eq 'pending (plist-get (harness-supervisor-test-task id) :state))) 30
+                         "the plan to be handed in")
+      (harness-call 'task/start id)
+      (should (eq t (harness-supervisor-test-get sid)))
+      (harness-supervisor-test-wait-task id 'done))))
+
 (ert-deftest harness-supervisor-only-a-new-session-is-set-by-its-task ()
   "The task events never override a switch the user flipped, or a session with a past."
   (harness-supervisor-test-with-tasks
@@ -1543,10 +1581,13 @@ selected by `:active' alone; the active sessions change as ever."
             (should (eq 'allow (plist-get (harness-supervisor-test-decide sid tool) :behavior)))))))))
 
 (ert-deftest harness-supervisor-stage-runs-before-the-jail-the-mode-and-the-judge ()
-  "The stage is at 8: after the move and sandbox guards, before the jail at 10."
+  "The stage is the readonly module's at 8: after the move and sandbox guards, before the jail at 10."
   (harness-supervisor-test-with
     (let ((priorities (mapcar #'car (gethash 'permission/decide harness--filters))))
-      (should (= 8 (car (rassq #'harness-supervisor--gate (gethash 'permission/decide harness--filters)))))
+      (should (= 8 (car (rassq #'harness-readonly--gate (gethash 'permission/decide harness--filters)))))
+      ;; The supervisor has no gate of its own: its policy is the readonly module's to apply.
+      (should (assq 'supervisor harness-readonly--policies))
+      (should-not (rassq 'harness-supervisor--gate (gethash 'permission/decide harness--filters)))
       (should (equal priorities (sort (copy-sequence priorities) #'<))))
     (should (= 90 (car (rassq #'harness-supervisor--tools (gethash 'agent/tools harness--filters)))))
     (should (> (car (rassq #'harness-supervisor--system-prompt (gethash 'agent/system-prompt harness--filters)))
@@ -1566,10 +1607,10 @@ selected by `:active' alone; the active sessions change as ever."
       (should (= 25 (funcall priority #'harness-tasks--write-up-gate)))
       (should (= 30 (funcall priority #'harness-perms--auto)))
       ;; So the order of the chain is the gate, the jail, the mode, the write-up gate, the approval, the judge.
-      (should (equal '(harness-supervisor--gate harness-perms--jail harness-perms--mode
+      (should (equal '(harness-readonly--gate harness-perms--jail harness-perms--mode
                        harness-tasks--write-up-gate harness-supervisor--approval harness-perms--auto
                        harness-perms--non-interactive harness-perms--ask)
-                     (seq-filter (lambda (fn) (memq fn '(harness-supervisor--gate harness-perms--jail
+                     (seq-filter (lambda (fn) (memq fn '(harness-readonly--gate harness-perms--jail
                                                          harness-perms--mode harness-tasks--write-up-gate
                                                          harness-supervisor--approval harness-perms--auto
                                                          harness-perms--non-interactive harness-perms--ask)))
@@ -1657,7 +1698,7 @@ selected by `:active' alone; the active sessions change as ever."
       (dolist (tool '("no_plan_needed" "submit_plan" "retry_step" "read_file"))
         (ert-info (tool)
           (let (result)
-            (harness-supervisor--gate '(:behavior ask) (lambda (d) (setq result d))
+            (harness-readonly--gate '(:behavior ask) (lambda (d) (setq result d))
                                       (list :session (harness-call 'session/get sid) :tool tool
                                             :input nil :kind 'meta :call-id "c1"))
             (should (equal '(:behavior ask) result))))))))
@@ -1758,15 +1799,15 @@ selected by `:active' alone; the active sessions change as ever."
       ;; A session nobody knows.
       (should (equal '(:read-only t :network nil)
                      (harness-run-filter 'tools/sandbox-options nil "no-such-session")))
-      ;; A failure in the check.
-      (cl-letf (((symbol-function 'harness-supervisor--active-id-p) (lambda (_id) (error "Broken"))))
+      ;; A failure in the check: the policy the readonly module asks.
+      (cl-letf (((symbol-function 'harness-supervisor--policy) (lambda (_session) (error "Broken"))))
         (let ((options (harness-run-filter 'tools/sandbox-options nil sid)))
           (should (plist-get options :read-only))
           (should-not (plist-get options :network))
           (should (plist-member options :network))))
       ;; Options from a handler before it that are no plist at all.
       (harness-add-filter 'tools/sandbox-options (lambda (_options _id) 5) 10)
-      (cl-letf (((symbol-function 'harness-supervisor--active-id-p) (lambda (_id) (error "Broken"))))
+      (cl-letf (((symbol-function 'harness-supervisor--policy) (lambda (_session) (error "Broken"))))
         (should (equal '(:read-only t :network nil) (harness-run-filter 'tools/sandbox-options nil sid)))))))
 
 (ert-deftest harness-supervisor-bash-reaches-the-sandbox-read-only ()
@@ -2353,7 +2394,8 @@ or model is coordination, like session_send, and is one."
       (should (equal '(:behavior ask) (harness-supervisor-test-decide sid "write_file")))
       ;; No stage of the module is on the bus, so not even a session that
       ;; carries the switch is decided: its plans go to the chain as any call.
-      (should-not (rassq #'harness-supervisor--gate (gethash 'permission/decide harness--filters)))
+      (should-not (assq 'supervisor harness-readonly--policies))
+      (should-not (rassq #'harness-readonly--gate (gethash 'permission/decide harness--filters)))
       (should-not (rassq #'harness-supervisor--approval (gethash 'permission/decide harness--filters)))
       (let ((marked (harness-supervisor-test-session :ext '(:supervisor t))))
         (dolist (tool '("write_file" "no_plan_needed" "submit_plan" "retry_step"))
@@ -2365,7 +2407,7 @@ or model is coordination, like session_send, and is one."
   (harness-supervisor-test-with-modules (tools-fs)
     (let ((sid (harness-supervisor-test-session)))
       (should (eq t (harness-supervisor-test-get sid)))
-      (should (rassq #'harness-supervisor--gate (gethash 'permission/decide harness--filters)))
+      (should (assq 'supervisor harness-readonly--policies))
       (should (rassq #'harness-supervisor--approval (gethash 'permission/decide harness--filters)))
       (should (eq 'allow (plist-get (harness-supervisor-test-decide sid "no_plan_needed" 'meta) :behavior)))
       (harness-supervisor--shutdown)
@@ -2373,8 +2415,10 @@ or model is coordination, like session_send, and is one."
       (should-not (harness-supervisor-test-get (harness-supervisor-test-session)))
       (should (member "write_file" (harness-supervisor-test-tool-names sid)))
       (should (equal '(:behavior ask) (harness-supervisor-test-decide sid "write_file")))
-      ;; Neither stage is left, and what the approval allowed is asked about again.
-      (should-not (rassq #'harness-supervisor--gate (gethash 'permission/decide harness--filters)))
+      ;; Neither the policy nor the approval is left, and what the approval
+      ;; allowed is asked about again.  The readonly module's gate stays, for
+      ;; the sessions of other policies.
+      (should-not (assq 'supervisor harness-readonly--policies))
       (should-not (rassq #'harness-supervisor--approval (gethash 'permission/decide harness--filters)))
       (dolist (tool '("no_plan_needed" "submit_plan" "retry_step"))
         (should (equal '(:behavior ask) (harness-supervisor-test-decide sid tool 'meta))))

@@ -28,10 +28,24 @@
 ;;
 ;; and a compose box at the bottom: describe a task, C-c C-c submits it
 ;; and it gets a session of its own.  A toggle above the box (C-c C-t)
-;; switches between Submit, which starts the task, and Refine (backlog
-;; refinement, once called grooming), which has an agent write the task
-;; up and leaves it in the Backlog until you start it: jot things down
-;; now, pick them up later, even after a restart.  The same box edits a
+;; cycles through three modes.  Submit starts the task.  Refine (backlog
+;; refinement, once called grooming) has an agent write the task up and
+;; leaves it in the Backlog until you start it: jot things down now,
+;; pick them up later, even after a restart.  Plan has a strong model
+;; (the hard tier of the task model's provider: Opus for Claude) read the
+;; code and plan the task, read-only, for a cheaper one (the medium
+;; tier, Sonnet) to carry out once you start it.  The lines above the
+;; box are the current mode's alone.  A step of a task has a model and a
+;; thinking level of its own and nothing else: in Refine and Plan a line
+;; per step -- the write-up or the plan, then the work, which in Plan
+;; runs on the model the plan is for -- holds those two, each a button
+;; that changes it.  What the whole task works with -- its permission
+;; mode, whether it is interactive, supervisor mode, where it works --
+;; is on one line below them, in every mode; in Submit, where the work is
+;; the whole task, that line starts with the work's model and thinking
+;; level.  Plan has no supervisor switch: a planned task works hands-on,
+;; its plan made already, while the work of Submit and Refine may
+;; supervise.  The same box edits a
 ;; pending task (e), replies to a task's session (m) -- for a backlog
 ;; task that is feedback on its write-up (r) -- without leaving the
 ;; board, answers a task's question (m or [Answer]) and takes the
@@ -60,7 +74,7 @@
 ;; (`harness-ui-priority-arrow') -- says what it is: up for high, down
 ;; for low, none for medium, and no words repeat it among the card's
 ;; facts.  + and - on a card raise and lower it (the change goes to the
-;; task's session), and the button beside the Submit / Refine toggle
+;; task's session), and the button beside the Submit / Refine / Plan toggle
 ;; sets the next task's.  To give many tasks a priority, or any other
 ;; setting, at once, mark their sessions in the session list
 ;; (`harness-sessions'): its keys and the harness's setting commands act
@@ -73,7 +87,9 @@
 ;; board and across restarts.
 ;;
 ;; How many of a project's tasks work at once ends the settings line
-;; under New task: "3 at a time", or "all at once" without a limit.  A
+;; under New task: "3 at a time", or "all at once" without a limit, in
+;; every mode -- a write-up or a plan takes no slot, but the work it
+;; leads to does once it starts.  A
 ;; click on it asks for another limit (`harness-ui-tasks-set-max-running'):
 ;; the harness option `harness-tasks-max-running', saved like the Review
 ;; switch, so every project has that many slots.  A higher limit starts
@@ -142,9 +158,13 @@
   "Seconds between refreshes of the elapsed times on visible boards.")
 
 (defcustom harness-ui-tasks-refine-by-default nil
-  "When non-nil, new boards refine tasks for the backlog, not submit them.
-Either way the toggle above the compose box switches it per board."
-  :type 'boolean :group 'harness-ui-tasks)
+  "The mode new boards open in: Submit, Refine or Plan.
+Nil submits new tasks, which start at once; t refines them, an agent
+writing each one up for the Backlog; `plan' has a strong model plan
+each one for the Backlog, for a cheaper model to carry out.  Whichever
+it is, the toggle above the compose box switches it per board."
+  :type '(choice (const :tag "Submit" nil) (const :tag "Refine" t) (const :tag "Plan" plan))
+  :group 'harness-ui-tasks)
 
 (defconst harness-ui-tasks--notify-review t
   "When non-nil, say in the echo area when a task waits for your review.")
@@ -162,7 +182,7 @@ Either way the toggle above the compose box switches it per board."
 (defface harness-task-merging-face '((t :inherit harness-dim-face))
   "The mark of a task waiting in the merge queue." :group 'harness-ui-tasks)
 (defface harness-task-choice-face '((t :inherit bold))
-  "The Submit / Refine toggle, which shows the current mode." :group 'harness-ui-tasks)
+  "The Submit / Refine / Plan toggle, which shows the current mode." :group 'harness-ui-tasks)
 (defface harness-task-priority-high-face '((t :inherit warning))
   "A button that says high priority: the compose box's."
   :group 'harness-ui-tasks)
@@ -217,6 +237,8 @@ The blue of links, without their underline." :group 'harness-ui-tasks)
   "Task in the merge queue: an arrow feeding into a line." :version "29.1")
 (harness-ui-define-icon harness-icon-message "message" "→" "msg"
   "A message to the session of an existing task.")
+(harness-ui-define-icon harness-icon-task-plan "plan" "≡" "plan"
+  "Plan mode: a strong model plans the task for a cheaper one.")
 ;; A priority's arrows are the priority UI's (`harness-ui-priority-arrow'),
 ;; so a card, a header line and a list row show the same one.
 
@@ -268,7 +290,11 @@ rather than going up to the card's first line."
 A plist of `:model', `:thinking', `:permission-mode', `:non-interactive'
 and, when the harness has the supervisor module, `:supervisor', seeded
 from the harness's task defaults and changed with the usual session
-commands.")
+commands.  The model and thinking level of the other steps are there
+too, seeded the same way: `:refine-model' and `:refine-thinking' write
+a task up in Refine, `:plan-model' and `:plan-thinking' plan it in
+Plan, and `:plan-work-model' and `:plan-work-thinking' do a planned
+task's work (see `harness-ui-tasks--step-keys').")
 (defvar-local harness-ui-tasks--loading t)
 (defvar-local harness-ui-tasks--error nil "Last failure, shown above the compose box.")
 (defvar-local harness-ui-tasks--show-archived nil)
@@ -293,8 +319,16 @@ write-up) or reject (feedback that sends a task back from review).
 \(search), with no ID, is the board's search: the box takes a line to
 find tasks, sessions and commands with, or to act on tasks
 \(`harness-tasks-search').")
-(defvar-local harness-ui-tasks--refine nil
-  "Non-nil when new tasks are refined for the backlog, not submitted.")
+(defvar-local harness-ui-tasks--mode 'submit
+  "What the compose box does with a new task: `submit', `refine' or `plan'.
+Submit starts it.  Refine has an agent write it up, and Plan has a
+strong model plan it for a cheaper one; either way it then waits in
+the Backlog until you start it.  See `harness-ui-tasks--modes'.")
+(defvar harness-ui-tasks--step nil
+  "The step of a new task whose settings the setting commands change.
+Nil is the work's (`harness-ui-tasks--work-step' then says which);
+`refine' or `plan' the step before it, which the buttons of its line
+bind while their command runs.  See `harness-ui-tasks--step-keys'.")
 (defvar-local harness-ui-tasks--main-tree-mode nil
   "How the main-tree choice holds: nil, `once' or `sticky'.")
 (defvar-local harness-ui-tasks--priority-mode nil
@@ -398,6 +432,10 @@ the board never shows one among the queued pending tasks."
 (defun harness-ui-tasks--refining-p (task)
   "Non-nil while an agent writes TASK up, or after its write-up stopped."
   (equal (plist-get task :state) "refining"))
+
+(defun harness-ui-tasks--planned-p (task)
+  "Non-nil when TASK's write-up is a plan for a cheaper model (Plan mode)."
+  (harness-json-true-p (plist-get task :plan)))
 
 (defun harness-ui-tasks--unstarted-p (task)
   "Non-nil when TASK has not started: queued, in the backlog or being written up."
@@ -564,10 +602,13 @@ POSITION is its place in line among queued tasks."
                          ("cannot-continue" (format "cannot continue — %s"
                                                     (or (plist-get task :error) "it said it cannot finish")))
                          ((and "interrupted" (guard (harness-ui-tasks--refining-p task)))
-                          "a restart interrupted its write-up: retry it, or edit it by hand")
+                          (format "a restart interrupted its %s: retry it, or edit it by hand"
+                                  (if (harness-ui-tasks--planned-p task) "plan" "write-up")))
                          ((guard (harness-ui-tasks--duplicate-p task)) (harness-ui-tasks--duplicate-detail task))
                          (outcome (format "%s: %s%s"
-                                          (if (harness-ui-tasks--refining-p task) "write-up stopped" "stopped")
+                                          (cond ((not (harness-ui-tasks--refining-p task)) "stopped")
+                                                ((harness-ui-tasks--planned-p task) "plan stopped")
+                                                (t "write-up stopped"))
                                           (or outcome "?")
                                           (if (plist-get task :error) (concat " — " (plist-get task :error)) "")))))
                    'face 'harness-task-attention-face))
@@ -694,9 +735,13 @@ pending says why it waits (`harness-ui-tasks--returned-why')."
         (sep (concat " " harness-ui-tasks--dot " ")))
     (cond
      ((harness-ui-tasks--refining-p task)
-      (or (nth 2 todos) (concat "an agent is writing it up" harness-ui-tasks--ellipsis)))
+      (or (nth 2 todos)
+          (concat (if (harness-ui-tasks--planned-p task) "planning it" "writing it up")
+                  harness-ui-tasks--ellipsis)))
      ((harness-ui-tasks--backlog-p task)
-      (concat (if (plist-get task :refined) "refined, start it when ready" "on hold")
+      (concat (cond ((not (plist-get task :refined)) "on hold")
+                    ((harness-ui-tasks--planned-p task) "planned, start it when ready")
+                    (t "refined, start it when ready"))
               (if body (concat sep body) "")))
      ((plist-get task :returned)
       (format "#%d in line%s" (or position 1)
@@ -883,7 +928,8 @@ and keeps its other properties: tooltips, and the context figure's button."
                    ;; queue, so it says when it was written up or added.
                    ('backlog (cond ((harness-ui-tasks--refining-p task) nil)
                                    ((plist-get task :refined)
-                                    (format "refined %s" (harness-relative-time (plist-get task :refined))))
+                                    (format "%s %s" (if (harness-ui-tasks--planned-p task) "planned" "refined")
+                                            (harness-relative-time (plist-get task :refined))))
                                    (t (format "added %s" (harness-relative-time (plist-get task :created))))))
                    ('review (and (plist-get task :finished)
                                  (format "ready %s" (harness-relative-time (plist-get task :finished)))))
@@ -2524,12 +2570,176 @@ That depends on `harness-ui-tasks--target': a new task by default."
     (`(search . ,_) "Search tasks, sessions and commands, or say what to do with tasks")
     (_ "New task")))
 
-(defun harness-ui-tasks--setting-button (label command help)
+(defun harness-ui-tasks--setting-button (label command help &optional step)
   "A button LABEL running the session setting COMMAND on the board's target.
-The target is the new-task settings, or the task at point (see
-`harness-ui-tasks--setting-target').  HELP is its tooltip."
-  (propertize (harness-ui-tasks--button label (lambda () (call-interactively command)) help command)
+The target is the new-task settings or the task at point (see
+`harness-ui-tasks--setting-target').  HELP is its tooltip.  With STEP, a step of a new task before its work (see
+`harness-ui-tasks--step-keys'), the command sets that step's model or
+thinking level instead."
+  (propertize (harness-ui-tasks--button label
+                                        (lambda ()
+                                          (let ((harness-ui-tasks--step step))
+                                            (call-interactively command)))
+                                        help
+                                        (if step (intern (format "%s@%s" command step)) command))
               'face 'harness-dim-face))
+
+;;;; The steps of a new task: write-up or plan, then the work
+
+;; In Submit a new task is its work, and the settings line under New
+;; task starts with the work's model and thinking level, then the
+;; task's other settings.  In Refine and Plan a step comes first -- an
+;; agent writes the task up, or a strong model plans it -- and each
+;; step, the work too, has a line of its own holding its model and
+;; thinking level alone: that is all a step has of its own.  The rest
+;; -- permission mode, interactive, supervisor mode, where the task
+;; works -- is the task's, whatever step it is in, on the settings line
+;; below the steps'.  A planned task's work has a model of its own: by
+;; default the medium tier of the task model's provider, which the
+;; plan is written for, where Submit and Refine work on the task model.
+;; The harness says what each step gets by default (`task/settings'),
+;; and the board keeps the choices in `harness-ui-tasks--new'.
+
+(defconst harness-ui-tasks--step-keys
+  '((refine :refine-model :refine-thinking)
+    (plan :plan-model :plan-thinking)
+    (plan-work :plan-work-model :plan-work-thinking))
+  "Where `harness-ui-tasks--new' keeps the model and thinking of a step.
+Each entry is (STEP MODEL-KEY THINKING-KEY): Refine's write-up, Plan's
+plan, and the work of a planned task.  Any other work has `:model' and
+`:thinking'.")
+
+(defconst harness-ui-tasks--modes
+  '((submit "Submit" harness-icon-running
+            "Submit: the task starts at once")
+    (refine "Refine" harness-icon-agent
+            "Refine: an agent writes the task up, then it waits in the Backlog until you start it")
+    (plan "Plan" harness-icon-task-plan
+          "Plan: an agent plans the task, then it waits in the Backlog until you start it"))
+  "The modes of the compose box for a new task, in the order they cycle.
+Each entry is (MODE LABEL ICON HELP): the label and icon of the toggle
+above the box, and its tooltip.")
+
+(defun harness-ui-tasks--first-step ()
+  "The step before a new task's work in the board's mode, or nil in Submit.
+That is `refine' in Refine, where an agent writes the task up, and
+`plan' in Plan, where a strong model plans it."
+  (car (memq harness-ui-tasks--mode '(refine plan))))
+
+(defun harness-ui-tasks--work-step ()
+  "The step a new task's work is in the board's mode.
+`plan-work' in Plan, where it runs on a model of its own, else nil:
+the work's settings are then `:model' and `:thinking'."
+  (and (eq harness-ui-tasks--mode 'plan) 'plan-work))
+
+(defun harness-ui-tasks--step-values (step)
+  "The new-task settings as the setting commands read them for STEP.
+STEP's model and thinking level are `:model' and `:thinking' there;
+without STEP they are the settings themselves."
+  (let ((keys (cdr (assq step harness-ui-tasks--step-keys)))
+        (new harness-ui-tasks--new))
+    (if keys
+        (plist-put (plist-put (copy-sequence new) :model (plist-get new (car keys)))
+                   :thinking (plist-get new (cadr keys)))
+      new)))
+
+(defun harness-ui-tasks--step-setter (step)
+  "Return the function that sets KEY to VALUE in this board's STEP.
+For STEP's model and thinking level that is its own keys of
+`harness-ui-tasks--new' (`harness-ui-tasks--step-keys'); the rest are
+the task's.  It sets them in this board whatever buffer it is called
+in: a setting command may answer later, from a request.  Supervisor
+mode it refuses for a step that never supervises: a write-up or a plan
+only reads, and a planned task's work runs hands-on
+\(`harness-ui-tasks--work-supervisor-p'), so `harness-toggle-supervisor'
+says so in Plan rather than change what Plan does not send."
+  (let ((buffer (current-buffer))
+        (keys (cdr (assq step harness-ui-tasks--step-keys))))
+    (lambda (key value)
+      (when (and step (eq key :supervisor))
+        (user-error "%s; supervisor mode is for the work of Submit and Refine tasks"
+                    (if (eq step 'plan-work)
+                        "A planned task works hands-on, its plan made already"
+                      "A write-up or a plan only reads")))
+      (when (buffer-live-p buffer)
+        (with-current-buffer buffer
+          (harness-ui-tasks--set-new (pcase key
+                                       (:model (or (car keys) key))
+                                       (:thinking (or (cadr keys) key))
+                                       (_ key))
+                                     value))))))
+
+(defun harness-ui-tasks--step-context (step)
+  "Who a change of STEP's model or thinking level applies to, for the message.
+STEP nil is the work: the whole task in Submit, the work after the
+write-up in Refine.  Any other setting is the task's, whatever the step
+\(`harness-ui-tasks--step-target')."
+  (pcase step
+    ('refine "for the write-up of new tasks")
+    ('plan "for the plan of new tasks")
+    ('plan-work "for the work of new planned tasks")
+    (_ (if (harness-ui-tasks--first-step) "for the work of new tasks" "for new tasks"))))
+
+(defun harness-ui-tasks--step-buttons (values scope &optional step)
+  "The model and thinking-level buttons of a step, as VALUES has them.
+They are all a step has of its own.  SCOPE names the step for their
+tooltips, as \"the plan of new tasks\".  STEP is the step whose
+settings they set, as `harness-ui-tasks--setting-button' takes it: nil
+for the work."
+  (concat (harness-ui-tasks--setting-button
+           (harness-ui-model-label (plist-get values :model))
+           #'harness-set-model (concat "Model of " scope) step)
+          (propertize " · " 'face 'harness-dim-face)
+          (harness-ui-tasks--setting-button
+           (harness-ui-thinking-label (plist-get values :thinking))
+           #'harness-set-thinking (concat "Thinking level of " scope) step)))
+
+(defun harness-ui-tasks--step-label (name)
+  "NAME, the step a line above the compose box is about, as it leads the line.
+The labels of the mode's two lines take the same width, so the settings
+after them line up."
+  (let ((width (if (eq harness-ui-tasks--mode 'refine) (length "refine") (length "plan"))))
+    (concat (propertize (string-pad name width) 'face 'harness-label-face) "  ")))
+
+(defun harness-ui-tasks--step-line (&optional room)
+  "The line of the step before a new task's work, fitted to ROOM columns.
+In Refine it is the write-up's, in Plan the plan's: the model and the
+thinking level, as buttons that set them -- all a step has of its own
+\(`harness-ui-tasks--step-buttons') -- and nothing else: what the mode
+does is the mode toggle's tooltip.  Empty in Submit and
+until the settings came."
+  (let ((step (harness-ui-tasks--first-step)))
+    (if (or (null step) (null harness-ui-tasks--settings))
+        ""
+      (harness-ui-tasks--fit-settings
+       (concat " " (harness-ui-tasks--step-label (symbol-name step))
+               (harness-ui-tasks--step-buttons
+                (harness-ui-tasks--step-values step)
+                (if (eq step 'plan) "the plan of new tasks" "the write-up of new tasks")
+                step))
+       "" nil room))))
+
+(defun harness-ui-tasks--work-line (&optional room)
+  "The line of a new task's work in Refine and Plan, fitted to ROOM columns.
+Like the line of the step before it (`harness-ui-tasks--step-line'), it
+holds the step's model and thinking level alone, as buttons that set
+them: in Plan the planned work's (`harness-ui-tasks--work-step'), in
+Refine the task's own.  Whatever else the work runs with is the whole
+task's, on the settings line below (`harness-ui-tasks--new-settings-line').
+Empty in Submit, whose settings line starts with the work's model and
+thinking level, and until the settings came."
+  (if (or (null (harness-ui-tasks--first-step))
+          (null harness-ui-tasks--settings))
+      ""
+    ;; Its buttons bind no step: the setting commands' target is the
+    ;; work's (`harness-ui-tasks--setting-target'), as when typed in the box.
+    (let ((step (harness-ui-tasks--work-step)))
+      (harness-ui-tasks--fit-settings
+       (concat " " (harness-ui-tasks--step-label "work")
+               (harness-ui-tasks--step-buttons
+                (harness-ui-tasks--step-values step)
+                (if step "the work of new planned tasks" "the work of new tasks")))
+       "" nil room))))
 
 (defconst harness-ui-tasks--min-settings-room 24
   "Columns the settings keep before the limit's button is cut off too.
@@ -2545,6 +2755,16 @@ there is nothing to show and nothing to run."
   (and (plist-member harness-ui-tasks--settings :supervisor)
        (fboundp 'harness-toggle-supervisor)))
 
+(defun harness-ui-tasks--work-supervisor-p (step)
+  "Non-nil when the work of STEP, a new task's, takes a supervisor setting.
+STEP is as `harness-ui-tasks--work-step' returns it.  The work of a
+planned task (`plan-work') does not: it works hands-on, since its plan
+is made already (the supervisor module's `harness-supervisor--task-value'),
+so in Plan the settings line has no supervisor switch and the task is
+sent without one.  Other work does where the board offers the setting
+\(`harness-ui-tasks--supervisor-p')."
+  (and (not (eq step 'plan-work)) (harness-ui-tasks--supervisor-p)))
+
 (defun harness-ui-tasks--supervisor-label (value)
   "Return the label of a supervisor setting VALUE.
 t reads \"supervisor\", and `:false' \"hands-on\" (the user turned it
@@ -2552,19 +2772,28 @@ off), as does anything else that is not true."
   (if (harness-json-true-p value) "supervisor" "hands-on"))
 
 (defun harness-ui-tasks--new-settings-line (&optional room)
-  "The settings line: each setting as a button, fitted to ROOM columns.
-The values are the new task's, and the line ends with how many tasks
-work at once (`harness-ui-tasks--max-running-button').  When ROOM is
-too narrow for it all, the settings shorten first, down to
-`harness-ui-tasks--min-settings-room' columns, so that button stays
-whole; the line shortens as a whole after that.  Without ROOM it is
-not fitted."
-  (let* ((values harness-ui-tasks--new)
+  "The settings line of a new task: each setting a button, fitted to ROOM columns.
+They are the whole task's, whatever step it is in: its permission
+mode, whether it is interactive, supervisor mode where the harness has
+it and the work takes it (`harness-ui-tasks--work-supervisor-p'), and,
+in a git project, where it works.  A step has a model and a thinking
+level of its own and nothing else, which Refine and Plan show on a
+line per step above this one (`harness-ui-tasks--step-line',
+`harness-ui-tasks--work-line'); in Submit, where the work is the whole
+task, this line starts with them.  It ends with how many tasks work at
+once (`harness-ui-tasks--max-running-button'), which Refine and Plan
+show too: their write-ups take no slot, but the work does once it
+starts.  When ROOM is too narrow for it all, the settings shorten
+first, down to `harness-ui-tasks--min-settings-room' columns, so that
+button stays whole; the line shortens as a whole after that.  Without
+ROOM it is not fitted."
+  (let* ((step (harness-ui-tasks--work-step))
+         (values harness-ui-tasks--new)
          (s harness-ui-tasks--settings)
          (main-tree (harness-json-true-p (plist-get values :main-tree)))
          ;; How many tasks work at once is the harness's, for every
          ;; project, not the next task's: apart from its settings.
-         (limit (not harness-ui-tasks--refine)))
+         (limit t))
     (if (null s)
         ""
       (harness-ui-tasks--fit-settings
@@ -2573,21 +2802,21 @@ not fitted."
         (mapconcat
          #'identity
          (delq nil
-               (list (harness-ui-tasks--setting-button
-                      (harness-ui-model-label (plist-get values :model))
-                      #'harness-set-model "Model of new tasks")
+               (list ;; The steps of Refine and Plan have their model and
+                     ;; thinking level on lines of their own; Submit's one
+                     ;; step has them here.
+                     (and (null (harness-ui-tasks--first-step))
+                          (harness-ui-tasks--step-buttons values "new tasks"))
                      (harness-ui-tasks--setting-button
                       (if-let* ((m (plist-get values :permission-mode))) (harness-ui-permission-mode-label m) "default mode")
                       #'harness-set-permission-mode "Permission mode of new tasks")
                      (harness-ui-tasks--setting-button
-                      (harness-ui-thinking-label (plist-get values :thinking))
-                      #'harness-set-thinking "Thinking level of new tasks")
-                     (harness-ui-tasks--setting-button
                       (harness-ui-non-interactive-label (plist-get values :non-interactive))
                       #'harness-toggle-non-interactive "Non-interactive mode of new tasks")
                      ;; Supervisor mode is the supervisor module's; a
-                     ;; harness without it has no setting to offer.
-                     (and (harness-ui-tasks--supervisor-p)
+                     ;; harness without it has no setting to offer, and
+                     ;; a planned task's work none to take.
+                     (and (harness-ui-tasks--work-supervisor-p step)
                           (harness-ui-tasks--setting-button
                            (harness-ui-tasks--supervisor-label (plist-get values :supervisor))
                            #'harness-toggle-supervisor
@@ -2601,13 +2830,11 @@ not fitted."
                            #'harness-ui-tasks-toggle-main-tree
                            "Where the next task works: its own worktree and branch, or the project's main tree, where nothing merges"))))
          (propertize " · " 'face 'harness-dim-face)))
-       (if harness-ui-tasks--refine
-           (propertize "   an agent writes it up; you start it" 'face 'harness-dim-face)
-         (concat "   "
-                 (and (harness-ui-tasks--queue-suspended-p)
-                      (concat (propertize "queue suspended" 'face 'harness-dim-face)
-                              (propertize " · " 'face 'harness-dim-face)))
-                 (harness-ui-tasks--max-running-button)))
+       (concat "   "
+               (and (harness-ui-tasks--queue-suspended-p)
+                    (concat (propertize "queue suspended" 'face 'harness-dim-face)
+                            (propertize " · " 'face 'harness-dim-face)))
+               (harness-ui-tasks--max-running-button))
        limit room))))
 
 (defun harness-ui-tasks--fit-settings (settings note keep room)
@@ -2658,6 +2885,11 @@ Without a limit, N nil, it is \"all at once\"."
           (format "%d at a time: no task starts by itself; each waits in Pending until you start it" n))
          (t (format "At most %d of this project's tasks work at once; the others wait in Pending and start, by priority, as slots free up"
                     n)))
+   ;; In Refine and Plan the limit still counts, but only once the work
+   ;; starts: what comes before takes no slot.
+   (pcase (harness-ui-tasks--first-step)
+     ('refine ".  A write-up takes no slot: the task holds one once you start it")
+     ('plan ".  A plan takes no slot: the task holds one once you start it"))
    ".  Click to change it, for every project; S shows who holds the slots and who waits for one."))
 
 (defun harness-ui-tasks--max-running-button ()
@@ -2781,19 +3013,37 @@ from the harness when they do.  Return the boards' directories."
 
 (defun harness-ui-tasks--setting-target ()
   "Where the session setting commands apply on the board.
-That is the session of the started task at point, else the new-task
-settings.  A backlog task's session only writes it up, with settings of
-its own, so it counts as not started."
-  (let ((task (and (not (harness-compose-in-p)) (harness-ui-tasks--task t))))
-    (if (and task (plist-get task :session) (not (harness-ui-tasks--unstarted-p task)))
-        (plist-get task :session)
-      (list harness-ui-tasks--new #'harness-ui-tasks--set-new))))
+The session of the started task at point, else the new-task settings.  A backlog task's session only
+writes it up, with settings of its own, so it counts as not started.
+The new-task settings are those of the work (in Plan, the planned
+work's model and thinking level: `harness-ui-tasks--work-step'), or
+of the step before it whose line's button was pushed
+\(`harness-ui-tasks--step')."
+  (cond
+   (harness-ui-tasks--step (harness-ui-tasks--step-target harness-ui-tasks--step))
+   (t
+    (let ((task (and (not (harness-compose-in-p)) (harness-ui-tasks--task t))))
+      (if (and task (plist-get task :session) (not (harness-ui-tasks--unstarted-p task)))
+          (plist-get task :session)
+        (harness-ui-tasks--step-target (harness-ui-tasks--work-step)))))))
+
+(defun harness-ui-tasks--step-target (step)
+  "What the setting commands change for STEP of a new task, nil the work.
+That is (VALUES SET CONTEXT), as `harness-ui-setting-target-function'
+returns it: STEP's settings, the function that sets one, and who the
+change is for, a function of the setting's key: STEP's own for its
+model and thinking level, the task's for the rest, which every step
+shares.  It is worked out now, as a setting command may answer later,
+from another buffer."
+  (let ((own (harness-ui-tasks--step-context step)))
+    (list (harness-ui-tasks--step-values step) (harness-ui-tasks--step-setter step)
+          (lambda (key) (if (memq key '(:model :thinking)) own "for new tasks")))))
 
 (defun harness-ui-tasks--label-line (room messaging bar)
   "The compose label, fitted to ROOM columns: what the box does, and the
-Submit / Refine toggle or [cancel].  MESSAGING is non-nil when the box
-sends to a session, BAR what starts the line.  A message and the
-board's search each lead with their icon, in their accent."
+Submit / Refine / Plan toggle or [cancel].  MESSAGING is non-nil when
+the box sends to a session, BAR what starts the line.  A message and
+the board's search each lead with their icon, in their accent."
   (let* ((searching (harness-ui-tasks--searching-p))
          (cancel (if harness-ui-tasks--target
                      (concat "  " (harness-ui-tasks--button
@@ -2902,7 +3152,9 @@ only gets a [keep on] BUTTON; a sticky one an [off] button."
 
 (defun harness-ui-tasks--tail-lines (messaging band bar)
   "The lines between the board and the compose box: (KEY FIT BAND) each.
-Top first: the error, the compose label, the settings
+Top first: the error, the compose label, in Refine and
+Plan a line per step -- the one before the work (`harness-ui-tasks--step-line'),
+then the work's (`harness-ui-tasks--work-line') -- the task's settings
 and, nearest the box, the armed submit-mode notices, those there are.
 KEY names the line for redraws, FIT returns it fitted to the columns
 it is called with, BAND is the face behind it or nil.  MESSAGING and
@@ -2913,6 +3165,12 @@ BAR are as `harness-ui-tasks--label-line' takes them."
         (push (list 'error (lambda (room) (harness-ui-tasks--fit text room)) band) lines)))
     (push (list 'label (lambda (room) (harness-ui-tasks--label-line room messaging bar)) band) lines)
     (unless harness-ui-tasks--target
+      ;; In Refine and Plan, the step before the work, then the work: a
+      ;; model and a thinking level each, above what the task works with.
+      (unless (string-empty-p (harness-ui-tasks--step-line))
+        (push (list 'step (lambda (room) (harness-ui-tasks--step-line room)) nil) lines))
+      (unless (string-empty-p (harness-ui-tasks--work-line))
+        (push (list 'work (lambda (room) (harness-ui-tasks--work-line room)) nil) lines))
       (unless (string-empty-p (harness-ui-tasks--new-settings-line))
         (push (list 'settings (lambda (room) (harness-ui-tasks--new-settings-line room)) nil) lines))
       (dolist (notice (harness-ui-tasks--mode-notices))
@@ -2947,8 +3205,8 @@ They are named for redraws, as the lines below them are."
   "Insert the error line, the compose label, the settings and the attachments.
 Each line is fitted to the window, like the board's: the buffer wraps
 for the compose box, so a longer line would take two.  A new task's
-label carries the Submit / Refine toggle, which the label makes room
-for.  A box that sends to a session wears its message colours here too,
+label carries the Submit / Refine / Plan toggle, which the label makes
+room for.  A box that sends to a session wears its message colours here too,
 the label, bar and band around it, so what submitting will do is plain
 before a key is pressed; the board's search wears colours of its own.
 What `harness-ui-tasks-corner-functions' draw sits at the right of the
@@ -3020,24 +3278,26 @@ board then fits its cards to the room the lines leave."
         (harness-ui-tasks--refit-tail)
         (harness-ui-tasks--schedule-render buffer)))))
 
+(defun harness-ui-tasks--next-mode ()
+  "The mode after the board's in `harness-ui-tasks--modes', round to the first."
+  (car (or (cadr (memq (assq harness-ui-tasks--mode harness-ui-tasks--modes) harness-ui-tasks--modes))
+           (car harness-ui-tasks--modes))))
+
 (defun harness-ui-tasks--mode-toggle ()
-  "The Submit / Refine toggle above the compose box: the current mode.
-One button, showing only the mode new tasks get, with the icon their
-cards get: running for Submit, the agent's for Refine.  A click switches
-to the other mode, as `harness-ui-tasks-toggle-refine' does."
-  (let ((keys (substitute-command-keys "\\<harness-ui-tasks-mode-map>\\[harness-ui-tasks-toggle-refine]")))
-    (pcase-let ((`(,icon ,label ,help ,other)
-                 (if harness-ui-tasks--refine
-                     '(harness-icon-agent "Refine"
-                       "Refine: an agent writes the task up, then it waits in the Backlog until you start it"
-                       "Submit")
-                   '(harness-icon-running "Submit" "Submit: the task starts at once" "Refine"))))
+  "The Submit / Refine / Plan toggle above the compose box: the current mode.
+One button, showing only the mode new tasks get, with its icon: running
+for Submit, the agent's for Refine, a plan's for Plan.  A click
+switches to the next mode, as `harness-ui-tasks-cycle-mode' does."
+  (let ((keys (substitute-command-keys "\\<harness-ui-tasks-mode-map>\\[harness-ui-tasks-cycle-mode]"))
+        (next (assq (harness-ui-tasks--next-mode) harness-ui-tasks--modes)))
+    (pcase-let ((`(,_ ,label ,icon ,help) (or (assq harness-ui-tasks--mode harness-ui-tasks--modes)
+                                              (car harness-ui-tasks--modes))))
       (propertize
        (harness-ui-tasks--button
         (concat (harness-ui-icon icon) " " label)
-        (lambda () (harness-ui-tasks--set-refine (not harness-ui-tasks--refine)))
-        (format "%s (click or %s to switch to %s)" help keys other)
-        'harness-ui-tasks-toggle-refine)
+        (lambda () (harness-ui-tasks--set-mode (harness-ui-tasks--next-mode)))
+        (format "%s (click or %s to switch to %s)" help keys (nth 1 next))
+        'harness-ui-tasks-cycle-mode)
        'face 'harness-task-choice-face))))
 
 (defun harness-ui-tasks--priority-button-face (priority)
@@ -3046,9 +3306,9 @@ Medium, or nil for none in particular, is dim like the other settings."
   (if (member priority '("high" "low")) (harness-ui-tasks--priority-face priority) 'harness-dim-face))
 
 (defun harness-ui-tasks--priority-toggle ()
-  "The button beside the Submit / Refine toggle: the next task's priority.
-It wears the face of its level (`harness-ui-tasks--priority-face'), and
-a click moves it on, as `harness-ui-tasks-cycle-new-priority' does."
+  "The button beside the Submit / Refine / Plan toggle: the next task's priority.
+It wears the face a card's priority fact has, and a click moves it on,
+as `harness-ui-tasks-cycle-new-priority' does."
   (let ((priority (harness-ui-tasks--priority harness-ui-tasks--new)))
     (propertize
      (harness-ui-tasks--button
@@ -3058,23 +3318,54 @@ a click moves it on, as `harness-ui-tasks-cycle-new-priority' does."
       'harness-ui-tasks-cycle-new-priority)
      'face (harness-ui-tasks--priority-button-face priority))))
 
-(defun harness-ui-tasks--set-refine (refine)
-  "Refine new tasks from the compose box when REFINE, else submit them."
-  (setq harness-ui-tasks--refine (and refine t))
-  (harness-ui-tasks--render-tail)
-  (message (if refine
-               "Refine: an agent writes each new task up; it waits in the Backlog until you start it"
-             "Submit: each new task starts at once")))
+(defun harness-ui-tasks--set-mode (mode)
+  "Have the compose box submit, refine or plan new tasks, as MODE says.
+MODE is `submit', `refine' or `plan' (see `harness-ui-tasks--modes').
+The toggle above the box then names it, and the lines under it are
+its own; what it does is the toggle's tooltip, not a message."
+  (unless (assq mode harness-ui-tasks--modes)
+    (error "Unknown mode %s: submit, refine or plan" mode))
+  (setq harness-ui-tasks--mode mode)
+  (harness-ui-tasks--render-tail))
 
-(defun harness-ui-tasks-toggle-refine (&optional arg)
-  "Switch the compose box between submitting new tasks and refining them.
-Submit starts a task at once.  Refine (backlog refinement, once called
-grooming) has an agent write it up first -- briefly, reading the code
-but changing nothing -- and the task then waits in the Backlog, across
-restarts, until you start it (\\<harness-ui-tasks-board-map>\\[harness-ui-tasks-start]).  With a prefix ARG, refine
-when it is positive and submit otherwise."
-  (interactive "P")
-  (harness-ui-tasks--set-refine (if arg (> (prefix-numeric-value arg) 0) (not harness-ui-tasks--refine))))
+(defun harness-ui-tasks--read-mode ()
+  "Read a mode of the compose box in the minibuffer: `submit', `refine' or `plan'."
+  (let* ((choices (mapcar (lambda (m) (cons (nth 1 m) (car m))) harness-ui-tasks--modes))
+         (completion-extra-properties
+          (list :annotation-function
+                (lambda (choice)
+                  (concat "  " (cadr (split-string (nth 3 (assq (cdr (assoc choice choices))
+                                                                harness-ui-tasks--modes))
+                                                   ": ")))))))
+    (cdr (assoc (completing-read "New tasks: "
+                                 (lambda (string pred action)
+                                   ;; Keep Submit, Refine, Plan in their order.
+                                   (if (eq action 'metadata)
+                                       '(metadata (display-sort-function . identity)
+                                                  (cycle-sort-function . identity))
+                                     (complete-with-action action choices string pred)))
+                                 nil t)
+                choices))))
+
+(defun harness-ui-tasks-cycle-mode (&optional mode)
+  "Switch the compose box to its next mode: Submit, Refine, Plan, and round.
+Submit starts a new task at once.  Refine (backlog refinement, once
+called grooming) has an agent write it up first -- briefly, reading the
+code but changing nothing.  Plan has a strong model -- the hard tier of
+the task model's provider, Opus for Claude -- read the code, make the
+decisions and plan the work for a cheaper model, the medium tier
+\(Sonnet), which then does it.  Either way the task then waits in the
+Backlog, across restarts, until you start it
+\(\\<harness-ui-tasks-board-map>\\[harness-ui-tasks-start]).  In Refine and Plan a
+line per step -- the write-up or the plan, then the work -- shows the
+step's model and thinking level, a click on either changing it; what
+the whole task works with is on the line below them.  With a prefix
+argument the mode is read; from Lisp, MODE (`submit', `refine' or
+`plan') sets it."
+  (interactive (list (and current-prefix-arg (harness-ui-tasks--read-mode))))
+  (harness-ui-tasks--set-mode (or mode (harness-ui-tasks--next-mode))))
+
+(define-obsolete-function-alias 'harness-ui-tasks-toggle-refine #'harness-ui-tasks-cycle-mode "3.1")
 
 (defun harness-ui-tasks--set-main-tree (main-tree &optional mode)
   "Make new tasks work in the main tree when MAIN-TREE, else in a worktree.
@@ -3184,8 +3475,8 @@ the box, or on the same line above it (`harness-ui-tasks--anchor')."
                                   (harness-ui-tasks-search-proposal-text))))
                  (format "  (RET: %s)" does)
                "")))
-    ((guard (and (null harness-ui-tasks--target) harness-ui-tasks--refine))
-     (concat "Jot a task down: an agent writes it up for later" harness-ui-tasks--ellipsis))
+    ((guard (and (null harness-ui-tasks--target) (eq harness-ui-tasks--mode 'refine)))
+     (concat "Jot a task down" harness-ui-tasks--ellipsis))
     (`(edit . ,_) "New prompt…")
     (`(reply . ,_) "Message…")
     (`(answer . ,_) "Answer…")
@@ -3385,6 +3676,16 @@ QUIET refreshes in the background, without the loading indicator."
                                                  (plist-put (copy-sequence harness-ui-tasks--new) :supervisor
                                                             (if (harness-json-true-p (plist-get s :supervisor))
                                                                 t :false))))
+                                         ;; So do the models of the write-up, the
+                                         ;; plan and the planned work, once the
+                                         ;; harness says what they are.
+                                         (dolist (step harness-ui-tasks--step-keys)
+                                           (dolist (key (cdr step))
+                                             (when (and (plist-member s key)
+                                                        (not (plist-member harness-ui-tasks--new key)))
+                                               (setq harness-ui-tasks--new
+                                                     (plist-put (copy-sequence harness-ui-tasks--new) key
+                                                                (plist-get s key))))))
                                          ;; The header's spend goes by the new tasks' model.
                                          (force-mode-line-update)
                                          (when (and (harness-compose-live-p) (null harness-ui-tasks--target))
@@ -3636,7 +3937,7 @@ so they type, into the compose box (`harness-compose-acts-p')."
   (set-keymap-parent map harness-compose-map)
   (define-key map (kbd "C-c C-c") #'harness-ui-tasks-submit)
   (define-key map (kbd "C-c C-k") #'harness-ui-tasks-compose-reset)
-  (define-key map (kbd "C-c C-t") #'harness-ui-tasks-toggle-refine)
+  (define-key map (kbd "C-c C-t") #'harness-ui-tasks-cycle-mode)
   ;; C-g, as a remapping: completion popups (corfu, company) keep their
   ;; C-g, and with no box to leave it falls back to the global one.
   (define-key map [remap keyboard-quit] #'harness-ui-tasks-compose-quit)
@@ -3717,7 +4018,7 @@ task's key typed off a card.
         ("C-c C-z" "Bury (q)" harness-ui-bury)]
        ["Compose box"
         ("C-c C-c" "Submit" harness-ui-tasks-submit)
-        ("C-c C-t" "Submit or Refine" harness-ui-tasks-toggle-refine)
+        ("C-c C-t" "Submit, Refine or Plan" harness-ui-tasks-cycle-mode)
         ("C-c C-k" "Clear" harness-ui-tasks-compose-reset)
         ("C-c C-a" "Attach file" harness-compose-add-attachment)
         ("C-y" "Paste; an image attaches" harness-compose-yank)]))
@@ -3786,7 +4087,10 @@ the left of the frame and the sessions open beside it (see
         (harness-ui-tasks-mode)
         (setq default-directory root
               harness-ui-tasks--dir root
-              harness-ui-tasks--refine harness-ui-tasks-refine-by-default)
+              harness-ui-tasks--mode (pcase harness-ui-tasks-refine-by-default
+                                       ('nil 'submit)
+                                       ('plan 'plan)
+                                       (_ 'refine)))
         (harness-ui-tasks--render)
         (harness-ui-tasks--render-tail "")
         (goto-char harness-compose-end)
@@ -3980,8 +4284,8 @@ That is `keyboard-quit', or what the global map remaps it to (Doom's
 
 (defun harness-ui-tasks-submit ()
   "Submit the compose box: a new task, an edited prompt, a message or an answer.
-A new task starts, or with the toggle on Refine goes to the backlog
-\(see `harness-ui-tasks-toggle-refine').  /skill references are expanded
+A new task starts, or with the toggle on Refine or Plan goes to the
+backlog (see `harness-ui-tasks-cycle-mode').  /skill references are expanded
 and attachments go along, as in a chat.  The board's search box sends
 its line to the search instead (`harness-ui-tasks-search-submit')."
   (interactive)
@@ -3992,10 +4296,16 @@ its line to the search instead (`harness-ui-tasks-search-submit')."
     (harness-ui-tasks--submit-compose)))
 
 (defun harness-ui-tasks--submit-compose ()
-  "Submit what the compose box holds for a task (see `harness-ui-tasks-submit')."
+  "Submit what the compose box holds for a task (see `harness-ui-tasks-submit').
+A harness that does not plan tasks yet, which its settings say by
+naming no plan model, is not sent one to plan: it would start it."
+  (when (and (null harness-ui-tasks--target) (eq harness-ui-tasks--mode 'plan)
+             harness-ui-tasks--settings (not (plist-member harness-ui-tasks--settings :plan-model)))
+    (user-error "This harness does not plan tasks: update it, or switch to Submit or Refine (%s)"
+                (substitute-command-keys "\\<harness-ui-tasks-mode-map>\\[harness-ui-tasks-cycle-mode]")))
   (pcase-let* ((`(,text . ,atts) (harness-compose-take))
                (target harness-ui-tasks--target)
-               (refine harness-ui-tasks--refine)
+               (mode harness-ui-tasks--mode)
                (buffer (current-buffer))
                ;; The box's own attachments, not the files its @ references
                ;; name: an answer mentioning a file goes as the text it is.
@@ -4013,17 +4323,28 @@ its line to the search instead (`harness-ui-tasks-search-submit')."
        (lambda (expanded)
          (when (buffer-live-p buffer)
            (with-current-buffer buffer
-             (harness-ui-tasks--send target text expanded atts refine))))))))
+             (harness-ui-tasks--send target text expanded atts mode))))))))
 
-(defun harness-ui-tasks--new-opts ()
+(defun harness-ui-tasks--new-opts (&optional mode)
   "The new-task settings as `task/submit' options (unset ones are left out).
-Supervisor mode is sent only when the harness has its module, which
-`task/settings' says by carrying the setting."
-  (let ((new harness-ui-tasks--new))
-    (append (cl-loop for k in '(:model :thinking :permission-mode)
-                     when (plist-get new k) append (list k (plist-get new k)))
+MODE is the compose box's mode for the task, `submit' by default.
+Refine sends `:refine' and the write-up's model and thinking level as
+`:refine-model' and `:refine-thinking'; Plan sends `:plan', the plan's
+model and thinking level as those, and the planned work's as `:model'
+and `:thinking' (see `harness-ui-tasks--step-keys').  Supervisor mode is
+sent only when the harness has its module, which `task/settings' says
+by carrying the setting, and never in Plan: a planned task works
+hands-on, its plan made already (`harness-ui-tasks--work-supervisor-p')."
+  (let* ((new harness-ui-tasks--new)
+         (work (harness-ui-tasks--step-values (and (eq mode 'plan) 'plan-work)))
+         (first (and (memq mode '(refine plan)) (harness-ui-tasks--step-values mode))))
+    (append (pcase mode ('refine (list :refine t)) ('plan (list :plan t)))
+            (and (plist-get first :model) (list :refine-model (plist-get first :model)))
+            (and (plist-get first :thinking) (list :refine-thinking (plist-get first :thinking)))
+            (cl-loop for k in '(:model :thinking :permission-mode)
+                     when (plist-get work k) append (list k (plist-get work k)))
             (and new (list :non-interactive (if (harness-json-true-p (plist-get new :non-interactive)) t :false)))
-            (and (plist-member harness-ui-tasks--settings :supervisor)
+            (and (plist-member harness-ui-tasks--settings :supervisor) (not (eq mode 'plan))
                  (list :supervisor (if (harness-json-true-p (plist-get new :supervisor)) t :false)))
             (and (harness-json-true-p (plist-get new :main-tree)) (list :main-tree t))
             (and (plist-get new :priority) (list :priority (harness-ui-tasks--priority new))))))
@@ -4041,9 +4362,11 @@ worktree and medium priority, and the tail is redrawn."
       (setq harness-ui-tasks--priority-mode nil)
       (harness-ui-tasks--set-new :priority "medium"))))
 
-(defun harness-ui-tasks--send (target text expanded atts &optional refine)
+(defun harness-ui-tasks--send (target text expanded atts &optional mode)
   "Send EXPANDED (typed as TEXT) with attachments ATTS for compose TARGET.
-A new task is refined for the backlog when REFINE is non-nil."
+A new task goes as MODE says, the compose box's mode when it was
+submitted: `submit' (the default) starts it, `refine' and `plan' have it
+written up or planned for the backlog (`harness-ui-tasks--new-opts')."
   (let ((buffer (current-buffer)))
     (pcase target
       (`(edit . ,id)
@@ -4072,8 +4395,7 @@ A new task is refined for the backlog when REFINE is non-nil."
        (harness-ui-call
         "_harness/task/submit" (list :cwd harness-ui-tasks--dir :prompt expanded
                                      :opts (append (list :attachments atts)
-                                                   (and refine (list :refine t))
-                                                   (harness-ui-tasks--new-opts)))
+                                                   (harness-ui-tasks--new-opts mode)))
         (lambda (task)
           (when (buffer-live-p buffer)
             (with-current-buffer buffer

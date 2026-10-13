@@ -4407,6 +4407,48 @@ priority).
   `task/reject` feedback are the user's, and so is a `task/prompt`
   follow-up unless its OPTS `:from` names another sender:
   `task_control`'s message names the calling session.
+- Plan mode: a `:plan` task (`task/submit`'s `:plan`, which implies
+  `:refine`; the board's Plan mode; `task_submit`'s `plan`) is a backlog
+  task whose write-up is a plan for a cheaper model: supervisor mode's
+  idea without its workers, and beside it, as the supervisor module
+  leaves a planned task's work hands-on unless the task has a setting
+  of its own (`harness-supervisor--task-value`).  Its session plans on
+  `:refine-model`/`:refine-thinking` when given, else on the hard tier
+  of the task model's provider (`harness-tasks--plan-tier`, Opus for
+  Claude; the task model where the provider names none), and the work
+  gets the medium tier (`harness-tasks--plan-work-tier`, Sonnet) as
+  `:model`/`:thinking` unless those were given.  The tiers are internal
+  defaults, not options: the models are parameters of each task, which
+  the board sets per step (docs/configuration-audit.md).
+  `task/settings` resolves them for the board as `:plan-model`,
+  `:plan-thinking`, `:plan-work-model` and `:plan-work-thinking`, next
+  to `:refine-model` and `:refine-thinking`.  The session gets
+  `harness-tasks--plan-prompt` in place of the tools agent's planning
+  section (`harness-readonly-system-prompt`), and only reads: the
+  tasks module registers its sessions with the readonly module
+  (`harness-tasks--readonly-policy`: the reading tools, read-only and
+  offline bash where the sandbox confines it, `submit_task_plan` and
+  `todo_write`, no `web_fetch`), and the write-up gate at 25 denies
+  the rest with `harness-tasks--plan-hint`.  `agent/tools` at 50
+  offers `submit_task_plan` to planning sessions alone.  After
+  `harness-tasks--plan-tool-calls` (40) tool calls, and every half
+  budget after (`harness-readonly-budget-point-p`), it is steered to
+  hand the plan in with what it knows, unless that call was the hand-in
+  itself.  `submit_task_plan TITLE PLAN`
+  (tools-sessions, kind meta) calls `task/hand-in-plan SESSION-ID TITLE
+  PLAN`, which puts `TITLE\n\nPLAN` in `:prompt`, keeps the task
+  pending in the backlog with `:refined` set, gives the session the plan
+  (`session/set-plan`, and a `plan` node in its transcript) and adds a
+  hint; the tool ends the turn (`:end-turn t`), and
+  `--finish-refinement` keeps the plan rather than taking the final
+  reply for the write-up.  A planning turn that ends with neither a plan
+  nor a duplicate refusal is sent back by the `agent/stop` filter
+  (`harness-tasks--plan-stop`) with `harness-tasks--plan-reminder`, at
+  most `harness-tasks--plan-max-reminders` (2) times.  Feedback to the
+  planning session (`task/prompt`, `task/refine`) asks for the whole
+  plan again.  Starting the task opens its message with
+  `harness-tasks--plan-start-message`, telling the medium model to keep
+  to the plan's decisions and say where it had to depart from them.
 - `task/adoptable &optional CWD` lists the project's open sessions that
   are not tasks; `task/adopt SESSION-ID` makes one a task (its first
   message is the prompt; a worktree session keeps its worktree and merges
@@ -5750,6 +5792,32 @@ TITLE is the session's name, else the prompt's first line without its
 leading `#`, at most 80 characters; PROJECT is `project/name` of the
 task's project.
 
+### readonly
+
+Read-only sessions, which look and change nothing: a supervisor
+planning, a task's write-up or plan (tasks, Plan mode).  A module
+registers a policy (`harness-readonly-register NAME FUNCTION`), a
+function of a session plist that returns nil for a session it does not
+govern, else a plist: `:tools` (its own tools, besides the reading
+ones, `harness-readonly-read-tools`, and the web's,
+`harness-readonly-net-tools`), `:except` (reading or web tools it may
+not use after all, as `web_fetch` for a session whose mode would only
+refuse it), `:label`, `:doing` and `:hint` for the denials.  The first
+policy that governs a session decides
+(`harness-readonly-allowed-tools`).  An `agent/tools` filter at 90 offers
+such a session nothing else; a `permission/decide` stage at 8, before
+the jail, the mode and the judge, denies for good a call to anything
+else and fails closed (a call it cannot check is denied); and
+`tools/sandbox-options` at 90 runs its commands read-only and offline
+(`harness-readonly-sandbox-options`), bash being offered only where the
+sandbox confines the directory.  `harness-readonly-system-prompt` puts
+a policy's own section in place of the tools agent's planning section
+(`harness-tools-agent-planning-section`), or at the end without one;
+`harness-readonly-budget-point-p N BUDGET` says when to nudge a turn
+that reads on: at the budget, then every half budget after.  The
+module loads on its own, whether supervisor mode is on or not; the
+tasks module requires it.
+
 ### supervisor
 
 Supervisor mode: a top-level session on an expensive model plans and
@@ -5766,6 +5834,8 @@ session with no parent takes `harness-supervisor` as `config/get` has it
 at its directory, a fork its parent's value, and a setting its maker gave
 in `:ext` stays.  The session of a task takes the task's own `:supervisor'
 setting (`task/submit', the board's button, `task/set-all'), else
+hands-on for a planned task (`:plan`, the board's Plan mode, whose plan
+a strong model made already: `harness-supervisor--task-value`), else
 `harness-supervisor-tasks' (`task/changed`, once, while it has no
 message and the task was not adopted); the session that writes a backlog
 task up only reads, so it
@@ -9148,7 +9218,7 @@ option the settings page has under Task board):
 off, finished tasks merge and complete by themselves, and Ready for
 review shows only while tasks from before still wait there; turning it
 off while tasks of the board wait for review offers to verify them.
-The settings line under the New task label ends, in Submit mode, with
+The settings line under the New task label ends, in every mode, with
 how many of a project's tasks work at once, a button: `N at a time`, or
 `all at once` without a limit, in `harness-task-held-face` at 0, when
 no task starts by itself.  A click reads another limit in the
@@ -9172,24 +9242,64 @@ from the compose box the settings the next task starts with (shown as
 buttons under the New task label), and so does the worktree switch
 beside them: `own worktree` (the default in a git project) or `main
 tree`, where the next task works in the project's own checkout, with
-nothing to merge (`harness-ui-tasks-toggle-main-tree`; new tasks only).
-While the harness has the supervisor module the line also shows the
-supervisor switch (`supervisor`, or `hands-on' once turned off,
-`harness-toggle-supervisor'): the setting of the next task's session,
-sent with the task and applied to its session when it starts.  The
-harness says whether it has the module by carrying `:supervisor' in
-`task/settings'; without it there is no button.  A
-Submit / Refine toggle beside that label, showing only the current mode
-(a click or `C-c C-t` switches it), picks what a new task does: start,
-or go to the backlog, written up by an agent and
-waiting in the backlog -- its own section, which the queue never
-starts -- until you start it (`s`); `r` refines a queued task,
+nothing to merge (`harness-ui-tasks-toggle-main-tree`; new tasks only).  While the harness has the supervisor module the line also
+shows the supervisor switch (`supervisor`, or `hands-on' once turned
+off, `harness-toggle-supervisor'): the setting of the next task's
+session, sent with the
+task and applied to its session when it starts.  The harness says
+whether it has the module by carrying `:supervisor' in `task/settings';
+without it there is no button.  Plan's settings line has none either
+(`harness-ui-tasks--work-supervisor-p`): a planned task works hands-on,
+so it is sent without the setting, and the step setter of a write-up,
+a plan or a planned task's work refuses `:supervisor` with a
+`user-error` saying why, which is what `harness-toggle-supervisor`
+shows in Plan.  A
+Submit / Refine / Plan switch beside that label, showing only the
+current mode (`harness-ui-tasks--mode`; a click or `C-c C-t`,
+`harness-ui-tasks-cycle-mode`, goes to the next, `C-u C-c C-t` reads
+one; `harness-ui-tasks-toggle-refine` is its obsolete alias), picks
+what a new task does: start, or go to the backlog, written up by an
+agent (Refine) or planned by a strong model (Plan, `:plan t`), and
+wait in the backlog -- its own section, which the queue never
+starts -- until you start it (`s`).  The lines above the box are the
+current mode's alone.  A step has a model and a thinking level of its
+own and nothing else (`harness-ui-tasks--step-buttons`): in Refine and
+Plan a line per step holds its name and those two buttons, and nothing
+else -- the step before the work (`harness-ui-tasks--step-line`,
+`refine` or `plan`), then the work (`harness-ui-tasks--work-line`,
+`work`) -- and the settings line below them holds the task's
+own, whatever the step: permission mode, non-interactive, the
+supervisor switch, the worktree switch, then the max-running button.
+Submit has the settings line alone, starting with the work's model
+and thinking level.
+No sentence says what a mode does: not those lines, not the empty
+box's placeholder (`Jot a task down…` in Refine, `Describe a task…`
+otherwise), and not a message when the mode changes; the toggle's
+tooltip does, and a card being written up or planned says `writing it
+up…` or `planning it…`.  The steps' choices are keys of
+`harness-ui-tasks--new` (`harness-ui-tasks--step-keys`:
+`:refine-model'/`:refine-thinking', `:plan-model'/`:plan-thinking',
+`:plan-work-model'/`:plan-work-thinking'), seeded from
+`task/settings`; a step's button binds `harness-ui-tasks--step` around
+the setting command, so `harness-ui-tasks--setting-target` sets that
+step's keys, while the setting commands typed in the box, and the
+buttons of the `work` line, set the work's.  A step's target
+(`harness-ui-tasks--step-target`) gives `harness-ui--setting-set` a
+function of the key as the CONTEXT of its message: the step's own for
+`:model'/`:thinking' ("for the plan of new tasks"), "for new tasks"
+for the rest, which every step shares.  `task/submit` then gets the first step's as
+`:refine-model'/`:refine-thinking' and the work's as
+`:model'/`:thinking'.  A board whose harness offers no `:plan-model'
+refuses to submit in Plan rather than start the task at once.  The
+max-running button ends the settings line in every mode: a
+write-up or a plan takes no slot, the limit counting the tasks at
+work.  `r` refines a queued task,
 retries a stopped write-up, writes one up all the same when it refused
 the task as a duplicate, or sends feedback on a backlog task's.  A task
 whose write-up refused it as a duplicate shows it in Requires your
 input, naming the task it duplicates and saying why: `k` drops it, `r`
 writes it up anyway, `m` takes what makes it another task than the one
-it duplicates.  Beside the Submit / Refine toggle, the priority button
+it duplicates.  Beside the Submit / Refine / Plan switch, the priority button
 (`medium priority`, `harness-ui-tasks-cycle-new-priority`) cycles the
 next task's priority through high and low and back; it is a setting of
 the board like the others, sent as `task/submit`'s `:priority`.  The
@@ -9207,8 +9317,7 @@ menu entries do the same, offered while the task has not started and it
 is not at the end of the range.  A high task wears `↑`
 (`harness-icon-task-priority-high`) before its title and a low one
 `↓`, and that is all: no words among its facts repeat it (the faces
-`harness-task-priority-high-face` / `-low-face` are the compose box's
-and the bulk edit's priority buttons'); medium shows nothing.  A
+`harness-task-priority-high-face` / `-low-face` are the compose box'); medium shows nothing.  A
 pending card's "queued X ago" counts from when the task joined the
 queue (`harness-ui-tasks--queued-since`: `:queued-at`, else
 `:returned`, else `:created`).  `I` or

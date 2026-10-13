@@ -129,12 +129,17 @@ before, so no other test sees it."
   "Return the path of fixture NAME under test/fixtures."
   (expand-file-name (concat "fixtures/" name) (file-name-directory (locate-library "harness-test-helpers"))))
 
+(defvar harness-readonly--policies)
+
 (defun harness-test-reset-bus ()
-  "Forget every method, subscriber, filter and module registration."
+  "Forget every method, subscriber, filter and module registration.
+The policies of read-only sessions go too: a module registers its own
+when it starts (harness-readonly.el)."
   (clrhash harness--methods)
   (clrhash harness--subscribers)
   (clrhash harness--filters)
-  (clrhash harness--modules))
+  (clrhash harness--modules)
+  (setq harness-readonly--policies nil))
 
 (defun harness-test-load-module (name)
   "Load module NAME from lisp/modules or lisp/ui, as `harness-start' would."

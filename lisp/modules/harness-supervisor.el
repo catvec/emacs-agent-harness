@@ -7,16 +7,18 @@
 ;; "delegate, don't do" is ignored often enough that the harness
 ;; enforces the rule itself.  A session that supervises has
 ;;
-;; - no write tools: `agent/tools' offers it only an allowlist (reading,
-;;   the web, coordination, and the supervisor's own tools), and the
+;; - no write tools: it is a read-only session (harness-readonly.el,
+;;   which the module's policy `harness-supervisor--policy' tells about
+;;   it), so `agent/tools' offers it only an allowlist (reading, the web,
+;;   coordination, and the supervisor's own tools), and that module's
 ;;   `permission/decide' stage at 8 denies, for good, a call to anything
 ;;   else.  The stage is what holds when the model still has an old tool
 ;;   list, right after the user switched the mode on;
 ;; - only read-only, offline bash, and only when the sandbox can confine
-;;   commands (`sandbox/confined-p'): `tools/sandbox-options' makes every
-;;   command run with every directory read-only and no network.  The
-;;   elisp tool's background Emacs is such a command too, so the elisp
-;;   tool, which the allowlist leaves out, would run so all the same;
+;;   commands (`sandbox/confined-p'): that module's `tools/sandbox-options'
+;;   filter makes every command run with every directory read-only and no
+;;   network.  The elisp tool's background Emacs is such a command too, so
+;;   the elisp tool, which the allowlist leaves out, would run so all the same;
 ;; - a turn that may end only on a decision.  The `agent/stop' filter
 ;;   sends a model that stopped without one back, twice at most, with a
 ;;   reminder; after that it lets the turn end and leaves a hint.
@@ -31,8 +33,8 @@
 ;; `permission/decide' stage at 28 allows them, after the mode and the
 ;; rules (20) and before the judge (30), so that the auto-mode judge never
 ;; rules on a plan.  What an earlier stage denied stays denied: the
-;; refusals of the stage at 8, a standing deny rule.  `no_plan_needed'
-;; only records a decision, and is allowed in every mode.
+;; refusals of the readonly module's stage at 8, a standing deny rule.
+;; `no_plan_needed' only records a decision, and is allowed in every mode.
 ;;
 ;; Whether a session supervises is its `:ext' `:supervisor': t, `:false'
 ;; for hands-on, or nothing for a session this module does not govern
@@ -42,7 +44,8 @@
 ;; setting `harness-supervisor' has for its directory, a task's session
 ;; `harness-supervisor-tasks' (`task/changed'; the session that writes a
 ;; backlog task up only reads, and takes the setting when the task
-;; starts), and a fork its parent's value.  Only the user changes it
+;; starts, a planned task's working hands-on since its plan is made),
+;; and a fork its parent's value.  Only the user changes it
 ;; later, with `supervisor/set' for one session or `supervisor/set-all'
 ;; for every governed one: there is no tool for it.  A change
 ;; takes effect at the next tool call, since the permission stage reads
@@ -212,8 +215,8 @@
 (require 'harness-core)
 (require 'harness-util)
 (require 'harness-tools)
+(require 'harness-readonly)
 
-(defvar harness-tools-agent-planning-section)
 (defvar harness-perms-dir-tool)
 (defvar harness-supervisor--ending)
 
@@ -419,16 +422,18 @@ directory.")
 
 ;;;; The allowlist
 
-(defconst harness-supervisor--read-tools
-  '("read_file" "grep" "glob" "list_dir" "file_info" "session_info" "session_history"
-    "session_list" "session_read" "session_search" "session_wait" "task_list" "task_wait"
-    "skill_search" "skill_load" "notification_providers" "emacs_buffers" "emacs_windows"
-    "emacs_buffer" "emacs_describe" "emacs_find_definition" "emacs_messages" "emacs_open"
-    "watch_events" "unwatch_events")
-  "Tools a supervising session uses to look at things.  None changes a file.")
+;; A supervising session is a read-only one (harness-readonly.el): its
+;; policy, `harness-supervisor--policy', has that module offer it only
+;; the reading and web tools and the ones named here, deny any other
+;; call for good at its stage at 8, and make its bash read-only and
+;; offline, and only where the sandbox can confine it.
 
-(defconst harness-supervisor--net-tools '("web_fetch" "web_search")
-  "Tools a supervising session uses to read the web.")
+(defconst harness-supervisor--look-tools
+  '("session_wait" "task_wait" "emacs_open" "watch_events" "unwatch_events")
+  "Tools a supervising session uses to look at things, besides the reading ones.
+They wait for sessions and tasks, watch events and show a buffer, and
+none changes a file.  The reading tools every read-only session has are
+`harness-readonly-read-tools'.")
 
 (defconst harness-supervisor--coordination-tools
   '("ask_user" "todo_write" "hand_in" "notify" "session_control" "session_send" "session_move"
@@ -442,61 +447,57 @@ allowed directories, the working directory and the host.")
 
 (defun harness-supervisor--allowed-tools ()
   "Return the names of the tools a supervising session may use besides bash.
-They are the reading, web and coordination tools, the tool to ask for
-a directory when the permission module defines it, `rerun_approved'
-\(which runs only a call the user approved by hand, see
+They are the reading and web tools of every read-only session
+\(`harness-readonly-read-tools', `harness-readonly-net-tools'), those of
+`harness-supervisor--look-tools', the coordination tools, the tool to
+ask for a directory when the permission module defines it,
+`rerun_approved' (which runs only a call the user approved by hand, see
 harness-perms.el), and the tools of `harness-supervisor-tools'."
-  (append harness-supervisor--read-tools
-          harness-supervisor--net-tools
+  (append harness-readonly-read-tools
+          harness-readonly-net-tools
+          harness-supervisor--look-tools
           harness-supervisor--coordination-tools
           (and (boundp 'harness-perms-dir-tool) (stringp harness-perms-dir-tool)
                (list harness-perms-dir-tool))
-          ;; The user's own approval lets a call this gate refused run as
+          ;; The user's own approval lets a call the gate refused run as
           ;; it was denied; the tool refuses anything they did not approve.
           '("rerun_approved")
           harness-supervisor-tools))
 
-(defun harness-supervisor--confined-p (dir)
-  "Non-nil when commands run in DIR can be confined by the sandbox.
-Bash runs read-only and offline only then, so without it a supervising
-session has no bash.  Anything that goes wrong counts as not confined."
-  (and dir
-       (harness-method-exists-p 'sandbox/confined-p)
-       (condition-case err
-           (and (harness-call 'sandbox/confined-p dir) t)
-         (error (harness-log 'warn "supervisor: asking whether %s is confined failed: %S" dir err)
-                nil))))
-
-(defun harness-supervisor--dir (session)
-  "Return the directory SESSION, a plist, runs commands in, host prefix and all."
-  (let ((cwd (plist-get session :cwd))
-        (host (plist-get session :host)))
-    (if (and (stringp cwd) (stringp host) (not (string-empty-p host)) (not (file-remote-p cwd)))
-        (concat host cwd)
-      cwd)))
-
-(defun harness-supervisor--tool-allowed-p (tool dir)
-  "Non-nil when a supervising session may use TOOL, to run in DIR when it is bash."
-  (or (and (member tool (harness-supervisor--allowed-tools)) t)
-      (and (equal tool "bash") (harness-supervisor--confined-p dir))))
-
-(defun harness-supervisor--tools (names session)
-  "Offer a supervising SESSION only the tools it may use among NAMES.
-An `agent/tools' filter at 90, after the filters that add and remove
-tools for other reasons.  Every other session loses the supervisor's own
-tools.  A nil SESSION is the catalogue of every tool, which stays whole."
-  (cond
-   ((null session) names)
-   ((harness-supervisor--session-p session)
-    (let ((dir (harness-supervisor--dir session)))
-      (cl-remove-if-not (lambda (name) (harness-supervisor--tool-allowed-p name dir)) names)))
-   (t (cl-remove-if (lambda (name) (member name harness-supervisor-tools)) names))))
-
-;;;; The permission stage
-
 (defconst harness-supervisor--deny-hint
   "Put the change in a step of your plan (submit_plan), for a worker to make, or ask the user to switch supervisor mode off with the supervisor button in the chat header."
   "What a supervising session is told when a call is denied.")
+
+(defun harness-supervisor--policy (session)
+  "Return the read-only policy of SESSION, a plist, when it supervises, else nil.
+The readonly module (harness-readonly.el) asks it about every session
+and call: a supervising session is offered only the tools of
+`harness-supervisor--allowed-tools', and bash only read-only and
+offline where the sandbox can confine it; a call of anything else is
+denied for good, with `harness-supervisor--deny-hint'.  Registered while
+the module runs (`harness-supervisor--init')."
+  (and (harness-supervisor--session-p session)
+       (list :tools (harness-supervisor--allowed-tools)
+             :label "supervisor mode"
+             :doing "plans and delegates"
+             :hint harness-supervisor--deny-hint)))
+
+(defun harness-supervisor--tools (names session)
+  "Keep the supervisor's own tools for the sessions that supervise.
+An `agent/tools' filter at 90.  A session that does not supervise loses
+the tools of `harness-supervisor-tools'; one that does keeps them, and
+is offered nothing its policy does not allow (`harness-supervisor--policy',
+which the readonly module applies).  A nil SESSION is the catalogue of
+every tool, which stays whole."
+  (if (or (null session) (harness-supervisor--session-p session))
+      names
+    (cl-remove-if (lambda (name) (member name harness-supervisor-tools)) names)))
+
+;;;; The permission stage
+
+;; The stage that refuses what a supervising session may not do is the
+;; readonly module's (`harness-readonly--gate', at 8).  This module's own
+;; stage approves plans.
 
 (defun harness-supervisor--denial (reason &optional hint)
   "Return the decision that denies a call for good, because of REASON.
@@ -506,47 +507,29 @@ given."
         :reason (format "supervisor mode: %s" reason)
         :hint (or hint harness-supervisor--deny-hint)))
 
-(defun harness-supervisor--refusal (request)
-  "Return the decision that denies REQUEST in a supervising session, or nil.
-A call is refused when the session supervises and the tool is not on
-the allowlist, or is bash and the sandbox cannot confine the command.
-A `hand_in' that hands a task in as done is refused while a step of the
-session's plans is not done (`harness-supervisor--hand-in-refusal')."
-  (let* ((session (plist-get request :session))
-         (tool (plist-get request :tool))
-         (dir (or (car (plist-get request :paths)) (harness-supervisor--dir session))))
-    (when (harness-supervisor--session-p session)
-      (if (not (harness-supervisor--tool-allowed-p tool dir))
-          (harness-supervisor--denial
-           (if (equal tool "bash")
-               (format "bash runs only read-only and offline here, which needs the sandbox, and the sandbox cannot confine commands in %s"
-                       (or dir "this session's directory"))
-             (format "this session plans and delegates, so it may not use %s" tool)))
-        (and (equal tool "hand_in")
-             (harness-supervisor--hand-in-refusal session (plist-get request :input)))))))
-
-(defun harness-supervisor--gate (decision next request)
-  "Deny a call a supervising session may not make, then go on with NEXT.
-A `permission/decide' stage at 8, before the jail, the mode and the
-judge: DECISION is the current value and REQUEST the call.  The denial
-is final, so no permission mode, rule or answer lets the call run.
-Besides the tools a supervising session may not use, it refuses the
-`hand_in' that would hand a task in as done while a step of the
-session's plans is not done (`harness-supervisor--hand-in-refusal'),
-which the user can still approve in the chat, as any denial.
-Calls of a session that does not supervise go on as they were.  A call
-this stage cannot check is denied too: it fails closed, since a handler
-that signals would be skipped, and the call would then be decided as if
-the mode were off.  The stage only refuses: it allows nothing, so what
-a supervising session may do is decided by the stages after it, and by
-`harness-supervisor--approval' for the tools of its own."
+(defun harness-supervisor--hand-in-gate (decision next request)
+  "Refuse a supervising session's `hand_in' while its plans are not done.
+A `permission/decide' stage at 9, just after the readonly module's gate
+\(8): DECISION is the current value and REQUEST the call.  A `hand_in'
+that hands a task in as done is refused while a step of the session's
+plans is not done (`harness-supervisor--hand-in-refusal'); the user can
+still approve it in the chat, as any denial.  Every other call, and
+every session that does not supervise, goes on as it was.  A call this
+stage cannot check is denied too: it fails closed, since a handler that
+signals would be skipped, and the call would then be decided as if the
+mode were off."
   (funcall next
            (condition-case err
-               (or (harness-supervisor--refusal request) decision)
+               (or (let ((session (plist-get request :session)))
+                     (and (equal (plist-get request :tool) "hand_in")
+                          (harness-supervisor--session-p session)
+                          (harness-supervisor--hand-in-refusal session (plist-get request :input))))
+                   decision)
              (error
               (harness-log 'error "supervisor: checking a call of %s failed, so it is denied: %S"
                            (plist-get request :tool) err)
               (harness-supervisor--denial "this call could not be checked, so it is not made")))))
+
 
 (defconst harness-supervisor--approval-tools '("no_plan_needed" "submit_plan" "retry_step")
   "The supervisor's own tools, which `harness-supervisor--approval' decides.
@@ -600,13 +583,14 @@ auto, yolo), and in a non-interactive session whatever its mode, the plan
 is allowed, and no judge ever rules on it.  `no_plan_needed' only
 records a decision, and is allowed in every mode.  What an earlier stage
 decided stays decided, since only a call that still asks is touched: the
-refusals of `harness-supervisor--gate', a standing rule, the write-up
-gate.  Without the permission module the mode is not known, so a plan is
-left as it is.
+refusals of the readonly module's stage at 8
+\(`harness-readonly--gate'), a standing rule, the write-up gate.
+Without the permission module the mode is not known, so a plan is left
+as it is.
 
 A handler that signals is skipped, so when anything goes wrong here the
 error is logged and DECISION goes on unchanged: refusing is the work of
-the gate."
+the readonly module's gate."
   (funcall next
            (condition-case err
                (harness-supervisor--approval-decision decision request)
@@ -614,30 +598,6 @@ the gate."
               (harness-log 'error "supervisor: deciding whether a call of %s needs approval failed, so the other stages decide: %S"
                            (plist-get request :tool) err)
               decision))))
-
-;;;; Bash
-
-(defconst harness-supervisor--sandbox-options '(:read-only t :network nil)
-  "The sandbox options of a supervising session's commands: look, don't touch.")
-
-(defun harness-supervisor--sandbox-options (options session-id)
-  "Make the commands of a supervising session read-only and offline.
-A `tools/sandbox-options' filter: OPTIONS is what the handlers before
-this one made, SESSION-ID the session about to run a command.  Options
-ask for the sandbox, so a command that cannot have it fails with an
-error rather than run unconfined.  A handler that signals is skipped,
-which would leave bash writable, so when anything goes wrong here the
-answer is read-only all the same."
-  (condition-case err
-      (if (harness-supervisor--active-id-p session-id)
-          (harness-plist-merge options harness-supervisor--sandbox-options)
-        options)
-    (error
-     (harness-log 'error "supervisor: choosing the sandbox options of %s failed, so they are read-only: %S"
-                  session-id err)
-     (condition-case nil
-         (harness-plist-merge options harness-supervisor--sandbox-options)
-       (error (copy-sequence harness-supervisor--sandbox-options))))))
 
 ;;;; Whether a session supervises
 
@@ -925,12 +885,16 @@ is not one, session and all."
 (defun harness-supervisor--task-value (task cwd)
   "Return the supervisor value the session of TASK takes: `auto', t or nil.
 A task submitted with its own setting keeps it (see `task/submit' and
-`task/set-all'); without one it takes `harness-supervisor-tasks' at the
-task's project -- which a project's .dir-locals.el may override -- with
-`auto' judged from the message that starts the work."
-  (if (plist-member task :supervisor)
-      (and (harness-json-true-p (plist-get task :supervisor)) t)
-    (harness-supervisor--setting 'harness-supervisor-tasks cwd)))
+`task/set-all').  Without one, a planned task (the task board's Plan
+mode, `:plan') works hands-on: a strong model planned it already,
+reading only, for the model its work runs on, so a supervisor would
+only plan it again.  Any other task takes `harness-supervisor-tasks' at
+the task's project -- which a project's .dir-locals.el may override --
+with `auto' judged from the message that starts the work."
+  (cond ((plist-member task :supervisor)
+         (and (harness-json-true-p (plist-get task :supervisor)) t))
+        ((harness-json-true-p (plist-get task :plan)) nil)
+        (t (harness-supervisor--setting 'harness-supervisor-tasks cwd))))
 
 (defun harness-supervisor--on-task-changed (task)
   "Set the supervisor setting of the session of TASK, a task view, when it is new.
@@ -1420,10 +1384,9 @@ worker is cancelled (see `harness-supervisor--forget-plans')."
 (defun harness-supervisor--budget-point-p (n)
   "Non-nil when N tool calls in a turn call for a nudge.
 That is when N reaches `harness-supervisor-step-budget' and every half
-budget after it."
-  (let ((budget harness-supervisor-step-budget))
-    (and (integerp budget) (> budget 0) (>= n budget)
-         (zerop (mod (- n budget) (max 1 (/ budget 2)))))))
+budget after it, as for any read-only turn
+\(`harness-readonly-budget-point-p')."
+  (harness-readonly-budget-point-p n harness-supervisor-step-budget))
 
 (defun harness-supervisor--budget-text (n)
   "Return the message that tells a turn which made N tool calls to wrap up."
@@ -3592,27 +3555,23 @@ PROMPT they made.  Without a Planning section to replace the new one is
 appended.  Other sessions keep PROMPT."
   (if (not (harness-supervisor--session-p session))
       prompt
-    (let* ((section (harness-supervisor-prompt-section))
-           (planning (and (boundp 'harness-tools-agent-planning-section)
-                          (stringp harness-tools-agent-planning-section)
-                          (not (string-empty-p harness-tools-agent-planning-section))
-                          harness-tools-agent-planning-section))
-           (start (and planning (string-search planning prompt))))
-      (if start
-          (concat (substring prompt 0 start) section (substring prompt (+ start (length planning))))
-        (concat prompt "\n\n" section "\n")))))
+    (harness-readonly-system-prompt prompt (harness-supervisor-prompt-section))))
 
 ;;;; Module
 
 (defun harness-supervisor--init ()
   "Hook the module into the bus (idempotent)."
+  ;; A supervising session is read-only: the readonly module's tool
+  ;; filter, gate (at 8) and sandbox options hold it to the policy.
+  (harness-readonly-register 'supervisor #'harness-supervisor--policy)
+  ;; The stages this module had before that module did the work.
+  (harness-remove-filter 'permission/decide 'harness-supervisor--gate)
+  (harness-add-filter 'permission/decide #'harness-supervisor--hand-in-gate 9)
+  (harness-remove-filter 'tools/sandbox-options 'harness-supervisor--sandbox-options)
   (harness-add-filter 'agent/tools #'harness-supervisor--tools 90)
-  (harness-add-filter 'permission/decide #'harness-supervisor--gate 8)
   ;; After the mode and the rules (20) and the tasks' write-up gate (25),
   ;; before the judge (30): it keeps the judge off the plans.
   (harness-add-filter 'permission/decide #'harness-supervisor--approval 28)
-  ;; Late, so the options of the handlers before it cannot undo its own.
-  (harness-add-filter 'tools/sandbox-options #'harness-supervisor--sandbox-options 90)
   (harness-add-filter 'agent/stop #'harness-supervisor--stop)
   ;; After the sections the other modules add, before the seed freezes the prompt.
   (harness-add-filter 'agent/system-prompt #'harness-supervisor--system-prompt 900)
@@ -3640,11 +3599,12 @@ left once they are (`harness-tasks--pick-up').  A reload hooks in again
   (harness-run-soon #'harness-supervisor--recover))
 
 (defun harness-supervisor--shutdown ()
-  "Take the module off the bus.  Sessions keep their setting."
+  "Take the module off the bus.  Sessions keep their setting.
+Its policy goes too, so the readonly module holds no session to it."
+  (harness-readonly-unregister 'supervisor)
   (harness-remove-filter 'agent/tools #'harness-supervisor--tools)
-  (harness-remove-filter 'permission/decide #'harness-supervisor--gate)
   (harness-remove-filter 'permission/decide #'harness-supervisor--approval)
-  (harness-remove-filter 'tools/sandbox-options #'harness-supervisor--sandbox-options)
+  (harness-remove-filter 'permission/decide #'harness-supervisor--hand-in-gate)
   (harness-remove-filter 'agent/stop #'harness-supervisor--stop)
   (harness-remove-filter 'agent/system-prompt #'harness-supervisor--system-prompt)
   (harness-off (cons 'session/created #'harness-supervisor--on-created))
@@ -3666,7 +3626,7 @@ left once they are (`harness-tasks--pick-up').  A reload hooks in again
 
 (harness-define-module 'supervisor
   :doc "Supervisor mode: sessions that plan and delegate, enforced by the harness."
-  :requires '(session agent tools)
+  :requires '(session agent tools readonly)
   :init #'harness-supervisor--start
   :shutdown #'harness-supervisor--shutdown)
 
