@@ -214,7 +214,18 @@ cooldown), and no UI shows it until BODY says one does."
   (should (null (harness-pet-sanitise nil "Fennel")))
   (let ((long (harness-pet-sanitise (make-string 400 ?x) "Fennel")))
     (should (<= (length long) 220))
-    (should (string-suffix-p "…" long))))
+    (should (string-suffix-p "…" long)))
+  ;; An action that reads as sensual goes, wherever it is; the rest stays.
+  (should (equal "Eight pats on the prickly head, so I'll allow it."
+                 (harness-pet-sanitise
+                  "*wobbles happily, a spine quivers with pleasure* Eight pats on the prickly head, so I'll allow it."
+                  "Biscuit")))
+  (should (equal "Third pet. Noted." (harness-pet-sanitise "Third pet. *Pleased to be TOUCHED again* Noted." "Biscuit")))
+  (should (equal "*tilts head* Noted." (harness-pet-sanitise "*tilts head* *moans softly* Noted." "Biscuit")))
+  (should (null (harness-pet-sanitise "\"*writhes*\"" "Biscuit")))
+  ;; Not an innocent one, nor the words outside an action.
+  (should (equal "*wiggles, untouched by the bug* With pleasure."
+                 (harness-pet-sanitise "*wiggles, untouched by the bug* With pleasure." "Biscuit"))))
 
 (ert-deftest harness-pet-soul-without-an-answer ()
   "A model that does not answer in JSON leaves the pet a name and a personality all the same."
@@ -474,6 +485,9 @@ the call's usage: the pet records none itself, so none counts twice."
         (should (equal "pet" (plist-get (car (funcall said)) :reason)))
         (should (string-match-p "you were just petted; that makes 1 pets"
                                 (harness-pet-test-request-text (car requests))))
+        ;; Its voice keeps a petting innocent.
+        (should (string-match-p "the kind a cartoon pet makes. Keep it all wholesome: nothing about how a touch feels, nothing that could read as sensual or suggestive"
+                                (plist-get (car requests) :system)))
         ;; Within the gap: petting again counts, but asks nothing.
         (harness-test-wait (lambda () (eq :false (plist-get (harness-call 'pet/get) :thinking))) 5 "quiet")
         (harness-call 'pet/pet)

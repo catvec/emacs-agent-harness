@@ -5484,9 +5484,16 @@ again brings it back as it was.
   otherwise (`error`) or changed more than `harness-pet--large-diff`
   lines (`large-diff`), see `harness-pet-turn-reason`.  It reads the
   session's name, its project and the last nodes of the transcript (at
-  most about 3000 characters).  The line is one line, without a leading
-  "NAME:" or quotes, at most `harness-pet--max-saying` characters
-  (`harness-pet-sanitise`); "..." is silence.
+  most about 3000 characters).  Its voice (`harness-pet--say-system`)
+  keeps the line wholesome: an action between asterisks is a small
+  gesture a cartoon pet makes, never how a touch feels, and nothing
+  reads as sensual or suggestive, since a cheap model that is petted
+  otherwise writes *pleased to be touched*.  The line is one line,
+  without a leading "NAME:" or quotes, and without an action that has a
+  word of `harness-pet--suggestive-regexp` (*a spine quivers with
+  pleasure*: the rest of the line stays), at most
+  `harness-pet--max-saying` characters (`harness-pet-sanitise`); "..."
+  is silence.
 - Every call is `provider/complete` with `:ephemeral t` and `:no-thinking
   t`, a session id of its own (closed with `provider/close` when it
   ends) and `pet/` under the state directory as its directory, so no

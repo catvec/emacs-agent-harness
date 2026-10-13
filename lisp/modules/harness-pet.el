@@ -820,9 +820,15 @@ ends.  Signals when the pet is turned off (`harness-pet-enabled')."
 (defconst harness-pet--say-system
   "You are a coding companion: %s, a tiny %s %s that lives in a programmer's editor and watches them work with an AI coding agent. %s
 Your stats, out of 100, colour your voice: %s.
-Now and then you say one short line about what is happening: in character, playful, about what you actually see, at most 140 characters. You may start with a brief action between asterisks, like *tilts head*. Plain text only: no markdown, no emoji, no quotation marks, no advice longer than a line, never the agent's words. When the user speaks to you by name, answer them directly. When nothing is worth saying, answer just: ..."
+Now and then you say one short line about what is happening: in character, playful, about what you actually see, at most 140 characters. You may start with a brief action between asterisks, like *tilts head* or *puffs up proudly*: a small gesture, the kind a cartoon pet makes. Keep it all wholesome: nothing about how a touch feels, nothing that could read as sensual or suggestive. Plain text only: no markdown, no emoji, no quotation marks, no advice longer than a line, never the agent's words. When the user speaks to you by name, answer them directly. When nothing is worth saying, answer just: ..."
   "System prompt of the call that has the pet say something.
-Filled with its name, rarity, species, personality and stats.")
+Filled with its name, rarity, species, personality and stats.  Its
+action is a cartoon pet's gesture, and nothing it says is sensual: left
+to itself, a cheap model that is petted writes *pleased to be touched*
+or *a spine quivers with pleasure*.  It names no words to avoid: in a
+trial, naming them did no better.  Those words are for
+`harness-pet--suggestive-regexp', which drops an action that has one
+all the same.")
 
 (defconst harness-pet--reasons
   '((prompt . "The user just sent their agent a message.")
@@ -857,16 +863,38 @@ Filled with its name, rarity, species, personality and stats.")
               "")
             "\n\nSay your line now.")))
 
+(defconst harness-pet--suggestive-regexp
+  (concat "\\<" (regexp-opt '("arous" "caress" "ecsta" "erotic" "moan" "pleasur" "quiver"
+                              "seduc" "sensual" "sultr" "throb" "touched" "writh")))
+  "Words that give an action of the pet a sensual turn, in any case.
+Each starts a word: \"quiver\" is quivers and quivering too.  The
+pet's prompt asks for a wholesome line (`harness-pet--say-system'), but
+a cheap model that is petted may still write *a spine quivers with
+pleasure*: `harness-pet-sanitise' drops an action between asterisks
+that has one of these words, and keeps the rest of the line.")
+
+(defun harness-pet--drop-suggestive (line)
+  "LINE without its actions between asterisks that read as sensual.
+See `harness-pet--suggestive-regexp'."
+  (let ((case-fold-search t))
+    (replace-regexp-in-string
+     "\\*[^*\n]+\\*[ \t]*"
+     (lambda (action) (if (string-match-p harness-pet--suggestive-regexp action) "" action))
+     line t t)))
+
 (defun harness-pet-sanitise (text &optional name)
   "Turn the model's TEXT into a saying of the pet NAME, or nil for silence.
 The first two lines are kept, on one line, without a leading \"NAME:\"
-or quotation marks around them; three dots, or nothing, are silence."
+or quotation marks around them, and without an action between
+asterisks that reads as sensual (`harness-pet--suggestive-regexp');
+three dots, or nothing, are silence."
   (let* ((lines (split-string (or text "") "\n" t "[ \t\r]+"))
          (line (string-join (seq-take lines 2) " ")))
     (when (and name (not (string-empty-p name)))
       (let ((case-fold-search t))
         (when (string-match (concat "\\`\\*?\\*?" (regexp-quote name) "\\*?\\*?[ \t]*:[ \t]*") line)
           (setq line (substring line (match-end 0))))))
+    (setq line (harness-pet--drop-suggestive line))
     (setq line (string-trim line "[\"“”‘ \t]+" "[\"“”’ \t]+"))
     (setq line (replace-regexp-in-string "[ \t]+" " " line))
     (unless (or (string-empty-p line) (string-match-p "\\`[.…]+\\'" line))
