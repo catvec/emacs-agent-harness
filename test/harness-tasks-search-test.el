@@ -301,8 +301,9 @@ some of them, and when none has any, that none does."
 ;;;; Failures
 
 (ert-deftest harness-tasks-search-fails-without-an-answer ()
-  "Prose, an error from the model, a model that takes too long and an
-empty query fail the search, saying why."
+  "JSON that breaks off before any answer in words, an error from the
+model, a model that takes too long and an empty query fail the search,
+saying why."
   (harness-tasks-search-test-with
     (cl-flet ((fails (pattern &rest replies)
                 (setq harness-tasks-search-test--replies replies)
@@ -310,7 +311,7 @@ empty query fail the search, saying why."
                                           (harness-call 'search/ask default-directory "q" '(:bias "tasks"))
                                           10))))
                   (should (string-match-p pattern (harness-error-message err))))))
-      (fails "did not answer in JSON: Sure! Here are" "Sure! Here are your tasks.")
+      (fails "JSON did not parse: {\"show\":" "{\"show\":[\"t-1\",")
       (fails "gave no answer" "  ")
       (fails "The model failed: overloaded"
              '((:type text :delta "{") (:type done :stop-reason error :error "overloaded")))
@@ -942,10 +943,126 @@ lines hold the query's words, as it picks tasks."
           (should (equal '("harness-compose-add-attachment")
                          (mapcar (lambda (c) (plist-get c :command)) (plist-get plan :commands))))
           (should-not (plist-get plan :sessions))
-          (should (eq :false (plist-get plan :widened))))
+          (should (eq :false (plist-get plan :widened)))
+          ;; A "how" question is answered in words too, naming the command.
+          (should (equal "Use `harness-compose-add-attachment` (C-c C-a, Chat): Attach file — Attach PATH to the next message."
+                         (plist-get plan :answer))))
         (let ((plan (ask "open the session where I debugged the merge queue" (list :context (list :view "sessions")))))
           (should (equal (list merge) (harness-tasks-search-test--ids (plist-get plan :sessions))))
+          (should-not (plist-get plan :answer))
           (should (eq :false (plist-get plan :widened))))))))
+
+;;;; Answers in words
+
+(declare-function harness-tasks-search--read-reply "harness-tasks-search")
+(declare-function harness-tasks-search--escape-controls "harness-tasks-search")
+(defvar harness-tasks-search--broke-off)
+
+(defconst harness-tasks-search-test--long-answer
+  (concat "To attach a file, put point in the compose box and press `C-c C-a`: "
+          (mapconcat (lambda (i) (format "word%d" i)) (number-sequence 1 120) " ")
+          ".\n\n"
+          (mapconcat (lambda (i)
+                       (format "%d. Step %d of attaching: pick the file, check its chip, and send the message with it once it is ready."
+                               i i))
+                     (number-sequence 1 12) "\n")
+          "\n\nThe last line of the answer.")
+  "An answer in words longer than any line, or quote, that used to cut one.")
+
+(ert-deftest harness-tasks-search-answers-in-words ()
+  "A question words answer gets its answer whole, Markdown and all, with
+the commands it names, even when the model breaks the lines of its JSON
+string as they are.  The model is told it may answer so, and has the
+room to.  An answer in words is something: the search adds nothing
+nearest to one that comes alone, and one that also asks to look further
+has answered."
+  (harness-tasks-search-test-with
+    (let ((plan (harness-tasks-search-test--ask
+                 "how do I attach a file?"
+                 (list :context (list :view "chat") :commands harness-tasks-search-test--catalogue)
+                 ;; Its line breaks as they are, not as \n.
+                 (concat "{\"commands\":[\"harness-compose-add-attachment\"],\"answer\":\""
+                         harness-tasks-search-test--long-answer "\"}"))))
+      (should (equal harness-tasks-search-test--long-answer (plist-get plan :answer)))
+      (should (equal '("harness-compose-add-attachment")
+                     (mapcar (lambda (c) (plist-get c :command)) (plist-get plan :commands))))
+      (should (eq :false (plist-get plan :widened)))
+      (let ((request (car harness-tasks-search-test--requests)))
+        (should (string-match-p "\"answer\" answers the query in words" (plist-get request :system)))
+        (should (string-match-p "\"answer\":\"...\"" (plist-get request :system)))
+        (should (>= (plist-get request :max-tokens) 4000))))
+    ;; An answer alone, escaped as JSON should be: nothing is added to it.
+    (let ((plan (harness-tasks-search-test--ask
+                 "what does verify do?" (list :context (list :view "chat"))
+                 "{\"show\":[],\"sessions\":[],\"commands\":[],\"do\":[],\"answer\":\"It accepts a task in review:\\nits work merges.\"}")))
+      (should (equal "It accepts a task in review:\nits work merges." (plist-get plan :answer)))
+      (should (eq :false (plist-get plan :widened)))
+      (should-not (plist-get plan :note))
+      (should-not (plist-get plan :sessions))
+      (should-not (plist-get plan :commands)))
+    ;; Answered, and asking to look further too: answered.
+    (let ((plan (harness-tasks-search-test--ask
+                 "where is the guide?" (list :context (list :view "chat"))
+                 "{\"grep\":\"guide\",\"answer\":\"It is `docs/guide.md`.\"}"
+                 "{\"show\":[]}")))
+      (should (= 1 (length harness-tasks-search-test--requests)))
+      (should (equal "It is `docs/guide.md`." (plist-get plan :answer)))
+      (should-not (plist-get plan :looked)))
+    ;; A plain find has no answer in words.
+    (should-not (plist-get (harness-tasks-search-test--ask
+                            "the attach command" (list :commands harness-tasks-search-test--catalogue)
+                            "{\"commands\":[\"harness-compose-add-attachment\"]}")
+                           :answer))))
+
+(ert-deftest harness-tasks-search-takes-prose-as-the-answer ()
+  "A model that answers in prose rather than JSON answered in words: its
+reply, whole, is the answer, braces and all, where it used to fail the
+search with the reply cut to a line."
+  (harness-tasks-search-test-with
+    (let* ((prose (concat "Press `C-c C-a` in the compose box, then pick the file.\n\n"
+                          "- It shows as a chip above the box.\n"
+                          "- A path in `{braces}` such as (let ((x {})) x) is fine too.\n\n"
+                          (make-string 300 ?x)))
+           (plan (harness-tasks-search-test--ask "how do I attach a file?" (list :context (list :view "chat"))
+                                                 prose)))
+      (should (equal prose (plist-get plan :answer)))
+      (should-not (plist-get plan :commands))
+      (should (eq :false (plist-get plan :widened))))
+    (should (equal "Sure! Here are your tasks."
+                   (plist-get (harness-tasks-search-test--search "q" "Sure! Here are your tasks.") :answer)))))
+
+(ert-deftest harness-tasks-search-keeps-what-came-of-a-broken-answer ()
+  "JSON that breaks off in its answer in words -- the model ran out of
+tokens, or left a quote unescaped -- keeps the answer as far as it came,
+an escape cut in half left out, with a note that says it broke off."
+  (harness-tasks-search-test-with
+    (let ((plan (harness-tasks-search-test--ask
+                 "how do I attach a file?" (list :context (list :view "chat"))
+                 "{\"show\":[],\"answer\":\"Press `C-c C-a`,\\nthen pick the fi\\u00")))
+      (should (equal "Press `C-c C-a`,\nthen pick the fi" (plist-get plan :answer)))
+      (should (equal harness-tasks-search--broke-off (plist-get plan :note)))
+      (should (eq :false (plist-get plan :widened))))))
+
+(ert-deftest harness-tasks-search-reads-replies-leniently ()
+  "What a reply gives: the first object with the search's keys, whatever
+text is around it; one that is nothing but an object, whatever its keys;
+line breaks inside its strings as they are; prose, braces and all, as the
+answer; nothing for a blank reply or JSON broken before any answer."
+  (harness-tasks-search-test-with
+    (dolist (case '(("{\"show\":[],\"answer\":\"one\ntwo\tthree\"}" (:show nil :answer "one\ntwo\tthree"))
+                    ("```json\n{\"answer\":\"Use `C-c C-a`.\"}\n```\nThat is all {really}." (:answer "Use `C-c C-a`."))
+                    ("Here: {not json} and {\"show\":[\"t-2\"],\"answer\":\"ok\"} after" (:show ("t-2") :answer "ok"))
+                    ("{\"grep\":\"x\"}\n{\"show\":[]}" (:grep "x"))
+                    ("{}" (:show nil))
+                    ("```json\n{}\n```" (:show nil))
+                    ("{\"foo\": 1}" (:foo 1))
+                    ("Use {braces}: (let ((x {})) x)" (:answer "Use {braces}: (let ((x {})) x)"))
+                    ("Set {\"model\": \"x\"} in your config." (:answer "Set {\"model\": \"x\"} in your config."))
+                    ("{\"commands\":[\"a\"" nil)
+                    ("  \n" nil)))
+      (should (equal (cadr case) (harness-tasks-search--read-reply (car case)))))
+    (should (equal "{\"a\":\"x\\ny\",\n\"b\":1}" (harness-tasks-search--escape-controls "{\"a\":\"x\ny\",\n\"b\":1}")))
+    (should (equal "{\"a\":\"\\\"q\\\"\\t\"}" (harness-tasks-search--escape-controls "{\"a\":\"\\\"q\\\"\t\"}")))))
 
 (provide 'harness-tasks-search-test)
 ;;; harness-tasks-search-test.el ends here

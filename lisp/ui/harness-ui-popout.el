@@ -16,7 +16,9 @@
 ;; The window is a side window at the bottom of the frame
 ;; (`harness-ui-popout-window-parameters'), selected, and fitted to its
 ;; content up to `harness-ui-popout-max-height', or the popout's own
-;; :max-height (a report with images grows taller).  An image is not
+;; :max-height (a report with images grows taller).  Content taller
+;; than that scrolls; while point is in the box, the box stays on the
+;; window's last line, as a chat's does.  An image is not
 ;; drawn with the content: decoding one takes long enough that the
 ;; popout would open frozen, so a line where it goes says it is loading
 ;; and the image comes a moment later, growing the window
@@ -154,6 +156,9 @@ a permission's y and n.
   (harness-compose-setup :project (lambda () (or harness-ui-popout--dir default-directory))
                          :placeholder #'harness-ui-popout--placeholder-text
                          :redraw #'harness-ui-popout--redraw-tail)
+  ;; The box stays in sight, however tall the content (see
+  ;; `harness-ui-popout--scroll').
+  (add-hook 'pre-redisplay-functions #'harness-ui-popout--follow nil t)
   (add-hook 'kill-buffer-hook #'harness-ui-popout--on-kill nil t))
 
 ;; The popout's keys in the harness menu.
@@ -331,11 +336,66 @@ That is its :max-height of the frame, or `harness-ui-popout-max-height'."
          (floor (* (or fraction harness-ui-popout-max-height) (frame-height frame))))))
 
 (defun harness-ui-popout--fit (window)
-  "Fit WINDOW, showing a popout, to its content within the height limits."
+  "Fit WINDOW, showing a popout, to its content within the height limits.
+To the pixel: windows above may be a few pixels off whole lines, and a
+popout fitted in lines would come out those pixels short, its last line
+-- the box -- cut.  Then scroll it as its content needs
+\(`harness-ui-popout--scroll')."
   (when (and (window-live-p window) (window-parameter window 'window-side))
     (let ((max (with-current-buffer (window-buffer window)
-                 (harness-ui-popout--max-lines (window-frame window)))))
-      (ignore-errors (fit-window-to-buffer window max harness-ui-popout-min-height)))))
+                 (harness-ui-popout--max-lines (window-frame window))))
+          (window-resize-pixelwise t))
+      (ignore-errors (fit-window-to-buffer window max harness-ui-popout-min-height))
+      (ignore-errors (harness-ui-popout--scroll window)))))
+
+(defun harness-ui-popout--scroll (window)
+  "Scroll WINDOW, showing a popout, so its content and box show as they should.
+Content that fits WINDOW shows from its start, however far down WINDOW
+was scrolled before it changed.  Content taller than WINDOW leaves it
+where it is, unless WINDOW's point is in the box and out of sight: Emacs
+would recenter on point then, leaving half the window empty under the
+box.  WINDOW shows the end of the content instead, the box's last line
+on its last line (point's, for a box taller than WINDOW), the way a chat
+keeps its box at the bottom; the start of the content is a scroll back.
+A draw scrolls so once the window is fitted, and
+`harness-ui-popout--follow' again whenever the window changes after."
+  (with-current-buffer (window-buffer window)
+    (let ((body (window-body-height window t))
+          (start (window-start window))
+          (pt (window-point window)))
+      (cond
+       ((and (> start (point-min))
+             (<= (harness-ui-text-height
+                  window (point-min)
+                  (save-excursion (goto-char (point-max)) (skip-chars-backward " \t\n") (point))
+                  body)
+                 body))
+        (set-window-start window (point-min) t))
+       ((and (harness-compose-in-p pt) (not (pos-visible-in-window-p pt window)))
+        (let* ((line (save-excursion (goto-char pt) (vertical-motion 0 window) (point)))
+               (anchor (if (<= (harness-ui-text-height window line harness-compose-end body) body)
+                           harness-compose-end
+                         pt)))
+          (with-selected-window window
+            (save-excursion (goto-char anchor) (recenter -1)))))))))
+
+(defun harness-ui-popout--follow (window)
+  "Scroll WINDOW as its popout needs, once something changed, before it is shown.
+Runs from `pre-redisplay-functions'.  A draw scrolls the window it
+fits (`harness-ui-popout--scroll'), yet the window may change size after
+that -- the echo area grows, the frame settles -- and point may move
+into the box, typing jumping there; Emacs would recenter on point then.
+So WINDOW is scrolled again before it is redisplayed, once its text,
+start, point or size changed since the last time: each time lays out up
+to a window's worth of text."
+  (when (and (window-live-p window) (eq (window-buffer window) (current-buffer))
+             (window-parameter window 'window-side))
+    (let ((key (lambda () (list (current-buffer) (buffer-chars-modified-tick)
+                                (window-start window) (window-point window)
+                                (window-body-height window t) (window-body-width window t)))))
+      (unless (equal (funcall key) (window-parameter window 'harness-ui-popout-follow))
+        (ignore-errors (harness-ui-popout--scroll window))
+        (set-window-parameter window 'harness-ui-popout-follow (funcall key))))))
 
 (defun harness-ui-popout--refit ()
   "Fit every window showing this popout to its content.

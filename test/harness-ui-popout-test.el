@@ -31,6 +31,8 @@
 (declare-function harness-ui-popout-pixel-width "harness-ui-popout")
 (declare-function harness-compose-live-p "harness-ui-compose")
 (declare-function harness-compose-text "harness-ui-compose")
+(declare-function harness-compose-in-p "harness-ui-compose")
+(declare-function harness-ui-popout--follow "harness-ui-popout")
 (defvar harness-ui-popout-max-height)
 (defvar harness-ui-popout-image-max-height)
 (defvar harness-ui-popout--parent)
@@ -251,6 +253,75 @@ sizes what it draws: `harness-ui-popout-pixel-height' follows it."
           (should (= (window-body-width window t) (harness-ui-popout-pixel-width)))
           (let ((main (window-main-window)))
             (should (= (window-body-width main t) (harness-ui-popout-pixel-width main)))))))))
+
+(ert-deftest harness-ui-popout-box-stays-in-sight ()
+  "Content taller than its popout keeps the box on the window's last line while
+point is in the box, with no gap under it; content that fits shows from
+its start again.  Point on the content leaves the window where it is."
+  (harness-ui-popout-test-with
+    (let* ((lines 3)
+           (buffer (harness-ui-popout-show
+                    '(test tall-box) "Tall"
+                    (lambda () (dotimes (i lines) (insert (format "line %d\n" i))))
+                    :compose (lambda () #'ignore)))
+           (window (get-buffer-window buffer)))
+      (with-selected-window window (goto-char harness-compose-end))
+      ;; The content grows past what the window may show.
+      (setq lines 80)
+      (harness-ui-popout-refresh '(test tall-box))
+      (with-current-buffer buffer
+        (should (harness-compose-in-p (window-point window)))
+        (should (> (window-start window) (point-min)))
+        ;; The box's line is the window's last: nothing under it.  (A
+        ;; batch Emacs never says a position is visible: lines are
+        ;; counted instead.)
+        (should (= (window-body-height window)
+                   (count-screen-lines (window-start window) harness-compose-end nil window))))
+      ;; It shrinks: it shows from its start, not from where it had
+      ;; scrolled to.
+      (setq lines 3)
+      (harness-ui-popout-refresh '(test tall-box))
+      (with-current-buffer buffer
+        (should (= (point-min) (window-start window)))
+        (should (harness-compose-in-p (window-point window))))
+      ;; Point on the content: a refresh leaves the window at its start.
+      (with-selected-window window (goto-char (point-min)))
+      (setq lines 80)
+      (harness-ui-popout-refresh '(test tall-box))
+      (with-current-buffer buffer
+        (should (= (point-min) (window-start window)))
+        (should (= (point-min) (window-point window)))))))
+
+(ert-deftest harness-ui-popout-box-follows-a-resize ()
+  "A popout's window shrunk after it was drawn -- the echo area grew, say --
+is scrolled again before it is redisplayed, the box on its last line.
+Nothing changed since, nothing is done again."
+  (harness-ui-popout-test-with
+    (let* ((buffer (harness-ui-popout-show
+                    '(test resized) "Resized"
+                    (lambda () (dotimes (i 80) (insert (format "line %d\n" i))))
+                    :compose (lambda () #'ignore)))
+           (window (get-buffer-window buffer))
+           (scroll (symbol-function 'harness-ui-popout--scroll))
+           (scrolls 0)
+           (box-last-p (lambda ()
+                         (with-current-buffer buffer
+                           (= (window-body-height window)
+                              (count-screen-lines (window-start window) harness-compose-end nil window))))))
+      (with-selected-window window
+        (goto-char harness-compose-end)
+        (harness-ui-popout-redraw)
+        (should (funcall box-last-p))
+        ;; Two lines fewer, the start where it was: the box is below the
+        ;; window's bottom.
+        (window-resize window -2 nil t)
+        (should-not (funcall box-last-p))
+        (cl-letf (((symbol-function 'harness-ui-popout--scroll)
+                   (lambda (w) (cl-incf scrolls) (funcall scroll w))))
+          (harness-ui-popout--follow window)
+          (should (funcall box-last-p))
+          (harness-ui-popout--follow window)
+          (should (= 1 scrolls)))))))
 
 (ert-deftest harness-ui-popout-parent-gets-its-window-back ()
   "A popout opened from another takes its window and says [back]; closing it

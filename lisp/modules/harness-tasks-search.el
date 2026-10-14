@@ -10,19 +10,23 @@
 ;; the mq land task", "restart the errored tasks") -- goes, with a
 ;; compact dump of the board, the other sessions and the commands, to
 ;; the cheapest model of the user's provider.  It answers in one line of
-;; JSON and nothing else: which tasks, sessions and commands the line is
-;; about, and what to do with the tasks.  No prose comes back: the board
-;; shows the answer by showing only those tasks, and says what the
-;; actions did.
+;; JSON: which tasks, sessions and commands the line is about, what to
+;; do with the tasks and, when words answer the line ("how do I attach a
+;; file?", "how many tasks failed?"), the answer itself, in Markdown.
+;; The board shows the answer by showing only those tasks, the words
+;; above them, and says what the actions did.  A model that answers in
+;; prose all the same is taken at its word: its reply is the answer
+;; (`harness-tasks-search--read-reply').
 ;;
 ;; `search/ask CWD QUERY OPTS' runs a search and returns its plan without
 ;; changing anything: the tasks to show, best match first, the sessions
-;; to open, the commands to run, and the actions the model proposes, each
-;; marked `:confirm' when it waits for the user's OK.  Those are the ones
-;; that interrupt work, merge it or send words to an agent (stop, verify,
-;; complete, message, reject, and archiving a task at work); the others
-;; (archive, restore, retry, start, priority) undo easily or do no harm,
-;; and a board runs them at once.
+;; to open, the commands to run, the answer in words, if any, and the
+;; actions the model proposes, each marked `:confirm' when it waits for
+;; the user's OK.  Those are the ones that interrupt work, merge it or
+;; send words to an agent (stop, verify, complete, message, reject, and
+;; archiving a task at work); the others (archive, restore, retry,
+;; start, priority) undo easily or do no harm, and a board runs them at
+;; once.
 ;; `task/search-apply ACTIONS' runs actions and says how each went, with
 ;; the action that undoes it where there is one.
 ;;
@@ -155,8 +159,10 @@ Matching names and commands by the words of a query leaves them out,
 and so does searching the transcripts for them
 \(`harness-tasks-search--content').")
 
-(defconst harness-tasks-search--max-tokens 2000
-  "Output budget of a search's model: a list of ids and a few actions.")
+(defconst harness-tasks-search--max-tokens 4000
+  "Output budget of a search's model.
+A list of ids, a few actions and, for a question words answer, the
+answer: short, as the model is told, but never to be cut off.")
 
 (defconst harness-tasks-search--warm-idle 300
   "Seconds a model process started for a board's next search waits for it.
@@ -174,9 +180,9 @@ After that it is closed.")
 ;;;; What the model is told
 
 (defconst harness-tasks-search--system
-  "You are the search box of a coding harness in Emacs: AI agent sessions (chats, task sessions, BTW side conversations, sub-agents, forks) working on software projects; a task board per project, each task one agent session working on one change; and the harness's Emacs commands. The engineer types a query: a question about tasks, sessions or commands (\"did I have a task about X?\", \"where did I debug the merge queue?\", \"how do I attach a file?\") or an order to manage tasks. You get one context line saying where the engineer is and what to favour, then the data blocks there are: the board's tasks, sessions, commands. Answer with exactly one line of JSON and nothing else: no prose, no markdown, no code fence.
+  "You are the search box of a coding harness in Emacs: AI agent sessions (chats, task sessions, BTW side conversations, sub-agents, forks) working on software projects; a task board per project, each task one agent session working on one change; and the harness's Emacs commands. The engineer types a query: a question about tasks, sessions or commands (\"did I have a task about X?\", \"where did I debug the merge queue?\", \"how do I attach a file?\") or an order to manage tasks. You get one context line saying where the engineer is and what to favour, then the data blocks there are: the board's tasks, sessions, commands. Answer with exactly one line of JSON and nothing else: no prose, markdown or code fence around it. Words for the engineer go inside it, in \"answer\".
 
-{\"show\":[\"TASK-ID\",...],\"sessions\":[\"SESSION-ID\",...],\"commands\":[\"COMMAND\",...],\"do\":[{\"task\":\"TASK-ID\",\"action\":\"ACTION\",\"text\":\"...\"}],\"note\":\"...\"}
+{\"show\":[\"TASK-ID\",...],\"sessions\":[\"SESSION-ID\",...],\"commands\":[\"COMMAND\",...],\"do\":[{\"task\":\"TASK-ID\",\"action\":\"ACTION\",\"text\":\"...\"}],\"answer\":\"...\",\"note\":\"...\"}
 
 \"show\" lists the tasks the query is about, best match first, or [] when none fits. A question (\"did I have a task about X?\", \"what is working on Y?\", \"which ones failed?\") shows the tasks that answer it. An order shows the tasks it acts on.
 
@@ -197,7 +203,9 @@ After that it is closed.")
 - priority: set the task's priority to \"text\": high, medium or low (\"prioritize\", \"urgent\", \"do first\", \"bump\", \"deprioritize\", \"later\"). While the slots are full, waiting tasks start highest priority first. A task says its priority when it is not medium.
 \"text\" is only for message, reject and priority.
 
-\"note\" is one short sentence when you looked beyond the favoured data or answer with what comes nearest (\"No task matched; these sessions mention it.\"); leave it out otherwise.
+\"answer\" answers the query in words, when words answer it: how to do something (\"how do I attach a file?\": the keys or the command, and where), what something is or does, why, or a question about the tasks or sessions a list alone does not answer (\"how many tasks failed?\", \"what is the docs task waiting for?\"). Write Markdown, as short as the question allows: a sentence or two, or a few steps as a list; put keys and command names in `backquotes`. Say only what the data you got says, or what you know of Emacs; never make up keys or commands. In the JSON string a line break is \\n and a quote is \\\". Leave \"answer\" out when the lists answer the query on their own: a search for a task, a session or a command, or an order. Whatever the answer names still goes in \"show\", \"sessions\" and \"commands\", so the engineer can open it.
+
+\"note\" is one short sentence about the lists when you looked beyond the favoured data or answer with what comes nearest (\"No task matched; these sessions mention it.\"); leave it out otherwise. It is never the answer: that goes in \"answer\".
 
 Favour what the context line names; the other lists may hold answers too.
 
@@ -212,7 +220,7 @@ It never changes, so a model process started ahead for a search
 favours.")
 
 (defconst harness-tasks-search--final-text
-  "That is all there is to look at. Now answer the query with one line of JSON: {\"show\":[...],\"sessions\":[...],\"commands\":[...],\"do\":[...],\"note\":\"...\"}."
+  "That is all there is to look at. Now answer the query with one line of JSON: {\"show\":[...],\"sessions\":[...],\"commands\":[...],\"do\":[...],\"answer\":\"...\",\"note\":\"...\"}."
   "What closes the message that hands a search's model what it asked to see.")
 
 ;;;; The board as the model reads it
@@ -853,15 +861,121 @@ outside CATALOGUE is ever named."
 
 ;;;; The model's answer
 
+(defun harness-tasks-search--escape-controls (json)
+  "JSON with the control characters inside its strings escaped.
+A model writing Markdown into a JSON string may break its lines there
+as they are, which JSON does not allow: a line break becomes \\n, a
+tab \\t, a carriage return \\r and any other control character
+\\uXXXX.  What is outside the strings is left as it is, and so is JSON
+without such a character."
+  (let ((in nil) (i 0) (len (length json)) (start 0) (parts nil))
+    (while (< i len)
+      (let ((c (aref json i)))
+        (cond
+         ;; The character after a backslash is escaped already.
+         ((and in (eq c ?\\)) (setq i (1+ i)))
+         ((eq c ?\") (setq in (not in)))
+         ((and in (< c 32))
+          (push (substring json start i) parts)
+          (push (pcase c (?\n "\\n") (?\t "\\t") (?\r "\\r") (_ (format "\\u%04x" c))) parts)
+          (setq start (1+ i)))))
+      (setq i (1+ i)))
+    (if parts
+        (apply #'concat (nreverse (cons (substring json start) parts)))
+      json)))
+
+(defconst harness-tasks-search--keys
+  '("show" "sessions" "commands" "do" "actions" "answer" "note" "grep" "read")
+  "The keys of the JSON a search's model answers, or asks to look further, with.")
+
+(defun harness-tasks-search--object (text &optional any)
+  "The JSON object TEXT starts with, as a plist; nil when it starts none.
+What follows the object is left alone.  The object must have one of
+`harness-tasks-search--keys', unless ANY: then any object counts, an
+empty one as (:show nil)."
+  (with-temp-buffer
+    (insert (harness-tasks-search--escape-controls text))
+    (goto-char (point-min))
+    (let ((obj (condition-case nil (harness-json-parse-buffer) (error :none))))
+      (cond ((eq obj :none) nil)
+            ((null obj) (and any (list :show nil)))
+            ((not (keywordp (car-safe obj))) nil)
+            ((or any (cl-loop for (key _) on obj by #'cddr
+                              thereis (member (substring (symbol-name key) 1) harness-tasks-search--keys)))
+             obj)))))
+
 (defun harness-tasks-search--json (text)
   "Return the JSON object TEXT holds, as a plist, or nil.
-The object may sit inside other text, a code fence say."
+The object may sit inside other text, a code fence say: the first of
+TEXT's first few `{' that starts one with a key of
+`harness-tasks-search--keys' is taken, and what follows it is left
+alone.  TEXT that is nothing but an object, in a code fence or not, is
+that object, whatever its keys.  Its strings may break lines as they are
+\(`harness-tasks-search--escape-controls')."
   (when (stringp text)
-    (let ((start (string-search "{" text))
-          (end (cl-position ?} text :from-end t)))
-      (when (and start end (< start end))
-        (let ((obj (ignore-errors (harness-json-parse (substring text start (1+ end))))))
-          (and (keywordp (car-safe obj)) obj))))))
+    (let ((from 0) (tries 0) (found nil)
+          (bare (string-trim (replace-regexp-in-string "\\`[ \t\r\n]*```[[:alnum:]]*\\|```[ \t\r\n]*\\'" "" text))))
+      (when (and (string-prefix-p "{" bare) (string-suffix-p "}" bare))
+        (setq found (harness-tasks-search--object bare t)))
+      (while (and (not found) (< tries 5) (setq from (string-search "{" text from)))
+        (setq found (harness-tasks-search--object (substring text from))
+              from (1+ from)
+              tries (1+ tries)))
+      found)))
+
+(defun harness-tasks-search--json-like-p (text)
+  "Non-nil when TEXT holds the start of the JSON a search's model writes.
+That is an object whose first key is one of `harness-tasks-search--keys'."
+  (string-match-p (concat "{[ \t\r\n]*\"" (regexp-opt harness-tasks-search--keys) "\"[ \t\r\n]*:") text))
+
+(defun harness-tasks-search--partial-answer (text)
+  "The answer in words of TEXT, JSON that breaks off, as far as it goes; or nil.
+That is the string after its \"answer\" key, up to its closing quote or,
+when TEXT broke off inside it, its end, decoded: an escape cut in half
+at the end is left out.  Nil when TEXT has no answer, or a blank one."
+  (when (string-match "\"answer\"[ \t\r\n]*:[ \t\r\n]*\"" text)
+    (let* ((start (match-end 0))
+           (len (length text))
+           (i start)
+           (end nil))
+      (while (and (not end) (< i len))
+        (pcase (aref text i)
+          (?\\ (setq i (+ i 2)))
+          (?\" (setq end i))
+          (_ (setq i (1+ i)))))
+      (let ((raw (substring text start (or end len)))
+            (decoded nil)
+            (tries 0))
+        ;; Each try drops the last character, until what is left decodes.
+        (while (and (not decoded) (< tries 8))
+          (setq decoded (car-safe (ignore-errors
+                                    (harness-json-parse
+                                     (harness-tasks-search--escape-controls (concat "[\"" raw "\"]")))))
+                tries (1+ tries))
+          (unless (or decoded (string-empty-p raw))
+            (setq raw (substring raw 0 -1))))
+        (and (stringp decoded) (not (string-blank-p decoded)) (string-trim decoded))))))
+
+(defconst harness-tasks-search--broke-off
+  "The model's reply broke off here."
+  "The note of a plan whose answer in words came from JSON that breaks off.")
+
+(defun harness-tasks-search--read-reply (reply)
+  "The answer REPLY, the text of the model's reply, gives, as a plist; or nil.
+REPLY is meant to be the JSON object the model was asked for, maybe
+inside other text such as a code fence (`harness-tasks-search--json').
+A reply with no such object answered in words all the same, and is taken
+as the answer: (:answer REPLY).  One whose object breaks off -- the model
+ran out of tokens, or left a quote unescaped -- gives as much of its
+answer in words as came through, with a note saying it broke off, and
+nil when it had none.  A blank REPLY is nil."
+  (cond
+   ((or (not (stringp reply)) (string-blank-p reply)) nil)
+   ((harness-tasks-search--json reply))
+   ((harness-tasks-search--json-like-p reply)
+    (when-let* ((partial (harness-tasks-search--partial-answer reply)))
+      (list :answer partial :note harness-tasks-search--broke-off)))
+   (t (list :answer (string-trim reply)))))
 
 (defun harness-tasks-search--list (value)
   "VALUE as a list of items: a string alone becomes one."
@@ -982,19 +1096,25 @@ Repeats are left out, and there are at most
                                              (harness-tasks-search--list (plist-get answer :commands)))))
               harness-tasks-search--plan-commands)))
 
+(defun harness-tasks-search--words-of (answer)
+  "The answer in words of the model's ANSWER, trimmed; nil when it has none."
+  (let ((words (plist-get answer :answer)))
+    (and (stringp words) (not (string-blank-p words)) (string-trim words))))
+
 (defun harness-tasks-search--plan (answer tasks &optional search)
   "Return the plan made of the model's ANSWER about TASKS.
 That is (:ids IDS :actions ACTIONS :tasks ENTRIES :sessions SESSIONS
-:commands COMMANDS :note NOTE).  IDS are the tasks to show, best match
-first; every task an action is for is among them.  Ids that name no
-task of the board are dropped.  ENTRIES are those tasks, each (:id
-:title :status :session), for a view without the board.
+:commands COMMANDS :answer WORDS :note NOTE).  IDS are the tasks to
+show, best match first; every task an action is for is among them.  Ids
+that name no task of the board are dropped.  ENTRIES are those tasks,
+each (:id :title :status :session), for a view without the board.
 
 SEARCH, the search's state, is what sessions and commands are named
 from: SESSIONS are the sessions ANSWER names, each as
 `harness-tasks-search--session-entry' gives it, and COMMANDS the
-entries of its catalogue ANSWER names.  NOTE is what the model says of
-its answer, or nil."
+entries of its catalogue ANSWER names.  WORDS is the model's answer in
+words, Markdown, whole, or nil.  NOTE is what the model says of its
+answer, or nil."
   (let* ((ids (delete-dups (delq nil (mapcar (lambda (ref) (harness-tasks-search--resolve ref tasks))
                                              (harness-tasks-search--list (plist-get answer :show))))))
          (actions (delq nil (mapcar (lambda (entry) (harness-tasks-search--action entry tasks))
@@ -1010,6 +1130,7 @@ its answer, or nil."
           :sessions (and search (mapcar (lambda (id) (harness-tasks-search--session-entry id search))
                                         (harness-tasks-search--named-sessions answer search)))
           :commands (and search (harness-tasks-search--named-commands answer search))
+          :answer (harness-tasks-search--words-of answer)
           :note note)))
 
 ;;;; Looking further
@@ -1017,10 +1138,11 @@ its answer, or nil."
 (defun harness-tasks-search--wants (answer tasks &optional search)
   "Return what ANSWER asks to look at before it answers, or nil.
 That is (:grep TEXT :read IDS :sessions TEXT :commands TEXT), from an
-answer that shows, names and does nothing; IDS name tasks of TASKS, at
-most `harness-tasks-search--read-limit' of them.  A text for
-\"sessions\" or \"commands\" asks to search them, where a list answers;
-one that names a session or a command SEARCH knows of answers too."
+answer that shows, names, says and does nothing: one with an answer in
+words has answered.  IDS name tasks of TASKS, at most
+`harness-tasks-search--read-limit' of them.  A text for \"sessions\" or
+\"commands\" asks to search them, where a list answers; one that names
+a session or a command SEARCH knows of answers too."
   (let* ((text (lambda (key)
                  (let ((value (plist-get answer key)))
                    (and (stringp value) (not (string-blank-p value)) (string-trim value)))))
@@ -1033,6 +1155,7 @@ one that names a session or a command SEARCH knows of answers too."
          (find-sessions (and (null sessions) (funcall text :sessions)))
          (find-commands (and (null commands) (funcall text :commands))))
     (when (and (or grep read find-sessions find-commands)
+               (null (harness-tasks-search--words-of answer))
                (null (harness-tasks-search--list (plist-get answer :show)))
                (null sessions) (null commands)
                (not (consp (plist-get answer :sessions)))
@@ -1266,11 +1389,13 @@ seconds, and when the provider ends the request with an error."
   (list :role 'user :content (list (list :type "text" :text text))))
 
 (defun harness-tasks-search--no-answer (text)
-  "A rejected promise saying why TEXT, the model's reply, holds no answer."
+  "A rejected promise saying why TEXT, the model's reply, holds no answer.
+It is blank, or JSON that does not parse and breaks off before any
+answer in words (`harness-tasks-search--read-reply')."
   (harness-rejected
    (list 'error (if (harness-string-blank-p text)
                     "The model gave no answer"
-                  (format "The model did not answer in JSON: %s" (harness-tasks-search--squash text 120))))))
+                  (format "The model's JSON did not parse: %s" (harness-tasks-search--squash text 120))))))
 
 ;;;; Warming up
 
@@ -1345,9 +1470,12 @@ that keeps a process per session prepares anything (see
 ;;;; Searching
 
 (defun harness-tasks-search--empty-p (plan)
-  "Non-nil when PLAN shows, names and does nothing."
+  "Non-nil when PLAN shows, names, says and does nothing.
+A plan that answers in words is not empty: the model answered, with no
+list to go with it, and the search adds nothing nearest to it."
   (not (or (plist-get plan :ids) (plist-get plan :actions)
-           (plist-get plan :sessions) (plist-get plan :commands))))
+           (plist-get plan :sessions) (plist-get plan :commands)
+           (plist-get plan :answer))))
 
 (defun harness-tasks-search--nearest (search)
   "Return a promise of what comes nearest the query of SEARCH, which found nothing.
@@ -1436,12 +1564,15 @@ only once that is known."
                                           (lambda (nearest) (harness-plist-merge plan nearest)))
                           (harness-resolved (append plan (list :widened :false))))
                         (lambda (plan)
-                          (harness-log 'info "search %S, favouring %s: %s, %s, %s, %s%s (%s, %.1fs)"
+                          (harness-log 'info "search %S, favouring %s: %s, %s, %s, %s%s%s (%s, %.1fs)"
                                        query bias
                                        (harness-tasks-search--count (length (plist-get plan :ids)) "task")
                                        (harness-tasks-search--count (length (plist-get plan :sessions)) "session")
                                        (harness-tasks-search--count (length (plist-get plan :commands)) "command")
                                        (harness-tasks-search--count (length (plist-get plan :actions)) "action")
+                                       (if (plist-get plan :answer)
+                                           (format ", answered in %d characters" (length (plist-get plan :answer)))
+                                         "")
                                        (if (eq t (plist-get plan :widened)) ", widened" "")
                                        model (- (float-time) start))
                           (append (list :query query :model model :bias bias :looked looked
@@ -1451,7 +1582,7 @@ only once that is known."
                    (harness-then
                     (harness-tasks-search--ask search first)
                     (lambda (reply)
-                      (let* ((answer (harness-tasks-search--json reply))
+                      (let* ((answer (harness-tasks-search--read-reply reply))
                              (wants (and answer (harness-tasks-search--wants answer tasks search))))
                         (cond
                          ((null answer) (harness-tasks-search--no-answer reply))
@@ -1468,7 +1599,7 @@ only once that is known."
                                                                 :content (list (list :type "text" :text reply)))
                                                           (harness-tasks-search--user found))))
                               (lambda (again)
-                                (let ((answer (harness-tasks-search--json again)))
+                                (let ((answer (harness-tasks-search--read-reply again)))
                                   (cond
                                    ((null answer) (harness-tasks-search--no-answer again))
                                    ;; It looks further once only.
@@ -1489,9 +1620,9 @@ only once that is known."
 (harness-defmethod search/ask (cwd query &optional opts)
   "Ask the search model about QUERY, typed anywhere in the harness at CWD.
 Return a promise of the plan: (:query QUERY :model MODEL :bias BIAS
-:looked LOOKED :session-query SESSION-QUERY :note NOTE :widened WIDENED
-:ids IDS :actions ACTIONS :tasks TASKS :sessions SESSIONS :commands
-COMMANDS).  Nothing changes yet.
+:looked LOOKED :session-query SESSION-QUERY :answer ANSWER :note NOTE
+:widened WIDENED :ids IDS :actions ACTIONS :tasks TASKS :sessions
+SESSIONS :commands COMMANDS).  Nothing changes yet.
 
 IDS are the tasks of CWD's board QUERY is about, best match first,
 archived ones included: a board shows only those.  ACTIONS are what
@@ -1520,18 +1651,24 @@ the sessions' transcripts were searched with, or would be, which a view
 that shows every match in them searches for: what the model asked the
 transcripts for when it looked, else the words of QUERY that say
 something (`harness-tasks-search--content'), nil when it has none.
-NOTE is the model's word on its answer (\"No task matched; these
-sessions mention it.\"), else nil.  WIDENED is t when the model answered
-with nothing and the search added the sessions and commands that come
-nearest QUERY itself, NOTE saying so; else false.
+ANSWER is the model's answer in words to a QUERY words answer (\"how do
+I attach a file?\"), in Markdown and whole, else nil; what it names is
+among TASKS, SESSIONS and COMMANDS too.  NOTE is the model's word on
+its answer (\"No task matched; these sessions mention it.\"), else nil.
+WIDENED is t when the model answered with nothing and the search added
+the sessions and commands that come nearest QUERY itself, NOTE saying
+so; else false.  An answer in words is something: it is never widened.
 
 The model is `harness-tasks-search-model'.  It reads the board's
 tasks, the other sessions and the commands, and answers in JSON, at
 most once after looking further: into the tasks' transcripts, every
-session's or the commands.  Transcripts are searched by
-`session/search', full text.  A search favouring sessions searches
-every session's transcripts for QUERY's words before the model reads
-anything, and the model reads what that finds too.  OPTS:
+session's or the commands.  A reply in prose instead is the answer in
+words, and one whose JSON breaks off keeps as much of its answer in
+words as came through (`harness-tasks-search--read-reply').
+Transcripts are searched by `session/search', full text.  A search
+favouring sessions searches every session's transcripts for QUERY's
+words before the model reads anything, and the model reads what that
+finds too.  OPTS:
   :bias      what to favour: \"tasks\", \"sessions\" or \"commands\";
              by default what the view of `:context' suggests: tasks on
              the board, sessions in the session list or a conversation
@@ -1683,7 +1820,7 @@ the task's session, which is where a task's priority lives."
     (ignore-errors (harness-tasks-search--drop-warm root))))
 
 (harness-define-module 'tasks-search
-  :doc "Search the harness with a cheap model, in JSON only: tasks and actions on them, sessions and commands."
+  :doc "Search the harness with a cheap model: tasks and actions on them, sessions, commands and an answer in words."
   :requires '(tasks provider session-search)
   :shutdown #'harness-tasks-search--shutdown)
 

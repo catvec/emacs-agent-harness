@@ -15,12 +15,16 @@
 ;; harness's commands, to a quick, cheap model (`search/ask', see
 ;; harness-tasks-search.el) that favours tasks; it answers with the
 ;; tasks, sessions and commands the line is about and what to do with
-;; the tasks, never with prose.  M-p and M-n in the search box bring
-;; back earlier searches, the quick search's among them.
+;; the tasks and, when words answer the line ("how many tasks failed?",
+;; "how do I attach a file?"), with the answer itself.  M-p and M-n in
+;; the search box bring back earlier searches, the quick search's among
+;; them.
 ;;
 ;; The board then shows only those tasks, in their columns, archived
 ;; ones included, under a banner that says what it shows: the line, what
 ;; it matched, and what the model looked at besides the board.  The
+;; answer in words comes next, whole, rendered as Markdown
+;; (`harness-quick-search-answer-text'): it is never cut to a line.  The
 ;; sessions and commands it found follow, each on a line of its own with
 ;; its buttons -- [Open] a session, at the message where the search found
 ;; its words when it did (`harness-quick-search-open-session'), [Run] or
@@ -74,6 +78,7 @@
 `:tasks'    those tasks as the answer names them;
 `:sessions' the sessions it found, as `search/ask' names them;
 `:commands' the commands it found, entries of the catalogue;
+`:answer'   its answer in words, Markdown, or nil;
 `:note'     what the model, or the search, says of the answer;
 `:widened'  non-nil when the search looked wider, having found nothing;
 `:looked'   what the model looked at besides the board;
@@ -232,14 +237,23 @@ does it."
   "N tasks in words."
   (pcase n (0 "no task matches") (1 "1 task") (_ (format "%d tasks" n))))
 
+(defun harness-ui-tasks-search--answer (state)
+  "The answer in words of the search STATE, or of a plan; nil when it has none."
+  (let ((answer (plist-get state :answer)))
+    (and (stringp answer) (not (string-blank-p answer)) answer)))
+
 (defun harness-ui-tasks-search--counts (state)
   "What the search STATE matched, in words: \"1 task · 2 sessions · 1 command\".
-No task is \"no task matches\", whatever else it found."
-  (let ((ids (plist-get state :ids))
-        (sessions (length (plist-get state :sessions)))
-        (commands (length (plist-get state :commands))))
+No task is \"no task matches\", whatever else it found, unless the
+search answered in words: then it is \"answered\"."
+  (let* ((ids (plist-get state :ids))
+         (n (if (listp ids) (length ids) 0))
+         (sessions (length (plist-get state :sessions)))
+         (commands (length (plist-get state :commands))))
     (string-join
-     (delq nil (list (harness-ui-tasks-search--count (if (listp ids) (length ids) 0))
+     (delq nil (list (if (and (= n 0) (harness-ui-tasks-search--answer state))
+                         "answered"
+                       (harness-ui-tasks-search--count n))
                      (and (> sessions 0) (harness-ui-tasks-search--plural sessions "session"))
                      (and (> commands 0) (harness-ui-tasks-search--plural commands "command"))))
      " · ")))
@@ -247,13 +261,17 @@ No task is \"no task matches\", whatever else it found."
 (defun harness-ui-tasks-search--found-text (plan)
   "Say what PLAN, an answer, found, for the echo area.
 That is \"1 task matches · 2 sessions\", or \"No task matches “…”\"
-with what else it found."
+with what else it found; a plan that answers in words says
+\"Answered\" first, and no task matching goes without saying."
   (let ((n (length (plist-get plan :ids)))
+        (answered (harness-ui-tasks-search--answer plan))
         (sessions (length (plist-get plan :sessions)))
         (commands (length (plist-get plan :commands))))
     (string-join
-     (delq nil (list (pcase n
-                       (0 (format "No task matches %s" (harness-ui-tasks--quote (plist-get plan :query))))
+     (delq nil (list (and answered "Answered")
+                     (pcase n
+                       (0 (and (not answered)
+                               (format "No task matches %s" (harness-ui-tasks--quote (plist-get plan :query)))))
                        (1 "1 task matches")
                        (_ (format "%d tasks match" n)))
                      (and (> sessions 0) (harness-ui-tasks-search--plural sessions "session"))
@@ -337,8 +355,9 @@ That is its note, then the sessions and the commands, at most
 (defun harness-ui-tasks-search--banner ()
   "The text above a board its search filters: what it shows, and what was done.
 Its first line has the line asked and where the search is, or what it
-matched; the note and the sessions and commands it found follow, then
-what the actions did, then a line that asks about what waits for an OK."
+matched; the answer in words, whole (`harness-quick-search-answer-text'),
+the note and the sessions and commands it found follow, then what the
+actions did, then a line that asks about what waits for an OK."
   (let* ((state harness-ui-tasks-search--state)
          (status (plist-get state :status))
          (dot (propertize "  ·  " 'face 'harness-dim-face))
@@ -384,6 +403,10 @@ what the actions did, then a line that asks about what waits for an OK."
                              (concat dot (propertize looked 'face 'harness-dim-face))
                            ""))
                  clear)))
+     ;; Its answer in words, whole, under the line it answers.
+     (if-let* ((answer (harness-ui-tasks-search--answer state)))
+         (harness-quick-search-answer-text answer 4 (harness-ui-tasks--width))
+       "")
      ;; What else it found.
      (harness-ui-tasks-search--found-lines state)
      ;; What ran.
@@ -571,12 +594,14 @@ stuck?\"), an order to manage some (\"get rid of the mq land task\",
 \(\"where did I debug the merge queue?\").  \\`RET' sends it, with the
 board and the harness's commands, to a quick, cheap model
 \(`harness-tasks-search-model'), which favours tasks: it answers with
-the tasks the line is about and what to do with them, and the sessions
-and commands it found.  \\`M-p' and \\`M-n' bring back earlier searches.
+the tasks the line is about and what to do with them, the sessions and
+commands it found and, when words answer the line (\"how many failed?\"),
+the answer in words.  \\`M-p' and \\`M-n' bring back earlier searches.
 
 The board shows those tasks only, under a banner that says what it
-shows and lists the sessions and commands found, with buttons to open
-or run them; \\[harness-ui-tasks-compose-quit] there shows every task again.  What is easily
+shows, has the answer in words, whole, and lists the sessions and
+commands found, with buttons to open or run them;
+\\[harness-ui-tasks-compose-quit] there shows every task again.  What is easily
 undone or does no harm (archive, restore, retry, start) is done at once
 and the banner says so, with [Undo]; what interrupts work, merges it or
 sends words to an agent is proposed, and \\`RET' on the empty search box
@@ -634,6 +659,7 @@ to the best match, once the board shows it."
                                            :tasks (plist-get plan :tasks)
                                            :sessions (plist-get plan :sessions)
                                            :commands (plist-get plan :commands)
+                                           :answer (harness-ui-tasks-search--answer plan)
                                            :note (plist-get plan :note)
                                            :widened (eq t (plist-get plan :widened))
                                            :results nil :undo nil)
@@ -675,11 +701,11 @@ the board shows that search."
   "Show PLAN on this board, as its search would: its tasks, under a banner.
 PLAN is what `search/ask' answers, or as much of it as the quick
 search's [Board] has: (:ids IDS :query QUERY), with `:sessions',
-`:commands', `:note', `:widened', `:looked' and `:model' when it has
-them.  The board shows the tasks IDS only, point on the first, under a
-banner naming QUERY and the rest.  Nothing is done, nor proposed: PLAN's
-actions stay where they were found.  An answer still on its way to this
-board's own search is dropped."
+`:commands', `:answer', `:note', `:widened', `:looked' and `:model'
+when it has them.  The board shows the tasks IDS only, point on the
+first, under a banner naming QUERY and the rest.  Nothing is done, nor
+proposed: PLAN's actions stay where they were found.  An answer still
+on its way to this board's own search is dropped."
   (unless (harness-ui-tasks--board-p (current-buffer)) (user-error "Not a task board"))
   (let ((ids (plist-get plan :ids)))
     (setq harness-ui-tasks--error nil
@@ -691,6 +717,7 @@ board's own search is dropped."
                 :tasks (plist-get plan :tasks)
                 :sessions (plist-get plan :sessions)
                 :commands (plist-get plan :commands)
+                :answer (harness-ui-tasks-search--answer plan)
                 :note (plist-get plan :note)
                 :widened (eq t (plist-get plan :widened))))
     (harness-ui-tasks-search--install)

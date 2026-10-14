@@ -1276,14 +1276,25 @@ That is the first eight characters of its id, as the sessions are listed."
 (defun harness-media--search-json (&rest fields)
   "The one line of JSON a search's model answers with.
 FIELDS are `:show' (task ids), `:sessions' (session ids), `:commands'
-\(command names) and `:do' (actions on tasks), each a list, and `:note',
-a sentence; a field left out is empty."
+\(command names) and `:do' (actions on tasks), each a list, `:answer',
+the answer in words, in Markdown, and `:note', a sentence; a field left
+out is empty."
   (harness-json-encode-text
    (append (list :show (harness-json-array (plist-get fields :show))
                  :sessions (harness-json-array (plist-get fields :sessions))
                  :commands (harness-json-array (plist-get fields :commands))
                  :do (harness-json-array (plist-get fields :do)))
+           (and (plist-get fields :answer) (list :answer (plist-get fields :answer)))
            (and (plist-get fields :note) (list :note (plist-get fields :note))))))
+
+(defconst harness-media--attach-answer
+  "The guide is `docs/api.md`, which the *Write the API guide* session wrote. To attach it to your next message:
+
+1. Press `C-c C-a` in the chat's box (`harness-compose-add-attachment`).
+2. Type part of its name, `api.md`, then `RET`: a file of the project is found in any directory.
+
+A file copied in a file manager attaches with `C-y` instead (`harness-compose-yank`)."
+  "What the scripted search model answers in words to how to attach the API guide.")
 
 (defun harness-media--search-answer (text &optional looked)
   "The scripted search model's answer to TEXT, the message carrying the query.
@@ -1295,9 +1306,10 @@ and been told what it found (its second answer):
   archives it, so the picture has a filter, a toast and an [Undo];
 - attaching the API guide, asked in a chat, asks to look in the
   sessions' transcripts for the guide, as a model does when a name says
-  little, then names the command that attaches a file and the session
-  that wrote the guide, which the session search found by what was said
-  in it: the picture shows the passage, for [Open] to go to;
+  little, then answers how in words (`harness-media--attach-answer')
+  and names the command that attaches a file and the session that wrote
+  the guide, which the session search found by what was said in it: the
+  picture shows the answer, then the passage, for [Open] to go to;
 - anything else finds nothing."
   (let ((query (harness-media--search-query text))
         (slow (plist-get (plist-get harness-media--world :tasks) :slow))
@@ -1309,7 +1321,8 @@ and been told what it found (its second answer):
      ((and guide (string-match-p "\\`how do i attach the api guide" (downcase query)))
       (if looked
           (harness-media--search-json :sessions (list guide)
-                                      :commands (list "harness-compose-add-attachment" "harness-compose-yank"))
+                                      :commands (list "harness-compose-add-attachment" "harness-compose-yank")
+                                      :answer harness-media--attach-answer)
         (harness-json-encode-text (list :sessions "API guide"))))
      (t (harness-media--search-json)))))
 
@@ -2521,20 +2534,21 @@ board every other picture shows."
 
 (defconst harness-media--quick-search-lines 40
   "How many lines high the quick search picture is.
-The popout takes what its answer needs, about 15, and the chat and the
-code beside it the rest.")
+The popout takes what its answer needs, about 25 with the answer in
+words, and the chat and the code beside it the rest.")
 
 (defun harness-media-shot-quick-search ()
-  "The quick search, opened from a chat: a command and a session found in words.
+  "The quick search, opened from a chat: a question answered in words.
 C-c h / in the rate-limit session's chat, `acme/ratelimit.py' beside
 it, opens the search's popout at the bottom of the frame; the line is
 typed in its box and RET sends it.  The scripted model looks in the
-sessions' transcripts for the guide, then names the command that
-attaches a file and the session that wrote it (see
-`harness-media--search-answer'), so the popout lists a command with
-[Run] and [Describe] and, under Sessions with its [All matches], a
-session with [Open] and the passage the session search found in it.
-The popout closes after the picture."
+sessions' transcripts for the guide, then answers how to attach it in
+words and names the command that attaches a file and the session that
+wrote it (see `harness-media--search-answer'), so the popout shows the
+answer, whole, rendered as Markdown, then lists a command with [Run]
+and [Describe] and, under Sessions with its [All matches], a session
+with [Open] and the passage the session search found in it.  The
+popout closes after the picture."
   (let ((buffer (harness-media--code-layout (plist-get harness-media--world :ratelimit))))
     (set-frame-size nil harness-media-columns harness-media--quick-search-lines)
     (harness-media--settle 0.5)

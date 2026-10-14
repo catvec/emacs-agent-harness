@@ -9,8 +9,9 @@
 ;; docs").  RET in the box sends the line, with where it was typed, to
 ;; a quick, cheap model (`search/ask', see harness-tasks-search.el),
 ;; which answers with the commands, sessions and tasks the line is
-;; about, never with prose.  The line stays in the box, to be refined;
-;; M-p and M-n bring back earlier searches.
+;; about and, when words answer it ("how do I attach a file?", "what
+;; does verify do?"), with the answer itself.  The line stays in the
+;; box, to be refined; M-p and M-n bring back earlier searches.
 ;;
 ;; Where the search opens sets what it favours, its bias: tasks on a
 ;; task board, sessions in the session list or a conversation tree,
@@ -30,6 +31,13 @@
 ;; moment (typing stops it), and again after files load; a search only
 ;; does what its buffer decides.
 ;;
+;; An answer in words comes first in the popout, rendered as the
+;; Markdown it is and whole, however long: nothing of it is cut to a
+;; line.  The popout grows taller for it than for a list
+;; (`harness-quick-search-answer-height').  An answer taller still
+;; keeps the box at the bottom, with the end of the answer above it,
+;; and the popout scrolls back to its start.
+;;
 ;; What the model found shows in the popout, each line with its
 ;; buttons: [Run] runs a command in the buffer the search was opened
 ;; from, [Describe] shows its documentation, [Open] opens a session --
@@ -45,7 +53,8 @@
 ;; On a task board, C-c h / is the board's own search
 ;; (`harness-tasks-search'), which filters the board.  The lines of
 ;; what a search found (`harness-quick-search-session-line' and the
-;; others) serve the board too, with buttons of its own.
+;; others) and its answer in words (`harness-quick-search-answer-text')
+;; serve the board too, with buttons of its own.
 
 ;;; Code:
 
@@ -56,6 +65,7 @@
 (require 'harness-util)
 (require 'harness-ui)
 (require 'harness-ui-compose)
+(require 'harness-ui-markdown)
 (require 'harness-ui-popout)
 (require 'harness-ui-search)
 
@@ -89,6 +99,16 @@
   "What a quick search proposes to do to tasks, waiting for your OK."
   :group 'harness-quick-search)
 
+(defcustom harness-quick-search-answer-height 0.8
+  "Height the quick search's popout grows to at most while it answers in words.
+As a fraction of its frame's.  An answer is shown whole, so the popout
+may grow taller for it than `harness-ui-popout-max-height' lets other
+popouts; it still takes only what the answer and the rest need.  The
+box stays at the bottom, so an answer taller still shows its end and
+scrolls back to its start."
+  :type 'number
+  :group 'harness-quick-search)
+
 (defvar harness-quick-search-history nil
   "The lines searched with the quick search, newest first.")
 
@@ -117,7 +137,8 @@ opened from.")
 `:seq'      its number, which an answer must carry to count;
 `:status'   `idle', `searching', `done' or `failed';
 `:bias'     what it favours;
-`:plan'     the answer, once done;
+`:plan'     the answer, once done: what it found, its answer in words
+            (`:answer', Markdown) and what it proposes;
 `:error'    why it failed;
 `:model'    the model that answers, once known;
 `:proposed' the actions of the answer waiting for your OK;
@@ -727,6 +748,37 @@ HELP is its tooltip."
   "Return TEXT, one line or more, indented, its wrapped lines too."
   (propertize (concat "  " text "\n") 'wrap-prefix "      "))
 
+(defun harness-quick-search--indent (text indent)
+  "Return TEXT with each of its lines, wrapped ones too, INDENT columns in.
+The line and wrap prefixes TEXT has already, the hanging indent of a
+list's items say, follow the new indent."
+  (let* ((s (copy-sequence text))
+         (pad (make-string indent ?\s))
+         (pos 0)
+         (len (length s)))
+    (while (< pos len)
+      (let ((next (or (next-property-change pos s) len))
+            (line (get-text-property pos 'line-prefix s))
+            (wrap (get-text-property pos 'wrap-prefix s)))
+        (put-text-property pos next 'line-prefix (concat pad (if (stringp line) line "")) s)
+        (put-text-property pos next 'wrap-prefix (concat pad (if (stringp wrap) wrap "")) s)
+        (setq pos next)))
+    s))
+
+(defun harness-quick-search-answer-text (answer &optional indent width)
+  "Return ANSWER, the Markdown a search answered with in words, rendered whole.
+Every line of it, wrapped ones too, is INDENT columns in (2 by
+default), after any indent of its own; its tables fit WIDTH columns, by
+default the selected window's.  Nothing is cut: no line is shortened
+and none left out, however long ANSWER is.  The text ends with a
+newline, and carries `harness-quick-search-answer' t, which says where
+it is."
+  (let* ((indent (or indent 2))
+         (harness-ui-markdown-table-width (max 20 (- (or width (window-body-width)) indent 2)))
+         (text (harness-quick-search--indent (concat (harness-ui-markdown-render answer) "\n") indent)))
+    (put-text-property 0 (length text) 'harness-quick-search-answer t text)
+    text))
+
 (defun harness-quick-search-session-line (session &optional button)
   "Return the line that shows SESSION as a search found it.
 SESSION is an entry of a plan's `:sessions': (:id :name :kind :status
@@ -1049,14 +1101,29 @@ WORDS, the words the search looked for in the sessions, in them
             "")
           "\n"))
 
+(defun harness-quick-search--answer (state)
+  "The answer in words of STATE's search, once it is done and has one; else nil."
+  (and (eq 'done (plist-get state :status))
+       (harness-quick-search--text (plist-get (plist-get state :plan) :answer))))
+
+(defun harness-quick-search--columns ()
+  "How many columns wide this popout's content is, or will be."
+  (max 20 (/ (harness-ui-popout-pixel-width) (max 1 (frame-char-width)))))
+
 (defun harness-quick-search--insert-found (state)
-  "Insert what STATE, a search that is done, found: its note, then each kind.
-[All matches] on the sessions' heading searches the words the search
-looked for in them, the plan's `:session-query', else the line asked."
+  "Insert what STATE, a search that is done, found.
+Its answer in words first, whole (`harness-quick-search-answer-text'),
+then its note and each kind.  A search that found nothing, and said
+nothing, says so.  [All matches] on the sessions' heading searches the
+words the search looked for in them, the plan's `:session-query', else
+the line asked."
   (let* ((plan (plist-get state :plan))
+         (answer (harness-quick-search--answer state))
          (words (or (harness-quick-search--text (plist-get plan :session-query))
                     (plist-get state :query))))
-    (if (harness-quick-search--empty-p plan)
+    (when answer
+      (insert "\n" (harness-quick-search-answer-text answer 2 (harness-quick-search--columns))))
+    (if (and (harness-quick-search--empty-p plan) (not answer))
         (insert (harness-quick-search--line
                  (propertize (format "Nothing found for %s: no task, session or command, even searching wider."
                                      (harness-quick-search--quote (plist-get state :query)))
@@ -1176,6 +1243,14 @@ looked for in them, the plan's `:session-query', else the line asked."
     (when (eq (current-buffer) (harness-ui-popout-buffer harness-quick-search--key))
       (harness-ui-popout-refresh harness-quick-search--key))))
 
+(defun harness-quick-search--max-height ()
+  "The height this popout grows to at most, a fraction of its frame's, or nil.
+While it shows an answer in words, `harness-quick-search-answer-height'
+\(or the usual height, when that is more); else nil, the usual
+`harness-ui-popout-max-height'."
+  (and (harness-quick-search--answer harness-quick-search--state)
+       (max harness-quick-search-answer-height harness-ui-popout-max-height)))
+
 (defun harness-quick-search--update (popout seq &rest changes)
   "Merge CHANGES into the search SEQ of POPOUT, and draw it; nil when it is gone.
 A search the popout dropped, or one asked before its latest, is left
@@ -1265,7 +1340,9 @@ place the search was opened from suggests (`harness-quick-search-bias')."
          (popout (harness-ui-popout-show harness-quick-search--key "Quick search" #'harness-quick-search--render
                                          :compose (lambda () #'harness-quick-search--submit)
                                          :placeholder "Find a session, a command or a task…"
-                                         :dir (plist-get context :project))))
+                                         :dir (plist-get context :project)
+                                         ;; Taller while it answers in words.
+                                         :max-height #'harness-quick-search--max-height)))
     (with-current-buffer popout
       (setq harness-quick-search--origin origin
             harness-quick-search--origin-window window
@@ -1283,12 +1360,14 @@ place the search was opened from suggests (`harness-quick-search-bias')."
         (when (and (not existing)
                    (equal (string-trim (harness-compose-text)) (car harness-quick-search-history)))
           (harness-compose-set "")))
-      (harness-quick-search--redraw)
-      (harness-quick-search--warm)
       (when query (harness-quick-search--put query))
       (when (harness-compose-live-p) (goto-char harness-compose-end))
       (when-let* ((w (get-buffer-window popout)))
         (set-window-point w (point)))
+      ;; Drawn with point in the box, which then shows however tall
+      ;; the answer above it.
+      (harness-quick-search--redraw)
+      (harness-quick-search--warm)
       (when query (harness-quick-search--search query)))
     popout))
 
@@ -1299,13 +1378,15 @@ A popout opens at the bottom of the frame, with a box to type a line in
 words: \"how do I attach a file?\", \"where did I debug the merge
 queue?\", \"the task about the docs\".  \\`RET' there sends it, with where it
 was typed and the harness's commands, to a quick, cheap model
-\(`harness-tasks-search-model'), and the popout lists the commands,
-sessions and tasks it found, with buttons: [Run] runs a command in the
-buffer the search was opened from, [Open] opens a session (at the
-message where the search found its words, when it did), [All matches]
-shows every session that matches the words the search looked for, with
-snippets, and [Board] shows a task on its board.  The line stays in the
-box, to be refined; \\`M-p' and \\`M-n' bring back earlier searches.
+\(`harness-tasks-search-model'), and the popout shows its answer in
+words, whole, when words answer the line (\"how do I ...?\"), then
+lists the commands, sessions and tasks it found, with buttons: [Run]
+runs a command in the buffer the search was opened from, [Open] opens
+a session (at the message where the search found its words, when it
+did), [All matches] shows every session that matches the words the
+search looked for, with snippets, and [Board] shows a task on its
+board.  The line stays in the box, to be refined; \\`M-p' and \\`M-n'
+bring back earlier searches.
 
 What the search favours depends on where it was opened: commands, then
 sessions, in most buffers; sessions in the session list and a

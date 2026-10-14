@@ -35,7 +35,9 @@
 ;; (`harness-provider-demo--plan').
 ;; A search, the task board's or the harness-wide one, gets the JSON a
 ;; search model answers with: the tasks, sessions and commands matched
-;; from the words of the query (`harness-provider-demo--search'),
+;; from the words of the query (`harness-provider-demo--search'), and
+;; for a "how ..." question a command answers, an answer in words that
+;; names it (`harness-provider-demo--how-to');
 ;; and a request to name a session the first words of its opening
 ;; message (`harness-provider-demo--title').  The companion pet gets
 ;; its name and its lines (`harness-provider-demo--pet'), and the
@@ -636,14 +638,31 @@ A word counts when a line holds its first five characters, so
     (and (> best 0)
          (seq-take (mapcar #'cdr (cl-remove-if-not (lambda (s) (= (car s) best)) scored)) max))))
 
+(defun harness-provider-demo--how-to (name text)
+  "Say in words how command NAME does what was asked, from its line in TEXT.
+TEXT is what a search sends its model; the commands' lines in it read
+\"name | keys | where | what it does\", the parts a command lacks left
+out.  Return Markdown naming the command, its keys and where, and what
+it does, or nil when TEXT has no line for NAME."
+  (when (string-match (concat "^" (regexp-quote name) " | \\(.*\\)$") text)
+    (let* ((fields (split-string (match-string 1 text) " | " t "[ \t]+"))
+           (what (car (last fields)))
+           (where (butlast fields)))
+      (concat (format "Use `%s`" name)
+              (if where (format " (%s)" (string-join where ", ")) "")
+              ": " what
+              (if (string-match-p "[.!?]\\'" what) "" ".")))))
+
 (defun harness-provider-demo--search (request)
   "Answer a search from what REQUEST gives, as a scripted model would.
 No model: words of the query that order an action pick it (or, failing
 that, words that give a priority), words that name a state keep the
 tasks in that state, and the other words keep the tasks whose lines
 hold them all (or, when none does, the most of them).  The same words
-pick the sessions and the commands whose lines hold the most of them.
-A query with no such words shows every task in its state, or every task
+pick the sessions and the commands whose lines hold the most of them,
+and a query that starts with \"how\" and picks a command is answered in
+words too, naming the first (`harness-provider-demo--how-to').  A
+query with no such words shows every task in its state, or every task
 when the search favours tasks."
   (let* ((text (harness-provider-demo--last-user-text request))
          (query (downcase (if (string-match "^Query: \\(.*\\)$" text) (match-string 1 text) "")))
@@ -691,7 +710,9 @@ when the search favours tasks."
            (commands (and words (harness-provider-demo--search-best
                                  words (harness-provider-demo--search-lines text "Commands (name | keys")
                                  3)))
-           (answer (format "{\"show\":[%s],\"sessions\":[%s],\"commands\":[%s],\"do\":[%s]}"
+           (words-answer (and commands (string-match-p "\\`how\\b" query)
+                              (harness-provider-demo--how-to (car commands) text)))
+           (answer (format "{\"show\":[%s],\"sessions\":[%s],\"commands\":[%s],\"do\":[%s]%s}"
                            (mapconcat (lambda (id) (format "%S" id)) shown ",")
                            (mapconcat (lambda (id) (format "%S" id)) sessions ",")
                            (mapconcat (lambda (name) (format "%S" name)) commands ",")
@@ -701,7 +722,10 @@ when the search favours tasks."
                                   (mapconcat (lambda (id) (format "{\"task\":%S,\"action\":\"priority\",\"text\":%S}"
                                                                   id priority))
                                              shown ","))
-                                 (t "")))))
+                                 (t ""))
+                           (if words-answer
+                               (concat ",\"answer\":" (harness-json-encode-text words-answer))
+                             ""))))
       `((:type text :delta ,answer)
         (:type usage :input ,(/ (length text) 4) :output ,(/ (length answer) 4) :cost 0.0004 :context ,(/ (length text) 4))
         (:type done :stop-reason end-turn)))))

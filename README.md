@@ -63,10 +63,10 @@ OpenAI-compatible APIs and AWS Bedrock.
 - **Quick search.** Say what you want -- "how do I attach a file?",
   "where did I debug the merge queue?", "the task about the docs" -- and
   a cheap model finds the command to run, the session to open, at the
-  message where it was said, or the task, from any buffer. It favours
-  tasks on the task board and commands and sessions elsewhere, and looks
-  wider when what it favours has no answer (see
-  [Quick search](#quick-search)).
+  message where it was said, or the task, from any buffer, and answers a
+  question in words when words answer it. It favours tasks on the task
+  board and commands and sessions elsewhere, and looks wider when what
+  it favours has no answer (see [Quick search](#quick-search)).
 - **Supervisor mode.** A session on an expensive model plans and
   coordinates while workers on cheaper models make the changes. The
   harness enforces it with tools rather than a prompt: the supervising
@@ -488,8 +488,8 @@ A popout opens at the bottom of the frame, with a box to type in. `RET`
 (`harness-tasks-search-model`, the provider's simple tier by default),
 together with where you typed it, the harness's commands, your tasks and
 your sessions. It answers with the commands, sessions and tasks the line
-is about, never with prose, and the popout lists them, each with its
-buttons. The line stays in the box, to be refined. `M-p` and `M-n` bring
+is about, and the popout lists them, each with its buttons. The line
+stays in the box, to be refined. `M-p` and `M-n` bring
 back earlier searches, the task board's among them
 (`harness-quick-search-history`), `TAB` moves between the buttons, and
 `C-g` closes the popout (so does `q` outside the box). The model's
@@ -504,6 +504,19 @@ like any other call.
   suggests. Its first line says where the search was opened from and
   what it favours; `[Search sessions]` and `[Search commands]` ask the
   same line again, favouring those.
+- **A question gets an answer in words.** When words answer the line --
+  "how do I attach the API guide?", "what does verify do?", "how many
+  tasks failed?" -- the model writes the answer too, in Markdown, and the
+  popout shows it first, above what the search found, rendered and
+  whole: no line of it is cut, however long it is. The popout grows
+  taller for it than for a list, up to
+  `harness-quick-search-answer-height` of the frame (0.8). An answer
+  taller still keeps the box at the bottom, the end of the answer above
+  it, and `M-v` scrolls back to its start. A line that only finds
+  something, or orders something done, gets no answer in words: the
+  list is the answer. A model that writes prose instead of the JSON it
+  is asked for has its prose shown as the answer, rather than the search
+  failing.
 - **Commands** come with their keys and what they do. The model knows
   the harness menu's commands, those under the `C-c h` prefix, those the
   mode of the buffer you are in lists in the menu (a chat's `C-c C-c`, a
@@ -2725,10 +2738,13 @@ your checkout itself can be submitted to the **main tree** instead (the
   dump of the board, the other sessions and the harness's commands to a
   quick, cheap model (`harness-tasks-search-model`, the provider's
   simple tier by default), which favours tasks here and answers with
-  the tasks it is about, what to do with them, and the sessions and
-  commands it found, never with prose. The board then shows only those
-  tasks, archived ones included, under a banner that says what it shows
-  and lists the sessions and commands found, each with its `[Open]`
+  the tasks it is about, what to do with them, the sessions and
+  commands it found and, when words answer the line ("how many tasks
+  failed?", "what is the docs task waiting for?"), the answer in words.
+  The board then shows only those tasks, archived ones included, under
+  a banner that says what it shows, has the answer in words, whole and
+  rendered as Markdown, and lists the sessions and commands found, each
+  with its `[Open]`
   (at the message where your words were found, for a session found in
   its transcript), `[Run]` or `[Describe]`; `C-g` on the board, once the
   box is closed, or `[Clear]` shows every task again. When no task

@@ -82,6 +82,9 @@
 (declare-function harness-quick-search--shutdown "harness-ui-quick-search")
 (declare-function harness-quick-search--text "harness-ui-quick-search")
 (declare-function harness-quick-search-open-session "harness-ui-quick-search")
+(declare-function harness-quick-search--max-height "harness-ui-quick-search")
+(defvar harness-quick-search-answer-height)
+(defvar harness-ui-popout-max-height)
 (declare-function harness-search-sessions "harness-ui-search")
 (declare-function harness-ui-chat-goto-node "harness-ui-chat")
 (declare-function harness-ui-visit-session "harness-ui")
@@ -980,6 +983,104 @@ found there is no button."
           (should (equal "the newer one" (plist-get state :query)))
           (should (equal "the newer one" (plist-get (plist-get state :plan) :query)))
           (should (= (buffer-local-value 'harness-quick-search--seq popout) (plist-get state :seq))))))))
+
+;;;; An answer in words
+
+(defconst harness-ui-quick-search-test--steps
+  (mapcar (lambda (n)
+            (format "Step %d of the answer, which says a good deal more than fits on one line of the popout, so that it has to wrap at least once."
+                    n))
+          (number-sequence 1 12))
+  "The steps of a long answer, each longer than a line.")
+
+(defconst harness-ui-quick-search-test--long-answer
+  (concat "To attach the API guide, use `harness-compose-add-attachment` in the box you type in, **before** you send.\n\n"
+          (let ((n 0))
+            (mapconcat (lambda (step) (format "%d. %s" (cl-incf n) step))
+                       harness-ui-quick-search-test--steps "\n"))
+          "\n\nThe last line of the answer.")
+  "An answer in words longer than any line, and taller than a popout usually is.")
+
+(defun harness-ui-quick-search-test--answer-region ()
+  "The text of the answer in words the popout shows, without properties; or nil."
+  (with-current-buffer (harness-ui-quick-search-test--popout)
+    (when-let* ((start (text-property-any (point-min) (point-max) 'harness-quick-search-answer t)))
+      (buffer-substring-no-properties
+       start (or (text-property-not-all start (point-max) 'harness-quick-search-answer t) (point-max))))))
+
+(ert-deftest harness-ui-quick-search-shows-a-long-answer-whole ()
+  "An answer in words shows first, under the line it answers and above
+what the search found: whole however long, every line of it, wrapped
+ones too, indented, and rendered as Markdown.  The popout may grow
+taller for it than for a list; a search that finds without answering in
+words shows no answer, at the usual height."
+  (harness-ui-quick-search-test-with
+    (let ((origin (harness-ui-quick-search-test--origin)))
+      (harness-ui-quick-search-test--ask
+       origin "how do I attach the API guide?"
+       (harness-json-encode-text (list :show nil :commands (list "harness-quick-search-test-run")
+                                       :answer harness-ui-quick-search-test--long-answer)))
+      (let ((plan (plist-get (harness-ui-quick-search-test--state) :plan))
+            (text (harness-ui-quick-search-test--text))
+            (answer (harness-ui-quick-search-test--answer-region)))
+        (should (equal harness-ui-quick-search-test--long-answer (plist-get plan :answer)))
+        (should (eq :false (plist-get plan :widened)))
+        ;; Every line of it, whole, as Markdown: no ** nor backquotes.
+        (should answer)
+        (should (string-prefix-p "To attach the API guide, use harness-compose-add-attachment in the box you type in, before you send.\n\n1. Step 1 of the answer"
+                                 answer))
+        (let ((n 0))
+          (dolist (step harness-ui-quick-search-test--steps)
+            (should (string-search (format "%d. %s\n" (cl-incf n) step) answer))))
+        (should (string-suffix-p "\n\nThe last line of the answer.\n" answer))
+        (should-not (string-search "…" answer))
+        ;; The line it answers, the answer, then what the search found.
+        (should (string-match-p "“how do I attach the API guide\\?” · 1 command\n\nTo attach" text))
+        (should (< (string-search "The last line of the answer." text) (string-search "Commands" text)))
+        (should (string-match-p "Commands\n.*(harness-quick-search-test-run)  \\[Run\\] \\[Describe\\]" text))
+        (should-not (string-match-p "Nothing found" text)))
+      (with-current-buffer (harness-ui-quick-search-test--popout)
+        (goto-char (point-min))
+        (should (search-forward "harness-compose-add-attachment" nil t))
+        (should (eq 'harness-md-code (get-text-property (match-beginning 0) 'face)))
+        (should (search-forward "The last line of the answer." nil t))
+        (should (equal "  " (get-text-property (match-beginning 0) 'line-prefix)))
+        (should (equal "  " (get-text-property (match-beginning 0) 'wrap-prefix)))
+        ;; A step wraps under its own text, past its number.
+        (should (search-backward "Step 12 of the answer" nil t))
+        (should (equal "  " (get-text-property (point) 'line-prefix)))
+        (should (equal "      " (get-text-property (point) 'wrap-prefix)))
+        ;; The popout may grow taller while it answers.
+        (should (= (max harness-quick-search-answer-height harness-ui-popout-max-height)
+                   (harness-quick-search--max-height))))
+      ;; A search that finds without answering in words: no answer, the usual height.
+      (harness-ui-quick-search-test--ask origin "run the test command"
+                                         "{\"commands\":[\"harness-quick-search-test-run\"]}")
+      (should-not (harness-ui-quick-search-test--answer-region))
+      (should-not (with-current-buffer (harness-ui-quick-search-test--popout) (harness-quick-search--max-height)))
+      (should (string-match-p "“run the test command” · 1 command\n\nCommands\n" (harness-ui-quick-search-test--text))))))
+
+(ert-deftest harness-ui-quick-search-answers-in-words-alone ()
+  "An answer in words with nothing else found shows alone, not as nothing
+found; so does a model that answered in prose instead of JSON, whole."
+  (harness-ui-quick-search-test-with
+    (let ((origin (harness-ui-quick-search-test--origin)))
+      (harness-ui-quick-search-test--ask origin "what does verify do?"
+                                         "{\"show\":[],\"answer\":\"It accepts a task's work:\\nthe branch merges.\"}")
+      (let ((text (harness-ui-quick-search-test--text)))
+        (should (eq :false (plist-get (plist-get (harness-ui-quick-search-test--state) :plan) :widened)))
+        ;; Markdown: a line break in a paragraph is a space.
+        (should (equal "It accepts a task's work: the branch merges.\n" (harness-ui-quick-search-test--answer-region)))
+        (should (string-match-p "“what does verify do\\?”\n\nIt accepts" text))
+        (should-not (string-match-p "Nothing found" text))
+        (should (string-match-p "\\[Search sessions\\] \\[Search commands\\]" text)))
+      ;; Prose, braces and all, is the answer: not a failure, and not cut.
+      (let ((prose (concat "Verify accepts the work of a task in review: its branch merges.\n\n"
+                           "Use {braces} freely: (let ((x {})) x).  "
+                           (mapconcat #'identity harness-ui-quick-search-test--steps " "))))
+        (harness-ui-quick-search-test--ask origin "what does verify do?" prose)
+        (should (equal (concat prose "\n") (harness-ui-quick-search-test--answer-region)))
+        (should-not (string-match-p "failed" (harness-ui-quick-search-test--text)))))))
 
 (provide 'harness-ui-quick-search-test)
 ;;; harness-ui-quick-search-test.el ends here

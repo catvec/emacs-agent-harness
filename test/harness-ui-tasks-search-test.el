@@ -70,6 +70,7 @@
 (declare-function harness-ui-chat-goto-node "harness-ui-chat")
 (declare-function harness-ui-tasks-search--banner "harness-ui-tasks-search")
 (declare-function harness-ui-tasks-search--done-text "harness-ui-tasks-search")
+(declare-function harness-ui-tasks-search--found-text "harness-ui-tasks-search")
 (declare-function harness-ui-tasks-search--install "harness-ui-tasks-search")
 (declare-function harness-ui-tasks-search--shutdown "harness-ui-tasks-search")
 (declare-function harness-ui-tasks-search-submit "harness-ui-tasks-search")
@@ -434,11 +435,11 @@ it takes."
           (should (string-match-p "\\[Search\\]" (harness-ui-tasks--header))))))))
 
 (ert-deftest harness-ui-tasks-search-failure-offers-retry ()
-  "A model that answers nothing useful says so, and can be asked again."
+  "A model whose answer does not parse says so, and can be asked again."
   (harness-ui-tasks-search-test-with
     (harness-ui-tasks-search-test--submit board "Fix the flaky test")
     (setq harness-ui-tasks-search-test--replies
-          '("I am afraid I cannot do that." "{\"show\":[],\"do\":[]}"))
+          '("{\"show\":[\"t-" "{\"show\":[],\"do\":[]}"))
     (harness-ui-tasks-search-test--search board "what is up?")
     (harness-ui-tasks-search-test--wait-status board 'failed)
     (with-current-buffer board
@@ -719,3 +720,61 @@ board as its search would: its tasks under a banner, nothing proposed."
           (should-not (string-match-p "Fix the flaky test" text))
           (should (equal id (get-text-property (point) 'harness-task-id))))))
     (should-not harness-ui-tasks-search-test--requests)))
+
+(ert-deftest harness-ui-tasks-search-banner-shows-the-answer-whole ()
+  "A search that answers in words has the answer in the banner, under the
+line it answers: whole however long, every line of it indented, and
+rendered as Markdown.  That line, and the echo area, say it answered
+rather than that no task matches.  A plan from the quick search's
+[Board] that answers shows its answer too."
+  (harness-ui-tasks-search-test-with
+    (harness-ui-tasks-search-test--submit board "Fix the flaky test")
+    (let* ((steps (mapcar (lambda (n)
+                            (format "Step %d of the answer, which says more than fits on one line of the board, so that it has to wrap at least once." n))
+                          (number-sequence 1 10)))
+           (answer (concat "A task that failed shows in the **Failed** column; press `r` on its card to retry it.\n\n"
+                           (mapconcat (lambda (step) (format "%d. %s" (1+ (cl-position step steps)) step))
+                                      steps "\n")
+                           "\n\nThe last line of the answer.")))
+      (setq harness-ui-tasks-search-test--replies (list (harness-json-encode-text (list :show nil :answer answer))))
+      (harness-ui-tasks-search-test--search board "how do I retry a failed task?")
+      (harness-ui-tasks-search-test--wait-status board 'done)
+      (let ((state (harness-ui-tasks-search-test--state board))
+            (text (harness-ui-tasks-search-test--board-text board)))
+        (should (equal answer (plist-get state :answer)))
+        ;; An answer in words is something found: the search did not look wider.
+        (should-not (plist-get state :widened))
+        (should (string-match-p "“how do I retry a failed task\\?”  ·  answered" text))
+        (should-not (string-match-p "no task matches" text))
+        ;; Every line of it, whole, as Markdown: no ** nor backquotes.
+        (should (string-search "A task that failed shows in the Failed column; press r on its card to retry it." text))
+        (dolist (step steps)
+          (should (string-search step text)))
+        (should (string-search "The last line of the answer." text))
+        (should-not (string-search "…" text))
+        (should (< (string-search "answered" text) (string-search "A task that failed" text)
+                   (string-search "The last line of the answer." text))))
+      (with-current-buffer board
+        (goto-char (point-min))
+        (should (search-forward "The last line of the answer." harness-ui-tasks--list-end t))
+        (should (get-text-property (match-beginning 0) 'harness-quick-search-answer))
+        (should (equal "    " (get-text-property (match-beginning 0) 'line-prefix)))
+        ;; A step wraps under its own text, past its number.
+        (should (search-backward "Step 10 of the answer" nil t))
+        (should (equal "    " (get-text-property (point) 'line-prefix)))
+        (should (equal "        " (get-text-property (point) 'wrap-prefix)))
+        (should (eq 'bold (progn (goto-char (point-min))
+                                 (search-forward "Failed column" harness-ui-tasks--list-end)
+                                 (get-text-property (match-beginning 0) 'face))))))
+    ;; What the echo area says of an answer.
+    (should (equal "Answered" (harness-ui-tasks-search--found-text (list :query "q" :answer "Press `r`."))))
+    (should (equal "Answered · 1 task matches"
+                   (harness-ui-tasks-search--found-text (list :query "q" :ids '("a") :answer "Press `r`."))))
+    (should (equal "No task matches “q”" (harness-ui-tasks-search--found-text (list :query "q" :answer " \n"))))
+    ;; A plan from the quick search shows its answer too.
+    (with-current-buffer board
+      (harness-ui-tasks-search-show-plan (list :ids nil :query "how?" :answer "Press `r` on its card."))
+      (should (equal "Press `r` on its card." (plist-get harness-ui-tasks-search--state :answer))))
+    (let ((text (harness-ui-tasks-search-test--board-text board)))
+      (should (string-match-p "“how\\?”  ·  answered" text))
+      (should (string-search "Press r on its card." text)))))
