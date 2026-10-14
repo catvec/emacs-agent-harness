@@ -4,10 +4,12 @@
 
 ;; The plugin (lisp/modules/harness-tool-slots-load.el) lowers this
 ;; machine's tool slots while its load average is high.  The load is
-;; stubbed (`harness-tool-slots-load-function') so that a test says
-;; exactly what kind of machine it is, and `--tick' takes one reading,
-;; as the plugin's timer would; the plugin's own timer is stopped by the
-;; tests' setup, which also loads the plugin before each test.
+;; stubbed (`harness-tool-slots-load-function', or `load-average' itself
+;; where a test checks which of its averages is read) so that a test
+;; says exactly what kind of machine it is, and `--tick' takes one
+;; reading, as the plugin's timer would; the plugin's own timer is
+;; stopped by the tests' setup, which also loads the plugin before each
+;; test.
 
 ;;; Code:
 
@@ -73,6 +75,16 @@ handler runs, which is when the plugins have given it a slot.  Return NAME."
 What it returns is what `load-average' would: the machine's load, not
 its load per processor, so the plugin divides by the processor count."
   (lambda (&optional _window) (* per-processor (max 1 (num-processors)))))
+
+(defun harness-tool-slots-load-test--averages (one five fifteen)
+  "Return a `load-average' reporting ONE, FIVE and FIFTEEN per processor.
+They are the 1-, 5- and 15-minute averages, in the order `load-average'
+reports them, and as the machine's load: the plugin divides them by the
+processor count.  Bind `load-average' to it, and the load function to
+the default one, to test which of the three the plugin reads."
+  (let ((processors (max 1 (num-processors))))
+    (lambda (&optional _use-floats)
+      (list (* one processors) (* five processors) (* fifteen processors)))))
 
 (defun harness-tool-slots-load-test--quiet ()
   "Return a load that leaves every slot: the machine is idle."
@@ -399,6 +411,98 @@ and put back when a test took it off."
     ;; Starting it again watches the load as before.
     (harness-tool-slots-load--init)
     (should (= 1 (harness-tool-slots--slots "local:test-machine")))))
+
+;;;; Which load average is read
+
+(ert-deftest harness-tool-slots-load-the-five-minute-average-by-default ()
+  "The plugin reads the 5-minute load average unless told otherwise."
+  (harness-tool-slots-load-test--setup)
+  (should (eql 5 (eval (car (get 'harness-tool-slots-load-window 'standard-value)) t)))
+  ;; The window is what the load function is asked for.
+  (let ((asked nil))
+    (let ((harness-tool-slots-load-function
+           (lambda (&optional window) (push window asked) 0.1)))
+      (harness-tool-slots-load-test--tick)
+      (let ((harness-tool-slots-load-window 15))
+        (harness-tool-slots-load-test--tick)))
+    (should (equal '(5 15) (reverse asked))))
+  ;; And the default load function answers it from `load-average''s
+  ;; three averages: the 1-, 5- and 15-minute ones, in that order.
+  (cl-letf (((symbol-function 'load-average)
+             (lambda (&optional _use-floats) (list 1.5 5.5 15.5))))
+    (should (= 5.5 (harness-tool-slots-load-default-load 5)))
+    (should (= 1.5 (harness-tool-slots-load-default-load 1)))
+    (should (= 15.5 (harness-tool-slots-load-default-load 15)))
+    ;; No window is the window configured.
+    (let ((harness-tool-slots-load-window 15))
+      (should (= 15.5 (harness-tool-slots-load-default-load))))
+    (let ((harness-tool-slots-load-window 5))
+      (should (= 5.5 (harness-tool-slots-load-default-load))))
+    ;; There is no 10-minute average: a window between the ends reads the
+    ;; 5-minute one, as does a window that is not a number, and one past
+    ;; an end reads that end.
+    (should (= 5.5 (harness-tool-slots-load-default-load 10)))
+    (should (= 5.5 (harness-tool-slots-load-default-load 'fortnight)))
+    (should (= 1.5 (harness-tool-slots-load-default-load 0.5)))
+    (should (= 15.5 (harness-tool-slots-load-default-load 60))))
+  ;; A system that keeps only the shorter averages gives the longest of
+  ;; them, rather than no load at all.
+  (cl-letf (((symbol-function 'load-average)
+             (lambda (&optional _use-floats) (list 1.5))))
+    (should (= 1.5 (harness-tool-slots-load-default-load 5)))
+    (should (= 1.5 (harness-tool-slots-load-default-load 15))))
+  (cl-letf (((symbol-function 'load-average)
+             (lambda (&optional _use-floats) (list 1.5 5.5))))
+    (should (= 5.5 (harness-tool-slots-load-default-load 15))))
+  ;; One that keeps none gives nil, which leaves the limit alone.
+  (cl-letf (((symbol-function 'load-average)
+             (lambda (&optional _use-floats) nil)))
+    (should-not (harness-tool-slots-load-default-load 5))))
+
+(ert-deftest harness-tool-slots-load-a-burst-of-work-keeps-the-slots ()
+  "A minute of heavy load leaves the slots; the 1-minute window would not."
+  (harness-tool-slots-load-test--setup)
+  (let ((harness-tool-slots-count 8)
+        (harness-tool-slots-burst 0)
+        (harness-tool-slots-load-function #'harness-tool-slots-load-default-load))
+    ;; A test run of a minute: the 1-minute average is three times what
+    ;; the processors can run, the 5-minute one -- the window read by
+    ;; default -- has hardly moved.
+    (cl-letf (((symbol-function 'load-average)
+               (harness-tool-slots-load-test--averages 3.0 0.8 0.3)))
+      (harness-tool-slots-load-test--tick)
+      (should (= 8 (harness-tool-slots--slots "local:test-machine")))
+      (should-not harness-tool-slots-load--limit)
+      ;; Read over one minute, the same burst takes every slot but one.
+      (let ((harness-tool-slots-load-window 1))
+        (harness-tool-slots-load-test--tick)
+        (should (= 1 (harness-tool-slots--slots "local:test-machine")))))))
+
+(ert-deftest harness-tool-slots-load-a-load-that-lasts-takes-the-slots ()
+  "A load that lasts reaches the 5-minute average, and the slots follow it."
+  (harness-tool-slots-load-test--setup)
+  (let ((harness-tool-slots-count 8)
+        (harness-tool-slots-burst 0)
+        (harness-tool-slots-load-function #'harness-tool-slots-load-default-load))
+    ;; A build that goes on: the 5-minute average is up too, halfway up
+    ;; the range, and half of the seven slots over the floor go.
+    (cl-letf (((symbol-function 'load-average)
+               (harness-tool-slots-load-test--averages 3.0 1.5 0.9)))
+      (harness-tool-slots-load-test--tick)
+      (should (= 4 (harness-tool-slots--slots "local:test-machine"))))
+    ;; The build is over: the 1-minute average is quiet at once, but the
+    ;; 5-minute one has not come down yet, and neither have the slots.
+    (setq harness-tool-slots-load--changed-at nil)
+    (cl-letf (((symbol-function 'load-average)
+               (harness-tool-slots-load-test--averages 0.2 1.5 1.0)))
+      (harness-tool-slots-load-test--tick)
+      (should (= 4 (harness-tool-slots--slots "local:test-machine"))))
+    ;; Once it has, the baseline is back.
+    (cl-letf (((symbol-function 'load-average)
+               (harness-tool-slots-load-test--averages 0.1 0.9 0.9)))
+      (harness-tool-slots-load-test--tick)
+      (should (= 8 (harness-tool-slots--slots "local:test-machine")))
+      (should-not harness-tool-slots-load--limit))))
 
 ;;;; Telling the sessions
 

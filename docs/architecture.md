@@ -7542,9 +7542,18 @@ Options:
 
 - `harness-tool-slots-load-enabled` (default t): the watch, on or off,
   without unloading the module.
-- `harness-tool-slots-load-window` (default 1): which load average is
-  read, over 1, 5 or 15 minutes.  The 1-minute average feels a build at
-  once; a longer one is steadier, and slower to give the slots back.
+- `harness-tool-slots-load-window` (default 5): which load average is
+  read, over 1, 5 or 15 minutes.  These are the three averages
+  `load-average` reports and the only ones the system keeps, so another
+  window -- 10, say -- reads the 5-minute one.  The 5-minute average
+  follows the load that lasts.  A test run or a compile of a minute or
+  two moves it a little, so the slots are not taken away and given back
+  with every burst of work, while a build that goes on lowers them
+  within a few minutes, and they come back a few minutes after it is
+  over.  The 1-minute average reacts to every burst at once, and gives
+  the slots back as fast; the 15-minute one is steadier still, and
+  slower to give them back.  On a system that keeps fewer averages the
+  longest one it has is read.
 - `harness-tool-slots-load-low` (default 1.0) and
   `harness-tool-slots-load-high` (default 2.0): the load per processor
   at or below which the limit is the baseline, and at or above which it

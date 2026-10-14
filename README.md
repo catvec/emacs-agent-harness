@@ -47,11 +47,13 @@ OpenAI-compatible APIs and AWS Bedrock.
   calls waiting go by session priority (low, medium or high; `C-c h +`
   and `C-c h -` raise and lower it, `C-c h y` sets it, and a task's is
   its session's), so the commands of a task you marked high go
-  before a low one's. The limit follows the machine's load average too:
+  before a low one's. The limit follows the machine's 5-minute load
+  average too, so a load that lasts counts and a short burst does not:
   under load fewer slots are handed out, down to one, and the full limit
-  comes back as the load falls (`harness-tool-slots-load-high`,
-  `harness-tool-slots-load-floor`). The test suites run at idle CPU and
-  I/O priority, yielding to whatever you are doing.
+  comes back as the load falls (`harness-tool-slots-load-window`,
+  `harness-tool-slots-load-high`, `harness-tool-slots-load-floor`). The
+  test suites run at idle CPU and I/O priority, yielding to whatever you
+  are doing.
 - **Task board.** Run tasks in parallel, each in its own session and git
   worktree, review the results, and merge them back through a merge
   queue. A per-project limit on running tasks starts the waiting ones

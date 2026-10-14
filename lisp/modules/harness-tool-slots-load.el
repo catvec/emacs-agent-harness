@@ -12,7 +12,11 @@
 ;; So this plugin watches this machine's load average (`load-average',
 ;; the same numbers /proc/loadavg shows on GNU/Linux) and lowers the
 ;; slots it allows while the load is high, restoring the configured
-;; limit as the load falls.  The load is read per processor: 1.0 means
+;; limit as the load falls.  It reads the 5-minute average by default
+;; (`harness-tool-slots-load-window'), which follows a load that lasts,
+;; such as a build.  The 1-minute average jumps with every test run or
+;; compile, and the slots would jump with it, down and back up again a
+;; minute later.  The load is read per processor: 1.0 means
 ;; one processor's worth of runnable work on each processor, and at
 ;; `harness-tool-slots-load-high' -- 2.0 by default -- the limit is
 ;; down to `harness-tool-slots-load-floor', one slot, so the work still
@@ -66,10 +70,16 @@ same and stops the sampling."
   :type 'boolean
   :group 'harness)
 
-(defcustom harness-tool-slots-load-window 1
+(defcustom harness-tool-slots-load-window 5
   "Which load average the module reads: over 1, 5 or 15 minutes.
-The 1-minute average feels a build or a test run at once; a longer
-window is steadier, and so slower to give the slots back."
+These are the three averages `load-average' reports.  The 5-minute
+average, the default, follows the load that lasts.  A test run or a
+compile of a minute or two moves it a little, so the slots are not taken
+away and given back with every burst of work, while a build that goes
+on lowers them within a few minutes, and they come back a few minutes
+after it is over.  The 1-minute average reacts to every burst at once,
+and gives the slots back as fast.  The 15-minute one is steadier still,
+and slower to give them back."
   :type '(choice (const :tag "1 minute" 1)
                  (const :tag "5 minutes" 5)
                  (const :tag "15 minutes" 15))
@@ -131,12 +141,23 @@ always gets its full limit back."
 
 (defun harness-tool-slots-load-default-load (&optional window)
   "Return this machine's load average over WINDOW minutes, or nil.
-WINDOW is 1, 5 or 15 (`harness-tool-slots-load-window'), and the value
-is what `load-average' reports -- the numbers /proc/loadavg shows on
-GNU/Linux.  A system that cannot report its load gives nil, which
-leaves the limit alone."
+WINDOW is 1, 5 or 15, and nil means `harness-tool-slots-load-window'.
+Those are the only averages the system keeps: a window of a minute or
+less reads the 1-minute one, a window of 15 minutes or more the
+15-minute one, and any other window -- 10, say -- the 5-minute one, the
+default.  The value is what `load-average' reports, the numbers
+/proc/loadavg shows on GNU/Linux.  A system that does not keep the
+longer averages reports fewer of them, and the longest one it has is
+read instead.  A system that cannot report its load at all gives nil,
+which leaves the limit alone."
   (condition-case err
-      (nth (pcase (or window 1) (5 1) (15 2) (_ 0)) (load-average t))
+      (let* ((loads (load-average t))
+             (window (or window harness-tool-slots-load-window))
+             (index (cond ((not (numberp window)) 1)
+                          ((<= window 1) 0)
+                          ((>= window 15) 2)
+                          (t 1))))
+        (or (nth index loads) (car (last loads))))
     (error (harness-log 'debug "tool-slots-load: no load average: %s"
                         (harness-error-message err))
            nil)))
