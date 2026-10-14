@@ -4355,8 +4355,8 @@ has both messages, retries the step, and the work comes back to review."
         (let ((s1 (harness-supervisor-plan-test-step bsid "s1")))
           (should (equal "interrupted" (plist-get s1 :state)))
           (should (equal worker (plist-get s1 :session)))
-          (should (string-prefix-p (format "its task was pre-empted: task %s" reviewed) (plist-get s1 :error)))
-          (should (string-suffix-p ", sent back from review, took its slot" (plist-get s1 :error))))
+          (should (string-prefix-p (format "its task was pre-empted by task %s" reviewed) (plist-get s1 :error)))
+          (should (string-suffix-p ", sent back from review" (plist-get s1 :error))))
         (should (zerop (hash-table-count harness-supervisor--live)))
         (should-not (harness-call 'agent/outstanding bsid))
         (should-not (harness-supervisor-plan-test-step-request "s1"))
@@ -4369,15 +4369,15 @@ has both messages, retries the step, and the work comes back to review."
           (should (= 1 (length reports)))
           (should (string-prefix-p "Supervisor report: the plan's workers were stopped, interrupting 1 running step: s1."
                                    (car reports)))
-          (should (string-match-p "Why: its task was pre-empted: task " (car reports)))
+          (should (string-match-p "Why: its task was pre-empted by task " (car reports)))
           (should (string-match-p "Decide: retry_step s1 to run it again" (car reports))))
         (harness-test-wait
-         (lambda () (cl-some (lambda (hint) (string-prefix-p "Turn not started: its task " hint))
+         (lambda () (cl-some (lambda (hint) (string-prefix-p "Turn not started: task " hint))
                              (harness-supervisor-plan-test-hints bsid)))
          10 "the report's turn refused")
         (let ((hints (harness-supervisor-plan-test-hints bsid)))
-          (should (cl-some (lambda (hint) (string-prefix-p "Task pre-empted: task " hint)) hints))
-          (should (member "Stopped while the task waits in the queue: Supervisor plan: 1 step interrupted" hints)))
+          (should (cl-some (lambda (hint) (string-prefix-p "Pre-empted by task " hint)) hints))
+          (should (member "Stopped while the task waits for a slot: Supervisor plan: 1 step interrupted" hints)))
         ;; The slot frees when the task sent back is in review again: the
         ;; pre-empted one carries on in its session, told why by the harness.
         (harness-test-wait (lambda () (harness-supervisor-plan-test-said bsid harness-tasks--preempted-message)) 15
@@ -4390,7 +4390,7 @@ has both messages, retries the step, and the work comes back to review."
                  (harness-tasks--reject-text "Handle tabs too.")))
         (harness-supervisor-plan-test--check-carried-on
          busy bsid worker harness-tasks--preempted-message
-         (format "its task was pre-empted: task %s" reviewed))
+         (format "its task was pre-empted by task %s" reviewed))
         ;; Both tasks are in review, so no slot is taken.
         (should (= 1 (harness-tasks--free-slots
                       (harness-tasks--slot-project (harness-supervisor-plan-test-task busy)))))))))
@@ -4423,18 +4423,18 @@ to review."
         (let ((s1 (harness-supervisor-plan-test-step bsid "s1")))
           (should (equal "interrupted" (plist-get s1 :state)))
           (should (equal worker (plist-get s1 :session)))
-          (should (equal "its task was returned to the queue" (plist-get s1 :error))))
+          (should (equal "its task was paused" (plist-get s1 :error))))
         (should-not (harness-call 'agent/outstanding bsid))
         (harness-test-wait (lambda () ended) 10 "the worker's turn to end")
         (should (equal '(cancelled) ended))
         (let ((reports (harness-supervisor-plan-test-wait-reports bsid 1)))
           (should (= 1 (length reports)))
-          (should (string-match-p "Why: its task was returned to the queue\\." (car reports))))
+          (should (string-match-p "Why: its task was paused\\." (car reports))))
         (harness-test-wait
-         (lambda () (cl-some (lambda (hint) (string-prefix-p "Turn not started: its task " hint))
+         (lambda () (cl-some (lambda (hint) (string-prefix-p "Turn not started: task " hint))
                              (harness-supervisor-plan-test-hints bsid)))
          10 "the report's turn refused")
-        (should (member "Stopped while the task waits in the queue: Supervisor plan: 1 step interrupted"
+        (should (member "Stopped while the task waits for a slot: Supervisor plan: 1 step interrupted"
                         (harness-supervisor-plan-test-hints bsid)))
         ;; The refused turn started nothing: a slot is free, but the task waits.
         (accept-process-output nil 0.5)
@@ -4448,7 +4448,7 @@ to review."
         (harness-test-wait (lambda () (eq 'review (plist-get (harness-supervisor-plan-test-task busy) :state))) 25
                            "the supervising task to be in review again")
         (harness-supervisor-plan-test--check-carried-on
-         busy bsid worker harness-tasks--paused-message "its task was returned to the queue")))))
+         busy bsid worker harness-tasks--paused-message "its task was paused")))))
 
 (provide 'harness-supervisor-plan-test)
 ;;; harness-supervisor-plan-test.el ends here

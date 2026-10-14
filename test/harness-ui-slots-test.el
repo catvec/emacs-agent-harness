@@ -254,7 +254,7 @@ The arrow of a priority is left out of its label."
     (should (string-match-p "3 in use · no limit · 2 waiting"
                             (funcall first :limit nil :holders (harness-ui-slots-test--busy)
                                      :queue (seq-take (harness-ui-slots-test--busy-queue) 2))))
-    (should (string-match-p "no slots: the limit is 0, nothing starts on its own · 4 waiting"
+    (should (string-match-p "limit 0: nothing starts by itself · 4 waiting"
                             (funcall first :limit 0 :queue (harness-ui-slots-test--busy-queue))))
     (should (string-match-p "queue suspended"
                             (funcall first :suspended t :queue (harness-ui-slots-test--busy-queue))))
@@ -377,7 +377,7 @@ The arrow of a priority is left out of its label."
 (ert-deftest harness-ui-slots-limit-zero-has-no-slots ()
   (let* ((data (harness-ui-slots-test--data :limit 0 :queue (harness-ui-slots-test--busy-queue)))
          (lines (harness-ui-slots-test--page data)))
-    (should (string-match-p "no slots: the limit is 0, nothing starts on its own" (car lines)))
+    (should (string-match-p "limit 0: nothing starts by itself" (car lines)))
     (should (= 0 (harness-ui-slots-test--box-count lines)))
     (should (harness-ui-slots-test--line-with lines "Queue · 4 waiting"))
     ;; Tasks still at work when it was lowered to 0 keep their boxes.
@@ -414,7 +414,7 @@ The arrow of a priority is left out of its label."
   (let ((lines (harness-ui-slots-test--page
                 (harness-ui-slots-test--data :suspended t :queue (harness-ui-slots-test--busy-queue)))))
     (should (string-match-p "queue suspended" (car lines)))
-    (should (harness-ui-slots-test--line-with lines "Queue · 4 waiting · suspended: nothing starts on its own"))))
+    (should (harness-ui-slots-test--line-with lines "Queue · 4 waiting · suspended"))))
 
 ;;;; The queue and the waits
 

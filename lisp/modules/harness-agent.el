@@ -2005,7 +2005,7 @@ the session which goes on without its turn -- a supervisor plan's
 workers, a background sub-agent -- stops it when asked through the sync
 filter `agent/stop-outstanding', whose value starts at nil and whose
 arguments are SESSION-ID and REASON.  REASON is a short text saying
-why, such as \"its task was returned to the queue\", or nil; a handler
+why, such as \"its task was paused\", or nil; a handler
 records it where the owner of the work reads it, as a supervisor step's
 error.  A handler with nothing to stop for the session returns the value
 unchanged; one that stopped something returns a text saying what, or

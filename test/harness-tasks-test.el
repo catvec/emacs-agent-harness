@@ -872,7 +872,7 @@ so by the harness, and the task works again."
           (harness-tasks-test-wait-state id 'done))
         (should (equal sid (plist-get (harness-tasks-test-task id) :session)))
         (let ((retry (car (last (harness-tasks-test-user-nodes sid)))))
-          (should (string-match-p "stopped before the task was finished: it failed with an error\\. Check where"
+          (should (string-match-p "stopped early: it failed with an error\\. Check where"
                                   (plist-get retry :content)))
           (should (equal (harness-sender-system "tasks") (harness-node-sender retry))))
         ;; Done: nothing to retry.
@@ -1852,7 +1852,7 @@ write-up goes to it, not to a new one."
                                                           (plist-get (plist-get n :meta) :steering)))
                                         (harness-call 'session/nodes sid))))
           (should (= 1 (length steers)))
-          (should (string-match-p "enough looking" (plist-get (car steers) :content)))
+          (should (string-match-p "\\`Enough reading" (plist-get (car steers) :content)))
           (should (equal (harness-sender-system "tasks") (harness-node-sender (car steers)))))))))
 
 (defvar harness-perms-auto-model)
@@ -1892,7 +1892,7 @@ judge decides the work's calls."
         (let ((d (funcall decide "bash" 'exec)))
           (should (eq 'deny (plist-get d :behavior)))
           (should (plist-get d :final))
-          (should (string-match-p "only reads" (plist-get d :reason)))
+          (should (string-match-p "read-only" (plist-get d :reason)))
           (should (equal harness-tasks--write-up-hint (plist-get d :hint))))
         (should (eq 'allow (plist-get (funcall decide "read_file" 'read (expand-file-name "f" default-directory))
                                       :behavior))))
@@ -2162,7 +2162,7 @@ cannot hand in a plan."
         (harness-tasks-test-wait-state id 'pending)
         (should (string-prefix-p harness-tasks-test-plan-title (plist-get (harness-tasks-test-task id) :prompt)))
         (let ((steers (harness-tasks-test-steering sid)))
-          (should (equal '("4 tool calls so far" "6 tool calls so far")
+          (should (equal '("4 tool calls" "6 tool calls")
                          (mapcar (lambda (n) (car (split-string (plist-get n :content) ":"))) steers)))
           (should (string-match-p "submit_task_plan" (plist-get (car steers) :content)))
           (should (equal (harness-sender-system "tasks") (harness-node-sender (car steers)))))))))
@@ -2331,11 +2331,11 @@ Written up all the same, it goes to the backlog."
           (should-not (plist-get task :duplicate-of)))
         ;; It was told that the user wants it after all.
         (should (equal harness-tasks--refine-anyway-text (car (last (harness-tasks-test-user-texts sid)))))
-        ;; Starting the work passes the nudge to coordinate on to whoever does it.
+        ;; Starting the work tells whoever does it to check on related tasks.
         (harness-call 'task/start id)
         (harness-tasks-test-wait-state id 'done)
         (should (string-prefix-p harness-tasks--start-message (nth 2 (harness-tasks-test-user-texts sid))))
-        (should (string-match-p "coordinate" (nth 2 (harness-tasks-test-user-texts sid))))))))
+        (should (string-match-p "related tasks" (nth 2 (harness-tasks-test-user-texts sid))))))))
 
 (ert-deftest harness-tasks-write-up-opening-duplicate-of ()
   "A write-up that merely opens \"Duplicate of a task …\" is written up, not refused."
@@ -5347,7 +5347,7 @@ in that session, told so by the harness."
         ;; Its next turn ends at once.
         (setq harness-tasks-test--slow nil)
         ;; Its turn stops, and its session says why, once it has.
-        (harness-test-wait (lambda () (harness-tasks-test--hint-p fsid "Task pre-empted: task ")) 5
+        (harness-test-wait (lambda () (harness-tasks-test--hint-p fsid "Pre-empted by task ")) 5
                            "the pre-emption said")
         (should-not (harness-call 'agent/running fsid))
         ;; The task sent back works on the feedback, and is back in review.
@@ -5437,7 +5437,7 @@ waited, and the feedback reaches the agent once."
         (should (eq 'pending (plist-get waiting :state)))
         (should (eq 'sent-back (plist-get waiting :return-reason)))
         (should (equal "Nested quotes still break." (plist-get (car (last (plist-get waiting :feedback))) :text))))
-      (harness-test-wait (lambda () (harness-tasks-test--hint-p ssid "Turn not started: its task ")) 5
+      (harness-test-wait (lambda () (harness-tasks-test--hint-p ssid "Turn not started: task ")) 5
                          "the turn refused")
       (should (harness-tasks-test--said ssid feedback))
       (should-not (harness-call 'agent/running ssid))
@@ -5508,7 +5508,7 @@ user's own message starts it, as `task/start' would."
         (harness-call 'task/return-to-pending id)
         (harness-test-wait (lambda () (harness-tasks-test--idle id)) 5 "its turn to stop")
         (harness-call 'agent/prompt sid "Here is what I found." (list :from (harness-sender-session other)))
-        (harness-test-wait (lambda () (harness-tasks-test--hint-p sid "Turn not started: its task ")) 5
+        (harness-test-wait (lambda () (harness-tasks-test--hint-p sid "Turn not started: task ")) 5
                            "the turn refused")
         (should (harness-tasks-test--said sid "Here is what I found."))
         (harness-tasks-test--settle)
@@ -5955,12 +5955,12 @@ nothing is said."
   (harness-tasks-test-with
     (let* ((id (harness-tasks-test-submit "fix the parser"))
            (sid (harness-tasks-test-session-id id)))
-      (should (member "Context window capped at 384k tokens, as a task session's is (harness-tasks-context-limit)"
+      (should (member "Context window capped at 384k tokens (harness-tasks-context-limit)"
                       (harness-tasks-test-hints sid))))
     (let ((harness-tasks-context-limit 4000))
       (let* ((id (harness-tasks-test-submit "keep it small"))
              (sid (harness-tasks-test-session-id id)))
-        (should (member "Context window capped at 4k tokens, as a task session's is (harness-tasks-context-limit)"
+        (should (member "Context window capped at 4k tokens (harness-tasks-context-limit)"
                         (harness-tasks-test-hints sid)))))
     (let ((harness-tasks-context-limit nil))
       (let* ((id (harness-tasks-test-submit "and another one"))
@@ -6125,14 +6125,14 @@ harness."
           (should (= 1 (length harness-tasks-test--stops)))
           (pcase-let ((`(,sid ,reason ,running) (car harness-tasks-test--stops)))
             (should (equal bsid sid))
-            (should (string-prefix-p (format "its task was pre-empted: task %s" reviewed) reason))
-            (should (string-suffix-p ", sent back from review, took its slot" reason))
+            (should (string-prefix-p (format "its task was pre-empted by task %s" reviewed) reason))
+            (should (string-suffix-p ", sent back from review" reason))
             (should-not running))
           (should-not harness-tasks-test--workers)
           ;; Its session says it was pre-empted, then what was stopped.
-          (let ((said (harness-tasks-test--hint-position bsid "Task pre-empted: task "))
+          (let ((said (harness-tasks-test--hint-position bsid "Pre-empted by task "))
                 (stopped (harness-tasks-test--hint-position
-                          bsid "Stopped while the task waits in the queue: 2 workers stopped")))
+                          bsid "Stopped while the task waits for a slot: 2 workers stopped")))
             (should said)
             (should stopped)
             (should (< said stopped)))
@@ -6170,9 +6170,9 @@ told so by the harness."
           (should (eq 'active (harness-tasks-test-state busy)))
           (should (eq 'pending (plist-get (harness-call 'task/return-to-pending busy) :state)))
           ;; Its workers were stopped there and then, once, told why.
-          (should (equal (list (list bsid "its task was returned to the queue" nil)) harness-tasks-test--stops))
+          (should (equal (list (list bsid "its task was paused" nil)) harness-tasks-test--stops))
           (should-not harness-tasks-test--workers)
-          (should (harness-tasks-test--hint-p bsid "Stopped while the task waits in the queue: 2 workers stopped"))
+          (should (harness-tasks-test--hint-p bsid "Stopped while the task waits for a slot: 2 workers stopped"))
           ;; Its slot goes to the next task; when that is done, it carries on.
           (harness-tasks-test-wait-state next 'done)
           (harness-tasks-test-wait-state busy 'done)
@@ -6201,7 +6201,7 @@ session carries on with the report before the harness's message."
         (harness-tasks-test--settle)
         (harness-call 'task/return-to-pending busy)
         (should (= 1 (length harness-tasks-test--stops)))
-        (harness-test-wait (lambda () (harness-tasks-test--hint-p bsid "Turn not started: its task ")) 5
+        (harness-test-wait (lambda () (harness-tasks-test--hint-p bsid "Turn not started: task ")) 5
                            "the report's turn refused")
         (should (harness-tasks-test--said bsid harness-tasks-test--stop-report))
         (harness-test-wait (lambda () (harness-tasks-test--idle busy)) 5 "the refused turn over")
@@ -6268,19 +6268,19 @@ again."
           (should (harness-call 'agent/running bsid))
           (should-not harness-tasks-test--stops)
           (should harness-tasks-test--workers)
-          (should-not (harness-tasks-test--hint-position bsid "Task pre-empted: task "))
+          (should-not (harness-tasks-test--hint-position bsid "Pre-empted by task "))
           ;; Once the turn has ended they stop, while no turn of it runs.
           (harness-test-wait (lambda () harness-tasks-test--stops) 5 "the workers stopped")
           (should (= 1 (length harness-tasks-test--stops)))
           (pcase-let ((`(,sid ,reason ,running) (car harness-tasks-test--stops)))
             (should (equal bsid sid))
-            (should (string-prefix-p (format "its task was pre-empted: task %s" reviewed) reason))
+            (should (string-prefix-p (format "its task was pre-empted by task %s" reviewed) reason))
             (should-not running))
           (should (eq 'pending (harness-tasks-test-state busy)))
           (should (memq (harness-tasks-test-state reviewed) '(active review)))
-          (let ((said (harness-tasks-test--hint-position bsid "Task pre-empted: task "))
+          (let ((said (harness-tasks-test--hint-position bsid "Pre-empted by task "))
                 (stopped (harness-tasks-test--hint-position
-                          bsid "Stopped while the task waits in the queue: 2 workers stopped")))
+                          bsid "Stopped while the task waits for a slot: 2 workers stopped")))
             (should said)
             (should stopped)
             (should (< said stopped)))
@@ -6333,7 +6333,7 @@ of its is stopped, and its next turn ends waiting on them again."
           (should (eq 'active (harness-tasks-test-state busy)))
           (should harness-tasks-test--workers)
           (should-not harness-tasks-test--stops)
-          (should-not (harness-tasks-test--hint-p bsid "Stopped while the task waits in the queue: ")))))))
+          (should-not (harness-tasks-test--hint-p bsid "Stopped while the task waits for a slot: ")))))))
 
 ;;;; Lending a blocked task's slot
 
@@ -6472,10 +6472,10 @@ the harness."
             (should (equal branch (plist-get back :branch))))
           (should (file-directory-p worktree))
           ;; Its turn stops, and its session says why.
-          (harness-test-wait (lambda () (harness-tasks-test--hint-p bsid "Task pre-empted: task ")) 5
+          (harness-test-wait (lambda () (harness-tasks-test--hint-p bsid "Slot taken back by task ")) 5
                              "the borrower told why")
           (should (cl-some (lambda (hint) (and (stringp hint)
-                                               (string-match-p "was answered and took its slot back" hint)))
+                                               (string-match-p "; waiting for a slot\\'" hint)))
                            (harness-tasks-test-hints bsid)))
           (should-not (harness-call 'agent/running bsid))
           ;; The task answered works on, in its slot.

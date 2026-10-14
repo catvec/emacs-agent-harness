@@ -487,7 +487,7 @@ match.  / under the harness prefix stays the quick search's."
         (should (harness-compose-in-p))
         (should (equal "" (harness-compose-text)))
         (should (string-match-p "Search tasks, sessions and commands" (harness-ui-tasks-search-test--label board)))
-        (should (string-match-p "Find or act on tasks; sessions and commands too"
+        (should (string-match-p "Search, or say what to do"
                                 (harness-ui-tasks-search-test--placeholder board)))
         ;; RET in the box searches the line.
         (insert "flaky test")

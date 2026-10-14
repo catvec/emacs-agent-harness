@@ -4766,7 +4766,8 @@ priority).
   victim is pre-empted (`harness-tasks--preempt`): returned to pending
   with `:return-reason` `preempted` and `:preempted-by` the task sent
   back, its turn stopped, and a hint in its session once the turn has
-  ended ("Task pre-empted: ...").  The work its session left running
+  ended ("Pre-empted by task T (TITLE), sent back from review; waiting
+  for a slot").  The work its session left running
   outside its turn stops too (next bullet).  A task still starting (its
   worktree being made) is pre-empted the same way: its start launches
   nothing (`harness-tasks--start-current-p`), and its next start reuses
@@ -4789,8 +4790,8 @@ priority).
   queues its message.  Feedback typed in the chat of a task in review
   sends it back too: with no slot to take, the message is recorded but
   its turn refused by the tasks module's `agent/before-turn` filter
-  (`harness-tasks--before-turn`, "Turn not started: its task ... waits
-  in the queue ..."), and the message reaches the model with the turn
+  (`harness-tasks--before-turn`, "Turn not started: task T is waiting
+  for a slot ..."), and the message reaches the model with the turn
   that starts the task.  That filter refuses the turn of any other
   sender (another session's agent, the harness) to a task returned to
   pending, pre-empted or sent back while it waits; the user's own
@@ -4835,10 +4836,9 @@ priority).
   at work, so what its session started that goes on without its turn
   stops with it (`harness-tasks--stop-outstanding`): the tasks module
   asks `agent/stop-outstanding SESSION-ID REASON` (see agent), REASON
-  being "its task was pre-empted: task T, sent back from review, took
-  its slot" (or "...: task T, whose slot it borrowed while that task
-  waited on the user, was answered and took its slot back") or "its
-  task was returned to the queue".  It asks once no
+  being "its task was pre-empted by task T (TITLE), sent back from
+  review", "task T (TITLE) took back the slot its task borrowed" or
+  "its task was paused".  It asks once no
   turn of the session runs: at once when none did, which is the case of
   a task that only waited on its workers (`:waiting`), else when the
   turn the pre-emption or the return stopped has ended
@@ -4847,7 +4847,7 @@ priority).
   reaches a session with no turn to steer, rather than steering the turn
   being cancelled and getting lost.  A task started again before that
   turn ended keeps its work, and nothing is stopped.  What was stopped is
-  a hint in the session ("Stopped while the task waits in the queue:
+  a hint in the session ("Stopped while the task waits for a slot:
   Supervisor plan: 2 steps interrupted"); a handler that fails is logged
   and stops nothing else.  The reports of the stopped work -- one message
   for all the interrupted steps of a supervisor's plans, one for each
@@ -9528,7 +9528,7 @@ task back from review -- wears the message colours
 `harness-compose-message-accent-face`, carried onto the label line and
 the [cancel] beside it), shows the message icon and names where it
 sends ("Message to session “X”", "Refine “X” with feedback",
-"Answer the session's question “…”", "Send back “X” with feedback");
+"Answer “…”", "Send back “X” with feedback");
 composing a task, new or edited, keeps the plain box.  A task in
 review shows [Verify] and [Send back]: `v`
 accepts the work (its branch then merges), `R` sends it back to its
@@ -9609,10 +9609,10 @@ supervisor switch, the worktree switch, then the max-running button.
 Submit has the settings line alone, starting with the work's model
 and thinking level.
 No sentence says what a mode does: not those lines, not the empty
-box's placeholder (`Jot a task down…` in Refine, `Describe a task…`
-otherwise), and not a message when the mode changes; the toggle's
-tooltip does, and a card being written up or planned says `writing it
-up…` or `planning it…`.  The steps' choices are keys of
+box's placeholder (`Describe a task…` in every mode), and not a
+message when the mode changes; the toggle's tooltip does, in a few
+words, and a card being written up or planned says `writing it up…` or
+`planning…`.  The steps' choices are keys of
 `harness-ui-tasks--new` (`harness-ui-tasks--step-keys`:
 `:refine-model'/`:refine-thinking', `:plan-model'/`:plan-thinking',
 `:plan-work-model'/`:plan-work-thinking'), seeded from
@@ -9638,12 +9638,9 @@ as a switch, [Manual queue] or [Auto queue]
 `:backlog-mode`): a click or `W` (`harness-ui-tasks-toggle-backlog-mode`)
 shows the other mode at once and sends `_harness/task/set-backlog-mode`,
 and every board of the project follows its `task/backlog-mode` event.
-In auto mode the heading's note, after the switch, says each task joins
-the queue once written up, and a write-up's card that it joins the
-queue after; a board too narrow for the note keeps the switch and drops
-the note.  The Pending heading has the queue's switch in the same
-place, [Queue: running] or, in the attention face, [Queue: suspended]
-followed by a note that nothing starts on its own
+No note follows a switch: what a mode does is in its tooltip.  The
+Pending heading has the queue's switch in the same place, [Queue:
+running] or, in the attention face, [Queue: suspended]
 (`harness-ui-tasks--queue-button`, from `task/settings`'s
 `:queue-suspended`): a click or `P` (`harness-ui-tasks-toggle-queue`)
 shows the other state at once and sends `_harness/task/toggle-queue`,

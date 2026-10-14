@@ -532,18 +532,18 @@ ID\" (see `harness-tasks--refusal').")
 See `task/hand-in-plan', and harness-tools-sessions.el for the tool.")
 
 (defconst harness-tasks--plan-hint
-  "You only read here: put the change in the plan, for the agent that carries it out, and hand the plan in with submit_task_plan."
+  "Planning is read-only: put the change in the plan and hand it in with submit_task_plan."
   "Hint of a call denied because the session that plans a task only reads.")
 
 (defconst harness-tasks--plan-reminder
-  "Plan mode: end this turn by handing the plan in with submit_task_plan (a short title and the plan, in markdown). If the board has this task already, reply instead with a first line \"Duplicate of ID\" and a short note for the engineer."
+  "Hand the plan in with submit_task_plan (a short title and the plan, in markdown). If the board has this task already, reply with a first line \"Duplicate of ID\" and a short note instead."
   "What a planning session that stopped without handing a plan in is told.")
 
 (defconst harness-tasks--plan-max-reminders 2
   "Most times a planning turn is sent back to hand its plan in.")
 
 (defconst harness-tasks--plan-start-message
-  "Start working on this task now, following the plan below.  A stronger model wrote it earlier, reading the code without changing any of it; that is over, so change files, run commands and so on as the plan says.  It made the hard decisions: keep to them.  Where the code shows the plan to be wrong or out of date, do what it is after, and say what you did differently and why when you hand the work in.  If it names related tasks, see where they stand now and coordinate with them as it says before you change the same code."
+  "Plan done; start the work now, following the plan below. You can edit files and run commands. Keep to its decisions; where the code proves it wrong, do what it intends and say what you changed when you hand in. Check on any related tasks it lists before touching the same code."
   "Opening of the message that starts a planned task's work.
 The plan follows it, then the request it was written from.")
 
@@ -619,14 +619,14 @@ The tail of the transcript, so the request stays short on a long task."
   :type '(choice (const :tag "No wait" nil) (number :tag "Seconds")) :group 'harness)
 
 (defconst harness-tasks--start-message
-  "Start working on this task now.  It was written up earlier without doing any of it; that is over, so change files, run commands and so on as the task requires.  If it names related tasks, see where they stand now and coordinate with them as it says before you change the same code."
+  "Write-up done; start the work now. You can edit files and run commands. Check on any related tasks it lists before touching the same code."
   "Opening of the message that starts a backlog task's work.
 The task's write-up follows it, then the request it was written from.
 A write-up names the related tasks working on the same code, which the
 work coordinates with (see `harness-tasks--refine-prompt').")
 
 (defconst harness-tasks--reject-message
-  "The user reviewed your work on this task and sent it back. Address their feedback below, then finish as before (commit your changes, if you work in a git worktree). Your work goes back to the user for review when your turn ends."
+  "Sent back from review. Address the feedback below, then finish as before."
   "Opening of the message that sends a task back to its session after review.
 The user's feedback follows it (`task/reject'), as it opens any message
 the user sends the session while its task waits for review
@@ -634,7 +634,7 @@ the user sends the session while its task waits for review
 session's agent is no review, and `harness-tasks--aside-message' opens it.")
 
 (defconst harness-tasks--aside-message
-  "Another session sent you the message below while your task was waiting for the user's review. It is not their review, and nothing was sent back: reply to it or act on it as it needs. Your work goes back to review when your turn ends. If you change it, finish as before (commit your changes, if you work in a git worktree) and hand it in again; otherwise the report you handed in stands."
+  "Message from another session while this task waits for review; not review feedback. If you change the work, finish as before and hand in again; otherwise your report stands."
   "Opening of a message another session sends a task's session in review.
 That session's agent wrote it (`session_send', task_control's message),
 not the user reviewing the work, so it does not send the task back
@@ -672,16 +672,16 @@ task's write-up: it is written again, or with nil waits for a retry."
   :type 'boolean :group 'harness)
 
 (defconst harness-tasks--resume-prompt
-  "The harness restarted while you were working on this task, so your last turn was cut short: tool calls that were still running did not finish. Check where you left off, then carry on with the task."
+  "The harness restarted and cut your last turn short; running tool calls did not finish. Check where you left off and carry on."
   "Message that resumes a task's session after a restart interrupted it.")
 
 (defconst harness-tasks--retry-prompt
-  "Your last turn on this task stopped before the task was finished: %s. Check where you left off, then carry on with the task."
+  "Your last turn stopped early: %s. Check where you left off and carry on."
   "Message that has a task's session work again after its turn stopped.
 `task/retry' sends it; %s says how the turn stopped.")
 
 (defconst harness-tasks--paused-message
-  "This task was returned to the queue: its turn stopped, and workers or sub-agents still running were stopped (what they were on is reported above: retry it or plan it again). It has started again now. Check where you left off -- the files you changed are still there -- then carry on with the task."
+  "Resumed after a pause. Your last turn was cut short and any workers or sub-agents were stopped (see above). Your changes are still there: check where you left off and carry on."
   "Message that starts a task returned to pending again.
 `task/return-to-pending' puts a working task back in the queue, its
 turn stopped and the work its session left running outside its turn
@@ -691,7 +691,7 @@ session carries on (see `harness-tasks--start-paused'), told so by
 this message.")
 
 (defconst harness-tasks--preempted-message
-  "Your work on this task was stopped to free its slot for a task the user sent back from review, which goes first: tool calls that were still running did not finish, and workers or sub-agents still running were stopped (what they were on is reported above: retry it or plan it again). The task waited in the queue and has started again now. Check where you left off -- the files you changed are still there -- then carry on with the task."
+  "Resumed after being pre-empted by a task sent back from review. Your last turn was cut short and any workers or sub-agents were stopped (see above). Your changes are still there: check where you left off and carry on."
   "Message that starts a task again after it was pre-empted.
 A task the user sends back from review while every slot of its project
 is taken takes the slot of a task at work it outranks
@@ -703,7 +703,7 @@ its own session carries on, told so by this message, as
 `harness-tasks--resume-prompt' tells it after a restart.")
 
 (defconst harness-tasks--reclaimed-message
-  "Your work on this task was stopped: it was working in a slot another task lent while that task waited on the user, and once the user answered, that task took its slot back. Tool calls that were still running did not finish, and workers or sub-agents still running were stopped (what they were on is reported above: retry it or plan it again). The task waited in the queue and has started again now. Check where you left off -- the files you changed are still there -- then carry on with the task."
+  "Resumed after the task that lent you its slot took it back. Your last turn was cut short and any workers or sub-agents were stopped (see above). Your changes are still there: check where you left off and carry on."
   "Message that starts a task again after its lender took its slot back.
 A task blocked on the user long enough lends its slot
 \(`harness-tasks-lend-blocked-slot-after'), and the queue starts a task
@@ -713,7 +713,7 @@ turn stopped and the work its session left running stopped too
 session carries on, told so by this message.")
 
 (defconst harness-tasks--sent-back-message
-  "The user sent your work on this task back from review, and it waited in the queue for a slot until now: every slot was taken by work that goes first. Address the feedback they sent it back with, then finish as before (commit your changes, if you work in a git worktree). Your work goes back to the user for review when your turn ends."
+  "Sent back from review; it waited for a slot until now. Address the feedback, then finish as before."
   "Message that starts a task sent back from review once it gets a slot.
 When no slot can take a task the user sends back, it waits in the
 queue with their feedback (`harness-tasks--hold-back'), and this message
@@ -2373,12 +2373,14 @@ task starts by itself then, nor takes another's slot."
 (defun harness-tasks--preempted-why (task)
   "Return who took the slot of TASK, pre-empted, and why, a short text.
 TASK's `:preempted-by' was sent back from review and outranks it
-\(`:return-reason' `preempted'), or lent TASK the slot while it waited
-on the user and took it back once answered (`reclaimed')."
+\(`:return-reason' `preempted'): \"pre-empted by task ID (TITLE), sent
+back from review\".  Or it lent TASK the slot while it waited on the
+user and took it back once answered (`reclaimed'): \"slot taken back
+by task ID (TITLE)\"."
   (let ((by (harness-tasks--label (plist-get task :preempted-by))))
     (if (eq (harness-tasks--return-reason task) 'reclaimed)
-        (format "task %s, whose slot it borrowed while that task waited on the user, was answered and took its slot back" by)
-      (format "task %s, sent back from review, took its slot" by))))
+        (format "slot taken back by task %s" by)
+      (format "pre-empted by task %s, sent back from review" by))))
 
 (defun harness-tasks--preempted-hint (id)
   "Say in task ID's session that it was pre-empted, as a hint.
@@ -2387,11 +2389,11 @@ the middle of one: at once for a task stopped before its turn began,
 else when the stopped turn ends (`harness-tasks--on-turn-ended').  It
 says who took its slot, and why (`harness-tasks--preempted-why')."
   (let* ((task (harness-tasks--get id))
-         (sid (plist-get task :session)))
+         (sid (plist-get task :session))
+         (why (harness-tasks--preempted-why task)))
     (when (and sid (harness-call 'session/exists-p sid))
       (harness-call 'session/hint sid
-                    (format "Task pre-empted: %s; this one waits in the queue and carries on when it gets one again"
-                            (harness-tasks--preempted-why task))))))
+                    (concat (upcase (substring why 0 1)) (substring why 1) "; waiting for a slot")))))
 
 (defun harness-tasks--pre-empted-p (task)
   "Non-nil when TASK waits in the queue because another task took its slot.
@@ -2403,9 +2405,12 @@ lender took back the slot it borrowed (`harness-tasks--preempt')."
   "Return why the work TASK's session left running is stopped, a short text.
 TASK waits in the queue: pre-empted (`harness-tasks--preempt') or
 returned to pending."
-  (if (harness-tasks--pre-empted-p task)
-      (format "its task was pre-empted: %s" (harness-tasks--preempted-why task))
-    "its task was returned to the queue"))
+  (let ((by (harness-tasks--label (plist-get task :preempted-by))))
+    (pcase (harness-tasks--return-reason task)
+      ('preempted (format "its task was pre-empted by task %s, sent back from review" by))
+      ('reclaimed (format "task %s took back the slot its task borrowed" by))
+      ('sent-back "its task waits for a slot")
+      (_ "its task was paused"))))
 
 (defun harness-tasks--stop-outstanding (id)
   "Stop the work task ID's session left running outside its turn.
@@ -2438,7 +2443,7 @@ agent module."
                            nil))))
         (when text
           (harness-log 'info "task %s: stopped while it waits in the queue: %s" id text)
-          (harness-call 'session/hint sid (format "Stopped while the task waits in the queue: %s" text)))
+          (harness-call 'session/hint sid (format "Stopped while the task waits for a slot: %s" text)))
         text))))
 
 (defun harness-tasks--preempt (id by &optional reason)
@@ -2915,7 +2920,7 @@ sub-agent's is not (see `harness-tools-agent-context-limit-hint')."
   (when (and (numberp limit)
              (numberp harness-tasks-context-limit)
              (equal limit harness-tasks-context-limit))
-    (format "Context window capped at %s tokens, as a task session's is (harness-tasks-context-limit)"
+    (format "Context window capped at %s tokens (harness-tasks-context-limit)"
             (harness-format-tokens-compact limit))))
 
 (defun harness-tasks--say-context-limit (sid limit)
@@ -3097,7 +3102,7 @@ worktree it does not), and the request it was written from, quoted."
     (concat (if (harness-tasks--plan-p task) harness-tasks--plan-start-message harness-tasks--start-message)
             "\n\n" prompt
             (if (and note (not (equal (string-trim note) (string-trim prompt))))
-                (concat "\n\n---\nIt was written up from this request (the write-up above takes precedence):\n\n"
+                (concat "\n\n---\nOriginal request (the write-up above takes precedence):\n\n"
                         (harness-tasks--quote note))
               ""))))
 
@@ -3461,13 +3466,13 @@ is for the caller to do, else when the stopped turn ends
 (defun harness-tasks--waiting-message (task)
   "Return why TASK's session takes no turn now, for a turn it refused.
 TASK waits in the queue (`harness-tasks--before-turn')."
-  (format "its task %s waits in the queue for a slot%s; the message waits with it and reaches the agent when the task starts (Start now on the board, or task_control start, starts it at once)"
+  (format "task %s is waiting for a slot (%s); the message is delivered when it starts"
           (plist-get task :id)
           (pcase (harness-tasks--return-reason task)
-            ('sent-back ", sent back from review with your feedback")
-            ('preempted (format ", pre-empted by task %s" (plist-get task :preempted-by)))
-            ('reclaimed (format ", its borrowed slot taken back by task %s" (plist-get task :preempted-by)))
-            (_ ", returned to pending"))))
+            ('sent-back "sent back from review")
+            ('preempted (format "pre-empted by task %s" (plist-get task :preempted-by)))
+            ('reclaimed (format "slot taken back by task %s" (plist-get task :preempted-by)))
+            (_ "paused"))))
 
 (defun harness-tasks--holds-turns-p (task from)
   "Non-nil when TASK's session takes no turn started by a message from FROM.
@@ -3513,11 +3518,11 @@ about the task (`harness-tasks--on-turn-ended')."
 ;;;; Refinement
 
 (defconst harness-tasks--refine-again-text
-  "Write the task up now: your final message is the complete write-up."
+  "Write the task up now. Your final message is the complete write-up."
   "Message that asks a backlog task's session for its write-up again.")
 
 (defconst harness-tasks--refine-anyway-text
-  "The engineer wants this task written up all the same: write it up now, the complete write-up as your final message, and name the task it seemed to duplicate as a related one."
+  "Write it up anyway, listing the task it seemed to duplicate as related. Your final message is the complete write-up."
   "Message that has a task written up after its write-up refused it.
 That is after the agent took it for a duplicate (`harness-tasks--refusal').")
 
@@ -3531,7 +3536,7 @@ Group 1 is the id of the task it duplicates, maybe with a full stop.
 Matched ignoring case, markdown around it allowed.")
 
 (defconst harness-tasks--refine-enough-text
-  "That is enough looking around: end the task now with what you know, as your final message -- the write-up, or the refusal when the board has it already."
+  "Enough reading: finish now with what you know. Your final message is the write-up, or the refusal if the board has this task already."
   "Steering message for a write-up that looked around long enough.
 That is once it made `harness-tasks--refine-tool-calls' tool calls.")
 
@@ -3540,7 +3545,7 @@ That is once it made `harness-tasks--refine-tool-calls' tool calls.")
 
 (defun harness-tasks--plan-enough-text (n)
   "Return the message that tells a planning turn of N tool calls to hand in."
-  (format "%d tool calls so far: that is enough looking around. Hand the plan in now with submit_task_plan, with what you know, and put what you could not settle in it as open questions." n))
+  (format "%d tool calls: hand the plan in now with submit_task_plan. List what you could not settle as open questions." n))
 
 (defun harness-tasks--on-tool-call (session-id &optional node &rest _)
   "Count the tool calls of a write-up in SESSION-ID; tell it to finish in time.
@@ -3641,7 +3646,7 @@ a brief write-up `harness-tasks-refine-model' and
                  (list :context-window-limit harness-tasks-context-limit)))))
 
 (defconst harness-tasks--write-up-hint
-  "Write the task up from what you can read; put what you could not check in the write-up as an open question."
+  "A write-up is read-only: write the task up from what you can read, and list what you could not check as open questions."
   "Hint of a call denied because a backlog write-up only reads.")
 
 (defun harness-tasks--write-up-allows (task request)
@@ -3678,8 +3683,8 @@ continues the chain with REQUEST's decision."
                    ((harness-tasks--write-up-allows task request))
                    (t (list :behavior 'deny :final t
                             :reason (if (harness-tasks--plan-p task)
-                                        "this session plans the task rather than doing it, so it only reads"
-                                      "this session writes a backlog task up rather than doing it, so it only reads")
+                                        "planning is read-only"
+                                      "a write-up is read-only")
                             :hint (if (harness-tasks--plan-p task)
                                       harness-tasks--plan-hint
                                     harness-tasks--write-up-hint)))))))
@@ -4383,7 +4388,7 @@ The `submit_task_plan' tool calls this (harness-tools-sessions.el)."
       (puthash session-id t harness-tasks--plans-submitted)
       (harness-call 'session/set-plan session-id plan)
       (harness-call 'session/append session-id (list :kind 'plan :content plan :title title))
-      (harness-call 'session/hint session-id "Plan handed in: the task waits in the Backlog until it is started")
+      (harness-call 'session/hint session-id "Plan handed in")
       (harness-call 'task/get id))))
 
 (harness-defmethod task/adoptable (&optional cwd)
@@ -5380,7 +5385,7 @@ turn that stopped without a plan back (`harness-tasks--plan-stop')."
 (harness-declare-event 'task/queue "(PROJECT SUSPENDED) when a project's pending queue is suspended or resumed.")
 
 (harness-define-module 'tasks
-  :doc "Task mode: one session per task on a shorter context, from backlog write-up or worktree through your review to merged, with a concurrency limit per project that starts waiting tasks by priority and that work sent back from review keeps to, pre-empting a task at work it outranks; a task left waiting on you lends its slot to the queue until you answer (harness-tasks-lend-blocked-slot-after); a project's queue can be suspended (task/suspend-queue), and a task at work can be returned to the front of it (task/return-to-pending)."
+  :doc "Task mode: one session per task, through review and the merge queue, with a limit of tasks at once per project, started by priority."
   :requires '(store project session agent)
   :init #'harness-tasks--init
   :shutdown #'harness-tasks--shutdown)

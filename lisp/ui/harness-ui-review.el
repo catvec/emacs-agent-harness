@@ -71,7 +71,7 @@
   "Background of the review banner: the board's Ready for review, in the session."
   :group 'harness-ui-review)
 
-(defconst harness-ui-review--feedback-hint "What should change? C-c C-c sends it back"
+(defconst harness-ui-review--feedback-hint "Feedback…  C-c C-c sends it back"
   "The empty box's hint while it takes the feedback that sends a task back.")
 
 (defvar harness-ui-review--tasks (make-hash-table :test 'equal)
@@ -161,7 +161,7 @@ takes you to the box."
   (when-let* ((window (get-buffer-window (current-buffer))))
     (select-window window)
     (goto-char (or harness-compose-end (point-max))))
-  (message "Write what should change in the box; C-c C-c sends it back"))
+  (message "Type the feedback; C-c C-c sends it back"))
 
 (defun harness-ui-review--send (text attachments)
   "Send the task this buffer shows back, TEXT and ATTACHMENTS its feedback.
@@ -172,7 +172,7 @@ task's session for the feedback that sends it back
 \(`harness-tasks--on-message')."
   (let ((task (harness-ui-review--current-task)))
     (if (and (harness-string-blank-p text) (null attachments))
-        (user-error "Sending the work back needs feedback: type what should change")
+        (user-error "Sending it back needs feedback")
       (harness-ui-call "_harness/task/reject"
                        (list :id (plist-get task :id) :feedback text :attachments attachments)
                        #'harness-ui-tasks--say-sent-back
@@ -219,7 +219,7 @@ The harness records one such when the turn ends without `hand_in'
   (harness-json-true-p (plist-get (plist-get task :report) :missing)))
 
 (defconst harness-ui-review--missing-text
-  "It handed no report in: its turn ended without hand_in, so there is no summary and no evidence.  Its last message is above; check the work before you verify it."
+  "No report: the turn ended without hand_in.  Its last message is above."
   "What the banner says of a task whose round handed no report in.")
 
 (defun harness-ui-review--report (task)
@@ -245,13 +245,13 @@ down with it."
 (defun harness-ui-review--banner (task &optional report in-report)
   "Return the banner string for TASK, waiting for review.
 It reads as the board's Ready for review card: the mark, the heading,
-what verifying does, and the buttons, with the keys beside them.
+the task's title, and the buttons, with the keys beside them.
 REPORT, what TASK handed in drawn in full (`harness-ui-review--report'),
-goes between what verifying does and the buttons: the work is read
-before it is verified or sent back.  IN-REPORT is non-nil when the banner
-is drawn at the end of TASK's report popout
-\(`harness-ui-report-panel-functions'): it speaks of the task then, and
-leaves [Review Changes] out, the report being the window it is drawn in."
+goes between the title and the buttons: the work is read before it is
+verified or sent back.  IN-REPORT is non-nil when the banner is drawn
+at the end of TASK's report popout (`harness-ui-report-panel-functions'):
+it leaves [Review Changes] out then, the report being the window it is
+drawn in."
   (let* ((in-report (or in-report (and (fboundp 'harness-ui-report-task)
                                        (harness-ui-report-task))))
          (title (harness-ui-tasks--title task))
@@ -261,13 +261,8 @@ leaves [Review Changes] out, the report being the window it is drawn in."
     (concat
      " " (propertize (concat (harness-ui-icon 'harness-icon-task-review) " Ready for review")
                     'face 'harness-task-review-face)
-     (propertize (if in-report "   this task is waiting for you" "   this session is a task waiting for you")
-                 'face 'harness-dim-face)
      "\n"
-     "   " (propertize title 'face 'bold)
-     (propertize (if merges " is done; verify it to merge its branch, or send it back with what to change."
-                   " is done; verify it, or send it back with what to change.")
-                 'face 'harness-dim-face 'wrap-prefix "   ")
+     "   " (propertize title 'face 'bold 'wrap-prefix "   ")
      "\n"
      (if (harness-string-blank-p report) "" (concat "\n" report "\n"))
      "   "
@@ -284,10 +279,9 @@ leaves [Review Changes] out, the report being the window it is drawn in."
      (when (and (not in-report) (plist-get task :report) (not (harness-ui-review--missing-p task))
                 (fboundp 'harness-ui-report-popout))
        (concat "   " (harness-ui-review--button "[Review Changes]" (lambda () (harness-ui-report-popout task))
-                                                "Review the changes, the final message and the evidence in a window of their own")))
+                                                "The changes, the summary and the evidence, in a window of their own")))
      "\n"
-     "   " (propertize "C-c C-c in the box sends what you write back to this task."
-                    'face 'harness-hint-face)
+     "   " (propertize "C-c C-c in the box sends it back" 'face 'harness-hint-face)
      "\n ")))
 
 ;;;; Keys

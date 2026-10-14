@@ -322,7 +322,7 @@ reports.  A priority with none has nil."
            ((null limit)
             (list (format "%d in use" used) "no limit"))
            ((zerop limit)
-            (list (propertize "no slots: the limit is 0, nothing starts on its own" 'face 'warning)
+            (list (propertize "limit 0: nothing starts by itself" 'face 'warning)
                   (and (> used 0) (format "%d still at work" used))))
            (t (list (format "%d of %d in use" used limit)
                     (format "%d free" (max 0 (- limit used)))
@@ -548,7 +548,7 @@ The longest wait so far and the average one, by priority, as of NOW."
     (concat
      (apply #'harness-ui-slots--heading "Queue" (format "%d waiting" waiting)
             (and (harness-json-true-p (plist-get data :suspended))
-                 (list (propertize "suspended: nothing starts on its own" 'face 'warning))))
+                 (list (propertize "suspended" 'face 'warning))))
      (harness-ui-slots--table
       '("waiting" "longest" "average")
       (harness-ui-slots--queue-stats data now)))))

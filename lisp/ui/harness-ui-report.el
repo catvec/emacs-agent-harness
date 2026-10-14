@@ -531,9 +531,7 @@ is to read, and a button to the session, where the work is."
               (propertize (format "  %s" (format-time-string "%Y-%m-%d %H:%M" at)) 'face 'harness-dim-face)
             "")
           "\n\n"
-          (propertize (concat "Its turn ended without hand_in, so there is no summary and no evidence. "
-                              "Check the work in its session before you verify it.")
-                      'face 'harness-dim-face)
+          (propertize "The turn ended without hand_in." 'face 'harness-dim-face)
           "\n  ")
   ;; `harness-ui-button' inserts the button itself, at point.
   (harness-ui-button "[Open the session]"
@@ -544,7 +542,7 @@ is to read, and a button to the session, where the work is."
     (if (and (stringp summary) (not (harness-string-blank-p summary)))
         (progn (insert (propertize "Its last message\n" 'face 'harness-label-face) "\n")
                (harness-ui-report--insert-message summary))
-      (insert (propertize "It wrote no message either.\n" 'face 'harness-dim-face)))))
+      (insert (propertize "No last message.\n" 'face 'harness-dim-face)))))
 
 (defun harness-ui-report--open-session (task)
   "Show the session of TASK."

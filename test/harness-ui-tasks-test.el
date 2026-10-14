@@ -1249,7 +1249,7 @@ one-shot choice, so the next task is a worktree task again."
       (should (eq harness-ui-tasks--main-tree-mode 'once))
       (let ((tail (harness-ui-tasks-test--tail-text board)))
         (should (string-match-p "main tree" tail))
-        (should (string-match-p "Main tree for the next task only" tail))
+        (should (string-match-p "Main tree for the next task" tail))
         (should-not (string-match-p "no worktree" tail))))
     (harness-ui-tasks-test--type-and-submit board "Clean the checkout")
     (harness-ui-tasks-test--wait-text board "main tree")
@@ -1609,7 +1609,7 @@ choice on with [keep on]; a submission spends a one-shot choice."
                                      (match-beginning 0)))
         (should (string-match-p "Submit +high priority\n" (harness-ui-tasks-test--tail-text board)))
         (should (eq harness-ui-tasks--priority-mode 'once))
-        (should (string-match-p "High priority for the next task only" (harness-ui-tasks-test--tail-text board))))
+        (should (string-match-p "High priority for the next task" (harness-ui-tasks-test--tail-text board))))
       (harness-ui-tasks-test--type-and-submit board "Urgent fix")
       (harness-ui-tasks-test--wait-text board "Pending  1\\(.\\|\n\\)*↑ +Urgent fix")
       (should (eq 'high (plist-get (car (harness-call 'task/list default-directory)) :priority)))
@@ -1681,7 +1681,7 @@ tests that check a card's detail line show it first."
       (harness-ui-tasks-test--wait-text
        board "Backlog  1\\(.\\|\n\\)*Fix nested quotes in the parser")
       (harness-ui-tasks-test--show-subtitle board "Fix nested quotes in the parser")
-      (harness-ui-tasks-test--wait-text board "refined, start it when ready")
+      (harness-ui-tasks-test--wait-text board "written up")
       (should (string-match-p "In progress  0" (harness-ui-tasks-test--board-text board)))
       (let ((task (car (harness-call 'task/list default-directory))))
         (should (eq 'pending (plist-get task :state)))
@@ -1769,10 +1769,10 @@ tests that check a card's detail line show it first."
       (with-current-buffer board
         (should (equal '("Drop" "Write it up")
                        (take 2 (mapcar #'car (harness-ui-tasks--actions (harness-ui-tasks--task))))))
-        ;; m takes feedback on it: what makes it another task than the one it duplicates.
+        ;; m takes feedback on it: why it is not a duplicate.
         (harness-ui-tasks-reply)
         (should (eq 'refine (car harness-ui-tasks--target)))
-        (should (string-match-p "another task" (harness-ui-tasks--placeholder)))
+        (should (string-match-p "not a duplicate" (harness-ui-tasks--placeholder)))
         (harness-ui-tasks-compose-reset))
       ;; r has it written up all the same.
       (let ((harness-provider-demo-script-override
@@ -1788,9 +1788,9 @@ tests that check a card's detail line show it first."
     (with-current-buffer board
       (harness-test-wait (lambda () harness-ui-tasks--settings) 5 "the settings")
       (pcase-dolist (`(,symbol ,mode ,does ,other)
-                     '((submit "Submit" "starts at once" "Refine")
-                       (refine "Refine" "an agent writes the task up" "Plan")
-                       (plan "Plan" "an agent plans the task" "Submit")))
+                     '((submit "Submit" "start the task now" "Refine")
+                       (refine "Refine" "an agent writes it up first" "Plan")
+                       (plan "Plan" "an agent plans it first" "Submit")))
         (should (eq symbol harness-ui-tasks--mode))
         (should (equal (list mode) (harness-ui-tasks-test--modes-shown board)))
         (let* ((pos (harness-ui-tasks-test--toggle board))
@@ -1930,7 +1930,7 @@ work's once started.  Submit and Refine keep the task model."
             (should (equal "Fix nested quotes\n\n1. Handle them in parse-args." (plist-get task :prompt)))
             (should (string-match-p "planned " (harness-ui-tasks-test--card-text board "Fix nested quotes")))
             (harness-ui-tasks-test--show-subtitle board "Fix nested quotes")
-            (harness-ui-tasks-test--wait-text board "planned, start it when ready")
+            (harness-ui-tasks-test--wait-text board "planned · Handle them")
             ;; Started, it works on the work's model.
             (harness-ui-tasks-test--goto-card board "Fix nested quotes")
             (with-current-buffer board (harness-ui-tasks-start))
@@ -2022,7 +2022,7 @@ the task's."
         (should-not (harness-ui-tasks-test--tail-line board 'step))
         (should-not (harness-ui-tasks-test--tail-line board 'work))
         (should (string-prefix-p "Describe a task…" (harness-ui-tasks--placeholder)))
-        (pcase-dolist (`(,mode ,switch ,placeholder) '((refine t "Jot a task down") (plan nil "Describe a task")))
+        (pcase-dolist (`(,mode ,switch ,placeholder) '((refine t "Describe a task") (plan nil "Describe a task")))
           (harness-ui-tasks-cycle-mode mode)
           (should (equal (list (intern (format "harness-set-model@%s" mode))
                                (intern (format "harness-set-thinking@%s" mode)))
@@ -2470,8 +2470,8 @@ lead to."
         ;; 0: nothing starts by itself, and the button stands out.
         (harness-ui-tasks-test--limit-says board "0 at a time")
         (pcase-let ((`(,_ ,help ,pos) (harness-ui-tasks-test--limit board)))
-          (should (string-search "no task starts by itself" help))
-          (should (string-search "Click to change it, for every project" help))
+          (should (string-search "nothing starts by itself" help))
+          (should (string-search "click to change" help))
           (should (eq 'harness-task-held-face (get-text-property pos 'face board)))
           ;; A click asks, the limit now the default; 2 lets both tasks start.
           (setq answer "2")
@@ -2483,7 +2483,7 @@ lead to."
         (should (eql 2 harness-tasks-max-running))
         (harness-ui-tasks-test--limit-says board "2 at a time")
         (should (eq 'harness-dim-face (get-text-property (nth 2 (harness-ui-tasks-test--limit board)) 'face board)))
-        (should (string-search "At most 2 of this project's tasks work at once"
+        (should (string-search "At most 2 tasks at once per project"
                                (nth 1 (harness-ui-tasks-test--limit board))))
         ;; At once: the waiting tasks need no other task to end.
         (harness-ui-tasks-test--wait-text board "Pending  0")
@@ -2522,12 +2522,12 @@ lead to."
             (should (<= (string-width line) 30))
             (should-not (string-search "4 at a time" line))))
         ;; Refine and Plan show it too: what they write up takes no
-        ;; slot, but the work does once it starts, as the tooltip says.
+        ;; slot, but the work does once it starts.
         (with-current-buffer board
           (dolist (mode '(refine plan))
             (harness-ui-tasks-cycle-mode mode)
             (should (harness-ui-tasks-test--limit board))
-            (should (string-search "takes no slot" (nth 1 (harness-ui-tasks-test--limit board))))
+            (should (string-search "At most 4 tasks at once" (nth 1 (harness-ui-tasks-test--limit board))))
             (should (string-prefix-p (format " %s " mode) (harness-ui-tasks-test--tail-line board 'step))))
           (harness-ui-tasks-cycle-mode 'submit))
         (harness-ui-tasks-test--limit-says board "4 at a time")))))
@@ -3805,16 +3805,16 @@ and the waiting task starts."
           (should (button-at at))
           (should (equal "Pending  1  " (buffer-substring-no-properties (- at 12) at)))
           (should-not (text-property-not-all (- at 12) at 'display nil))
-          (should (string-match-p "\\`The queue is running.*Click or P to suspend it"
+          (should (string-match-p "\\`Queue running.*Click or P to suspend"
                                   (harness-ui-tasks--queue-help nil nil at))))
         (should-not (string-match-p "Queue" (harness-ui-tasks--header most-positive-fixnum)))
         (goto-char (point-min))
         (execute-kbd-macro "P"))
       ;; Suspended: the heading's switch says so, and so does the box.
-      (harness-ui-tasks-test--wait-text board "Pending  1  \\[Queue: suspended\\]  · nothing starts on its own\n")
+      (harness-ui-tasks-test--wait-text board "Pending  1  \\[Queue: suspended\\]\n")
       (with-current-buffer board
         (should-not (string-match-p "Queue" (harness-ui-tasks--header most-positive-fixnum)))
-        (should (string-match-p "\\`The queue is suspended.*Click or P to let the waiting tasks start again"
+        (should (string-match-p "\\`Queue suspended.*Click or P to resume"
                                 (harness-ui-tasks--queue-help nil nil (point-min))))
         (should (string-match-p "queue suspended" (harness-ui-tasks--new-settings-line))))
       ;; The waiting task stays pending while the queue is suspended, and
@@ -3860,18 +3860,18 @@ backlog task stays where it is."
         ;; section of its own, saying only you start one, with no
         ;; suspended-queue notice.
         (should (string-match-p "Pending  1  \\[Queue: running\\]\n\\(.\\|\n\\)*Waits for a slot" text))
-        (should (string-match-p "Backlog  1  \\[Manual queue\\]  · start one when ready\n\\(.\\|\n\\)*Fix the lexer"
+        (should (string-match-p "Backlog  1  \\[Manual queue\\]\n\\(.\\|\n\\)*Fix the lexer"
                                 text))
-        (should-not (string-match-p "suspended\\|nothing starts on its own" text)))
+        (should-not (string-match-p "suspended" text)))
       ;; Refined: the card says it waits to be started, not for a slot.
       (harness-ui-tasks-test--show-subtitle board "Fix the lexer")
-      (should (string-match-p "refined, start it when ready"
+      (should (string-match-p "written up"
                               (harness-ui-tasks-test--card-text board "Fix the lexer")))
       ;; Suspended: Pending says so; the backlog, which never drains on its
       ;; own, waits for you either way.
       (with-current-buffer board (harness-ui-tasks-toggle-queue))
-      (harness-ui-tasks-test--wait-text board "Pending  1  \\[Queue: suspended\\]  · nothing starts on its own\n")
-      (should (string-match-p "Backlog  1  \\[Manual queue\\]  · start one when ready\n\\(.\\|\n\\)*Fix the lexer"
+      (harness-ui-tasks-test--wait-text board "Pending  1  \\[Queue: suspended\\]\n")
+      (should (string-match-p "Backlog  1  \\[Manual queue\\]\n\\(.\\|\n\\)*Fix the lexer"
                               (harness-ui-tasks-test--board-text board)))
       ;; A free slot does not start either while the queue is suspended.
       (setq harness-tasks-max-running 1)
@@ -3939,8 +3939,8 @@ and waits in Pending for a slot like any queued task.  A click on
         (should (equal "Backlog  0  " (buffer-substring-no-properties (- (match-beginning 0) 12) (match-beginning 0))))
         (should-not (text-property-not-all (- (match-beginning 0) 12) (match-beginning 0) 'display nil))
         (let ((help (harness-ui-tasks--backlog-mode-help nil nil (match-beginning 0))))
-          (should (string-match-p "Manual queue: a written-up task waits in the Backlog" help))
-          (should (string-match-p "Click or W to" help)))
+          (should (string-match-p "Manual queue: written-up tasks wait here" help))
+          (should (string-match-p "Click or W for auto" help)))
         (should (eq 'harness-ui-tasks-toggle-backlog-mode (key-binding (kbd "W"))))
         (goto-char (point-min))
         (execute-kbd-macro "W"))
@@ -3949,16 +3949,15 @@ and waits in Pending for a slot like any queued task.  A click on
       (harness-test-wait (lambda () (eq 'auto (plist-get (harness-call 'task/backlog-mode default-directory) :mode)))
                          5 "the project's backlog to queue its tasks itself")
       (with-current-buffer board
-        (should (string-match-p "Auto queue: a task written up for the backlog joins the queue by itself"
+        (should (string-match-p "Auto queue: written-up tasks join the queue"
                                 (harness-ui-tasks--backlog-mode-help nil nil (point-min)))))
-      ;; While its write-up goes on, the task waits in the Backlog, whose
-      ;; heading and card say it joins the queue once written up.
+      ;; While its write-up goes on, the task waits in the Backlog.
       (with-current-buffer board (harness-ui-tasks-toggle-refine))
       (harness-ui-tasks-test--type-and-submit board "jot the lexer down")
       (harness-ui-tasks-test--wait-text
-       board "Backlog  1  \\[Auto queue\\]  · each joins the queue once written up\n\\(.\\|\n\\)*jot the lexer down")
+       board "Backlog  1  \\[Auto queue\\]\n\\(.\\|\n\\)*jot the lexer down")
       (harness-ui-tasks-test--show-subtitle board "jot the lexer down")
-      (should (string-match-p "writing it up, then it joins the queue"
+      (should (string-match-p "writing it up…"
                               (harness-ui-tasks-test--card-text board "jot the lexer down")))
       ;; Written up, it moves to Pending by itself, where it waits for a slot.
       (harness-ui-tasks-test--wait-text board "Pending  2\\(.\\|\n\\)*Fix the lexer")
@@ -4003,7 +4002,7 @@ it again."
             (should (plist-get task :returned))
             (should (equal sid (plist-get task :session))))
           (harness-ui-tasks-test--show-subtitle board "Long work")
-          (should (string-match-p "returned, carries on where it stopped"
+          (should (string-match-p "#1 in line · paused"
                                   (harness-ui-tasks-test--card-text board "Long work")))
           ;; The return started nothing, and s starts it again.
           (harness-test-wait (lambda () (not (harness-call 'agent/running sid))) 5 "its turn to stop")
@@ -4028,24 +4027,23 @@ the wire gives them, symbols as strings."
   (harness-ui-tasks-test-with
     (with-temp-buffer
       (setq-local harness-ui-tasks--tasks (list (list :id "t-1" :prompt "Fix the parser\nand the lexer")))
-      (should (equal "pre-empted by \"Fix the parser\", carries on where it stopped"
+      (should (equal "pre-empted by \"Fix the parser\""
                      (harness-ui-tasks--returned-why '(:returned t :return-reason "preempted" :preempted-by "t-1"))))
-      (should (equal "pre-empted by t-2, carries on where it stopped"
+      (should (equal "pre-empted by t-2"
                      (harness-ui-tasks--returned-why '(:returned t :return-reason "preempted" :preempted-by "t-2"))))
-      (should (equal "slot taken back by \"Fix the parser\", carries on where it stopped"
+      (should (equal "slot taken back by \"Fix the parser\""
                      (harness-ui-tasks--returned-why '(:returned t :return-reason "reclaimed" :preempted-by "t-1"))))
-      (should (equal "slot taken back by the task that lent it, carries on where it stopped"
+      (should (equal "slot taken back by the task that lent it"
                      (harness-ui-tasks--returned-why '(:returned t :return-reason "reclaimed"))))
-      (should (equal "sent back from review, waits for a slot with your feedback"
+      (should (equal "sent back from review"
                      (harness-ui-tasks--returned-why '(:returned t :return-reason "sent-back"))))
       (dolist (task '((:returned t :return-reason "returned") (:returned t)))
-        (should (equal "returned, carries on where it stopped" (harness-ui-tasks--returned-why task)))))
-    (should (equal "Sent back: its session works on your feedback"
-                   (harness-ui-tasks--sent-back-message '(:state "active"))))
-    (should (string-match-p "no slot is free for it, so it waits in the queue"
-                            (harness-ui-tasks--sent-back-message '(:state "pending"))))
-    (should (string-match-p "waits in the suspended queue"
-                            (harness-ui-tasks--sent-back-message '(:state "pending" :queue-suspended t))))))
+        (should (equal "paused" (harness-ui-tasks--returned-why task)))))
+    (should (equal "Sent back" (harness-ui-tasks--sent-back-message '(:state "active"))))
+    (should (equal "Sent back; waiting for a slot"
+                   (harness-ui-tasks--sent-back-message '(:state "pending"))))
+    (should (equal "Sent back; waiting for a slot (queue suspended)"
+                   (harness-ui-tasks--sent-back-message '(:state "pending" :queue-suspended t))))))
 
 (defun harness-ui-tasks-test--supervisor-switch-p (board)
   "Non-nil when the lines above BOARD's compose box have the supervisor switch."
@@ -4098,10 +4096,10 @@ to Pending, saying why it waits, and no card speaks of a loan any more."
               (should (string-match-p "borrowed slot" borrowed))
               (should-not (string-match-p "slot lent" borrowed)))
             ;; Each names the other in its tooltip.
-            (should (string-match-p "\"Write the docs\" works in it until you answer"
-                                    (harness-ui-tasks-test--fact-tooltip board "Ask about the parser" "slot lent")))
-            (should (string-match-p "the slot \"Ask about the parser\" lends while it waits on you"
-                                    (harness-ui-tasks-test--fact-tooltip board "Write the docs" "borrowed slot")))
+            (should (equal "Lent to \"Write the docs\" until you answer"
+                           (harness-ui-tasks-test--fact-tooltip board "Ask about the parser" "slot lent")))
+            (should (equal "Borrowed from \"Ask about the parser\" until you answer it"
+                           (harness-ui-tasks-test--fact-tooltip board "Write the docs" "borrowed slot")))
             ;; Only a card at work or waiting on you speaks of a loan.
             (with-current-buffer board
               (let ((task (harness-ui-tasks--find borrower)))
@@ -4195,7 +4193,7 @@ works hands-on; each mode shows its own lines alone."
             (unless switch
               (should-not (string-match-p "supervisor\\|hands-on" tail)))))
         (let ((err (should-error (harness-toggle-supervisor) :type 'user-error)))
-          (should (string-match-p "planned task works hands-on" (cadr err))))
+          (should (equal "No supervisor mode for a planned task's work" (cadr err))))
         (should (harness-json-true-p (plist-get harness-ui-tasks--new :supervisor)))
         (should-not (plist-member (harness-ui-tasks--new-opts 'plan) :supervisor))
         (should (eq t (plist-get (harness-ui-tasks--new-opts 'refine) :supervisor)))
@@ -4224,12 +4222,12 @@ on, or turns it off again."
       (harness-ui-tasks-toggle-main-tree)
       (should (eq 'once harness-ui-tasks--main-tree-mode))
       (let ((tail (harness-ui-tasks-test--tail-text board)))
-        (should (string-match-p "Main tree for the next task only" tail))
+        (should (string-match-p "Main tree for the next task" tail))
         (should (string-match-p "\\[keep on\\]" tail)))
       ;; Another: every task, until it is clicked off.
       (harness-ui-tasks-toggle-main-tree)
       (should (eq 'sticky harness-ui-tasks--main-tree-mode))
-      (should (string-match-p "Main tree for every task until you click it off"
+      (should (string-match-p "Main tree for every task"
                               (harness-ui-tasks-test--tail-text board)))
       ;; The notice's [off] button turns it off, and the worktree is back.
       (push-button (harness-ui-tasks-test--tail-button board "[off]"))
@@ -4274,7 +4272,7 @@ medium for the next one."
         (harness-ui-tasks-cycle-new-priority)
         (should (eq 'once harness-ui-tasks--priority-mode))
         (let ((tail (harness-ui-tasks-test--tail-text board)))
-          (should (string-match-p "High priority for the next task only" tail))
+          (should (string-match-p "High priority for the next task" tail))
           (should (string-match-p "\\[keep on\\]" tail))))
       (harness-ui-tasks-test--type-and-submit board "Urgent fix")
       (harness-ui-tasks-test--wait-text board "Pending  1\\(.\\|\n\\)*↑ +Urgent fix")
@@ -4286,7 +4284,7 @@ medium for the next one."
                          (string-match-p "Submit +medium priority\n"
                                          (harness-ui-tasks-test--tail-text board)))))
        5 "the one-shot priority to reset")
-      (should-not (string-match-p "priority for the next task only"
+      (should-not (string-match-p "priority for the next task"
                                   (harness-ui-tasks-test--tail-text board))))))
 
 (ert-deftest harness-ui-tasks-priority-sticky-keeps-across-submits ()
@@ -4299,18 +4297,18 @@ it applies to, and the notice stays until its [off] button is used."
         (harness-ui-tasks-cycle-new-priority)
         (push-button (harness-ui-tasks-test--tail-button board "[keep on]"))
         (should (eq 'sticky harness-ui-tasks--priority-mode))
-        (should (string-match-p "High priority for every task until you click it off"
+        (should (string-match-p "High priority for every task"
                                 (harness-ui-tasks-test--tail-text board))))
       (harness-ui-tasks-test--type-and-submit board "First urgent")
       (harness-ui-tasks-test--wait-text board "Pending  1\\(.\\|\n\\)*↑ +First urgent")
-      (should (string-match-p "High priority for every task until you click it off"
+      (should (string-match-p "High priority for every task"
                               (harness-ui-tasks-test--tail-text board)))
       ;; A second submit goes high too, the notice still showing.
       (harness-ui-tasks-test--type-and-submit board "Second urgent")
       (harness-ui-tasks-test--wait-text board "Pending  2\\(.\\|\n\\)*First urgent\\(.\\|\n\\)*Second urgent")
       (should (cl-every (lambda (task) (eq 'high (plist-get task :priority)))
                         (harness-call 'task/list default-directory)))
-      (should (string-match-p "High priority for every task until you click it off"
+      (should (string-match-p "High priority for every task"
                               (harness-ui-tasks-test--tail-text board)))
       ;; Off: medium again, and the notice is gone.
       (with-current-buffer board
@@ -4391,7 +4389,7 @@ it says there was nothing to merge."
                         :no-merge t :prompt "Document the flag" :created 0)))
       (harness-ui-tasks--render))
     (harness-ui-tasks-test--show-subtitle board "Explain the flag")
-    (should (string-match-p "nothing to merge: verifying accepts it"
+    (should (string-match-p "nothing to merge"
                             (harness-ui-tasks-test--card-text board "Explain the flag")))
     (harness-ui-tasks-test--show-subtitle board "Document the flag")
     (should (string-match-p "nothing to merge"

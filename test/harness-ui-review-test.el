@@ -204,7 +204,7 @@ gives the task another script."
     (let ((chat (harness-ui-review-test--open-session sid)))
       (harness-ui-review-test--wait-text chat "Ready for review")
       (with-current-buffer chat
-        (should (string-match-p "this session is a task waiting for you" (buffer-string)))
+        (should-not (string-match-p "waiting for you" (buffer-string)))
         (should (string-match-p "Fix the flaky test" (buffer-string)))
         (should (string-search "[Verify]  C-c C-v" (buffer-string)))
         (should (string-search "[Send back]  C-c C-x" (buffer-string)))
@@ -422,7 +422,7 @@ the quote."
         ;; The summary's, not the banner's "Fix the flaky test" nor the
         ;; problem above it, which both hold "The flaky test".
         (let ((case-fold-search nil)) (search-forward "The flaky test is fixed."))
-        (should (eq 'harness-compose-quote-reply (key-binding (kbd "C-c >"))))
+        (should (eq 'compose-quote-reply (key-binding (kbd "C-c >"))))
         (execute-kbd-macro (kbd "C-c >"))
         (should (equal quoted (harness-compose-text)))
         (should (= (point) harness-compose-end))
@@ -709,10 +709,9 @@ C-c C-v, anywhere in the popout, accepts the work, and the popout closes."
       (with-current-buffer popout
         (let ((text (buffer-string)))
           (should (string-match-p "Ready for review" text))
-          (should (string-match-p "this task is waiting for you" text))
           (should (string-match-p "\\[Verify\\]" text))
           (should (string-match-p "\\[Send back\\]" text))
-          (should (string-match-p "C-c C-c in the box sends what you write back to this task" text))
+          (should (string-match-p "C-c C-c in the box sends it back" text))
           ;; The report shows already: its banner has no [Review Changes].
           (should-not (string-match-p "\\[Review Changes\\]" text))
           ;; After the evidence, on the review background, as in the session.
@@ -721,7 +720,7 @@ C-c C-v, anywhere in the popout, accepts the work, and the popout closes."
             (should (memq 'harness-chat-review-face (ensure-list (get-text-property (1+ at) 'face))))))
         ;; Under it, the box takes the feedback.
         (should (harness-compose-live-p))
-        (should (equal "What should change? C-c C-c sends it back" (harness-ui-report--placeholder)))
+        (should (equal "Feedback…  C-c C-c sends it back" (harness-ui-report--placeholder)))
         ;; The keys work on the content and in the box.
         (goto-char (point-min))
         (should (eq 'harness-ui-review-verify (key-binding (kbd "C-c C-v"))))
@@ -974,7 +973,7 @@ in a line, the message being right above, with no [Review Changes]."
         (let ((popout (harness-ui-popout-buffer key)))
           (harness-ui-review-test--wait-text popout "Not handed in")
           (let ((text (harness-ui-review-test--text popout)))
-            (should (string-search "Its turn ended without hand_in" text))
+            (should (string-search "The turn ended without hand_in" text))
             (should (string-search "Its last message" text))
             (should (string-search "I think the flaky test passes now." text))
             (should (string-search "[Open the session]" text))
@@ -986,7 +985,7 @@ in a line, the message being right above, with no [Review Changes]."
           (harness-ui-popout-close key))
         (let ((chat (harness-ui-review-test--open-session sid)))
           (harness-ui-review-test--wait-text chat "Ready for review")
-          (harness-test-wait (lambda () (string-search "It handed no report in"
+          (harness-test-wait (lambda () (string-search "No report: the turn ended without hand_in"
                                                        (harness-ui-review-test--tail chat)))
                              5 "the banner to say no report was handed in")
           (let ((tail (harness-ui-review-test--tail chat)))
