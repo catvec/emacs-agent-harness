@@ -168,10 +168,12 @@ non-interactive anyway."
   '(harness-model harness-permission-mode harness-thinking harness-btw-thinking
     harness-btw-model
     harness-allowed-directories harness-sandbox-policy harness-non-interactive
-    harness-supervisor harness-supervisor-tasks)
+    harness-supervisor harness-supervisor-tasks
+    harness-commit-msg-strip-attribution)
   "Settings that take part in layering.
-A module defines some of them, `harness-supervisor' the supervisor
-plugin: until it is loaded the key takes part in nothing, and every
+A module defines some of them: `harness-supervisor' the supervisor
+plugin, `harness-commit-msg-strip-attribution' the commit-msg module.
+Until that module is loaded the key takes part in nothing, and every
 reader of the layers skips it (see `harness-config--layered-keys').")
 
 (defconst harness-config-sections
@@ -216,6 +218,10 @@ reader of the layers skips it (see `harness-config--layered-keys').")
             harness-tasks-require-verification
             harness-tasks-max-running harness-tasks-lend-blocked-slot-after harness-tasks-worktrees
             harness-merge-conflict-resolver harness-merge-resolver-model))
+    (commits
+     :title "Commits"
+     :doc "Whether the commits made in a project lose the lines that attribute them to Claude, through a commit-msg hook the harness installs in its repository.  It is off unless you turn it on: for one project in that project's .dir-locals.el (the Project scope of this page), or for every project with the global value."
+     :keys (harness-commit-msg-strip-attribution))
     (notifications
      :title "Notifications"
      :doc "When the harness tells you it needs you, and where."

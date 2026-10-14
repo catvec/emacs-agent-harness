@@ -754,11 +754,14 @@ model offers; nil for the session's),
 simple tier of the provider of the model they would otherwise use; a
 `PROVIDER:NAME`; nil for that model itself),
 `harness-allowed-directories`, `harness-sandbox-policy`,
-`harness-non-interactive`, `harness-supervisor`.  A module defines some
-of them, `harness-supervisor` the supervisor module: until it is loaded
-the key takes part in nothing, and every reader of the layers skips it
-(`harness-config--layered-keys`).  `harness-budget` has a global value
-only: it is one budget for all sessions together (see usage).
+`harness-non-interactive`, `harness-supervisor`,
+`harness-commit-msg-strip-attribution` (see commit-msg).  A module
+defines some of them, `harness-supervisor` the supervisor module and
+`harness-commit-msg-strip-attribution` the commit-msg module: until it
+is loaded the key takes part in nothing, and every reader of the layers
+skips it (`harness-config--layered-keys`).  `harness-budget` has a
+global value only: it is one budget for all sessions together (see
+usage).
 
 The other harness options (the `harness` customize group, less the
 ones that decide how the harness starts or reaches the UI:
@@ -787,7 +790,7 @@ refused on save, where a free-form plist would have taken it.
 
 `harness-config-sections` names the options most people change, in
 sections by what they are for (new sessions, supervisor mode, files and
-safety, task board, notifications, models and services);
+safety, task board, commits, notifications, models and services);
 `config/describe` lists them first, each with its `:section`, then the
 advanced ones.  A setting a page should not lead with but must keep
 working stays a global `defcustom` and is advanced; what only the
@@ -4133,6 +4136,124 @@ session may itself be a target with a queue of its own.
   new cwd is a checkout of the same repository: `merge/enqueue` refuses
   a target outside any git repository, and git cannot merge a branch
   another repository does not have.
+
+### commit-msg
+
+A module of its own (lisp/modules/harness-commit-msg.el, `:requires
+'(config worktree)`) that installs a `commit-msg` hook taking the lines
+that attribute a commit to Claude out of its message, in the
+repositories that ask for it.  Opt-in, always: a tool that many
+repositories share must not rewrite commit messages unasked -- another
+workflow may depend on a co-signing agent's trailer, which the hook
+would drop silently -- so nothing is ever installed in a repository
+nobody turned it on for.  Modules load by themselves, so a loaded
+module does nothing in a repository that did not opt in.  It calls the
+worktree module's git helpers (`harness-worktree--git`,
+`--same-path-p`, `--known-roots`) and changes nothing there.
+
+- The setting, `harness-commit-msg-strip-attribution`: a boolean
+  `defcustom`, nil by default, `:safe #'booleanp` so Emacs reads it from
+  a `.dir-locals.el` without asking.  It is in `harness-config-keys`,
+  so it layers like `harness-model`: the policy, else a `.dir-locals.el`
+  in the session's directory, else the one at the project root, else
+  the global (customize) value.  The settings page shows it as *Strip
+  Claude attribution* in the Commits section, after Task board; its
+  Project scope writes `((nil . ((harness-commit-msg-strip-attribution
+  . t))))` to the project's `.dir-locals.el`.  The global value t opts
+  every repository the harness works in; the docs recommend turning it
+  on per project.
+- Which repositories.  The hook lives in a repository's shared hooks
+  directory, so it acts on the main checkout and every linked worktree
+  alike: the repository is the unit, named by its main checkout MAIN
+  (`harness-files-main-root` of a directory, made canonical, with a
+  `.git` directory; remote directories are skipped).  It is selected
+  (`harness-commit-msg--selected-p MAIN &optional DIRS`) when
+  `config/get` of the setting is non-nil at MAIN or at a directory the
+  harness works in that lies in that repository: one of
+  `harness-config--work-dirs` (the active sessions', the current tasks'
+  and their sessions') whose main checkout is MAIN, or one the event at
+  hand names (DIRS).  So a `.dir-locals.el` at the root of the main
+  checkout opts the project in, and so does one that applies to a
+  session working in it: a task worktree's, or one in a subdirectory a
+  session works in.  The work directories are looked at only when MAIN
+  and DIRS do not select it.
+- When it acts.
+  - `worktree/created ROOT WORKTREE`: ROOT's repository, with ROOT and
+    the new worktree's `:path` as event directories; the hook goes in
+    when it is selected.  Nothing may fail `worktree/create`: the
+    handler catches and logs.
+  - `session/created ID SESSION` (SESSION's `:cwd`) and `session/moved
+    ID OLD NEW` (NEW): that directory's repository, with that
+    directory; the hook goes in when it is selected.  This covers a
+    repository used without worktrees.  Many sessions are made
+    (sub-agents, plan workers, BTWs), so the repositories found
+    installed since the last full pass are kept in a table
+    (`harness-commit-msg--installed`, `pending` while an install runs)
+    and skipped: a session there runs no git and reads no setting.
+  - `config/changed` of this key (compared by name, `(format "%s"
+    key)`): a full pass, with CWD as an event directory when it is
+    non-nil.  Turning the setting on or off on the settings page
+    therefore takes effect at once.
+  - `harness/started` and `harness/reloaded`: a full pass.
+  - A `.dir-locals.el` edited by hand gives no event: the next start or
+    reload applies it, while worktree and session events see it at once
+    when it turns the setting on.
+  - A full pass clears the table first, takes as candidates
+    `harness-worktree--known-roots`, the repositories of the work
+    directories and of the event directory, and the recorded
+    repositories, then installs the hook in a selected candidate and
+    removes it from a recorded one that is no longer selected.  A
+    repository whose setting cannot be read is left as it is.
+  - Every handler runs only while the module is ready and logs what it
+    signals; the init function also runs at top level, so a hot reload
+    subscribes (`harness-on` subscribes a function once).
+- The record: commit-msg-hooks.json in the state directory, a JSON
+  array of main checkouts, read and written as worktree-locks.json is.
+  A repository is recorded whenever its hook is the harness's after an
+  install, written by it or already current.  A recorded repository
+  that is no longer selected loses the hook in the next full pass, but
+  only a file that still carries the marker in the repository's own
+  hooks directory (`GIT-COMMON-DIR/hooks`): never anyone else's hook,
+  and nothing in a `core.hooksPath` elsewhere.  The harness's file there
+  goes even when a `core.hooksPath` set since keeps git from running
+  it, since it would run again once that is unset.  Then the repository
+  leaves the record, also when its hook was gone already; a recorded
+  path that is no repository any more just leaves it.  A failure keeps
+  the repository recorded, for the next pass.
+- `commit-msg/uninstall DIR` (ACP `_harness/commit-msg/uninstall
+  {dir}`) removes the harness-marked hook of DIR's repository, never a
+  foreign one, and drops the repository from the record and the table.
+  It resolves to `(:repository MAIN :removed BOOL :reason REASON
+  :selected BOOL)`: REASON is null when the hook went, else `none` (no
+  `commit-msg` hook), `foreign` (somebody else's), `hooks-path` (none
+  of the harness's, and `core.hooksPath` puts the hooks elsewhere),
+  `remote` or `no-repository`; `:selected` says whether the setting
+  still selects the repository, in which case the hook comes back the
+  next time the harness installs it.  The UI's
+  `harness-commit-msg-uninstall` (lisp/ui/harness-ui-commit-msg.el,
+  module `ui-commit-msg`) reads a directory, the current project's root
+  by default, calls the method with `harness-ui-call` and says in the
+  echo area what happened -- and, when the setting still selects the
+  repository, that it has to be turned off for the hook to stay away.
+- The hook (`harness-commit-msg--hook`): `#!/bin/sh`, then the marker `# harness: strip Claude attribution
+  trailers` (`harness-commit-msg-hook-marker`) on its second line, which
+  is how the harness tells its own hook from anyone else's.  It drops
+  the lines matching `harness-commit-msg--claude-attribution-regexp`
+  with `grep -iE` -- a `Co-Authored-By` or `Signed-off-by` naming
+  Claude, a `Generated with` line naming it, a `Claude-Session` line, a
+  bare claude.com or claude.ai link -- keeps every other byte of the
+  message, trailing newlines included, leaves a message that would be
+  empty without its Claude lines as it was, and always exits 0.  It
+  goes into the directory `git rev-parse --git-path hooks
+  --git-common-dir` resolves, and only when that is the repository's
+  own hooks directory: a `core.hooksPath` pointing elsewhere is left
+  alone, and so is a `commit-msg` somebody else wrote, byte for byte,
+  each logged once per repository.  A harness-marked hook whose text
+  changed is rewritten; the file is mode 0755.  Remote (TRAMP) roots
+  are skipped, and a failure is logged and never fails anything else.
+  Agents working in a linked worktree cannot change it: the sandbox
+  mounts the repository's hooks directory read-only there (see
+  sandbox).
 
 ### priority
 
@@ -7707,7 +7828,7 @@ Extension methods: any bus method whose name starts with `session/`,
 `project/`, `task/`, `search/`, `notification/`, `sandbox/status`, `harness-dev/`, `harness/api`,
 `harness/modules`, `harness/version`, `harness/reload`, `harness/call`, `acp/remote-`,
 `pet/`, `version/`, `insights/`, `supervisor/`, `seed/`, `priority/`,
-`secrets/` (`harness-acp-extension-prefixes`), or with one of
+`secrets/`, `commit-msg/` (`harness-acp-extension-prefixes`), or with one of
 `harness-acp-extra-method-prefixes`, which modules of the user's own
 add to (see Modules of your own), is callable as `_harness/NAME` with a
 params object whose keys become the plist arguments (`{"id": …}` →

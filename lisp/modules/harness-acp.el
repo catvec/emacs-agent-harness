@@ -141,7 +141,7 @@ is never used for any other failure.")
     "harness/api" "harness/modules" "harness/version" "harness/reload" "harness/call"
     "harness-dev/" "question/" "project/" "task/" "search/"
     "notification/" "acp/remote-" "pet/" "version/" "insights/" "supervisor/" "seed/" "priority/"
-    "secrets/")
+    "secrets/" "commit-msg/")
   "Bus method name prefixes callable as `_harness/NAME'.
 Modules of the user's own add theirs to
 `harness-acp-extra-method-prefixes'.")

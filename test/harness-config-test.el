@@ -460,8 +460,10 @@ that take a key all leave them out, as they would without the keys."
         (should-not (plist-member (cdr (assq layer layers)) 'harness-supervisor))
         (should-not (plist-member (cdr (assq layer layers)) 'harness-supervisor-tasks)))
       ;; The others are there, global lists every key that is defined.
+      ;; Only the project and config modules are loaded here, so the
+      ;; keys other modules define, the commit-msg module's say, are not.
       (should (eq 'yolo (plist-get (cdr (assq 'project layers)) 'harness-permission-mode)))
-      (should (equal (remq 'harness-supervisor-tasks (remq 'harness-supervisor harness-config-keys))
+      (should (equal (cl-remove-if-not #'boundp harness-config-keys)
                      (cl-loop for (key _) on (cdr (assq 'global layers)) by #'cddr collect key))))
     (let* ((d (harness-call 'config/describe sub))
            (keys (mapcar (lambda (s) (plist-get s :key)) (plist-get d :settings))))

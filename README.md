@@ -2767,6 +2767,53 @@ your checkout itself can be submitted to the **main tree** instead (the
 Press `?` on the board, or `C-c h ?` in its compose box, to see all of
 the board's commands.
 
+### Commit messages without Claude attribution
+
+Agents commit in the repositories the harness works in, and Claude Code
+writes lines into their messages that credit Claude: `Co-Authored-By:
+Claude <noreply@anthropic.com>`, `Generated with [Claude
+Code](https://claude.com/claude-code)`. The harness can take those
+lines out as each commit is made. Its `commit-msg` module installs a
+`commit-msg` hook in the repository that drops them and keeps every
+other byte of the message. The hook belongs to the repository, so it
+acts on every commit made there, in the main checkout and in every
+worktree, yours included.
+
+It is off unless you turn it on, for one project at a time:
+
+- On the settings page (`C-c h S`), opened from a buffer of the
+  project, switch to the **Project** scope and turn on *Strip Claude
+  attribution* under **Commits**. It takes effect at once.
+- Or write it in the project's `.dir-locals.el`:
+
+  ```elisp
+  ((nil . ((harness-commit-msg-strip-attribution . t))))
+  ```
+
+  A `.dir-locals.el` edited by hand takes effect at the next start or
+  reload of the harness (`M-x harness-reload`), or as soon as a worktree
+  or a session is made in the project.
+
+The global value of `harness-commit-msg-strip-attribution` (the
+settings page's **Global** scope, or `(setopt
+harness-commit-msg-strip-attribution t)`) turns it on in every
+repository the harness works in. Turning it on project by project is
+the better habit.
+
+To turn it off, turn the setting off where you turned it on: the
+harness then removes the hook it installed (at once from the settings
+page, at the next start or reload after a hand edit).
+`M-x harness-commit-msg-uninstall` takes the hook out of a repository
+right away. If the setting is still on for that repository, the hook
+comes back, and the command says so. The harness never touches a
+`commit-msg` hook somebody else wrote, nor a `core.hooksPath` that
+points elsewhere.
+
+It is off by default because a tool that many repositories share must
+not rewrite commit messages unasked. Your workflow, or a colleague's,
+may depend on the trailer of a co-signing agent, which the hook would
+drop silently.
+
 ### Fullscreen overviews
 
 The task board, the session list and a main session can take the whole
@@ -3116,7 +3163,9 @@ budget, one for all sessions together), **Compaction** (what stands in
 for a conversation that grew too long, and which model writes a brief
 summary), **Files and safety** (directory access,
 sandbox policy, standing permission rules), **Task board** (what task
-sessions start with, and when their work counts as done),
+sessions start with, and when their work counts as done), **Commits**
+(whether commits lose the lines crediting Claude, see [Commit messages
+without Claude attribution](#commit-messages-without-claude-attribution)),
 **Notifications** (which task events notify you, and through which
 providers) and **Models and services** (extra providers, web search,
 keys).
@@ -3140,6 +3189,7 @@ project's, and a project's over the global value.
 - `harness-sandbox-policy`
 - `harness-non-interactive`
 - `harness-supervisor`
+- `harness-commit-msg-strip-attribution`
 
 The rest of the settings have a global value only.
 

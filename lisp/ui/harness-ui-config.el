@@ -13,17 +13,17 @@
 ;;
 ;; The page leads with the settings most people change, in the sections
 ;; the harness names (`harness-config-sections'): new sessions,
-;; spending, files and safety, the task board, notifications, models and
-;; services.
+;; spending, files and safety, the task board, commits, notifications,
+;; models and services.
 ;; Everything else is advanced: the Global scope folds it into one line
 ;; saying how many there are and how many were changed, and `a' (or the
 ;; button there) shows them, by module.  The Project scope shows only
 ;; the settings that layer (model, permission mode, thinking, allowed
-;; directories, sandbox policy, non-interactive), in their
-;; sections, and folds the rest, which have a global value
-;; only, into one line.  The options of the interface itself live in
-;; this Emacs, not the harness: a button at the end opens Customize on
-;; them.
+;; directories, sandbox policy, non-interactive, stripping Claude
+;; attribution from commits), in their sections, and folds the rest,
+;; which have a global value only, into one line.  The options of the
+;; interface itself live in this Emacs, not the harness: a button at the
+;; end opens Customize on them.
 ;;
 ;; Each setting is a `wid-edit' widget built from the option's customize
 ;; type, its documentation, and a line saying where the value in effect
@@ -107,6 +107,7 @@
 
 (defconst harness-ui-config--module-titles
   '(("config" . "Session defaults") ("agent" . "Agent") ("compaction" . "Compaction")
+    ("commit-msg" . "Commit messages")
     ("merge" . "Merge queue") ("naming" . "Session naming") ("perms" . "Permissions")
     ("provider" . "Models") ("provider-claude" . "Claude Code") ("provider-copilot" . "GitHub Copilot")
     ("provider-openai" . "OpenAI-compatible providers") ("provider-bedrock" . "AWS Bedrock")
@@ -125,7 +126,9 @@
     ("harness-bedrock-tiers" . "Bedrock tiers")
     ("harness-provider-copilot-tiers" . "Copilot tiers")
     ;; Under Supervisor mode, beside the providers' own tiers.
-    ("harness-supervisor-tiers" . "Step models"))
+    ("harness-supervisor-tiers" . "Step models")
+    ;; "Strip attribution" would not say whose.
+    ("harness-commit-msg-strip-attribution" . "Strip Claude attribution"))
   "Names of settings that the general rule gets wrong, as (KEY . NAME).")
 
 (defconst harness-ui-config--acronyms
