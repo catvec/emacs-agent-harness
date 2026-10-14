@@ -14,6 +14,26 @@
 ;; a chat and of the task board, what it last said about a session above
 ;; that session's compose box.
 ;;
+;; Its voice is dry: a colleague at the next desk who notices things,
+;; never cutesy, affectionate or bodily.  It may start a line with a
+;; small deadpan gesture between asterisks, *squints at the diff*,
+;; unless `harness-pet-actions' is off; an action that nestles, nuzzles
+;; or purrs all the same is dropped from what it says.
+;;
+;; What the harness does to a session it tells as its own news: a new
+;; name (`session/updated'), and a compaction (`compaction/done'), where
+;; it reaches for the forgetting trope -- the neuralyzer of Men in Black
+;; and its kin.  Those it says whenever that session's chat is seen,
+;; cooldown or not, after the line it is saying if it is saying one.
+;;
+;; What it says about a session is that session's: it is said only while
+;; the session's chat is on screen, and shows there.  The pet itself on
+;; screen -- its buffer, or its figure on the task board or the session
+;; list -- hears what is about nothing in particular, a petting or its
+;; first words.  An overview, the board or the list, gets recaps of the
+;; sessions it lists instead: the recap module's recap of each, as the
+;; pet would put it (`recap/done', `recap/session-done').
+;;
 ;; It can be turned off altogether: with `harness-pet-enabled' nil it
 ;; reacts to nothing, grows no more, asks no model anything and refuses
 ;; to be hatched, petted, renamed or released; `pet/get' still answers,
@@ -38,11 +58,14 @@
 ;; announces the pet again).
 ;;
 ;; It is cheap.  Nothing here runs unless something happens: no timer
-;; but the one of a model call in flight and the one that saves the
-;; record a few seconds after it grew.  It only ever speaks where what
-;; it says would be seen: about a session while a UI shows it beside
-;; that session, or shows the pet itself (`pet/watch'); while it is not
-;; muted and while `harness-pet-reactions' is on; and then through the
+;; but the one of a model call in flight, the one that saves the record
+;; a few seconds after it grew, and the one that says a system message
+;; once the pet is free.  It only ever speaks where what it says would
+;; be seen, while the user is at the screen: about a session while a UI
+;; shows that session's chat, about nothing in particular while one
+;; shows the pet itself, a recap while one shows an overview listing the
+;; session (`pet/watch'); while it is not muted and while
+;; `harness-pet-reactions' is on; and then through the
 ;; cheapest model of the provider in use, for a line of at most a
 ;; couple of hundred tokens: unasked, at most once every
 ;; `harness-pet-cooldown' seconds and only by chance
@@ -81,10 +104,22 @@ it was.  Its buffer (`harness-pet') says it is off and turns it on."
 (defcustom harness-pet-reactions t
   "Whether the companion pet comments on what happens.
 Its comments come from a cheap model (see `harness-pet-model'), only
-where they would be seen -- while its buffer is on screen, or about a
-session whose chat is -- and the pet is not muted, and unasked at most
-once every `harness-pet-cooldown' seconds.  nil keeps it quiet: no
-model is asked anything but the name and personality it hatches with."
+where they would be seen -- about a session whose chat is on screen,
+about itself while its buffer is, recaps of the sessions an overview
+on screen lists -- and the pet is not muted, and unasked at most once
+every `harness-pet-cooldown' seconds.  It tells of a session's new name
+and of its compaction too.  nil keeps it quiet: no model is asked
+anything but the name and personality it hatches with."
+  :type 'boolean :group 'harness)
+
+(defcustom harness-pet-actions t
+  "Whether the companion pet may start a line with an action, *like this*.
+On (the default), now and then, a brief, dry gesture between
+asterisks, *squints at the diff*: what a deadpan observer does with its
+eyes or its hat, never anything affectionate or bodily -- an action
+that nestles, nuzzles or purrs is dropped from what it says all the
+same.  nil keeps it to words: it is asked for none, and an action it
+writes anyway is dropped.  Its words stay as they are either way."
   :type 'boolean :group 'harness)
 
 (defcustom harness-pet-model 'auto
@@ -135,6 +170,12 @@ The last three go with every request, so it does not repeat itself.")
 
 (defconst harness-pet--min-gap 4
   "Seconds at least between the start of two sayings, asked or not.")
+
+(defconst harness-pet--wait-limit 30
+  "Seconds at most a system message waits for the pet to be free.
+A rename or a compaction that comes while the pet is saying something
+else is said after it, unless that takes longer than this: news that
+old is no news.")
 
 (defconst harness-pet--save-delay 5
   "Seconds after it grew that a pet's record is saved.")
@@ -447,22 +488,32 @@ Level N takes 5 N (N - 1) experience: 10 for level 2, 30 for level 3,
   "The pet's record as stored, or nil when there is none (yet).
 \(:seed SEED :name NAME :personality TEXT :hatched TIME :xp N :pets N
 :muted BOOL :said SAYINGS), SAYINGS oldest first, each (:text TEXT :ts
-TIME :reason REASON :session ID :session-name NAME).")
+TIME :reason REASON :session ID :session-name NAME :scope SCOPE); see
+`harness-pet--scope' for SCOPE, which a saying from before scopes lacks.")
 
 (defvar harness-pet--loaded nil "Non-nil once the record was read from the state directory.")
 (defvar harness-pet--dirty nil "Non-nil while the record has changes not saved yet.")
 
 (defvar harness-pet--watchers (make-hash-table :test 'equal)
   "Client id -> where that UI shows the pet now, for each UI that does.
-t when it shows the pet itself, its buffer, where anything it says is
-seen; else the ids of the sessions beside which it shows what the pet
-says about them, their chats.")
+A plist (:self BOOL :sessions IDS :overview IDS), as `pet/watch' takes
+it: whether it shows the pet itself, its buffer or its figure on an
+overview, where what it says about nothing in particular is seen; the
+sessions whose chats it shows, where what it says about each is; and
+the sessions an overview on screen lists, where its recaps of them are.")
 
 (defvar harness-pet--hatching nil "The promise of the hatching in flight, or nil.")
 (defvar harness-pet--speaking nil "Non-nil while a saying is being asked for.")
 (defvar harness-pet--last-unasked 0 "When the pet last started to speak unasked.")
 (defvar harness-pet--last-spoke 0 "When the pet last started to speak.")
 (defvar harness-pet--last-pet 0 "When the pet was last petted for experience.")
+(defvar harness-pet--waiting nil
+  "A system message waiting for the pet to be free, or nil.
+\(:reason REASON :context TEXT :session ID :fallback TEXT :at TIME): a
+rename or a compaction that came while the pet was saying something, or
+too soon after (`harness-pet--min-gap').  Only the newest waits.")
+(defvar harness-pet--waiting-timer nil
+  "The timer that says the waiting system message once the pet may, or nil.")
 
 (defun harness-pet--load ()
   "Read the pet's record, once."
@@ -508,17 +559,33 @@ says about them, their chats.")
   "Non-nil while a UI shows the pet, anywhere."
   (> (hash-table-count harness-pet--watchers) 0))
 
-(defun harness-pet--seen-p (&optional session-id)
-  "Non-nil while what the pet says about SESSION-ID would be seen.
-That is while a UI shows the pet itself, or, for a SESSION-ID, shows
-what it says beside that session.  What is about no session is seen
-only where the pet itself is."
+(defun harness-pet--watching-p (test)
+  "Non-nil when some UI's watch, as `harness-pet--watchers' keeps it, passes TEST."
   (catch 'seen
-    (maphash (lambda (_client where)
-               (when (or (eq where t) (and session-id (member session-id where)))
-                 (throw 'seen t)))
+    (maphash (lambda (_client where) (when (funcall test where) (throw 'seen t)))
              harness-pet--watchers)
     nil))
+
+(defun harness-pet--seen-p (&optional session-id)
+  "Non-nil while what the pet says about SESSION-ID would be seen.
+About a session: while a UI shows that session's chat, beside which it
+shows what the pet says about it.  About none -- a petting, its first
+words, a level it grew -- while a UI shows the pet itself.  What it
+says about a session's work is that session's: neither its own buffer
+nor an overview of many sessions makes it seen, an overview gets the
+pet's recaps instead (`harness-pet--overview-p')."
+  (harness-pet--watching-p
+   (lambda (where)
+     (if session-id
+         (member session-id (plist-get where :sessions))
+       (plist-get where :self)))))
+
+(defun harness-pet--overview-p (session-id)
+  "Non-nil while an overview a UI shows lists SESSION-ID.
+The task board or the session list, which says the pet's recaps of the
+sessions on it (see `pet/watch')."
+  (and session-id
+       (harness-pet--watching-p (lambda (where) (member session-id (plist-get where :overview))))))
 
 (defun harness-pet--enabled-p ()
   "Non-nil unless the pet is turned off (`harness-pet-enabled')."
@@ -717,10 +784,13 @@ error."
 (defconst harness-pet--hatch-system
   "You name newly hatched coding companions: small creatures that live in a programmer's editor and now and then comment on their work. Given a creature's rarity, species, stats and a few inspiration words, invent
 - a name: ONE word of at most 12 letters, memorable and slightly absurd. A pet's name, not a title: no \"the X\", no epithets. Lean on the inspiration words loosely: riff on one, blend two, or borrow their mood. The register: Fennel, Grommet, Tuck, Mothball, Quillon.
-- a personality: ONE short sentence, at most 20 words, giving it a specific, funny quirk that shapes how it comments on code, in keeping with its stats.
+- a personality: ONE short sentence, at most 20 words: a specific, dry quirk in how it watches code -- what it notices, distrusts or keeps score of -- in keeping with its stats. Wry and odd, never cute: nothing cuddly, sweet or affectionate. The register: Distrusts any function longer than its own tail. Counts semicolons and is always one short.
 The rarer the creature, the stranger and more specific; a legendary one is genuinely odd. No two companions are alike.
 Answer with one line of JSON and nothing else: {\"name\":\"...\",\"personality\":\"...\"}"
-  "System prompt of the call that names a pet.")
+  "System prompt of the call that names a pet.
+Its personality is a dry quirk, not a cute one: it colours every line
+the pet says after (`harness-pet--say-system'), and a cuddly one makes
+for cuddly lines.")
 
 (defun harness-pet--stats-text (stats)
   "STATS as the model reads them: \"DEBUGGING 62, PATIENCE 30, ...\"."
@@ -820,15 +890,22 @@ ends.  Signals when the pet is turned off (`harness-pet-enabled')."
 (defconst harness-pet--say-system
   "You are a coding companion: %s, a tiny %s %s that lives in a programmer's editor and watches them work with an AI coding agent. %s
 Your stats, out of 100, colour your voice: %s.
-Now and then you say one short line about what is happening: in character, playful, about what you actually see, at most 140 characters. You may start with a brief action between asterisks, like *tilts head* or *puffs up proudly*: a small gesture, the kind a cartoon pet makes. Keep it all wholesome: nothing about how a touch feels, nothing that could read as sensual or suggestive. Plain text only: no markdown, no emoji, no quotation marks, no advice longer than a line, never the agent's words. When the user speaks to you by name, answer them directly. When nothing is worth saying, answer just: ..."
+Now and then you say one short line about what is happening, at most 140 characters: in character, about what you actually see. Your register is dry and observant, a colleague at the next desk who notices things: wry, deadpan, playful at most, never cloying. No cutesy or baby talk, no endearments, no gushing, nothing affectionate, physical or sensual: you are a character, not a lap pet. %s Plain text only: no markdown, no emoji, no quotation marks, no advice longer than a line, never the agent's words. When the user speaks to you by name, answer them directly. When nothing is worth saying, answer just: ..."
   "System prompt of the call that has the pet say something.
-Filled with its name, rarity, species, personality and stats.  Its
-action is a cartoon pet's gesture, and nothing it says is sensual: left
-to itself, a cheap model that is petted writes *pleased to be touched*
-or *a spine quivers with pleasure*.  It names no words to avoid: in a
-trial, naming them did no better.  Those words are for
-`harness-pet--suggestive-regexp', which drops an action that has one
-all the same.")
+Filled with its name, rarity, species, personality and stats, then what
+it may do between asterisks (`harness-pet--actions-text').  Its register
+is a dry observer's, not a cuddly pet's: left to itself, a cheap model
+that is petted writes *nestles closer* or *pleased to be touched*, which
+reads as petplay rather than as charm.  The cuddly gestures it names,
+which helps; the sensual words it does not, as in a trial naming them
+did no better.  `harness-pet--cuddly-regexp' and
+`harness-pet--suggestive-regexp' drop an action that has one of their
+words all the same.")
+
+(defconst harness-pet--actions-text
+  '("You may start with a brief action between asterisks now and then, a dry gesture such as *squints at the diff* or *makes a note*: what a deadpan observer does with its eyes, its hat or a notebook, never touching, nuzzling, nestling, snuggling, purring or leaning into anything."
+    . "Words only: no actions between asterisks, no gestures, no stage directions.")
+  "What the pet's prompt says of actions: (ON . OFF), as `harness-pet-actions' is.")
 
 (defconst harness-pet--reasons
   '((prompt . "The user just sent their agent a message.")
@@ -838,8 +915,29 @@ all the same.")
     (large-diff . "The agent just made a big change.")
     (pet . "The user just petted you.")
     (hatch . "You just hatched: these are the first words you ever say.")
-    (level-up . "You just grew a level."))
-  "What happened, for each reason the pet may speak for.")
+    (level-up . "You just grew a level.")
+    (rename . "The session you watch was just renamed.")
+    (compact . "The conversation you watch was just compacted: the agent forgot its old messages and goes on from what is left.")
+    (recap . "Here is a recap of one of the sessions on the overview the user is looking at."))
+  "What happened, for each reason the pet may speak for.
+The first line of what it is asked, which the demo provider picks its
+line by.")
+
+(defconst harness-pet--steers
+  '((pet . "Acknowledge it, dry as ever: a petting is noted, not swooned over.")
+    (rename . "Tell the user its new name, as your own news: name it, and a dry word about it is welcome.")
+    (compact . "Tell the user it compacted, as your own news, with a joke about forgetting: a memory wipe in the manner of the neuralyzer of Men in Black, Dory, Memento, Eternal Sunshine of the Spotless Mind, 50 First Dates or Total Recall. One reference at most, lightly.")
+    (recap . "Tell the user what that session is up to, in your own words: name it, and say no more than the recap does."))
+  "What the pet is asked besides, for some reasons, just before its line.
+A system message -- a new name, a compaction -- it tells as its own
+news, so its line must carry the news; a recap names its session, as an
+overview lists many.")
+
+(defconst harness-pet--system-reasons '(rename compact)
+  "Reasons that tell of something the harness did to a session: system messages.
+The pet says them as its own news, cooldown or not, after the line it
+is saying when it is saying one (`harness-pet--wait'); when the model
+has nothing, plainly.")
 
 (defun harness-pet--say-system ()
   "The system prompt that gives the pet its voice."
@@ -849,11 +947,15 @@ all the same.")
             (plist-get bones :rarity) (plist-get bones :species)
             (let ((p (harness-pet--personality)))
               (if (harness-string-blank-p p) "" (concat "Your personality: " p)))
-            (harness-pet--stats-text (plist-get bones :stats)))))
+            (harness-pet--stats-text (plist-get bones :stats))
+            (if harness-pet-actions (car harness-pet--actions-text) (cdr harness-pet--actions-text)))))
 
 (defun harness-pet--say-text (reason context)
-  "The message that asks the pet for a line about CONTEXT, for REASON."
-  (let ((recent (last (plist-get harness-pet--pet :said) 3)))
+  "The message that asks the pet for a line about CONTEXT, for REASON.
+What happened (`harness-pet--reasons'), CONTEXT, its last words, what
+it is asked besides for REASON (`harness-pet--steers'), and the ask."
+  (let ((recent (last (plist-get harness-pet--pet :said) 3))
+        (steer (cdr (assq reason harness-pet--steers))))
     (concat (or (cdr (assq reason harness-pet--reasons)) "Something happened.")
             (if (harness-string-blank-p context) "" (concat "\n\n" context))
             (if recent
@@ -861,6 +963,7 @@ all the same.")
                         (mapconcat (lambda (s) (concat "- " (harness-pet--squash (plist-get s :text) 200)))
                                    recent "\n"))
               "")
+            (if steer (concat "\n\n" steer) "")
             "\n\nSay your line now.")))
 
 (defconst harness-pet--suggestive-regexp
@@ -868,25 +971,45 @@ all the same.")
                               "seduc" "sensual" "sultr" "throb" "touched" "writh")))
   "Words that give an action of the pet a sensual turn, in any case.
 Each starts a word: \"quiver\" is quivers and quivering too.  The
-pet's prompt asks for a wholesome line (`harness-pet--say-system'), but
-a cheap model that is petted may still write *a spine quivers with
+pet's prompt asks for a dry line (`harness-pet--say-system'), but a
+cheap model that is petted may still write *a spine quivers with
 pleasure*: `harness-pet-sanitise' drops an action between asterisks
 that has one of these words, and keeps the rest of the line.")
 
-(defun harness-pet--drop-suggestive (line)
-  "LINE without its actions between asterisks that read as sensual.
-See `harness-pet--suggestive-regexp'."
+(defconst harness-pet--cuddly-regexp
+  (concat "\\<" (regexp-opt '("blush" "boop" "cosies" "cosy up" "cozies" "cozy up" "cuddl" "curls up"
+                              "giggl" "hugg" "hugs" "kiss" "knead" "lean into" "leaning into"
+                              "leans into" "lick" "nestl" "nuzzl" "presses against" "purr"
+                              "rubs against" "smooch" "snuggl" "squee")))
+  "Words that make an action of the pet cutesy or affectionate, in any case.
+Each starts a word, as in `harness-pet--suggestive-regexp': \"nestl\" is
+nestles and nestling.  The pet is a dry observer, not a lap pet
+\(`harness-pet--say-system'); an action that nestles, nuzzles or purrs
+reads as petplay, so `harness-pet-sanitise' drops one with these words
+as it does a sensual one, and keeps the rest of the line.")
+
+(defun harness-pet--drop-actions (line)
+  "LINE without the actions between asterisks it may not keep.
+All of them while `harness-pet-actions' is off; else those that read as
+sensual (`harness-pet--suggestive-regexp') or as cutesy or affectionate
+\(`harness-pet--cuddly-regexp')."
   (let ((case-fold-search t))
     (replace-regexp-in-string
      "\\*[^*\n]+\\*[ \t]*"
-     (lambda (action) (if (string-match-p harness-pet--suggestive-regexp action) "" action))
+     (lambda (action)
+       (if (or (not harness-pet-actions)
+               (string-match-p harness-pet--suggestive-regexp action)
+               (string-match-p harness-pet--cuddly-regexp action))
+           ""
+         action))
      line t t)))
 
 (defun harness-pet-sanitise (text &optional name)
   "Turn the model's TEXT into a saying of the pet NAME, or nil for silence.
 The first two lines are kept, on one line, without a leading \"NAME:\"
 or quotation marks around them, and without an action between
-asterisks that reads as sensual (`harness-pet--suggestive-regexp');
+asterisks that reads as sensual, cutesy or affectionate -- nor any
+while `harness-pet-actions' is off (`harness-pet--drop-actions');
 three dots, or nothing, are silence."
   (let* ((lines (split-string (or text "") "\n" t "[ \t\r]+"))
          (line (string-join (seq-take lines 2) " ")))
@@ -894,37 +1017,112 @@ three dots, or nothing, are silence."
       (let ((case-fold-search t))
         (when (string-match (concat "\\`\\*?\\*?" (regexp-quote name) "\\*?\\*?[ \t]*:[ \t]*") line)
           (setq line (substring line (match-end 0))))))
-    (setq line (harness-pet--drop-suggestive line))
+    (setq line (harness-pet--drop-actions line))
     (setq line (string-trim line "[\"“”‘ \t]+" "[\"“”’ \t]+"))
     (setq line (replace-regexp-in-string "[ \t]+" " " line))
     (unless (or (string-empty-p line) (string-match-p "\\`[.…]+\\'" line))
       (harness-truncate-end line harness-pet--max-saying))))
 
-(defun harness-pet--may-speak-p (&optional session-id)
-  "Non-nil when the pet may speak now, about SESSION-ID if given.
-It is turned on and has hatched, is not muted, reactions are on, what
-it would say would be seen (`harness-pet--seen-p'), and it is not in
-the middle of saying something."
+(defun harness-pet--could-speak-p (&optional session-id overview)
+  "Non-nil when the pet could speak about SESSION-ID now, but for a line in flight.
+It is turned on and has hatched, is not muted, reactions are on, and
+what it would say would be seen: in SESSION-ID's chat, or where the pet
+itself shows when there is no SESSION-ID (`harness-pet--seen-p'); with
+OVERVIEW, on an overview that lists SESSION-ID instead
+\(`harness-pet--overview-p')."
   (and (harness-pet--enabled-p)
        harness-pet--pet
        harness-pet-reactions
        (not (harness-pet--muted-p))
-       (harness-pet--seen-p session-id)
+       (if overview (harness-pet--overview-p session-id) (harness-pet--seen-p session-id))))
+
+(defun harness-pet--may-speak-p (&optional session-id overview)
+  "Non-nil when the pet may speak now, about SESSION-ID if given.
+As `harness-pet--could-speak-p' says, for OVERVIEW too, and it is not in
+the middle of saying something."
+  (and (harness-pet--could-speak-p session-id overview)
        (not harness-pet--speaking)))
 
-(defun harness-pet--maybe-speak (reason context asked &optional session-id)
+(defun harness-pet--cool-p ()
+  "Non-nil once `harness-pet-cooldown' seconds passed since it last spoke unasked."
+  (>= (- (float-time) harness-pet--last-unasked) (or harness-pet-cooldown 0)))
+
+(defun harness-pet--scope (reason session-id)
+  "Where a saying for REASON about SESSION-ID belongs.
+`overview' for a recap: an overview that lists its session.  `session'
+for what else is about a session: that session's chat.  `pet' for what
+is about none: wherever the pet itself shows.  Each saying keeps it as
+`:scope', a string."
+  (cond ((eq reason 'recap) 'overview)
+        (session-id 'session)
+        (t 'pet)))
+
+(defun harness-pet--maybe-speak (reason context asked &optional session-id fallback)
   "Have the pet say something about CONTEXT, for REASON, when it may.
-ASKED non-nil means the user asked for it (named it, petted it): then
-no cooldown applies, only `harness-pet--min-gap'.  SESSION-ID is the
-session it is about, if any.  Return non-nil when it started."
-  (let ((now (float-time)))
-    (when (and (harness-pet--may-speak-p session-id)
-               (>= (- now harness-pet--last-spoke) harness-pet--min-gap)
-               (or asked (>= (- now harness-pet--last-unasked) (or harness-pet-cooldown 0))))
+ASKED non-nil means the user asked for it (named it, petted it), or the
+harness has news for it to tell: then no cooldown applies, only
+`harness-pet--min-gap'.  SESSION-ID is the session it is about, if any;
+a recap (REASON `recap') is for an overview that lists it.  FALLBACK is
+what it says when the model has nothing: a system message's news,
+plainly.  A system message (`harness-pet--system-reasons') that comes
+while the pet is saying something, or too soon after, waits until it is
+free (`harness-pet--wait').  Return non-nil when it started."
+  (let ((now (float-time))
+        (overview (eq reason 'recap)))
+    (cond
+     ((and (harness-pet--may-speak-p session-id overview)
+           (>= (- now harness-pet--last-spoke) harness-pet--min-gap)
+           (or asked (harness-pet--cool-p)))
       (unless asked (setq harness-pet--last-unasked now))
       (setq harness-pet--last-spoke now)
-      (harness-pet--speak reason context session-id)
-      t)))
+      (harness-pet--speak reason context session-id fallback)
+      t)
+     ;; Seen, but busy or too soon: news waits its turn.
+     ((and (memq reason harness-pet--system-reasons)
+           (harness-pet--could-speak-p session-id))
+      (harness-pet--wait reason context session-id fallback)
+      nil))))
+
+(defun harness-pet--wait (reason context session-id fallback)
+  "Keep the system message REASON about SESSION-ID until the pet is free.
+CONTEXT and FALLBACK are as `harness-pet--maybe-speak' takes them.  It
+takes the place of one waiting already: only the newest waits."
+  (setq harness-pet--waiting (list :reason reason :context context :session session-id
+                                   :fallback fallback :at (float-time)))
+  (harness-pet--wait-soon))
+
+(defun harness-pet--wait-soon ()
+  "Say the waiting system message as soon as the pet may: arm its timer.
+That is `harness-pet--min-gap' after its last line started, once that
+line is over: the end of a line in flight arms the timer again."
+  (when (timerp harness-pet--waiting-timer) (cancel-timer harness-pet--waiting-timer))
+  (setq harness-pet--waiting-timer nil)
+  (when (and harness-pet--waiting (not harness-pet--speaking))
+    (setq harness-pet--waiting-timer
+          (run-at-time (max 0 (+ 0.05 (- (+ harness-pet--last-spoke harness-pet--min-gap) (float-time))))
+                       nil #'harness-pet--say-waiting))))
+
+(defun harness-pet--say-waiting ()
+  "Say the system message that waits, if it still may be.
+Not once it waited `harness-pet--wait-limit' seconds, nor when its
+session's chat is no longer seen; while the pet is still busy, it waits
+on."
+  (setq harness-pet--waiting-timer nil)
+  (let ((waiting harness-pet--waiting)
+        (now (float-time)))
+    (cond ((null waiting))
+          ((>= (- now (plist-get waiting :at)) harness-pet--wait-limit)
+           (setq harness-pet--waiting nil))
+          ((or harness-pet--speaking (< (- now harness-pet--last-spoke) harness-pet--min-gap))
+           (harness-pet--wait-soon))
+          (t (setq harness-pet--waiting nil)
+             (harness-pet--maybe-speak (plist-get waiting :reason) (plist-get waiting :context) t
+                                       (plist-get waiting :session) (plist-get waiting :fallback))))))
+
+(defun harness-pet--stop-waiting ()
+  "Forget the system message that waits, and its timer."
+  (when (timerp harness-pet--waiting-timer) (cancel-timer harness-pet--waiting-timer))
+  (setq harness-pet--waiting-timer nil harness-pet--waiting nil))
 
 (defun harness-pet--session-facts (session-id)
   "Return (NAME PROJECT-NAME PROJECT-ROOT) of SESSION-ID; nils when unknown."
@@ -936,10 +1134,13 @@ session it is about, if any.  Return non-nil when it started."
                               (file-name-nondirectory (directory-file-name root))))))
     (list (plist-get session :name) project root)))
 
-(defun harness-pet--speak (reason context &optional session-id)
+(defun harness-pet--speak (reason context &optional session-id fallback)
   "Ask the model for the pet's line about CONTEXT, for REASON; say it.
 The saying is remembered and announced with `pet/said', then
-`pet/changed'.  SESSION-ID is the session it is about, if any."
+`pet/changed'.  SESSION-ID is the session it is about, if any.  When
+the model fails, or has nothing to say, the pet says FALLBACK, if
+given: a system message's news, plainly.  A system message waiting for
+the pet to be free goes next (`harness-pet--wait-soon')."
   (pcase-let* ((`(,session-name ,_project ,root) (harness-pet--session-facts session-id))
                (model (harness-pet--model session-id)))
     (setq harness-pet--speaking t)
@@ -952,20 +1153,31 @@ The saying is remembered and announced with `pet/said', then
      (lambda (reply)
        (setq harness-pet--speaking nil)
        ;; Released, or turned off, while it thought: it says nothing.
-       (let ((text (and harness-pet--pet (harness-pet--enabled-p)
-                        (harness-pet-sanitise reply (harness-pet--name)))))
-         (when text
-           (let ((saying (list :text text :ts (float-time) :reason (symbol-name reason)
-                               :session session-id :session-name session-name)))
-             (harness-pet--set :said (last (append (plist-get harness-pet--pet :said) (list saying))
-                                           harness-pet--memory))
-             (harness-pet--save-soon)
-             (harness-emit 'pet/said saying))))
-       (harness-pet--changed))
+       (when (and harness-pet--pet (harness-pet--enabled-p))
+         (when-let* ((text (or (harness-pet-sanitise reply (harness-pet--name)) fallback)))
+           (harness-pet--say text reason session-id session-name)))
+       (harness-pet--changed)
+       (harness-pet--wait-soon))
      (lambda (err)
        (setq harness-pet--speaking nil)
        (harness-log 'warn "pet: it could not speak: %s" (harness-error-message err))
-       (harness-pet--changed)))))
+       (when (and fallback harness-pet--pet (harness-pet--enabled-p))
+         (harness-pet--say fallback reason session-id session-name))
+       (harness-pet--changed)
+       (harness-pet--wait-soon)))))
+
+(defun harness-pet--say (text reason session-id session-name)
+  "Remember TEXT as what the pet said for REASON about SESSION-ID; announce it.
+SESSION-NAME is the session's name as it is now.  The saying keeps
+where it belongs (`harness-pet--scope'), and the last
+`harness-pet--memory' are kept."
+  (let ((saying (list :text text :ts (float-time) :reason (symbol-name reason)
+                      :session session-id :session-name session-name
+                      :scope (symbol-name (harness-pet--scope reason session-id)))))
+    (harness-pet--set :said (last (append (plist-get harness-pet--pet :said) (list saying))
+                                  harness-pet--memory))
+    (harness-pet--save-soon)
+    (harness-emit 'pet/said saying)))
 
 ;;;; What it reacts to
 
@@ -1014,17 +1226,24 @@ With OUTPUTS, the tail of a tool result's output too."
                        (format "[%s]\n%s" (if (harness-json-true-p (plist-get node :is-error)) "it failed" "output")
                                (if (> (length out) 600) (concat "…" (substring out -600)) out)))))))
 
+(defun harness-pet--about (session-id &optional nameless)
+  "What the pet reads first about SESSION-ID: a line of its name and project.
+\"Session \\\"NAME\\\", in project PROJECT.\", without the name when
+NAMELESS; \"\" when there is nothing to say."
+  (pcase-let* ((`(,name ,project ,_root) (harness-pet--session-facts session-id))
+               (name (and (not nameless) name)))
+    (cond ((and name project) (format "Session \"%s\", in project %s.\n" name project))
+          (project (format "A session in project %s.\n" project))
+          (name (format "Session \"%s\".\n" name))
+          (t ""))))
+
 (defun harness-pet--context (session-id nodes &optional outputs)
   "The transcript the pet reads: SESSION-ID's name and project, then NODES.
 With OUTPUTS, tool results show the tail of their output.  At most about
 3000 characters, the end kept."
-  (pcase-let* ((`(,name ,project ,_root) (harness-pet--session-facts session-id))
-               (lines (delq nil (mapcar (lambda (n) (harness-pet--node-line n outputs)) nodes)))
-               (text (string-join lines "\n")))
-    (concat (cond ((and name project) (format "Session \"%s\", in project %s.\n" name project))
-                  (project (format "A session in project %s.\n" project))
-                  (name (format "Session \"%s\".\n" name))
-                  (t ""))
+  (let* ((lines (delq nil (mapcar (lambda (n) (harness-pet--node-line n outputs)) nodes)))
+         (text (string-join lines "\n")))
+    (concat (harness-pet--about session-id)
             (if (> (length text) 3000) (concat "…" (substring text -3000)) text))))
 
 (defun harness-pet--recent (session-id &optional limit)
@@ -1056,9 +1275,7 @@ and so it does for an internal session's prompt (`harness-pet--internal-p')."
       (let ((text (plist-get node :content)))
         (when (and (not (harness-string-blank-p text)) (harness-pet--may-speak-p session-id))
           (let ((addressed (harness-pet--addressed-p text)))
-            (when (or addressed
-                      (and (>= (- (float-time) harness-pet--last-unasked) (or harness-pet-cooldown 0))
-                           (harness-pet--chance-p)))
+            (when (or addressed (and (harness-pet--cool-p) (harness-pet--chance-p)))
               ;; Out of the append that announced the message.
               (harness-run-soon #'harness-pet--speak-about-message session-id (plist-get node :id)
                                 addressed))))))))
@@ -1165,8 +1382,7 @@ nothing."
       (when-let* ((nodes (harness-pet--turn-nodes session-id)))
         (when (eq reason 'end-turn)
           (harness-pet--gain 1 session-id))
-        (when (and (harness-pet--may-speak-p session-id)
-                   (>= (- (float-time) harness-pet--last-unasked) (or harness-pet-cooldown 0)))
+        (when (and (harness-pet--may-speak-p session-id) (harness-pet--cool-p))
           (when-let* ((why (harness-pet-turn-reason nodes)))
             (harness-run-soon #'harness-pet--maybe-speak why
                               (harness-pet--context session-id (last nodes 12) t)
@@ -1182,7 +1398,10 @@ Turned off, it does nothing."
 
 (defun harness-pet--gain (xp &optional session-id)
   "Give the pet XP experience; it may remark on growing a level.
-SESSION-ID is the session it grew by, which a remark is about."
+SESSION-ID is the session it grew by.  A remark is about that session,
+in its chat, while the chat is seen; else it is about the pet itself,
+for wherever the pet shows: a level is the pet's news, not the
+session's, and a task done off screen still makes it grow."
   (let* ((before (or (plist-get harness-pet--pet :xp) 0))
          (after (+ before xp)))
     (harness-pet--set :xp after)
@@ -1191,9 +1410,120 @@ SESSION-ID is the session it grew by, which a remark is about."
         (progn
           (harness-pet--changed)
           (harness-run-soon #'harness-pet--maybe-speak 'level-up
-                            (format "You are level %d now." (harness-pet-level after)) t session-id))
+                            (format "You are level %d now." (harness-pet-level after)) t
+                            (and session-id (harness-pet--seen-p session-id) session-id)))
       (when (harness-pet--watched-p)
         (harness-pet--changed)))))
+
+;;;; What the harness does: its system messages
+
+;; A session's new name and its compaction are what the harness tells a
+;; chat in a hint; the pet tells them too, as its own news, in that
+;; session's chat (`harness-pet--system-reasons').  Asked-like: no
+;; cooldown, but never two lines within `harness-pet--min-gap', so news
+;; that comes while the pet speaks waits for it (`harness-pet--wait').
+
+(defun harness-pet--on-session-updated (session-id changes)
+  "Tell of SESSION-ID's new name, when CHANGES, of `session/updated', gave it one.
+The pet says it as its own news, in that session's chat, cooldown or
+not; when the model has nothing, plainly: \"New name: NAME.\"  A name
+taken away is no news, nor an internal session's."
+  (let ((name (plist-get changes :name)))
+    (when (and (harness-pet--enabled-p) (stringp name) (not (harness-string-blank-p name))
+               (not (harness-pet--internal-p session-id)))
+      (harness-pet--load)
+      (when harness-pet--pet
+        (let ((name (harness-pet--squash name 120)))
+          (harness-run-soon #'harness-pet--maybe-speak 'rename
+                            (concat (harness-pet--about session-id t) "Its new name: " name)
+                            t session-id (format "New name: %s." name)))))))
+
+(defun harness-pet--compaction-text (session-id node)
+  "What the pet reads of SESSION-ID's compaction into NODE: how much went, and how.
+From NODE's `:meta': the tokens it compacted, its kind and the tokens
+of the summary."
+  (let* ((meta (plist-get node :meta))
+         (tokens (lambda (n) (if (numberp n) (harness-format-tokens n) "some"))))
+    (concat (harness-pet--about session-id)
+            (format "About %s tokens of conversation %s."
+                    (funcall tokens (plist-get meta :input-tokens))
+                    (pcase (harness-pet--str (plist-get meta :compaction))
+                      ("transcript" "went to a file, which the agent now knows only from a note pointing at it")
+                      ("fresh" "were let go: the agent starts afresh, with nothing carried over")
+                      ("truncate" "lost their oldest part: those messages are gone")
+                      (_ (format "became a summary of about %s tokens"
+                                 (funcall tokens (plist-get meta :summary-tokens)))))))))
+
+(defun harness-pet--on-compaction-done (session-id node)
+  "Tell of SESSION-ID's compaction, NODE the compaction node it ended with.
+As the pet's own news, with a joke about forgetting
+\(`harness-pet--steers'), in that session's chat, cooldown or not; when
+the model has nothing, plainly."
+  (when (and (harness-pet--enabled-p) (not (harness-pet--internal-p session-id)))
+    (harness-pet--load)
+    (when harness-pet--pet
+      (harness-run-soon #'harness-pet--maybe-speak 'compact
+                        (harness-pet--compaction-text session-id node) t session-id
+                        "Compacted. Everything before this is a blur."))))
+
+;;;; Recaps, for an overview
+
+;; An overview -- the task board, the session list -- lists many
+;; sessions, and the pet's word about one of them there is a recap: the
+;; recap module's, put the pet's way and naming the session.  A task's
+;; card is recapped as it works (`recap/done'); a session that is no
+;; task's gets one when its turn ends while an overview lists it, its
+;; chat not on screen (`recap/session-done').  Unasked, so at most once
+;; every `harness-pet-cooldown' seconds.
+
+(declare-function harness-recap-session "harness-recap" (session-id &optional force))
+
+(defun harness-pet--task-session-p (session-id)
+  "Non-nil when SESSION-ID is a task's: its card is recapped on its own."
+  (and (harness-method-exists-p 'task/for-session)
+       (ignore-errors (harness-call 'task/for-session session-id))
+       t))
+
+(defun harness-pet--on-recap (session-id recap)
+  "Say RECAP, a recap of SESSION-ID just made, on an overview that lists it.
+On `recap/done', a task card's, and `recap/session-done', another
+session's: the pet puts it its own way, naming the session, while an
+overview on screen lists it, unasked."
+  (when (and (harness-pet--enabled-p) (stringp recap) (not (harness-string-blank-p recap))
+             (not (harness-pet--internal-p session-id)))
+    (harness-pet--load)
+    (when (and harness-pet--pet (harness-pet--may-speak-p session-id t) (harness-pet--cool-p))
+      (harness-run-soon #'harness-pet--maybe-speak 'recap
+                        (concat (harness-pet--about session-id) "Its latest recap: "
+                                (harness-pet--squash recap 300))
+                        nil session-id))))
+
+(defvar harness-pet--recap-asked 0
+  "When the pet last had a session recapped for an overview, as a float time.")
+
+(defun harness-pet--on-turn-ended-overview (session-id _reason)
+  "Have SESSION-ID recapped for the overview that lists it, when its turn ended.
+Only a session that is no task's -- a task's card is recapped on its
+own -- whose chat is not on screen, where the pet speaks of it first
+hand, and only while the pet may speak on that overview and its
+cooldown is over, so that no recap is made it would not say: one at
+most every `harness-pet-cooldown' seconds, however many turns end.  The
+recap module makes it (`harness-recap-session'), and its
+`recap/session-done' brings it back here."
+  (when (and (harness-pet--enabled-p) (fboundp 'harness-recap-session)
+             (not (harness-pet--internal-p session-id)))
+    (harness-pet--load)
+    (when (and harness-pet--pet
+               (harness-pet--may-speak-p session-id t)
+               (not (harness-pet--seen-p session-id))
+               (harness-pet--cool-p)
+               (>= (- (float-time) harness-pet--recap-asked)
+                   (max harness-pet--min-gap (or harness-pet-cooldown 0)))
+               (not (harness-pet--task-session-p session-id)))
+      (setq harness-pet--recap-asked (float-time))
+      (condition-case err
+          (harness-recap-session session-id t)
+        (error (harness-log 'warn "pet: no recap of %s: %s" session-id (harness-error-message err)))))))
 
 ;;;; Methods
 
@@ -1267,26 +1597,44 @@ when the pet is turned off: turning it off keeps it, for later."
   (harness-pet--require-enabled)
   (harness-pet--load)
   (setq harness-pet--pet nil harness-pet--speaking nil)
+  (harness-pet--stop-waiting)
   (harness-pet--save)
   (harness-pet--changed)
   (harness-pet-view))
 
-(harness-defmethod pet/watch (client on &optional sessions)
-  "Say whether the UI CLIENT shows the pet now: ON true or false.
-CLIENT is an id the UI makes up for itself.  With SESSIONS, a list of
-session ids, it shows the pet only beside those sessions -- what it
-says about them above their chats, say -- and not the pet itself.  The
-pet only speaks where it would be seen: about anything while some UI
-shows the pet itself, about a session while some UI shows it beside
-that session.  Return the pet (`pet/get')."
+(defun harness-pet--watch-ids (ids)
+  "IDS, session ids as `pet/watch' takes them, as a new list.
+They come as a list or a vector; signal unless that is what they are."
+  (let ((ids (if (vectorp ids) (append ids nil) ids)))
+    (unless (and (proper-list-p ids) (cl-every #'stringp ids))
+      (signal 'harness-error (list "pet/watch takes lists of session ids")))
+    (copy-sequence ids)))
+
+(harness-defmethod pet/watch (client on &optional sessions self overview)
+  "Say where the UI CLIENT shows the pet now: ON true, or false for nowhere.
+CLIENT is an id the UI makes up for itself.  Where it shows it:
+
+- SESSIONS, a list of session ids: beside those sessions' chats, where
+  what the pet says about each shows.  It speaks about a session's work
+  only while some UI shows that session's chat.
+- SELF true: the pet itself, its buffer or its figure on an overview,
+  where what it says about nothing in particular shows -- a petting, its
+  first words, a level it grew.  ON true without SESSIONS or OVERVIEW
+  means this too, as a UI from before the others says it.
+- OVERVIEW, a list of session ids: an overview -- the task board, the
+  session list -- lists those sessions, and shows the pet's recaps of
+  them (`recap/done', `recap/session-done').
+
+A UI says it shows the pet only while someone is at the screen.
+Return the pet (`pet/get')."
   (unless (and (stringp client) (not (string-empty-p client)))
     (signal 'harness-error (list "pet/watch needs a client id")))
-  (let ((sessions (if (vectorp sessions) (append sessions nil) sessions)))
-    (unless (and (proper-list-p sessions) (cl-every #'stringp sessions))
-      (signal 'harness-error (list "pet/watch takes a list of session ids")))
-    (setq sessions (copy-sequence sessions))
+  (let ((sessions (harness-pet--watch-ids sessions))
+        (overview (harness-pet--watch-ids overview)))
     (if (harness-json-true-p on)
-        (puthash client (or sessions t) harness-pet--watchers)
+        (puthash client (list :self (if (null self) (not (or sessions overview)) (harness-json-true-p self))
+                              :sessions sessions :overview overview)
+                 harness-pet--watchers)
       (remhash client harness-pet--watchers)))
   (harness-pet-view))
 
@@ -1299,31 +1647,49 @@ That is `harness-pet-overrides': every place it shows, shows it anew."
     (harness-pet--changed)))
 
 (defun harness-pet--init ()
-  "Read the pet and listen for what it reacts to."
+  "Read the pet and listen for what it reacts to.
+Each of these may run again: a subscription made already stays one."
   (harness-pet--load)
   (harness-on 'session/node-added #'harness-pet--on-node-added 70)
   (harness-on 'agent/turn-ended #'harness-pet--on-turn-ended 70)
+  ;; After the recap module's own (40), which recaps a task's card.
+  (harness-on 'agent/turn-ended #'harness-pet--on-turn-ended-overview 75)
   (harness-on 'task/done #'harness-pet--on-task-done 70)
   (harness-on 'config/changed #'harness-pet--on-config-changed 70)
+  (harness-on 'session/updated #'harness-pet--on-session-updated 70)
+  (harness-on 'compaction/done #'harness-pet--on-compaction-done 70)
+  (harness-on 'recap/done #'harness-pet--on-recap 70)
+  (harness-on 'recap/session-done #'harness-pet--on-recap 70)
   (add-hook 'kill-emacs-hook #'harness-pet-flush))
 
 (defun harness-pet--shutdown ()
   "Save what the pet gained, and stop listening."
   (harness-pet-flush)
+  (harness-pet--stop-waiting)
   (remove-hook 'kill-emacs-hook #'harness-pet-flush)
   (harness-off (cons 'session/node-added #'harness-pet--on-node-added))
   (harness-off (cons 'agent/turn-ended #'harness-pet--on-turn-ended))
+  (harness-off (cons 'agent/turn-ended #'harness-pet--on-turn-ended-overview))
   (harness-off (cons 'task/done #'harness-pet--on-task-done))
-  (harness-off (cons 'config/changed #'harness-pet--on-config-changed)))
+  (harness-off (cons 'config/changed #'harness-pet--on-config-changed))
+  (harness-off (cons 'session/updated #'harness-pet--on-session-updated))
+  (harness-off (cons 'compaction/done #'harness-pet--on-compaction-done))
+  (harness-off (cons 'recap/done #'harness-pet--on-recap))
+  (harness-off (cons 'recap/session-done #'harness-pet--on-recap)))
 
 (harness-declare-event 'pet/changed "(PET) after the companion pet changed; PET as `pet/get' returns it.")
-(harness-declare-event 'pet/said "(SAYING) after the companion pet said something: (:text :ts :reason :session :session-name).")
+(harness-declare-event 'pet/said "(SAYING) after the companion pet said something: (:text :ts :reason :session :session-name :scope), SCOPE \"pet\", \"session\" or \"overview\" (`harness-pet--scope').")
 
 (harness-define-module 'pet
   :doc "A companion pet: hatched with random bones, named and voiced by a cheap model, growing with use."
   :requires '(store provider)
   :init #'harness-pet--init
   :shutdown #'harness-pet--shutdown)
+
+;; A reload does not initialise a running module again: subscribe the
+;; handlers this version adds now.
+(when (harness-module-ready-p 'pet)
+  (harness-pet--init))
 
 (provide 'harness-pet)
 ;;; harness-pet.el ends here

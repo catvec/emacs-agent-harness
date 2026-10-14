@@ -3205,18 +3205,21 @@ Once it hatched, it keeps you company in other places too:
   as Claude Code's companion sits beside its prompt. It is drawn in its
   rarity's colour, with its name beside its eyes, and takes only as many
   lines as it is tall. What it last said about the session shows in a
-  speech bubble on its left, joined to it, until the session's next turn
-  starts. The bubble widens rather than grow taller than the creature.
+  speech bubble on its left, joined to it, for a minute, or until the
+  session's next turn starts. The bubble widens rather than grow taller
+  than the creature.
   Hovering names the pet, and a click opens its buffer. Side
   conversations (BTW) go without it.
 - **The task board.** It sits in the board's bottom right corner in the
-  same way, with the last thing it said about anything. The compose
-  label and settings lines narrow to make room for its bottom rows, so
-  it adds only a few lines of its own. Each task that gets done gives it
-  experience.
+  same way. Its bubble there recaps the board's tasks, or says what it
+  last said about itself, never what it said about a task's work: that
+  stays in the task's chat. The compose label and settings lines narrow
+  to make room for its bottom rows, so it adds only a few lines of its
+  own. Each task that gets done gives it experience.
 - **The session list.** It stands under the last row, after a blank
-  line, at the right, with the last thing it said about anything. It is
-  no session's: `RET` and the row commands find nothing there.
+  line, at the right, its bubble recapping the sessions on the list as
+  on the board. It is no session's: `RET` and the row commands find
+  nothing there.
 - **Small windows.** A window narrower than 40 columns or shorter than
   20 lines shows its face on one line instead, as in `(·>`. The face
   comes with its name or the first few of its words, and only blinks:
@@ -3234,13 +3237,32 @@ them. nil keeps the pet to its own buffer. `harness-ui-pet-figure`
 chooses how it shows in the chats, on the board and under the session
 list: `whole` (the default) or `face`.
 
-While it is on screen (its buffer, the task board, the session list, or
-a chat whose session it would talk about), it now and then says a line.
-It may comment on the message you just sent, on a test run that failed
-or on a big change. It always answers when you call it by name in a
-message or pet it (`p`). It grows a level as you work. `r` renames it,
-`m` mutes it, `s` spins it and `R` lets it go, after which the next egg
-hatches another.
+While you are at your Emacs (one of its frames has focus) and it is on
+screen, it now and then says a line, and each line shows only where it
+belongs:
+
+- **In a chat**, about that chat's session: the message you just sent,
+  a test run that failed or a big change. It also tells you, as its own
+  news, when the harness renames the session or compacts its
+  conversation, the latter with a joke about forgetting (the Men in
+  Black neuralyzer and the like). Those it says even while it would
+  otherwise keep quiet.
+- **On the task board and the session list**, recaps of the sessions
+  they list. On the board these are the recaps the task cards already
+  get. A session on the list that is no task's is recapped when a turn
+  of it ends while its own chat is not on screen.
+- **In its buffer and wherever its figure shows**, what it says about
+  itself: when you pet it, its first words, a level it grew.
+
+It always answers when you call it by name in a message or pet it
+(`p`). Its voice is dry: a colleague at the next desk who notices
+things, never cutesy. It may start a line with a small gesture, as in
+*squints at the diff*; set `harness-pet-actions` to nil to keep it to
+words. A line leaves its bubble after a minute
+(`harness-ui-pet-saying-lifetime`; nil keeps it until the next one),
+and its buffer keeps the last few. It grows a level as you work. `r`
+renames it, `m` mutes it, `s` spins it and `R` lets it go, after which
+the next egg hatches another.
 
 It moves, too. Every 6 to 14 seconds the pet in a chat, on the board or
 under the session list blinks, blinks twice or wiggles, and it fidgets
@@ -3257,11 +3279,13 @@ why. Nothing moves while the pet is off screen, and
 `harness-ui-pet-animations` set to nil keeps it still.
 
 It costs little. It never asks a model anything about what is not on
-screen, nor while it is muted. It comments unasked at most once a minute
-(`harness-pet-cooldown`), and on your messages only by chance
-(`harness-pet-chance`). It then asks a cheap model (`harness-pet-model`)
-for one short line, with no thinking and no context from your project
-beyond the last few messages. Nothing runs while nothing happens: the
+screen, nor while no frame of your Emacs has focus, nor while it is
+muted. It comments unasked at most once a minute
+(`harness-pet-cooldown`), recaps included, and on your messages only by
+chance (`harness-pet-chance`). It then asks a cheap model
+(`harness-pet-model`) for one short line, with no thinking and no
+context from your project beyond the last few messages, or the recap.
+Nothing runs while nothing happens: the
 creature in a chat, on the board or under the list is drawn again only
 when it changes, says something else, or has more or less room, and
 never to make it move. A frame changes how a few of the buffer's lines

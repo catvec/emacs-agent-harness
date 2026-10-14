@@ -24,7 +24,11 @@
 (defvar harness-pet--last-unasked)
 (defvar harness-pet--last-spoke)
 (defvar harness-pet--last-pet)
+(defvar harness-pet--recap-asked)
+(defvar harness-pet--waiting)
+(defvar harness-pet--min-gap)
 (defvar harness-pet--save-timer)
+(defvar harness-pet-actions)
 (defvar harness-pet-reactions)
 (defvar harness-pet-enabled)
 (defvar harness-pet-model)
@@ -47,6 +51,8 @@
 (declare-function harness-pet-turn-reason "harness-pet")
 (declare-function harness-pet-flush "harness-pet")
 (declare-function harness-pet--soul "harness-pet")
+(declare-function harness-pet--stop-waiting "harness-pet")
+(declare-function harness-pet--maybe-speak "harness-pet")
 (declare-function harness-acp-connect "harness-acp")
 (declare-function harness-acp-request "harness-acp")
 (declare-function harness-acp-set-handler "harness-acp")
@@ -55,9 +61,11 @@
 (defun harness-pet-test-reset ()
   "Forget the pet this process knows of, as a fresh process would."
   (when (timerp harness-pet--save-timer) (cancel-timer harness-pet--save-timer))
+  (when (fboundp 'harness-pet--stop-waiting) (harness-pet--stop-waiting))
   (setq harness-pet--pet nil harness-pet--loaded nil harness-pet--dirty nil
         harness-pet--hatching nil harness-pet--speaking nil harness-pet--save-timer nil
-        harness-pet--last-unasked 0 harness-pet--last-spoke 0 harness-pet--last-pet 0)
+        harness-pet--last-unasked 0 harness-pet--last-spoke 0 harness-pet--last-pet 0
+        harness-pet--recap-asked 0)
   (clrhash harness-pet--watchers))
 
 (defmacro harness-pet-test-with (&rest body)
@@ -95,9 +103,11 @@ cooldown), and no UI shows it until BODY says one does."
   "Hatch the pet with the demo model; return the view."
   (harness-test-await (harness-call 'pet/hatch)))
 
-(defun harness-pet-test-watch (&optional on)
-  "Have a UI show the pet (ON nil) or stop showing it."
-  (harness-call 'pet/watch "test-ui" (if (eq on 'off) :false t)))
+(defun harness-pet-test-watch (&optional on &rest sessions)
+  "Have a UI show the pet itself and the chats of SESSIONS, or (ON `off') neither."
+  (if (eq on 'off)
+      (harness-call 'pet/watch "test-ui" :false)
+    (harness-call 'pet/watch "test-ui" t sessions (and sessions t))))
 
 (defmacro harness-pet-test-counting-requests (var &rest body)
   "Run BODY with VAR collecting the requests made to providers, newest first."
@@ -340,8 +350,8 @@ cooldown), and no UI shows it until BODY says one does."
         (harness-call 'session/append sid (list :kind 'user :content (format "hey %s, look" name)))
         (sleep-for 0.1)
         (should (null requests))
-        ;; Muted.
-        (harness-pet-test-watch)
+        ;; Muted, though the pet and the session's chat are on screen.
+        (harness-pet-test-watch nil sid)
         (harness-call 'pet/set-muted t)
         (should (eq t (plist-get (harness-call 'pet/get) :muted)))
         (harness-call 'session/append sid (list :kind 'user :content (format "hey %s, look" name)))
@@ -366,12 +376,12 @@ cooldown), and no UI shows it until BODY says one does."
   "A message that names the pet gets an answer about it, whatever the chance."
   (harness-pet-test-with
     (harness-pet-test-hatch)
-    (harness-pet-test-watch)
     (let* ((sid (harness-pet-test-session))
            (name (plist-get harness-pet--pet :name))
            (said (harness-pet-test-said))
            (harness-pet-chance 0)
            (harness-pet-cooldown 3600))
+      (harness-pet-test-watch nil sid)
       (harness-pet-test-counting-requests requests
         (harness-call 'session/append sid (list :kind 'user :content "please fix the tokenizer"))
         (sleep-for 0.1)
@@ -399,10 +409,10 @@ cooldown), and no UI shows it until BODY says one does."
   "Unasked, the pet comments by chance, and then not again until the cooldown passed."
   (harness-pet-test-with
     (harness-pet-test-hatch)
-    (harness-pet-test-watch)
     (let ((sid (harness-pet-test-session))
           (said (harness-pet-test-said))
           (harness-pet-cooldown 3600))
+      (harness-pet-test-watch nil sid)
       (harness-pet-test-counting-requests requests
         (harness-call 'session/append sid (list :kind 'user :content "rewrite the tokenizer"))
         (harness-test-wait (lambda () (funcall said)) 5 "a comment")
@@ -426,9 +436,9 @@ cooldown), and no UI shows it until BODY says one does."
   "Messages of the harness or of other agents neither grow the pet nor make it speak."
   (harness-pet-test-with
     (harness-pet-test-hatch)
-    (harness-pet-test-watch)
     (let ((sid (harness-pet-test-session))
           (name (plist-get harness-pet--pet :name)))
+      (harness-pet-test-watch nil sid)
       (harness-pet-test-counting-requests requests
         (harness-call 'session/append sid (list :kind 'user :content (format "%s, do the task" name)
                                                 :meta (list :from (list :kind 'system :source "tasks"))))
@@ -456,9 +466,9 @@ the call's usage: the pet records none itself, so none counts twice."
                  (:type done :stop-reason end-turn))))
           (harness-pet-test-hatch))
         (should (equal "Pet" (plist-get (car requests) :job)))
-        (harness-pet-test-watch)
         (let* ((sid (harness-pet-test-session))
                (said (harness-pet-test-said)))
+          (harness-pet-test-watch nil sid)
           (harness-call 'session/append sid (list :kind 'user :content "rewrite the tokenizer"))
           (harness-test-wait (lambda () (funcall said)) 5 "a comment")
           (should (equal (plist-get (harness-call 'session/get sid) :project)
@@ -480,14 +490,21 @@ the call's usage: the pet records none itself, so none counts twice."
       (harness-pet-test-counting-requests requests
         (harness-call 'pet/pet)
         (harness-call 'pet/pet)
-        (harness-test-wait (lambda () (funcall said)) 5 "a purr")
+        (harness-test-wait (lambda () (funcall said)) 5 "a word on it")
         (should (= 1 (length requests)))
         (should (equal "pet" (plist-get (car (funcall said)) :reason)))
+        ;; About no session: the pet's own, for wherever it shows itself.
+        (should (equal "pet" (plist-get (car (funcall said)) :scope)))
         (should (string-match-p "you were just petted; that makes 1 pets"
                                 (harness-pet-test-request-text (car requests))))
-        ;; Its voice keeps a petting innocent.
-        (should (string-match-p "the kind a cartoon pet makes. Keep it all wholesome: nothing about how a touch feels, nothing that could read as sensual or suggestive"
+        ;; Its voice is a dry observer's, and keeps a petting so.
+        (should (string-match-p "Your register is dry and observant" (plist-get (car requests) :system)))
+        (should (string-match-p "nothing affectionate, physical or sensual: you are a character, not a lap pet"
                                 (plist-get (car requests) :system)))
+        (should (string-match-p "never touching, nuzzling, nestling" (plist-get (car requests) :system)))
+        (should (string-match-p "a petting is noted, not swooned over"
+                                (harness-pet-test-request-text (car requests))))
+        (should (string-match-p "Acknowledged" (plist-get (car (funcall said)) :text)))
         ;; Within the gap: petting again counts, but asks nothing.
         (harness-test-wait (lambda () (eq :false (plist-get (harness-call 'pet/get) :thinking))) 5 "quiet")
         (harness-call 'pet/pet)
@@ -535,10 +552,10 @@ the call's usage: the pet records none itself, so none counts twice."
   "A turn of the user's whose tests failed draws a remark; a turn the harness started does not."
   (harness-pet-test-with
     (harness-pet-test-hatch)
-    (harness-pet-test-watch)
     (let ((sid (harness-pet-test-session))
           (said (harness-pet-test-said))
           (harness-pet-chance 0))
+      (harness-pet-test-watch nil sid)
       (harness-call 'session/append sid (list :kind 'user :content "run the tests"))
       (harness-call 'session/append sid (list :kind 'tool-call :tool "bash" :call-id "c1" :title "make test"))
       (harness-call 'session/append sid (list :kind 'tool-result :call-id "c1" :output "40 passed, 2 failed"))
@@ -550,6 +567,8 @@ the call's usage: the pet records none itself, so none counts twice."
       ;; 2 for the message, 1 for the turn.
       (should (= 3 (plist-get (harness-call 'pet/get) :xp))))
     (let ((sid (harness-pet-test-session)))
+      ;; Its chat on screen: what keeps the pet quiet is who started the turn.
+      (harness-pet-test-watch nil sid)
       (harness-pet-test-counting-requests requests
         (setq harness-pet--last-unasked 0 harness-pet--last-spoke 0)
         (harness-call 'session/append sid (list :kind 'user :content "Work on the task"
@@ -581,7 +600,10 @@ the call's usage: the pet records none itself, so none counts twice."
         (harness-call 'session/append sid (list :kind 'user :content "more"))
         (should (= 2 (plist-get (car changes) :level)))
         (harness-test-wait (lambda () (funcall said)) 5 "a remark on growing")
-        (should (equal "level-up" (plist-get (car (funcall said)) :reason))))
+        (should (equal "level-up" (plist-get (car (funcall said)) :reason)))
+        ;; The session's chat is not on screen: the pet's own news, about no session.
+        (should (equal "pet" (plist-get (car (funcall said)) :scope)))
+        (should-not (plist-get (car (funcall said)) :session)))
       ;; Saved soon, not at once.
       (should harness-pet--dirty)
       (harness-pet-flush)
@@ -646,7 +668,7 @@ the call's usage: the pet records none itself, so none counts twice."
 
 (ert-deftest harness-pet-speaks-only-where-seen ()
   "A UI showing what the pet says beside some sessions lets it speak about those only;
-showing the pet itself lets it speak about anything."
+showing the pet itself lets it speak about itself, and no session's work."
   (harness-pet-test-with
     (harness-pet-test-hatch)
     (let ((s1 (harness-pet-test-session))
@@ -655,10 +677,18 @@ showing the pet itself lets it speak about anything."
       (should-error (harness-call 'pet/watch "test-ui" t "s1") :type 'harness-error)
       (should-error (harness-call 'pet/watch "test-ui" t 7) :type 'harness-error)
       (should-error (harness-call 'pet/watch "test-ui" t (list 1 2)) :type 'harness-error)
+      (should-error (harness-call 'pet/watch "test-ui" t nil nil "s1") :type 'harness-error)
       ;; As a JSON array may come.
       (harness-call 'pet/watch "test-ui" t (vector s1))
-      (should (equal (list s1) (gethash "test-ui" harness-pet--watchers)))
+      (should (equal (list :self nil :sessions (list s1) :overview nil) (gethash "test-ui" harness-pet--watchers)))
       (should (eq t (plist-get (harness-call 'pet/watch "test-ui" t (list s1)) :watching)))
+      ;; Without ids it is the pet itself, as a UI from before them says.
+      (harness-call 'pet/watch "test-ui" t)
+      (should (equal '(:self t :sessions nil :overview nil) (gethash "test-ui" harness-pet--watchers)))
+      (harness-call 'pet/watch "test-ui" t (list s1) t (vector s2))
+      (should (equal (list :self t :sessions (list s1) :overview (list s2))
+                     (gethash "test-ui" harness-pet--watchers)))
+      (harness-call 'pet/watch "test-ui" t (list s1))
       (harness-pet-test-counting-requests requests
         ;; Another session, whose chat is not on screen: nothing.
         (harness-call 'session/append s2 (list :kind 'user :content "rewrite the tokenizer"))
@@ -666,21 +696,221 @@ showing the pet itself lets it speak about anything."
         (harness-call 'pet/pet)
         (sleep-for 0.1)
         (should (null requests))
-        ;; The session on screen: it speaks about that.
+        ;; The session on screen: it speaks about that, for that chat.
         (harness-call 'session/append s1 (list :kind 'user :content "rewrite the tokenizer"))
         (harness-test-wait (lambda () (funcall said)) 5 "a comment on the session on screen")
         (should (equal s1 (plist-get (car (funcall said)) :session)))
+        (should (equal "session" (plist-get (car (funcall said)) :scope)))
         (should (= 1 (length requests)))
         (harness-test-wait (lambda () (eq :false (plist-get (harness-call 'pet/get) :thinking))) 5 "quiet")
-        ;; The pet itself on screen: anything.
+        ;; The pet itself on screen, on a board say: not another session's work.
         (harness-call 'pet/watch "test-ui" t)
         (setq harness-pet--last-unasked 0 harness-pet--last-spoke 0)
         (harness-call 'session/append s2 (list :kind 'user :content "and the parser"))
-        (harness-test-wait (lambda () (= 2 (length (funcall said)))) 5 "a comment on another session")
-        (should (equal s2 (plist-get (cadr (funcall said)) :session)))
+        (sleep-for 0.1)
+        (should (= 1 (length requests)))
+        ;; But a petting: that is about itself.
+        (harness-call 'pet/pet)
+        (harness-test-wait (lambda () (= 2 (length (funcall said)))) 5 "a word on the petting")
+        (should (equal "pet" (plist-get (cadr (funcall said)) :scope)))
+        (should-not (plist-get (cadr (funcall said)) :session))
         ;; Gone from the screen.
         (harness-call 'pet/watch "test-ui" :false)
         (should (eq :false (plist-get (harness-call 'pet/get) :watching)))))))
+
+;;;; Its voice
+
+(ert-deftest harness-pet-actions-follow-the-option ()
+  "With `harness-pet-actions' off the prompt asks for words only, and no action
+survives; on, a dry one may, while a cuddly or sensual one goes all the same."
+  (harness-pet-test-with
+    (harness-pet-test-hatch)
+    (harness-pet-test-watch)
+    (let ((said (harness-pet-test-said)))
+      (harness-pet-test-counting-requests requests
+        (let ((harness-pet-actions nil))
+          (harness-call 'pet/pet)
+          (harness-test-wait (lambda () (funcall said)) 5 "a word on it")
+          (let ((system (plist-get (car requests) :system)))
+            (should (string-match-p "Words only: no actions between asterisks" system))
+            (should-not (string-match-p "action between asterisks now and then" system)))
+          ;; The demo model acts all the same: the action goes, the words stay.
+          (should (equal "Acknowledged. Do that again after the next commit."
+                         (plist-get (car (funcall said)) :text)))
+          (should (equal "Fine." (harness-pet-sanitise "*squints* Fine. *makes a note*" "Biscuit")))
+          (should (null (harness-pet-sanitise "*squints at the diff*" "Biscuit"))))
+        (harness-test-wait (lambda () (eq :false (plist-get (harness-call 'pet/get) :thinking))) 5 "quiet")
+        (setq harness-pet--last-spoke 0)
+        (harness-call 'pet/pet)
+        (harness-test-wait (lambda () (= 2 (length (funcall said)))) 5 "a second word")
+        (should (string-match-p "a dry gesture such as \\*squints at the diff\\*" (plist-get (car requests) :system)))
+        (should (equal "*straightens its hat* Acknowledged. Do that again after the next commit."
+                       (plist-get (cadr (funcall said)) :text)))))
+    ;; On, a dry action stays; a cuddly one goes, as a sensual one does, and the words stay.
+    (should (equal "*squints at the diff* Fine." (harness-pet-sanitise "*squints at the diff* Fine." "Biscuit")))
+    (should (equal "Another commit." (harness-pet-sanitise "*nestles closer* Another commit." "Biscuit")))
+    (should (equal "Tests pass." (harness-pet-sanitise "*Nuzzles your hand, purring* Tests pass." "Biscuit")))
+    (should (equal "*makes a note* Again." (harness-pet-sanitise "*makes a note* *leans into the pat* Again." "Biscuit")))
+    (should (null (harness-pet-sanitise "*snuggles up*" "Biscuit")))
+    ;; The words outside an action are the pet's to choose.
+    (should (equal "It purrs, the build." (harness-pet-sanitise "It purrs, the build." "Biscuit")))))
+
+;;;; What the harness does: a new name, a compaction
+
+(ert-deftest harness-pet-tells-of-a-new-name ()
+  "A session's new name is the pet's news in that chat, whatever the cooldown and
+the chance; not while its chat is not on screen, nor a name taken away."
+  (harness-pet-test-with
+    (harness-pet-test-hatch)
+    (let ((sid (harness-pet-test-session))
+          (other (harness-pet-test-session))
+          (said (harness-pet-test-said))
+          (harness-pet-chance 0)
+          (harness-pet-cooldown 3600))
+      (setq harness-pet--last-unasked (float-time))
+      (harness-pet-test-watch nil sid)
+      (harness-pet-test-counting-requests requests
+        ;; Its chat is not on screen, or no name came: nothing.
+        (harness-call 'session/update other :name "Elsewhere")
+        (harness-emit 'session/updated sid (list :name nil))
+        (harness-emit 'session/updated sid (list :name "  "))
+        (harness-emit 'session/updated sid (list :model "demo:other"))
+        (sleep-for 0.1)
+        (should (null requests))
+        (harness-call 'session/update sid :name "Lexer rewrite")
+        (harness-test-wait (lambda () (funcall said)) 5 "the news")
+        (let ((saying (car (funcall said)))
+              (text (harness-pet-test-request-text (car requests))))
+          (should (= 1 (length requests)))
+          (should (equal "rename" (plist-get saying :reason)))
+          (should (equal sid (plist-get saying :session)))
+          (should (equal "session" (plist-get saying :scope)))
+          (should (equal "*squints at the tab* Lexer rewrite now. It has a ring to it."
+                         (plist-get saying :text)))
+          (should (string-prefix-p "The session you watch was just renamed." text))
+          (should (string-match-p "^Its new name: Lexer rewrite$" text))
+          (should (string-match-p "Tell the user its new name, as your own news" text)))))))
+
+(ert-deftest harness-pet-tells-of-a-compaction ()
+  "A compaction is the pet's news in that chat, with a joke about forgetting, whatever
+the cooldown; when the model has nothing, the pet says it plainly."
+  (harness-pet-test-with
+    (harness-pet-test-hatch)
+    (let ((sid (harness-pet-test-session))
+          (said (harness-pet-test-said))
+          (harness-pet-chance 0)
+          (harness-pet-cooldown 3600))
+      (setq harness-pet--last-unasked (float-time))
+      (harness-pet-test-watch nil sid)
+      (harness-pet-test-counting-requests requests
+        (harness-emit 'compaction/done sid
+                      (list :kind 'compaction :content "Summary."
+                            :meta (list :compaction "summary" :input-tokens 120000 :summary-tokens 3000)))
+        (harness-test-wait (lambda () (funcall said)) 5 "the news")
+        (let ((saying (car (funcall said)))
+              (text (harness-pet-test-request-text (car requests))))
+          (should (equal "compact" (plist-get saying :reason)))
+          (should (equal sid (plist-get saying :session)))
+          (should (equal "session" (plist-get saying :scope)))
+          (should (string-match-p "Neuralyzed" (plist-get saying :text)))
+          (should (string-prefix-p "The conversation you watch was just compacted" text))
+          (should (string-match-p "About 120k tokens of conversation became a summary of about 3\\.0k tokens\\." text))
+          (should (string-match-p "a joke about forgetting: a memory wipe in the manner of the neuralyzer of Men in Black"
+                                  text)))
+        (harness-test-wait (lambda () (eq :false (plist-get (harness-call 'pet/get) :thinking))) 5 "quiet")
+        ;; The model has nothing to say: the pet tells it plainly.
+        (setq harness-pet--last-spoke 0)
+        (let ((harness-provider-demo-script-override '((:type done :stop-reason error :error "no credit"))))
+          (harness-emit 'compaction/done sid (list :kind 'compaction :meta (list :compaction "fresh")))
+          (harness-test-wait (lambda () (= 2 (length (funcall said)))) 5 "the plain news"))
+        (should (equal "Compacted. Everything before this is a blur." (plist-get (cadr (funcall said)) :text)))
+        (should (equal "compact" (plist-get (cadr (funcall said)) :reason)))
+        (should (string-match-p "were let go" (harness-pet-test-request-text (car requests))))))))
+
+(ert-deftest harness-pet-news-waits-for-its-turn ()
+  "News that comes while the pet is saying something is told once it is free."
+  (harness-pet-test-with
+    (harness-pet-test-hatch)
+    (let ((sid (harness-pet-test-session))
+          (said (harness-pet-test-said))
+          (harness-pet--min-gap 0.3))
+      (harness-pet-test-watch nil sid)
+      (harness-call 'pet/pet)
+      (should harness-pet--speaking)
+      ;; It is speaking: the news waits.
+      (should-not (harness-pet--maybe-speak 'rename "Its new name: Lexer rewrite" t sid "New name: Lexer rewrite."))
+      (should (eq 'rename (plist-get harness-pet--waiting :reason)))
+      (harness-test-wait (lambda () (= 2 (length (funcall said)))) 5 "the news after the petting")
+      (should (equal '("pet" "rename") (mapcar (lambda (s) (plist-get s :reason)) (funcall said))))
+      (should (equal sid (plist-get (cadr (funcall said)) :session)))
+      (should-not harness-pet--waiting)
+      ;; Not two lines within the gap.
+      (should (>= (- (plist-get (cadr (funcall said)) :ts) (plist-get (car (funcall said)) :ts)) 0.25)))))
+
+;;;; Overviews
+
+(ert-deftest harness-pet-recaps-for-an-overview ()
+  "A recap of a session an overview on screen lists is the pet's word there, unasked;
+not that of a session no overview lists, nor one while no overview is on screen."
+  (harness-pet-test-with
+    (harness-pet-test-hatch)
+    (let ((listed (harness-pet-test-session))
+          (other (harness-pet-test-session))
+          (said (harness-pet-test-said)))
+      (harness-pet-test-counting-requests requests
+        ;; The pet itself on screen, no overview: nothing.
+        (harness-pet-test-watch)
+        (harness-emit 'recap/session-done listed "Rewrote the lexer; tests pass.")
+        (sleep-for 0.1)
+        (should (null requests))
+        ;; A board that lists one of them, and not the other.
+        (harness-call 'pet/watch "test-ui" t nil t (list listed))
+        (harness-emit 'recap/done other "Fixing the parser.")
+        (harness-emit 'recap/session-done listed "  ")
+        (sleep-for 0.1)
+        (should (null requests))
+        (harness-emit 'recap/session-done listed "Rewrote the lexer; tests pass.")
+        (harness-test-wait (lambda () (funcall said)) 5 "a recap")
+        (let ((saying (car (funcall said)))
+              (text (harness-pet-test-request-text (car requests))))
+          (should (equal "recap" (plist-get saying :reason)))
+          (should (equal listed (plist-get saying :session)))
+          (should (equal "overview" (plist-get saying :scope)))
+          (should (equal "*checks its notes* Parser work is still at it." (plist-get saying :text)))
+          (should (string-prefix-p "Here is a recap of one of the sessions on the overview" text))
+          (should (string-match-p "Session \"Parser work\"" text))
+          (should (string-match-p "Its latest recap: Rewrote the lexer; tests pass\\." text)))
+        (harness-test-wait (lambda () (eq :false (plist-get (harness-call 'pet/get) :thinking))) 5 "quiet")
+        ;; Unasked: not again within the cooldown.
+        (setq harness-pet--last-spoke 0)
+        (let ((harness-pet-cooldown 3600))
+          (harness-emit 'recap/done listed "Still at it.")
+          (sleep-for 0.1)
+          (should (= 1 (length requests))))))))
+
+(ert-deftest harness-pet-has-an-overview-session-recapped ()
+  "A turn that ends in a session an overview on screen lists, its chat not on
+screen, has the recap module recap it, at most once a cooldown."
+  (harness-pet-test-with
+    (harness-pet-test-hatch)
+    (let ((listed (harness-pet-test-session))
+          (asked nil))
+      (cl-letf (((symbol-function 'harness-recap-session)
+                 (lambda (sid &optional force) (push (list sid force) asked) nil)))
+        ;; Its chat on screen too: the pet speaks of it first hand there.
+        (harness-call 'pet/watch "test-ui" t (list listed) t (list listed))
+        (harness-emit 'agent/turn-ended listed 'end-turn)
+        (should (null asked))
+        ;; No overview lists it.
+        (harness-call 'pet/watch "test-ui" t)
+        (harness-emit 'agent/turn-ended listed 'end-turn)
+        (should (null asked))
+        (harness-call 'pet/watch "test-ui" t nil t (list listed))
+        (harness-emit 'agent/turn-ended listed 'end-turn)
+        (should (equal (list (list listed t)) asked))
+        ;; However many turns end, one at most a cooldown.
+        (harness-emit 'agent/turn-ended listed 'end-turn)
+        (should (= 1 (length asked)))))))
 
 ;;;; Turned off
 
@@ -834,6 +1064,7 @@ the record keeps what it hatched with, which comes back when they go."
           ;; It answers to the name it goes by now, not the one it hatched with.
           (setq harness-pet--last-unasked 0 harness-pet--last-spoke 0)
           (let ((sid (harness-pet-test-session)))
+            (harness-pet-test-watch nil sid)
             (harness-call 'session/append sid (list :kind 'user :content (format "hey %s, look" hatched)))
             (sleep-for 0.1)
             (should (= 1 (length requests)))

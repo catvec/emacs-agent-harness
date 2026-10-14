@@ -5953,14 +5953,28 @@ again brings it back as it was.
 - `pet/pet` (counts, +1 xp at most once a minute, and it answers),
   `pet/rename NAME` (one line, at most `harness-pet--max-name`
   characters), `pet/set-muted BOOL`, `pet/release` (forgets it; the next
-  egg brings a new seed) → the VIEW.  `pet/watch CLIENT ON [SESSIONS]`
-  → the VIEW: CLIENT, an id the UI makes up, shows the pet now or not;
-  with SESSIONS, a list of session ids, it shows the pet only beside
-  those sessions (what it says above their chats), not the pet itself.
-- It speaks only where it would be seen: about a session while some
-  client shows the pet itself or shows it beside that session, about
-  nothing in particular (a petting, hatching) only while some client
-  shows the pet itself; and only while it is on, not muted, and
+  egg brings a new seed) → the VIEW.  `pet/watch CLIENT ON [SESSIONS
+  [SELF [OVERVIEW]]]` → the VIEW: CLIENT, an id the UI makes up, shows
+  the pet now or not (ON false: nowhere).  SESSIONS, a list of session
+  ids: the chats it shows the pet beside, where what it says about each
+  shows.  SELF true: it shows the pet itself, its buffer or its figure on
+  an overview.  OVERVIEW, a list of session ids: the sessions an
+  overview it shows (the task board, the session list) lists, whose
+  recaps show there.  ON true with neither list means SELF, as a client
+  from before them says it.  A client says it shows the pet only while
+  someone is at the screen (in Emacs, while one of its frames has
+  focus), so nothing is asked of a model while nobody would read it.
+  `harness-pet--watchers` keeps `(:self :sessions :overview)` per
+  client.
+- It speaks only where it would be seen, and each line is said for one
+  scope (`harness-pet--scope`), which the saying keeps as `:scope`:
+  `session`, about a session's work, only while some client shows that
+  session's chat, and shown there only; `pet`, about nothing in
+  particular (a petting, hatching, a level gained with the session's
+  chat off screen), only while some client shows the pet itself;
+  `overview`, a recap of a session, only while some client shows an
+  overview that lists it.  The pet's own buffer and an overview never
+  make a session's work seen.  And only while it is on, not muted, and
   `harness-pet-reactions` is on; never two lines within
   `harness-pet--min-gap` seconds, never two at once.  Asked -- a message
   of the user's that names it, a petting, hatching, a level gained --
@@ -5971,16 +5985,45 @@ again brings it back as it was.
   otherwise (`error`) or changed more than `harness-pet--large-diff`
   lines (`large-diff`), see `harness-pet-turn-reason`.  It reads the
   session's name, its project and the last nodes of the transcript (at
-  most about 3000 characters).  Its voice (`harness-pet--say-system`)
-  keeps the line wholesome: an action between asterisks is a small
-  gesture a cartoon pet makes, never how a touch feels, and nothing
-  reads as sensual or suggestive, since a cheap model that is petted
-  otherwise writes *pleased to be touched*.  The line is one line,
-  without a leading "NAME:" or quotes, and without an action that has a
-  word of `harness-pet--suggestive-regexp` (*a spine quivers with
-  pleasure*: the rest of the line stays), at most
-  `harness-pet--max-saying` characters (`harness-pet-sanitise`); "..."
-  is silence.
+  most about 3000 characters).
+- Its voice (`harness-pet--say-system`) is dry and observant, a
+  colleague at the next desk: wry, deadpan, never cloying, with no
+  cutesy talk, endearments or anything affectionate, physical or
+  sensual, since a cheap model that is petted otherwise writes *nestles
+  closer* or *pleased to be touched*.  `harness-pet-actions` (t) lets it
+  start a line now and then with a dry gesture between asterisks
+  (*squints at the diff*); nil asks for words only.  The hatch prompt
+  gives it a dry quirk rather than a cute one, as the personality
+  colours every line.  The line is one line, without a leading "NAME:"
+  or quotes, and without an action that has a word of
+  `harness-pet--suggestive-regexp` (*a spine quivers with pleasure*) or
+  `harness-pet--cuddly-regexp` (*nuzzles*, *nestles*, *purrs*), or any
+  action while `harness-pet-actions` is nil -- the rest of the line
+  stays -- at most `harness-pet--max-saying` characters
+  (`harness-pet-sanitise`); "..." is silence.  Some reasons add a steer
+  after the context (`harness-pet--steers`).
+- System messages: what the harness does to a session the pet tells as
+  its own news, in that session's chat (`harness-pet--system-reasons`):
+  a new name (`session/updated` with a non-blank `:name`, reason
+  `rename`) and a compaction (`compaction/done`, reason `compact`, told
+  how much went and how, and steered to a joke about forgetting -- the
+  neuralyzer of Men in Black, Memento, Dory and their kin, one at most).
+  Neither waits for the cooldown.  One that comes while the pet is
+  saying something, or within `harness-pet--min-gap`, waits for it
+  (`harness-pet--waiting`, only the newest, for at most
+  `harness-pet--wait-limit` seconds, and only while that chat is still
+  seen).  When the model fails or has nothing to say, the pet says the
+  news plainly ("New name: NAME.", "Compacted. ...").  An internal
+  session's are no news.
+- Overview recaps: a task card's recap (`recap/done`) and the recap of a
+  session that is no task's (`recap/session-done`) are said, reason
+  `recap`, scope `overview`, while an overview on screen lists the
+  session: the pet puts the recap its own way and names the session.
+  Unasked, so at most once a cooldown.  When a turn ends in a session
+  that is no task's, an overview on screen lists it and its chat is not
+  on screen, the pet has the recap module recap it
+  (`harness-recap-session` with FORCE), at most once a cooldown; that
+  recap comes back as `recap/session-done`.
 - Every call is `provider/complete` with `:ephemeral t` and `:no-thinking
   t`, a session id of its own (closed with `provider/close` when it
   ends) and `pet/` under the state directory as its directory, so no
@@ -6000,10 +6043,14 @@ again brings it back as it was.
   of theirs that ends well, +3 for every task that gets done
   (`task/done`).  Event `pet/changed VIEW` after any change
   (growing only while watched or when it gains a level), `pet/said
-  SAYING` with `(:text :ts :reason :session :session-name)`.  Both are
-  forwarded to clients; the methods are `_harness/pet/...` over ACP.
+  SAYING` with `(:text :ts :reason :session :session-name :scope)`,
+  SCOPE `"pet"`, `"session"` or `"overview"` (a saying from before
+  scopes has none: a client takes it for its session's when it names
+  one, else for the pet's own).  Both are forwarded to clients; the
+  methods are `_harness/pet/...` over ACP.
 - The demo provider names pets and speaks their lines from a script,
-  so the dev daemon and the tests run offline.
+  a new name, a compaction and a recap included, so the dev daemon and
+  the tests run offline.
 
 ### notifications
 
@@ -10336,13 +10383,22 @@ hatched, and their hooks are set only then (`harness-ui-pet--wire`):
   its words in quotes (`harness-ui-pet--quip-width`, 28 columns, cut at
   a space), as Claude Code's narrow terminals do.  So does every window
   with `harness-ui-pet-figure` set to `face`.  Only a window too narrow
-  for even the face goes without.  Words show until the session's next
-  `agent/turn-started` or for `harness-ui-pet--saying-lifetime` (15
-  minutes), and not while the pet is muted.  Hovering over the creature
-  names it, a click shows the buffer.
+  for even the face goes without.  The words are what the pet last said
+  about that session's work (scope `session`, `harness-ui-pet--saying-for`):
+  never its recap of the session, which is an overview's, nor what it
+  said about itself.  They show until the session's next
+  `agent/turn-started` or for `harness-ui-pet-saying-lifetime` seconds
+  (60; nil, until it says something else there), and not while the pet
+  is muted.  Hovering over the creature names it, a click shows the
+  buffer.
 - `board`: the same figure in the task board's bottom right corner, from
   `harness-ui-tasks-corner-functions` (`harness-ui-pet--board-corner`),
-  with what it said last about anything.  Its bottom rows end the first
+  with what it said last about itself (scope `pet`) or its recap of a
+  session the board lists (scope `overview`; the sessions of its tasks
+  not archived, `harness-ui-pet--overview-sessions`), never what it said
+  about a session's work (`harness-ui-pet--latest-saying`).  A saying
+  from before scopes is its session's when it names one, else the pet's
+  own (`harness-ui-pet--scope`).  Its bottom rows end the first
   lines above the compose box, those that leave it room (the label, then
   the settings), as many as save lines.  So the creature takes only the
   lines it is taller than they are, and its bubble goes beside its upper
@@ -10351,8 +10407,9 @@ hatched, and their hooks are set only then (`harness-ui-pet--wire`):
 - `sessions`: the same figure under the session list's last row, from
   `harness-ui-sessions-footer-functions`
   (`harness-ui-pet--sessions-footer`), with what it said last about
-  anything, as on the board (`harness-ui-pet--latest-saying`, place
-  `sessions`).  A blank line comes first, so it stands apart from the
+  itself or its recap of a session on the list, as on the board
+  (`harness-ui-pet--latest-saying`, place `sessions`, the ids of the
+  list's rows).  A blank line comes first, so it stands apart from the
   rows; then the creature, right-aligned, as many lines as it is tall
   with its bubble beside it, the list having no lines of its own to
   share either, on `harness-pet-figure-face` and `default` as in a chat.
@@ -10392,17 +10449,32 @@ list; a board fits its tail itself), buffer
 (`window-buffer-change-functions`) or text scale (`text-scale-mode-hook`).
 A buffer no window shows is drawn again only when what its figure shows
 changes, not for want of room: the window that shows it next fits it.
-No periodic timer draws it; only its moving, below, has timers.
+No periodic timer draws it; only its moving, below, and the fading of
+its words have timers.  Words leave a bubble when they grow older than
+`harness-ui-pet-saying-lifetime`: one timer (`harness-ui-pet--fade-timer`),
+armed after every `harness-ui-pet--sync-panels` for the oldest saying a
+figure shows (`harness-ui-pet--expiry`), runs it again then
+(`harness-ui-pet--fade`).  None waits while no bubble shows a saying.
+Only the bubble forgets it: the buffer and the pet's record keep it.
 
 This Emacs tells the harness where the pet is on screen
 (`_harness/pet/watch`, client `HOST:PID`) whenever that changes
-(`harness-ui-pet--seen`).  It is t while the buffer is on screen, or a
-board while the pet sits on boards, or the session list while it sits
-there.  With `chat`, it is otherwise the ids of the sessions whose chats
-are on screen, so the pet speaks about those sessions only.  It is sent
-from `window-buffer-change-functions` while the buffer lives or the pet
-sits in chats, on boards or under the list, as the buffer is killed, and
-after every connect.
+(`harness-ui-pet--seen`): a plist of `:self`, t while the buffer is on
+screen, or a board while the pet sits on boards, or the session list
+while it sits there; `:sessions`, with `chat`, the ids of the sessions
+whose chats are on screen, so the pet speaks about those sessions'
+work only; and `:overview`, the ids of the sessions those boards and
+lists list, whose recaps it says there.  Nil, so nowhere, while no frame
+of this Emacs is attended: visible and focused, or not known to be
+unfocused, a daemon's initial frame aside (`harness-ui-pet--attended-p`,
+from `frame-focus-state`).  It is sent from
+`window-buffer-change-functions` while the buffer lives or the pet sits
+in chats, on boards or under the list, as the buffer is killed, after
+every connect, and 0.3 s after a frame gains or loses focus
+(`after-focus-change-function`, in the same places) or a board or list
+comes to list other sessions as its figure is drawn
+(`harness-ui-pet--note-listed`; `harness-ui-pet--watch-soon` tells a
+burst once).
 
 A figure has frames besides the creature at rest, all drawn to its
 geometry, so one can take another's place on screen.  FRAME, of

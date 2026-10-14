@@ -544,13 +544,29 @@ duplicate of it, the first time."
 
 (defconst harness-provider-demo--pet-lines
   '(("hatched" . "*blinks* Oh. Hello. Is it always this bright in here?")
-    ("petted" . "*leans into it* Yes. That. Do that again after the next commit.")
+    ("petted" . "*straightens its hat* Acknowledged. Do that again after the next commit.")
     ("Tests just failed" . "*peers at the red* Somebody's assertion has feelings.")
     ("failed" . "*winces* That one went sideways. I saw nothing.")
     ("big change" . "*whistles* That diff needs its own postcode.")
-    ("by name" . "*perks up* You called? I was only pretending to nap.")
-    ("grew a level" . "*stretches* I feel taller. Probably am."))
-  "The demo pet's line for what happened, by words of the request.")
+    ("by name" . "*looks up from its notes* You called? I was only pretending to nap.")
+    ("grew a level" . "*stretches* I feel taller. Probably am.")
+    ("renamed" . harness-provider-demo--pet-renamed)
+    ("compacted" . "*flash* Neuralyzed. What were we doing? Something about a parser?")
+    ("recap of" . harness-provider-demo--pet-recap))
+  "The demo pet's line for what happened, by words of the request.
+A line is a string, or a function that makes one of the request's text.")
+
+(defun harness-provider-demo--pet-renamed (text)
+  "The demo pet's line for a session's new name, which TEXT gives."
+  (if (string-match "^Its new name: \\(.*\\)$" text)
+      (format "*squints at the tab* %s now. It has a ring to it." (match-string 1 text))
+    "*squints at the tab* New name. It has a ring to it."))
+
+(defun harness-provider-demo--pet-recap (text)
+  "The demo pet's line for the recap of a session, which TEXT gives."
+  (if (string-match "^Session \"\\([^\"\n]+\\)\"" text)
+      (format "*checks its notes* %s is still at it." (match-string 1 text))
+    "*checks its notes* One of these is still at it."))
 
 (defun harness-provider-demo--pet (request)
   "Answer the companion pet's REQUEST, as a scripted cheap model would.
@@ -566,11 +582,13 @@ happened, or remarks on the longest word of the user's last message."
                     (species (if (string-match "^Species: \\(.*\\)$" text) (match-string 1 text) "creature")))
                 (format "{\"name\":%S,\"personality\":%S}"
                         (capitalize word)
-                        (format "%s %s that rates every function by how it would taste, and hums when the tests pass."
+                        (format "%s %s that rates every function by how it would taste, and keeps a tally of passing tests."
                                 (if (string-match-p "\\`[aeiou]" species) "An" "A") species)))
             ;; What happened is the first line; the user's last words, the last "user:" line.
-            (or (let ((what (car (split-string text "\n"))))
-                  (cdr (cl-find-if (lambda (line) (string-search (car line) what)) harness-provider-demo--pet-lines)))
+            (or (let* ((what (car (split-string text "\n")))
+                       (line (cdr (cl-find-if (lambda (line) (string-search (car line) what))
+                                              harness-provider-demo--pet-lines))))
+                  (if (functionp line) (funcall line text) line))
                 (let* ((last (car (last (cl-remove-if-not (lambda (line) (string-prefix-p "user: " line))
                                                           (split-string text "\n")))))
                        (said (and last

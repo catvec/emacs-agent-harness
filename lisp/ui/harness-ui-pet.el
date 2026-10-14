@@ -30,18 +30,21 @@
 ;;                 The whole creature in its rarity's colour, a few
 ;;                 lines tall, its name beside its eyes; or, in a speech
 ;;                 bubble on its left joined to it, what it last said
-;;                 about that chat's session, until the session's next
-;;                 turn starts (`harness-chat-top-functions').
+;;                 about that chat's session, and only that, until the
+;;                 session's next turn starts or the saying grows old
+;;                 (`harness-chat-top-functions').
 ;;   board         the same at the bottom right of the task board, the
-;;                 bubble saying what it said last about anything.  The
-;;                 lines above the board's compose box -- its label and
-;;                 settings -- narrow for the creature's bottom rows, so
-;;                 it takes few lines of its own
+;;                 bubble saying what it said last about itself, or its
+;;                 recap of a session the board lists -- never what it
+;;                 said about a session's work, which is for that chat.
+;;                 The lines above the board's compose box -- its label
+;;                 and settings -- narrow for the creature's bottom rows,
+;;                 so it takes few lines of its own
 ;;                 (`harness-ui-tasks-corner-functions').
 ;;   sessions      the same at the bottom right of the session list,
 ;;                 under its last row after a blank line, the bubble
-;;                 saying what it said last about anything
-;;                 (`harness-ui-sessions-footer-functions').
+;;                 saying what it would on the board, of the sessions
+;;                 the list lists (`harness-ui-sessions-footer-functions').
 ;;   chat header   its face, on one line, near the end of a chat's
 ;;                 header line, the first thing to go when the window is
 ;;                 narrow.  It blinks now and then while the session
@@ -66,11 +69,27 @@
 ;; the harness last told this Emacs (`harness-ui-pet--current'), asked
 ;; for when the UI connects and followed through `pet/changed'.
 ;;
-;; The pet only speaks where it would be seen.  This Emacs tells the
-;; harness (`pet/watch') whenever that changes, through
-;; `window-buffer-change-functions' while it matters: the pet's buffer,
-;; a task board or the session list with its figure on screen lets it
-;; speak about anything, a chat on screen about that chat's session.
+;; The pet only speaks where it would be seen, and each of its sayings
+;; shows where it belongs: the harness tags it with a scope
+;; (`harness-ui-pet--scope').  What it says about a session's work shows
+;; in that session's chat only; what it says about itself -- a petting,
+;; its first words, a level it grew -- shows where it is itself, its
+;; buffer and its figure on a board or under the list; its recap of a
+;; session shows on an overview that lists the session, the board or the
+;; list.  This Emacs tells the harness (`pet/watch') where that is
+;; whenever it changes, through `window-buffer-change-functions' while
+;; it matters, and as a board or list comes to list other sessions:
+;; the chats on screen, whether the pet itself is, and the sessions the
+;; overviews on screen list.  While no frame of this Emacs has focus,
+;; nobody is looking, and it says it shows nowhere
+;; (`harness-ui-pet--attended-p'), so the harness asks no model for a
+;; line nobody would read.
+;;
+;; A saying leaves its bubble after `harness-ui-pet-saying-lifetime'
+;; seconds, a minute by default: one timer, armed for the oldest saying
+;; shown, draws the figures again then (`harness-ui-pet--arm-fade').
+;; Only the bubble forgets it: it stays in the pet's buffer, and in what
+;; the pet remembers it said.
 ;;
 ;; Nothing here runs while nothing happens.  Four short animations
 ;; play when something does -- the egg wobbles and cracks as it hatches,
@@ -144,16 +163,17 @@ A list of:
   todo list or a panel.  With none of those it stands on the compose
   box.  Its name is beside its eyes; in a speech bubble on its left
   instead, what it last said about that chat's session, until the
-  session's next turn starts.  A chat on screen lets it speak about that
-  session.
+  session's next turn starts or `harness-ui-pet-saying-lifetime' is
+  over.  A chat on screen lets it speak about that session.
 - `board': the same at the bottom right of the task board, with what it
-  said last about anything.  The lines above the board's compose box
-  narrow for it, so it takes few lines of its own.  The board on screen
-  lets it speak about anything, as its own buffer on screen does.
+  last said about itself, or its recap of a session the board lists;
+  what it said about a session's work stays in that session's chat.
+  The lines above the board's compose box narrow for it, so it takes
+  few lines of its own.  The board on screen lets it speak about itself,
+  as its own buffer on screen does, and recap the sessions it lists.
 - `sessions': its figure at the bottom right of the session list, under
-  the rows after a blank line, with what it said last about anything in
-  its bubble, as on the board.  The list on screen lets it speak about
-  anything.
+  the rows after a blank line, its bubble saying what it would on the
+  board, of the sessions the list lists.
 - `chat-header': its face, on one line in its rarity's colour, near the
   end of a chat's header line, the first thing to go in a narrow window.
   It blinks now and then while the session works.
@@ -191,12 +211,23 @@ Where it shows at all is `harness-ui-pet-places'."
          (when (fboundp 'harness-ui-pet--sync) (harness-ui-pet--sync)))
   :group 'harness-ui-pet)
 
+(defcustom harness-ui-pet-saying-lifetime 60
+  "Seconds what the pet says shows in its speech bubble, or nil for no limit.
+Then its figure shows its name again.  What it said about a session
+goes sooner when the session's next turn starts, and any saying goes
+when the pet says something else there.  Only the bubble forgets it:
+the pet's buffer still shows it, and the pet knows what it said, so it
+does not say it again."
+  :type '(choice (number :tag "Seconds")
+                 (const :tag "Until it says something else, or the session's next turn" nil))
+  :initialize #'custom-initialize-default
+  :set (lambda (symbol value)
+         (set-default symbol value)
+         (when (bound-and-true-p harness-ui-pet--live) (harness-ui-pet--sync-panels)))
+  :group 'harness-ui-pet)
+
 (defconst harness-ui-pet--buffer-name "*harness pet*"
   "Name of the pet's buffer.")
-
-(defconst harness-ui-pet--saying-lifetime (* 15 60)
-  "Seconds at most a saying shows in the pet's bubble.
-Its session's next turn takes it away before, as a redraw finds.")
 
 (defconst harness-ui-pet--header-priority 2
   "Priority of the pet's face in a chat's header line: it goes first.")
@@ -534,7 +565,12 @@ KIND is `egg', `crack', `sparkle', `hearts', `fidget' or `spin'.")
 (defvar harness-ui-pet--timer nil "The timer of the animation playing, or nil.")
 (defvar harness-ui-pet--watching nil
   "Where this Emacs last told the harness it shows the pet.
-As `harness-ui-pet--seen' returns it: t, a list of session ids, or nil.")
+As `harness-ui-pet--seen' returns it: a plist of `:self', `:sessions'
+and `:overview', or nil for nowhere.")
+(defvar harness-ui-pet--watch-timer nil
+  "The timer that tells the harness again where the pet is seen, or nil.")
+(defvar harness-ui-pet--fade-timer nil
+  "The timer that takes the oldest saying shown from its bubble, or nil.")
 (defvar harness-ui-pet--bars (make-hash-table :test 'equal)
   "Stat bar images by (FRACTION WIDTH COLOR), so a redraw reuses them.")
 
@@ -552,6 +588,10 @@ What the pet said about a session before then shows no more.")
   "What the pet's figure in a buffer shows, or nil.
 As `harness-ui-pet--spec' returns it, in a chat, a task board or the
 session list.")
+(defvar-local harness-ui-pet--listed nil
+  "The sessions this board or list listed when its figure was last drawn.
+As `harness-ui-pet--overview-sessions' returns them: when they change,
+the harness hears where the pet is seen again.")
 
 (defun harness-ui-pet--buffer ()
   "The pet's buffer, or nil."
@@ -614,46 +654,134 @@ a frame of another terminal selected, as in a daemon."
           (cl-pushnew (window-buffer window) buffers))))
     buffers))
 
+(defun harness-ui-pet--frame-attended-p (frame)
+  "Non-nil unless FRAME is known not to be looked at.
+It is visible, not a daemon's initial frame, which no one sees, and has
+focus or cannot tell: a terminal that does not report focus, or a
+graphical frame no focus event has reached yet -- only a focus event
+sets the parameter `frame-focus-state' reads."
+  (and (eq t (frame-visible-p frame))
+       (not (and (daemonp)
+                 (if (fboundp 'frame-initial-p)
+                     (frame-initial-p frame)
+                   ;; Before Emacs 31.
+                   (equal (terminal-name (frame-terminal frame)) "initial_terminal"))))
+       (or (frame-focus-state frame)
+           (and (not (tty-top-frame frame))
+                (not (assq 'last-focus-update (frame-parameters frame)))))))
+
+(defun harness-ui-pet--attended-p ()
+  "Non-nil when someone may be at this Emacs: one of its frames has focus.
+Or may have (`harness-ui-pet--frame-attended-p').  Then every window on
+a visible frame counts as seen; while none has focus, none does."
+  (and (cl-some #'harness-ui-pet--frame-attended-p (frame-list)) t))
+
+(defun harness-ui-pet--mode-buffer-p (buffer mode)
+  "Non-nil when BUFFER is in MODE, or a mode derived from it."
+  (provided-mode-derived-p (buffer-local-value 'major-mode buffer) mode))
+
+(defvar harness-ui-tasks--tasks)
+(defvar tabulated-list-entries)
+
+(defun harness-ui-pet--overview-sessions (&optional buffer)
+  "The sorted ids of the sessions BUFFER (default the current one) lists.
+A task board lists the sessions of its tasks that are not archived, the
+session list those of its rows; any other buffer lists none.  The pet's
+recaps of them show there."
+  (with-current-buffer (or buffer (current-buffer))
+    (let ((ids nil))
+      (cond ((derived-mode-p 'harness-ui-tasks-mode)
+             (dolist (task (and (boundp 'harness-ui-tasks--tasks) harness-ui-tasks--tasks))
+               (let ((sid (plist-get task :session)))
+                 (when (and (stringp sid) (not (harness-json-true-p (plist-get task :archived))))
+                   (push sid ids)))))
+            ((derived-mode-p 'harness-ui-sessions-mode)
+             (dolist (entry (and (listp tabulated-list-entries) tabulated-list-entries))
+               (when (stringp (car-safe entry)) (push (car entry) ids)))))
+      (sort (delete-dups ids) #'string<))))
+
 (defun harness-ui-pet--seen (&optional without-buffer)
-  "Where this Emacs shows the pet now, as `pet/watch' takes it.
-t while the pet's buffer is on screen, or a task board where its figure
-sits (`board') or the session list where it does (`sessions'): anything
-it says is seen there.  Else, while it sits in chats (`chat'), the
-sorted ids of the sessions whose chats are on screen, or nil.
-WITHOUT-BUFFER leaves the buffer out, as it goes."
-  (let ((buffers (and (harness-ui-pet--figure-place-p) (harness-ui-pet--visible-buffers))))
-    (cond ((and (not without-buffer) (harness-ui-pet--shown-p)) t)
-          ((and (harness-ui-pet--place-p 'board)
-                (cl-some (lambda (buffer)
-                           (provided-mode-derived-p (buffer-local-value 'major-mode buffer)
-                                                    'harness-ui-tasks-mode))
-                         buffers))
-           t)
-          ((and (harness-ui-pet--place-p 'sessions)
-                (cl-some (lambda (buffer)
-                           (provided-mode-derived-p (buffer-local-value 'major-mode buffer)
-                                                    'harness-ui-sessions-mode))
-                         buffers))
-           t)
-          ((harness-ui-pet--place-p 'chat)
-           (let ((ids nil))
-             (dolist (buffer buffers)
-               (when (harness-ui-pet--figure-chat-p buffer)
-                 (when-let* ((id (buffer-local-value 'harness-ui-session-id buffer)))
-                   (cl-pushnew id ids :test #'equal))))
-             (sort ids #'string<))))))
+  "Where this Emacs shows the pet now, as `pet/watch' takes it, or nil.
+A plist of what is on screen:
+
+- `:self' t while the pet itself is: its buffer, or its figure on a task
+  board (`board') or under the session list (`sessions'), where what it
+  says about itself shows.
+- `:sessions' the sorted ids of the sessions whose chats are on screen
+  with its figure (`chat'), where what it says about each shows.
+- `:overview' the sorted ids of the sessions those boards and lists list
+  \(`harness-ui-pet--overview-sessions'), whose recaps show there.
+
+Nil while none of it is, and while no frame of this Emacs has focus:
+nobody is looking then (`harness-ui-pet--attended-p').  WITHOUT-BUFFER
+leaves the buffer out, as it goes."
+  (when (harness-ui-pet--attended-p)
+    (let* ((buffers (and (harness-ui-pet--figure-place-p) (harness-ui-pet--visible-buffers)))
+           (overviews (cl-remove-if-not
+                       (lambda (buffer)
+                         (or (and (harness-ui-pet--place-p 'board)
+                                  (harness-ui-pet--mode-buffer-p buffer 'harness-ui-tasks-mode))
+                             (and (harness-ui-pet--place-p 'sessions)
+                                  (harness-ui-pet--mode-buffer-p buffer 'harness-ui-sessions-mode))))
+                       buffers))
+           (self (or (and (not without-buffer) (harness-ui-pet--shown-p)) overviews))
+           (sessions nil)
+           (overview nil))
+      (when (harness-ui-pet--place-p 'chat)
+        (dolist (buffer buffers)
+          (when (harness-ui-pet--figure-chat-p buffer)
+            (when-let* ((id (buffer-local-value 'harness-ui-session-id buffer)))
+              (cl-pushnew id sessions :test #'equal)))))
+      (dolist (buffer overviews)
+        (setq overview (append (harness-ui-pet--overview-sessions buffer) overview)))
+      (when (or self sessions)
+        (list :self (and self t)
+              :sessions (sort sessions #'string<)
+              :overview (sort (delete-dups overview) #'string<))))))
 
 (defun harness-ui-pet--send-watch (seen)
   "Tell the harness where this Emacs shows the pet: SEEN.
 SEEN is as `harness-ui-pet--seen' returns it.  Draw the pet the harness
-answers with, unless SEEN is nil: it shows nowhere then."
+answers with, unless SEEN is nil: it shows nowhere then.  `:self' goes
+only with the ids, as the harness takes the pet itself for seen when
+it hears of no ids."
   (setq harness-ui-pet--watching seen)
-  (harness-ui-call "_harness/pet/watch"
-                   (append (list :client (harness-ui-pet--client-id) :on (if seen t :false))
-                           (and (consp seen) (list :sessions seen)))
-                   (lambda (view) (when seen (harness-ui-pet--receive view)) nil)
-                   ;; Only the buffer says what went wrong; the places stay quiet.
-                   (if (eq seen t) #'harness-ui-pet--failed #'ignore)))
+  (let ((sessions (plist-get seen :sessions))
+        (overview (plist-get seen :overview)))
+    (harness-ui-call "_harness/pet/watch"
+                     (append (list :client (harness-ui-pet--client-id) :on (if seen t :false))
+                             (and sessions (list :sessions sessions))
+                             (and overview (list :overview overview))
+                             (and (or sessions overview)
+                                  (list :self (if (plist-get seen :self) t :false))))
+                     (lambda (view) (when seen (harness-ui-pet--receive view)) nil)
+                     ;; Only the buffer says what went wrong; the places stay quiet.
+                     (if (plist-get seen :self) #'harness-ui-pet--failed #'ignore))))
+
+(defun harness-ui-pet--watch-soon ()
+  "Tell the harness where the pet is seen in a moment, if that changed.
+Unless that is pending already: a burst of changes -- frames that lose
+and gain focus, a list that prints its rows again and again -- is told
+once."
+  (unless (timerp harness-ui-pet--watch-timer)
+    (setq harness-ui-pet--watch-timer
+          (run-at-time 0.3 nil (lambda ()
+                                 (setq harness-ui-pet--watch-timer nil)
+                                 (when harness-ui-pet--live (harness-ui-pet--update-watch)))))))
+
+(defun harness-ui-pet--on-focus ()
+  "A frame gained or lost focus: whether anybody looks may have changed.
+On `after-focus-change-function' while the pet may be seen somewhere."
+  (harness-ui-pet--watch-soon))
+
+(defun harness-ui-pet--note-listed ()
+  "Note the sessions this board or list lists; if they changed, say so soon.
+As it draws the pet's figure: a board that gained a task, or a list a
+row, has the pet recap that session too."
+  (let ((ids (harness-ui-pet--overview-sessions)))
+    (unless (equal ids harness-ui-pet--listed)
+      (setq harness-ui-pet--listed ids)
+      (harness-ui-pet--watch-soon))))
 
 (defun harness-ui-pet--update-watch (&rest _)
   "Tell the harness where the pet is on screen, when that changed.
@@ -857,12 +985,14 @@ timer follows the pace of the animation that plays next."
           (or (plist-get view :species) "pet")
           (or (plist-get view :level) 1)))
 
-(defun harness-ui-pet--face-help (&rest _)
+(defun harness-ui-pet--face-help (&optional window &rest _)
   "The tooltip of the pet's face: who it is, what it said last, what a click does.
 A `help-echo' function, so it is worked out on hover only; one line, as
-hover text must be (`harness-ui-one-line')."
+hover text must be (`harness-ui-one-line').  What it said last there:
+in WINDOW's buffer, the header line hovered, as its bubble there would
+say it (`harness-ui-pet--last-in'), however long ago."
   (let* ((view harness-ui-pet--current)
-         (last (car (last (plist-get view :said))))
+         (last (harness-ui-pet--last-in (and (window-live-p window) (window-buffer window))))
          (ago (and last (harness-ui-pet--when last))))
     (harness-ui-one-line
      (concat (harness-ui-pet--about view) "."
@@ -910,12 +1040,13 @@ narrow window the name goes first, then the face."
 
 (defun harness-ui-pet--fresh-p (saying now)
   "Non-nil when SAYING may still show beside the pet at NOW.
-Not older than `harness-ui-pet--saying-lifetime', and said since the
+Not older than `harness-ui-pet-saying-lifetime', and said since the
 last turn of the session it is about started, when it is about one."
   (let ((ts (plist-get saying :ts))
-        (session (plist-get saying :session)))
+        (session (plist-get saying :session))
+        (lifetime harness-ui-pet-saying-lifetime))
     (and (numberp ts)
-         (< (- now ts) harness-ui-pet--saying-lifetime)
+         (or (not (numberp lifetime)) (< (- now ts) lifetime))
          (or (not (stringp session))
              (> ts (gethash session harness-ui-pet--turns 0))))))
 
@@ -923,23 +1054,71 @@ last turn of the session it is about started, when it is about one."
   "Non-nil when the pet is muted: nothing it said shows beside it."
   (harness-ui-pet--true-p (plist-get harness-ui-pet--current :muted)))
 
+(defun harness-ui-pet--scope (saying)
+  "Where SAYING belongs: `session', `pet' or `overview'.
+As the harness tagged it (`:scope'): `session' for what it said about a
+session's work, which shows in that session's chat only; `pet' for what
+it said about itself, which shows wherever it is itself; `overview' for
+its recap of a session, which shows on a board or list that lists the
+session.  A saying from before scopes is its session's when it is about
+one, else the pet's own."
+  (pcase (plist-get saying :scope)
+    ("session" 'session)
+    ("overview" 'overview)
+    ("pet" 'pet)
+    (_ (if (stringp (plist-get saying :session)) 'session 'pet))))
+
+(defun harness-ui-pet--last-saying (test)
+  "The last thing the pet said that TEST, a function of a saying, holds for."
+  (cl-find-if test (plist-get harness-ui-pet--current :said) :from-end t))
+
+(defun harness-ui-pet--for-session-p (saying session-id)
+  "Non-nil when SAYING belongs in the chat of SESSION-ID: it is about its work."
+  (and (equal (plist-get saying :session) session-id)
+       (eq (harness-ui-pet--scope saying) 'session)))
+
+(defun harness-ui-pet--for-overview-p (saying ids)
+  "Non-nil when SAYING belongs on an overview that lists IDS, session ids.
+The pet's own, or its recap of one of IDS."
+  (pcase (harness-ui-pet--scope saying)
+    ('pet t)
+    ('overview (and (member (plist-get saying :session) ids) t))))
+
+(defun harness-ui-pet--last-in (buffer)
+  "What the pet said last that belongs in BUFFER, however long ago, or nil.
+In a chat, about its session's work; on a task board or the session
+list, about itself, or its recap of a session listed there; anything,
+in another buffer or none."
+  (cond ((and buffer (harness-ui-pet--chat-buffer-p buffer))
+         (let ((sid (buffer-local-value 'harness-ui-session-id buffer)))
+           (harness-ui-pet--last-saying (lambda (s) (harness-ui-pet--for-session-p s sid)))))
+        ((and buffer (or (harness-ui-pet--mode-buffer-p buffer 'harness-ui-tasks-mode)
+                         (harness-ui-pet--mode-buffer-p buffer 'harness-ui-sessions-mode)))
+         (let ((ids (harness-ui-pet--overview-sessions buffer)))
+           (harness-ui-pet--last-saying (lambda (s) (harness-ui-pet--for-overview-p s ids)))))
+        (t (car (last (plist-get harness-ui-pet--current :said))))))
+
 (defun harness-ui-pet--saying-for (session-id &optional now)
   "What the pet said about SESSION-ID, for its bubble in that chat, or nil.
-Its last saying about it, while the pet sits in chats, it is not muted,
-the session's turn has not started again since, and it is not older
-than `harness-ui-pet--saying-lifetime' at NOW."
+Its last saying about the session's work -- not a recap of it, which is
+for an overview -- while the pet sits in chats, it is not muted, the
+session's turn has not started again since, and it is not older than
+`harness-ui-pet-saying-lifetime' at NOW."
   (when (and session-id (harness-ui-pet--place-p 'chat) (not (harness-ui-pet--muted-p)))
-    (let ((saying (cl-find session-id (plist-get harness-ui-pet--current :said)
-                           :key (lambda (s) (plist-get s :session)) :test #'equal :from-end t)))
+    (let ((saying (harness-ui-pet--last-saying
+                   (lambda (s) (harness-ui-pet--for-session-p s session-id)))))
       (and saying (harness-ui-pet--fresh-p saying (or now (float-time))) saying))))
 
-(defun harness-ui-pet--latest-saying (&optional now place)
-  "What the pet said last, for its bubble on the task board, or nil.
-About whichever session, or none, while the pet sits in PLACE (default
-`board'; `sessions' is the other that says what it said last), it is
-not muted, and the saying is fresh at NOW (`harness-ui-pet--fresh-p')."
+(defun harness-ui-pet--latest-saying (&optional now place ids)
+  "What the pet said last for an overview, its bubble on a task board, or nil.
+Its last saying about itself, or its recap of one of IDS, the sessions
+the overview lists (`harness-ui-pet--for-overview-p'), while the pet
+sits in PLACE (default `board'; `sessions' is the other overview), it
+is not muted, and the saying is fresh at NOW (`harness-ui-pet--fresh-p').
+What it said about a session's work is for that session's chat, so it
+never shows here."
   (when (and (harness-ui-pet--place-p (or place 'board)) (not (harness-ui-pet--muted-p)))
-    (let ((saying (car (last (plist-get harness-ui-pet--current :said)))))
+    (let ((saying (harness-ui-pet--last-saying (lambda (s) (harness-ui-pet--for-overview-p s ids)))))
       (and saying (harness-ui-pet--fresh-p saying (or now (float-time))) saying))))
 
 ;;;; Its figure, in chats, on the board and under the session list
@@ -1460,16 +1639,17 @@ As `harness-ui-pet--spec' has it, with what it said about the session."
 
 (defun harness-ui-pet--board-spec ()
   "What the pet's figure by this board's compose box shows now, or nil.
-As `harness-ui-pet--spec' has it, with what it said last."
+As `harness-ui-pet--spec' has it, with what it said last about itself
+or in a recap of one of the board's sessions."
   (when (harness-ui-pet--place-p 'board)
-    (harness-ui-pet--spec (harness-ui-pet--latest-saying))))
+    (harness-ui-pet--spec (harness-ui-pet--latest-saying nil 'board (harness-ui-pet--overview-sessions)))))
 
 (defun harness-ui-pet--sessions-spec ()
   "What the pet's figure under this session list shows now, or nil.
-As `harness-ui-pet--spec' has it, with what it said last about anything,
-as on the board."
+As `harness-ui-pet--spec' has it, with what it said last about itself
+or in a recap of one of the list's sessions, as on the board."
   (when (harness-ui-pet--place-p 'sessions)
-    (harness-ui-pet--spec (harness-ui-pet--latest-saying nil 'sessions))))
+    (harness-ui-pet--spec (harness-ui-pet--latest-saying nil 'sessions (harness-ui-pet--overview-sessions)))))
 
 (defvar-local harness-ui-pet--lines-kept nil
   "The lines `harness-ui-pet--draw' drew last in this buffer: (KEY . LINES).
@@ -1515,6 +1695,7 @@ line, so it stands apart from the last row, then the creature as tall as
 it is, its bubble beside it, on the window's own background.  Nil when
 not even its face fits.  The list prints again often, so the lines are
 the ones kept while the figure is as it was (`harness-ui-pet--draw')."
+  (harness-ui-pet--note-listed)
   (when-let* ((lines (harness-ui-pet--draw (harness-ui-pet--sessions-spec))))
     (concat "\n" lines)))
 
@@ -1525,6 +1706,7 @@ and WIDTHS are the columns the lines above the compose box have and
 take.  The creature's bottom rows end the first of those lines, as many
 as leave it room, so it takes few lines of its own; its other rows go
 above them.  On the board's own colours, its message band included."
+  (harness-ui-pet--note-listed)
   (let ((spec (harness-ui-pet--board-spec)))
     (setq harness-ui-pet--panel-shown spec)
     (when spec
@@ -1612,7 +1794,41 @@ stand still, as they are on screen or not (`harness-ui-pet--arm')."
       (with-current-buffer buffer (setq harness-ui-pet--panel-shown nil)))
     (when (fboundp 'harness-ui-sessions-redraw)
       (harness-ui-sessions-redraw)))
-  (harness-ui-pet--arm))
+  (harness-ui-pet--arm)
+  (harness-ui-pet--arm-fade))
+
+(defun harness-ui-pet--expiry ()
+  "When the oldest saying a bubble shows grows old, as a float time, or nil.
+Of the figures in chats, on boards and under session lists, by
+`harness-ui-pet-saying-lifetime'.  Nil while none shows a saying, or
+sayings do not grow old.  A saying old already, that a redraw left in
+place, is not waited for: the next redraw takes it away."
+  (when (numberp harness-ui-pet-saying-lifetime)
+    (let ((now (float-time))
+          (soonest nil))
+      (dolist (buffer (append (harness-ui-pet--chat-buffers) (harness-ui-pet--board-buffers)
+                              (harness-ui-pet--list-buffers)))
+        (let ((ts (plist-get (nth 1 (buffer-local-value 'harness-ui-pet--panel-shown buffer)) :ts)))
+          (when (numberp ts)
+            (let ((at (+ ts harness-ui-pet-saying-lifetime)))
+              (when (and (> at now) (or (null soonest) (< at soonest)))
+                (setq soonest at))))))
+      soonest)))
+
+(defun harness-ui-pet--arm-fade ()
+  "Arm the timer that takes the oldest saying shown from its bubble.
+For when it grows old (`harness-ui-pet--expiry'); none while no bubble
+shows a saying.  Each redraw of the figures arms it again, for the
+saying that is oldest then."
+  (when (timerp harness-ui-pet--fade-timer) (cancel-timer harness-ui-pet--fade-timer))
+  (setq harness-ui-pet--fade-timer
+        (when-let* ((at (and harness-ui-pet--live (harness-ui-pet--expiry))))
+          (run-at-time (max 0.05 (+ 0.05 (- at (float-time)))) nil #'harness-ui-pet--fade))))
+
+(defun harness-ui-pet--fade ()
+  "A saying in a bubble grew old: draw the figures without it."
+  (setq harness-ui-pet--fade-timer nil)
+  (when harness-ui-pet--live (harness-ui-pet--sync-panels)))
 
 (defun harness-ui-pet--on-window-size (&rest _)
   "Windows changed size or buffer, or text its scale: fit the figures again.
@@ -1635,15 +1851,20 @@ saying from before does not come back when it sits there again."
   "Set the hooks the pet's places need now, and only those.
 The window hook while its buffer lives (unless DYING, as it goes) or the
 pet sits in a place with a figure -- chats, boards or the session list --
-where what it says is seen; the hook for a window's size while it sits in
-chats or under the list, whose figures nothing else fits; each place's
-own while it shows there.  Once its figure sits in none, the figures
-stand still (`harness-ui-pet--still')."
+where what it says is seen, and `after-focus-change-function' then, as
+nobody sees it while no frame has focus; the hook for a window's size
+while it sits in chats or under the list, whose figures nothing else
+fits; each place's own while it shows there.  Once its figure sits in
+none, the figures stand still (`harness-ui-pet--still')."
   (cl-flet ((set-hook (on hook fn)
               (if on (add-hook hook fn t) (remove-hook hook fn))))
     (set-hook (or (and (not dying) (harness-ui-pet--buffer))
                   (harness-ui-pet--figure-place-p))
               'window-buffer-change-functions #'harness-ui-pet--on-window-buffer)
+    ;; Whether anybody looks follows the focus, in the same places.
+    (if (or (and (not dying) (harness-ui-pet--buffer)) (harness-ui-pet--figure-place-p))
+        (add-function :after after-focus-change-function #'harness-ui-pet--on-focus)
+      (remove-function after-focus-change-function #'harness-ui-pet--on-focus))
     (set-hook (or (harness-ui-pet--place-p 'chat) (harness-ui-pet--place-p 'sessions))
               'window-size-change-functions #'harness-ui-pet--on-window-size)
     (set-hook (harness-ui-pet--figure-place-p)
@@ -2396,19 +2617,34 @@ VIEW's `:overrides' names the attributes, as a list or a vector."
               (car keys)))))
 
 (defun harness-ui-pet--where-it-speaks ()
-  "Where the pet speaks, as a phrase after \"while it is on screen: \".
-Here, in its buffer, then the task board and the session list, if it sits
-there, and beside the chat it is about, if it sits in chats: \"here, on
-the task board, on the session list, or beside the chat it is about\".
-Only its buffer when it sits in none."
-  (let ((places (delq nil (list "here"
-                                (and (memq 'board harness-ui-pet-places) "on the task board")
-                                (and (memq 'sessions harness-ui-pet-places) "on the session list")
-                                (and (memq 'chat harness-ui-pet-places) "beside the chat it is about")))))
-    (pcase (length places)
-      (1 (car places))
-      (2 (format "%s, or %s" (car places) (cadr places)))
-      (_ (format "%s, or %s" (string-join (butlast places) ", ") (car (last places)))))))
+  "Where the pet speaks, and of what, as a phrase after \"on screen: \".
+Here, in its buffer, about itself; beside a chat, about that chat's
+session, if it sits in chats; on the task board and the session list,
+if it sits there, about itself and in recaps of the sessions they list:
+\"here, about itself; beside a chat, about that chat's session; on the
+task board and the session list, about itself and in recaps of the
+sessions they list\".  Only its buffer when it sits in none."
+  (let ((overviews (delq nil (list (and (memq 'board harness-ui-pet-places) "the task board")
+                                   (and (memq 'sessions harness-ui-pet-places) "the session list")))))
+    (string-join
+     (delq nil (list "here, about itself"
+                     (and (memq 'chat harness-ui-pet-places) "beside a chat, about that chat's session")
+                     (and overviews
+                          (format "on %s, about itself and in recaps of the sessions %s"
+                                  (string-join overviews " and ")
+                                  (if (cdr overviews) "they list" "it lists")))))
+     "; ")))
+
+(defun harness-ui-pet--lifetime-text ()
+  "How long a saying stays in the pet's bubble, as a sentence, or nil.
+After `harness-ui-pet-saying-lifetime', when it is set."
+  (let ((seconds harness-ui-pet-saying-lifetime))
+    (when (and (numberp seconds) (> seconds 0))
+      (format "What it says leaves its bubble after %s."
+              (cond ((= seconds 60) "a minute")
+                    ((and (zerop (mod seconds 60)) (integerp seconds)) (format "%d minutes" (/ seconds 60)))
+                    ((= seconds 1) "a second")
+                    (t (format "%s seconds" (if (integerp seconds) seconds (format "%.1f" seconds)))))))))
 
 (defun harness-ui-pet--footer ()
   "Insert what the pet speaks with, and whether it may.
@@ -2420,9 +2656,12 @@ Then which of its attributes are set by hand, when any are."
                       "Quiet: harness-pet-reactions is off, so it asks no model anything.")
                      ((harness-ui-pet--true-p (plist-get view :muted))
                       "Muted: it asks no model anything until you unmute it (m).")
-                     (t (format "It now and then has a word to say%s, while it is on screen: %s. m mutes it, s spins it (a 3D turn, in graphical frames only), O turns it off."
+                     (t (format "It now and then has a word to say%s, while you are at this Emacs and it is on screen: %s.%s m mutes it, s spins it (a 3D turn, in graphical frames only), O turns it off."
                                 (if (stringp model) (format ", through %s" (harness-ui-model-label model)) "")
-                                (harness-ui-pet--where-it-speaks))))))
+                                (harness-ui-pet--where-it-speaks)
+                                (if-let* ((lifetime (harness-ui-pet--lifetime-text)))
+                                    (concat " " lifetime)
+                                  ""))))))
     (when text
       (insert "\n")
       (harness-ui-pet--insert-filled text 'harness-dim-face))
@@ -2710,6 +2949,9 @@ Asks first, unless FORCE."
   (harness-ui-pet--still)
   (setq harness-ui-pet--live nil)
   (harness-ui-pet--wire t)
+  (when (timerp harness-ui-pet--watch-timer) (cancel-timer harness-ui-pet--watch-timer))
+  (setq harness-ui-pet--watch-timer nil)
+  ;; Drawn without it, the figures leave no saying to fade.
   (harness-ui-pet--sync-panels)
   (setq harness-ui-pet--current nil harness-ui-pet--drawn nil)
   (clrhash harness-ui-pet--turns)

@@ -34,6 +34,7 @@
 (defvar harness-pet--last-unasked)
 (defvar harness-pet--last-spoke)
 (defvar harness-pet--last-pet)
+(defvar harness-pet--recap-asked)
 (defvar harness-pet--save-timer)
 (defvar harness-pet-reactions)
 (defvar harness-pet-model)
@@ -76,7 +77,10 @@
 (defvar harness-ui-pet--error)
 (defvar harness-ui-pet--faces)
 (defvar harness-ui-pet--current)
-(defvar harness-ui-pet--saying-lifetime)
+(defvar harness-ui-pet-saying-lifetime)
+(defvar harness-ui-pet--fade-timer)
+(defvar harness-ui-pet--watching)
+(defvar harness-ui-pet--watch-timer)
 (defvar harness-ui-pet-places)
 (defvar harness-ui-pet--min-lines)
 (defvar harness-ui-pet--panel-shown)
@@ -213,15 +217,25 @@
 (declare-function harness-ui-pet--receive "harness-ui-pet")
 (declare-function harness-ui-pet--when "harness-ui-pet")
 (declare-function harness-acp--drop-client "harness-acp")
+(declare-function harness-pet--stop-waiting "harness-pet")
+(declare-function harness-tasks--put "harness-tasks")
+(declare-function harness-tasks--project "harness-tasks")
+(declare-function harness-ui-pet--scope "harness-ui-pet")
+(declare-function harness-ui-pet--last-in "harness-ui-pet")
+(declare-function harness-ui-pet--lifetime-text "harness-ui-pet")
+(declare-function harness-ui-pet--overview-sessions "harness-ui-pet")
+(declare-function harness-ui-pet--on-focus "harness-ui-pet")
 
 (defconst harness-ui-pet-test--buffer "*harness pet*")
 
 (defun harness-ui-pet-test-reset ()
   "Forget the pet the harness knows of, as a fresh harness would."
   (when (timerp harness-pet--save-timer) (cancel-timer harness-pet--save-timer))
+  (when (fboundp 'harness-pet--stop-waiting) (harness-pet--stop-waiting))
   (setq harness-pet--pet nil harness-pet--loaded nil harness-pet--dirty nil
         harness-pet--hatching nil harness-pet--speaking nil harness-pet--save-timer nil
-        harness-pet--last-unasked 0 harness-pet--last-spoke 0 harness-pet--last-pet 0)
+        harness-pet--last-unasked 0 harness-pet--last-spoke 0 harness-pet--last-pet 0
+        harness-pet--recap-asked 0)
   (clrhash harness-pet--watchers))
 
 (defmacro harness-ui-pet-test-with (&rest body)
@@ -472,8 +486,12 @@ once in the fifteen half seconds of its idle loop."
         (dolist (stat '("DEBUGGING" "PATIENCE" "CHAOS" "WISDOM" "SNARK"))
           (should (string-match-p stat text)))
         (should (string-match-p "now and then has a word to say, through .*m mutes it, s spins it (a 3D turn, in graphical frames only), O turns it off\\." text))
-        ;; Where: here, and in each place it sits where it speaks.
-        (should (string-search "while it is on screen: here, on the task board, on the session list, or beside the chat it is about."
+        ;; Where, and of what: here, and in each place it sits where it speaks;
+        ;; only while someone is at this Emacs; and for how long.
+        (should (string-search (concat "while you are at this Emacs and it is on screen: here, about itself; "
+                                       "beside a chat, about that chat's session; on the task board and the "
+                                       "session list, about itself and in recaps of the sessions they list. "
+                                       "What it says leaves its bubble after a minute.")
                                (harness-ui-pet-test--flat-text))))
       ;; Its first words, the action set apart without its asterisks, on the band.
       (harness-ui-pet-test--wait-text "Is it always this bright in here")
@@ -498,7 +516,7 @@ once in the fifteen half seconds of its idle loop."
       (setq harness-pet--last-spoke 0)
       (with-current-buffer buf (harness-ui-pet-pet))
       (harness-ui-pet-test--wait-text "petted 1 time")
-      (harness-ui-pet-test--wait-text "Yes\\. That\\.")
+      (harness-ui-pet-test--wait-text "Acknowledged\\. Do that again")
       (with-current-buffer buf (harness-ui-pet-rename "Pickle"))
       (harness-ui-pet-test--wait-text "Pickle")
       (should (equal "Pickle" (plist-get harness-pet--pet :name)))
@@ -631,8 +649,13 @@ and the prose is filled to the window."
                          (default-value hook))))
 
 (defun harness-ui-pet-test--watching ()
-  "Where this Emacs told the harness it shows the pet: t, session ids, or nil."
+  "Where this Emacs told the harness it shows the pet, or nil for nowhere.
+As the harness keeps it: (:self BOOL :sessions IDS :overview IDS)."
   (gethash (harness-ui-pet--client-id) harness-pet--watchers))
+
+(defun harness-ui-pet-test--watch (self &optional sessions overview)
+  "The watch the harness keeps for this Emacs showing SELF, SESSIONS and OVERVIEW."
+  (list :self self :sessions sessions :overview overview))
 
 (defun harness-ui-pet-test--figure-rows (buffer)
   "The rows of the pet's figure in BUFFER, top first, as plain text.
@@ -828,8 +851,10 @@ it is narrow, blinking while the session works."
                                  harness-ui--sessions)))
                   (customize-set-variable 'harness-ui-pet-places places))))
             (should-not (harness-ui-pet-test--own-hooks 'harness-chat-header-end-functions))
-            ;; The chat on screen lets it speak about its session, and only that.
-            (harness-test-wait (lambda () (equal (list sid) (harness-ui-pet-test--watching)))
+            ;; The chat on screen lets it speak about its session, and only that:
+            ;; not about itself, which needs it shown itself.
+            (harness-test-wait (lambda () (equal (harness-ui-pet-test--watch nil (list sid))
+                                                 (harness-ui-pet-test--watching)))
                                5 "the harness told the chat is on screen")
             (let ((harness-ui-pet-places '(chat-header board)))
               (should-not (harness-ui-pet--seen)))
@@ -872,7 +897,10 @@ it is narrow, blinking while the session works."
                                (list (list :text "Hm." :ts now :session "s9")))))
               (should (harness-ui-pet--saying-for "s9" now))
               (should-not (harness-ui-pet--saying-for "s8" now))
-              (should-not (harness-ui-pet--saying-for "s9" (+ now harness-ui-pet--saying-lifetime 1)))
+              (should-not (harness-ui-pet--saying-for "s9" (+ now harness-ui-pet-saying-lifetime 1)))
+              ;; With no lifetime, until it says something else.
+              (let ((harness-ui-pet-saying-lifetime nil))
+                (should (harness-ui-pet--saying-for "s9" (+ now 86400))))
               (let ((harness-ui-pet--current (plist-put (copy-sequence harness-ui-pet--current) :muted t)))
                 (should-not (harness-ui-pet--saying-for "s9" now)))
               (let ((harness-ui-pet-places '(chat-header)))
@@ -998,17 +1026,18 @@ narrower board loses its name first, then its face."
                 (delete-window window)
                 (switch-to-buffer board)
                 (kill-buffer other)))
-            ;; The board on screen lets it speak about anything, and it shows.
-            (harness-test-wait (lambda () (eq t (harness-ui-pet-test--watching))) 5 "the board's watch")
+            ;; The board on screen, with no tasks, lets it speak about itself, and it shows.
+            (harness-test-wait (lambda () (equal (harness-ui-pet-test--watch t) (harness-ui-pet-test--watching)))
+                               5 "the board's watch")
             (should-not (harness-ui-pet-test--own-hooks 'harness-ui-tasks-header-functions))
             (harness-call 'pet/pet)
-            (harness-test-wait (lambda () (string-search "Yes. That." (harness-ui-pet-test--figure-text board)))
+            (harness-test-wait (lambda () (string-search "Acknowledged." (harness-ui-pet-test--figure-text board)))
                                5 "its words on the board")
             (harness-ui-pet-test--check-figure board)
             (should (harness-ui-pet-test--joined board))
             ;; Muted, its words leave the board; the pet stays.
             (harness-call 'pet/set-muted t)
-            (harness-test-wait (lambda () (not (string-search "Yes. That." (harness-ui-pet-test--figure-text board))))
+            (harness-test-wait (lambda () (not (string-search "Acknowledged." (harness-ui-pet-test--figure-text board))))
                                5 "its words to leave")
             (harness-ui-pet-test--check-figure board)
             (harness-call 'pet/set-muted :false)
@@ -1042,6 +1071,138 @@ narrower board loses its name first, then its face."
                 (customize-set-variable 'harness-ui-pet-places places)))
             (should (harness-ui-pet-test--figure board)))
         (kill-buffer board)))))
+
+(ert-deftest harness-ui-pet-sayings-leave-their-bubble ()
+  "A saying leaves its bubble once `harness-ui-pet-saying-lifetime' is over: one
+timer, armed for the oldest saying shown, draws the figure again without
+it, its name back beside it.  The pet still knows what it said, and no
+timer waits while no bubble shows a saying."
+  (harness-ui-pet-test-with
+    (harness-test-load-module 'ui-chat)
+    (let* ((sid (plist-get (harness-call 'session/create :cwd dir :model "demo:scripted" :name "Parser work") :id))
+           (buf (harness-chat-buffer sid))
+           (harness-ui-pet-saying-lifetime 1))
+      (unwind-protect
+          (progn
+            (harness-test-wait (lambda () (with-current-buffer buf (and (not harness-chat--loading) harness-compose-end)))
+                               5 "the chat to load")
+            (switch-to-buffer buf)
+            (harness-ui-pet-test--know-the-pet)
+            (harness-ui-pet-test--hatch-elsewhere)
+            (harness-test-wait (lambda () (harness-ui-pet-test--figure buf)) 5 "the pet above the compose box")
+            (harness-test-wait (lambda () (equal (harness-ui-pet-test--watch nil (list sid))
+                                                 (harness-ui-pet-test--watching)))
+                               5 "the harness told the chat is on screen")
+            ;; Nothing said here yet: nothing to wait for.
+            (should-not harness-ui-pet--fade-timer)
+            (harness-call 'session/append sid (list :kind 'user :content "rewrite the tokenizer"))
+            (harness-test-wait (lambda () (string-search "Tokenizer? Bold" (harness-ui-pet-test--figure-text buf)))
+                               5 "its words beside it")
+            (should (timerp harness-ui-pet--fade-timer))
+            ;; A second on, its words go, though nothing else happened.
+            (harness-test-wait (lambda () (not (string-search "Tokenizer? Bold"
+                                                              (harness-ui-pet-test--figure-text buf))))
+                               5 "its words to leave the bubble")
+            (should (string-search (plist-get harness-ui-pet--current :name) (harness-ui-pet-test--figure-text buf)))
+            (harness-ui-pet-test--check-figure buf)
+            (should-not harness-ui-pet--fade-timer)
+            ;; Only the bubble forgot it.
+            (dolist (said (list (plist-get harness-ui-pet--current :said) (plist-get harness-pet--pet :said)))
+              (should (string-search "Tokenizer? Bold" (plist-get (car (last said)) :text)))))
+        (kill-buffer buf)))))
+
+(ert-deftest harness-ui-pet-board-recaps-its-tasks ()
+  "The board tells the harness the sessions of its tasks, and its bubble says the
+pet's recap of one of them; what the pet said about a task's work stays
+in that task's chat.  A recap leaves the bubble as any saying does."
+  (harness-ui-pet-test-with
+    (let ((harness-acp--server-enabled nil))
+      (harness-test-load-module 'tasks))
+    (clrhash harness-tasks--table)
+    (clrhash harness-tasks--starting)
+    (setq harness-tasks--loaded t)
+    (harness-test-load-module 'ui-tasks)
+    (let* ((harness-tasks-worktrees nil)
+           (harness-ui-pet-saying-lifetime 2)
+           (sid (plist-get (harness-call 'session/create :cwd dir :model "demo:scripted" :name "Parser work") :id))
+           (board (harness-tasks dir)))
+      (unwind-protect
+          (progn
+            (harness-test-wait (lambda () (not (buffer-local-value 'harness-ui-tasks--loading board)))
+                               5 "the board to load")
+            (harness-ui-pet-test--know-the-pet)
+            (harness-ui-pet-test--hatch-elsewhere)
+            (harness-test-wait (lambda () (harness-ui-pet-test--figure board)) 5 "the pet on the board")
+            ;; No task yet: the pet itself, and no session to recap.
+            (harness-test-wait (lambda () (equal (harness-ui-pet-test--watch t) (harness-ui-pet-test--watching)))
+                               5 "the board's watch")
+            ;; A task of the board's, waiting for review, its session SID.
+            (harness-tasks--put (list :id "t-recap" :project (harness-tasks--project dir) :cwd dir
+                                      :state 'review :created (float-time) :prompt "Rewrite the lexer"
+                                      :session sid))
+            (harness-test-wait (lambda () (equal (list sid) (harness-ui-pet--overview-sessions board)))
+                               5 "the task on the board")
+            (harness-test-wait (lambda () (equal (harness-ui-pet-test--watch t nil (list sid))
+                                                 (harness-ui-pet-test--watching)))
+                               5 "the harness told the board lists the task")
+            ;; Its recap: the pet's word on the board.
+            (harness-emit 'recap/done sid "Rewrote the lexer; tests pass.")
+            (harness-test-wait (lambda () (string-search "is still at it" (harness-ui-pet-test--figure-text board)))
+                               5 "the recap on the board")
+            (harness-ui-pet-test--check-figure board)
+            (should (equal "overview" (plist-get (car (last (plist-get harness-ui-pet--current :said))) :scope)))
+            ;; What it says about the task's work is for its chat, not the board.
+            (harness-ui-pet--receive
+             (plist-put (copy-sequence harness-ui-pet--current) :said
+                        (append (plist-get harness-ui-pet--current :said)
+                                (list (list :text "Bold move." :ts (float-time) :reason "prompt"
+                                            :session sid :scope "session")))))
+            (should-not (string-search "Bold move." (harness-ui-pet-test--figure-text board)))
+            (should (string-search "is still at it" (harness-ui-pet-test--figure-text board)))
+            ;; And the recap leaves in its time, the pet's name back.
+            (harness-test-wait (lambda () (not (string-search "is still at it"
+                                                              (harness-ui-pet-test--figure-text board))))
+                               5 "the recap to leave")
+            (should (string-search (plist-get harness-ui-pet--current :name) (harness-ui-pet-test--figure-text board))))
+        (kill-buffer board)))))
+
+(ert-deftest harness-ui-pet-asks-nothing-while-nobody-looks ()
+  "While no frame of this Emacs has focus, the pet is seen nowhere: the harness
+hears so, and the pet says nothing, petted or not.  Focus back, it is
+seen again.  The focus is followed only while the pet may be seen."
+  (harness-ui-pet-test-with
+    (let ((buf (harness-ui-pet-test--open))
+          (attended t))
+      (harness-ui-pet-test--hatch)
+      (harness-test-wait (lambda () (equal (harness-ui-pet-test--watch t) (harness-ui-pet-test--watching)))
+                         5 "the watch")
+      (should (advice-function-member-p #'harness-ui-pet--on-focus after-focus-change-function))
+      (cl-letf (((symbol-function 'harness-ui-pet--frame-attended-p) (lambda (_frame) attended)))
+        ;; Its frame loses focus: nobody looks.
+        (setq attended nil)
+        (should-not (harness-ui-pet--seen))
+        (harness-ui-pet--on-focus)
+        (harness-test-wait (lambda () (null (harness-ui-pet-test--watching))) 5 "the watch to end")
+        (let ((said (length (plist-get harness-pet--pet :said))))
+          (setq harness-pet--last-spoke 0)
+          (with-current-buffer buf (harness-ui-pet-pet))
+          (harness-ui-pet-test--wait-text "petted 1 time")
+          (sleep-for 0.1)
+          (should (= said (length (plist-get harness-pet--pet :said)))))
+        ;; Focus back: seen again.
+        (setq attended t)
+        (harness-ui-pet--on-focus)
+        (harness-test-wait (lambda () (equal (harness-ui-pet-test--watch t) (harness-ui-pet-test--watching)))
+                           5 "the watch again"))
+      ;; Seen nowhere it could be: the focus is not followed.
+      (kill-buffer buf)
+      (should (advice-function-member-p #'harness-ui-pet--on-focus after-focus-change-function))
+      (let ((places harness-ui-pet-places))
+        (unwind-protect
+            (progn
+              (customize-set-variable 'harness-ui-pet-places nil)
+              (should-not (advice-function-member-p #'harness-ui-pet--on-focus after-focus-change-function)))
+          (customize-set-variable 'harness-ui-pet-places places))))))
 
 (defun harness-ui-pet-test--draw (view saying room &optional lines)
   "VIEW's figure with SAYING, fitted to ROOM columns and LINES (default 40).
@@ -2992,32 +3153,36 @@ while its spec holds, measured in pixels once; another spec is drawn anew."
                    (length (harness-ui-pet-test--figure-rows list))))))))
 
 
-(ert-deftest harness-ui-pet-list-on-screen-lets-it-speak-about-anything ()
-  "The session list on screen, the pet under it, lets it speak about anything.
-This Emacs tells the harness so, as it does for the board; the list off
-screen, or left out of `harness-ui-pet-places', does not.  Left out, the
-footer is not hooked, and the figure leaves the list and comes back."
+(ert-deftest harness-ui-pet-list-on-screen-lets-it-speak-about-itself-and-recap ()
+  "The session list on screen, the pet under it, lets it speak about itself and
+recap the sessions the list lists.  This Emacs tells the harness so, as
+it does for the board; the list off screen, or left out of
+`harness-ui-pet-places', does not.  Left out, the footer is not hooked,
+and the figure leaves the list and comes back."
   (harness-ui-pet-test-with-list list
-    (should (eq t (harness-ui-pet--seen)))
-    (should (eq t (harness-ui-pet--seen t)))
-    (harness-test-wait (lambda () (eq t (harness-ui-pet-test--watching))) 5 "the list's watch")
-    ;; Only where the pet sits under the list.
-    (let ((harness-ui-pet-places '(chat board chat-header)))
-      (should-not (harness-ui-pet--seen)))
-    (let ((harness-ui-pet-places '(sessions)))
-      (should (eq t (harness-ui-pet--seen))))
-    ;; Off screen it is not seen, and the harness hears so; back, and it does.
-    (let ((other (get-buffer-create "*harness-ui-pet-test other*")))
-      (unwind-protect
-          (progn
-            (switch-to-buffer other)
-            (should-not (harness-ui-pet--seen))
-            (harness-ui-pet--update-watch (selected-frame))
-            (harness-test-wait (lambda () (null (harness-ui-pet-test--watching))) 5 "the watch to end")
-            (switch-to-buffer list)
-            (harness-ui-pet--update-watch (selected-frame))
-            (harness-test-wait (lambda () (eq t (harness-ui-pet-test--watching))) 5 "the watch again"))
-        (kill-buffer other)))
+    (let* ((listed (with-current-buffer list (sort (mapcar #'car tabulated-list-entries) #'string<)))
+           (watch (harness-ui-pet-test--watch t nil listed)))
+      (should (= 2 (length listed)))
+      (should (equal watch (harness-ui-pet--seen)))
+      (should (equal watch (harness-ui-pet--seen t)))
+      (harness-test-wait (lambda () (equal watch (harness-ui-pet-test--watching))) 5 "the list's watch")
+      ;; Only where the pet sits under the list.
+      (let ((harness-ui-pet-places '(chat board chat-header)))
+        (should-not (harness-ui-pet--seen)))
+      (let ((harness-ui-pet-places '(sessions)))
+        (should (equal watch (harness-ui-pet--seen))))
+      ;; Off screen it is not seen, and the harness hears so; back, and it does.
+      (let ((other (get-buffer-create "*harness-ui-pet-test other*")))
+        (unwind-protect
+            (progn
+              (switch-to-buffer other)
+              (should-not (harness-ui-pet--seen))
+              (harness-ui-pet--update-watch (selected-frame))
+              (harness-test-wait (lambda () (null (harness-ui-pet-test--watching))) 5 "the watch to end")
+              (switch-to-buffer list)
+              (harness-ui-pet--update-watch (selected-frame))
+              (harness-test-wait (lambda () (equal watch (harness-ui-pet-test--watching))) 5 "the watch again"))
+          (kill-buffer other))))
     ;; Left out of the places: nothing wired for it, and the list is as it was without it.
     (let ((places harness-ui-pet-places))
       (unwind-protect
@@ -3037,20 +3202,39 @@ footer is not hooked, and the figure leaves the list and comes back."
     (should (equal (list list) (harness-ui-pet--figure-buffers)))))
 
 (ert-deftest harness-ui-pet-list-says-what-it-said-last ()
-  "The bubble beside the pet under the list says what it said last about anything.
-Joined to it at its eyes; muted, the words leave and the pet stays."
+  "The bubble beside the pet under the list says what it said last about itself,
+or its recap of a session the list lists; never what it said about a
+session's work.  Joined to it at its eyes; muted, the words leave and the
+pet stays."
   (harness-ui-pet-test-with-list list
-    (harness-test-wait (lambda () (eq t (harness-ui-pet-test--watching))) 5 "the list's watch")
+    (harness-test-wait (lambda () (plist-get (harness-ui-pet-test--watching) :self)) 5 "the list's watch")
     (harness-call 'pet/pet)
-    (harness-test-wait (lambda () (string-search "Yes. That." (harness-ui-pet-test--figure-text list)))
+    (harness-test-wait (lambda () (string-search "Acknowledged." (harness-ui-pet-test--figure-text list)))
                        5 "its words under the list")
     (harness-ui-pet-test--check-figure list)
     (should (harness-ui-pet-test--joined list))
     ;; Said about nothing in particular: a chat's turn starting does not take it away.
     (harness-ui-pet--on-event "agent/turn-started" (list "no-such-session"))
-    (should (string-search "Yes. That." (harness-ui-pet-test--figure-text list)))
+    (should (string-search "Acknowledged." (harness-ui-pet-test--figure-text list)))
+    (let* ((listed (with-current-buffer list (car (car tabulated-list-entries))))
+           (said (lambda (saying)
+                   (harness-ui-pet--receive
+                    (plist-put (copy-sequence harness-ui-pet--current) :said
+                               (append (plist-get harness-ui-pet--current :said) (list saying)))))))
+      ;; What it said about a listed session's work is for that session's chat.
+      (funcall said (list :text "Bold move." :ts (float-time) :reason "prompt" :session listed :scope "session"))
+      (should (string-search "Acknowledged." (harness-ui-pet-test--figure-text list)))
+      (should-not (string-search "Bold move." (harness-ui-pet-test--figure-text list)))
+      ;; Its recap of a session the list does not list is for another overview.
+      (funcall said (list :text "Elsewhere." :ts (float-time) :reason "recap" :session "no-such-session"
+                          :scope "overview"))
+      (should (string-search "Acknowledged." (harness-ui-pet-test--figure-text list)))
+      ;; Its recap of a listed session shows.
+      (funcall said (list :text "Still at it." :ts (float-time) :reason "recap" :session listed :scope "overview"))
+      (should (string-search "Still at it." (harness-ui-pet-test--figure-text list)))
+      (harness-ui-pet-test--check-figure list))
     (harness-call 'pet/set-muted t)
-    (harness-test-wait (lambda () (not (string-search "Yes. That." (harness-ui-pet-test--figure-text list))))
+    (harness-test-wait (lambda () (not (string-search "Still at it." (harness-ui-pet-test--figure-text list))))
                        5 "its words to leave")
     (harness-ui-pet-test--check-figure list)
     (harness-call 'pet/set-muted :false)))
@@ -3230,35 +3414,84 @@ draw them anew, and no spec draws nothing and keeps nothing."
           (should-not (eq lines (harness-ui-pet--draw spec))))))))
 
 (ert-deftest harness-ui-pet-latest-saying-follows-its-place ()
-  "The last saying shows in the bubble on the board and under the session list.
-Each only where the pet sits, while it is fresh and the pet is not muted."
+  "The bubble on the board and under the session list says what the pet last said
+about itself, or in its recap of a session listed there -- never what it
+said about a session's work, which is for that chat.  Each only where the
+pet sits, while it is fresh and the pet is not muted."
   (require 'harness-pet)
   (require 'harness-ui-pet)
   (let* ((now (float-time))
          (harness-ui-pet--live t)
          (view (list :species "cat" :eye "o" :hat "none" :rarity "rare" :name "Fennel" :hatched t
-                     :said (list (list :text "Old." :ts (- now 5) :session "s1")
-                                 (list :text "Hm." :ts now :session "s2")))))
+                     :said (list (list :text "Old." :ts (- now 9) :scope "pet")
+                                 (list :text "Mine." :ts (- now 5) :scope "pet")
+                                 (list :text "Recap." :ts (- now 3) :session "s1" :scope "overview")
+                                 (list :text "Hm." :ts now :session "s2" :scope "session")))))
     (let ((harness-ui-pet--current view))
       (let ((harness-ui-pet-places '(board)))
-        (should (equal "Hm." (plist-get (harness-ui-pet--latest-saying now) :text)))
-        (should (equal "Hm." (plist-get (harness-ui-pet--latest-saying now 'board) :text)))
-        (should-not (harness-ui-pet--latest-saying now 'sessions)))
+        ;; Its own last word, not a session's work; a recap only where its session is listed.
+        (should (equal "Mine." (plist-get (harness-ui-pet--latest-saying now) :text)))
+        (should (equal "Mine." (plist-get (harness-ui-pet--latest-saying now 'board '("s2")) :text)))
+        (should (equal "Recap." (plist-get (harness-ui-pet--latest-saying now 'board '("s1" "s2")) :text)))
+        (should-not (harness-ui-pet--latest-saying now 'sessions '("s1"))))
       (let ((harness-ui-pet-places '(sessions)))
         (should-not (harness-ui-pet--latest-saying now))
-        (should (equal "Hm." (plist-get (harness-ui-pet--latest-saying now 'sessions) :text))))
+        (should (equal "Recap." (plist-get (harness-ui-pet--latest-saying now 'sessions '("s1")) :text))))
       (let ((harness-ui-pet-places '(chat chat-header)))
         (should-not (harness-ui-pet--latest-saying now))
         (should-not (harness-ui-pet--latest-saying now 'sessions)))
-      ;; Stale, muted or turned off: nothing, where it sits.
+      ;; A saying from before scopes is its session's when it is about one, else its own.
+      (let ((harness-ui-pet-places '(board))
+            (harness-ui-pet--current (plist-put (copy-sequence view) :said
+                                                (list (list :text "Old." :ts now)
+                                                      (list :text "Hm." :ts now :session "s2")))))
+        (should (equal "Old." (plist-get (harness-ui-pet--latest-saying now 'board '("s2")) :text))))
+      ;; Stale, muted or turned off: nothing, where it sits.  No lifetime: no stale.
       (let ((harness-ui-pet-places '(chat board sessions)))
         (should (harness-ui-pet--latest-saying now 'sessions))
-        (should-not (harness-ui-pet--latest-saying (+ now harness-ui-pet--saying-lifetime 1) 'sessions))
+        (should-not (harness-ui-pet--latest-saying (+ now harness-ui-pet-saying-lifetime 1) 'sessions '("s1")))
+        (let ((harness-ui-pet-saying-lifetime nil))
+          (should (equal "Recap." (plist-get (harness-ui-pet--latest-saying (+ now 86400) 'sessions '("s1"))
+                                             :text))))
         (let ((harness-ui-pet--current (plist-put (copy-sequence view) :muted t)))
           (should-not (harness-ui-pet--latest-saying now 'sessions))
           (should-not (harness-ui-pet--latest-saying now 'board)))
         (let ((harness-ui-pet--current (plist-put (copy-sequence view) :enabled :false)))
           (should-not (harness-ui-pet--latest-saying now 'sessions)))))))
+
+(ert-deftest harness-ui-pet-saying-shows-where-it-belongs ()
+  "A saying shows in the buffer its scope names: about a session's work in that
+session's chat only; about the pet itself on its overviews; a recap of a
+session on an overview that lists it, never in the session's own chat.
+The tooltip of a chat's face follows its bubble."
+  (require 'harness-pet)
+  (require 'harness-ui-pet)
+  (let* ((now (float-time))
+         (harness-ui-pet--live t)
+         (harness-ui-pet-places '(chat board sessions))
+         (work (list :text "Bold." :ts now :session "s1" :scope "session"))
+         (recap (list :text "Busy." :ts (+ now 1) :session "s1" :scope "overview"))
+         (own (list :text "Noted." :ts (+ now 2) :scope "pet"))
+         (harness-ui-pet--current (list :species "cat" :eye "o" :hat "none" :rarity "rare" :name "Fennel"
+                                        :hatched t :said (list work recap own))))
+    (should (eq 'session (harness-ui-pet--scope work)))
+    (should (eq 'overview (harness-ui-pet--scope recap)))
+    (should (eq 'pet (harness-ui-pet--scope own)))
+    (should (eq 'session (harness-ui-pet--scope (list :text "Old." :session "s1"))))
+    (should (eq 'pet (harness-ui-pet--scope (list :text "Old."))))
+    ;; In s1's chat, its work, however much the pet said since elsewhere.
+    (should (eq work (harness-ui-pet--saying-for "s1" (+ now 3))))
+    (should-not (harness-ui-pet--saying-for "s2" (+ now 3)))
+    ;; On an overview, its own word, or the recap where s1 is listed.
+    (should (eq own (harness-ui-pet--latest-saying (+ now 3) 'board '("s1"))))
+    (let ((harness-ui-pet--current (plist-put (copy-sequence harness-ui-pet--current) :said (list work recap))))
+      (should (eq recap (harness-ui-pet--latest-saying (+ now 3) 'board '("s1"))))
+      (should-not (harness-ui-pet--latest-saying (+ now 3) 'board '("s2")))
+      (should (eq work (harness-ui-pet--saying-for "s1" (+ now 3)))))
+    ;; Hovering a face: what its bubble there would say.
+    (with-temp-buffer
+      (should (eq own (harness-ui-pet--last-in nil)))
+      (should (eq own (harness-ui-pet--last-in (current-buffer)))))))
 
 (ert-deftest harness-ui-pet-places-say-where-it-sits ()
   "The places option offers the session list, on by default, and says where
@@ -3273,17 +3506,31 @@ the pet stands in chats; its buffer says where it speaks."
     ;; Chat: on whatever comes first below the transcript, no longer just by its box.
     (should (string-search "whatever is first below" (plist-get (cdr (nth 0 consts)) :tag)))
     (should (equal '(chat board sessions) (eval (car (get 'harness-ui-pet-places 'standard-value))))))
-  (dolist (case '(((chat board sessions) . "here, on the task board, on the session list, or beside the chat it is about")
-                  ((chat board) . "here, on the task board, or beside the chat it is about")
-                  ((chat sessions) . "here, on the session list, or beside the chat it is about")
-                  ((board sessions) . "here, on the task board, or on the session list")
-                  ((sessions) . "here, or on the session list")
-                  ((board) . "here, or on the task board")
-                  ((chat) . "here, or beside the chat it is about")
-                  ((chat-header board-header) . "here")
-                  (nil . "here")))
+  (dolist (case '(((chat board sessions)
+                   . "here, about itself; beside a chat, about that chat's session; on the task board and the session list, about itself and in recaps of the sessions they list")
+                  ((chat board)
+                   . "here, about itself; beside a chat, about that chat's session; on the task board, about itself and in recaps of the sessions it lists")
+                  ((chat sessions)
+                   . "here, about itself; beside a chat, about that chat's session; on the session list, about itself and in recaps of the sessions it lists")
+                  ((board sessions)
+                   . "here, about itself; on the task board and the session list, about itself and in recaps of the sessions they list")
+                  ((sessions) . "here, about itself; on the session list, about itself and in recaps of the sessions it lists")
+                  ((board) . "here, about itself; on the task board, about itself and in recaps of the sessions it lists")
+                  ((chat) . "here, about itself; beside a chat, about that chat's session")
+                  ((chat-header board-header) . "here, about itself")
+                  (nil . "here, about itself")))
     (let ((harness-ui-pet-places (car case)))
-      (should (equal (cdr case) (harness-ui-pet--where-it-speaks))))))
+      (should (equal (cdr case) (harness-ui-pet--where-it-speaks)))))
+  ;; How long a saying stays in its bubble, when it goes at all.
+  (dolist (case '((60 . "What it says leaves its bubble after a minute.")
+                  (120 . "What it says leaves its bubble after 2 minutes.")
+                  (30 . "What it says leaves its bubble after 30 seconds.")
+                  (1 . "What it says leaves its bubble after a second.")
+                  (2.5 . "What it says leaves its bubble after 2.5 seconds.")
+                  (nil . nil)
+                  (0 . nil)))
+    (let ((harness-ui-pet-saying-lifetime (car case)))
+      (should (equal (cdr case) (harness-ui-pet--lifetime-text))))))
 
 (provide 'harness-ui-pet-test)
 ;;; harness-ui-pet-test.el ends here
