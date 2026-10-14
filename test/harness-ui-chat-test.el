@@ -27,6 +27,9 @@
 (declare-function harness-provider-claude-close-all "harness-provider-claude")
 (declare-function harness-perms--add-rule-noted "harness-perms")
 (declare-function harness-ui-session-live "harness-ui")
+(declare-function harness-decisions-define-kind "harness-decisions" (kind &rest spec))
+(declare-function harness-ui-decisions-store "harness-ui-decisions" (decision))
+(declare-function harness-ui-decisions--shutdown "harness-ui-decisions" ())
 (declare-function harness-ui-cache-session "harness-ui")
 
 (defvar harness-ui-chat-test-events nil "Recorded (EVENT . ARGS), newest first.")
@@ -3637,6 +3640,378 @@ button."
                                                      "    Not undone: this session's rule for web_fetch has changed since, so it stays as it is\n")))
                              5 "the reason")
           (should-not (harness-ui-chat-test-find buf "[Undo]")))))))
+
+;;;; Lasting decisions
+
+(defvar harness-ui-chat-test--setting nil
+  "The setting the chat tests' kind of decision switches: `before' or `after'.")
+
+(defun harness-ui-chat-test--switch (decision from to)
+  "Switch the chat tests' setting from DECISION's FROM to its TO, if it holds FROM.
+Return (OUTCOME . MESSAGE) as a kind's undo or redo does: `changed',
+with the harness's own sentence, when the setting holds anything else."
+  (let ((record (plist-get decision :record)))
+    (if (equal (format "%s" harness-ui-chat-test--setting) (format "%s" (plist-get record from)))
+        (progn (setq harness-ui-chat-test--setting (intern (format "%s" (plist-get record to))))
+               (list (if (eq to :before) 'undone 'done)))
+      (list 'changed))))
+
+(defmacro harness-ui-chat-test-with-decisions (&rest body)
+  "Run BODY as `harness-ui-chat-test-with' does, with lasting decisions kept.
+The harness keeps them (its decisions module) and the UI caches them
+\(ui-decisions).  The tests' kind of decision, `test', switches
+`harness-ui-chat-test--setting', which holds `after', as a decision just
+made leaves it."
+  (declare (indent 0))
+  `(harness-ui-chat-test-with
+     (harness-test-load-module 'decisions)
+     (harness-test-load-module 'ui-decisions)
+     (setq harness-ui-chat-test--setting 'after)
+     (harness-decisions-define-kind
+      'test
+      :undo (lambda (d) (harness-ui-chat-test--switch d :after :before))
+      :redo (lambda (d) (harness-ui-chat-test--switch d :before :after)))
+     (unwind-protect (progn ,@body)
+       (harness-ui-decisions--shutdown))))
+
+(defun harness-ui-chat-test--decide (sid text)
+  "Keep a decision of the tests' kind, made in SID, that TEXT says; return its id.
+The note that tells of it is written in SID, as the harness writes it:
+after the decision, naming it."
+  (let ((id (plist-get (harness-call 'decision/record 'test sid text '(:before before :after after)) :id)))
+    (harness-call 'session/append sid (list :kind 'hint :content text :meta (list :decision id)))
+    id))
+
+(defun harness-ui-chat-test--click (buf text &optional from)
+  "Push the button TEXT ends with in BUF, after FROM.
+Return what the echo area said, newest first."
+  (let (shown)
+    (with-current-buffer buf
+      (goto-char (- (harness-ui-chat-test-find buf text from) 2))
+      (cl-letf (((symbol-function 'message)
+                 (lambda (fmt &rest args) (when fmt (push (apply #'format fmt args) shown)))))
+        (harness-chat-push)
+        (harness-test-wait (lambda () shown) 5 "the echo area")))
+    shown))
+
+(defun harness-ui-chat-test--struck-p (pos)
+  "Non-nil when the text at POS is struck through, as an undone decision is."
+  (let ((f (get-text-property pos 'face)))
+    (or (eq f 'harness-chat-undone-face)
+        (and (listp f) (or (memq 'harness-chat-undone-face f) (member '(:strike-through t) f))))))
+
+(ert-deftest harness-ui-chat-decision-note-undoes-and-redoes ()
+  "The note of a lasting decision offers [Undo], then [Redo], then [Undo] again.
+Undone, its text is struck through.  Once what it set was changed by
+something else, the note says so under it and offers nothing more."
+  (harness-ui-chat-test-with-decisions
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid))
+           (id (harness-ui-chat-test--decide sid "Always testing")))
+      (harness-test-wait (lambda () (harness-ui-chat-test-find buf "    Always testing  [Undo]\n")) 5 "the note")
+      (with-current-buffer buf
+        (let ((pos (harness-ui-chat-test-find buf "Always testing  [Undo]")))
+          (should (harness-ui-chat-test-face-at (- pos 2) 'button))
+          (should (equal "Take this decision back" (get-text-property (- pos 2) 'help-echo)))
+          (should-not (harness-ui-chat-test--struck-p (- pos 9)))))
+      ;; Undone: the echo area says so, the text is struck through, [Redo] is offered.
+      (should (member "Undone: no longer always testing" (harness-ui-chat-test--click buf "Always testing  [Undo]")))
+      (should (eq 'before harness-ui-chat-test--setting))
+      (harness-test-wait (lambda () (harness-ui-chat-test-find buf "    Always testing  [Redo]\n"))
+                         5 "the note offering its redo")
+      (with-current-buffer buf
+        (let ((pos (harness-ui-chat-test-find buf "Always testing  [Redo]")))
+          (should (harness-ui-chat-test--struck-p (- pos 9)))
+          (should (harness-ui-chat-test-face-at (- pos 9) 'harness-chat-undone-face))
+          (should-not (harness-ui-chat-test--struck-p (- pos 2)))
+          (should (equal "Make this decision again" (get-text-property (- pos 2) 'help-echo))))
+        (should-not (harness-ui-chat-test-find buf "[Undo]")))
+      ;; Redone: as it was.
+      (should (member "Redone: always testing" (harness-ui-chat-test--click buf "Always testing  [Redo]")))
+      (should (eq 'after harness-ui-chat-test--setting))
+      (harness-test-wait (lambda () (harness-ui-chat-test-find buf "    Always testing  [Undo]\n"))
+                         5 "the note offering its undo again")
+      (with-current-buffer buf
+        (should-not (harness-ui-chat-test--struck-p (- (harness-ui-chat-test-find buf "Always testing  [Undo]") 9))))
+      ;; Changed since by something else: it stays, and the note says so, with no button.
+      (setq harness-ui-chat-test--setting 'other)
+      (should (member "Not undone: it was changed since, so it stays as it is"
+                      (harness-ui-chat-test--click buf "Always testing  [Undo]")))
+      (should (eq 'other harness-ui-chat-test--setting))
+      (harness-test-wait (lambda () (harness-ui-chat-test-find
+                                     buf "    Always testing\n    Not undone: it was changed since, so it stays as it is\n"))
+                         5 "the note saying how it ended")
+      (should (eq 'changed (plist-get (harness-call 'decision/get id) :state)))
+      (should-not (harness-ui-chat-test-find buf "[Undo]"))
+      (should-not (harness-ui-chat-test-find buf "[Redo]")))))
+
+(ert-deftest harness-ui-chat-decided-by-follows-the-decision-anywhere ()
+  "A note written where a lasting decision took effect names it, with its button.
+The decision may have been made in another session: undone or redone
+there or here, the notes of both sessions follow.  A decision the UI
+never heard of adds no line."
+  (harness-ui-chat-test-with-decisions
+    (let* ((sid (harness-ui-chat-test-session "Made here"))
+           (other (harness-ui-chat-test-session "Took effect here"))
+           (buf (harness-ui-chat-test-open sid))
+           (buf2 (harness-ui-chat-test-open other))
+           (id (harness-ui-chat-test--decide sid "Always testing")))
+      (harness-call 'session/append other (list :kind 'hint :content "Tested without asking"
+                                                :meta (list :decided-by id)))
+      (harness-test-wait (lambda () (harness-ui-chat-test-find
+                                     buf2 "    Tested without asking\n    decided by: Always testing  [Undo]\n"))
+                         5 "the line naming the decision")
+      (with-current-buffer buf2
+        (should (equal "Take this decision back"
+                       (get-text-property (- (harness-ui-chat-test-find buf2 "decided by: Always testing  [Undo]") 2)
+                                          'help-echo))))
+      ;; Undone in the session that made it: the other session's line follows.
+      (harness-ui-chat-test--click buf "Always testing  [Undo]")
+      (harness-test-wait (lambda () (harness-ui-chat-test-find buf2 "    decided by: Always testing  [Redo]\n"))
+                         5 "the other session's line offering the redo")
+      (with-current-buffer buf2
+        (let ((pos (harness-ui-chat-test-find buf2 "decided by: Always testing")))
+          (should (harness-ui-chat-test--struck-p (1- pos)))
+          (should-not (harness-ui-chat-test--struck-p (- pos 16)))
+          (should-not (harness-ui-chat-test--struck-p (- pos 27)))))
+      ;; Redone from there: the note where it was made follows.
+      (should (member "Redone: always testing"
+                      (harness-ui-chat-test--click buf2 "decided by: Always testing  [Redo]")))
+      (should (eq 'after harness-ui-chat-test--setting))
+      (harness-test-wait (lambda () (harness-ui-chat-test-find buf "    Always testing  [Undo]\n"))
+                         5 "the note offering its undo")
+      (harness-test-wait (lambda () (harness-ui-chat-test-find buf2 "    decided by: Always testing  [Undo]\n"))
+                         5 "the line offering its undo")
+      ;; A decision the UI never heard of: no line.
+      (harness-call 'session/append other (list :kind 'hint :content "Followed an old rule"
+                                                :meta (list :decided-by "d-forgotten")))
+      (harness-test-wait (lambda () (harness-ui-chat-test-find buf2 "    Followed an old rule\n")) 5 "the note")
+      (should-not (harness-ui-chat-test-find buf2 "decided by" (harness-ui-chat-test-find buf2 "Followed an old rule"))))))
+
+(ert-deftest harness-ui-chat-tool-result-names-its-decision ()
+  "A call a lasting decision's rule refused names the decision, above the fold.
+The line follows the decision: [Undo], then [Redo] with the text struck
+through, then how it ended.  The harness may name the decision as the
+result is written or just after."
+  (harness-ui-chat-test-with-decisions
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid))
+           (text "Always denying every bash call, in every session")
+           (id (harness-ui-chat-test--decide sid text))
+           (line (concat "  decided by: " text "  [Undo]\n")))
+      ;; Named as the result is written.
+      (harness-call 'session/append sid (list :kind 'tool-call :tool "bash" :call-id "c1"
+                                              :title "Bash: rm -rf build" :input '(:command "rm -rf build")))
+      (harness-call 'session/append sid (list :kind 'tool-result :call-id "c1" :is-error t
+                                              :output "Denied: a rule denies every bash call"
+                                              :meta (list :denied t :decided-by id)))
+      ;; Named just after.
+      (harness-call 'session/append sid (list :kind 'tool-call :tool "bash" :call-id "c2"
+                                              :title "Bash: make clean" :input '(:command "make clean")))
+      (let ((result (harness-call 'session/append sid (list :kind 'tool-result :call-id "c2" :is-error t
+                                                            :output "Denied: a rule denies every bash call"
+                                                            :meta (list :denied t)))))
+        (harness-call 'session/update-node sid (plist-get result :id) :meta (list :denied t :decided-by id)))
+      (harness-test-wait (lambda () (let ((first (harness-ui-chat-test-find buf line)))
+                                      (and first (harness-ui-chat-test-find buf line first))))
+                         5 "both calls naming the decision")
+      (with-current-buffer buf
+        (let ((calls (harness-ui-chat-test-blocks buf "tool-call")))
+          (should (= 2 (length calls)))
+          (dolist (block calls)
+            (let ((pos (harness-ui-chat-test-find buf "decided by:" (harness-chat-block-start block)))
+                  (reason (harness-ui-chat-test-find buf "Denied: a rule" (harness-chat-block-start block))))
+              (should (< pos (harness-chat-block-end block)))
+              ;; Folded, the call still shows it; the reason is folded away.
+              (should (harness-chat-block-collapsed block))
+              (should-not (invisible-p (1- pos)))
+              (should (invisible-p (1- reason)))
+              (should (equal "Take this decision back"
+                             (get-text-property (- (harness-ui-chat-test-find buf "[Undo]" pos) 2) 'help-echo)))))))
+      ;; Undone from a call's line: both calls offer the redo, the decision struck through.
+      (let ((second (harness-chat-block-start (cadr (harness-ui-chat-test-blocks buf "tool-call")))))
+        (should (member (concat "Undone: no longer " (downcase (substring text 0 1)) (substring text 1))
+                        (harness-ui-chat-test--click buf "[Undo]" second))))
+      (let ((redo (concat "  decided by: " text "  [Redo]\n")))
+        (harness-test-wait (lambda () (let ((first (harness-ui-chat-test-find buf redo)))
+                                        (and first (harness-ui-chat-test-find buf redo first))))
+                           5 "both calls offering the redo")
+        (with-current-buffer buf
+          (let ((pos (harness-ui-chat-test-find buf (concat "decided by: " text))))
+            (should (harness-ui-chat-test--struck-p (1- pos)))
+            (should-not (harness-ui-chat-test--struck-p (- pos (length text) 2))))))
+      ;; Redone, then changed since: the line says how it ended, with no button.
+      (harness-ui-chat-test--click buf "[Redo]")
+      (harness-test-wait (lambda () (harness-ui-chat-test-find buf line)) 5 "the undo again")
+      (setq harness-ui-chat-test--setting 'other)
+      (harness-ui-chat-test--click buf "[Undo]")
+      (let ((ended (concat "  decided by: " text "\n  Not undone: it was changed since, so it stays as it is\n")))
+        (harness-test-wait (lambda () (let ((first (harness-ui-chat-test-find buf ended)))
+                                        (and first (harness-ui-chat-test-find buf ended first))))
+                           5 "both calls saying how it ended"))
+      (should-not (harness-ui-chat-test-find buf "[Undo]"))
+      (should-not (harness-ui-chat-test-find buf "[Redo]")))))
+
+(ert-deftest harness-ui-chat-decision-note-the-ui-has-not-heard-of ()
+  "A note of a decision the UI has not heard of draws what the note says.
+A permission note says where its answer stands, which the harness keeps
+in step with the decision, so its button is drawn from that.  A note of
+another kind offers nothing until the UI hears of its decision.  The
+note of an answer that recorded nothing new has nothing under it."
+  (harness-ui-chat-test-with-decisions
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid))
+           (rule '(:tool "bash" :behavior "allow"))
+           (note (harness-call 'session/append sid
+                               (list :kind 'hint :content "Always allowing every bash call, in every session"
+                                     :meta (list :permission (list :scope "always" :rule rule :undo "offered")
+                                                 :decision "d-unheard"))))
+           (set-undo (lambda (undo result)
+                       (harness-call 'session/update-node sid (plist-get note :id)
+                                     :meta (list :permission (list :scope "always" :rule rule :undo undo :result result)
+                                                 :decision "d-unheard")))))
+      (harness-call 'session/append sid (list :kind 'hint :content "Always starting afresh when the cache is cold"
+                                              :meta (list :decision "d-unheard-too")))
+      (harness-call 'session/append sid (list :kind 'hint :content "Already allowing every grep call"
+                                              :meta (list :permission (list :scope "session"
+                                                                            :rule '(:tool "grep" :behavior "allow")))))
+      (harness-test-wait (lambda () (harness-ui-chat-test-find buf "    Already allowing every grep call\n")) 5 "the notes")
+      (with-current-buffer buf
+        (let ((pos (harness-ui-chat-test-find buf "    Always allowing every bash call, in every session  [Undo]\n")))
+          (should pos)
+          (should (equal "Take back what this answer recorded; the call it answered stays allowed"
+                         (get-text-property (- pos 3) 'help-echo))))
+        (should (harness-ui-chat-test-find buf "    Always starting afresh when the cache is cold\n"))
+        (should-not (harness-ui-chat-test-find buf "cache is cold  ["))
+        (should-not (harness-ui-chat-test-find buf "every grep call\n    nil")))
+      ;; The note says it was undone: [Redo], struck through.
+      (funcall set-undo "undone" "Undone: no longer always allowing every bash call, in every session")
+      (harness-test-wait (lambda () (harness-ui-chat-test-find
+                                     buf "    Always allowing every bash call, in every session  [Redo]\n"))
+                         5 "the note offering its redo")
+      (with-current-buffer buf
+        (let ((pos (harness-ui-chat-test-find buf "in every session  [Redo]")))
+          (should (harness-ui-chat-test--struck-p (- pos 9)))
+          (should (equal "Record this answer again" (get-text-property (- pos 2) 'help-echo)))))
+      ;; The note says the rule changed since: the reason, no button.
+      (funcall set-undo "changed" "Not redone: the rule for bash has changed since, so it stays as it is")
+      (harness-test-wait (lambda () (harness-ui-chat-test-find
+                                     buf (concat "    Always allowing every bash call, in every session\n"
+                                                 "    Not redone: the rule for bash has changed since, so it stays as it is\n")))
+                         5 "the note saying how it ended")
+      (should-not (harness-ui-chat-test-find buf "[Redo]"))
+      ;; Heard of: the note follows the decision, and its kind says what the button does.
+      (harness-ui-decisions-store (list :id "d-unheard-too" :kind "cowboy" :state "done"
+                                        :text "Always starting afresh when the cache is cold"))
+      (harness-test-wait (lambda () (harness-ui-chat-test-find buf "    Always starting afresh when the cache is cold  [Undo]\n"))
+                         5 "the note offering its undo")
+      (with-current-buffer buf
+        (should (equal "Ask again when the prompt cache is cold"
+                       (get-text-property (- (harness-ui-chat-test-find buf "cache is cold  [Undo]") 2) 'help-echo)))))))
+
+(defun harness-ui-chat-test--both (bufs text)
+  "Wait until every chat buffer in BUFS shows TEXT."
+  (dolist (buf bufs)
+    (harness-test-wait (lambda () (harness-ui-chat-test-find buf text)) 5 (format "%S in %s" text (buffer-name buf)))))
+
+(ert-deftest harness-ui-chat-a-lasting-answer-moves-from-any-session ()
+  "A lasting permission answer, given in one session, is undone from a call
+its rule denied in another, and redone from its note: both chats follow,
+and the rule goes and comes back.  The real permission layer, end to end."
+  (harness-ui-chat-test-with-decisions
+    (harness-test-load-module 'perms)
+    ;; The chain starts at `ask', as it does outside the tests, so that
+    ;; the permission layer decides, not the tests' blanket allow (10).
+    (harness-add-filter 'permission/decide (lambda (_d next &rest _) (funcall next (list :behavior 'ask))) 15)
+    (let ((harness-perms-rules nil)
+          (text "Always denying every bash call, in every session"))
+      (cl-letf (((symbol-function 'harness-save-user-option) (lambda (sym value) (set sym value))))
+        (let* ((sid (harness-ui-chat-test-session "Answered here"))
+               (other (harness-ui-chat-test-session "Denied here"))
+               (buf (harness-ui-chat-test-open sid))
+               (buf2 (harness-ui-chat-test-open other)))
+          (harness-perms--add-rule-noted sid '(:tool "bash" :behavior deny) 'always)
+          (harness-ui-chat-test--both (list buf) (concat "    " text "  [Undo]\n"))
+          ;; The other session's agent runs bash: the rule denies it, and
+          ;; the result names the answer.
+          (let ((harness-provider-demo-script-override
+                 '((:type tool-call :id "b1" :name "bash" :input (:command "rm -rf build"))
+                   (:type text :delta "The rule denies it.")
+                   (:type usage :input 10 :output 5 :context 15)
+                   (:type done :stop-reason end-turn))))
+            (harness-ui-chat-test-prompt buf2 "clean the build"))
+          (harness-ui-chat-test--both (list buf2) (concat "  decided by: " text "  [Undo]\n"))
+          ;; Undone from the denied call: the rule is gone, both offer the redo.
+          (should (member "Undone: no longer always denying every bash call, in every session"
+                          (harness-ui-chat-test--click buf2 "[Undo]")))
+          (should-not harness-perms-rules)
+          (harness-ui-chat-test--both (list buf) (concat "    " text "  [Redo]\n"))
+          (harness-ui-chat-test--both (list buf2) (concat "  decided by: " text "  [Redo]\n"))
+          (with-current-buffer buf
+            (should (harness-ui-chat-test--struck-p (harness-ui-chat-test-find buf "Always denying"))))
+          ;; Redone from the note: the rule is back, both offer the undo again.
+          (should (member "Redone: always denying every bash call, in every session"
+                          (harness-ui-chat-test--click buf "[Redo]")))
+          (should (equal "bash" (plist-get (car harness-perms-rules) :tool)))
+          (harness-ui-chat-test--both (list buf) (concat "    " text "  [Undo]\n"))
+          (harness-ui-chat-test--both (list buf2) (concat "  decided by: " text "  [Undo]\n")))))))
+
+(defvar harness-cowboy-ask)
+(defvar harness-cowboy-default)
+(defvar harness-compaction-brief-model)
+
+(ert-deftest harness-ui-chat-an-always-cold-cache-answer-moves-from-any-session ()
+  "The cold-cache question answered \"always\" in one session is undone from
+the note of another, whose default it took unasked, and redone from its
+own note: both chats follow, and asking goes back on, then off.  The
+real cold-cache layer, end to end."
+  (harness-ui-chat-test-with-decisions
+    (dolist (m '(compaction tools-agent tools-sessions cowboy))
+      (harness-test-load-module m))
+    (let ((harness-cowboy-ask t)
+          (harness-cowboy-default 'brief)
+          (harness-compaction-brief-model "demo:scripted")
+          (text "Always starting afresh when the prompt cache is cold, without asking"))
+      (cl-letf (((symbol-function 'harness-save-user-option) (lambda (sym value) (set sym value))))
+        (let* ((cold (lambda (name)
+                       (let ((id (harness-ui-chat-test-session name)))
+                         (harness-call 'session/append id '(:kind user :content "paginate the orders"))
+                         (harness-call 'session/append id '(:kind assistant :content "A cursor, then."))
+                         (harness-call 'session/usage-add id '(:input 10 :output 10 :cache-read 3000
+                                                               :context 3020 :cache-at 1000.0))
+                         id)))
+               (sid (funcall cold "Answered here"))
+               (other (funcall cold "Unasked here"))
+               (buf (harness-ui-chat-test-open sid))
+               (buf2 (harness-ui-chat-test-open other)))
+          (let ((p (harness-call 'agent/prompt sid "go on")))
+            (harness-test-wait (lambda () (harness-call 'question/pending sid)) 5 "the cold-cache question")
+            (harness-call 'question/answer sid (plist-get (car (harness-call 'question/pending sid)) :id)
+                          (list :answer "always start afresh"))
+            (harness-test-await p 10))
+          (should-not harness-cowboy-ask)
+          (harness-ui-chat-test--both (list buf) "as you chose, from now on without asking (harness-cowboy-ask turns asking back on)  [Undo]\n")
+          (harness-test-await (harness-call 'agent/prompt other "go on") 10)
+          (should-not (harness-call 'question/pending other))
+          (harness-ui-chat-test--both (list buf2) (concat "    decided by: " text "  [Undo]\n"))
+          (with-current-buffer buf2
+            (should (equal "Ask again when the prompt cache is cold"
+                           (get-text-property (- (harness-ui-chat-test-find buf2 (concat "decided by: " text "  [Undo]")) 2)
+                                              'help-echo))))
+          ;; Undone from the session it was not made in: asking is back on.
+          (should (member "Undone: asking again what goes first when the prompt cache is cold, and “Brief summary” is the default again"
+                          (harness-ui-chat-test--click buf2 "[Undo]")))
+          (should (eq t harness-cowboy-ask))
+          (should (eq 'brief harness-cowboy-default))
+          (harness-ui-chat-test--both (list buf) "(harness-cowboy-ask turns asking back on)  [Redo]\n")
+          (harness-ui-chat-test--both (list buf2) (concat "    decided by: " text "  [Redo]\n"))
+          ;; Redone from its own note: the default and the silence are back.
+          (should (member (concat "Redone: always starting afresh when the prompt cache is cold, without asking")
+                          (harness-ui-chat-test--click buf "[Redo]")))
+          (should-not harness-cowboy-ask)
+          (should (eq 'fresh harness-cowboy-default))
+          (harness-ui-chat-test--both (list buf) "(harness-cowboy-ask turns asking back on)  [Undo]\n")
+          (harness-ui-chat-test--both (list buf2) (concat "    decided by: " text "  [Undo]\n")))))))
 
 (ert-deftest harness-ui-chat-the-judgement-note-offers-its-actions ()
   "The note after a judgement draws its two actions as buttons.

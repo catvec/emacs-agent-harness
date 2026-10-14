@@ -14,8 +14,8 @@ module needs something more, add it here first.
                                  when `harness-process' is nil)
  State          session, agent, config, project, store, usage, insights, fallback,
                 retry, naming, judge, compaction, handoff, worktree, merge, tasks,
-                tasks-notify, supervisor, seed, skills, perms, sandbox, notifications,
-                secrets, redact
+                tasks-notify, supervisor, seed, skills, perms, decisions, sandbox,
+                notifications, secrets, redact
  Completion     provider, provider-openai, provider-deepseek, provider-claude,
                 provider-bedrock, provider-copilot
  Tool calls     tools, tools-fs, tools-shell, tools-ssh, tools-emacs, tools-emacs-eval,
@@ -622,6 +622,19 @@ means the answer recorded nothing new.  Read it with
 The chat shows the note's text with an [Undo] that calls
 `permission/undo` (see perms) while `:undo` is `offered`.
 
+A lasting decision (see "decisions") is named by the notes about it.
+The hint written where it was made -- a lasting permission answer's,
+or the cold-cache hint of an "always" answer (see cowboy) -- has its id
+in its `:meta` `:decision`; a hint or a tool result written later where
+it took effect, in any session, has it in `:meta` `:decided-by`: the
+cold-cache hint of the default taken unasked, the result of a call a
+recorded rule denied.  Read them with `harness-node-decision` and
+`harness-node-decided-by` (harness-util).  The chat draws each such
+note's [Undo] or [Redo] from the decision itself (ui-decisions), not
+from the node, so a move made in one session shows in all of them.  A
+permission note keeps `:permission` `:undo` in step with its decision
+(`offered` while done, `undone`, `changed` or `gone` after a move), for
+a client that does not follow decisions.
 A tool-result node whose output had secrets masked (see secrets) says so
 in its `:meta` `:masked`, a list of `(:label LABEL :fingerprint F
 :count N)`: which secret, by the first 8 hex digits of its SHA-256, and
@@ -2503,13 +2516,20 @@ non-interactive session it stays a denial.
   in its `:meta` `:permission` (see Node).  A rule or a grant that was
   there already gives a note with nothing to undo (no `:undo`, and the
   text says "already so").  allow-once records nothing and gives no
-  note, the turn grant of the agent's own request included.
+  note, the turn grant of the agent's own request included.  What a
+  new note records is also a lasting decision of the kind `permission`
+  (`decision/record`, see "decisions"), whose id the note's `:meta`
+  `:decision` holds: undone and redone by id, from any session.
 - `permission/undo SESSION-ID NODE-ID` → `(:outcome undone|changed|gone|none
-  :message "…")` takes back what note NODE-ID recorded and nothing
-  else: the decision on the call it answered stands.  It marks the
-  note (`session/update-node`, `:undo` OUTCOME and `:result` the
-  message), and a note tried already returns what it got and changes
-  nothing (`none` for one with nothing to undo).  A rule is looked up
+  :message "…" :decision DECISION)` takes back what note NODE-ID
+  recorded and nothing else: the decision on the call it answered
+  stands.  With the decisions module it is `decision/undo` of the
+  note's decision; a note written before decisions were kept is taken
+  in first (`decision/record` with what its `:permission` says, the id
+  then written into its `:meta`).  It marks the note
+  (`session/update-node`, `:undo` OUTCOME and `:result` the message),
+  and a note tried already returns what it got and changes nothing
+  (`none` for one with nothing to undo).  A rule is looked up
   by value, the rule as recorded first, then one equal in substance
   (`harness-perms--rule-key`: tool, kind, path and behavior, compared
   trimmed and with symbols as strings, so a rule Settings saved back
@@ -2523,6 +2543,21 @@ non-interactive session it stays a denial.
   (`permission/dir-revoked`); an entry that still covers it, a parent
   put in its place say, is `changed` and stays; else `gone`.  The
   message says what happened and why.
+- `permission/redo SESSION-ID NODE-ID` → the same plist: `decision/redo`
+  of what note NODE-ID records, once undone.  It records the rule again
+  (`harness-perms-add-rule`) or grants the directory again
+  (`permission/allow-dir`) while nothing took its place: no rule for the
+  same tool and path, no entry that covers the directory, the session
+  a session-wide answer was for still there, and the policy not setting
+  the list.  Otherwise the decision ends `changed` (or `gone`, its
+  session gone) and the setting stays as it is.  The note is `offered`
+  again once redone.
+- A call denied by a rule a decision recorded names it: the rule
+  decision of `permission/decide` carries `:decided-by ID`
+  (`harness-perms--rule-decision-id`: the newest decision in effect for
+  that rule, the session's own or one for every session), and once the
+  call's result is in the transcript its `:meta` `:decided-by` says so
+  (`agent/tool-result`, `session/update-node`).
 - Denied calls the user can approve: every denial is kept, per session,
   under the handle of the call's id (`harness-perms--remember-denied`, a
   `permission/decided` subscriber, so a denial is kept whoever made it,
@@ -2750,6 +2785,47 @@ non-interactive session it stays a denial.
   allow-always, `permission/allow-dir` with SCOPE `always` is refused,
   and the global entries are not `:revocable`; grants for the session
   or the turn, which a person answering makes, stay as they are.
+
+### decisions
+
+Lasting decisions: answers that hold beyond their moment, kept with
+their undo and redo, the harness's rather than a session's, so any
+session can move one.  A lasting permission answer (kind `permission`,
+see perms) and an "always" answer to the cold-cache question (kind
+`cowboy`) are decisions.
+
+- A decision is `(:id "d-…" :kind KIND :text TEXT :record RECORD
+  :session SID :node NODE-ID :at FLOAT :state STATE :result TEXT
+  :moved-at FLOAT)`: TEXT what it does, as its note reads ("Always
+  allowing every bash call, in every session"); RECORD what its kind
+  needs to undo and redo it; SID and NODE-ID the note where it was made
+  (see Node); `:result` how its last move went, in a sentence.
+- STATE (`harness-decision-states`) is a cursor: `done` while what it
+  changed is in effect, `undone` once taken back; `changed` (what it
+  changed was changed since, by Settings or another answer) and `gone`
+  (it is no longer there) end it.  Undo moves `done` to `undone`, redo
+  back, each only while the setting holds what the other move left:
+  a move never takes back a change somebody else made, and of two
+  decisions about one setting only the one that holds it moves.
+- `harness-decisions-define-kind KIND :undo FN :redo FN`: the module
+  that owns the setting defines its kind as it loads.  Each FN takes
+  the decision and returns `(OUTCOME . MESSAGE)`: `undone`, `done`,
+  `changed` or `gone`, and the sentence (nil for the default one).  A FN
+  that signals, or a kind no module defines, moves nothing: the outcome
+  is `failed` and the decision stays as it was.
+- `decision/record KIND SESSION-ID TEXT RECORD &rest OPTS` → the
+  decision, `done` (OPTS: `:node`, `:at`, and `:state` with `:result` for
+  one taken in after the fact).  `decision/attach ID SESSION-ID NODE-ID`
+  names its note.  `decision/get ID`, `decision/list &rest OPTS`
+  (`:kind`, `:state`, `:session`, `:limit`; newest first).
+- `decision/undo ID`, `decision/redo ID` → `(:outcome OUTCOME :message
+  TEXT :decision DECISION)`, OUTCOME the state after it or `failed`.  A
+  decision in no state to move returns its state and why, unchanged.
+- Event `decision/changed DECISION` on every decision kept, attached
+  or moved; ACP forwards it, and clients call the methods as
+  `_harness/decision/…`.
+- The newest `harness-decisions-kept` (500) are kept in the store
+  (`decisions.json`), so the notes' buttons work after a restart.
 
 ### sandbox
 
@@ -3672,6 +3748,16 @@ as it is, all of the conversation uncached, without a decision.
   `harness-cowboy-default` and `harness-cowboy-ask`).  An answer that
   names no choice asks again; a dismissed question holds the message.
   `session_control` refuses to answer it for another session's agent.
+- An "always" answer is a lasting decision of the kind `cowboy` (see
+  "decisions"), its record `(:choice C :before SETTINGS :after
+  SETTINGS)`, each SETTINGS `(:default C :ask BOOL)`; the hint written
+  then has its id in `:meta` `:decision`.  Undo sets the settings back
+  to `:before` (asking on, the earlier default) while they hold
+  `:after`; redo sets `:after` while they hold `:before`; else the
+  decision ends `changed`, the settings left as they are.  A hint of
+  the default taken unasked (BY `default`, `non-interactive`,
+  `unasked`, `cold-start`) names the decision whose `:after` the
+  settings hold now as `:decided-by` (`harness-cowboy--live-decision`).
 - Not asked, `harness-cowboy-default` goes first (`brief`, the one
   choice that never reads the whole conversation uncached and still
   leaves a summary).  No model judges the choice.
@@ -8491,6 +8577,26 @@ option as on any question; answers go through
 `harness-ui-pending-answer-question` (`harness-ui-cowboy-answer`), and
 text typed in the box answers it too.  Without a `:cowboy` the ordinary
 question panel shows.
+Lasting decisions (`harness-ui-decisions`, module `ui-decisions`): a
+cache of the harness's decisions (see decisions), fetched whole with
+`_harness/decision/list` on connect and after `harness/reloaded`, then
+kept by `decision/changed`; `harness-ui-decision` reads one, and
+`harness-ui-decision-functions` hears every change, (nil nil) after a
+whole fetch.  A decision offers one button
+(`harness-ui-decision-button`): [Undo] while done, [Redo] while undone,
+none once ended.  They run `harness-decision-undo` and
+`harness-decision-redo`, which call `_harness/decision/undo|redo`, cache
+the decision returned and echo the harness's sentence; from M-x they
+ask which decision, newest first.  The chat draws a note whose `:meta`
+has `:decision` as `TEXT  [Undo]`, `TEXT  [Redo]` with TEXT struck
+through (`harness-chat-undone-face`), or TEXT with the decision's
+`:result` on the line under it once ended; a hint or tool result with
+`:decided-by` gets a line `decided by: TEXT  [Undo]` the same way (in a
+tool block, above the fold).  A permission note whose decision the
+cache lacks follows its `:permission` `:undo`; another kind shows no
+button until the cache hears of it.  Every chat redraws the blocks of a
+decision that changed (`harness-chat--on-decision`), so a move made in
+one session shows in all.
 Prompt cache warning (`harness-ui-cache`, module `ui-cache`): once the
 session's `:cache :expires` has passed while it is idle or closed, a
 panel above the box says so ("Prompt cache expired at

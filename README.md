@@ -150,6 +150,8 @@ OpenAI-compatible APIs and AWS Bedrock.
 | A search in words, typed in the board's own box: the board shows what it is about, and acts | |
 | ![The Insights report over 30 days: the totals, the summary the model wrote, and the messages by hour of day and by weekday](docs/media/insights.png) | ![The Insights report further down: the busiest sessions, each tool's calls and failures, the permission decisions and the tasks](docs/media/insights-activity.png) |
 | Insights: a month of work, summed up by your model | The sessions, tools, permissions and tasks behind it |
+| ![Two chats: an Always deny answer in the left one, a call the rule denied in the right one, both struck through and offering [Redo] after [Undo] was clicked on the right](docs/media/chat-decisions.png) | ![Two chats: an always answer to the cold-cache question in the left one, a default taken unasked in the right one, which names that answer, both offering [Undo]](docs/media/chat-decisions-cold.png) |
+| A lasting answer, undone from another session: both offer [Redo] | An "always" cold-cache answer, and a chat it decided for |
 | ![The task slots page: four slots in use, each a box with its task, priority, state and time at work; the queue by priority, the next four in line, and how long tasks waited for a slot this week](docs/media/slots.png) | |
 | A project's task slots: who holds them, who waits, for how long | |
 | ![A chat whose agent replied in three paragraphs, the reply quoted in the compose box with C-c > and answered inline: the middle of the long paragraph elided as [...], the quote split in two with an answer under each part](docs/media/quote-reply.png) | |
@@ -862,11 +864,27 @@ or the task board: `Always allowing every bash call, in every session
 [Undo]`. `[Undo]` takes back what that answer recorded, the rule or
 the directory, for the session or from `harness-perms-rules` and
 `harness-allowed-directories`, and nothing else. The call it answered
-stays allowed or denied. Once undone the note is struck through. When
-the rule has changed since, edited in Settings say, `[Undo]` leaves it
-as it is, and the note says so under it; it says so too when the rule
-or the directory is gone already. An answer that recorded nothing new,
-the same rule being there already, offers no `[Undo]`.
+stays allowed or denied. Once undone the note is struck through and
+offers `[Redo]`, which records it again, and then `[Undo]` again. When
+the rule has changed since, edited in Settings say, or another answer
+recorded it again, the button leaves it as it is, and the note says so
+under it and offers nothing more; it says so too when the rule or the
+directory is gone already. An answer that recorded nothing new, the
+same rule being there already, offers no `[Undo]`.
+
+Such an answer belongs to no one session: undo it, or redo it, from
+whichever session shows it, now or after a restart, and every chat
+showing it follows. A call that a rule from such an answer denies,
+in any session, names it under the call, with the same button:
+
+```
+ › Bash rm -rf build/  ● denied
+   decided by: Always denying every bash call, in every session  [Undo]
+```
+
+`M-x harness-decision-undo` and `M-x harness-decision-redo` do the same
+for an answer whose note is not on screen: they offer the answers that
+can move that way, newest first.
 
 The tools that inspect your Emacs never ask. When `emacs_find_definition`
 shows a definition, the file it names may then be read without a grant
@@ -1294,7 +1312,18 @@ for you.
 A capital letter, or "always" with a choice, makes that choice the
 default and stops the asking (`harness-cowboy-default`,
 `harness-cowboy-ask`, saved like any setting; **Cold cache** on the
-settings page). A session that never waits for you, such as a
+settings page). The note that says so offers `[Undo]`, as a lasting
+permission answer does: it turns asking back on, with the default as
+it was, and then offers `[Redo]`. So does every note, in any session,
+saying the default went first unasked because of that answer:
+
+```
+ Prompt cache cold since 09:12: starting afresh, the default, as asking is off (harness-cowboy-ask)
+ decided by: Always starting afresh when the prompt cache is cold, without asking  [Undo]
+```
+
+Settings changed by hand since are left as they are, and the note
+says so. A session that never waits for you, such as a
 non-interactive task, is never asked: no model judges what to do, the
 default goes first. The default default is the brief summary, the one
 choice that never pays for the whole conversation uncached and still

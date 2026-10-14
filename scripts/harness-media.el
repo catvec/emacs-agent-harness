@@ -1237,6 +1237,7 @@ The handle is the one the approval message names."
     ("OpenAPI" . harness-media--task-openapi)
     ("Let a sub-agent run" . harness-media--notes-script)
     ("Run the project's check suite" . harness-media--notes-child-script)
+    ("old build" . harness-media--decisions-script)
     ("dropped after one try" . harness-media--quote-script)
     ;; The denied call and the user's approval of it.
     ("baseline" . harness-media--baseline-denied-script)
@@ -2003,6 +2004,137 @@ none of theirs."
     (harness-call 'agent/cancel id)
     (harness-media--wait (lambda () (not (harness-call 'agent/running id))) 15 "the turn to end")
     (harness-call 'session/delete id)))
+
+;;;; Lasting decisions
+
+(defun harness-media--decisions-script (_request)
+  "The turn of the decisions pictures' sessions: a command a rule may deny."
+  (list (harness-media--say "The artefacts in build/ are from the last release; I'll clear them out first.\n")
+        (harness-media--tool "bash" :command "rm -rf build/")
+        (harness-media--say "That command is denied, so build/ stays as it is; the release script rebuilds it anyway.")))
+
+(defun harness-media--step (name)
+  "Take the picture NAME of a step between two pictures, when they are wanted.
+They are when HARNESS_MEDIA_STEPS is set: a picture made of clicks then
+shows each of them, for a reviewer, while `scripts/media.sh' keeps only
+the one picture the docs show."
+  (let ((wanted (getenv "HARNESS_MEDIA_STEPS")))
+    (when (and wanted (not (string-empty-p wanted)))
+      (harness-media--capture name))))
+
+(defun harness-media--shows (buffer text)
+  "Non-nil when BUFFER shows TEXT."
+  (with-current-buffer buffer
+    (save-excursion (goto-char (point-min)) (search-forward text nil t))))
+
+(declare-function harness-chat-push "harness-ui-chat" ())
+
+(defun harness-media--push (buffer label)
+  "Push the last button LABEL of chat BUFFER, as a click there would."
+  (with-current-buffer buffer
+    (goto-char (point-max))
+    (unless (search-backward label nil t)
+      (error "No %s in %s" label (buffer-name)))
+    (forward-char 1)
+    (harness-chat-push))
+  (harness-media--settle 0.5))
+
+(defun harness-media--both (buffers text what)
+  "Wait until every chat of BUFFERS shows TEXT, described as WHAT."
+  (harness-media--wait (lambda () (cl-every (lambda (b) (harness-media--shows b text)) buffers)) 15 what)
+  (harness-media--settle 0.5))
+
+(defun harness-media--pair (left right)
+  "Show the chats of sessions LEFT and RIGHT side by side, fitted; return them.
+The value is the list of the two chat buffers."
+  (harness-media--reset-layout)
+  (let* ((lb (harness-media--notes-open left 'full "the left chat"))
+         (rb (harness-media--notes-open right 'right "the right chat")))
+    (harness-media--fit (max (harness-media--text-lines (get-buffer-window lb))
+                             (harness-media--text-lines (get-buffer-window rb)))
+                        24 40)
+    (harness-media--to-bottom lb)
+    (harness-media--to-bottom rb)
+    (harness-media--settle 0.5)
+    (list lb rb)))
+
+(defun harness-media-shot-chat-decisions ()
+  "A lasting permission answer in one chat, a call it denied in another.
+The left session's agent asked to run a command and was answered
+\"Always deny\": its note says so.  The right session's agent ran the
+same command later, and the rule denied it: its call says which
+answer decided it.  [Undo] was clicked on the right, so both offer
+[Redo] now, the answer struck through, and the echo area says what the
+undo did.  With HARNESS_MEDIA_STEPS, the pictures before the click and
+after a [Redo] on the left are taken too.  The answer is undone and the
+sessions are deleted after, so no other picture shows them."
+  (let ((answered (harness-media--new-session :name "Prepare the 2.4 release" :model "claude:claude-sonnet-5"
+                                              :permission-mode 'ask))
+        (denied (harness-media--new-session :name "Tidy the repository" :model "claude:claude-sonnet-5"
+                                            :permission-mode 'ask)))
+    (harness-media--prompt answered "Clear out the old build before the release." '(blocked))
+    (let ((request (car (harness-call 'permission/pending answered))))
+      (harness-call 'permission/answer answered (plist-get request :id) "deny-always"))
+    (harness-media--wait-status answered '(idle))
+    (harness-media--prompt denied "The old build is stale: clear it out.")
+    (pcase-let ((`(,lb ,rb) (harness-media--pair answered denied)))
+      (harness-media--both (list lb rb) "[Undo]" "both chats to offer [Undo]")
+      (harness-media--step "chat-decisions-before")
+      (harness-media--push rb "[Undo]")
+      (harness-media--both (list lb rb) "[Redo]" "both chats to offer [Redo]")
+      (harness-media--capture "chat-decisions")
+      (harness-media--push lb "[Redo]")
+      (harness-media--both (list lb rb) "[Undo]" "both chats to offer [Undo] again")
+      (harness-media--step "chat-decisions-redone"))
+    ;; The rule goes with the pictures: the ones after run commands.
+    (dolist (decision (harness-call 'decision/list :kind 'permission :state 'done))
+      (harness-call 'decision/undo (plist-get decision :id)))
+    (dolist (id (list answered denied)) (harness-call 'session/delete id))))
+
+(defun harness-media--cold-session (name question answer)
+  "Create session NAME whose prompt cache went cold half an hour ago.
+It talked QUESTION and ANSWER before then."
+  (let ((id (harness-media--new-session :name name :model "claude:claude-opus-5-5" :permission-mode 'accept-edits)))
+    (harness-call 'session/append id (list :kind 'user :content question))
+    (harness-call 'session/append id (list :kind 'assistant :content answer))
+    (harness-call 'session/usage-add id (list :input 200 :output 900 :cache-read 36000 :cache-write 2000 :context 38200
+                                             :cache-at (harness-media--ago (* 60 27))))
+    (harness-media--set-times id (* 60 28) (* 60 27))
+    (harness-media--age-nodes id (* 60 27))
+    id))
+
+(defun harness-media-shot-chat-decisions-cold ()
+  "An \"always\" cold-cache answer in one chat, the default it set in another.
+The left session's cache went cold and the question was answered
+\"always\" start afresh: its note offers [Undo].  The right session's
+cache went cold too, and nobody was asked: its note says the default
+went first and which answer decided that, with the same [Undo].  With
+HARNESS_MEDIA_STEPS, the pictures after an [Undo] on the right and a
+[Redo] on the left are taken too.  The answer is undone after, asking
+again with the brief summary the default, and the sessions are deleted."
+  (let ((answered (harness-media--cold-session
+                   "Paginate the orders list" "GET /orders sends every order at once. How should we paginate it?"
+                   "A cursor (`?after=<id>&limit=50`) stays stable while orders arrive. Say when, and I'll implement it."))
+        (unasked (harness-media--cold-session
+                  "Export orders as CSV" "Finance wants the orders as CSV. Where should the export live?"
+                  "A `GET /orders.csv` beside the JSON listing, streaming rows. I'll write it when you say.")))
+    (harness-call 'agent/prompt answered "Go with the cursor, please.")
+    (harness-media--wait (lambda () (harness-call 'cowboy/asking answered)) 15 "the cold-cache question")
+    (harness-call 'question/answer answered (harness-call 'cowboy/asking answered) (list :answer "always start afresh"))
+    (harness-media--wait-status answered '(idle))
+    (harness-media--prompt unasked "Write the CSV export now.")
+    (pcase-let ((`(,lb ,rb) (harness-media--pair answered unasked)))
+      (harness-media--both (list lb rb) "[Undo]" "both chats to offer [Undo]")
+      (harness-media--capture "chat-decisions-cold")
+      (harness-media--push rb "[Undo]")
+      (harness-media--both (list lb rb) "[Redo]" "both chats to offer [Redo]")
+      (harness-media--step "chat-decisions-cold-undone")
+      (harness-media--push lb "[Redo]")
+      (harness-media--both (list lb rb) "[Undo]" "both chats to offer [Undo] again")
+      (harness-media--step "chat-decisions-cold-redone"))
+    (dolist (decision (harness-call 'decision/list :kind 'cowboy :state 'done))
+      (harness-call 'decision/undo (plist-get decision :id)))
+    (dolist (id (list answered unasked)) (harness-call 'session/delete id))))
 
 ;;;; The task slots page
 
@@ -3202,6 +3334,10 @@ afterwards."
     ("prompt-region" . harness-media-shot-prompt-region)
     ;; After every picture of usage: its session's usage would count there.
     ("chat-cowboy" . harness-media-shot-chat-cowboy)
+    ;; Last: an "Always deny" and an "always" cold-cache answer, both
+    ;; undone again after, but taken last all the same.
+    ("chat-decisions" . harness-media-shot-chat-decisions)
+    ("chat-decisions-cold" . harness-media-shot-chat-decisions-cold)
     ;; Last: it sets a limit, starts a task and queues four, which every
     ;; board picture would show, and their usage would count.
     ("slots" . harness-media-shot-slots)

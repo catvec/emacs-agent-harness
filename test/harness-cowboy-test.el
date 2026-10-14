@@ -458,6 +458,176 @@ brief summary, goes first, and says why."
       (should-not (harness-call 'question/pending sid))
       (should (= 2 (length (harness-cowboy-test--compactions sid)))))))
 
+;;;; "Always" as a lasting decision: undo, redo, from any session
+
+(defvar harness-decisions--entries)
+
+(defmacro harness-cowboy-test-with-decisions (&rest body)
+  "Run BODY as `harness-cowboy-test-with' does, with the decisions kept."
+  (declare (indent 0))
+  `(harness-cowboy-test-with
+     (harness-test-load-module 'decisions)
+     (setq harness-decisions--entries nil)
+     ,@body))
+
+(defun harness-cowboy-test--hint-nodes (sid regexp)
+  "Return SID's hints whose text matches REGEXP, oldest first."
+  (cl-remove-if-not (lambda (n) (and (eq (plist-get n :kind) 'hint)
+                                     (string-match-p regexp (or (plist-get n :content) ""))))
+                    (harness-call 'session/nodes sid)))
+
+(defun harness-cowboy-test--always (sid text)
+  "Prompt cold SID and answer its question with TEXT; return the hint it left."
+  (let ((p (harness-call 'agent/prompt sid "one")))
+    (harness-cowboy-test--answer sid text)
+    (harness-test-await p 10))
+  (car (last (harness-cowboy-test--hint-nodes sid "as you chose, from now on without asking"))))
+
+(defun harness-cowboy-test--move (way id)
+  "Move decision ID one step WAY, undo or redo; return (OUTCOME . MESSAGE)."
+  (let ((r (harness-call (if (eq way 'undo) 'decision/undo 'decision/redo) id)))
+    (cons (plist-get r :outcome) (plist-get r :message))))
+
+(ert-deftest harness-cowboy-always-is-undone-then-redone ()
+  "An \"always\" answer is a decision its hint names: undo asks again, with
+the old default, redo stops asking again, and undo works once more."
+  (harness-cowboy-test-with-decisions
+    (let* ((sid (harness-cowboy-test-session))
+           (hint (harness-cowboy-test--always sid "always start afresh"))
+           (id (harness-node-decision hint))
+           (decision (harness-call 'decision/get id)))
+      (should id)
+      (should (eq 'cowboy (plist-get decision :kind)))
+      (should (eq 'done (plist-get decision :state)))
+      (should (equal "Always starting afresh when the prompt cache is cold, without asking" (plist-get decision :text)))
+      (should (equal '(:choice "fresh" :before (:default "brief" :ask t) :after (:default "fresh" :ask :false))
+                     (plist-get decision :record)))
+      ;; It knows its note, in the session it was made in.
+      (should (equal sid (plist-get decision :session)))
+      (should (equal (plist-get hint :id) (plist-get decision :node)))
+      (should (eq 'fresh harness-cowboy-default))
+      (should-not harness-cowboy-ask)
+      (should (equal '(undone . "Undone: asking again what goes first when the prompt cache is cold, and “Brief summary” is the default again")
+                     (harness-cowboy-test--move 'undo id)))
+      (should (eq 'brief harness-cowboy-default))
+      (should (eq t harness-cowboy-ask))
+      (should (equal '(done . "Redone: always starting afresh when the prompt cache is cold, without asking")
+                     (harness-cowboy-test--move 'redo id)))
+      (should (eq 'fresh harness-cowboy-default))
+      (should-not harness-cowboy-ask)
+      (should (eq 'undone (car (harness-cowboy-test--move 'undo id))))
+      (should (eq t harness-cowboy-ask))
+      ;; Undone, a cold cache asks again.
+      (harness-call 'session/usage-add sid '(:input 10 :output 10 :cache-read 400 :context 430 :cache-at 1000.0))
+      (let ((p (harness-call 'agent/prompt sid "two")))
+        (should (harness-cowboy-test--question sid))
+        (harness-cowboy-test--answer sid "carry on")
+        (harness-test-await p 10)))))
+
+(ert-deftest harness-cowboy-a-default-taken-unasked-names-the-always-answer ()
+  "Where the default an \"always\" answer set goes first unasked -- another
+session, asking off; one that never waits for you; a cold start -- the
+hint names the answer's decision, and any of those sessions can undo it."
+  (harness-cowboy-test-with-decisions
+    (let* ((first (harness-cowboy-test-session))
+           (id (harness-node-decision (harness-cowboy-test--always first "always transcript")))
+           (other (harness-cowboy-test-session))
+           (non-interactive (harness-cowboy-test-session :non-interactive t))
+           (fork (harness-cowboy-test-fork)))
+      (should id)
+      (harness-test-await (harness-call 'agent/prompt other "go") 10)
+      (should-not (harness-call 'question/pending other))
+      (let ((hint (car (harness-cowboy-test--hint-nodes other "the default, as asking is off"))))
+        (should hint)
+        (should (equal id (harness-node-decided-by hint)))
+        (should-not (harness-node-decision hint)))
+      (harness-test-await (harness-call 'agent/prompt non-interactive "go") 10)
+      (should (equal id (harness-node-decided-by
+                         (car (harness-cowboy-test--hint-nodes non-interactive "does not wait for you")))))
+      (should (eq 'transcript (harness-test-await (harness-call 'cowboy/compact fork) 10)))
+      (should (equal id (harness-node-decided-by
+                         (car (harness-cowboy-test--hint-nodes fork "no warm cache holds")))))
+      ;; Undone from another session than the one it was made in: asking
+      ;; is on again there too, and the next cold message asks.
+      (should (eq 'undone (car (harness-cowboy-test--move 'undo id))))
+      (should (eq t harness-cowboy-ask))
+      (harness-call 'session/usage-add other '(:input 10 :output 10 :cache-read 400 :context 430 :cache-at 1000.0))
+      (let ((p (harness-call 'agent/prompt other "again")))
+        (should (harness-cowboy-test--question other))
+        (harness-cowboy-test--answer other "carry on")
+        (harness-test-await p 10))
+      ;; Asked and answered once: that hint names no decision.
+      (should-not (harness-node-decided-by (car (last (harness-cowboy-test--hint-nodes other "as you chose\\'")))))
+      ;; A session that does not wait for you takes the default the undo
+      ;; put back, and no decision is behind it.
+      (harness-call 'session/usage-add non-interactive '(:input 10 :output 10 :cache-read 400 :context 430 :cache-at 1000.0))
+      (harness-test-await (harness-call 'agent/prompt non-interactive "again") 10)
+      (let ((hint (car (last (harness-cowboy-test--hint-nodes non-interactive "does not wait for you")))))
+        (should (string-match-p "brief summary" (plist-get hint :content)))
+        (should-not (harness-node-decided-by hint)))
+      ;; Redone from yet another: the default and the silence are back.
+      (should (eq 'done (car (harness-cowboy-test--move 'redo id))))
+      (should (eq 'transcript harness-cowboy-default))
+      (should-not harness-cowboy-ask))))
+
+(ert-deftest harness-cowboy-settings-changed-since-end-the-always-answer ()
+  "Settings changed by hand after an \"always\" answer stay as they are: the
+answer is neither undone nor redone, and no hint names it any more."
+  (harness-cowboy-test-with-decisions
+    (let* ((sid (harness-cowboy-test-session))
+           (id (harness-node-decision (harness-cowboy-test--always sid "always start afresh"))))
+      (harness-call 'config/set 'harness-cowboy-default 'summary)
+      (should (equal '(changed . "Not undone: the cold-cache settings changed since (in Settings, say), so they stay as they are")
+                     (harness-cowboy-test--move 'undo id)))
+      (should (eq 'summary harness-cowboy-default))
+      (should-not harness-cowboy-ask)
+      (should (eq 'changed (plist-get (harness-call 'decision/get id) :state)))
+      ;; Ended: it offers nothing more, and says why.
+      (should (equal (cdr (harness-cowboy-test--move 'redo id))
+                     "Not undone: the cold-cache settings changed since (in Settings, say), so they stay as they are"))
+      (let ((other (harness-cowboy-test-session)))
+        (harness-test-await (harness-call 'agent/prompt other "go") 10)
+        (should-not (harness-node-decided-by (car (harness-cowboy-test--hint-nodes other "as asking is off")))))))
+  ;; Undone, then asking turned off by hand: the redo leaves it.
+  (harness-cowboy-test-with-decisions
+    (let* ((sid (harness-cowboy-test-session))
+           (id (harness-node-decision (harness-cowboy-test--always sid "always carry on"))))
+      (should (eq 'undone (car (harness-cowboy-test--move 'undo id))))
+      (harness-call 'config/set 'harness-cowboy-ask nil)
+      (should (equal '(changed . "Not redone: the cold-cache settings changed since (in Settings, say), so they stay as they are")
+                     (harness-cowboy-test--move 'redo id)))
+      (should (eq 'brief harness-cowboy-default))
+      (should-not harness-cowboy-ask))))
+
+(ert-deftest harness-cowboy-two-always-answers-never-share-the-settings ()
+  "Of two \"always\" answers, the one whose settings hold is the one whose
+undo works; the other, its settings taken over, ends."
+  (harness-cowboy-test-with-decisions
+    (let* ((sid (harness-cowboy-test-session))
+           (one (harness-node-decision (harness-cowboy-test--always sid "always start afresh"))))
+      (should (eq 'undone (car (harness-cowboy-test--move 'undo one))))
+      (harness-call 'session/usage-add sid '(:input 10 :output 10 :cache-read 400 :context 430 :cache-at 1000.0))
+      (let ((two (harness-node-decision (harness-cowboy-test--always sid "always start afresh"))))
+        (should two)
+        (should-not (equal one two))
+        ;; The settings are as the first's redo would make them, but the
+        ;; second made them so: the first ends, and the second undoes.
+        (should (equal '(changed . "Not redone: the cold-cache settings are so again already (another answer, say), so they stay as they are")
+                       (harness-cowboy-test--move 'redo one)))
+        (should (eq 'undone (car (harness-cowboy-test--move 'undo two))))
+        (should (eq t harness-cowboy-ask))))))
+
+(ert-deftest harness-cowboy-always-without-the-decisions-module ()
+  "Without the decisions module an \"always\" answer still sets both
+settings, and its hint names no decision."
+  (harness-cowboy-test-with
+    (let* ((sid (harness-cowboy-test-session))
+           (hint (harness-cowboy-test--always sid "always start afresh")))
+      (should hint)
+      (should-not (plist-get hint :meta))
+      (should (eq 'fresh harness-cowboy-default))
+      (should-not harness-cowboy-ask))))
+
 (ert-deftest harness-cowboy-a-summary-that-fails-falls-back ()
   "A summary that cannot be made gives way to the transcript file; the
 message goes all the same."

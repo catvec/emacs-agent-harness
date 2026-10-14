@@ -17,6 +17,8 @@
 # Environment:
 #   HARNESS_MEDIA_OUT      where the pictures go (default docs/media)
 #   HARNESS_MEDIA_DUMPS    also write each picture's text there, to review it
+#   HARNESS_MEDIA_STEPS    also take the pictures of the steps between, where
+#                          a picture is made of clicks (chat-decisions)
 #   HARNESS_MEDIA_WORK     scratch directory (default scripts/.dev/media)
 #   HARNESS_MEDIA_DISPLAY  use this X display rather than a private one
 #   HARNESS_MEDIA_RUNTIME  where the private display's sockets go

@@ -66,7 +66,13 @@
 (require 'harness-ui-pending)
 
 (declare-function harness-ui-media-render-attachment "harness-ui-media" (attachment))
+(declare-function harness-ui-decision "harness-ui-decisions" (id))
+(declare-function harness-ui-decision-help "harness-ui-decisions" (id way))
+(declare-function harness-ui-decisions-store "harness-ui-decisions" (decision))
+(declare-function harness-decision-undo "harness-ui-decisions" (id))
+(declare-function harness-decision-redo "harness-ui-decisions" (id))
 (defvar harness-state-directory)
+(defvar harness-ui-decision-functions)
 (defvar harness-ui-markdown-table-width)
 (defvar harness-ui-markdown-hard-breaks)
 
@@ -165,9 +171,10 @@ under it." :group 'harness-ui-chat)
   "Background of plan blocks." :group 'harness-ui-chat)
 
 (defface harness-chat-undone-face '((t :inherit harness-hint-face :strike-through t))
-  "Face of the note of a lasting permission answer that was undone.
-The rule or directory grant it tells of is gone, so it is struck
-through." :group 'harness-ui-chat)
+  "Face of the text of a lasting decision that was undone.
+The note of a permission answer or of the cold-cache choice it tells
+of, or the decision a later note says it follows from: what it set is
+gone, so it is struck through." :group 'harness-ui-chat)
 
 (defface harness-chat-found-face '((t :inherit match))
   "What a search found, where its session opens at it.
@@ -1732,6 +1739,9 @@ denied call's block where the buffer still has it."
                                         "\n")
                               ""))
                           (harness-chat--child-line node result)
+                          ;; A call a lasting decision's rule refused says
+                          ;; which, with its undo, above the fold.
+                          (harness-chat--decided-by-lines result "  " 'harness-dim-face)
                           (harness-chat--rerun-line node result)
                           (harness-chat--approval-line (plist-get result :call-id) result)
                           (harness-chat--note-lines node)))
@@ -1800,17 +1810,31 @@ and in the message that attached it."
 
 (defun harness-chat--render-hint (block)
   "Return the body of hint BLOCK.
-The note the harness writes after a lasting permission answer (see
-`harness-node-permission') ends in an [Undo] button while the answer
-can be undone.  Once that was tried it says how it went: struck
-through when undone, else with the reason under it.  The note that says
-how a new session's opening message was judged (see
-`harness-node-supervisor') carries the two things to do about the
-choice as buttons."
+A note that tells of a lasting decision (`harness-node-decision') -- a
+permission answer for the session or always, the cold-cache question
+answered \"always\" -- ends in the decision's one button: [Undo] while
+what it set is in effect, [Redo], its text struck through, once it was
+undone.  Once the decision ended -- what it set was changed since by
+something else, or is gone -- the note says so under it, with no
+button.  Where the decision stands is what the harness last announced
+of it, from whichever session moved it (harness-ui-decisions.el); see
+`harness-chat--decision-state' for when the UI has not heard of it.  A
+note written where a decision took effect, perhaps in another session,
+names the decision on a line of its own, with the same button
+\(`harness-chat--decided-by-lines').  A permission note written before
+decisions were kept (`harness-node-permission' without a decision)
+offers [Undo] alone, and says how that went: struck through when
+undone, else with the reason under it.  The note that says how a new
+session's opening message was judged (see `harness-node-supervisor')
+carries the two things to do about the choice as buttons."
   (let* ((node (harness-chat-block-node block))
          (text (string-trim (or (plist-get node :content) "")))
          (record (harness-node-permission node))
-         (state (harness-permission-undo-state record))
+         (id (harness-node-decision node))
+         (decision (harness-chat--decision id))
+         (state (if id
+                    (harness-chat--decision-state decision record)
+                  (harness-permission-undo-state record)))
          (judged (harness-node-supervisor node)))
     (harness-chat--margin
      (propertize
@@ -1818,28 +1842,181 @@ choice as buttons."
               (propertize text 'face (if (eq state 'undone) 'harness-chat-undone-face 'harness-hint-face))
               (cond
                (judged (concat "  " (harness-chat--supervisor-buttons node judged)))
+               (id (harness-chat--decision-tail id decision state record "    " 'harness-hint-face))
                ((eq state 'offered) (concat "  " (harness-chat--undo-button (plist-get node :id) record)))
                ((eq state 'undone) (propertize "  undone" 'face 'harness-hint-face 'help-echo (plist-get record :result)))
-               (record (propertize (format "\n    %s" (or (plist-get record :result) state)) 'face 'harness-hint-face)))
-              (propertize "\n" 'face 'harness-hint-face))
+               ;; A note of an answer that recorded nothing new has no
+               ;; state, and nothing to say under it.
+               ((and record state)
+                (propertize (format "\n    %s" (or (plist-get record :result) state)) 'face 'harness-hint-face)))
+              (propertize "\n" 'face 'harness-hint-face)
+              (harness-chat--decided-by-lines node "    " 'harness-hint-face))
       'wrap-prefix "    "))))
 
-(defun harness-chat--undo-button (node-id record)
-  "Return the [Undo] button of note NODE-ID, which tells of lasting answer RECORD."
-  (let ((sid harness-ui-session-id)
-        (denied (and (not (stringp (plist-get record :dir)))
+(defun harness-chat--permission-undo-help (record)
+  "Return the tooltip of the [Undo] of a note of lasting permission answer RECORD.
+It says that undoing leaves the call the answer answered as it was."
+  (let ((denied (and (not (stringp (plist-get record :dir)))
                      (equal "deny" (format "%s" (plist-get (plist-get record :rule) :behavior))))))
+    (format "Take back what this answer recorded; the call it answered stays %s"
+            (if denied "denied" "allowed"))))
+
+(defun harness-chat--undo-button (node-id record)
+  "Return the [Undo] button of note NODE-ID, which tells of lasting answer RECORD.
+That is the note of an answer given before the harness kept decisions,
+which `permission/undo' takes back by the note."
+  (let ((sid harness-ui-session-id))
     (harness-chat--button "[Undo]" (lambda () (harness-chat--undo-permission sid node-id))
-                          :help (format "Take back what this answer recorded; the call it answered stays %s"
-                                        (if denied "denied" "allowed")))))
+                          :help (harness-chat--permission-undo-help record))))
 
 (defun harness-chat--undo-permission (session-id node-id)
   "Undo the lasting permission answer that note NODE-ID of SESSION-ID tells of.
 The harness removes what the answer recorded while it is still as the
 answer left it (`permission/undo'); the echo area says how that went,
-and the note changes when the harness updates it."
+and the note changes when the harness updates it.  A harness that keeps
+decisions keeps the answer as one from then on, which it answers with:
+the UI's cache takes it at once, so the note offers its redo."
   (harness-ui-call "_harness/permission/undo" (list :session-id session-id :node-id node-id)
-                   (lambda (result) (message "%s" (or (plist-get result :message) "Undone")))))
+                   (lambda (result)
+                     (when (and (plist-get result :decision) (fboundp 'harness-ui-decisions-store))
+                       (harness-ui-decisions-store (plist-get result :decision)))
+                     (message "%s" (or (plist-get result :message) "Undone")))))
+
+;;;; Lasting decisions in notes
+
+(defun harness-chat--decision (id)
+  "Return the lasting decision ID as the UI last heard of it, or nil.
+Nil too for no ID, and when the UI keeps no decisions: its decisions
+module (harness-ui-decisions.el) is not loaded."
+  (and id (fboundp 'harness-ui-decision) (harness-ui-decision id)))
+
+(defun harness-chat--decision-state (decision record)
+  "Return where the decision a note tells of stands, a symbol, or nil.
+DECISION is the decision as the UI last heard of it, which says:
+`done', `undone', `changed' or `gone'.  When the UI has not heard of it
+\(DECISION nil), a permission note's RECORD says, as the harness keeps
+its `:undo' in step with the decision: `offered' while it is in
+effect, then `undone', `changed' or `gone'.  A note of another kind
+says nothing, and its decision offers nothing until the UI hears of it."
+  (if decision
+      (harness-decision-state (plist-get decision :state))
+    (let ((undo (harness-permission-undo-state record)))
+      (if (eq undo 'offered) 'done (harness-decision-state undo)))))
+
+(defun harness-chat--decision-tail (id decision state record indent face)
+  "Return what ends a line naming decision ID: its button, or how it ended.
+STATE is where the decision stands (`harness-chat--decision-state'):
+`done' ends the line in [Undo], `undone' in [Redo].  `changed' and
+`gone' put what the decision's last move said -- DECISION's `:result',
+else RECORD's, the permission note's own -- on a line of its own,
+INDENT first, in FACE.  Any other STATE adds nothing."
+  (pcase state
+    ((or 'done 'undone)
+     (concat "  " (harness-chat--decision-button id state (harness-chat--decision-help id state record))))
+    ((or 'changed 'gone)
+     (propertize (concat "\n" indent
+                         (or (cl-find-if (lambda (s) (and (stringp s) (not (string-blank-p s))))
+                                         (list (plist-get decision :result) (plist-get record :result)))
+                             (if (eq state 'gone) "No longer there" "Changed since")))
+                 'face face))
+    (_ "")))
+
+(defun harness-chat--decision-help (id state record)
+  "Return the tooltip of the button decision ID offers in STATE.
+A permission note's RECORD says what its [Undo] leaves of the call it
+answered, as the note of an earlier answer does; otherwise the
+decision's kind says (`harness-ui-decision-help')."
+  (let ((way (if (eq state 'done) 'undo 'redo)))
+    (cond ((and record (eq way 'undo)) (harness-chat--permission-undo-help record))
+          (record "Record this answer again")
+          ((fboundp 'harness-ui-decision-help) (harness-ui-decision-help id way))
+          ((eq way 'undo) "Take this decision back")
+          (t "Make this decision again"))))
+
+(defun harness-chat--decision-button (id state help)
+  "Return the button of decision ID in STATE, or \"\".
+It is [Undo] while STATE is `done' and [Redo] while it is `undone',
+HELP its tooltip; a click moves the decision that way
+\(`harness-chat--move-decision')."
+  (pcase state
+    ('done (harness-chat--button "[Undo]" (lambda () (harness-chat--move-decision id 'undo)) :help help))
+    ('undone (harness-chat--button "[Redo]" (lambda () (harness-chat--move-decision id 'redo)) :help help))
+    (_ "")))
+
+(defun harness-chat--move-decision (id way)
+  "Ask the harness to move decision ID one step WAY, `undo' or `redo'.
+It moves whichever session made it.  The echo area says how that
+went, and every note that refers to the decision is drawn again once
+the harness announces it (`harness-chat--on-decision').  Without the
+UI's decisions module the request is made from here, and the notes
+follow what the harness writes into them."
+  (cond
+   ((and (eq way 'undo) (fboundp 'harness-decision-undo)) (harness-decision-undo id))
+   ((and (eq way 'redo) (fboundp 'harness-decision-redo)) (harness-decision-redo id))
+   (t (harness-ui-call (format "_harness/decision/%s" way) (list :id id)
+                       (lambda (result)
+                         (message "%s" (or (plist-get result :message)
+                                           (if (eq way 'undo) "Undone" "Redone"))))))))
+
+(defun harness-chat--struck (face)
+  "Return FACE struck through, as the text of an undone decision is drawn."
+  (if (eq face 'harness-hint-face) 'harness-chat-undone-face (list '(:strike-through t) face)))
+
+(defun harness-chat--decided-by-lines (node indent face)
+  "Return the lines naming the lasting decision NODE follows from, or \"\".
+NODE is a hint or a tool result written where a decision took effect,
+perhaps in another session -- a cold cache compacted unasked as its
+default says, a call its rule refused -- whose `:meta' `:decided-by'
+names the decision (`harness-node-decided-by').  The line is
+\"decided by: \", the decision's text and its button: [Undo] while it
+is in effect, [Redo], the text struck through, once undone.  Once it
+ended, what its last move said follows on a line of its own.  INDENT
+starts each line, FACE draws them.  Nothing when the UI has not heard
+of the decision."
+  (let* ((id (and node (harness-node-decided-by node)))
+         (decision (harness-chat--decision id))
+         (state (and decision (harness-decision-state (plist-get decision :state))))
+         (text (and decision (plist-get decision :text))))
+    (if (not (and state (stringp text) (not (string-blank-p text))))
+        ""
+      (concat (propertize (concat indent "decided by: ") 'face face)
+              (propertize (string-trim text) 'face (if (eq state 'undone) (harness-chat--struck face) face))
+              (harness-chat--decision-tail id decision state nil indent face)
+              (propertize "\n" 'face face)))))
+
+(defun harness-chat--decision-ids (block)
+  "Return the ids of the lasting decisions BLOCK's notes refer to.
+That is the decision its node tells of or follows from, and the one
+its tool result follows from."
+  (let ((node (harness-chat-block-node block))
+        (result (harness-chat-block-result block)))
+    (delq nil (list (harness-node-decision node) (harness-node-decided-by node)
+                    (and result (harness-node-decided-by result))))))
+
+(defun harness-chat--on-decision (id _decision)
+  "Draw again, in every chat buffer, the blocks that refer to decision ID.
+On `harness-ui-decision-functions': the decision was kept, named its
+note, or was undone or redone, from any session.  ID nil means every
+decision was fetched again, so every block that refers to one is
+drawn.  A block is drawn once, though its tool result's id finds it
+too, and the summary of the group it is folded into follows.  A buffer
+loading its transcript is left alone: it draws its blocks from the
+decisions as they are once it renders them."
+  (dolist (buf (hash-table-values harness-chat--buffers))
+    (when (buffer-live-p buf)
+      (with-current-buffer buf
+        (when (and harness-chat--blocks (not harness-chat--loading))
+          (let ((blocks nil))
+            (maphash (lambda (_ block)
+                       (let ((ids (harness-chat--decision-ids block)))
+                         (when (if id (member id ids) ids)
+                           (cl-pushnew block blocks :test #'eq))))
+                     harness-chat--blocks)
+            (dolist (block blocks)
+              (when (and (markerp (harness-chat-block-start block))
+                         (marker-buffer (harness-chat-block-start block)))
+                (harness-chat--rerender block)
+                (harness-chat--refresh-group-of block)))))))))
 
 (defun harness-chat--supervisor-buttons (node record)
   "Return the buttons of the session judge's note NODE, RECORD being its record.
@@ -4906,6 +5083,9 @@ A reload does not initialise a running module again, so the file adds
 them itself when the module is ready (below)."
   ;; Windows following a streaming chat scroll once per slice of messages.
   (add-hook 'harness-acp-received-hook #'harness-chat--pin-waiting)
+  ;; A lasting decision undone or redone, from any session, redraws the
+  ;; notes that refer to it (harness-ui-decisions.el keeps them).
+  (add-hook 'harness-ui-decision-functions #'harness-chat--on-decision)
   ;; The region of any buffer starts a message: C-c h > (see
   ;; `harness-prompt-region'); the harness menu has it too.
   (define-key harness-ui-map (kbd ">") #'harness-prompt-region))

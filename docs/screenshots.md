@@ -35,6 +35,7 @@ Either of the first two keeps your screen untouched.
 |---|---|
 | `HARNESS_MEDIA_OUT` | Where the pictures go (default `docs/media`) |
 | `HARNESS_MEDIA_DUMPS` | Also write the text of each picture there |
+| `HARNESS_MEDIA_STEPS` | Also take the pictures of the steps between, where a picture is made of clicks (`chat-decisions-before`, `chat-decisions-redone`, …), to review them; the docs keep only the pictures named below |
 | `HARNESS_MEDIA_WORK` | Scratch directory (default `scripts/.dev/media`, which git ignores) |
 | `HARNESS_MEDIA_DISPLAY` | Draw on this X display rather than a private one |
 | `HARNESS_MEDIA_RUNTIME` | Where the private display's sockets go (default `$XDG_RUNTIME_DIR`, else `/tmp`); a Unix socket path must stay under 108 bytes |
@@ -71,6 +72,8 @@ The pictures, by the name `scripts/media.sh` takes:
 | `insights` | The Insights report over 30 days of every project: the totals, the summary the scripted model wrote, the messages by hour and weekday | `harness-media-shot-insights` |
 | `insights-activity` | The same report further down: the busiest sessions, the tools, the permission decisions and the tasks | `harness-media-shot-insights-activity` |
 | `chat-cowboy` | A chat whose prompt cache went cold yesterday, `orders.py` beside it: another session's message waits while the panel asks what goes first, each choice with its cost | `harness-media-shot-chat-cowboy` |
+| `chat-decisions` | Two chats: an "Always deny" answer for `bash` in the left one, a `bash` call that rule denied in the right one, naming the answer; [Undo] was clicked on the right, so both strike the answer through and offer [Redo] | `harness-media-shot-chat-decisions` |
+| `chat-decisions-cold` | Two chats whose prompt caches went cold: the left one answered "always" start afresh, the right one took that default unasked and names the answer; both offer [Undo] | `harness-media-shot-chat-decisions-cold` |
 | `notes` | A session's chat whose `spawn_agent` call runs, and the sub-agent's chat beside it: the note under the spawn call says what the child does, with a recap of it and its facts, and the note under the child's `bash` call says it is still running | `harness-media-shot-notes` |
 | `chat-queue` | A chat whose turn runs, `acme/db.py` beside it: a message sent during the turn says "delivered", one sent since "sent", and two queued messages, drawn as messages of the user's, say "queued" beside the name with `[send now]`, `[edit]` and `[×]`, above the line saying what the turn does | `harness-media-shot-chat-queue` |
 | `prompt-region` | Lines of `acme/ratelimit.py` selected, and `C-c h >` on them: the newest session's box holds where they come from and the code in a fenced block | `harness-media-shot-prompt-region` |

@@ -53,8 +53,10 @@
 ;; chat's cold-cache panel (harness-ui-cowboy.el), a popout, an ACP
 ;; client, typed text -- with a choice, or with "always" and a choice,
 ;; which makes it the default and stops the asking (`harness-cowboy-default'
-;; and `harness-cowboy-ask', saved as any setting is).  Dismissing it holds
-;; the message.  Its payload's `:cowboy' says what each choice costs, for
+;; and `harness-cowboy-ask', saved as any setting is).  That answer is a
+;; lasting decision the harness keeps, which the chat offers to undo, and
+;; then to redo, from any session (see "\"Always\": a lasting decision"
+;; below).  Dismissing it holds the message.  Its payload's `:cowboy' says what each choice costs, for
 ;; the clients that draw more than the question; the others show it as an
 ;; ordinary question with its options.
 ;;
@@ -458,22 +460,169 @@ naming it (see `harness-cowboy--words').  Nil when it names none."
                                harness-cowboy--words)))))
     (and choice (cons choice always))))
 
-(defun harness-cowboy--remember (choice)
+;;;; "Always": a lasting decision
+;;
+;; An "always" answer changes two settings for every session, so it is
+;; a lasting decision the harness keeps (harness-decisions.el), of the
+;; kind `cowboy', with the settings before it and after it.  The hint
+;; written right after it names it (`:meta' `:decision'), and so does
+;; every hint written later, in any session, where the default it set
+;; went first unasked (`:decided-by', see `harness-cowboy--hint'): the
+;; chat offers its undo, and then its redo, on each.  Undo puts both
+;; settings back as they were before it -- asking on, the old default --
+;; while they still hold what the answer set; redo sets them again while
+;; they still hold what the undo put back.  Settings changed by hand in
+;; between are left as they are, and the decision ends there.
+
+(defun harness-cowboy--settings ()
+  "Return what the cold-cache settings hold now, as a decision records them.
+That is (:default CHOICE :ask BOOL), CHOICE the name of the choice taken
+unasked (`harness-cowboy--default') and BOOL t or `:false', so it
+travels as JSON."
+  (list :default (symbol-name (harness-cowboy--default)) :ask (if harness-cowboy-ask t :false)))
+
+(defun harness-cowboy--settings-equal (a b)
+  "Non-nil when cold-cache settings A and B say the same.
+Each is as `harness-cowboy--settings' returns it, perhaps back from JSON."
+  (and (eq (harness-cowboy--choice (plist-get a :default)) (harness-cowboy--choice (plist-get b :default)))
+       (eq (and (harness-json-true-p (plist-get a :ask)) t)
+           (and (harness-json-true-p (plist-get b :ask)) t))))
+
+(defun harness-cowboy--set-settings (settings)
+  "Make the cold-cache settings hold SETTINGS, saved as Settings saves them.
+SETTINGS is as `harness-cowboy--settings' returns it.  Signal when one
+cannot be saved, as when the policy sets it."
+  (let ((choice (harness-cowboy--choice (plist-get settings :default)))
+        (ask (and (harness-json-true-p (plist-get settings :ask)) t)))
+    (if (harness-method-exists-p 'config/set)
+        (progn (harness-call 'config/set 'harness-cowboy-default choice)
+               (harness-call 'config/set 'harness-cowboy-ask ask))
+      (harness-save-user-option 'harness-cowboy-default choice)
+      (harness-save-user-option 'harness-cowboy-ask ask))))
+
+(defun harness-cowboy--decision-text (choice)
+  "Return what an \"always\" answer of CHOICE does, in words."
+  (format "Always %s when the prompt cache is cold, without asking"
+          (harness-cowboy--choice-text choice nil)))
+
+(defun harness-cowboy--record-decision (session-id choice before)
+  "Keep the \"always\" answer of CHOICE in SESSION-ID as a lasting decision.
+BEFORE is what the settings held before it.  Return the decision's id,
+or nil without the decisions module or when keeping it failed (logged)."
+  (when (harness-method-exists-p 'decision/record)
+    (condition-case err
+        (plist-get (harness-call 'decision/record 'cowboy session-id (harness-cowboy--decision-text choice)
+                                 (list :choice (symbol-name choice) :before before
+                                       :after (list :default (symbol-name choice) :ask :false)))
+                   :id)
+      (error (harness-log 'warn "cowboy: could not keep the answer in %s as a decision: %s"
+                          session-id (harness-error-short-message err))
+             nil))))
+
+(defun harness-cowboy--remember (choice &optional session-id)
   "Make CHOICE the default and stop asking, as an \"always\" answer says.
-Both settings are saved as the settings page saves them (`config/set').
-Return nil when they were, else why not: an option the policy sets,
-say, which then stays as it is."
-  (condition-case err
-      (progn
-        (if (harness-method-exists-p 'config/set)
-            (progn (harness-call 'config/set 'harness-cowboy-default choice)
-                   (harness-call 'config/set 'harness-cowboy-ask nil))
-          (harness-save-user-option 'harness-cowboy-default choice)
-          (harness-save-user-option 'harness-cowboy-ask nil))
-        nil)
-    (error (let ((msg (harness-error-short-message err)))
-             (harness-log 'warn "cowboy: could not make %s the default: %s" choice msg)
-             msg))))
+Both settings are saved as the settings page saves them (`config/set'),
+and the answer, given in SESSION-ID, is kept as a lasting decision with
+the settings before it, which can be undone and redone from any
+session (`harness-cowboy--record-decision').  Return (:decision ID)
+once saved, ID nil when no decision was kept, else (:failed WHY): an
+option the policy sets, say, which then stays as it is."
+  (let ((before (harness-cowboy--settings)))
+    (condition-case err
+        (progn
+          (harness-cowboy--set-settings (list :default (symbol-name choice) :ask :false))
+          (list :decision (harness-cowboy--record-decision session-id choice before)))
+      (error (let ((msg (harness-error-short-message err)))
+               (harness-log 'warn "cowboy: could not make %s the default: %s" choice msg)
+               (list :failed msg))))))
+
+(defun harness-cowboy--undone-text (record)
+  "Return what undoing the \"always\" answer RECORD keeps did, in words."
+  (let* ((before (plist-get record :before))
+         (old (harness-cowboy--choice (plist-get before :default)))
+         (default (and old (not (eq old (harness-cowboy--choice (plist-get record :choice))))
+                       (format "“%s” is the default again" (harness-cowboy-label old)))))
+    (cond ((harness-json-true-p (plist-get before :ask))
+           (concat "Undone: asking again what goes first when the prompt cache is cold"
+                   (if default (concat ", and " default) "")))
+          (default (format "Undone: %s when the prompt cache is cold" default))
+          (t "Undone: the cold-cache settings are as they were before it"))))
+
+(defun harness-cowboy--decision-undo (decision)
+  "Undo the \"always\" answer DECISION keeps: the `:undo' of the kind `cowboy'.
+While the settings hold what the answer set, they go back to what they
+held before it.  Return (OUTCOME . MESSAGE), as
+`harness-decisions-define-kind' says."
+  (let* ((record (plist-get decision :record))
+         (now (harness-cowboy--settings)))
+    (cond ((harness-cowboy--settings-equal now (plist-get record :after))
+           (harness-cowboy--set-settings (plist-get record :before))
+           (cons 'undone (harness-cowboy--undone-text record)))
+          ((harness-cowboy--settings-equal now (plist-get record :before))
+           (cons 'changed "Not undone: the cold-cache settings were put back since, so they stay as they are"))
+          (t (cons 'changed "Not undone: the cold-cache settings changed since (in Settings, say), so they stay as they are")))))
+
+(defun harness-cowboy--decision-redo (decision)
+  "Redo the \"always\" answer DECISION keeps: the `:redo' of the kind `cowboy'.
+While the settings hold what its undo put back, they hold what the
+answer set again.  Return (OUTCOME . MESSAGE), as
+`harness-decisions-define-kind' says."
+  (let* ((record (plist-get decision :record))
+         (now (harness-cowboy--settings)))
+    (cond ((harness-cowboy--settings-equal now (plist-get record :before))
+           (harness-cowboy--set-settings (plist-get record :after))
+           (list 'done))
+          ((harness-cowboy--settings-equal now (plist-get record :after))
+           (cons 'changed "Not redone: the cold-cache settings are so again already (another answer, say), so they stay as they are"))
+          (t (cons 'changed "Not redone: the cold-cache settings changed since (in Settings, say), so they stay as they are")))))
+
+(declare-function harness-decisions-define-kind "harness-decisions" (kind &rest spec))
+
+(with-eval-after-load 'harness-decisions
+  (harness-decisions-define-kind 'cowboy
+                                 :undo #'harness-cowboy--decision-undo
+                                 :redo #'harness-cowboy--decision-redo))
+
+(defun harness-cowboy--live-decision ()
+  "Return the id of the \"always\" decision the settings hold now, or nil.
+That is the newest `cowboy' decision in effect whose settings after it
+are the settings now: its choice is the default, and asking is off,
+because of it."
+  (when (harness-method-exists-p 'decision/list)
+    (let ((now (harness-cowboy--settings)))
+      (plist-get (cl-find-if (lambda (d)
+                               (harness-cowboy--settings-equal (plist-get (plist-get d :record) :after) now))
+                             (harness-call 'decision/list :kind 'cowboy :state 'done))
+                 :id))))
+
+(defun harness-cowboy--hint-meta (by &optional decision)
+  "Return the `:meta' of the hint saying what goes first, as BY decided.
+DECISION is the id of the decision an \"always\" answer kept just now,
+which the hint names as `:decision': it was made there.  Otherwise a
+choice taken unasked -- asking off, a session that does not wait for
+you, a question that could not be asked, a cold start -- is the default,
+and when an \"always\" answer still holding set it, the hint names that
+answer's decision as `:decided-by' (`harness-cowboy--live-decision').
+Nil when there is neither."
+  (cond ((and (stringp decision) (not (string-empty-p decision))) (list :decision decision))
+        ((memq by '(default non-interactive unasked cold-start))
+         (when-let* ((live (ignore-errors (harness-cowboy--live-decision))))
+           (list :decided-by live)))))
+
+(defun harness-cowboy--hint (session-id text &optional meta)
+  "Append the hint TEXT to SESSION-ID's transcript, with `:meta' META.
+A hint whose META names the decision made there (`:decision') becomes
+that decision's note (`decision/attach').  Return the hint."
+  (if (null meta)
+      (harness-call 'session/hint session-id text)
+    (let ((node (harness-call 'session/append session-id (list :kind 'hint :content text :meta meta)))
+          (decision (plist-get meta :decision)))
+      (when (and decision (harness-method-exists-p 'decision/attach))
+        (condition-case err
+            (harness-call 'decision/attach decision session-id (plist-get node :id))
+          (error (harness-log 'warn "cowboy: could not name the note of %s: %s"
+                              decision (harness-error-short-message err)))))
+      node)))
 
 ;;;; Asking
 
@@ -486,9 +635,10 @@ FN takes the choice and who made it, once: it lets the turn go on.")
 VALUE is the `agent/before-turn' value, whose `:message' is the
 message waiting; ESTIMATE `compaction/estimate''s answer, or nil.
 SETTLE is called once with the choice and who made it: `user', or
-`always' for an answer that made it the default.  An answer that names
-no choice asks again, NOTE then saying so; a dismissed question holds
-the message."
+`always' for an answer that made it the default, and then with the id
+of the lasting decision kept of it, or nil (`harness-cowboy--remember').
+An answer that names no choice asks again, NOTE then saying so; a
+dismissed question holds the message."
   (let* ((message (plist-get value :message))
          (from (plist-get message :from))
          (default (harness-cowboy--default))
@@ -520,12 +670,13 @@ the message."
                                        session-id (harness-error-short-message err))
                           (funcall settle 'hold 'user))))
                 ((and (cdr parsed) (not (eq (car parsed) 'hold)))
-                 (let ((failed (harness-cowboy--remember (car parsed))))
+                 (let* ((saved (harness-cowboy--remember (car parsed) session-id))
+                        (failed (plist-get saved :failed)))
                    (when failed
                      (harness-call 'session/hint session-id
                                    (format "Could not make %s the default: %s"
                                            (downcase (harness-cowboy-label (car parsed))) failed)))
-                   (funcall settle (car parsed) (if failed 'user 'always))))
+                   (funcall settle (car parsed) (if failed 'user 'always) (plist-get saved :decision))))
                 (t (funcall settle (car parsed) 'user)))))))
     (unless answered
       (puthash session-id (list :pid pid :settle settle) harness-cowboy--asking)
@@ -628,11 +779,14 @@ starts, and its end, cancelled or not, when it ends."
           (harness-call 'agent/note-activity session-id (list :phase 'compacting))))
     (error (harness-log 'warn "cowboy: could not mark %s busy: %s" session-id (harness-error-short-message err)))))
 
-(defun harness-cowboy--apply (session-id choice by value estimate)
+(defun harness-cowboy--apply (session-id choice by value estimate &optional decision)
   "Do CHOICE before SESSION-ID's turn, as BY decided; promise the gate value.
 VALUE is the `agent/before-turn' value the turn goes on with; ESTIMATE
-`compaction/estimate''s answer, or nil.  `hold' stops the turn, with
-`harness-cowboy--hold-reason'; a session deleted meanwhile has no turn."
+`compaction/estimate''s answer, or nil.  DECISION is the id of the
+lasting decision an \"always\" answer kept just now, which the hint
+saying what goes first names (`harness-cowboy--hint-meta').  `hold'
+stops the turn, with `harness-cowboy--hold-reason'; a session deleted
+meanwhile has no turn."
   (harness-emit 'cowboy/decided session-id choice by)
   (cond
    ((not (harness-call 'session/exists-p session-id))
@@ -641,7 +795,8 @@ VALUE is the `agent/before-turn' value the turn goes on with; ESTIMATE
     (harness-resolved (list :proceed nil :reason harness-cowboy--hold-reason)))
    (t
     (let ((session (harness-call 'session/get session-id)))
-      (harness-call 'session/hint session-id (harness-cowboy--hint-text choice by session estimate))
+      (harness-cowboy--hint session-id (harness-cowboy--hint-text choice by session estimate)
+                            (harness-cowboy--hint-meta by decision))
       (if (eq choice 'carry-on)
           (harness-resolved value)
         (harness-cowboy--busy session-id)
@@ -660,11 +815,11 @@ the turn goes on with: asked (`harness-cowboy--ask') or taken unasked
                                value estimate)
       (let* ((promise (harness-make-promise))
              (settled nil)
-             (settle (lambda (choice by)
+             (settle (lambda (choice by &optional decision)
                        (unless settled
                          (setq settled t)
                          (harness-resolve promise
-                                          (harness-cowboy--apply session-id choice by value estimate))))))
+                                          (harness-cowboy--apply session-id choice by value estimate decision))))))
         (condition-case err
             (harness-cowboy--ask session-id session value estimate settle)
           (error
@@ -722,9 +877,11 @@ OPTS keys:
             (harness-resolved nil)
           (harness-emit 'cowboy/decided session-id choice by)
           ;; Whoever the caller says decided, what was done is the default
-          ;; for a session no warm cache holds: the hint says so.
-          (harness-call 'session/hint session-id
-                        (harness-cowboy--hint-text choice 'cold-start session estimate (plist-get opts :why)))
+          ;; for a session no warm cache holds: the hint says so, and
+          ;; names the "always" answer that set the default, if one did.
+          (harness-cowboy--hint session-id
+                                (harness-cowboy--hint-text choice 'cold-start session estimate (plist-get opts :why))
+                                (harness-cowboy--hint-meta 'cold-start))
           (if (eq choice 'carry-on)
               (harness-resolved choice)
             (harness-then (harness-cowboy--compact session-id choice by)

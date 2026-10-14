@@ -587,6 +587,49 @@ RECORD is what `harness-node-permission' returns."
     (cond ((and (stringp u) (not (string-empty-p u))) (intern u))
           ((and u (symbolp u) (not (memq u '(t :false :null)))) u))))
 
+;;;; Lasting decisions
+;;
+;; An answer that lasts -- a permission answer for the session or
+;; always, an "always" answer to the cold-cache question -- is a
+;; decision the harness keeps (harness-decisions.el), with an undo and
+;; a redo.  A note refers to one by its id: the note that tells of the
+;; decision where it was made holds it in its `:meta' `:decision', and a
+;; hint or tool result written later where the decision took effect, in
+;; any session, in its `:meta' `:decided-by'.
+
+(defconst harness-decision-states '(done undone changed gone)
+  "Where a lasting decision stands.
+`done' while what it changed is in effect, so it can be undone;
+`undone' once it was taken back, so it can be redone; `changed' or
+`gone' once what it changed was changed by something else or is no
+longer there, so it offers nothing more.")
+
+(defun harness-decision-state (value)
+  "Return the decision state VALUE names, a symbol, or nil.
+VALUE may have travelled over JSON, as a string; anything that is no
+state in `harness-decision-states' is nil."
+  (let ((s (cond ((and (stringp value) (not (string-empty-p value))) (intern-soft value))
+                 ((and value (symbolp value) (not (keywordp value))) value))))
+    (and (memq s harness-decision-states) s)))
+
+(defun harness--node-meta-id (node key)
+  "Return the id NODE's `:meta' holds under KEY, a non-empty string, or nil."
+  (let ((id (plist-get (plist-get node :meta) key)))
+    (and (stringp id) (not (string-empty-p id)) id)))
+
+(defun harness-node-decision (node)
+  "Return the id of the lasting decision NODE tells of, or nil.
+NODE is the note written where the decision was made, such as the
+hint after a permission answer for the session or always."
+  (harness--node-meta-id node :decision))
+
+(defun harness-node-decided-by (node)
+  "Return the id of the lasting decision that made NODE happen, or nil.
+NODE is a hint or a tool result written where a decision made earlier,
+perhaps in another session, took effect: a cold cache compacted
+unasked as the default it set says, or a call its rule denied."
+  (harness--node-meta-id node :decided-by))
+
 ;;;; The note of the session judge
 
 ;; A new session's opening message may be judged -- read by a cheap model

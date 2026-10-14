@@ -141,7 +141,8 @@ is never used for any other failure.")
     "harness/api" "harness/modules" "harness/version" "harness/reload" "harness/call"
     "harness-dev/" "question/" "project/" "task/" "search/"
     "notification/" "acp/remote-" "pet/" "version/" "insights/" "supervisor/" "seed/" "priority/"
-    "secrets/" "commit-msg/")
+    "secrets/" "commit-msg/"
+    "decision/")
   "Bus method name prefixes callable as `_harness/NAME'.
 Modules of the user's own add theirs to
 `harness-acp-extra-method-prefixes'.")
@@ -210,7 +211,8 @@ it can answer for another one.")
     session/moved session/ext-changed supervisor/changed
     question/answered task/changed task/deleted task/review task/done task/queue task/backlog-mode
     permission/dir-allowed permission/dir-revoked
-    config/changed harness/reloaded tools/file-written acp/remote-changed pet/changed pet/said version/checked)
+    config/changed harness/reloaded tools/file-written acp/remote-changed pet/changed pet/said version/checked
+    decision/changed)
   "Bus events forwarded verbatim as `_harness/event' notifications.")
 
 (defvar harness-acp-authorize-functions nil
