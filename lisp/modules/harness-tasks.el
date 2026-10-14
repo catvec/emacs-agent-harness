@@ -150,7 +150,9 @@
 ;; them, the queue in the order it will start, the recent waits
 ;; (`harness-tasks-slot-wait-days') -- read from what the scheduler goes
 ;; by, so the sub-agents and the merge queue that take no slot are not
-;; in it.
+;; in it.  `task/queue-order' gives each waiting task its place in its
+;; project's line, in that same order, for the lists that show it (the
+;; task_list tool).
 ;;
 ;; Return to pending: `task/return-to-pending' (the board's u,
 ;; task_control's return-to-pending) stops the turn of a task at work
@@ -197,8 +199,10 @@
 ;;             project's tasks run at once: each project has slots of
 ;;             its own, and only the tasks' own top-level sessions take
 ;;             them, never their sub-agents or the merge queue's work;
-;;             higher priority first, then oldest first), or a backlog
-;;             task waiting for someone to start it
+;;             in start order: higher priority first, then among equals
+;;             work sent back from review, then tasks returned to
+;;             pending, then the oldest), or a backlog task waiting for
+;;             someone to start it
 ;;   refining  an agent is writing a backlog task up, or stopped part
 ;;             way (`:outcome' says why: error, cancelled, duplicate…)
 ;;   active    its session is working on it, or stopped part way
@@ -308,8 +312,10 @@ branch is queued, merging or having its conflicts resolved holds no
 slot, even while its own session commits or resolves them.
 `task/start' starts a task whatever the limit.
 nil (the default) means no limit, and 0 that no task starts by itself.
-Waiting tasks start by priority, then oldest first (see
-`harness-priority-levels').
+Waiting tasks start by priority (see `harness-priority-levels'); among
+equals, work sent back from review goes first, then the tasks returned
+to pending -- paused, pre-empted, or their borrowed slot taken back --
+and then the others, oldest first (`harness-tasks--start-order').
 
 Work the user sends back from review is held to the limit too: with no
 slot free it pre-empts a task at work it outranks -- of a lower
@@ -2058,8 +2064,11 @@ without it."
 ;; `harness-tasks-max-running' limits each project on its own: every
 ;; project has that many slots, and its queued tasks wait only for its
 ;; own working tasks, so a busy board never holds up another project's.
-;; Queued tasks take free slots by priority, the oldest first among
-;; equals (`harness-tasks--start-order').
+;; Queued tasks take free slots in start order
+;; (`harness-tasks--start-order'): by priority; among equals, work sent
+;; back from review first, then the tasks returned to pending, then the
+;; oldest.  What lists waiting tasks lists them so: the board's Pending,
+;; `task/slots' and `task/queue-order'.
 ;;
 ;; Only top-level sessions take slots (`harness-tasks--holds-slot-p'): a
 ;; task holds one while its own session, which no other session started,
@@ -2698,8 +2707,9 @@ back as it holds back any start the harness makes by itself."
 
 (defun harness-tasks--schedule (&optional skip)
   "Start the queued tasks of every project while it has slots free.
-They go by priority, highest first, the oldest first among equals
-\(`harness-tasks--start-order').  Projects have slots of their own
+They go in start order (`harness-tasks--start-order'): highest priority
+first; among equals, work sent back from review, then the tasks
+returned to pending, then the oldest.  Projects have slots of their own
 \(`harness-tasks--free-slots'): the walk keeps what is left of each
 one's, so a project at its limit holds up only its own tasks.  Backlog
 tasks wait for `task/start' instead, and so do the tasks of a project
@@ -4466,7 +4476,8 @@ none, and a model the policy does not allow signals an error (see
            (and asked (list :model asked)))))
 
 (harness-defmethod task/list (&optional cwd)
-  "Return the tasks of CWD's project, oldest first; every task without CWD."
+  "Return the tasks of CWD's project, oldest first; every task without CWD.
+The order the waiting ones start in is `task/queue-order''s."
   (harness-tasks--load)
   (let ((project (and cwd (harness-tasks--project cwd))))
     (when project (harness-tasks--open-project project))
@@ -4653,6 +4664,37 @@ No sub-agent, fork or merge-queue work holds a slot, so none is listed."
                            (lambda (task) (and (funcall mine task) (harness-tasks--queued-p task))))))
           :waits (harness-tasks--slot-waits project))))
 
+(harness-defmethod task/queue-order (&optional cwd)
+  "Return the tasks waiting for a slot, in the order they will start.
+CWD's project's, every project's without CWD: the tasks
+`harness-tasks--queued-p' says wait -- pending, not in the backlog, not
+archived -- in the order the scheduler hands them slots
+\(`harness-tasks--start-order'): by priority; among equals, work sent
+back from review first, then the tasks returned to pending (paused,
+pre-empted, or their borrowed slot taken back), the first returned
+first, then the others, oldest first.  The board's Pending lists a
+project's waiting tasks in that order too.  Each is a plist of :id,
+:project, the project whose slots it takes
+\(`harness-tasks--slot-project'), and :place, its place in that
+project's line: 1 is the next of the project's tasks to start.  The
+projects have slots of their own, so the places count per project.  A
+suspended queue keeps its order, which its tasks start in once it
+resumes."
+  (harness-tasks--load)
+  (let ((project (and cwd (harness-tasks--project cwd)))
+        (places (make-hash-table :test 'equal)))
+    (when project (harness-tasks--open-project project))
+    (mapcar (lambda (task)
+              (let ((home (harness-tasks--slot-project task)))
+                (list :id (plist-get task :id)
+                      :project home
+                      :place (puthash home (1+ (gethash home places 0)) places))))
+            (harness-tasks--start-order
+             (harness-tasks--sorted
+              (lambda (task)
+                (and (harness-tasks--queued-p task)
+                     (or (null project) (equal project (harness-tasks--slot-project task))))))))))
+
 (harness-defmethod task/set-all (settings &optional filter)
   "Apply SETTINGS to every current task FILTER selects; return the ids changed.
 SETTINGS is a plist of `:model', `:thinking', `:permission-mode',
@@ -4734,8 +4776,9 @@ restart.  Return (:project PROJECT :suspended t)."
 
 (harness-defmethod task/resume-queue (&optional cwd)
   "Start starting the pending tasks of CWD's project again, at once.
-They start by priority, the oldest first among equals, a task returned
-to pending first of its priority, up to `harness-tasks-max-running'.
+They start in start order (`harness-tasks--start-order') -- by priority;
+of a priority, work sent back from review first, then a task returned
+to pending, then the oldest -- up to `harness-tasks-max-running'.
 Return (:project PROJECT :suspended :false)."
   (let ((project (harness-tasks--project (or cwd default-directory))))
     (harness-tasks--set-suspended project nil)

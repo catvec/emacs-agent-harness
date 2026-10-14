@@ -4381,7 +4381,9 @@ priority).
   the main checkout, else its `:cwd`) has that many slots of its own,
   and the scheduler (`harness-tasks--schedule`) starts each project's
   queued tasks in start order (`harness-tasks--start-order`: highest
-  `:priority` first, oldest first among equals) while that project has
+  `:priority` first; among equals, work sent back from review
+  (`:sent-back`), then tasks returned to pending (`:returned`, the first
+  returned first), then the rest, oldest first) while that project has
   slots left (`harness-tasks--free-slots PROJECT`), so a project at its
   limit holds up only its own tasks.  The limit (a `natnum`, or nil for
   none; 0 starts nothing by itself) can change while tasks wait: its
@@ -4873,7 +4875,13 @@ priority).
 - `task/list &optional CWD`, `task/get ID`, `task/settings &optional CWD`
   (what new tasks start with, and `:max-running`, the limit, nil for
   none), `task/slots &optional CWD` (the slots, above),
-  `task/start ID` (ignores the limit; not while a write-up runs),
+  `task/queue-order &optional CWD` (the queued tasks of CWD's project,
+  every project's without CWD, in `harness-tasks--start-order`, each
+  `(:id :project :place)`: `:place` is its place in its project's line,
+  1 for the next to start, counted per project as the slots are; the
+  task_list tool says `#N in line` from it and lists the pending column
+  alone in its order), `task/start ID` (ignores the limit; not while a
+  write-up runs),
   `task/queue ID` (a backlog task back in the pending queue, where the
   scheduler starts it as slots free; the suspended queue holds it there),
   `task/return-to-pending ID` (a task at work, not one still starting:
@@ -6540,7 +6548,7 @@ TRAMP prefixes come from the session host):
 | `session_wait` | Wait for sessions | session_id / session_ids, until (stopped/idle/blocked/running/changed), mode (all/any), timeout_seconds (optional: wake anyway after this long) | read (registers a wake-up prompt and returns at once; needs no approval: `harness-perms--inspection-tools`) |
 | `watch_events` | Watch events | events (kinds), prompt, actions (default `["wake"]`), session_id, task_id, all_projects, once (default true), timeout_seconds | read (tools-events; registers a watch and returns at once, never waiting; needs no approval: `harness-perms--inspection-tools`) |
 | `unwatch_events` | Stop watching events | watch_id (default: every watch of the session) | read (tools-events; needs no approval: `harness-perms--inspection-tools`) |
-| `task_list` | List tasks | column (pending/backlog/needs-input/active/review/merging/done), include_archived, all_projects, limit (the most recent) | read (needs no approval: `harness-perms--inspection-tools`) |
+| `task_list` | List tasks | column (pending/backlog/needs-input/active/review/merging/done), include_archived, all_projects, limit (the most recent); oldest first, each waiting task saying `#N in line` (`task/queue-order`) and why when it was put back, the pending column alone in start order | read (needs no approval: `harness-perms--inspection-tools`) |
 | `task_submit` | Submit task | prompt, cwd, model, thinking, refine (for the backlog), main_tree (no worktree: the project's main checkout), priority (low/medium/high: given to the session the task is submitted with, and the order waiting tasks start in) | meta |
 | `task_control` | Control task | task_id, action (start/queue/message/cancel/return-to-pending/merge/verify/reject/complete/archive/restore/delete/priority, and on a project with no task_id: suspend-queue/resume-queue, auto-queue/manual-queue for its backlog mode), message (the feedback, for reject), priority (low/medium/high, for priority: given to the task's session, where a task's priority lives), cwd (the project of the four project actions; default: this session's) | meta |
 | `task_wait` | Wait for tasks | task_id / task_ids, until (settled/done/needs-input/active/review/merging/changed; settled counts review, and a written-up backlog task unless an auto-queued backlog hands it on to the queue), mode, timeout_seconds | read (needs no approval: `harness-perms--inspection-tools`) |
@@ -9748,10 +9756,17 @@ task, merge, turn, status, worktree, budget or reload event.  New tasks show at
 the top of in progress (latest started first), review lists the latest
 finished first and completed the latest completed (verified, else
 finished) first; merging is the queue's own order, from when each
-branch joined it; pending is the queue, in the order its tasks start,
-with the backlog among it (highest priority first, then oldest first,
-as `harness-tasks--start-order` has it; only queued tasks have a place
-in line).
+branch joined it; pending is the queue, in the order its tasks start
+(`harness-ui-tasks--starts-before-p`, which reads
+`harness-tasks--start-order` off the views -- `:priority`, `:sent-back`,
+`:returned`, `:created` -- since a board may show a remote harness):
+the highest priority first, and within one the work sent back from
+review, then the tasks returned to the queue (paused, pre-empted, their
+borrowed slot taken back), the first returned first, then the oldest;
+each card's place in line counts down that order.  The backlog and
+Requires your input go by priority, then the oldest
+(`harness-ui-tasks--ranks-before-p`); only queued tasks have a place in
+line.
 
 The board's search (`harness-ui-tasks-search`, `/` on the board,
 [Search] in its header, `C-c h /` on a board) turns the board's compose

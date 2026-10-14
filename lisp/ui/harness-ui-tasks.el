@@ -17,9 +17,12 @@
 ;;   Pending               waiting for a slot, so it starts on its own
 ;;                         while the project has one free; editable,
 ;;                         startable; in the order they start: by
-;;                         priority, then oldest first.  Beside its
-;;                         count, [Queue: running] (P) suspends the
-;;                         queue, so none starts on its own until resumed
+;;                         priority, and within one, work sent back
+;;                         from review, then tasks returned to pending
+;;                         (paused or pre-empted), then the oldest.
+;;                         Beside its count, [Queue: running] (P)
+;;                         suspends the queue, so none starts on its own
+;;                         until resumed
 ;;   Backlog               jotted down or written up for later: the queue
 ;;                         never starts one by itself; Q queues it, so it
 ;;                         drains like any pending task, and s starts it
@@ -82,7 +85,8 @@
 ;; submission, holding the level, so the board and the queues the
 ;; task's work waits in serve it by the same thing.  While the project's
 ;; slots are full (`harness-tasks-max-running'), a higher priority starts
-;; first, oldest first among equals.  A card's arrow -- the priority
+;; first; among equals, work sent back from review, then a task returned
+;; to pending, then the oldest.  A card's arrow -- the priority
 ;; UI's, clickable like the chat header's
 ;; (`harness-ui-priority-arrow') -- says what it is: up for high, down
 ;; for low, none for medium, and no words repeat it among the card's
@@ -489,25 +493,62 @@ session (`harness-priority-of-task')."
   "The place of TASK's priority in `harness-ui-priority-levels': 0 is low."
   (cl-position (harness-ui-tasks--priority task) harness-ui-priority-levels :test #'equal))
 
-(defun harness-ui-tasks--starts-before-p (a b)
-  "Non-nil when waiting task A gets a slot before B, as the harness hands them.
-That is a higher priority first, then the older one."
+(defun harness-ui-tasks--ranks-before-p (a b)
+  "Non-nil when task A goes before B by priority: a higher one, else the older.
+The backlog, which the queue never starts, and Requires your input list
+their tasks so; Pending goes by the order its tasks start in, which
+puts the tasks returned to the queue first of their priority
+\(`harness-ui-tasks--starts-before-p')."
   (let ((ra (harness-ui-tasks--priority-rank a))
         (rb (harness-ui-tasks--priority-rank b)))
     (if (= ra rb)
         (< (or (plist-get a :created) 0) (or (plist-get b :created) 0))
       (> ra rb))))
 
+(defun harness-ui-tasks--returned (task)
+  "When TASK was put back in the queue after it worked, a float time, or nil.
+That is its `:returned': paused (returned to pending), pre-empted by
+work sent back from review, its borrowed slot taken back, or sent back
+while no slot could take it.  The harness clears it once the task
+starts.  One that says so without a time counts as returned at 0, as
+its card says it was returned all the same."
+  (let ((returned (plist-get task :returned)))
+    (and (harness-json-true-p returned) (if (numberp returned) returned 0))))
+
+(defun harness-ui-tasks--starts-before-p (a b)
+  "Non-nil when waiting task A gets a slot before B, as the harness hands them.
+That is the harness's start order (`harness-tasks--start-order'), read
+from the views: a higher priority first; among equals, work sent back
+from review (`:sent-back') first, then a task returned to the queue
+after it worked (`harness-ui-tasks--returned') -- paused, pre-empted or
+its slot taken back -- before one that never started, the first
+returned first, and the others oldest first.  So a pre-empted task is
+next in line once the higher priorities are served."
+  (let ((ra (harness-ui-tasks--priority-rank a))
+        (rb (harness-ui-tasks--priority-rank b))
+        (sa (and (harness-json-true-p (plist-get a :sent-back)) t))
+        (sb (and (harness-json-true-p (plist-get b :sent-back)) t))
+        (qa (harness-ui-tasks--returned a))
+        (qb (harness-ui-tasks--returned b)))
+    (cond ((/= ra rb) (> ra rb))
+          ((not (eq sa sb)) sa)
+          ((and qa qb) (< qa qb))
+          ((or qa qb) (and qa t))
+          (t (< (or (plist-get a :created) 0) (or (plist-get b :created) 0))))))
+
 (defun harness-ui-tasks--visible (&optional filtered)
   "Return the tasks shown, as an alist COLUMN -> tasks in display order.
 In progress is newest first by when each task started, review by when
 it finished and completed by when it was completed, so a task arriving
 in any of them shows at the top; merging is the queue's own order, from
-when each branch joined it; pending is in the order its tasks start, by
-priority then oldest first, and the backlog (which the queue never
-starts) and Requires your input the same way; the other columns are
-oldest first.  With FILTERED, only the tasks `harness-ui-tasks-filter'
-shows, when there is one, archived or not."
+when each branch joined it; pending is in the order its tasks start
+\(`harness-ui-tasks--starts-before-p'): by priority, and within one,
+work sent back from review, then the tasks returned to the queue, then
+the oldest.  The backlog (which the queue never starts) and Requires
+your input go by priority, then oldest first
+\(`harness-ui-tasks--ranks-before-p'); the other columns are oldest
+first.  With FILTERED, only the tasks `harness-ui-tasks-filter' shows,
+when there is one, archived or not."
   (let ((groups (mapcar (lambda (c) (list (car c))) harness-ui-tasks--columns))
         (show (and filtered (plist-get harness-ui-tasks-filter :show))))
     (dolist (task harness-ui-tasks--tasks)
@@ -524,8 +565,8 @@ shows, when there is one, archived or not."
                                                    (harness-ui-tasks--merge-queued b))))
                         ('done (lambda (a b) (> (harness-ui-tasks--completed a) (harness-ui-tasks--completed b))))
                         ('pending #'harness-ui-tasks--starts-before-p)
-                        ('backlog #'harness-ui-tasks--starts-before-p)
-                        ('needs-input #'harness-ui-tasks--starts-before-p)
+                        ('backlog #'harness-ui-tasks--ranks-before-p)
+                        ('needs-input #'harness-ui-tasks--ranks-before-p)
                         (_ (lambda (a b) (< (or (plist-get a :created) 0) (or (plist-get b :created) 0))))))))))
 
 ;;;; What a card says
@@ -2970,7 +3011,7 @@ this one does not wait for them."
 
 (defun harness-ui-tasks-set-max-running (n)
   "Let N of each project's tasks work at once; N nil means no limit.
-The others wait in Pending and start, by priority then oldest first, as
+The others wait in Pending and start in its order, by priority first, as
 slots free up.  Raising the limit starts the tasks it lets through at
 once; lowering it stops no task at work, and only fewer start after.
 With 0 no task starts by itself: each waits until you start it
@@ -4597,8 +4638,9 @@ priority."
   "Move the priority of the task at point STEP places: 1 up, -1 down.
 Priorities are low, medium and high (`harness-ui-priority-levels'),
 and a task's priority is its session's (`harness-priority-of-task').
-The harness starts waiting tasks by priority, then oldest first, and
-Pending shows them in that order, and the backlog too, so the card moves with it."
+The harness starts waiting tasks by priority first, and Pending shows
+them in the order they start, the backlog by priority too, so the card
+moves with it."
   (let* ((task (harness-ui-tasks--task))
          (rank (harness-ui-tasks--priority-rank task))
          (priority (nth (+ rank step) harness-ui-priority-levels)))
@@ -4611,7 +4653,8 @@ Pending shows them in that order, and the backlog too, so the card moves with it
 (defun harness-ui-tasks-raise-priority ()
   "Raise the priority of the task at point: low to medium, medium to high.
 While its project's slots are full, a waiting task of higher priority
-starts first; equals start oldest first."
+starts first; among equals, work sent back from review, then a task
+returned to pending, then the oldest."
   (interactive)
   (harness-ui-tasks--shift-priority 1))
 

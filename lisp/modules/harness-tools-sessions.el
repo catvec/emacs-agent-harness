@@ -58,7 +58,9 @@
 ;;   `task_control' (start, message, cancel, merge, verify, reject,
 ;;   complete, archive, restore, delete, priority) and `task_wait'.
 ;;   `task_control''s priority action sets the task's session's, since
-;;   that is where a task's priority lives.
+;;   that is where a task's priority lives.  A task waiting for a slot
+;;   says its place in its project's line (`task/queue-order'), and
+;;   `task_list' of the pending column lists the tasks in that order.
 ;;
 ;; Nothing here grants permissions: a session's permission requests and
 ;; permission mode are left to the user, and tasks are submitted with
@@ -1910,28 +1912,72 @@ message of the harness's own."
     (concat (if (numberp created) (format ", created %s" (harness-relative-time created)) "")
             (if (numberp finished) (format ", finished %s" (harness-relative-time finished)) ""))))
 
-(defun harness-tools-sessions--task-line (task &optional self)
+(defun harness-tools-sessions--queue (&optional cwd)
+  "Return where the tasks waiting for a slot stand, a hash table by task id.
+CWD's project's tasks, every project's without CWD (`task/queue-order'):
+each id maps to (RANK . PLACE), RANK its place in the order every one
+of them starts in, PLACE its place in its own project's line, 1 for
+the next of the project's tasks to start.  When the order cannot be
+had the table is empty, and the lines go without their places."
+  (let ((queue (make-hash-table :test 'equal))
+        (rank 0))
+    (when (harness-method-exists-p 'task/queue-order)
+      (dolist (entry (condition-case err
+                         (harness-call 'task/queue-order cwd)
+                       (error (harness-log 'warn "tools-sessions: no queue order for %s: %s"
+                                           (or cwd "every project") (harness-error-message err))
+                              nil)))
+        (puthash (plist-get entry :id) (cons (cl-incf rank) (plist-get entry :place)) queue)))
+    queue))
+
+(defun harness-tools-sessions--queued-p (task)
+  "Non-nil when TASK, a view, is in the pending column: it waits for a slot."
+  (equal (format "%s" (plist-get task :column)) "pending"))
+
+(defun harness-tools-sessions--queue-why (task)
+  "Say why waiting TASK goes before the tasks of its priority that never started.
+That is when it was put back in the queue after it worked (`:returned'):
+returned to pending by hand, pre-empted by work sent back from review,
+its borrowed slot taken back, or sent back from review while no slot
+could take it.  \"\" for any other task."
+  (if (not (plist-get task :returned))
+      ""
+    (let ((by (plist-get task :preempted-by)))
+      (pcase (format "%s" (or (plist-get task :return-reason) "returned"))
+        ("preempted" (format " (pre-empted%s)" (if by (format " by %s" by) "")))
+        ("reclaimed" (format " (its borrowed slot taken back%s)" (if by (format " by %s" by) "")))
+        ("sent-back" " (sent back from review)")
+        (_ " (returned to pending)")))))
+
+(defun harness-tools-sessions--task-line (task &optional self queue)
   "Return the listing of TASK.
 Its title on the board, once it has one, comes before its prompt: the
 name of its session, else its own, which a task has from submission --
 it gets its session then, named with the title once it comes.  A
 backlog task says on its state line that it waits in the backlog for
-someone to start it, so it does not read as a queued pending task.
-When SELF, a session id, is TASK's session, the line says \"(this
-task)\"."
+someone to start it, so it does not read as a queued pending task; a
+queued one says its place in its project's line, \"#1 in line\" for the
+next to start, and why it is ahead of the tasks of its priority that
+never started when it worked already (`harness-tools-sessions--queue-why').
+QUEUE is the table `harness-tools-sessions--queue' makes, for a caller
+listing many tasks; without it the line asks for its own.  When SELF,
+a session id, is TASK's session, the line says \"(this task)\"."
   (let* ((sid (plist-get task :session))
          (session (and sid (harness-call 'session/exists-p sid) (harness-call 'session/get sid)))
          (title (if (harness-string-blank-p (plist-get session :name))
                     (plist-get task :name)
                   (plist-get session :name)))
          (backlog (and (equal (format "%s" (plist-get task :column)) "backlog") t))
+         (place (and (harness-tools-sessions--queued-p task)
+                     (cdr (gethash (plist-get task :id)
+                                   (or queue (harness-tools-sessions--queue (plist-get task :project)))))))
          (pending (and session (harness-tools-sessions--pending-text session))))
     (concat
      (format "%s  %-11s %s%s%s" (plist-get task :id) (plist-get task :column)
              (if (harness-string-blank-p title) "" (format "%S: " title))
              (harness-truncate-end (harness-first-line (or (plist-get task :prompt) "")) 100)
              (if (and self sid (equal sid self)) "  (this task)" ""))
-     (format "\n    state %s%s%s%s%s%s%s%s%s%s%s%s"
+     (format "\n    state %s%s%s%s%s%s%s%s%s%s%s%s%s"
              (plist-get task :state)
              (cond ((not backlog) "")
                    ((harness-json-true-p (plist-get task :joining-queue))
@@ -1946,6 +1992,8 @@ task)\"."
                (if (and priority (not (equal (format "%s" priority) "medium")))
                    (format ", priority %s" priority)
                  ""))
+             ;; Where it stands in the queue, which is not the list's order.
+             (if place (format ", #%d in line%s" place (harness-tools-sessions--queue-why task)) "")
              (if (plist-get task :duplicate-of) (format ", duplicate of %s" (plist-get task :duplicate-of)) "")
              (harness-tools-sessions--task-times task)
              (if sid (format ", session %s %s" sid (if session (harness-tools-sessions--status sid) "deleted")) "")
@@ -2012,7 +2060,17 @@ INPUT is the tool call's input plist and CTX its context."
          ;; The list is oldest first: the most recent are its end.
          (shown (if (and limit (> (length tasks) limit)) (last tasks limit) tasks))
          (hidden (- (length tasks) (length shown)))
+         ;; Where the waiting tasks stand, asked once for the whole list.
+         (queue (if (cl-some #'harness-tools-sessions--queued-p shown)
+                    (harness-tools-sessions--queue cwd)
+                  (make-hash-table :test 'equal)))
          (self (plist-get ctx :session-id)))
+    ;; The pending column alone lists its tasks in the order they start.
+    (when (eq column 'pending)
+      (setq shown (sort (copy-sequence shown)
+                        (lambda (a b)
+                          (< (car (gethash (plist-get a :id) queue (list most-positive-fixnum)))
+                             (car (gethash (plist-get b :id) queue (list most-positive-fixnum))))))))
     (harness-tool-ok
      (concat (harness-tools-sessions--task-queue-line tasks)
              (harness-tools-sessions--task-backlog-line tasks)
@@ -2020,12 +2078,12 @@ INPUT is the tool call's input plist and CTX its context."
                  (concat (if (> hidden 0)
                              (format "… %d older task%s not shown; raise limit to see them\n" hidden (if (= hidden 1) "" "s"))
                            "")
-                         (mapconcat (lambda (task) (harness-tools-sessions--task-line task self)) shown "\n"))
+                         (mapconcat (lambda (task) (harness-tools-sessions--task-line task self queue)) shown "\n"))
                "No tasks match.")))))
 
 (harness-define-tool "task_list"
   :label "List tasks"
-  :description "List the task board: tasks (one session each, usually in its own worktree, or in the project's main tree when submitted with main_tree, done once the user verified the work and it merged) with their title (their session's name, else the one a task is given as soon as it is submitted), prompt, column (pending, backlog, needs-input, active, review, merging, done), state, priority (shown when it is low or high rather than medium; waiting tasks start highest priority first), when they were created and finished, session, branch, merge status and review status. Pending holds only tasks waiting for a slot: they start on their own as slots free, by priority. A task in the backlog (task_submit with refine) waits for a person to start it (task_control start) and says so, \"backlog, waits to be started\"; the queue never starts it. A task in review has finished and waits for the user to verify it or send it back; one in merging holds a place in the merge queue (queued, merging, or its session resolving conflicts). A suspended queue (task_control suspend-queue) is named before the tasks, and its queued pending tasks say so: they start only by hand (task_control start) or when the queue is resumed. So is a backlog that queues its tasks itself (task_control auto-queue): a task written up there joins the pending queue by itself. Defaults to this project's unarchived tasks, oldest first; limit keeps the most recent ones. The task this session works on says (this task). Inspect a task's work with session_read on its session."
+  :description "List the task board: tasks (one session each, usually in its own worktree, or in the project's main tree when submitted with main_tree, done once the user verified the work and it merged) with their title (their session's name, else the one a task is given as soon as it is submitted), prompt, column (pending, backlog, needs-input, active, review, merging, done), state, priority (shown when it is low or high rather than medium), a waiting task's place in its project's line (\"#1 in line\" starts next), when they were created and finished, session, branch, merge status and review status. Pending holds only tasks waiting for a slot: they start on their own as slots free, in the order of their places in line -- highest priority first; within a priority, work sent back from review, then tasks returned to pending (paused or pre-empted, as their line says), then the rest, oldest first. A task in the backlog (task_submit with refine) waits for a person to start it (task_control start) and says so, \"backlog, waits to be started\"; the queue never starts it. A task in review has finished and waits for the user to verify it or send it back; one in merging holds a place in the merge queue (queued, merging, or its session resolving conflicts). A suspended queue (task_control suspend-queue) is named before the tasks, and its queued pending tasks say so: they start only by hand (task_control start) or when the queue is resumed. So is a backlog that queues its tasks itself (task_control auto-queue): a task written up there joins the pending queue by itself. Defaults to this project's unarchived tasks, oldest first, and the pending column alone in the order they start; limit keeps the most recently created ones. The task this session works on says (this task). Inspect a task's work with session_read on its session."
   :schema '(:type "object"
             :properties (:column (:type "string" :enum ("pending" "backlog" "needs-input" "active" "review" "merging" "done"))
                          :include_archived (:type "boolean" :description "Include archived tasks (default false).")
@@ -2061,7 +2119,7 @@ INPUT is the tool call's input plist and CTX its context."
 
 (harness-define-tool "task_submit"
   :label "Submit task"
-  :description "Add a task to the task board. The task runs in its own session (in a git project, in a fresh worktree whose branch is merged back through the merge queue) with the task defaults for permissions; it starts when its project has a free slot (the limit on running tasks applies to each project separately, and counts only the tasks' own top-level sessions at work: sub-agents, forks and the merge queue never take a slot), and waiting tasks take free slots by priority: high before medium (the default) before low, oldest first among equals. While the project's queue is suspended (task_control suspend-queue) nothing starts it on its own; the task waits until the queue is resumed or someone starts it with task_control start. By default finished work waits in review until the user verifies it (task_control verify) or sends it back (task_control reject). With refine=true it goes to the backlog instead: an agent briefly writes it up, read-only, and it waits in pending until someone starts it (task_control start), which is how to record work for later; when the project's backlog is auto-queued (task_control auto-queue) the written-up task joins the pending queue by itself. With plan=true it is planned instead: an agent on the provider's hard model reads the code, read-only, and writes a detailed plan for a medium model, which then does the work once someone starts the task (model and thinking, when given, are that work's). With main_tree=true it works in the project's main checkout instead of a worktree: no branch, nothing merges, and its changes take effect in the checkout itself -- for work that has to touch it, such as cleaning up uncommitted changes. Returns the task id; follow it with task_wait or task_list."
+  :description "Add a task to the task board. The task runs in its own session (in a git project, in a fresh worktree whose branch is merged back through the merge queue) with the task defaults for permissions; it starts when its project has a free slot (the limit on running tasks applies to each project separately, and counts only the tasks' own top-level sessions at work: sub-agents, forks and the merge queue never take a slot), and waiting tasks take free slots by priority: high before medium (the default) before low; among equals, work sent back from review and tasks returned to pending go first, then the oldest (task_list says each waiting task's place in line). While the project's queue is suspended (task_control suspend-queue) nothing starts it on its own; the task waits until the queue is resumed or someone starts it with task_control start. By default finished work waits in review until the user verifies it (task_control verify) or sends it back (task_control reject). With refine=true it goes to the backlog instead: an agent briefly writes it up, read-only, and it waits in pending until someone starts it (task_control start), which is how to record work for later; when the project's backlog is auto-queued (task_control auto-queue) the written-up task joins the pending queue by itself. With plan=true it is planned instead: an agent on the provider's hard model reads the code, read-only, and writes a detailed plan for a medium model, which then does the work once someone starts the task (model and thinking, when given, are that work's). With main_tree=true it works in the project's main checkout instead of a worktree: no branch, nothing merges, and its changes take effect in the checkout itself -- for work that has to touch it, such as cleaning up uncommitted changes. Returns the task id; follow it with task_wait or task_list."
   :schema '(:type "object"
             :properties (:prompt (:type "string" :description "What the task should do; self-contained, the task does not see this conversation.")
                          :cwd (:type "string" :description "Project directory (default: this session's).")
@@ -2210,7 +2268,7 @@ sends work back."
 
 (harness-define-tool "task_control"
   :label "Control task"
-  :description "Act on a task, or on its project's pending queue. start runs a pending task now, whatever the limit or a suspended queue; queue puts a backlog task back in the pending queue, where it starts on its own as soon as a slot frees (or waits there while the queue is suspended); message sends a follow-up to its session, marked as coming from this session (while pending, it appends to the prompt instead -- a task returned to pending that waits with its queue suspended, or that was sent back from review and waits for a slot, keeps the message and gets it when it starts, otherwise it starts now); cancel drops a pending task or stops a working one's turn; return-to-pending stops a working task's turn, and the work its session left running outside it (its supervisor plan's workers and its sub-agents, whose steps it is told were interrupted), and puts it back at the front of its project's pending queue, keeping its session, branch and worktree so it carries on where it stopped when it starts again; reject sends a task in review back to its session with the feedback in message, to work on it again within the limit on running tasks: with no slot free it takes the slot of a working task it outranks (a lower priority, or its own unless that task was sent back from review too; one waiting on its supervisor plan's workers or its sub-agents is working), which returns to pending, its workers and sub-agents stopped, and carries on where it stopped when it starts again; when it outranks none it waits at the front of its priority in pending with the feedback kept, and takes a slot as soon as one frees or it outranks a working task (with the queue suspended it waits so until the queue resumes); merge retries the merge queue after a failed merge; verify accepts the work of a task in review (its branch then merges and it is done); complete marks it done by hand; archive hides a done task (removing a merged task's worktree); restore unarchives; delete forgets the task (its session and worktree are kept); priority sets its priority to the given one (low, medium or high), given to the task's session, which is where a task's priority lives (`harness-priority-of-task'), and which reorders the tasks waiting for a slot: high starts before medium, medium before low (a task sent back from review that waits takes the slot of a working task it comes to outrank). suspend-queue stops a project's pending tasks from starting on their own -- the queue waits until resume-queue, while start still starts a task -- and resume-queue starts them again at once, by priority. auto-queue makes a project's backlog queue its tasks itself: each task whose write-up finishes from then on joins the pending queue as queue would put it there; manual-queue (the default) leaves written-up tasks in the backlog until they are queued or started; neither moves a task already waiting. These four act on the project of cwd (default: this session's) and need no task_id."
+  :description "Act on a task, or on its project's pending queue. start runs a pending task now, whatever the limit or a suspended queue; queue puts a backlog task back in the pending queue, where it starts on its own as soon as a slot frees (or waits there while the queue is suspended); message sends a follow-up to its session, marked as coming from this session (while pending, it appends to the prompt instead -- a task returned to pending that waits with its queue suspended, or that was sent back from review and waits for a slot, keeps the message and gets it when it starts, otherwise it starts now); cancel drops a pending task or stops a working one's turn; return-to-pending stops a working task's turn, and the work its session left running outside it (its supervisor plan's workers and its sub-agents, whose steps it is told were interrupted), and puts it back in its project's pending queue ahead of the tasks of its priority that never started (behind higher priorities, work sent back from review and tasks returned before it), keeping its session, branch and worktree so it carries on where it stopped when it starts again; reject sends a task in review back to its session with the feedback in message, to work on it again within the limit on running tasks: with no slot free it takes the slot of a working task it outranks (a lower priority, or its own unless that task was sent back from review too; one waiting on its supervisor plan's workers or its sub-agents is working), which returns to pending, its workers and sub-agents stopped, and carries on where it stopped when it starts again; when it outranks none it waits at the front of its priority in pending with the feedback kept, and takes a slot as soon as one frees or it outranks a working task (with the queue suspended it waits so until the queue resumes); merge retries the merge queue after a failed merge; verify accepts the work of a task in review (its branch then merges and it is done); complete marks it done by hand; archive hides a done task (removing a merged task's worktree); restore unarchives; delete forgets the task (its session and worktree are kept); priority sets its priority to the given one (low, medium or high), given to the task's session, which is where a task's priority lives (`harness-priority-of-task'), and which reorders the tasks waiting for a slot: high starts before medium, medium before low (a task sent back from review that waits takes the slot of a working task it comes to outrank). suspend-queue stops a project's pending tasks from starting on their own -- the queue waits until resume-queue, while start still starts a task -- and resume-queue starts them again at once, by priority. auto-queue makes a project's backlog queue its tasks itself: each task whose write-up finishes from then on joins the pending queue as queue would put it there; manual-queue (the default) leaves written-up tasks in the backlog until they are queued or started; neither moves a task already waiting. These four act on the project of cwd (default: this session's) and need no task_id."
   :schema '(:type "object"
             :properties (:task_id (:type "string" :description "Task id or unique prefix; not needed by suspend-queue, resume-queue, auto-queue and manual-queue.")
                          :action (:type "string" :enum ("start" "queue" "message" "cancel" "return-to-pending" "merge" "verify" "reject" "complete" "archive" "restore" "delete" "priority" "suspend-queue" "resume-queue" "auto-queue" "manual-queue"))

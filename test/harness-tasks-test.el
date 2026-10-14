@@ -5365,6 +5365,84 @@ in that session, told so by the harness."
           (should-not (plist-get carried :return-reason))
           (should-not (plist-get carried :preempted-by)))))))
 
+(ert-deftest harness-tasks-queue-order-is-the-start-order ()
+  "`task/queue-order' lists the waiting tasks in the order they will start.
+Medium A and B were made first, then medium C, which started and was
+pre-empted by work sent back from review, then high H: the line is H,
+C, A, B -- the higher priority first, then the pre-empted task ahead of
+the older tasks of its priority that never started -- each with its
+place in it.  With one slot the scheduler starts them in that very
+order."
+  (harness-tasks-test-with
+    (harness-tasks-test--settle)
+    (let* ((harness-tasks-test--slow (list "C, pre-empted"))
+           (harness-agent--cancel-grace 0.05)
+           (harness-tasks-max-running 1)
+           (harness-tasks-require-verification t)
+           (harness-provider-demo-script-override #'harness-tasks-test--slow-script)
+           (now (float-time))
+           (reviewed (harness-tasks-test-submit "R, sent back"))
+           a b c h)
+      (harness-tasks-test-wait-state reviewed 'review)
+      ;; C takes the free slot, and the others wait for it.
+      (setq c (harness-tasks-test-submit "C, pre-empted"))
+      (harness-test-wait (lambda () (harness-tasks-test--running-p (harness-tasks-test-session-id c)))
+                         5 "C at work")
+      (setq a (harness-tasks-test-submit "A, old")
+            b (harness-tasks-test-submit "B, old")
+            h (harness-tasks-test-submit-at "H, high" "high"))
+      ;; A and B are older than C: oldest first would put them ahead of it.
+      (harness-tasks--set a :created (- now 3000))
+      (harness-tasks--set b :created (- now 2000))
+      (harness-tasks--set c :created (- now 1000))
+      ;; Sending R back takes C's slot, and C goes back to the queue.
+      (harness-call 'task/reject reviewed "handle tabs too")
+      (should (eq 'active (harness-tasks-test-state reviewed)))
+      (should (eq 'preempted (plist-get (harness-tasks-test-task c) :return-reason)))
+      (dolist (id (list a b c h)) (should (eq 'pending (harness-tasks-test-state id))))
+      (let ((order (harness-call 'task/queue-order default-directory))
+            (project (plist-get (harness-tasks-test-task a) :project)))
+        (should (equal (list h c a b) (mapcar (lambda (entry) (plist-get entry :id)) order)))
+        (should (equal '(1 2 3 4) (mapcar (lambda (entry) (plist-get entry :place)) order)))
+        (should (equal (make-list 4 project) (mapcar (lambda (entry) (plist-get entry :project)) order)))
+        ;; Every project's line, without a directory: this one's alone here.
+        (should (equal order (harness-call 'task/queue-order))))
+      ;; From here every turn ends at once: the one slot serves the line.
+      (setq harness-tasks-test--slow nil)
+      (dolist (id (list reviewed h c a b)) (harness-tasks-test-wait-state id 'review))
+      (should (equal (list h c a b) (harness-tasks-test-start-order (list a b c h))))
+      (should-not (harness-call 'task/queue-order default-directory)))))
+
+(ert-deftest harness-tasks-queue-order-counts-places-per-project ()
+  "Each project has a line of its own: `task/queue-order' counts places in it.
+Without a directory it lists every project's waiting tasks in the order
+the scheduler walks them, each with its place in its own project's
+line; with one, that project's alone.  The backlog and archived tasks
+wait in no line."
+  (harness-tasks-test-with
+    (harness-tasks-test--settle)
+    (let ((harness-tasks-max-running 0)
+          (other (harness-test-temp-dir))
+          here1 here2 there1 there2)
+      (setq here1 (harness-tasks-test-submit "here, first")
+            there1 (harness-tasks-test-submit "there, first" other)
+            here2 (harness-tasks-test-submit "here, second")
+            there2 (plist-get (harness-call 'task/submit other "there, high" (list :priority "high")) :id))
+      (let* ((project (plist-get (harness-tasks-test-task here1) :project))
+             (backlog (harness-tasks-test--hold 'pending nil project :backlog t :prompt "in the backlog"))
+             (archived (harness-tasks-test--hold 'pending nil project :archived t :prompt "archived"))
+             (all (harness-call 'task/queue-order)))
+        (should (equal (list there2 here1 there1 here2) (mapcar (lambda (entry) (plist-get entry :id)) all)))
+        (should (equal '(1 1 2 2) (mapcar (lambda (entry) (plist-get entry :place)) all)))
+        (should-not (cl-find backlog all :key (lambda (entry) (plist-get entry :id)) :test #'equal))
+        (should-not (cl-find archived all :key (lambda (entry) (plist-get entry :id)) :test #'equal))
+        (should (equal (list here1 here2)
+                       (mapcar (lambda (entry) (plist-get entry :id))
+                               (harness-call 'task/queue-order default-directory))))
+        (should (equal (list there2 there1)
+                       (mapcar (lambda (entry) (plist-get entry :id))
+                               (harness-call 'task/queue-order other))))))))
+
 (ert-deftest harness-tasks-sent-back-task-waits-behind-higher-priority-work ()
   "Work sent back from review waits when every task at work outranks it.
 A task of a higher priority keeps its slot: the task sent back goes to

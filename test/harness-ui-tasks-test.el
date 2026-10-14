@@ -1353,6 +1353,80 @@ priority a step, and the card moves with it; off a card they type."
         (execute-kbd-macro "-")
         (should (equal "+-" (harness-compose-text)))))))
 
+(declare-function harness-ui-tasks--visible "harness-ui-tasks")
+
+(defun harness-ui-tasks-test--column-ids (column)
+  "The ids of the tasks the board shows in COLUMN, in its order."
+  (mapcar (lambda (task) (plist-get task :id)) (cdr (assq column (harness-ui-tasks--visible)))))
+
+(ert-deftest harness-ui-tasks-pending-follows-the-start-order ()
+  "Pending lists the waiting tasks in the order the harness starts them.
+That is `harness-tasks--start-order': by priority; within one, work
+sent back from review first, then the tasks returned to the queue --
+paused, pre-empted, their slot taken back -- the first returned first,
+and only then the tasks that never started, oldest first.  The backlog
+and Requires your input still go by priority, then the oldest,
+whatever their tasks went through.  The tasks have the shape the wire
+gives them, symbols as strings."
+  (harness-ui-tasks-test-with
+    (with-temp-buffer
+      (setq-local harness-ui-tasks--tasks
+                  (list (list :id "t-a" :state "pending" :column "pending" :priority "medium" :created 100)
+                        (list :id "t-b" :state "pending" :column "pending" :priority "medium" :created 200)
+                        (list :id "t-c" :state "pending" :column "pending" :priority "medium" :created 300
+                              :returned 1000.5 :return-reason "preempted" :preempted-by "t-r")
+                        (list :id "t-p" :state "pending" :column "pending" :priority "medium" :created 600
+                              :returned 2000.0 :return-reason "returned")
+                        (list :id "t-s" :state "pending" :column "pending" :priority "medium" :created 400
+                              :returned 3000.0 :sent-back 3000.0 :return-reason "sent-back")
+                        (list :id "t-h" :state "pending" :column "pending" :priority "high" :created 500)
+                        (list :id "t-l" :state "pending" :column "pending" :priority "low" :created 10
+                              :returned 900.0 :return-reason "returned")
+                        (list :id "t-k1" :state "pending" :column "backlog" :backlog t
+                              :priority "medium" :created 100)
+                        (list :id "t-k2" :state "pending" :column "backlog" :backlog t
+                              :priority "high" :created 200)
+                        (list :id "t-n1" :state "active" :column "needs-input" :outcome "error"
+                              :priority "medium" :created 100)
+                        (list :id "t-n2" :state "active" :column "needs-input" :outcome "error"
+                              :priority "medium" :created 200 :sent-back 5000.0)))
+      ;; High first; then of medium the feedback, the pre-empted and the
+      ;; paused task in the order they were returned, and the ones that
+      ;; never started, oldest first; low last, returned or not.
+      (should (equal '("t-h" "t-s" "t-c" "t-p" "t-a" "t-b" "t-l")
+                     (harness-ui-tasks-test--column-ids 'pending)))
+      (should (equal '("t-k2" "t-k1") (harness-ui-tasks-test--column-ids 'backlog)))
+      (should (equal '("t-n1" "t-n2") (harness-ui-tasks-test--column-ids 'needs-input))))))
+
+(ert-deftest harness-ui-tasks-pending-is-the-harness-line ()
+  "The board's Pending is the line the harness starts tasks in.
+Alpha and Bravo wait; Charlie, made after them, starts and is paused
+back to the queue; then Hotel comes, high.  Pending shows Hotel,
+Charlie, Alpha, Bravo -- as `task/queue-order' has them -- and
+Charlie's card says it is #2 in line, and why."
+  (harness-ui-tasks-test-with
+    (let ((harness-tasks-max-running 0)
+          (harness-agent--cancel-grace 0.05)
+          (harness-provider-demo-script-override '((:type wait :seconds 30))))
+      (harness-call 'task/submit default-directory "Alpha, waiting")
+      (harness-call 'task/submit default-directory "Bravo, waiting")
+      (let* ((charlie (plist-get (harness-call 'task/submit default-directory "Charlie, paused") :id))
+             (sid (plist-get (harness-call 'task/get charlie) :session)))
+        (harness-call 'task/start charlie)
+        (harness-test-wait (lambda () (harness-call 'agent/running sid)) 5 "Charlie at work")
+        (harness-call 'task/return-to-pending charlie)
+        (harness-test-wait (lambda () (not (harness-call 'agent/running sid))) 5 "Charlie's turn to stop"))
+      (harness-call 'task/submit default-directory "Hotel, high" (list :priority "high"))
+      (harness-ui-tasks-test--wait-text
+       board "Pending  4\\(.\\|\n\\)*Hotel\\(.\\|\n\\)*Charlie\\(.\\|\n\\)*Alpha\\(.\\|\n\\)*Bravo")
+      (with-current-buffer board
+        (should (equal (mapcar (lambda (entry) (plist-get entry :id))
+                               (harness-call 'task/queue-order default-directory))
+                       (harness-ui-tasks-test--column-ids 'pending))))
+      (harness-ui-tasks-test--show-subtitle board "Charlie")
+      (should (string-match-p "#2 in line · returned, carries on where it stopped"
+                              (harness-ui-tasks-test--card-text board "Charlie"))))))
+
 (ert-deftest harness-ui-tasks-click-the-priority-arrow ()
   "A click on a card's arrow asks for that task's session's priority.
 The arrow is the priority UI's, so it carries the task's session id --

@@ -1547,6 +1547,62 @@ task that waits to be started."
       (should (eq 'low (plist-get (harness-call 'task/get plain) :priority)))
       (should (= 2 (length (harness-call 'task/list)))))))
 
+(ert-deftest harness-tools-sessions-task-list-says-the-place-in-line ()
+  "A waiting task's line says its place in its project's line, and why it leads.
+Alpha and Bravo wait; Charlie, made after them, starts and is paused
+back to the queue; Hotel comes, high.  The line is Hotel, Charlie,
+Alpha, Bravo: task_list keeps its oldest-first order and says each
+waiting task's place, Charlie's with why it is ahead of the older ones
+of its priority; the pending column alone is listed in that order.  A
+single task's line, as task_control prints it, says its place too."
+  (harness-tools-sessions-test-with
+    (let* ((harness-tasks-max-running 0)
+           (harness-agent--cancel-grace 0.05)
+           (harness-provider-demo-script-override '((:type wait :seconds 30)))
+           (me (harness-tools-sessions-test-session))
+           (submit (lambda (prompt &rest more)
+                     (plist-get (plist-get (harness-tools-sessions-test-run
+                                            me "task_submit" (append (list :prompt prompt) more))
+                                           :meta)
+                                :task-id)))
+           (alpha (funcall submit "Alpha, waiting"))
+           (bravo (funcall submit "Bravo, waiting"))
+           (charlie (funcall submit "Charlie, paused"))
+           (sid (plist-get (harness-call 'task/get charlie) :session)))
+      (harness-call 'task/start charlie)
+      (harness-test-wait (lambda () (harness-call 'agent/running sid)) 5 "Charlie at work")
+      (harness-tools-sessions-test-ok me "task_control" (list :task_id charlie :action "return-to-pending"))
+      (harness-test-wait (lambda () (not (harness-call 'agent/running sid))) 5 "Charlie's turn to stop")
+      (let* ((hotel (funcall submit "Hotel, high" :priority "high"))
+             (place (lambda (id listing)
+                      (and (string-match (concat (regexp-quote id)
+                                                 "[^\n]*\n    state pending[^\n]*?, #\\([0-9]+\\) in line")
+                                         listing)
+                           (string-to-number (match-string 1 listing)))))
+             (listing (harness-tools-sessions-test-ok me "task_list" nil)))
+        ;; The list keeps its order, oldest first ...
+        (should (< (string-search alpha listing) (string-search bravo listing)
+                   (string-search charlie listing) (string-search hotel listing)))
+        ;; ... and says where each waiting task stands in line.
+        (should (equal '(1 2 3 4) (mapcar (lambda (id) (funcall place id listing))
+                                          (list hotel charlie alpha bravo))))
+        (should (string-match-p (concat (regexp-quote hotel)
+                                        "[^\n]*\n    state pending, priority high, #1 in line, created")
+                                listing))
+        (should (string-match-p (concat (regexp-quote charlie)
+                                        "[^\n]*\n    state pending, #2 in line (returned to pending), created")
+                                listing))
+        ;; The pending column alone is listed in the order it starts.
+        (let ((pending (harness-tools-sessions-test-ok me "task_list" '(:column "pending"))))
+          (should (< (string-search hotel pending) (string-search charlie pending)
+                     (string-search alpha pending) (string-search bravo pending))))
+        ;; A single task's line says its place: raised to high, Bravo,
+        ;; older than Hotel, starts first.
+        (should (string-match-p (concat (regexp-quote bravo) "[^\n]*\n    state pending, priority high, #1 in line,")
+                                (harness-tools-sessions-test-ok
+                                 me "task_control" (list :task_id bravo :action "priority" :priority "high"))))
+        (should (= 2 (funcall place hotel (harness-tools-sessions-test-ok me "task_list" nil))))))))
+
 (ert-deftest harness-tools-sessions-task-review ()
   "task_wait settles when finished work waits for review; task_control sends it back, then verifies it."
   (harness-tools-sessions-test-with

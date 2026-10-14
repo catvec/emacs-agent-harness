@@ -2405,8 +2405,10 @@ your checkout itself can be submitted to the **main tree** instead (the
   at once, and lowering it stops no task at work; at `0` no task starts
   by itself, and the button turns to a warning colour. Every project
   has that many slots of its own; a task submitted while they are all
-  taken waits in *Pending* and starts, by priority and then oldest
-  first, when one frees up, or at once with `s`. Only top-level
+  taken waits in *Pending* and starts in the order *Pending* lists --
+  by priority, then within one the work sent back from review, the
+  tasks paused or pre-empted, and the oldest -- when one frees up, or
+  at once with `s`. Only top-level
   sessions are limited: a task takes a slot while its own session
   works on it, running or waiting for your answer mid-turn, and while
   its turn is over but the workers of its supervisor plan or its
@@ -2509,8 +2511,13 @@ your checkout itself can be submitted to the **main tree** instead (the
   its session's (see [Priorities](#priorities)). It
   matters when `harness-tasks-max-running` limits how many of a
   project's tasks work at once: the others wait in *Pending*, and a
-  free slot goes to the highest priority waiting, the oldest of those
-  first, which is also the order *Pending* lists them in. A priority
+  free slot goes to the highest priority waiting. Within a priority,
+  work you sent back from review goes first, then the tasks put back in
+  the queue after they worked (paused, pre-empted, or their borrowed
+  slot taken back), the first put back first, and then the rest, oldest
+  first. *Pending* lists them in that order, each card saying its place
+  (`#1 in line` starts next), and so does `task_list`, whose pending
+  lines say `#N in line` and why a task is ahead of older ones. A priority
   stops a task at work only for work you send back from review, which
   can take the slot of a task it outranks (see *Ready for review*
   below); the only other task stopped to free a slot is one working in
