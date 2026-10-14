@@ -114,7 +114,7 @@
     ("provider-demo" . "Demo provider") ("pet" . "Companion pet")
     ("sandbox" . "Sandbox") ("session" . "Sessions") ("skills" . "Skills") ("tasks" . "Task mode")
     ("tools" . "Tools") ("tools-fs" . "File tools") ("tools-sessions" . "Session tools")
-    ("tools-shell" . "Shell tools") ("tools-web" . "Web tools") ("tools-agent" . "Agent tools")
+    ("tools-shell" . "Shell tools") ("tools-web" . "Web tools") ("tools-agent" . "Sub-agents")
     ("tools-emacs" . "Emacs tools") ("usage" . "Usage and budgets") ("worktree" . "Worktrees")
     ("core" . "Core"))
   "Section titles of the harness modules.")

@@ -777,11 +777,6 @@ removed.  Safe to call again."
   (harness-on 'merge/finished #'harness-worktree--on-merge-finished)
   (harness-on 'worktree/removed #'harness-worktree--on-worktree-removed))
 
-;; A reload does not run `:init' again for a ready module, so a running
-;; harness that reloads this file subscribes here and still locks the
-;; worktrees made before.
-(harness-worktree--init)
-
 (harness-define-module 'worktree
   :doc "Git worktree listing, creation, locking, removal and status."
   :requires '(project)

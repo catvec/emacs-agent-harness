@@ -462,21 +462,17 @@ the start of turns stayed \"unnamed\" that way."
 (defun harness-naming--init ()
   "Subscribe automatic naming to the start of turns.
 Naming once followed the end of turns: a harness reloaded from that
-version drops that subscription here."
+version drops that subscription here.  At a reload, the sessions whose
+turn runs across it are named once everything is loaded again, the
+modules' `naming/auto-p' filters included."
   (harness-off (cons 'agent/turn-ended 'harness-naming--on-turn-ended))
-  (harness-on 'agent/turn-started #'harness-naming--on-turn-started))
+  (harness-on 'agent/turn-started #'harness-naming--on-turn-started)
+  (when (harness-module-ready-p 'naming)
+    (harness-run-soon #'harness-naming--name-running)))
 
 (defun harness-naming--shutdown ()
   "Stop naming sessions automatically."
   (harness-off (cons 'agent/turn-started #'harness-naming--on-turn-started)))
-
-(harness-naming--init)
-
-;; A reload does not initialise the module again: the sessions whose
-;; turn runs across it are named once everything is loaded again, the
-;; modules' `naming/auto-p' filters included.
-(when (harness-module-ready-p 'naming)
-  (harness-run-soon #'harness-naming--name-running))
 
 (harness-declare-event 'naming/done "(SESSION-ID NAME) after a session is named by the model.")
 (harness-declare-event 'naming/failed "(SESSION-ID MESSAGE) when naming fails.")

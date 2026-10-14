@@ -98,7 +98,7 @@ gets a plain answer that stops the turn.")
   (list (list :type 'tool-call :id (format "call-%s" (harness-short-id 4)) :name name :input input)))
 
 (defconst harness-supervisor-test-modules
-  '(store project config provider provider-demo tools session agent tools-agent readonly supervisor)
+  '(store project config provider provider-demo tools session agent tools-agent tools-question tools-plan tools-todo tools-session-info readonly supervisor)
   "The modules every test loads.")
 
 (defmacro harness-supervisor-test-with-modules (extra &rest body)
@@ -2380,7 +2380,7 @@ or model is coordination, like session_send, and is one."
   (harness-test-with-temp-state
     (harness-test-reset-bus)
     (clrhash harness-tools)
-    (dolist (m '(store project config provider provider-demo tools session agent tools-agent tools-fs))
+    (dolist (m '(store project config provider provider-demo tools session agent tools-agent tools-question tools-plan tools-todo tools-session-info tools-fs))
       (harness-test-load-module m))
     (clrhash harness-sessions)
     (let* ((sid (harness-supervisor-test-session))

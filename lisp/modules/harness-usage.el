@@ -1723,10 +1723,14 @@ gate so far, NEXT continues the chain, SESSION is the plist."
 ;;;; Module
 
 (defun harness-usage--init ()
-  "Create the schema, load budgets and hook into the bus."
+  "Create the schema, load budgets and hook into the bus.
+At a reload the schema is brought up to date, but the budgets in
+memory and what providers reported are kept: they are as fresh as what
+is on disk, and fetches of reports may be scheduled."
   (harness-usage--db)
-  (harness-usage--load-budgets)
-  (harness-usage--forget-reports)
+  (unless (harness-module-ready-p 'usage)
+    (harness-usage--load-budgets)
+    (harness-usage--forget-reports))
   (harness-on 'session/usage #'harness-usage--on-session-usage)
   (harness-on 'provider/quota-updated #'harness-usage--on-quota-updated)
   (harness-usage--watch-rates)
@@ -1748,15 +1752,6 @@ gate so far, NEXT continues the chain, SESSION is the plist."
   :requires '(store session provider)
   :init #'harness-usage--init
   :shutdown #'harness-usage--forget-reports)
-
-;; A reload does not initialise the module again: subscribe what this
-;; version added (`harness-on' adds a handler once).
-(when (harness-module-ready-p 'usage)
-  (harness-on 'provider/quota-updated #'harness-usage--on-quota-updated)
-  (harness-usage--watch-rates)
-  (harness-usage--watch-live)
-  (harness-add-filter 'agent/before-turn #'harness-usage--gate 30)
-  (harness-add-filter 'agent/step #'harness-usage--gate 30))
 
 (provide 'harness-usage)
 ;;; harness-usage.el ends here

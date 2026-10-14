@@ -5071,16 +5071,6 @@ Point moved onto an option of a question with diagrams shows its diagram."
   (add-hook 'harness-ui-pending-changed-hook #'harness-chat--on-pending-changed)
   (add-hook 'harness-ui-redraw-hook #'harness-chat--redraw-all)
   (add-hook 'harness-ui-connected-hook #'harness-chat--reopen-all)
-  (harness-chat--init-hooks)
-  (define-key harness-ui-map (kbd "o") #'harness-open-latest-session)
-  (define-key harness-ui-map (kbd "O") #'harness-open-session)
-  (ignore-errors
-    (transient-append-suffix 'harness-menu "s" '("o" "Open latest session" harness-open-latest-session))))
-
-(defun harness-chat--init-hooks ()
-  "Add the hooks and keys that came after the module's first version.
-A reload does not initialise a running module again, so the file adds
-them itself when the module is ready (below)."
   ;; Windows following a streaming chat scroll once per slice of messages.
   (add-hook 'harness-acp-received-hook #'harness-chat--pin-waiting)
   ;; A lasting decision undone or redone, from any session, redraws the
@@ -5088,15 +5078,16 @@ them itself when the module is ready (below)."
   (add-hook 'harness-ui-decision-functions #'harness-chat--on-decision)
   ;; The region of any buffer starts a message: C-c h > (see
   ;; `harness-prompt-region'); the harness menu has it too.
-  (define-key harness-ui-map (kbd ">") #'harness-prompt-region))
+  (define-key harness-ui-map (kbd ">") #'harness-prompt-region)
+  (define-key harness-ui-map (kbd "o") #'harness-open-latest-session)
+  (define-key harness-ui-map (kbd "O") #'harness-open-session)
+  (ignore-errors
+    (transient-append-suffix 'harness-menu "s" '("o" "Open latest session" harness-open-latest-session))))
 
 (harness-define-module 'ui-chat
   :doc "The chat buffer: transcript, pending panel, queue, attachments and compose box."
   :requires '(ui)
   :init #'harness-chat--init)
-
-(when (harness-module-ready-p 'ui-chat)
-  (harness-chat--init-hooks))
 
 (provide 'harness-ui-chat)
 ;;; harness-ui-chat.el ends here

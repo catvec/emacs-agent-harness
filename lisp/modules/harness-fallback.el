@@ -776,8 +776,10 @@ See `harness-fallback-choose'."
 ;;;; Module
 
 (defun harness-fallback--init ()
-  "Load what ran out and hook into turns, failures and quota reports."
-  (harness-fallback--load)
+  "Load what ran out and hook into turns, failures and quota reports.
+A reload reads nothing: the marks in memory are newer than the store."
+  (unless (harness-module-ready-p 'fallback)
+    (harness-fallback--load))
   (harness-on 'provider/quota-updated #'harness-fallback--on-quota-updated)
   (harness-on 'session/updated #'harness-fallback--on-session-updated)
   (harness-on 'session/deleted #'harness-fallback--on-session-deleted)

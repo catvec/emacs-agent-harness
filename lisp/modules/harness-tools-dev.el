@@ -991,10 +991,5 @@ looks after them."
   :init #'harness-tools-dev--init
   :shutdown #'harness-tools-dev--shutdown)
 
-;; A reload does not initialise a running module again: subscribe what
-;; this version subscribes, and restart the sweeps.
-(when (harness-module-ready-p 'tools-dev)
-  (harness-tools-dev--init))
-
 (provide 'harness-tools-dev)
 ;;; harness-tools-dev.el ends here

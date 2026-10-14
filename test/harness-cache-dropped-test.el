@@ -25,7 +25,7 @@
 (defvar harness-sessions)
 (defvar harness-agent--turns)
 (defvar harness-compaction--running)
-(defvar harness-tools-agent--questions)
+(defvar harness-tools-question--questions)
 (defvar harness-cowboy--asking)
 (defvar harness-cowboy-default)
 (defvar harness-cowboy-ask)
@@ -98,12 +98,12 @@ settings say; a cache lasts 300 seconds."
   `(harness-test-with-temp-state
      (harness-test-reset-bus)
      (dolist (m '(store project config provider provider-demo tools session agent compaction
-                  tools-agent tools-sessions cowboy))
+                  tools-agent tools-question tools-sessions cowboy))
        (harness-test-load-module m))
      (clrhash harness-sessions)
      (clrhash harness-agent--turns)
      (clrhash harness-compaction--running)
-     (clrhash harness-tools-agent--questions)
+     (clrhash harness-tools-question--questions)
      (clrhash harness-cowboy--asking)
      (setq harness-cache-dropped-test--requests nil)
      (unwind-protect

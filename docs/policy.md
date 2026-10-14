@@ -246,7 +246,9 @@ model fixes that.  A policy that also sets `harness-model` fixes every
 session's model instead (above).
 
 Providers are modules (`provider-claude`, `provider-copilot`,
-`provider-openai`, `provider-bedrock`, ...), so a policy drops one with
+`provider-openai`, `provider-bedrock`, ...), and only `provider-claude`
+loads unless the user enables another, so a policy decides which load
+by fixing `harness-enabled-modules`, drops one with
 `harness-disabled-modules`, and fixes where one sends its requests by
 setting its endpoints (`harness-openai-endpoints` for a company
 gateway, `harness-bedrock-endpoints`).
@@ -254,12 +256,16 @@ gateway, `harness-bedrock-endpoints`).
 ### Modules
 
 The harness's guards are modules too: the perms module decides
-permissions, the sandbox module confines commands.  A policy that fixes
-permission settings should also fix `harness-disabled-modules` (nil:
-the user disables nothing; or the modules the company leaves out) and,
-if it was changed, `harness-enabled-modules`, so that the modules it
-relies on load.  The modules to load are read after the policy is
-applied, so this holds from the start.
+permissions, the sandbox module confines commands.  Both are core
+modules (`harness-core-modules`): they load whatever
+`harness-enabled-modules` says, which only adds modules to the core,
+and only `harness-disabled-modules` leaves them out.  So a policy that
+fixes permission settings should also fix `harness-disabled-modules`
+(nil: the user disables nothing; or the modules the company leaves
+out).  It may fix `harness-enabled-modules` too, to decide which other
+features load; `M-x harness-enable-module` then says the policy holds
+the option.  The modules to load are read after the policy is applied,
+so this holds from the start.
 
 ### Corporate mode
 

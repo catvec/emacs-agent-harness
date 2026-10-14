@@ -515,16 +515,24 @@ documentation."
 (defun harness-on (event fn &optional priority)
   "Call FN whenever EVENT is emitted.  Return a handle for `harness-off'.
 Lower PRIORITY runs first (default 50).  Subscribing the same FN to
-the same EVENT twice is a no-op, so modules can subscribe with named
-functions at load time and be reloaded safely.  Subscribe to `*' to
-receive every event as (EVENT . ARGS)."
+the same EVENT again is a no-op, but for moving it to a new PRIORITY,
+so a module subscribes with named functions in its `:init', which runs
+again at each `harness-reload' (see `harness-define-module'), and is
+subscribed once, at the priority its latest code gives.  Subscribe to
+`*' to receive every event as (EVENT . ARGS)."
   (let* ((priority (or priority 50))
-         (subs (gethash event harness--subscribers)))
-    (unless (cl-find fn subs :key #'cdr :test #'equal)
-      (puthash event
-               (sort (cons (cons priority fn) subs) (lambda (a b) (< (car a) (car b))))
+         (subs (gethash event harness--subscribers))
+         (old (cl-find fn subs :key #'cdr :test #'equal)))
+    (unless (and old (= (car old) priority))
+      (puthash event (harness--insert-handler (cons priority fn) (remq old subs))
                harness--subscribers))
     (cons event fn)))
+
+(defun harness--insert-handler (entry entries)
+  "Return ENTRIES, a list of (PRIORITY . FN) sorted by priority, with ENTRY.
+ENTRY goes before those of its priority.  ENTRIES is left as it was: an
+event being emitted may be going through it."
+  (sort (cons entry (copy-sequence entries)) (lambda (a b) (< (car a) (car b)))))
 
 (defun harness-off (handle)
   "Cancel the subscription HANDLE returned by `harness-on'."
@@ -566,11 +574,15 @@ The subscribers run after the caller returns."
 
 (defun harness-add-filter (name fn &optional priority)
   "Add FN to the filter chain NAME at PRIORITY (default 50, lower runs first).
-Adding the same FN twice is a no-op."
-  (let ((chain (gethash name harness--filters)))
-    (unless (cl-find fn chain :key #'cdr :test #'equal)
-      (puthash name (sort (cons (cons (or priority 50) fn) chain)
-                          (lambda (a b) (< (car a) (car b))))
+Adding the same FN again is a no-op, but for moving it to a new
+PRIORITY, so a module adds named functions in its `:init', which runs
+again at each `harness-reload' (see `harness-define-module'), and each
+is in the chain once, at the priority its latest code gives."
+  (let* ((priority (or priority 50))
+         (chain (gethash name harness--filters))
+         (old (cl-find fn chain :key #'cdr :test #'equal)))
+    (unless (and old (= (car old) priority))
+      (puthash name (harness--insert-handler (cons priority fn) (remq old chain))
                harness--filters))
     (cons name fn)))
 
@@ -659,15 +671,29 @@ it names the source that the module `harness--defining-module' records
 as its file.")
 
 (defvar harness-module-init-hook nil
-  "Hook run with the module name after each module initialises.")
+  "Hook run with the module name after each module initialises.
+That is when the module becomes ready, and after each time its INIT
+runs again, as `harness-reload' has it do (see `harness-module-start').")
 
 (cl-defun harness-define-module (name &key doc requires init shutdown)
   "Register module NAME.
 DOC describes it.  REQUIRES lists module names that must be ready
-first.  INIT is called once when the harness starts (or when the module
-is enabled later); SHUTDOWN when it stops.  Re-evaluating a definition
-while the module is ready keeps it ready and just refreshes the
-metadata, which is what a hot reload needs."
+first.  INIT is called when the module starts, as the harness starts or
+when the module is enabled later, and again at every `harness-reload',
+so that what new code adds there is wired in; SHUTDOWN is called when
+it stops.
+
+INIT must therefore be idempotent.  It subscribes with named functions
+through `harness-on', `harness-add-filter' and `add-hook', which add a
+handler once however often they run.  Work to do once per start, such
+as reading state from disk, recovering what a stopped harness left
+behind or connecting, checks `harness-module-ready-p' for NAME first:
+it is nil while the module starts and non-nil when it initialises
+again.
+
+Re-evaluating a definition while the module is ready keeps it ready
+with the new metadata and functions; the next `harness-modules-init',
+as a reload runs, calls the new INIT."
   (let ((existing (gethash name harness--modules))
         ;; Not a module another file defines as this one requires it.
         (file (if (and harness--defining-file (eq name harness--defining-module))
@@ -719,11 +745,38 @@ metadata, which is what a hot reload needs."
     (nreverse order)))
 
 (defun harness-module-start (name)
-  "Initialise module NAME if it is registered and not yet ready.
-Return non-nil on success.  Failures are recorded on the module."
+  "Initialise module NAME, or initialise it again when it is ready.
+A module that is not ready starts once every module it requires is
+ready: its INIT runs and it becomes ready, or failed when INIT signals
+or a requirement is not ready.  A module that is ready has its INIT run
+again, as `harness-reload' needs to wire in what new code adds there
+\(see `harness-define-module'); `harness-module-ready-p' is non-nil
+for it meanwhile.  When that INIT signals, the module stays ready, as
+what it set up before is still in place, and the error is recorded on
+it; when one of its requirements is no longer ready, it is left as it
+is.  A disabled module never starts.
+Return non-nil when INIT ran and returned.  Failures are recorded on
+the module."
   (let ((m (gethash name harness--modules)))
     (cond ((null m) nil)
-          ((eq (harness-module-state m) 'ready) t)
+          ((eq (harness-module-state m) 'disabled) nil)
+          ((eq (harness-module-state m) 'ready)
+           (if-let* ((missing (cl-remove-if #'harness-module-ready-p (harness-module-requires m))))
+               (progn
+                 (harness-log 'debug "module %s not initialised again: requirements not ready: %s"
+                              name missing)
+                 nil)
+             (condition-case err
+                 (progn
+                   (when (harness-module-init-fn m) (funcall (harness-module-init-fn m)))
+                   (setf (harness-module-error m) nil)
+                   (harness-log 'debug "module %s initialised again" name)
+                   (run-hook-with-args 'harness-module-init-hook name)
+                   t)
+               (error
+                (setf (harness-module-error m) err)
+                (harness-log 'error "module %s failed to initialise again: %S" name err)
+                nil))))
           ((cl-notevery #'harness-module-ready-p (harness-module-requires m))
            (setf (harness-module-state m) 'failed
                  (harness-module-error m)
@@ -745,7 +798,10 @@ Return non-nil on success.  Failures are recorded on the module."
 
 (defun harness-modules-init (&optional names)
   "Initialise NAMES (default: every registered module) in dependency order.
-Return the list of module names that are ready."
+Each module starts as `harness-module-start' starts it: one not ready
+yet starts, and one that is ready initialises again, its INIT run anew,
+so a reload wires in what new code adds there.  Disabled ones are left
+alone.  Return the list of module names that are ready."
   (let ((names (or names (mapcar #'harness-module-name (harness-modules)))))
     (dolist (n (harness--module-order names))
       (harness-module-start n))
@@ -771,14 +827,17 @@ Return the list of module names that are ready."
 
 (defun harness-module-descriptions ()
   "Describe every registered module, sorted by name.
-Each description is (:name NAME :state STATE :doc DOC :file FILE
-:error ERROR): FILE is the source the module was loaded from, or nil,
-and ERROR says what failed it, or is nil."
+Each description is (:name NAME :state STATE :doc DOC :requires
+REQUIRES :file FILE :error ERROR): REQUIRES lists the modules it
+requires, FILE is the source the module was loaded from, or nil, and
+ERROR says what failed it, or what failed when it last initialised
+again, or is nil."
   (mapcar (lambda (m)
             (let ((err (harness-module-error m)))
               (list :name (harness-module-name m)
                     :state (harness-module-state m)
                     :doc (harness-module-doc m)
+                    :requires (harness-module-requires m)
                     :file (harness-module-file m)
                     :error (cond ((null err) nil)
                                  ((stringp err) err)

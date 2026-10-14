@@ -175,8 +175,11 @@ in `harness-notify-flash-face' while it flashes."
     (force-mode-line-update t)))
 
 (defun harness-ui-notify--init ()
-  "Turn on `harness-notify-mode', the notifier in every mode line."
-  (harness-notify-mode 1))
+  "Turn on `harness-notify-mode', the notifier in every mode line.
+A reload, which initialises the module again, leaves the mode as the
+user has it."
+  (unless (harness-module-ready-p 'ui-notify)
+    (harness-notify-mode 1)))
 
 (harness-define-module 'ui-notify
   :doc "Mode line notifier with blocked/running/idle counts."

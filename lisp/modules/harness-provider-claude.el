@@ -3431,10 +3431,5 @@ harness stopped.  Loading this file ends the idle ones."
   :init #'harness-provider-claude--init
   :shutdown #'harness-provider-claude-close-all)
 
-;; A reload does not initialise a running module again: subscribe the
-;; handlers this version adds now.
-(when (harness-module-ready-p 'provider-claude)
-  (harness-provider-claude--init))
-
 (provide 'harness-provider-claude)
 ;;; harness-provider-claude.el ends here

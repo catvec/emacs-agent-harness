@@ -198,7 +198,7 @@ message that follows a result: providers join the two."
 ;;;; Fixtures
 
 (defconst harness-supervisor-plan-test-modules
-  '(store project config provider provider-demo tools session agent tools-agent seed readonly supervisor)
+  '(store project config provider provider-demo tools session agent tools-agent tools-question tools-plan tools-todo tools-session-info seed readonly supervisor)
   "The modules every test loads.")
 
 (defun harness-supervisor-plan-test--tier-model (_model &optional tier)
@@ -3187,25 +3187,34 @@ and the worker is told what the interrupted one ran on and how it ended."
           (should-not (harness-supervisor-plan-test-own-compactions (plist-get step :session)))))
       (harness-supervisor-plan-test-wait-idle sid))))
 
+(defun harness-supervisor-plan-test-start-again ()
+  "Start the supervisor module as a new harness does, which recovers the steps.
+A module that is ready initialises again instead, as a reload has it,
+and recovers nothing."
+  (setf (harness-module-state (harness-module-get 'supervisor)) 'registered)
+  (should (harness-module-start 'supervisor)))
+
 (ert-deftest harness-supervisor-plan-the-module-recovers-once-it-is-up-but-a-reload-does-not ()
-  "Starting the module schedules the recovery; hooking in again after a reload starts nothing."
+  "Starting the module schedules the recovery; initialising it again at a reload starts nothing."
   (harness-supervisor-plan-test-with
     (let ((sid (harness-supervisor-plan-test-session)))
       (harness-supervisor-plan-test-running-plan sid)
       (harness-supervisor-plan-test-restart sid)
-      ;; A reload hooks the module in again: the steps are not touched.
-      (harness-supervisor--init)
+      ;; A reload initialises the ready module again: the steps are not
+      ;; touched.
+      (should (harness-module-ready-p 'supervisor))
+      (should (harness-module-start 'supervisor))
       (accept-process-output nil 0.2)
       (should (equal "running" (harness-supervisor-plan-test-state sid "s1")))
       ;; The start, once every module is up, sees them interrupted.
-      (harness-supervisor--start)
+      (harness-supervisor-plan-test-start-again)
       (harness-supervisor-plan-test-wait-state sid "s1" "interrupted")
       ;; A step this process runs is left alone: its worker is alive.
       (let ((sid2 (harness-supervisor-plan-test-session)))
         (harness-supervisor-plan-test-behave "w" 'hold)
         (harness-supervisor-plan-test-submit sid2 (harness-supervisor-plan-test-step-input "w"))
         (harness-supervisor-plan-test-worker sid2 "w")
-        (harness-supervisor--start)
+        (harness-supervisor-plan-test-start-again)
         (accept-process-output nil 0.2)
         (should (equal "running" (harness-supervisor-plan-test-state sid2 "w")))
         (harness-call 'session/delete sid2)))))

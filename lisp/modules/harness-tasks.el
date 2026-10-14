@@ -5374,7 +5374,10 @@ are never returned."
 (defun harness-tasks--init ()
   "Load the records, follow sessions and merges, then get work going.
 Once every module is up, work a stopped harness interrupted is picked
-up again, merges in flight are queued again and waiting tasks start."
+up again, merges in flight are queued again and waiting tasks start.
+A reload follows what the new code follows and names the tasks without
+a title, but picks nothing up: the work under way then is this
+process's own, and goes on."
   (harness-tasks--load)
   (add-hook 'kill-emacs-hook #'harness-tasks-flush)
   (harness-on 'agent/turn-started #'harness-tasks--on-turn-started)
@@ -5399,7 +5402,10 @@ up again, merges in flight are queued again and waiting tasks start."
   ;; First of the gates: a turn it refuses needs no compaction or fallback.
   (harness-add-filter 'agent/before-turn #'harness-tasks--before-turn 2)
   (harness-add-filter 'session/before-move #'harness-tasks--before-move)
-  (harness-tasks--pick-up))
+  (harness-run-soon #'harness-tasks--arm-lend-timers)
+  (if (harness-module-ready-p 'tasks)
+      (harness-run-soon #'harness-tasks--name-untitled)
+    (harness-tasks--pick-up)))
 
 (defun harness-tasks--hook-write-ups ()
   "Hold write-ups and plans read-only, and plans to handing themselves in.
@@ -5432,31 +5438,6 @@ turn that stopped without a plan back (`harness-tasks--plan-stop')."
   :requires '(store project session agent)
   :init #'harness-tasks--init
   :shutdown #'harness-tasks--shutdown)
-
-;; A reload does not initialise a running module again, and a write-up
-;; must not go without the stage that keeps it read-only, nor a message
-;; to a task in review without the filter that tells the user's
-;; feedback, which sends it back, from another session's word: install
-;; them now, with the filter that keeps a task's session in its task's
-;; directory.  The session of a task whose title is on its way waits for
-;; it, and the tasks of the boards without a title get one.  A limit
-;; raised from a board starts the tasks it lets through, here too, and
-;; so does a priority that lets work sent back from review pre-empt; the
-;; session of a task waiting in the queue takes no turn of its own.  A
-;; task blocked on the user lends its slot once it has waited long
-;; enough, and takes it back when answered.
-(when (harness-module-ready-p 'tasks)
-  (harness-on 'config/changed #'harness-tasks--on-config-changed)
-  (harness-on 'session/ext-changed #'harness-tasks--on-priority-changed)
-  (harness-on 'session/status #'harness-tasks--on-session-status)
-  (harness-run-soon #'harness-tasks--arm-lend-timers)
-  (harness-add-filter 'permission/decide #'harness-tasks--write-up-gate 25)
-  (harness-tasks--hook-write-ups)
-  (harness-add-filter 'agent/message #'harness-tasks--on-message)
-  (harness-add-filter 'agent/before-turn #'harness-tasks--before-turn 2)
-  (harness-add-filter 'session/before-move #'harness-tasks--before-move)
-  (harness-add-filter 'naming/auto-p #'harness-tasks--auto-name-p)
-  (harness-run-soon #'harness-tasks--name-untitled))
 
 (provide 'harness-tasks)
 ;;; harness-tasks.el ends here

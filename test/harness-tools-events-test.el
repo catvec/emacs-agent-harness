@@ -17,7 +17,7 @@
 (defvar harness-providers)
 (defvar harness-sessions)
 (defvar harness-agent--turns)
-(defvar harness-tools-agent--questions)
+(defvar harness-tools-question--questions)
 (defvar harness-tasks--table)
 (defvar harness-tasks--starting)
 (defvar harness-tasks--loaded)
@@ -134,12 +134,12 @@ wakes its session within 0.05s."
   (declare (indent 0))
   `(harness-test-with-temp-state
      (harness-test-reset-bus)
-     (dolist (m '(store project config provider tools session agent tools-agent priority tasks
+     (dolist (m '(store project config provider tools session agent tools-agent tools-question priority tasks
                   tools-sessions tools-events))
        (harness-test-load-module m))
      (clrhash harness-sessions)
      (clrhash harness-agent--turns)
-     (clrhash harness-tools-agent--questions)
+     (clrhash harness-tools-question--questions)
      (clrhash harness-tasks--table)
      (clrhash harness-tasks--starting)
      (clrhash harness-tools-sessions--waiters)

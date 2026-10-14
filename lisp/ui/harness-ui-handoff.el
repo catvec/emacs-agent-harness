@@ -1,7 +1,10 @@
-;;; harness-ui-switch.el --- The switch banner of a session  -*- lexical-binding: t; -*-
+;;; harness-ui-handoff.el --- The handoff banner of a model switch  -*- lexical-binding: t; -*-
 
 ;;; Commentary:
 
+;; The UI half of the handoff module (harness-handoff.el), which loads
+;; with it.
+;;
 ;; A switch to a model that keeps its own conversation (Claude Code,
 ;; Copilot) starts a new conversation there, so the harness asks how to
 ;; hand the old one over.  The question shows as a banner above the
@@ -51,7 +54,7 @@
 (declare-function harness-chat--buffer-for "harness-ui-chat" (sid))
 (declare-function harness-compose-panel-hint "harness-ui-compose" (key))
 
-(defgroup harness-ui-switch nil
+(defgroup harness-ui-handoff nil
   "Choosing how to hand a conversation over when the model changes."
   :group 'harness-ui)
 
@@ -59,89 +62,89 @@
   '((((background light)) :background "#fff3d6" :extend t)
     (((background dark)) :background "#3a3117" :extend t))
   "Background of the switch banner: a model switch waiting for your choice."
-  :group 'harness-ui-switch)
+  :group 'harness-ui-handoff)
 
-(defvar-local harness-ui-switch--prompt nil
+(defvar-local harness-ui-handoff--prompt nil
   "The switch waiting to be answered in this buffer, or nil.
 A plist (:checks CHECKS :label LABEL :total N :session SID :callback FN).")
 
 ;;;; Where the banner shows
 
-(defun harness-ui-switch--chat-buffer (sid)
+(defun harness-ui-handoff--chat-buffer (sid)
   "Return the live chat buffer of session SID, or nil."
   (and (fboundp 'harness-chat--buffer-for) (harness-chat--buffer-for sid)))
 
-(defun harness-ui-switch--host (session host)
+(defun harness-ui-handoff--host (session host)
   "Return the chat buffer to show a switch banner in, or nil.
 SESSION's own chat buffer serves; for a switch of many (SESSION nil)
 the HOST the command ran in does."
-  (or (and session (harness-ui-switch--chat-buffer session))
+  (or (and session (harness-ui-handoff--chat-buffer session))
       (and (buffer-live-p host) host)))
 
-(defun harness-ui-switch--redraw ()
+(defun harness-ui-handoff--redraw ()
   "Draw the tail of this chat buffer again."
   (when (functionp harness-compose-redraw-function)
     (funcall harness-compose-redraw-function)))
 
-(defun harness-ui-switch--banner-pos ()
+(defun harness-ui-handoff--banner-pos ()
   "Return where the switch banner starts in this buffer, or nil."
-  (text-property-any (point-min) (point-max) 'harness-ui-switch-panel t))
+  (text-property-any (point-min) (point-max) 'harness-ui-handoff-panel t))
 
-(defun harness-ui-switch--focus ()
+(defun harness-ui-handoff--focus ()
   "Put point on the switch banner when this buffer shows, so its keys work."
-  (when-let* ((pos (harness-ui-switch--banner-pos)))
+  (when-let* ((pos (harness-ui-handoff--banner-pos)))
     (when (get-buffer-window (current-buffer))
       (goto-char pos))))
 
-(defun harness-ui-switch--ask (checks label total session host callback)
+(defun harness-ui-handoff--ask (checks label total session host callback)
   "Ask how to hand over: show a banner, or ask in the minibuffer.
 See `harness-ui-switch-function' for CHECKS, LABEL, TOTAL, SESSION, HOST
 and CALLBACK.  The banner shows in SESSION's chat buffer, else in HOST;
 without either, the minibuffer asks."
-  (let ((target (harness-ui-switch--host session host)))
+  (let ((target (harness-ui-handoff--host session host)))
     (if (null target)
         (funcall callback (harness-ui--read-handoff checks label total))
       (with-current-buffer target
-        (setq harness-ui-switch--prompt
+        (setq harness-ui-handoff--prompt
               (list :checks checks :label label :total (or total (length checks))
                     :session session :callback callback))
-        (harness-ui-switch--redraw)
-        (harness-ui-switch--focus)
+        (harness-ui-handoff--redraw)
+        (harness-ui-handoff--focus)
         (unless (get-buffer-window target)
           (message "How to hand over: choose in %s" (buffer-name target))))
       t)))
 
 ;;;; Answering
 
-(defun harness-ui-switch--choose (buffer prompt mode)
+(defun harness-ui-handoff--choose (buffer prompt mode)
   "Answer the switch PROMPT shown in BUFFER with MODE, running its callback."
   (let ((current nil))
     (when (buffer-live-p buffer)
       (with-current-buffer buffer
-        (when (eq harness-ui-switch--prompt prompt)
+        (when (eq harness-ui-handoff--prompt prompt)
           (setq current t)
-          (setq harness-ui-switch--prompt nil)
-          (harness-ui-switch--redraw))))
+          (setq harness-ui-handoff--prompt nil)
+          (harness-ui-handoff--redraw))))
     (when current
       (funcall (plist-get prompt :callback) mode))))
 
-(defun harness-ui-switch--command (buffer prompt mode)
+(defun harness-ui-handoff--command (buffer prompt mode)
   "Return the command answering PROMPT in BUFFER with MODE."
-  (lambda () (interactive) (harness-ui-switch--choose buffer prompt mode)))
+  (lambda () (interactive) (harness-ui-handoff--choose buffer prompt mode)))
 
-(defun harness-ui-switch--keymap (buffer prompt)
+(defun harness-ui-handoff--keymap (buffer prompt)
   "Return a keymap whose keys answer PROMPT in BUFFER."
   (let ((map (make-sparse-keymap)))
     (dolist (choice harness-ui--handoff-choices)
       (define-key map (kbd (char-to-string (nth 0 choice)))
-                  (harness-ui-switch--command buffer prompt (nth 2 choice))))
+                  (harness-ui-handoff--command buffer prompt (nth 2 choice))))
     map))
 
 ;;;; The banner
 
-(defun harness-ui-switch--heading (prompt)
+(defun harness-ui-handoff--heading (prompt)
   "Return the heading of the switch banner: what switches to what.
-PROMPT is the switch it asks about, as `harness-ui-switch--prompt' holds it."
+PROMPT is the switch it asks about, as `harness-ui-handoff--prompt' holds it."
   (let* ((first (car (plist-get prompt :checks)))
          (total (plist-get prompt :total))
          (from (or (plist-get first :from-label)
@@ -156,7 +159,7 @@ PROMPT is the switch it asks about, as `harness-ui-switch--prompt' holds it."
                  'face 'bold)
      "\n")))
 
-(defun harness-ui-switch--rows (rows)
+(defun harness-ui-handoff--rows (rows)
   "Return ROWS, a list of (LABEL TEXT), as aligned banner lines.
 The labels are padded to their widest, and a long TEXT wraps under
 itself, not under its label."
@@ -171,21 +174,21 @@ itself, not under its label."
                  "\n")))
      rows "")))
 
-(defun harness-ui-switch--risk-row (risk)
+(defun harness-ui-handoff--risk-row (risk)
   "Return RISK, a \"label: what it means\" sentence, as banner row cells."
   (let ((colon (string-match ":" risk)))
     (if colon
         (list (substring risk 0 colon) (string-trim (substring risk (1+ colon))))
       (list risk ""))))
 
-(defun harness-ui-switch--facts (prompt)
+(defun harness-ui-handoff--facts (prompt)
   "Return the labelled facts of the switch banner for PROMPT."
   (let* ((checks (plist-get prompt :checks))
          (first (car checks))
          (total (plist-get prompt :total))
          (running (cl-some (lambda (c) (harness-json-true-p (plist-get c :running))) checks)))
     (append
-     (mapcar #'harness-ui-switch--risk-row (plist-get first :risks))
+     (mapcar #'harness-ui-handoff--risk-row (plist-get first :risks))
      (when (plist-get first :cache-cost)
        (list (list "Cost" (format "%s (list prices)" (plist-get first :cache-cost)))))
      (when running
@@ -196,7 +199,7 @@ itself, not under its label."
                                                  " · ")
                                       (length checks) total)))))))
 
-(defun harness-ui-switch--options (buffer prompt)
+(defun harness-ui-handoff--options (buffer prompt)
   "Return the options of the switch banner for PROMPT, answered in BUFFER.
 Each names its key, so the banner answers like a question's options.
 Summarising on the current model says whether its cache is still warm
@@ -211,7 +214,7 @@ the cache panel draws it again the moment the cache lapses."
               (prefix (concat "   " (harness-chat--kbd (format " %c " key)) " "))
               (indent (make-string (+ (length prefix) width 2) ?\s)))
          (concat prefix
-                 (harness-chat--button name (harness-ui-switch--command buffer prompt (nth 2 choice))
+                 (harness-chat--button name (harness-ui-handoff--command buffer prompt (nth 2 choice))
                                        :help (format "%s (press %c, or click)" (nth 3 choice) key))
                  (make-string (max 0 (- width (string-width name))) ?\s)
                  "  "
@@ -219,7 +222,7 @@ the cache panel draws it again the moment the cache lapses."
                  "\n")))
      choices)))
 
-(defun harness-ui-switch--box-hint ()
+(defun harness-ui-handoff--box-hint ()
   "Return the line saying how to press an option's key from the compose box.
 The options' keys type in the box: its key for a panel's keys does what
 they do (`harness-compose-panel-hint'), the first option's key the
@@ -228,46 +231,46 @@ example."
                       "\n")
               'wrap-prefix "   "))
 
-(defun harness-ui-switch--banner (prompt)
+(defun harness-ui-handoff--banner (prompt)
   "Return the banner asking how to hand over, as PROMPT says."
   (let* ((buffer (current-buffer))
          (first (car (plist-get prompt :checks)))
          (string (concat
-                  (harness-ui-switch--heading prompt)
+                  (harness-ui-handoff--heading prompt)
                   (propertize (concat "   " (plist-get first :reason))
                               'face 'harness-dim-face 'wrap-prefix "   ")
                   "\n"
-                  (harness-ui-switch--rows (harness-ui-switch--facts prompt))
+                  (harness-ui-handoff--rows (harness-ui-handoff--facts prompt))
                   "\n"
-                  (harness-ui-switch--options buffer prompt)
-                  (harness-ui-switch--box-hint))))
+                  (harness-ui-handoff--options buffer prompt)
+                  (harness-ui-handoff--box-hint))))
     ;; A panel of the compose box too: C-c . presses its keys from there.
-    (add-text-properties 0 (length string) (list 'harness-ui-switch-panel t 'harness-compose-panel 'switch)
+    (add-text-properties 0 (length string) (list 'harness-ui-handoff-panel t 'harness-compose-panel 'switch)
                          string)
-    (harness-ui-with-keymap string (harness-ui-switch--keymap buffer prompt))
+    (harness-ui-with-keymap string (harness-ui-handoff--keymap buffer prompt))
     (harness-chat--face string 'harness-chat-switch-face)))
 
-(defun harness-ui-switch--panel ()
+(defun harness-ui-handoff--panel ()
   "Return the switch banner when this buffer waits for its answer."
-  (when harness-ui-switch--prompt
-    (harness-ui-switch--banner harness-ui-switch--prompt)))
+  (when harness-ui-handoff--prompt
+    (harness-ui-handoff--banner harness-ui-handoff--prompt)))
 
 ;;;; Setup
 
-(defun harness-ui-switch--setup ()
+(defun harness-ui-handoff--setup ()
   "Show the switch banner in this chat buffer."
-  (add-hook 'harness-chat-panel-functions #'harness-ui-switch--panel t))
+  (add-hook 'harness-chat-panel-functions #'harness-ui-handoff--panel t))
 
-(defun harness-ui-switch--init ()
+(defun harness-ui-handoff--init ()
   "Let the UI show its switch question as a banner in the chat."
-  (setq harness-ui-switch-function #'harness-ui-switch--ask)
+  (setq harness-ui-switch-function #'harness-ui-handoff--ask)
   (with-eval-after-load 'harness-ui-chat
-    (add-hook 'harness-chat-mode-hook #'harness-ui-switch--setup)))
+    (add-hook 'harness-chat-mode-hook #'harness-ui-handoff--setup)))
 
-(harness-define-module 'ui-switch
+(harness-define-module 'ui-handoff
   :doc "The switch banner of a session: choose how to hand the conversation over."
   :requires '(ui ui-chat)
-  :init #'harness-ui-switch--init)
+  :init #'harness-ui-handoff--init)
 
-(provide 'harness-ui-switch)
-;;; harness-ui-switch.el ends here
+(provide 'harness-ui-handoff)
+;;; harness-ui-handoff.el ends here

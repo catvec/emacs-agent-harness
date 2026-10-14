@@ -11,6 +11,10 @@
 #   scripts/dev.sh errors           recent *Messages* and harness log warnings
 #   scripts/dev.sh reload           harness-reload
 #
+# The daemon loads every module (`harness-enabled-modules' t), so that
+# every feature can be tried; HARNESS_DEV_MODULES=default starts it with
+# the harness's defaults instead, the core only.
+#
 # The daemon's socket is in the checkout, scripts/.dev/run/SOCKET, so a
 # command the harness runs in its sandbox (the bash tool) reaches a
 # daemon the harness started outside it: the sandbox shows the checkout

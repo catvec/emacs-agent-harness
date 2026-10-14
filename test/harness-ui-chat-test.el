@@ -3966,7 +3966,7 @@ the note of another, whose default it took unasked, and redone from its
 own note: both chats follow, and asking goes back on, then off.  The
 real cold-cache layer, end to end."
   (harness-ui-chat-test-with-decisions
-    (dolist (m '(compaction tools-agent tools-sessions cowboy))
+    (dolist (m '(compaction tools-agent tools-question tools-sessions cowboy))
       (harness-test-load-module m))
     (let ((harness-cowboy-ask t)
           (harness-cowboy-default 'brief)
@@ -6382,7 +6382,7 @@ the panel ends on the finished list, and it agrees with the session's
 own, which the task board shows."
   (harness-ui-chat-test-with
     ;; The tool that replaces the list; the harness serves it in production.
-    (harness-test-load-module 'tools-agent)
+    (harness-test-load-module 'tools-todo)
     (let* ((sid (harness-ui-chat-test-session "Work"))
            (buf (harness-ui-chat-test-open sid)))
       (harness-ui-chat-test-prompt buf "please work through this project")

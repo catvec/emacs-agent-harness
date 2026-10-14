@@ -81,7 +81,7 @@ through `harness-seed-test--script'."
   (declare (indent 1))
   `(harness-test-with-temp-state
      (harness-test-reset-bus)
-     (dolist (m (append '(store project config provider provider-demo tools session agent tools-agent seed)
+     (dolist (m (append '(store project config provider provider-demo tools session agent tools-agent tools-question tools-plan tools-todo tools-session-info seed)
                         ',extra))
        (harness-test-load-module m))
      (clrhash harness-sessions)

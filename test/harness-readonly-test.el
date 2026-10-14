@@ -23,7 +23,7 @@
 (declare-function harness-readonly-budget-point-p "harness-readonly")
 
 (defconst harness-readonly-test-modules
-  '(store project config provider provider-demo tools session agent tools-agent tools-fs readonly)
+  '(store project config provider provider-demo tools session agent tools-agent tools-question tools-plan tools-todo tools-session-info tools-fs readonly)
   "The modules every test loads.")
 
 (defun harness-readonly-test--policy (session)

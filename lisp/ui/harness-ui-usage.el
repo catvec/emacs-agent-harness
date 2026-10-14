@@ -1592,7 +1592,9 @@ Defaults come from the budget on the current line when there is one."
 ARGS are the event's arguments: for `config/changed', the first names
 the option that changed."
   (cond
-   ((member event '("usage/budget-warning" "agent/turn-ended" "usage/budgets-changed" "usage/recorded"
+   ;; Not usage/recorded, which the harness keeps to itself: the end of
+   ;; the turn that recorded usage tells.
+   ((member event '("usage/budget-warning" "agent/turn-ended" "usage/budgets-changed"
                     "usage/reported-changed" "fallback/changed" "fallback/switched"))
     (harness-ui-usage--refresh-soon))
    ((and (equal event "config/changed")

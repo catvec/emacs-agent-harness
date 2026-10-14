@@ -2636,10 +2636,12 @@ to the loopback address, on the same port when it is free."
 ;;;; Module
 
 (defun harness-acp--init ()
-  "Subscribe to bus events and start the TCP server when enabled."
+  "Subscribe to bus events and start the TCP server when enabled.
+The server starts as the module does, not at a reload, which leaves it
+as it is: stopped, say, by `harness-acp--on-corporate-mode'."
   (add-hook 'harness-corporate-mode-change-hook #'harness-acp--on-corporate-mode)
   (harness-acp--subscribe)
-  (when harness-acp--server-enabled
+  (when (and harness-acp--server-enabled (not (harness-module-ready-p 'acp)))
     (condition-case err
         (harness-call 'acp/start)
       (error (harness-log 'warn "acp: TCP server not started: %s" (harness-error-message err))))))
@@ -2653,16 +2655,6 @@ to the loopback address, on the same port when it is free."
   :requires nil
   :init #'harness-acp--init
   :shutdown #'harness-acp--shutdown)
-
-;; A reload does not initialise a running module again: subscribe the
-;; handlers this version adds now.
-(when (harness-module-ready-p 'acp)
-  (add-hook 'harness-corporate-mode-change-hook #'harness-acp--on-corporate-mode)
-  (harness-acp--subscribe))
-
-;; Nor does a reload end the connections made before it: poll those too,
-;; whichever version made them (nothing happens when there are none).
-(harness-acp--poll-sync)
 
 (provide 'harness-acp)
 ;;; harness-acp.el ends here

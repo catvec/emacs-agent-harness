@@ -84,6 +84,8 @@ The harness process loads `harness-server-test--init'."
      (harness-test-reset-bus)
      (let* ((init (expand-file-name "server-init.el" harness-state-directory))
             (harness-process t)
+            ;; Every module, the demo provider of its model included.
+            (harness-enabled-modules t)
             (harness-model "demo:scripted")
             (harness-server-init-file init))
        (with-temp-file init (insert harness-server-test--init))
@@ -259,6 +261,7 @@ so settings made later in the init file are forwarded."
   (harness-test-with-temp-state
     (harness-test-reset-bus)
     (let ((harness-process t)
+          (harness-enabled-modules t)
           (harness-model "demo:scripted")
           (emacs-startup-hook nil))
       (unwind-protect
@@ -303,6 +306,7 @@ modules and listen beyond this machine."
     (let* ((init (expand-file-name "server-init.el" harness-state-directory))
            (policy (expand-file-name "policy.el" harness-state-directory))
            (harness-process t)
+           (harness-enabled-modules t)
            (harness-model "demo:scripted")
            (harness-server-init-file init))
       ;; Where the process looks is its own business, as /etc would be:

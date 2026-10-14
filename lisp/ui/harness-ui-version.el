@@ -790,9 +790,7 @@ else the last one it made, for the nag icon."
     (harness-ui-version--fetch)))
 
 (defun harness-ui-version--init-nag ()
-  "Add the hooks the nag icon shows through, after the other segments there.
-A reload does not initialise a running module again, so the file adds
-them itself when the module is ready (below)."
+  "Add the hooks the nag icon shows through, after the other segments there."
   (add-hook 'harness-chat-header-end-functions #'harness-ui-version--chat-header 95)
   (add-hook 'harness-ui-tasks-header-functions #'harness-ui-version--board-header 95)
   (add-hook 'harness-ui-notify-segment-functions #'harness-ui-version--notify-segment)
@@ -818,9 +816,6 @@ them itself when the module is ready (below)."
   :requires '(ui)
   :init #'harness-ui-version--init
   :shutdown #'harness-ui-version--shutdown)
-
-(when (harness-module-ready-p 'ui-version)
-  (harness-ui-version--init-nag))
 
 (provide 'harness-ui-version)
 ;;; harness-ui-version.el ends here

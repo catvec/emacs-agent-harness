@@ -632,7 +632,8 @@ Task mode holds it off a session whose task's title is on its way."
   "A nameless session whose turn runs as the harness reloads is named then.
 Its turn started before naming moved to the start of turns, and a
 task's first turn lasts until the task is done: it would stay nameless
-all that time.  A named session is left alone."
+all that time.  A named session is left alone.  The reload initialises
+the module again, which names them once everything is loaded again."
   (harness-naming-test-with
     (harness-naming-test-with-held
       ;; Turns that started with nothing to name them.
@@ -642,9 +643,10 @@ all that time.  A named session is left alone."
              (turn (harness-call 'agent/prompt id "fix the parser, it drops comments"))
              (other (harness-call 'agent/prompt named "and the lexer")))
         (harness-test-wait (lambda () (= 2 (length harness-naming-test--held))) 5 "the turns")
-        (harness-naming--init)
+        (should (harness-module-ready-p 'naming))
+        (harness-modules-init '(naming))
+        ;; Soon, not at once: the other modules' filters load first.
         (should (null (harness-naming-test-name id)))
-        (harness-naming--name-running)
         (harness-test-wait (lambda () (harness-naming-test-name id)) 5 "the name")
         (should (harness-agent-running-p id))
         (should (equal "Fix the parser" (harness-naming-test-name id)))

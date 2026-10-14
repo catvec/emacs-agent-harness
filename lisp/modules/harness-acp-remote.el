@@ -1125,9 +1125,5 @@ whose link named the old address.  Return the status."
   :init #'harness-acp-remote--init
   :shutdown #'harness-acp-remote--shutdown)
 
-;; A reload does not initialise a running module again.
-(when (harness-module-ready-p 'acp-remote)
-  (harness-acp-remote--hook))
-
 (provide 'harness-acp-remote)
 ;;; harness-acp-remote.el ends here

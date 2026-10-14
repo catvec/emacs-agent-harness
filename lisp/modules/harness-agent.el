@@ -2059,10 +2059,5 @@ was receiving."
   :init #'harness-agent--init
   :shutdown #'harness-agent--save-live)
 
-;; A reload does not initialise a running module again: subscribe the
-;; handlers this version adds now.
-(when (harness-module-ready-p 'agent)
-  (harness-agent--init))
-
 (provide 'harness-agent)
 ;;; harness-agent.el ends here

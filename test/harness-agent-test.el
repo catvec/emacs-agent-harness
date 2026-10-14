@@ -1083,7 +1083,7 @@ user message after that answer: \"No user message to send\"."
       (should-not (gethash id harness-agent--calls)))))
 
 (ert-deftest harness-agent-reload-subscribes-new-handlers ()
-  "A reload does not initialise a running module again, yet its new handlers run."
+  "A reload initialises the running module again, so its new handlers run."
   (harness-agent-test-with
     (let ((subscribed (lambda (event fn) (cl-find fn (gethash event harness--subscribers) :key #'cdr))))
       (should (funcall subscribed 'tools/progress #'harness-agent--on-tool-progress))
@@ -1093,12 +1093,17 @@ user message after that answer: \"No user message to send\"."
       (harness-off (cons 'tools/note #'harness-agent--on-tool-note))
       (harness-off (cons 'permission/decided #'harness-agent--on-permission-decided))
       (should-not (funcall subscribed 'tools/progress #'harness-agent--on-tool-progress))
+      ;; What `harness-reload' does: load the file, then initialise the
+      ;; modules, the ready ones again.
       (let ((harness--defining-module 'agent))
         (harness-load-compiled (expand-file-name "lisp/modules/harness-agent.el" harness-test-root)))
+      (harness-modules-init '(agent))
+      (should (harness-module-ready-p 'agent))
       (should (funcall subscribed 'tools/progress #'harness-agent--on-tool-progress))
       (should (funcall subscribed 'tools/note #'harness-agent--on-tool-note))
       (should (funcall subscribed 'permission/decided #'harness-agent--on-permission-decided))
-      ;; Subscribing is idempotent: one handler, however often loaded.
+      ;; Subscribing is idempotent: one handler, however often reloaded.
+      (harness-modules-init '(agent))
       (should (= 1 (cl-count #'harness-agent--on-tool-progress (gethash 'tools/progress harness--subscribers)
                              :key #'cdr)))
       (should (= 1 (cl-count #'harness-agent--on-tool-note (gethash 'tools/note harness--subscribers)

@@ -57,7 +57,7 @@
 ;; nothing -- sends none of the old one, and a compaction replaces it
 ;; with its summary: the session reports no cache then, and no panel
 ;; shows.  While the switch banner asks how to hand over
-;; (harness-ui-switch.el), the panel stays away: what the next request
+;; (harness-ui-handoff.el), the panel stays away: what the next request
 ;; sends depends on the answer, and the banner says what the cache
 ;; means for each.  So it does while a message sent to the session
 ;; waits on the question of what goes first, the cache being cold
@@ -93,7 +93,7 @@
 (defvar harness-chat--session)
 (defvar harness-ui-session-id)
 (defvar harness-compose-redraw-function)
-(defvar harness-ui-switch--prompt)
+(defvar harness-ui-handoff--prompt)
 (declare-function harness-chat--buffer-for "harness-ui-chat" (sid))
 (declare-function harness-compose-redraw "harness-ui-compose" ())
 (declare-function harness-compose-panel-hint "harness-ui-compose" (key))
@@ -226,7 +226,7 @@ how to hand over, or while a message waits on the question about the
 cold cache (`harness-ui-cache--asked-p'): what the next request sends
 depends on the answer, and the banner or the question says what the
 cache means for each."
-  (unless (or (bound-and-true-p harness-ui-switch--prompt)
+  (unless (or (bound-and-true-p harness-ui-handoff--prompt)
               (harness-ui-cache--asked-p session))
     (harness-ui-cache--state session now)))
 

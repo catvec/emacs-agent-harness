@@ -1008,7 +1008,7 @@ UI asks it for an option's image (`question/image') instead of reading
 the path, shows it once it comes, says why when it cannot, and forgets
 it with the question."
   (harness-ui-pending-test-with
-    (harness-test-load-module 'tools-agent)
+    (harness-test-load-module 'tools-question)
     (let* ((sid (harness-ui-pending-test-session "Far away"))
            (png (harness-ui-pending-test-png dir "far.png"))
            (gone (harness-ui-pending-test-png dir "gone.png"))

@@ -2795,8 +2795,8 @@ auto judge objecting to a call offers none either."
   (should (equal 6 (car (rassq #'harness-perms--away-request
                                (gethash 'permission/decide harness--filters)))))
   (should (memq 'permission/requested (mapcar #'car (harness-events))))
-  ;; A hot reload does not run `:init' again for a ready module; loading
-  ;; the file still installs the stage that decides directory requests.
+  ;; A hot reload loads the file and runs `:init' of the ready module
+  ;; again, which installs the stage that decides directory requests.
   (harness-remove-filter 'permission/decide #'harness-perms--dir-request)
   (harness-test-load-module 'perms)
   (should (harness-module-ready-p 'perms))
@@ -2876,7 +2876,7 @@ judge denying them cannot stop the agent looking at its own harness."
 else: each such tool is of kind read and takes no path for the jail."
   (harness-perms-test--setup)
   (let ((harness-tools (make-hash-table :test 'equal)))
-    (dolist (library '("harness-tools-emacs" "harness-tools-agent" "harness-tools-sessions" "harness-tools-notify"
+    (dolist (library '("harness-tools-emacs" "harness-tools-session-info" "harness-tools-sessions" "harness-tools-notify"
                        "harness-tools-events"))
       (load library nil t))
     (dolist (name harness-perms--inspection-tools)

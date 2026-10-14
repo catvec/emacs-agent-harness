@@ -199,11 +199,60 @@ and `:final' stops it as it stops the whole chain."
       (should (equal '(a b c) (sort (copy-sequence ready) (lambda (x y) (string< x y)))))
       (should (eq 'failed (harness-module-state (harness-module-get 'bad))))
       (should (eq 'failed (harness-module-state (harness-module-get 'dep-on-bad)))))
-    ;; Redefinition keeps a ready module ready.
+    ;; Redefinition keeps a ready module ready, and the next
+    ;; initialisation, as a reload runs, calls the new INIT.
     (harness-define-module 'a :doc "new doc" :init (lambda () (push 'again order)))
     (should (harness-module-ready-p 'a))
     (harness-modules-init)
-    (should-not (memq 'again order))))
+    (should (memq 'again order))
+    (should (harness-module-ready-p 'a))))
+
+(ert-deftest harness-core-module-initialises-again ()
+  "A ready module's INIT runs again, and tells a first start from a later one.
+A failing INIT keeps a ready module ready, with the error recorded until
+it runs cleanly again.  A disabled module stays off."
+  (harness-test-reset-bus)
+  (let ((runs nil) (fail nil))
+    (harness-define-module 'm :init (lambda ()
+                                      (push (harness-module-ready-p 'm) runs)
+                                      (when fail (error "Broken"))))
+    (should (harness-module-start 'm))
+    (should (harness-module-start 'm))
+    ;; nil the first time, t the second.
+    (should (equal '(t nil) runs))
+    (setq fail t)
+    (should-not (harness-module-start 'm))
+    (should (harness-module-ready-p 'm))
+    (should (equal "Broken" (plist-get (car (harness-module-descriptions)) :error)))
+    (setq fail nil)
+    (should (harness-module-start 'm))
+    (should-not (harness-module-error (harness-module-get 'm)))
+    (harness-module-disable 'm)
+    (setq runs nil)
+    (harness-modules-init)
+    (should-not runs)
+    (should (eq 'disabled (harness-module-state (harness-module-get 'm))))))
+
+(ert-deftest harness-core-handlers-move-to-a-new-priority ()
+  "Subscribing or filtering with the same function again changes nothing,
+but for moving it to the priority given, as a reloaded `:init' gives."
+  (harness-test-reset-bus)
+  (let (log)
+    (defalias 'harness-core-test--early (lambda () (push 'early log)))
+    (defalias 'harness-core-test--late (lambda () (push 'late log)))
+    (harness-on 'test/ev #'harness-core-test--early 10)
+    (harness-on 'test/ev #'harness-core-test--late 20)
+    (harness-on 'test/ev #'harness-core-test--early 10)
+    (should (= 2 (length (gethash 'test/ev harness--subscribers))))
+    (harness-on 'test/ev #'harness-core-test--early 30)
+    (should (= 2 (length (gethash 'test/ev harness--subscribers))))
+    (harness-emit 'test/ev)
+    (should (equal '(early late) log))
+    (harness-add-filter 'test/f #'1+ 10)
+    (harness-add-filter 'test/f #'1+ 10)
+    (should (equal '((10 . 1+)) (gethash 'test/f harness--filters)))
+    (harness-add-filter 'test/f #'1+ 40)
+    (should (equal '((40 . 1+)) (gethash 'test/f harness--filters)))))
 
 (ert-deftest harness-core-defmethod-records-module ()
   (harness-test-reset-bus)
@@ -501,7 +550,9 @@ are fitted by."
       (let ((harness-module-directories '("lisp/modules"))
             (harness--core-files nil)
             (harness--library-files nil)
-            (harness-process nil))
+            (harness-process nil)
+            (harness-enabled-modules t)
+            (harness-disabled-modules nil))
         (should (harness-start))
         (should (eq 'pong (harness-call 'demo/ping)))
         (should (harness-module-ready-p 'demo))
@@ -515,6 +566,69 @@ are fitted by."
         (should (harness-reload))
         (should (eq 'pong2 (harness-call 'demo/ping)))))
     (delete-directory dir t)))
+
+(defvar harness-core-test--reload-hook nil
+  "A hook the test module of `harness-loader-reload-wires-in-what-init-adds' adds to.")
+
+(defvar harness-core-test--first-starts 0
+  "How often that module did the work it does once per start.")
+
+(ert-deftest harness-loader-reload-wires-in-what-init-adds ()
+  "`harness-reload' runs a ready module's INIT again, so what new code adds there works.
+A second reload adds nothing twice, the work an INIT does once per start
+is not done again, and an INIT that fails now is reported by the reload
+while the module stays ready with what it set up before."
+  (harness-test-reset-bus)
+  (let* ((dir (harness-test-temp-dir))
+         (file (expand-file-name "lisp/modules/harness-demo.el" dir))
+         (write (lambda (&rest init)
+                  (harness-core-test--write-elisp
+                   file
+                   `(defun harness-demo--init ()
+                      (unless (harness-module-ready-p 'demo)
+                        (setq harness-core-test--first-starts (1+ harness-core-test--first-starts)))
+                      ,@init)
+                   '(harness-define-module 'demo :init #'harness-demo--init)
+                   '(provide 'harness-demo)))))
+    (setq harness-core-test--reload-hook nil
+          harness-core-test--first-starts 0)
+    (funcall write '(add-hook 'harness-core-test--reload-hook #'harness-core-test--a))
+    ;; Each reload loads harness.el first: the real one would put back
+    ;; the `harness--path' that this test replaces.
+    (harness-core-test--write-elisp (expand-file-name "harness.el" dir) '(ignore))
+    (unwind-protect
+        (cl-letf (((symbol-function 'harness--path)
+                   (lambda (rel) (expand-file-name rel dir))))
+          (let ((harness--self-file (expand-file-name "harness.el" dir))
+                (harness-module-directories '("lisp/modules"))
+                (harness--core-files nil)
+                (harness--library-files nil)
+                (harness-process nil)
+                (harness-enabled-modules t)
+                (harness-disabled-modules nil))
+            (should (harness-start))
+            (should (equal '(harness-core-test--a) harness-core-test--reload-hook))
+            ;; New code adds a hook in INIT: the reload adds it.
+            (funcall write
+                     '(add-hook 'harness-core-test--reload-hook #'harness-core-test--a)
+                     '(add-hook 'harness-core-test--reload-hook #'harness-core-test--b))
+            (should (harness-reload))
+            (should (equal '(harness-core-test--b harness-core-test--a) harness-core-test--reload-hook))
+            ;; Another reload adds nothing twice, and starts nothing again.
+            (should (harness-reload))
+            (should (= 2 (length harness-core-test--reload-hook)))
+            (should (= 1 harness-core-test--first-starts))
+            ;; An INIT that fails now is reported; the module stays ready.
+            (funcall write '(error "Init broke"))
+            (let ((errors (plist-get (harness--reload) :errors)))
+              (should (= 1 (length errors)))
+              (should (string-match-p "module demo: Init broke" (car errors))))
+            (should (harness-module-ready-p 'demo))
+            (should (= 2 (length harness-core-test--reload-hook)))
+            (harness-stop)))
+      (fmakunbound 'harness-demo--init)
+      (setq features (delq 'harness-demo features))
+      (delete-directory dir t))))
 
 (ert-deftest harness-loader-reloads-library-files ()
   "Library files load compiled at start and again at every reload.
@@ -539,7 +653,9 @@ that does not compile refuses the reload like a module does."
           (let ((harness-module-directories '("lisp/modules"))
                 (harness--core-files nil)
                 (harness--library-files '("lisp/harness-testlib.el"))
-                (harness-process nil))
+                (harness-process nil)
+                (harness-enabled-modules t)
+                (harness-disabled-modules nil))
             (should (harness-start))
             (should (equal 1 (harness-call 'libuser/answer)))
             (should (funcall (if (fboundp 'compiled-function-p) #'compiled-function-p #'byte-code-function-p)
@@ -575,7 +691,7 @@ lisp/ui does and any other where lisp/modules does: both in a harness
 with no process of its own, only the UI ones in the UI of a harness
 process, and only the others in that process.  One whose name the
 harness has already, a library's included, is left out with a warning;
-the enabled and disabled lists filter them as they do the harness's own."
+the enabled and disabled lists select them as they do the harness's own."
   (let* ((config (harness-test-temp-dir))
          (mine (expand-file-name "my-modules/" config))
          (warned nil)
@@ -626,12 +742,18 @@ the enabled and disabled lists filter them as they do the harness's own."
           ;; The enabled and disabled lists name them as they do any other.
           (let ((harness-process nil)
                 (harness-module-directories '("lisp/modules" "lisp/ui")))
+            ;; A module's UI half is disabled with it, not the other way.
             (let ((harness-disabled-modules '(hello)))
-              (should (equal '("harness-ui-hello.el") (funcall mine-of (harness--module-files)))))
-            (let ((harness-enabled-modules '(hello session)))
-              (should (equal (list (harness--path "lisp/modules/harness-session.el")
-                                   (expand-file-name "harness-hello.el" mine))
-                             (harness--module-files))))))
+              (should-not (funcall mine-of (harness--module-files))))
+            (let ((harness-disabled-modules '(ui-hello)))
+              (should (equal '("harness-hello.el") (funcall mine-of (harness--module-files)))))
+            ;; Not enabled, they do not load; enabled, one brings its other half.
+            (let ((harness-enabled-modules nil))
+              (should-not (funcall mine-of (harness--module-files))))
+            (dolist (one '(hello ui-hello))
+              (let ((harness-enabled-modules (list one)))
+                (should (equal '("harness-hello.el" "harness-ui-hello.el")
+                               (funcall mine-of (harness--module-files))))))))
       (delete-directory config t))))
 
 (ert-deftest harness-loader-loads-supervisor-mode-and-readonly-by-default ()
@@ -701,6 +823,8 @@ edit, naming the file, and picks up a good one."
                   (harness--core-files nil)
                   (harness--library-files nil)
                   (harness-process nil)
+                  (harness-enabled-modules t)
+                  (harness-disabled-modules nil)
                   (user-emacs-directory config)
                   (harness-extra-module-directories '("my-modules"))
                   (load-path load-path))
@@ -739,6 +863,178 @@ edit, naming the file, and picks up a good one."
                                      features))
         (delete-directory tree t)
         (delete-directory config t)))))
+
+;;;; Which modules load
+
+(defvar harness-core-test--inits nil
+  "The modules of `harness-core-test-with-module-tree' in the order they initialised.")
+
+(defmacro harness-core-test-with-module-tree (&rest body)
+  "Run BODY in a harness tree of small modules, the core being base and ui.
+lisp/modules has base; feat, which requires base, and its UI half
+ui-feat; extra, which requires feat and whose file requires lib, a
+library; and other.  lisp/ui has ui, ui-feat and ui-solo, a UI with no
+other half.  Each module notes its initialisation in
+`harness-core-test--inits'.  `tree' is bound to the tree in BODY."
+  (declare (indent 0))
+  `(let ((tree (harness-test-temp-dir))
+         (had-ui (featurep 'harness-ui)))
+     (harness-test-reset-bus)
+     (setq harness-core-test--inits nil)
+     ;; A reload loads harness.el first: the real one would put back the
+     ;; `harness--path' and the core this replaces.
+     (harness-core-test--write-elisp (expand-file-name "harness.el" tree) '(ignore))
+     (pcase-dolist (`(,file ,name ,requires . ,forms)
+                    '(("lisp/modules/harness-base.el" base nil)
+                      ("lisp/modules/harness-feat.el" feat (base))
+                      ("lisp/modules/harness-extra.el" extra (feat)
+                       (require 'harness-feat) (require 'harness-lib))
+                      ("lisp/modules/harness-lib.el" nil nil (defun harness-lib-answer () 42))
+                      ("lisp/modules/harness-other.el" other nil)
+                      ("lisp/ui/harness-ui.el" ui nil)
+                      ("lisp/ui/harness-ui-feat.el" ui-feat (ui))
+                      ("lisp/ui/harness-ui-solo.el" ui-solo (ui))))
+       (apply #'harness-core-test--write-elisp (expand-file-name file tree)
+              (append forms
+                      (and name
+                           `((harness-define-module ',name
+                               :doc ,(format "The %s module." name)
+                               :requires ',requires
+                               :init (lambda () (push ',name harness-core-test--inits)))))
+                      `((provide ',(intern (file-name-base file)))))))
+     (unwind-protect
+         (cl-letf (((symbol-function 'harness--path)
+                    (lambda (rel) (expand-file-name rel tree))))
+           (let ((harness--self-file (expand-file-name "harness.el" tree))
+                 (harness-module-directories '("lisp/modules" "lisp/ui"))
+                 (harness--core-files nil)
+                 (harness--library-files nil)
+                 (harness-process nil)
+                 (harness-extra-module-directories nil)
+                 (harness-core-modules '(base ui))
+                 (harness-enabled-modules nil)
+                 (harness-disabled-modules nil)
+                 (harness-started nil)
+                 (load-path load-path))
+             ,@body))
+       (dolist (f '(harness-base harness-feat harness-extra harness-lib harness-other
+                    harness-ui-feat harness-ui-solo))
+         (setq features (delq f features)))
+       (unless had-ui (setq features (delq 'harness-ui features)))
+       (fmakunbound 'harness-lib-answer)
+       (harness-test-reset-bus)
+       (delete-directory tree t))))
+
+(defun harness-core-test--loads ()
+  "Return the names of the module files `harness--module-files' returns."
+  (mapcar #'harness--file-module-name (harness--module-files)))
+
+(ert-deftest harness-loader-loads-the-core-and-what-is-enabled ()
+  "Out of the box only the core loads; each module enabled brings what it needs.
+That is the modules and libraries it requires, by its :requires or by
+its file's requires, and its other half, ui-NAME for NAME and NAME for
+ui-NAME.  t loads every module, and a disabled module stays out with
+its UI half, whatever brings it."
+  (harness-core-test-with-module-tree
+    (should (equal '(base ui) (harness-core-test--loads)))
+    (let ((harness-enabled-modules '(extra)))
+      (should (equal '(base extra feat lib ui-feat ui) (harness-core-test--loads))))
+    (let ((harness-enabled-modules '(ui-feat)))
+      (should (equal '(base feat ui-feat ui) (harness-core-test--loads))))
+    (let ((harness-enabled-modules '(ui-solo)))
+      (should (equal '(base ui-solo ui) (harness-core-test--loads))))
+    (let ((harness-enabled-modules t))
+      (should (equal '(base extra feat lib other ui-feat ui-solo ui) (harness-core-test--loads))))
+    (let ((harness-enabled-modules '(extra))
+          (harness-disabled-modules '(feat)))
+      (should (equal '(base extra lib ui) (harness-core-test--loads))))
+    (let ((harness-enabled-modules t)
+          (harness-disabled-modules '(feat base)))
+      (should (equal '(extra lib other ui-solo ui) (harness-core-test--loads))))
+    ;; Each side loads its own.
+    (let ((harness-enabled-modules '(extra))
+          (harness-module-directories '("lisp/modules")))
+      (should (equal '(base extra feat lib) (harness-core-test--loads))))
+    (should (harness-module-default-p 'base))
+    (should-not (harness-module-default-p 'extra))
+    (let ((harness-enabled-modules '(extra nope ui-solo)))
+      (should (equal '(nope) (harness--unknown-modules))))))
+
+(ert-deftest harness-loader-core-of-the-harness ()
+  "The harness's own core, and the UI halves named after their modules.
+Every name of `harness-core-modules' is a module of the harness.  Out
+of the box session names, worktrees and the agent tools load, each
+tool a module of its own; the task board, merges, serving other
+devices and handoffs wait to be enabled, each with its UI half."
+  (let ((sources (harness--module-sources))
+        (harness-enabled-modules nil)
+        (harness-disabled-modules nil))
+    (dolist (name harness-core-modules)
+      (should (assq name sources)))
+    (dolist (name '(naming worktree ui-worktree tools-agent tools-question tools-plan
+                    tools-todo tools-session-info))
+      (should (harness-module-default-p name)))
+    (dolist (name '(tasks merge acp-remote ui-acp-remote handoff ui-handoff))
+      (should-not (harness-module-default-p name)))
+    (pcase-dolist (`(,name . ,ui) '((acp-remote . ui-acp-remote) (handoff . ui-handoff)))
+      (should (memq ui (harness--module-closure sources (list name))))
+      (should (memq name (harness--module-closure sources (list ui)))))))
+
+(ert-deftest harness-enable-modules-reads-groups ()
+  "`harness-enable-modules' names modules in groups, as Doom's init.el does."
+  (let ((harness-enabled-modules '(old)))
+    (harness-enable-modules
+      tasks
+      :features merge ;;pet
+      :providers openai provider-bedrock
+      :tools web
+      :ui tree)
+    (should (equal '(tasks merge provider-openai provider-bedrock tools-web ui-tree)
+                   harness-enabled-modules)))
+  (should-error (harness--module-names '(:nope x)))
+  (should-error (harness--module-names '(:features "x"))))
+
+(ert-deftest harness-enable-module-loads-and-starts-in-dependency-order ()
+  "\\[harness-enable-module] loads a module with what it brings and starts them.
+They start after what they require, and enabling it again, or a module
+it brought, starts nothing again.  A reload after it is no longer
+enabled says it runs on until a restart."
+  (harness-core-test-with-module-tree
+    (should (harness-start))
+    (should (equal '(base ui) (reverse harness-core-test--inits)))
+    (setq harness-core-test--inits nil)
+    (harness-enable-module 'extra)
+    (should (equal '(extra) harness-enabled-modules))
+    (let ((order (reverse harness-core-test--inits)))
+      (should (equal '(extra feat ui-feat) (sort (copy-sequence order) #'string<)))
+      (should (< (cl-position 'feat order) (cl-position 'extra order))))
+    (should (cl-every #'harness-module-ready-p '(base ui feat extra ui-feat)))
+    (should (= 42 (harness-lib-answer)))
+    (should (funcall (if (fboundp 'compiled-function-p) #'compiled-function-p #'byte-code-function-p)
+                     (symbol-function 'harness-lib-answer)))
+    ;; Again, and a module it brought: nothing more starts.
+    (setq harness-core-test--inits nil)
+    (harness-enable-module 'extra)
+    (harness-enable-module 'feat)
+    (should-not harness-core-test--inits)
+    (should (equal '(extra) harness-enabled-modules))
+    (should-error (harness-enable-module 'nope) :type 'user-error)
+    (let ((harness-disabled-modules '(other)))
+      (should-error (harness-enable-module 'other) :type 'user-error))
+    ;; The modules that could be enabled still, as the module list shows them.
+    (let ((section (harness--modules-not-loaded)))
+      (should (string-match-p "not loaded" (car section)))
+      (should (equal '((other available "The other module.") (ui-solo available "The ui-solo module."))
+                     (mapcar (lambda (d) (list (plist-get d :name) (plist-get d :state) (plist-get d :doc)))
+                             (harness-test-await (cdr section))))))
+    ;; No longer enabled: a reload says the modules run on until a restart.
+    (setq harness-enabled-modules nil)
+    (let ((result (harness--reload)))
+      (should-not (plist-get result :errors))
+      (should (equal '(extra feat ui-feat)
+                     (sort (copy-sequence (plist-get result :stale)) #'string<))))
+    (should (harness-module-ready-p 'extra))
+    (harness-stop)))
 
 ;;;; Vendored libraries
 
@@ -862,6 +1158,7 @@ the library, and a library that does not compile refuses the reload."
           (let ((harness-module-directories '("lisp/modules"))
                 (harness--core-files nil)
                 (harness--library-files '("lisp/vendor/vlib/vlib.el"))
+                (harness-enabled-modules '(vuser))
                 (harness-process nil)
                 (load-path load-path))
             (should (harness-start))

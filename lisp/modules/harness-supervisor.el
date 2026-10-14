@@ -3594,9 +3594,11 @@ Steps stored as running belong to a harness that stopped, unless this
 process runs their workers; once every module is up they are interrupted
 \(`harness-supervisor--recover'), as the tasks module picks up what it
 left once they are (`harness-tasks--pick-up').  A reload hooks in again
-\(`harness-supervisor--init') but starts nothing: its workers run on."
+\(`harness-supervisor--init') but recovers nothing: the steps stored as
+running then really run, their workers in this process."
   (harness-supervisor--init)
-  (harness-run-soon #'harness-supervisor--recover))
+  (unless (harness-module-ready-p 'supervisor)
+    (harness-run-soon #'harness-supervisor--recover)))
 
 (defun harness-supervisor--shutdown ()
   "Take the module off the bus.  Sessions keep their setting.
@@ -3618,11 +3620,6 @@ Its policy goes too, so the readonly module holds no session to it."
   (harness-off (cons 'agent/turn-ended #'harness-supervisor--on-turn-ended))
   (harness-remove-filter 'agent/outstanding #'harness-supervisor--outstanding)
   (harness-remove-filter 'agent/stop-outstanding #'harness-supervisor--stop-outstanding))
-
-;; A reload does not initialise a running module again: hook in what
-;; this version brings now.
-(when (harness-module-ready-p 'supervisor)
-  (harness-supervisor--init))
 
 (harness-define-module 'supervisor
   :doc "Supervisor mode: sessions that plan and delegate, enforced by the harness."

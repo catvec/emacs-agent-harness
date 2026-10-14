@@ -116,8 +116,9 @@ knows of and, waking, sees the ones added meanwhile."
 (defun harness-server--reload ()
   "Reload the harness process in place, for its `harness/reload' method.
 Return (:files N).  Signal a `harness-error' naming the problems when a
-file does not compile, so that nothing was reloaded, or when some files
-failed to load while the others did."
+file does not compile, so that nothing was reloaded, or when the rest
+reloaded but some files failed to load or some modules to initialise
+\(see `harness--reload')."
   (let ((result (harness--reload)))
     (cond
      ((plist-get result :refused)
@@ -126,7 +127,7 @@ failed to load while the others did."
                             (string-join (plist-get result :refused) "; ")))))
      ((plist-get result :errors)
       (signal 'harness-error
-              (list (format "reloaded, but these files failed to load: %s"
+              (list (format "reloaded, but with errors: %s"
                             (string-join (plist-get result :errors) "; ")))))
      (t (harness-log 'info "server: reloaded %d files" (plist-get result :files))
         (list :files (plist-get result :files))))))

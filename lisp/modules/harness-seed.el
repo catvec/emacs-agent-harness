@@ -556,11 +556,6 @@ messages out of."
   (harness-off (cons 'session/deleted #'harness-seed--on-deleted))
   (harness-off (cons 'agent/turn-ended #'harness-seed--on-turn-ended)))
 
-;; A reload does not initialise a running module again: hook in what
-;; this version brings now.
-(when (harness-module-ready-p 'seed)
-  (harness-seed--init))
-
 (harness-define-module 'seed
   :doc "Seed sessions: forks onto a model that share one warm prompt cache."
   :requires '(session agent)

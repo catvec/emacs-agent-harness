@@ -16,6 +16,21 @@
 ;; Modules of the user's own live in `harness-extra-module-directories',
 ;; outside the harness's tree, and load beside its own.
 ;;
+;; Out of the box only the core loads (`harness-core-modules'): sessions,
+;; the turn loop, the default provider, the file, shell and Emacs tools,
+;; the question, plan, todo and sub-agent tools, permissions, session
+;; names, worktrees, and the chat and session list.  Every other feature
+;; is a module the user enables, as Doom Emacs's init.el enables its own:
+;;
+;;   (harness-enable-modules
+;;    :features tasks merge
+;;    :tools web)
+;;
+;; (`harness-enabled-modules' t loads every module.)  A module brings
+;; the modules it requires along, and its other half: ui-tasks, the task
+;; board, with tasks.  M-x harness-enable-module enables one at once,
+;; and M-x harness-describe-module says what one does.
+;;
 ;; Libraries that are not the harness's -- compose-quote, which the
 ;; compose box quotes with -- live under lisp/vendor, a directory each,
 ;; laid out as their own repositories would be (lisp/vendor/README.md).
@@ -112,12 +127,45 @@ directory.  The harness process reads this option when it starts, so
 after changing it run \\[harness-restart]."
   :type '(repeat directory) :group 'harness)
 
-(defcustom harness-enabled-modules t
-  "Modules to load: t for every discovered module, or a list of names."
-  :type '(choice (const :tag "All" t) (repeat symbol)) :group 'harness)
+(defconst harness-core-modules
+  '(acp agent compaction config naming perms priority project provider provider-claude
+    retry sandbox session store usage worktree
+    tools tools-agent tools-emacs tools-fs tools-plan tools-question tools-session-info
+    tools-shell tools-todo
+    ui ui-chat ui-compose ui-notify ui-pending ui-sessions)
+  "The modules that load whatever `harness-enabled-modules' says.
+They make a harness to work with: sessions and the turn loop, Claude
+Code for the default model, compaction and retries, session names,
+the file, shell and Emacs tools with the permissions and the sandbox
+that guard them, the tools that ask the user, plan, keep a todo list,
+describe the session and start sub-agents, worktrees, usage and
+costs, and the chat, the session list and the requests a session
+waits on.  What they require loads with them, and so does the UI half
+of each (ui-config with config, ui-worktree with worktree).
+`harness-disabled-modules' leaves any of them out.")
+
+(defcustom harness-enabled-modules nil
+  "Modules to load besides `harness-core-modules', or t for every module.
+Each is a module's name, the harness's own or one of
+`harness-extra-module-directories'.  A module brings along what it
+requires and its other half: ui-NAME, its UI, with NAME, and NAME with
+ui-NAME.  So enabling tasks loads the task board, ui-tasks, too.  A
+module that only makes use of another when it loads, as tasks merges
+each task's worktree back with merge, leaves it to be enabled too.
+
+`harness-enable-modules' sets this from a list grouped as in Doom
+Emacs's init.el, and \\[harness-enable-module] enables one module now.
+nil, the default, loads only the core; t loads every module, as the
+harness did before it had a core.  The harness process reads this when
+it starts, so after changing it run \\[harness-restart]."
+  :type '(choice (const :tag "Every module" t)
+                 (repeat :tag "These, besides the core" symbol))
+  :group 'harness)
 
 (defcustom harness-disabled-modules nil
-  "Modules never to load, by name."
+  "Modules never to load, by name, whatever else would load them.
+A module's UI half goes with it: disabling pet disables ui-pet.  A
+module that requires one of them fails to start, and says so."
   :type '(repeat symbol) :group 'harness)
 
 (defcustom harness-state-directory (locate-user-emacs-file "harness/")
@@ -154,11 +202,14 @@ every file (see `harness--compiled-fresh-p').")
                                   "lisp/harness-redaction.el"
                                   "lisp/harness-emacs-endpoint.el"
                                   "lisp/harness-notifications-desktop.el" "lisp/harness-server.el"
-                                  "lisp/harness-revision.el" "lisp/harness-slots.el"
+                                  "lisp/harness-revision.el" "lisp/harness-module-docs.el"
+                                  "lisp/harness-slots.el"
                                   "lisp/vendor/compose-quote/compose-quote.el")
   "Libraries loaded after the core files and before any module, in order.
-Both sides of the process split use them: the UI requires them all, and
-the harness process's modules require harness-policy (the settings an
+Both sides of the process split use them: the UI requires them all,
+harness-module-docs among them (which reads the modules' pages from
+their source for `harness-describe-module'), and the harness process's
+modules require harness-policy (the settings an
 administrator fixes, which each side reads for itself), harness-files,
 harness-redaction (how a secret is named and taken out of text, which
 the harness process's modules and the commands of the UI share),
@@ -233,50 +284,191 @@ never shadows a library."
   "Non-nil when FILE, a module's source or compiled file, holds a UI module."
   (string-match-p "\\`harness-ui\\(?:-\\|\\'\\)" (file-name-base file)))
 
-(defun harness--module-enabled-p (name)
-  "Non-nil when module NAME is to load.
-That is when `harness-enabled-modules' has it and
-`harness-disabled-modules' does not."
-  (and (or (eq harness-enabled-modules t)
-           (memq name harness-enabled-modules))
-       (not (memq name harness-disabled-modules))))
+;;;; Which modules load
 
-(defun harness--module-files ()
-  "Return the enabled module files of this Emacs, in the order they load.
-The harness's own come first, by directory then name, then those of
-`harness-extra-module-directories', likewise.  Of these, a UI module
-\(`harness--ui-module-p') loads where the harness's own UI modules do,
-from lisp/ui, and any other where the rest of its modules do, from
-lisp/modules.  One whose name an earlier one has, or one of the
-harness's libraries, is left out with a warning: it would replace it."
-  (let* ((dirs (harness--module-directories))
-         (kinds (append (and (member "lisp/ui" dirs) '(ui))
-                        (and (member "lisp/modules" dirs) '(other))))
-         (files (and harness-process
-                     (reverse (mapcar #'harness--path harness--client-module-files))))
-         (taken (mapcar (lambda (f) (cons (harness--file-module-name f) (harness--path f)))
-                        (append harness--core-files harness--library-files
-                                harness--client-module-files))))
-    (dolist (dir dirs)
+(defun harness--module-kinds ()
+  "Return the kinds of module this Emacs loads: ui, other, or both.
+UI modules load where lisp/ui does, the others where lisp/modules does."
+  (let ((dirs (harness--module-directories)))
+    (append (and (member "lisp/ui" dirs) '(ui))
+            (and (member "lisp/modules" dirs) '(other)))))
+
+(defun harness--module-kind (name)
+  "Return the kind of module NAME: ui for a UI module, else other."
+  (if (harness--ui-module-p name) 'ui 'other))
+
+(defun harness--module-sources (&optional warn)
+  "Return (NAME . FILE) for every module the harness can load, either side.
+The harness's own come first, by directory then name -- lisp/modules,
+lisp/ui and `harness-module-directories' -- then those of
+`harness-extra-module-directories', likewise.  Which of them load
+depends on what each requires, whatever side it runs on, so all of them
+count, here and in the harness process.  A file of the user's whose
+name an earlier one has, the harness's libraries included, is left out:
+it would replace it.  With WARN, that is logged, for the files this
+Emacs would load."
+  (let ((kinds (and warn (harness--module-kinds)))
+        (taken (mapcar (lambda (f) (cons (harness--file-module-name f) (harness--path f)))
+                       (append harness--core-files harness--library-files)))
+        (sources nil))
+    (dolist (dir (delete-dups (append (copy-sequence harness-module-directories)
+                                      (list "lisp/modules" "lisp/ui"))))
       (let ((full (harness--path dir)))
         (when (file-directory-p full)
           (dolist (f (directory-files full t harness--module-file-regexp))
             (let ((name (harness--file-module-name f)))
-              (when (harness--module-enabled-p name)
-                (push f files)
-                (push (cons name f) taken)))))))
+              (unless (assq name sources)
+                (push (cons name f) sources)))))))
     (dolist (dir (harness--extra-module-directories))
       (when (file-directory-p dir)
         (dolist (f (directory-files dir t harness--module-file-regexp))
           (let ((name (harness--file-module-name f)))
-            (when (and (memq (if (harness--ui-module-p name) 'ui 'other) kinds)
-                       (harness--module-enabled-p name))
-              (if-let* ((other (alist-get name taken)))
+            (if-let* ((other (or (alist-get name sources) (alist-get name taken))))
+                (when (and (memq (harness--module-kind name) kinds)
+                           (not (harness--module-disabled-p name)))
                   (harness-log 'warn "module %s: %s is left out, as %s has that name"
-                               name (abbreviate-file-name f) (abbreviate-file-name other))
-                (push f files)
-                (push (cons name f) taken)))))))
-    (nreverse files)))
+                               name (abbreviate-file-name f) (abbreviate-file-name other)))
+              (push (cons name f) sources))))))
+    (nreverse sources)))
+
+(defvar harness--module-headers (make-hash-table :test 'equal)
+  "FILE -> (MODIFICATION-TIME . HEADER), for `harness--module-header'.")
+
+(defun harness--module-header (file)
+  "Return (:requires NAMES :doc DOC) of the module FILE defines.
+NAMES are those of its `harness-define-module' :requires, then those
+of the harness files it requires at top level, (require \\='harness-NAME)
+as NAME: a module requires another's file to call its functions.  DOC
+is its :doc.  Read from FILE's source, without loading it, and kept
+until FILE changes."
+  (let* ((mtime (file-attribute-modification-time (file-attributes file)))
+         (cached (gethash file harness--module-headers)))
+    (if (and cached (equal (car cached) mtime))
+        (cdr cached)
+      (let ((requires nil) (files nil) (doc nil))
+        (with-temp-buffer
+          (insert-file-contents file)
+          (goto-char (point-min))
+          (when (re-search-forward "^(harness-define-module\\_>" nil t)
+            (goto-char (match-beginning 0))
+            (let ((keys (ignore-errors (nthcdr 2 (read (current-buffer))))))
+              (pcase (ignore-errors (plist-get keys :requires))
+                (`(quote ,(and (pred listp) names))
+                 (setq requires (cl-remove-if-not #'symbolp names))))
+              (when (stringp (ignore-errors (plist-get keys :doc)))
+                (setq doc (plist-get keys :doc)))))
+          (goto-char (point-min))
+          (while (re-search-forward "^(require '\\(harness-[a-z0-9-]+\\))" nil t)
+            (push (harness--file-module-name (match-string 1)) files)))
+        (let ((header (list :requires (delete-dups (append requires (nreverse files))) :doc doc)))
+          (puthash file (cons mtime header) harness--module-headers)
+          header)))))
+
+(defun harness--module-other-half (name)
+  "Return the name of the other half of module NAME, or nil.
+The UI half of module NAME is ui-NAME, and NAME is the other half of
+ui-NAME: tasks and ui-tasks, the task board.  The UI foundation, ui,
+has none."
+  (let ((s (symbol-name name)))
+    (cond ((eq name 'ui) nil)
+          ((string-prefix-p "ui-" s) (intern (substring s 3)))
+          (t (intern (concat "ui-" s))))))
+
+(defun harness--module-disabled-p (name)
+  "Non-nil when `harness-disabled-modules' leaves module NAME out.
+It does when it names NAME, or the module whose UI half NAME is."
+  (or (memq name harness-disabled-modules)
+      (and (harness--ui-module-p name)
+           (memq (harness--module-other-half name) harness-disabled-modules))))
+
+(defun harness--module-closure (sources names)
+  "Return NAMES and what they bring along, among SOURCES.
+SOURCES is ((NAME . FILE) ...), as `harness--module-sources' returns.
+A module brings the modules and libraries it requires (see
+`harness--module-header') and its other half
+\(`harness--module-other-half'), which bring theirs.  A module
+`harness-disabled-modules' leaves out is left out with what only it
+brings.  Names SOURCES lacks stay in the list, which is in no order."
+  (let ((todo (copy-sequence names)) (seen nil))
+    (while todo
+      (let ((name (pop todo)))
+        (unless (or (memq name seen) (not (symbolp name)) (harness--module-disabled-p name))
+          (push name seen)
+          (when-let* ((file (alist-get name sources)))
+            (setq todo (append (plist-get (harness--module-header file) :requires) todo)))
+          (let ((other (harness--module-other-half name)))
+            (when (and other (assq other sources))
+              (push other todo))))))
+    seen))
+
+(defun harness--selected-modules (sources)
+  "Return the names of the modules of SOURCES that load, on either side.
+SOURCES is ((NAME . FILE) ...), as `harness--module-sources' returns.
+With `harness-enabled-modules' t, every one; else
+`harness-core-modules' and `harness-enabled-modules', with what they
+bring along (`harness--module-closure').  `harness-disabled-modules'
+leaves its modules out, and their UI halves."
+  (if (eq harness-enabled-modules t)
+      (cl-loop for (name . _) in sources
+               unless (harness--module-disabled-p name) collect name)
+    (let ((selected (harness--module-closure
+                     sources (append harness-core-modules (ensure-list harness-enabled-modules)))))
+      (cl-loop for (name . _) in sources when (memq name selected) collect name))))
+
+(defun harness--module-files ()
+  "Return the module files this Emacs loads, in the order they load.
+They are the files of the modules `harness--selected-modules' selects
+of those `harness--module-sources' finds, in its order, that load on
+this side of the process split: a UI module (`harness--ui-module-p')
+where the harness's own UI modules do, from lisp/ui, and any other
+where the rest of its modules do, from lisp/modules.  The UI of a
+harness process loads the ACP client first
+\(`harness--client-module-files')."
+  (let* ((sources (harness--module-sources t))
+         (selected (harness--selected-modules sources))
+         (dirs (mapcar (lambda (d) (file-name-as-directory (harness--path d)))
+                       (harness--module-directories)))
+         (own (mapcar (lambda (d) (file-name-as-directory (harness--path d)))
+                      (append harness-module-directories '("lisp/modules" "lisp/ui"))))
+         (kinds (harness--module-kinds))
+         (files (and harness-process (mapcar #'harness--path harness--client-module-files))))
+    (dolist (s sources)
+      (let* ((file (cdr s))
+             (dir (file-name-directory file)))
+        (when (and (memq (car s) selected)
+                   (if (member dir own)
+                       (member dir dirs)
+                     (memq (harness--module-kind (car s)) kinds))
+                   (not (member file files)))
+          (setq files (append files (list file))))))
+    files))
+
+(defun harness-module-default-p (name)
+  "Non-nil when module NAME loads by default, with no module option set.
+It does when it is one of `harness-core-modules' or comes with them."
+  (let ((harness-enabled-modules nil)
+        (harness-disabled-modules nil))
+    (and (memq name (harness--selected-modules (harness--module-sources))) t)))
+
+(defun harness--unknown-modules ()
+  "Return the names `harness-enabled-modules' has that no module has."
+  (when (listp harness-enabled-modules)
+    (let ((sources (harness--module-sources)))
+      (cl-remove-if (lambda (name) (assq name sources)) harness-enabled-modules))))
+
+(defun harness--stale-modules ()
+  "Return the names of the modules that run but would no longer load.
+A reload loads the modules selected now, but stops none: one that was
+enabled when the harness started and no longer is runs on until it
+restarts."
+  (let* ((sources (harness--module-sources))
+         (selected (harness--selected-modules sources)))
+    (cl-loop for m in (harness-modules)
+             for name = (harness-module-name m)
+             when (and (harness-module-ready-p name)
+                       (assq name sources)
+                       (not (memq name selected)))
+             collect name)))
 
 (defun harness--load-file (file)
   "Compile and load FILE with `harness--defining-module' bound to its module name.
@@ -285,6 +477,11 @@ its source: what loads is a compiled copy elsewhere."
   (let ((harness--defining-module (harness--file-module-name file))
         (harness--defining-file file))
     (harness-load-compiled file)))
+
+(harness-declare-event 'harness/started "() after `harness-start' loaded and initialised the modules.")
+(harness-declare-event 'harness/stopping "() as `harness-stop' starts shutting the modules down.")
+(harness-declare-event 'harness/reloaded
+                       "() after `harness-reload' loaded the sources again and initialised the modules.")
 
 (defvar harness--defining-module)
 (defvar harness--defining-file)
@@ -317,6 +514,11 @@ Return non-nil when every module loaded and initialised."
              (harness-policy-apply))
     (error (harness-log 'error "%s" (error-message-string err))
            (signal (car err) (cdr err))))
+  (when-let* ((unknown (harness--unknown-modules)))
+    (let ((text (format-message "`harness-enabled-modules' names no module: %s"
+                                (mapconcat #'symbol-name unknown ", "))))
+      (harness-log 'warn "%s" text)
+      (display-warning 'harness text)))
   (let (failed)
     (dolist (f (harness--module-files))
       (condition-case err
@@ -359,6 +561,165 @@ Return non-nil when every module loaded and initialised."
     (harness-emit 'harness/stopping)
     (harness-modules-shutdown))
   (setq harness-started nil))
+
+;;;; Enabling modules
+
+(eval-and-compile
+  (defconst harness--module-groups
+    '((:features . "") (:providers . "provider-") (:tools . "tools-") (:ui . "ui-"))
+    "The groups of `harness-enable-modules', with the prefix of their modules.")
+
+  (defun harness--module-names (spec)
+    "Return the names of the modules SPEC names.
+SPEC is the arguments of `harness-enable-modules'.  A keyword of
+`harness--module-groups' starts a group: a name in it
+gets the group's prefix, which it may have already (web and tools-web
+in :tools are tools-web).  A name before any keyword is taken as it is."
+    (let ((prefix "") (names nil))
+      (dolist (x spec)
+        (cond ((keywordp x)
+               (setq prefix (or (alist-get x harness--module-groups)
+                                (error "No group %s in `harness-enable-modules'; the groups are %s"
+                                       x (mapconcat (lambda (g) (symbol-name (car g)))
+                                                    harness--module-groups " ")))))
+              ((and x (symbolp x))
+               (let ((name (symbol-name x)))
+                 (push (intern (if (string-prefix-p prefix name) name (concat prefix name))) names)))
+              (t (error "No module is named %S, in `harness-enable-modules'" x))))
+      (nreverse names))))
+
+;;;###autoload
+(defmacro harness-enable-modules (&rest modules)
+  "Load MODULES besides `harness-core-modules', as Doom Emacs's init.el does.
+MODULES are module names in groups, each started by a keyword:
+:features names modules as they are, :providers model providers
+\(openai is provider-openai), :tools tools (web is tools-web) and :ui
+parts of the UI (tree is ui-tree).  Names before any keyword are taken
+as they are.  Comment a name out to leave its module out:
+
+  (harness-enable-modules
+   :features tasks merge ;;pet
+   :providers openai
+   :tools web
+   :ui tree)
+
+Each module brings along what it requires and its other half: tasks
+loads ui-tasks, the task board, and ui-tree nothing more than its own
+UI.  This sets `harness-enabled-modules' to the list, replacing what it
+was, so the call says all that loads besides the core; see there.  A
+name no module has is reported when the harness starts."
+  (declare (indent 0))
+  `(harness--enable-modules ',(harness--module-names modules)))
+
+(defun harness--enable-modules (names)
+  "Set `harness-enabled-modules' to NAMES, for `harness-enable-modules'."
+  (setq harness-enabled-modules names))
+
+(defun harness--read-module (prompt)
+  "Read with PROMPT the name of a module that does not load yet.
+The candidates say what each module is."
+  (let* ((sources (harness--module-sources))
+         (selected (harness--selected-modules sources))
+         (candidates (cl-loop for (name . _) in sources
+                              unless (or (memq name selected) (harness--module-disabled-p name))
+                              collect (symbol-name name)))
+         (completion-extra-properties
+          (list :annotation-function
+                (lambda (candidate)
+                  (when-let* ((file (alist-get (intern candidate) sources))
+                              (doc (plist-get (harness--module-header file) :doc)))
+                    (concat (propertize " " 'display '(space :align-to 24))
+                            (car (split-string doc "\n"))))))))
+    (unless candidates
+      (user-error "Every module loads already"))
+    (intern (completing-read prompt candidates nil t))))
+
+(declare-function harness-restart "harness-ui")
+(declare-function harness-policy-apply "harness-policy" (&optional final))
+
+(defun harness--load-new-modules ()
+  "Load and start the module files this Emacs selects that are not loaded.
+Return the names of the modules started."
+  ;; Which ones first: loading one may require another, which then
+  ;; looks loaded but must load compiled too.
+  (let ((todo (cl-remove-if (lambda (f) (featurep (intern (file-name-base f))))
+                            (harness--module-files)))
+        (loaded nil))
+    (dolist (f todo)
+      (condition-case err
+          (progn (harness--load-file f)
+                 (push (harness--file-module-name f) loaded))
+        (error (harness-log 'error "loading %s failed: %S" f err))))
+    (condition-case err
+        (harness-policy-apply (not harness-process))
+      (error (harness-log 'error "%s" (error-message-string err))))
+    (let ((new (cl-remove-if-not #'harness-module-get loaded)))
+      (dolist (name (harness--module-order new))
+        (when (memq name new) (harness-module-start name)))
+      new)))
+
+;;;###autoload
+(defun harness-enable-module (name)
+  "Enable module NAME now: load it, with what it brings along, and start it.
+NAME is added to `harness-enabled-modules' for this Emacs session; to
+keep it, add it to `harness-enable-modules' in your init file.  The
+harness in this Emacs loads it at once.  A harness process loads its
+part when it restarts, which you are offered when there is one.
+`harness-disabled-modules' is left as it is: a module it names cannot
+be enabled."
+  (interactive (list (harness--read-module "Enable module: ")))
+  (let* ((sources (harness--module-sources))
+         (before (harness--selected-modules sources)))
+    (cond
+     ((eq harness-enabled-modules t)
+      (user-error "Every module loads already: `harness-enabled-modules' is t"))
+     ((not (assq name sources))
+      (user-error "No module %s" name))
+     ((harness--module-disabled-p name)
+      (user-error "Module %s is disabled (`harness-disabled-modules')" name))
+     ((memq name before)
+      (message "Module %s loads already" name))
+     (t
+      (setq harness-enabled-modules (append (ensure-list harness-enabled-modules) (list name)))
+      (let* ((added (cl-set-difference (harness--selected-modules sources) before))
+             (remote (and harness-process
+                          (cl-remove-if #'harness--ui-module-p added)))
+             (keep (format-message "add %s to `harness-enable-modules' in your init file to keep it"
+                                   name)))
+        (when harness-started
+          (harness--load-new-modules))
+        (cond
+         ((not harness-started)
+          (message "Module %s enabled; it loads when the harness starts; %s" name keep))
+         ((and remote (fboundp 'harness-restart) (called-interactively-p 'interactive)
+               (y-or-n-p (format "The harness process loads %s when it restarts.  Restart it now? "
+                                 (mapconcat #'symbol-name remote ", "))))
+          (harness-restart)
+          (message "Module %s enabled; %s" name keep))
+         (remote
+          (message "Module %s enabled; the harness process loads %s when it restarts (%s); %s"
+                   name (mapconcat #'symbol-name remote ", ")
+                   (substitute-command-keys "\\[harness-restart]") keep))
+         (t (message "Module %s enabled; %s" name keep))))))))
+
+(defun harness--modules-not-loaded ()
+  "Return (TITLE . PROMISE) of the modules that could be enabled, or nil.
+For `harness-describe-modules-functions': PROMISE resolves to them,
+described as `harness-module-descriptions' describes modules."
+  (unless (eq harness-enabled-modules t)
+    (let* ((sources (harness--module-sources))
+           (selected (harness--selected-modules sources))
+           (off (cl-loop for (name . file) in sources
+                         unless (or (memq name selected) (harness--module-disabled-p name))
+                         collect (list :name name :state 'available
+                                       :doc (plist-get (harness--module-header file) :doc)
+                                       :file file))))
+      (when off
+        (cons (substitute-command-keys
+               "Modules not loaded, enabled with `harness-enable-modules' or \\[harness-enable-module]")
+              (harness-resolved off))))))
+
+(add-hook 'harness-describe-modules-functions #'harness--modules-not-loaded t)
 
 ;;;; Safe reload
 
@@ -433,10 +794,15 @@ Used by tests and the loader."
 The files are this one, the core and library files, and the modules of
 this Emacs.  Return (:refused PROBLEMS) when one of them does not
 compile: then nothing was loaded.  Otherwise return (:files N :errors
-ERRORS), where ERRORS describes the files that failed to load: the
-others are loaded, modules that were not ready are initialised, and
-`harness-reload-hook' and the `harness/reloaded' event have run.  In
-the UI of a harness process, the process is asked to reload too."
+ERRORS), where ERRORS describes the files that failed to load and the
+modules that failed to initialise with an error they did not have
+before: the others are loaded, every module is initialised, again when
+it was ready so that its INIT wires in what the new code adds there
+\(see `harness-define-module'), and `harness-reload-hook' and the
+`harness/reloaded' event have run.  The result has :stale STALE too,
+the modules that are no longer enabled but run on until a restart
+\(`harness--stale-modules').  In the UI of a harness process, the
+process is asked to reload too."
   (harness--setup-load-path)
   (let* ((early (mapcar #'harness--path (append harness--core-files harness--library-files)))
          (files (append early (harness--module-files)))
@@ -467,12 +833,26 @@ the UI of a harness process, the process is asked to reload too."
             (error (let ((problem (error-message-string err)))
                      (harness-log 'error "reload: %s" problem)
                      (push problem errors)))))
-        (harness-modules-init)
+        ;; A module whose INIT fails now, again or for the first time,
+        ;; is a problem of this reload; one that failed as before is not.
+        (let ((before (mapcar (lambda (m) (cons (harness-module-name m) (harness-module-error m)))
+                              (harness-modules))))
+          (harness-modules-init)
+          (dolist (m (harness-modules))
+            (let ((err (harness-module-error m)))
+              (when (and err (not (equal err (alist-get (harness-module-name m) before))))
+                (push (format "module %s: %s" (harness-module-name m)
+                              (if (stringp err) err (error-message-string err)))
+                      errors)))))
         (when (and harness-process (fboundp 'harness-ui-reload-server))
           (harness-ui-reload-server))
         (run-hooks 'harness-reload-hook)
         (harness-emit 'harness/reloaded)
-        (list :files (length files) :errors (nreverse errors))))))
+        (let ((stale (harness--stale-modules)))
+          (when stale
+            (harness-log 'warn "reload: no longer enabled, running until a restart: %s"
+                         (mapconcat #'symbol-name stale ", ")))
+          (list :files (length files) :errors (nreverse errors) :stale stale))))))
 
 ;;;###autoload
 (defun harness-reload ()
@@ -490,6 +870,10 @@ Return non-nil when every file loaded again."
      ((plist-get result :errors)
       (message "Harness reloaded with errors: %s" (string-join (plist-get result :errors) "; "))
       nil)
+     ((plist-get result :stale)
+      (message "Harness reloaded (%d files); no longer enabled but running until a restart: %s"
+               (plist-get result :files) (mapconcat #'symbol-name (plist-get result :stale) ", "))
+      t)
      (t (message "Harness reloaded (%d files)" (plist-get result :files))
         t))))
 

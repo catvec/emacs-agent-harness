@@ -3133,20 +3133,18 @@ After that, a budget a session has was given to it, and stays."
 Load the saved sessions, drop the copies of the Budget setting they
 hold, follow the updates of the model catalogue, hold every session to
 the policy after a reload, make the move a session waits to make once
-its turn ends, and write every record when Emacs exits."
-  (harness-session--load-all)
+its turn ends, and write every record when Emacs exits.  A reload loads
+no session: the sessions are in memory already, and loading would
+settle the turns it finds running and make the moves waiting for them,
+while these turns run on in this process."
+  (unless (harness-module-ready-p 'session)
+    (harness-session--load-all))
   (harness-session--drop-budget-copies)
   (harness-on 'provider/models-updated #'harness-session--on-models-updated)
   (harness-on 'harness/reloaded #'harness-session--on-reloaded)
   ;; A session that asked to move during a turn moves when it ends.
   (harness-on 'agent/turn-ended #'harness-session--apply-pending-move)
   (add-hook 'kill-emacs-hook #'harness-session--on-kill-emacs))
-
-;; A reload does not run `:init' again for a ready module, so the
-;; subscriptions are made here too.
-(harness-on 'provider/models-updated #'harness-session--on-models-updated)
-(harness-on 'harness/reloaded #'harness-session--on-reloaded)
-(harness-on 'agent/turn-ended #'harness-session--apply-pending-move)
 
 ;; The context-window slot of sessions loaded by an earlier version of
 ;; this file holds a copy of their model's window, or the stand-in for
@@ -3157,11 +3155,6 @@ its turn ends, and write every record when Emacs exits."
 (unless harness-session--window-slot-holds-overrides
   (maphash (lambda (_ s) (setf (harness-session-context-window s) nil)) harness-sessions)
   (setq harness-session--window-slot-holds-overrides t))
-
-;; Nor does it drop the copies of the Budget setting the loaded sessions
-;; may hold: this does, the first time.
-(when (harness-module-ready-p 'session)
-  (harness-session--drop-budget-copies))
 
 (dolist (ev '((session/created . "(ID SESSION)")
               (session/changed . "(ID SESSION) after any change")

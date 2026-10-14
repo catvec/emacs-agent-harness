@@ -16,7 +16,7 @@
 ;; of it: who sent the message that waits, what carrying on costs
 ;; against the cache it lost, and a line per choice with its key, its
 ;; cost and what it does.  Its amber is the switch banner's
-;; (harness-ui-switch.el), the other place a conversation is carried
+;; (harness-ui-handoff.el), the other place a conversation is carried
 ;; over at a cost.
 ;;
 ;; A key answers once -- b, s, t, f, c -- and its capital always: B, S,

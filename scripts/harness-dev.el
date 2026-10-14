@@ -43,6 +43,7 @@ for it.")
   "Seconds between two checks that the owner still runs.")
 
 (defvar harness-tasks-store-in-repository)
+(defvar harness-enabled-modules)
 (defvar server-socket-dir)
 
 (defun harness-dev-socket-dir ()
@@ -104,6 +105,10 @@ Without HARNESS_DEV_OWNER, as when started by hand, do nothing."
   ;; boards.  Set it to t to try repository stores, in a scratch repository.
   (setq harness-tasks-store-in-repository nil)
   (require 'harness)
+  ;; Every module, so that every feature can be tried, unless
+  ;; HARNESS_DEV_MODULES=default asks for the defaults: the core only.
+  (unless (equal (getenv "HARNESS_DEV_MODULES") "default")
+    (setq harness-enabled-modules t))
   (harness-start)
   (harness-auto-reload-mode 1))
 

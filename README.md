@@ -113,9 +113,13 @@ OpenAI-compatible APIs and AWS Bedrock.
 - **Remote control.** The harness speaks the Agent Client Protocol
   (ACP), so another Emacs or any ACP client can drive it, including one
   on your phone, paired by scanning a QR code.
-- **Modular and reloadable.** Every feature is a module, modules of
-  your own load beside them, and the whole harness reloads in place
-  without losing running sessions.
+- **Modular and reloadable.** Every feature is a module. Out of the box
+  only a small core loads, and you enable the rest in your init file,
+  as Doom Emacs's `init.el` does ([Choosing modules](#choosing-modules)).
+  Modules of your own load beside them, every module has a page saying
+  what it provides and uses ([docs/modules](docs/modules/README.md)),
+  and the whole harness reloads in place without losing running
+  sessions.
 - **A companion pet.** Hatch a small creature of a random species and
   rarity. It stands at the bottom of your chats, of the task board and
   of the session list, blinks and wiggles now and then, once in a while
@@ -274,7 +278,9 @@ you update it by changing the pin.
 ## Getting started
 
 `harness-start` loads the UI, enables `harness-global-mode` and the
-mode line notifier, and starts the harness in the background.
+mode line notifier, and starts the harness in the background. It loads
+the core modules, and the others you enable ([Choosing
+modules](#choosing-modules)).
 
 1. Press `C-c h n` and choose the directory the session works in. The
    session opens in a window on the right.
@@ -290,6 +296,58 @@ dashboard or the directory access list), it also lists that buffer's
 own commands under the keys they have there. Key chords such as
 `C-c C-c` appear as they are, and single-letter keys appear behind `.`:
 for example, `. s` runs what `s` does on the task board.
+
+### Choosing modules
+
+Every feature is a module, and out of the box only the core loads
+(`harness-core-modules`): sessions and the turn loop, Claude Code for
+the default model, compaction and retries, session names, the file,
+shell and Emacs tools with the permissions and the sandbox that guard
+them, the tools that ask you a question, plan, keep a todo list,
+describe the session and start sub-agents, worktrees, usage and costs,
+the settings page, and the chat, the session list and the requests a
+session waits on. You enable the rest in your init file,
+after `(require 'harness)` and before `(harness-start)`, grouped as
+Doom Emacs's `init.el` groups its own:
+
+```elisp
+(harness-enable-modules
+ :features tasks merge supervisor notifications tasks-notify
+ :providers openai deepseek
+ :tools sessions handin web
+ :ui btw tree)
+```
+
+`:features` names modules as they are, `:providers` model providers
+(`openai` is `provider-openai`), `:tools` the tools an agent gets
+(`web` is `tools-web`) and `:ui` parts of the interface (`tree` is
+`ui-tree`). A module brings along what it requires and its UI:
+`tasks` loads the task board, `ui-tasks`, and `acp-remote` its
+remote control page, `ui-acp-remote`. One that only makes use of
+another when it is there leaves it to you: `tasks` merges each task's
+worktree back once `merge` is enabled.
+
+To load every module, as the harness did before it had a core:
+
+```elisp
+(setq harness-enabled-modules t)
+```
+
+- [docs/modules/README.md](docs/modules/README.md#choosing-modules)
+  lists every module, with a `harness-enable-modules` form to copy:
+  uncomment the ones you want. Each module has a page there saying what
+  it is, what it provides and what it uses.
+- `M-x harness-enable-module` (`X` in the `C-c h ?` menu) enables a
+  module at once: your Emacs loads its UI, and the harness process its
+  part when it restarts, which it offers. Add it to your init file to
+  keep it.
+- `M-x harness-describe-modules` (`O` in the menu) lists the modules
+  that run on either side and those that do not, and `M-x
+  harness-describe-module` shows a module's page.
+- `harness-disabled-modules` leaves modules out whatever would load
+  them, the core's included; disabling a module disables its UI too.
+
+The sections below name the modules of the features they describe.
 
 ### Choosing the prefix key
 
@@ -331,9 +389,9 @@ delivered.
 
 ### Running the latest version
 
-`C-c h v` (`M-x harness-version`) shows the commit the harness runs,
-compares it with the places newer commits come from, and can update it
-from there:
+With the `version` module (`:features version`), `C-c h v` (`M-x
+harness-version`) shows the commit the harness runs, compares it with the
+places newer commits come from, and can update it from there:
 
 - the checkout it was loaded from, as that checkout is now: what a pull
   or a merge brought there runs only after a reload (`C-c h R`) or a
@@ -1224,8 +1282,9 @@ here on the session's own model. Automatic compaction makes the kind
 `harness-compaction-kind` says, a summary by default; the settings page
 has both under **Compaction**.
 
-`C-c h C` (`M-x harness-compact`, or Compact context in the menu)
-compacts the current session by hand, between turns: it asks which kind,
+With the `ui-compact` module (`:ui compact`), `C-c h C` (`M-x
+harness-compact`, or Compact context in the menu) compacts the current
+session by hand, between turns: it asks which kind,
 naming what each costs, beside a table of who writes each, what it
 costs and what it does, and of what carrying on without compacting
 costs. Typing `/compact` in the message box asks the same;
@@ -1249,7 +1308,8 @@ filling up mid-task.
 A provider's prompt cache lasts only a while after its last use: five
 minutes or an hour for Claude, hours for DeepSeek (see
 `harness-cache-ttl`). Once it expires, the next message re-sends the
-whole conversation uncached, at the full input price. A panel above
+whole conversation uncached, at the full input price. With the
+`ui-cache` module (`:ui cache`), a panel above
 the message box says when the cache expired and what the next message
 will cost instead of what it would have cost cached. After a redaction
 took a secret out of a session and started its provider conversation
@@ -1280,8 +1340,9 @@ the merge queue reporting a conflict: any of them can reach a session
 whose prompt cache lapsed long ago, and sending it as it is would pay
 for the whole conversation again, uncached. So a message that meets a
 cold cache, whoever sent it, waits while the session asks what goes
-first. The session is blocked on the question, and the chat (or its
-popout) shows it in place of the cache panel:
+first. This is the `cowboy` module (`:features cowboy`), which brings
+its panel, `ui-cowboy`. The session is blocked on the question, and
+the chat (or its popout) shows it in place of the cache panel:
 
 ```
  ◷ Prompt cache cold  since 09:12 · Claude Opus · ~84.0k tokens
@@ -1750,8 +1811,9 @@ already is selected when there is one, else the parent takes the
 child's place; the child stays in the session list and the conversation
 tree. A session with no parent says so instead.
 
-`C-c h t` shows the conversation tree: every message of the session, its
-forks and its BTWs as a git-like graph. On a message, `f` forks the
+`C-c h t` shows the conversation tree (the `ui-tree` module, `:ui
+tree`): every message of the session, its forks and its BTWs as a
+git-like graph. On a message, `f` forks the
 session there and `c` checks the message out, moving the session's head
 back to it. Either way the next message continues from that message: the
 model knows the conversation up to it and nothing that came after, which
@@ -1761,7 +1823,7 @@ prefix. Where nothing can be cut there (Copilot, or a session older than
 this), the new conversation gets the transcript up to the message.
 
 `C-c h b` opens a BTW ("by the way") side conversation in a window
-below the session. A BTW is a new, empty session that shares nothing
+below the session (the `ui-btw` module, `:ui btw`). A BTW is a new, empty session that shares nothing
 with the session or with other BTWs, which makes it a good place for
 quick questions. It has the full chat interface, including the header
 line with its model, permission mode, thinking level and whether it is
@@ -1807,6 +1869,12 @@ too: it runs on that model, `harness-btw-model` changes nothing, and a
 model asked for must be the policy's.
 
 ### Sub-agents
+
+Sub-agents are the `tools-agent` module, in the core, as are the
+question (`tools-question`), plan (`tools-plan`), todo list
+(`tools-todo`) and session info (`tools-session-info`) tools, each a
+module of its own; the tools that list, read, message and wait on
+other sessions and tasks are `tools-sessions` (`:tools sessions`).
 
 An agent hands a job to a sub-agent of its own with `spawn_agent`: one
 prompt runs in a child session, and the call never blocks the
@@ -1867,6 +1935,10 @@ step fails and when the plan has finished, and the supervisor checks the
 work and decides what comes next. The plan shows in the chat as soon as
 it is submitted, and every worker is a sub-agent session of its own,
 named `Step ID: title`, that you can open and read like any other.
+
+Supervisor mode is the `supervisor` module (`:features supervisor`),
+which brings its UI, `ui-supervisor`; the cache seeds below are the
+`seed` module (`:features seed`).
 
 The harness enforces the rule itself, with tools and not with a prompt,
 because a model that is only told to delegate drifts back to "I'll just
@@ -2215,11 +2287,13 @@ call to one anyway, in every permission mode.
   the workers run with the supervisor's permission mode, directory
   grants and non-interactive switch, so in Ask mode their edits ask too.
   A standing deny rule for `submit_plan` still denies it.
-- **Removing the plugin.** Supervisor mode is a plugin. Add
-  `supervisor` and `ui-supervisor` to `harness-disabled-modules`, and
-  `seed` too if nothing should share a cache this way, and everything
-  else works as before: no turn has to end on a decision, sessions keep
-  every tool, and the header line shows no segment.
+- **A plugin.** Without `supervisor`, everything else works as before:
+  no turn has to end on a decision, sessions keep every tool, and the
+  header line shows no segment. So leave it out of
+  `harness-enable-modules` (or, when every module loads, add
+  `supervisor` to `harness-disabled-modules`, which takes
+  `ui-supervisor` with it), and `seed` too if nothing should share a
+  cache this way.
 
 ### Priorities
 
@@ -2354,6 +2428,22 @@ its own session and, in a git project, normally in its own worktree and
 branch, so several tasks can work in parallel; a task that has to touch
 your checkout itself can be submitted to the **main tree** instead (the
 `own worktree` / `main tree` switch below).
+
+The task board is the `tasks` module, which brings the board itself,
+`ui-tasks`. The rest of what this section describes is modules of its
+own, enabled beside it: `merge` gives each task a worktree (from the
+core's `worktree` module) and merges it back (without it tasks work in
+the main tree), `tools-handin` gives task sessions the `hand_in` tool
+they finish with, `ui-review` and `ui-patch-review` show the reports to
+verify or send back, `recap` writes the recaps on the cards,
+`tasks-notify` notifies you, and `tasks-search` is the board's search:
+
+```elisp
+(harness-enable-modules
+ :features tasks merge recap tasks-notify tasks-search
+ :tools handin sessions
+ :ui review patch-review)
+```
 
 - Write a task in the compose box at the bottom of the board and press
   `C-c C-c` to submit it. `C-c C-t` cycles the box through three modes
@@ -2747,8 +2837,9 @@ your checkout itself can be submitted to the **main tree** instead (the
   repository is on this machine. Ediff's own settings apply
   (`ediff-split-window-function` puts the two versions side by side);
   `harness-ui-patch-review-ediff-window-setup` keeps its control panel
-  in the frame. The module (`ui-patch-review`) is self-contained: add it
-  to `harness-disabled-modules` and the changes leave the report.
+  in the frame. The module (`ui-patch-review`) is self-contained:
+  without it, left out of `harness-enable-modules` or added to
+  `harness-disabled-modules`, the changes leave the report.
 - `I` adds an ongoing session to the board as a task, and `b` opens a
   BTW conversation about the tasks.
 - `SPC` on a task that needs input pops out what it waits on -- the
@@ -2931,8 +3022,8 @@ Agents work on other machines through TRAMP, as you do in Emacs:
 - A session started in a TRAMP directory works on that host: press
   `C-c h n` and choose a directory such as `/ssh:box:/srv/app/`. Every
   tool of the session runs there.
-- Any session reaches a host with the `ssh` tool, which runs a shell
-  command there. The host is an alias from `~/.ssh/config`,
+- Any session reaches a host with the `ssh` tool (the `tools-ssh`
+  module, `:tools ssh`), which runs a shell command there. The host is an alias from `~/.ssh/config`,
   `user@host:port`, or a TRAMP prefix such as `/ssh:user@host#2222:`
   (`/ssh:jump|ssh:host:` through a jump host). The other tools take
   TRAMP paths as well: `read_file`, `write_file`, `edit_file`,
@@ -2963,6 +3054,15 @@ TRAMP settings you made, such as `tramp-default-method`,
 it.
 
 ### Notifications
+
+Notifications are the `notifications` module; `tasks-notify` sends the
+task board's, and `tools-notify` gives agents the `notify` tool:
+
+```elisp
+(harness-enable-modules
+ :features notifications tasks-notify
+ :tools notify)
+```
 
 The harness tells you when a task's work waits for your review and
 when a task is done, so you can leave it working:
@@ -3026,6 +3126,8 @@ wrong one.
 
 ### Insights
 
+Insights are the `insights` module (`:features insights`).
+
 `C-c h A` (`M-x harness-insights`) opens the Insights report in a
 buffer of its own, `*harness insights*`. It shows how a period of your
 work with the agents went, like Claude Code's `/insights`. The report is
@@ -3083,6 +3185,8 @@ first ran a harness with Insights. Set
 `harness-insights-record-permissions` to nil to stop the log.
 
 ### Companion pet
+
+The pet is the `pet` module (`:features pet`).
 
 `C-c h z` (`M-x harness-pet`) opens the pet's buffer. The first time
 there is an egg: press `h` to hatch it. It hatches into one of 18
@@ -3193,8 +3297,9 @@ altogether, press `O` in its buffer, click [Turn off] there, or set
 `harness-pet-enabled` to nil (also on the settings page). It then shows
 nowhere else, grows no more and asks no model anything. Its buffer only
 says it is asleep and offers to turn it on again, as it was. To remove
-the code itself, add `pet`, `ui-pet`, `ui-pet-3d` and `ui-pet-models` to
-`harness-disabled-modules`.
+the code itself, leave `pet` out of `harness-enable-modules`, or, when
+every module loads, add it to `harness-disabled-modules`, which takes
+`ui-pet` with it.
 
 ## Configuration
 
@@ -3304,6 +3409,8 @@ redaction](#secrets-and-redaction).
 
 ### GitHub Copilot
 
+Copilot is the `provider-copilot` module (`:providers copilot`).
+
 Install GitHub Copilot CLI 1.0 or later with
 `npm install -g @github/copilot`, then run `copilot login` once. Copilot
 models appear in the model picker (`C-c h m`) as `copilot:` models,
@@ -3327,12 +3434,16 @@ Claude Code's logs (see [Secrets and redaction](#secrets-and-redaction)).
 
 ### OpenAI-compatible APIs
 
-Each entry of `harness-openai-endpoints` registers an OpenAI-compatible
-API as a provider, with models named `ID:MODEL`. OpenRouter
+With the `provider-openai` module (`:providers openai`), each entry of
+`harness-openai-endpoints` registers an OpenAI-compatible API as a
+provider, with models named `ID:MODEL`. OpenRouter
 (`OPENROUTER_API_KEY`) and OpenAI (`OPENAI_API_KEY`) are configured by
 default.
 
 ### DeepSeek
+
+DeepSeek is the `provider-deepseek` module (`:providers deepseek`),
+which brings `provider-openai` along.
 
 Set `DEEPSEEK_API_KEY` (or `harness-deepseek-api-key`, or an
 auth-source entry for `api.deepseek.com`) and `deepseek:` models appear
@@ -3368,8 +3479,9 @@ the thinking menu offers exactly those levels and never a `medium` or
 
 ### AWS Bedrock
 
-`bedrock:` models run on AWS Bedrock and authenticate with an AWS
-profile or a Bedrock API key (`AWS_BEARER_TOKEN_BEDROCK`). See
+With the `provider-bedrock` module (`:providers bedrock`), `bedrock:`
+models run on AWS Bedrock and authenticate with an AWS profile or a
+Bedrock API key (`AWS_BEARER_TOKEN_BEDROCK`). See
 `harness-bedrock-endpoints` for the configuration.
 
 #### Through a gateway
@@ -3497,8 +3609,9 @@ model should take over work already in flight.
 Claude Code and Copilot keep the conversation themselves and are sent
 only your newest message, so switching a session to one of them from
 another provider would start a conversation that knows nothing of the
-work so far. Such a switch asks first — once for all of them with
-`C-c h M` — and lists the risks: a cold prompt cache (with what the
+work so far. With the `handoff` module (`:features handoff`), which
+brings its banner, `ui-handoff`, such a switch asks first — once for
+all of them with `C-c h M` — and lists the risks: a cold prompt cache (with what the
 session's context costs to write), lower fidelity (the model explores
 again; tool calls and thinking reach it only as text), the old
 provider's own state left behind, and that a running turn finishes its
@@ -3588,7 +3701,8 @@ budget is money, not a permission.
 
 The usage dashboard (`C-c h u`) lists every quota window with its reset
 time, the plan's extra usage, and the value at API prices that the plan
-covered.  Its Fallback section sets `harness-fallback-models`, the order
+covered.  With the `fallback` module (`:features fallback`), its
+Fallback section sets `harness-fallback-models`, the order
 of use when a provider runs out of quota or money, first entry first:
 each entry a provider id (that provider's model of the same
 [tier](#model-tiers), or of the nearest tier it has, shown with the
@@ -3781,6 +3895,9 @@ the token yourself.
 
 ### Pairing a phone
 
+Pairing is the `acp-remote` module, which brings its page,
+`ui-acp-remote`: `(harness-enable-modules :features acp-remote)`.
+
 A phone (or any other device on the network) can drive the harness
 with an ACP client of its own, such as ACP UI, Agmente or Ferngeist.
 ACP defines no way to pair a device, so the harness pairs it with a web
@@ -3846,15 +3963,27 @@ Corporate mode turns all of this off.
 
 The core only loads modules and passes messages between them. Every
 feature is a module, and the UI talks to the rest of the harness over
-ACP, so it works the same with a local or a remote harness.
+ACP, so it works the same with a local or a remote harness. The core
+modules load always, the others when enabled ([Choosing
+modules](#choosing-modules)); a module's UI half, `ui-NAME`, loads
+with it.
 
-| Area | Modules |
-|---|---|
-| Core | `config` `project` `store` `session` `agent` `perms` `sandbox` `secrets` `redact` `usage` `compaction` `cowboy` `handoff` `naming` `judge` `skills` `worktree` `merge` `tasks` `notifications` `tasks-notify` `readonly` `supervisor` `seed` `acp` `acp-remote` |
-| Providers | `provider` `provider-claude` `provider-copilot` `provider-openai` `provider-deepseek` `provider-bedrock` `provider-demo` |
-| Tools | `tools` `tools-fs` `tools-shell` `tools-ssh` `tools-emacs` `tools-web` `tools-agent` `tools-sessions` `tools-events` `tools-notify` |
-| User interface | `ui` `ui-chat` `ui-compose` `ui-compact` `ui-cowboy` `ui-sessions` `ui-tasks` `ui-slots` `ui-tree` `ui-notify` `ui-usage` `ui-worktree` `ui-merge` `ui-children` `ui-btw` `ui-media` `ui-dirs` `ui-config` `ui-qr` `ui-remote` `ui-supervisor` `ui-secrets` |
+| Area | Core | Enabled by you |
+|---|---|---|
+| Sessions | `config` `project` `store` `session` `agent` `compaction` `retry` `priority` `usage` `naming` | `cowboy` `handoff` `fallback` `seed` `supervisor` `insights` `pet` `version` `decisions` `session-search` `cost-compare` `commit-msg` |
+| Tasks and git | `worktree` | `tasks` `tasks-notify` `tasks-search` `recap` `merge` |
+| Safety | `perms` `sandbox` | `tool-slots` `tool-slots-load` `readonly` `secrets` `redact` `judge` |
+| Providers | `provider` `provider-claude` | `provider-copilot` `provider-openai` `provider-deepseek` `provider-bedrock` `provider-demo` |
+| Tools | `tools` `tools-fs` `tools-shell` `tools-emacs` `tools-question` `tools-plan` `tools-todo` `tools-session-info` `tools-agent` | `tools-ssh` `tools-web` `tools-sessions` `tools-notify` `tools-handin` `tools-emacs-eval` `tools-dev` `tools-events` `tools-compact` `skills` |
+| Connections | `acp` | `acp-remote` `notifications` |
+| User interface | `ui` `ui-chat` `ui-compose` `ui-pending` `ui-sessions` `ui-notify` `ui-config` `ui-usage` `ui-priority` `ui-worktree` | `ui-btw` `ui-tree` `ui-compact` `ui-cache` `ui-review` `ui-report` `ui-patch-review` `ui-popout` `ui-media` `ui-dirs` `ui-qr` `ui-acp-remote` `ui-handoff` |
 
+[docs/modules](docs/modules/README.md) has a page for each module,
+generated from its source by `scripts/module-docs.sh`: what it is, what
+it requires and brings along, and the methods, tools, events, filter
+chains and hooks it provides and uses. `M-x harness-describe-module`
+shows one in Emacs. [docs/module-audit.md](docs/module-audit.md) is an
+audit of the modules and their API made with them.
 Beside the modules, `lisp/vendor` holds libraries the harness ships that
 need nothing of it, and may be used without it: `compose-quote`, which
 the compose box quotes with, is the first. See
@@ -3871,10 +4000,11 @@ or relative to `user-emacs-directory`:
 ```
 
 As in the harness's own tree, each file named `harness-NAME.el` there
-is a module called `NAME`, which `harness-enabled-modules` and
-`harness-disabled-modules` name like any other. Other files are not
-modules, but a module can `require` them: the directories are on
-`load-path`.
+is a module called `NAME`. Like the harness's optional modules, it
+loads once enabled, with `harness-enable-modules` (or with
+`harness-enabled-modules` t, which loads every module), and
+`harness-disabled-modules` leaves it out. Other files are not modules,
+but a module can `require` them: the directories are on `load-path`.
 
 The name also decides where a module runs:
 
@@ -3893,6 +4023,10 @@ Your modules are handled like the harness's own:
 - `harness-auto-reload-mode` watches their directories.
 - `M-x harness-describe-modules` lists the modules of your Emacs and of
   the harness process, with the file of each of yours.
+- `M-x harness-describe-module` shows a page for each, read from its
+  source: its `:doc`, the Commentary of its file, and what it provides
+  and uses ([docs/architecture.md](docs/architecture.md#pages-of-the-modules)
+  says what the pages read).
 - The options of a module in the harness process show on the settings
   page, under Advanced, by module.
 
@@ -3937,7 +4071,9 @@ your Emacs that calls it.
 (provide 'harness-ui-hello)
 ```
 
-The harness process receives every `harness-` variable you set, so
+Enable them in your init file with `(harness-enable-modules hello)`:
+`ui-hello` is the UI half of `hello`, so it comes with it. The harness
+process receives every `harness-` variable you set, so
 `(setq harness-hello-greeting "Hi")` in your init file reaches the
 module.
 [docs/architecture.md](docs/architecture.md#modules-of-your-own) has
@@ -3947,6 +4083,10 @@ Further documentation:
 
 - [DESIGN.md](DESIGN.md): the design the harness implements
 - [docs/architecture.md](docs/architecture.md): module contracts
+- [docs/modules](docs/modules/README.md): a page for each module,
+  generated from its source (`scripts/module-docs.sh`)
+- [docs/module-audit.md](docs/module-audit.md): an audit of the modules
+  and their API, and what is left to do
 - [docs/ui-guide.md](docs/ui-guide.md): the presentation layer, for
   writing UI modules
 - [docs/dev-loop.md](docs/dev-loop.md): the live development loop
@@ -3962,8 +4102,15 @@ scripts/test.sh test/harness-core-test.el    # run one suite (optionally with an
 scripts/lint.sh [--checkdoc]                 # byte-compile every file out of tree
 scripts/dev.sh start                         # start a clean development Emacs
 scripts/media.sh [NAME...]                   # take the screenshots in docs/media again
+scripts/module-docs.sh [--check]             # write the module pages in docs/modules again
 make -C lisp/vendor/compose-quote test       # a vendored library's own tests, on their own
 ```
+
+A development Emacs (`scripts/dev.sh`) loads every module; set
+`HARNESS_DEV_MODULES=default` to try the harness as a new user gets it,
+with the core only. Run `scripts/module-docs.sh` after changing what a
+module provides or uses, and commit the pages it writes;
+`scripts/module-docs.sh --check` fails while they are out of date.
 
 Tests that talk to real models run only when `HARNESS_INTEGRATION=1` is
 set. See [docs/dev-loop.md](docs/dev-loop.md) for the full workflow.
@@ -3996,8 +4143,12 @@ or `HARNESS_TEST_IONICE=0` to run them at the usual priority.
 `M-x harness-reload` (`C-c h R`) checks and byte-compiles every source
 file, then reloads the harness in place, keeping running sessions. If
 any file fails to compile, nothing is reloaded. The UI reloads first,
-then the harness process. The echo area says whether the process
-reloaded every file, some failed to load, or it refused the reload.
+then the harness process. Each ready module's `:init` runs again, so
+what new code wires in there takes effect. A module enabled since the
+start loads; one no longer enabled runs on until a restart, and the
+reload says so. The echo area says whether
+the process reloaded every file, some failed to load or a module failed
+to initialise, or it refused the reload.
 `harness-auto-reload-mode` reloads the harness whenever one of its
 source files changes.
 

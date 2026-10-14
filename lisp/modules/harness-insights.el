@@ -1344,10 +1344,6 @@ is not tried again for a while unless `:refresh')."
   (harness-on 'permission/decided #'harness-insights--on-decided)
   (ignore-errors (harness-insights--prune-permissions)))
 
-;; A reload does not initialise a running module again: subscribe now.
-(when (harness-module-ready-p 'insights)
-  (harness-insights--init))
-
 (harness-define-module 'insights
 		       :doc "The Insights report: figures and a written summary of the work, for any provider."
 		       :requires '(store)

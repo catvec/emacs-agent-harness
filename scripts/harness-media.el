@@ -70,6 +70,7 @@ layout: half the frame keeps the board's cards whole.")
 (defvar harness-state-directory)
 (defvar harness-process)
 (defvar harness-disabled-modules)
+(defvar harness-enabled-modules)
 (defvar harness-ui-positions)
 (defvar harness-ui-default-position)
 (defvar harness-ui--position-buffers)
@@ -3039,7 +3040,7 @@ lifted again afterwards, and the settings it fixed get their values back."
 (defvar harness-acp-remote-port)
 (defvar harness-acp-remote-address)
 (declare-function harness-acp-remote--grant "harness-acp-remote")
-(declare-function harness-ui-remote-toggle-qr "harness-ui-remote")
+(declare-function harness-ui-acp-remote-toggle-qr "harness-ui-acp-remote")
 
 (defun harness-media-shot-remote ()
   "The remote control page: serving, a paired phone, the QR code unfolded."
@@ -3055,7 +3056,7 @@ lifted again afterwards, and the settings it fixed get their values back."
   (harness-media--view #'harness-remote-control
                        (lambda ()
                          (harness-media--settle 0.5)
-                         (harness-ui-remote-toggle-qr)
+                         (harness-ui-acp-remote-toggle-qr)
                          (harness-media--settle 1)
                          (goto-char (point-min))))
   (harness-media--capture "remote")
@@ -3383,6 +3384,8 @@ afterwards."
         ;; pictures; the settings-policy picture brings its own.
         harness-policy-file nil
         harness-process nil
+        ;; The pictures show every feature.
+        harness-enabled-modules t
         ;; Every agent is scripted, so recaps are seeded for the pictures
         ;; instead (`harness-media--seed-recaps').  A busy machine --
         ;; this run's own, or whatever else it is doing -- would have

@@ -19,7 +19,8 @@ module needs something more, add it here first.
  Completion     provider, provider-openai, provider-deepseek, provider-claude,
                 provider-bedrock, provider-copilot
  Tool calls     tools, tools-fs, tools-shell, tools-ssh, tools-emacs, tools-emacs-eval,
-                tools-web, tools-agent, tools-sessions, tools-events, tools-notify,
+                tools-web, tools-agent, tools-question, tools-plan, tools-todo,
+                tools-session-info, tools-sessions, tools-events, tools-notify,
                 tools-handin, tools-compact, tools-dev
  ------------------------------- bus (lisp/harness-core.el)
  Core           harness.el (loader, reload), harness-core (methods, events, filters,
@@ -169,7 +170,7 @@ local connection.
 ## The bus
 
 ```elisp
-(harness-define-module 'NAME :doc "…" :requires '(a b) :init #'fn :shutdown #'fn)
+(harness-define-module 'NAME :doc "…" :requires '(a b) :init #'fn :shutdown #'fn) ; :init runs at every reload
 (harness-defmethod session/get (id) "Doc." …)          ; registers method `session/get'
 (harness-call 'session/get id)                         ; sync; may return a promise
 (harness-call-async 'session/get id)                   ; always a promise
@@ -219,11 +220,21 @@ or `ui-NAME`, in `lisp/ui/harness-ui-NAME.el`.  The directories of
 (see Modules of your own).
 
 Reload safety: keep state in `defvar`s (never re-initialised), register
-subscribers with named functions, and make `:init` idempotent.
+subscribers with named functions, and make `:init` idempotent: every
+`harness-reload` runs the `:init` of each ready module again, so that
+what new code subscribes there takes effect without a restart.
+`harness-on`, `harness-add-filter` and `add-hook` add a named function
+once, at the priority the latest code gives.  Work to do once per start
+-- reading state from disk, recovering what a stopped harness left,
+connecting, starting a server -- checks `(harness-module-ready-p
+'NAME)` first, which is nil while the module starts and non-nil when it
+initialises again.  A ready module whose `:init` fails again stays
+ready with what it set up before, and the reload reports the error; a
+disabled module stays off.
 `harness-reload` compiles every file first and refuses to load anything
 if one fails.  It loads harness.el, the core files, the libraries of
 lisp/ (`harness--library-files`: policy, files, redaction, the Emacs
-endpoint, desktop notifications, server, revision, slots) and the
+endpoint, desktop notifications, server, revision, module docs, slots) and the
 modules, so a module never runs against a library as it was before an
 update; a file added to lisp/ that both sides load belongs in one of
 those lists.  Records made before a reload
@@ -232,6 +243,79 @@ way that tolerates records without it (see `harness-acp--client-get`),
 or the module drops its stale records (see
 `harness-provider-claude--drop-stale-entries`).  After a reload the
 `harness/reloaded` event fires and the UI redraws every session buffer.
+A reload loads the modules selected now (below) but stops none: one no
+longer enabled runs on until a restart, and the reload says so.
+
+## Which modules load
+
+Out of the box the harness loads its core, `harness-core-modules`:
+sessions and the turn loop, the Claude Code provider of the default
+model, compaction and retries, session names, the file, shell and
+Emacs tools with the permissions and the sandbox that guard them, the
+question, plan, todo, session info and sub-agent tools (a module
+each), worktrees, usage, and the chat, session list and pending
+requests of the UI.  Everything else is
+enabled by the user, Doom style, with `harness-enable-modules` (which
+sets `harness-enabled-modules`), or at once with `M-x
+harness-enable-module`; `harness-enabled-modules` t loads every module.
+`harness--selected-modules` decides, the same way on both sides of the
+process split, from every module file of either side
+(`harness--module-sources`):
+
+- The core and the enabled modules load, with what each brings along
+  (`harness--module-closure`): the modules of its `:requires`, the
+  harness files it `require`s at top level -- a module that requires
+  another's file loads it, libraries of lisp/ui such as ui-drag
+  included, so they load compiled -- and its other half, `ui-NAME` for
+  `NAME` and `NAME` for `ui-NAME`.  They are read from the source
+  without loading it (`harness--module-header`).
+- `harness-disabled-modules` leaves its modules out, with their UI
+  halves, whatever brings them; a module requiring one fails to start.
+- Each side then loads the files of its own directories
+  (`harness--module-files`), in directory then name order.
+
+The harness's guards, perms and sandbox, are core modules: they load
+whatever the user enables, and only `harness-disabled-modules` takes
+them out (see docs/policy.md).  A name `harness-enabled-modules` has
+that no module has is reported at `harness-start`.
+
+## Pages of the modules
+
+Every module documents itself: `lisp/harness-module-docs.el` reads
+from a module's source, without loading it, what it provides to the
+others -- methods, tools, model providers, events, the filter chains
+it runs, hooks, commands, options -- and what it uses of them: the
+modules it requires and brings along, the methods it calls (and
+whether it does without them), the events it handles on the bus or
+hears over ACP, those it emits, the filter chains it joins and the
+hooks it adds to.  `scripts/module-docs.sh` writes a page for each in
+docs/modules/ and an index whose tables cross the events, filter chains
+and hooks with the modules on either side of them, with the
+`harness-enable-modules` template of every optional module;
+`scripts/module-docs.sh --check` says whether they are up to date, and
+`M-x harness-describe-module` shows a page in Emacs.  Run the script
+after changing what a module provides or uses, and commit the pages.
+
+The pages see what the code says plainly, so a module keeps to these:
+
+- `:doc` says in a line what the module is; the Commentary section of
+  its file, which the page shows as its About, says how it works.
+- Names are quoted where they are used: `(harness-on 'area/event ...)`,
+  `(harness-call 'area/verb ...)`, `"_harness/area/verb"` in the UI.  A
+  `dolist` over a quoted list of them is read too; a name computed at
+  run time is not.
+- Events are declared (`harness-declare-event`) by the module that
+  emits them, and an event a UI module hears is forwarded to the UI
+  (`harness-acp--forwarded-events`, or `harness-acp-extra-events` for a
+  module of your own).  A UI module hears events in a function it adds
+  to `harness-ui-event-functions`, comparing the event with literal
+  names (`"task/changed"`) or prefixes (`"merge/"`).  A test of
+  test/harness-module-docs-test.el fails when an event is emitted
+  undeclared, or heard in the UI but never forwarded there.
+- Handlers are named functions, as reload safety wants anyway.
+
+docs/module-audit.md is an audit of the modules and their API made
+with these pages, and what is left to do about it.
 
 ## Modules of your own
 
@@ -241,8 +325,10 @@ to `user-emacs-directory`).  It is bound by this document as the
 harness's own modules are.  `harness--module-files` decides what loads
 where:
 
-- Every `harness-NAME.el` of such a directory is module `NAME`,
-  filtered by `harness-enabled-modules` and `harness-disabled-modules`.
+- Every `harness-NAME.el` of such a directory is module `NAME`, which
+  `harness-enabled-modules` and `harness-disabled-modules` select as
+  they select the harness's own (Which modules load, above): a module
+  of your own loads once enabled, or when an enabled module brings it.
   Its other files are not modules.  The directories are on `load-path`,
   after everything else so that no file there shadows a library, so a
   module may `require` its other files.  Only module files are
@@ -6584,7 +6670,7 @@ names its own working and temporary directories.
   session pickers).  The supervisor module forks the workers of its fork
   steps this way, when a plan has two or more on one model.
 
-### tools-fs, tools-shell, tools-ssh, tools-emacs, tools-emacs-eval, tools-web, tools-agent, tools-sessions, tools-events, tools-notify, tools-handin, tools-compact
+### tools-fs, tools-shell, tools-ssh, tools-emacs, tools-emacs-eval, tools-web, tools-agent, tools-question, tools-plan, tools-todo, tools-session-info, tools-sessions, tools-events, tools-notify, tools-handin, tools-compact
 
 Tool names, labels and inputs (all paths relative to cwd or absolute;
 TRAMP prefixes come from the session host):
@@ -7124,7 +7210,7 @@ a question the harness asked (below) gets the text alone.
 
 The harness asks the user its own questions the way ask_user does, with
 no tool call behind them: `question/ask SESSION-ID REQUEST ON-ANSWER`
-(tools-agent) puts REQUEST, `(:question :options :allow-free-text .
+(tools-question) puts REQUEST, `(:question :options :allow-free-text .
 MORE)`, pending on the session, MORE going into the payload as it is
 for the clients that know it (the cowboy module's `:cowboy` and
 `:waiting-message`), emits `question/asked`, and returns the id.  It is
@@ -7856,7 +7942,7 @@ wanting to block on a remote host), asks for the image:
 (`question/image SESSION-ID PID INDEX`: the file's bytes in base64,
 read by the harness, for a question still pending; an error when there
 is none, or the file is gone or larger than
-`harness-tools-agent-image-max-bytes`, 16 MiB).
+`harness-tools-question-image-max-bytes`, 16 MiB).
 
 `initialize` answers `protocolVersion`, `agentCapabilities`
 (`loadSession`, `promptCapabilities` and, while the bus has
@@ -8517,7 +8603,7 @@ read from its header (`harness-image-pixel-size`: PNG, GIF, JPEG, WebP,
 BMP), is a line saying so instead, a button opening it outside Emacs
 (`harness-ui-image-too-large`, for the transcript's images, a report's
 and the image popout too), and ask_user refuses one over
-`harness-tools-agent-image-max-side` (8000) pixels on a side, telling
+`harness-tools-question-image-max-side` (8000) pixels on a side, telling
 the agent to crop it.  The UI reads the file itself when it shares the
 harness's files (the harness in this Emacs, or the process it
 started), and otherwise asks for it with `question/image`, showing
@@ -8644,7 +8730,7 @@ compare it with.  The model switch wins when both apply: a cache held
 for another model reads as that model's, dropped or not.  The first
 request that stamps a cache after a redaction clears the dropped mark,
 and so does a compaction, so the panel goes then as well.  While the
-switch banner (`ui-switch`) asks how to
+switch banner (`ui-handoff`) asks how to
 hand over, or the cold-cache question waits (`harness-ui-cache--asked-p`),
 the panel stays away: the banner's options, or the question's, say what
 the cache means for each.  The panel needs no input and no polling: each
@@ -9526,7 +9612,7 @@ to the front and lists the sessions waiting for the user
 notification through `_harness/notification/send` and says in the
 echo area what each provider did with it.
 
-Remote control page (`harness-ui-remote`, `C-c h P`,
+Remote control page (`harness-ui-acp-remote`, `C-c h P`,
 `harness-remote-control`): whether the harness serves other devices
 (start or stop), the ACP address their clients connect to, the address
 of this machine that QR codes carry (chosen among the interfaces), the
@@ -10790,7 +10876,7 @@ those two keys over the buffer's own, only for as long as it shows; it
 follows the task events of its session and draws again only when what
 it shows changes, finding the chat buffer by session id with `equal`,
 since an id from the harness process is a fresh string), the switch
-banner of a session (`harness-ui-switch`: the chat panel that asks how
+banner of a session (`harness-ui-handoff`: the chat panel that asks how
 to hand the conversation over when a lossy model switch needs it -- the
 models, the reason, the risks and costs as labelled rows, and a button
 and a key per way to hand over, falling back to the minibuffer question

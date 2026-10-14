@@ -2516,7 +2516,7 @@ of non-interactive mode says what the marked sessions have."
                     (when transient--prefix (execute-kbd-macro (kbd "C-g"))))))
         ;; a and c are non-interactive: the label says so, and i turns it off.
         (harness-ui-sessions-test--mark "a" "c")
-        (should (string-match-p " i Non-interactive: on$" (menu "i")))
+        (should (string-match-p " i Non-interactive: on\\(?: \\|$\\)" (menu "i")))
         (should (equal '(("_harness/session/set-all"
                           (:settings (:non-interactive :false) :filter (:ids ("a" "c")))))
                        (harness-ui-sessions-test--answers)))
@@ -2524,7 +2524,7 @@ of non-interactive mode says what the marked sessions have."
         (harness-ui-sessions-test--press "U")
         (harness-ui-sessions-test--mark "a" "b")
         (setq harness-ui-sessions-test--requests nil)
-        (should (string-match-p " i Non-interactive: off$" (menu "i")))
+        (should (string-match-p " i Non-interactive: off\\(?: \\|$\\)" (menu "i")))
         (should (equal '("_harness/session/set-all" "_harness/task/set-all")
                        (mapcar #'car (harness-ui-sessions-test--answers))))
         (should (equal '(:non-interactive t)

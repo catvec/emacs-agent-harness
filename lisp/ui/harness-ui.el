@@ -4252,7 +4252,7 @@ the switch changes in all, SESSION the session's id or nil for a switch
 of many, HOST the chat buffer the command ran in or nil, and CALLBACK a
 function taking the mode chosen (`compact', `compact-new', `transcript',
 `none' or `cancel'), run once the user decides.  The default asks in the
-minibuffer (`harness-ui--read-handoff'); the `ui-switch' module shows a
+minibuffer (`harness-ui--read-handoff'); the `ui-handoff' module shows a
 banner in the session's chat instead.")
 
 (defun harness-ui--handoff-perform (session-id model label mode)
@@ -5207,6 +5207,10 @@ leaves the buffer's commands out, never the whole menu."
     ("w" "Worktrees" harness-worktrees :if (lambda () (harness-ui--command-available-p 'harness-worktrees)))
     ("Q" "Task slots" harness-slots :if (lambda () (harness-ui--command-available-p 'harness-slots)))
     ("S" "Settings" harness-settings :if (lambda () (harness-ui--command-available-p 'harness-settings)))
+    ;; Out of the box only the core modules load: these say which do
+    ;; and enable another.
+    ("O" "Modules" harness-describe-modules)
+    ("X" "Enable a module" harness-enable-module)
     ("z" "Companion pet" harness-pet :if (lambda () (harness-ui--command-available-p 'harness-pet)))
     ("c" "Connect remote" harness-connect-remote :inapt-if harness-corporate-p)
     ("P" "Remote control" harness-remote-control
@@ -5235,7 +5239,10 @@ leaves the buffer's commands out, never the whole menu."
 Also stop the harness process when Emacs exits, and make changes of
 `harness-corporate-mode' reach the harness.  A click on a notification
 this Emacs no longer knows lists the sessions waiting for you, unless
-another function already handles such clicks."
+another function already handles such clicks.  A reload, which
+initialises the module again, keeps the connection and leaves the mode
+as the user has it: connecting again would replace the connection, and
+the answers it waits for with it."
   (add-hook 'kill-emacs-hook #'harness-ui--stop-server)
   (add-hook 'harness-corporate-mode-change-hook #'harness-ui--corporate-mode-changed)
   ;; A click on a macOS notification this Emacs no longer knows (one it
@@ -5243,10 +5250,12 @@ another function already handles such clicks."
   (unless harness-notifications-desktop-unknown-click-function
     (setq harness-notifications-desktop-unknown-click-function
           #'harness-ui--unknown-notification-clicked))
-  (harness-ui-connect harness-ui-connection-address)
-  ;; A reload reaches the UI as the forwarded `harness/reloaded' event, for
-  ;; local and remote harnesses alike, so no bus subscription is needed.
-  (harness-global-mode 1))
+  (unless (harness-module-ready-p 'ui)
+    (harness-ui-connect harness-ui-connection-address)
+    ;; A reload reaches the UI as the forwarded `harness/reloaded' event,
+    ;; for local and remote harnesses alike, so no bus subscription is
+    ;; needed.
+    (harness-global-mode 1)))
 
 (harness-define-module 'ui
   :doc "UI foundation: ACP connection, faces, positions, keymap and menu."

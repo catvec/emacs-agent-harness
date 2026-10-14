@@ -3966,12 +3966,10 @@ to call again."
   (harness-off (cons 'agent/turn-started #'harness-perms--end-turn-grants))
   (harness-off (cons 'agent/turn-ended #'harness-perms--end-turn-grants)))
 
-;; A reload does not run `:init' again for a ready module, and the tools
-;; above are registered at load time, so the chain is installed here too:
-;; a reloaded harness never offers request_directory_access without the
-;; stage that decides it.
-(harness-perms--init)
-
+;; The tools above are registered as the file loads.  A reload
+;; initialises the module again before anything runs, so a reloaded
+;; harness never offers request_directory_access without the stage that
+;; decides it; and a call no stage decides is asked about.
 (harness-define-module 'perms
   :doc "Directory jail, directory requests, sandbox guard, permission modes, auto judge, user prompts and the user's approval of denied calls."
   :requires '(config tools)

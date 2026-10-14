@@ -1998,6 +1998,13 @@ set for sessions."
 
 (defvar harness-budget)
 
+(defun harness-session-test--start-again ()
+  "Start the session module as a new harness does: it reads the saved sessions.
+A module that is ready initialises again instead, as a reload has it,
+and reads none."
+  (setf (harness-module-state (harness-module-get 'session)) 'registered)
+  (should (harness-module-start 'session)))
+
 (ert-deftest harness-session-budget-setting-copies-dropped-once ()
   "Sessions used to copy the Budget setting into a budget of their own:
 one budget per session, where the setting is one for them all.  A new
@@ -2015,7 +2022,7 @@ a budget given to a session after that stays."
       ;; The old version left no marker.
       (harness-call 'store/delete harness-session--budget-copies-marker)
       (clrhash harness-sessions)
-      (harness-session--init)
+      (harness-session-test--start-again)
       (dolist (id (cons fresh old))
         (should-not (plist-get (harness-call 'session/get id) :budget))
         (should-not (plist-get (harness-call 'store/load (format "sessions/%s.json" id)) :budget)))
@@ -2024,14 +2031,31 @@ a budget given to a session after that stays."
       (harness-call 'session/update (car old) :budget '(:amount 2.0) :silent t)
       (harness-session-flush)
       (clrhash harness-sessions)
-      (harness-session--init)
+      (harness-session-test--start-again)
       (should (equal '(:amount 2.0) (plist-get (harness-call 'session/get (car old)) :budget)))
       ;; Loaded over the old version in a running harness, this one drops
-      ;; the copies the loaded sessions hold.
+      ;; the copies the loaded sessions hold, as the reload initialises
+      ;; the module again.
       (harness-call 'store/delete harness-session--budget-copies-marker)
       (harness-test-load-module 'session)
       (should-not (plist-get (harness-call 'session/get (car old)) :budget))
       (should (harness-call 'store/load harness-session--budget-copies-marker)))))
+
+(ert-deftest harness-session-reload-reads-no-session ()
+  "A reload initialises the module again, but reads no saved session.
+The sessions are in memory already; reading them would settle the turns
+found running and make the moves waiting for them, while those turns
+run on.  A start reads them."
+  (harness-session-test-with
+    (let ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id)))
+      (harness-session-flush)
+      (clrhash harness-sessions)
+      (should (harness-module-ready-p 'session))
+      (harness-test-load-module 'session)
+      (should (harness-module-ready-p 'session))
+      (should-not (gethash id harness-sessions))
+      (harness-session-test--start-again)
+      (should (gethash id harness-sessions)))))
 
 ;;;; The thinking level of a BTW
 

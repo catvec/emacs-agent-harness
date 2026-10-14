@@ -441,14 +441,6 @@ the task itself goes straight to done."
   (harness-on 'agent/tool-result #'harness-recap--on-tool-result)
   (harness-recap--start-timer))
 
-;; A reload does not initialise a running module again: subscribe and
-;; restart the timer now.  On a fresh start `:init' does it, once the
-;; tasks module (which defines `harness-tasks-recap-interval') is loaded;
-;; calling it here then would signal void-variable, as modules load in
-;; alphabetical order and recap comes before tasks.
-(when (harness-module-ready-p 'recap)
-  (harness-recap--init))
-
 (harness-declare-event 'recap/done "(SESSION-ID RECAP) after a task card's recap was stored.")
 (harness-declare-event 'recap/failed "(SESSION-ID MESSAGE) when a recap could not be made.")
 (harness-declare-event 'recap/session-done
