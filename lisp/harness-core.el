@@ -675,6 +675,30 @@ as its file.")
 That is when the module becomes ready, and after each time its INIT
 runs again, as `harness-reload' has it do (see `harness-module-start').")
 
+(defun harness-loading-module ()
+  "Return the name of the module whose definitions are loading, or nil.
+That is NAME while a file named harness-NAME.el, or its compiled copy,
+loads: one module per file, named after it, is the harness's
+convention, whoever loads the file -- the harness, or a project's
+.dir-locals.el requiring its plugin (see harness-plugins.el), maybe
+while the harness loads a module of its own.  Otherwise it is the
+module the harness is loading (`harness--defining-module'), whose file
+may load files of other names."
+  (or (and (stringp load-file-name)
+           (let ((base (file-name-base load-file-name)))
+             (and (string-match-p "\\`harness-[a-z0-9-]+\\'" base)
+                  (intern (substring base (length "harness-"))))))
+      harness--defining-module))
+
+(defun harness-module--start-late (name)
+  "Start module NAME, which was defined after the harness started.
+Not when it is ready, failed or disabled by now, nor when
+`harness-disabled-modules' names it."
+  (let ((m (gethash name harness--modules)))
+    (when (and m (eq (harness-module-state m) 'registered)
+               (not (memq name (bound-and-true-p harness-disabled-modules))))
+      (harness-module-start name))))
+
 (cl-defun harness-define-module (name &key doc requires init shutdown)
   "Register module NAME.
 DOC describes it.  REQUIRES lists module names that must be ready
@@ -693,7 +717,13 @@ again.
 
 Re-evaluating a definition while the module is ready keeps it ready
 with the new metadata and functions; the next `harness-modules-init',
-as a reload runs, calls the new INIT."
+as a reload runs, calls the new INIT.
+
+A module that code other than the harness defines once the harness
+has started -- a project's plugin that its .dir-locals.el requires (see
+harness-plugins.el), say -- starts by itself as soon as the file that
+defines it has loaded, unless `harness-disabled-modules' names it.  The
+harness starts the modules it loads itself."
   (let ((existing (gethash name harness--modules))
         ;; Not a module another file defines as this one requires it.
         (file (if (and harness--defining-file (eq name harness--defining-module))
@@ -709,7 +739,11 @@ as a reload runs, calls the new INIT."
                                          :init-fn init :shutdown-fn shutdown
                                          :file file
                                          :feature (intern (format "harness-%s" name)))
-               harness--modules)))
+               harness--modules)
+      (when (and (bound-and-true-p harness-started)
+                 (not (eq name harness--defining-module)))
+        ;; After the file has loaded: its init function may come below.
+        (run-at-time 0 nil #'harness-module--start-late name))))
   name)
 
 (defun harness-module-get (name)

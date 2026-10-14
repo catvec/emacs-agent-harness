@@ -13,8 +13,9 @@
 ;; module merges a worktree's branch back into its parent's cwd.
 ;; Whatever else runs from a worktree lets go of it in the
 ;; `worktree/before-remove' filter, which `worktree/remove' runs before
-;; git deletes the directory: the Emacs that `open_harness' started
-;; there, say (harness-tools-dev.el).
+;; git deletes the directory: the Emacs that this repository's plugin
+;; started there with `open_harness', say
+;; (.harness/plugins/dev/harness-tools-dev.el).
 ;;
 ;; Locks.  Every worktree the harness creates is locked (`git worktree
 ;; add --lock'), its lock reason starting with
@@ -374,7 +375,8 @@ remove -f -f').  Return a promise of PATH.  Emits `worktree/removed'.
 Before git runs, the asynchronous filter `worktree/before-remove' runs
 from nil with ROOT and PATH (see `harness-run-filter-async'): it is
 for what must let go of the directory first, such as an Emacs running
-the harness from it (harness-tools-dev.el)."
+the harness from it (the open_harness plugin of the harness's own
+repository, .harness/plugins/dev/harness-tools-dev.el)."
   (let ((path (file-name-as-directory (expand-file-name path))))
     (harness-then
      (harness-then

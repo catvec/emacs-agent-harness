@@ -1033,8 +1033,35 @@ session's priority.  See `harness-ui-tasks--shown-priority'."
 
 ;;;; Actions (shared by keys, buttons and the context menu)
 
-(defun harness-ui-tasks--actions (task)
-  "Return (LABEL COMMAND) for the actions that apply to TASK, primary first."
+(defvar harness-ui-tasks-action-functions nil
+  "Functions adding actions of their own to the menu of a task's card.
+Each is called with TASK, a task as the board has it (a plist), and
+returns a list of (LABEL COMMAND), empty when it has none for TASK.
+COMMAND is an interactive command, run as the board's own actions are,
+with point on TASK's card: `harness-ui-tasks-task-at-point' returns
+TASK there, and `harness-ui-tasks-request' calls the harness with a
+failure shown on the board.  The actions come after those of TASK's
+column, and are never one of a card's buttons.  A module of your own
+or a project's plugin adds a function here as it loads, as the
+harness's own repository's plugin adds Open harness to a task in
+review whose worktree is a checkout of the harness.")
+
+(defun harness-ui-tasks--extra-actions (task)
+  "Return the actions `harness-ui-tasks-action-functions' add to TASK.
+A function that fails adds none, and the log says why."
+  (cl-loop for fn in harness-ui-tasks-action-functions
+           when (functionp fn)
+           append (condition-case err
+                      (copy-sequence (funcall fn task))
+                    (error (harness-log 'warn "task board: actions of %s failed: %s"
+                                        fn (error-message-string err))
+                           nil))))
+
+(defun harness-ui-tasks--actions (task &optional own)
+  "Return (LABEL COMMAND) for the actions that apply to TASK, primary first.
+Those of `harness-ui-tasks-action-functions' follow the actions of
+TASK's column, unless OWN is non-nil: then the board's own actions
+come alone, as for the card's buttons."
   (let ((column (harness-ui-tasks--column task)))
     (append
      (pcase column
@@ -1109,18 +1136,14 @@ session's priority.  See `harness-ui-tasks--shown-priority'."
                     '(("Unarchive" harness-ui-tasks-archive) ("Verify" harness-ui-tasks-verify)
                       ("Open" harness-ui-tasks-open))
                   ;; No Reply: a message to a task in review sends it back.
-                  (append
-                   '(("Verify" harness-ui-tasks-verify) ("Send back" harness-ui-tasks-reject)
-                     ("Open" harness-ui-tasks-open))
-                   ;; The card's menu only: its buttons are Verify and
-                   ;; Send back, and a click on its title is Open.
-                   (and (harness-ui-tasks--open-harness-p task)
-                        '(("Open harness" harness-ui-tasks-open-harness)))
-                   '(("Archive" harness-ui-tasks-archive)))))
+                  '(("Verify" harness-ui-tasks-verify) ("Send back" harness-ui-tasks-reject)
+                    ("Open" harness-ui-tasks-open) ("Archive" harness-ui-tasks-archive))))
        ('done (if (harness-ui-tasks--archived-p task)
                   '(("Unarchive" harness-ui-tasks-archive) ("Open" harness-ui-tasks-open))
                 '(("Archive" harness-ui-tasks-archive) ("Reply" harness-ui-tasks-reply)
                   ("Open" harness-ui-tasks-open)))))
+     ;; In the menu only, never among the card's buttons (OWN).
+     (unless own (harness-ui-tasks--extra-actions task))
      ;; Before it starts a task runs with the settings it was submitted
      ;; with, not its write-up session's, so those are not offered.
      (when (and (plist-get task :session) (not (harness-ui-tasks--unstarted-p task)))
@@ -1430,7 +1453,8 @@ offers for it, the session list too (`harness-ui-pending-view-actions'):
                       (list (funcall button '("Reply" harness-ui-tasks-reply))))
                  (and (harness-ui-tasks--pausable-p task)
                       (list (funcall button '("Pause" harness-ui-tasks-return-to-pending)))))
-       (mapcar button (take 2 (cl-remove 'harness-ui-tasks-open (harness-ui-tasks--actions task) :key #'cadr))))
+       (mapcar button (take 2 (cl-remove 'harness-ui-tasks-open (harness-ui-tasks--actions task t)
+                                         :key #'cadr))))
      " ")))
 
 (defun harness-ui-tasks--card-buttons (task)
@@ -1443,9 +1467,8 @@ was handed in, and the session's last message
 \(`harness-tasks--missing-report').
 
 A card has no button for opening its session: a click on its title
-does that.  Nor for Open harness, which stays in the card's menu
-\(`mouse-3') for a task in review whose worktree is a checkout of the
-harness (`harness-ui-tasks--open-harness-p')."
+does that.  Nor for an action of `harness-ui-tasks-action-functions',
+which stays in the card's menu (`mouse-3')."
   (let ((missing (harness-json-true-p (plist-get (plist-get task :report) :missing))))
     (concat
      (harness-ui-tasks--action-buttons task)
@@ -4250,6 +4273,21 @@ the request is answered, or fails, and then no sooner than
       ;; A request that never left has no answer to wait for.
       (when (and answered (not sent)) (funcall answered)))))
 
+(defun harness-ui-tasks-task-at-point (&optional noerror)
+  "Return the task at point on a task board, a plist as the board has it.
+Without one, return nil if NOERROR is non-nil, else signal a user
+error.  For the commands of `harness-ui-tasks-action-functions'."
+  (harness-ui-tasks--task noerror))
+
+(defun harness-ui-tasks-request (method params what &optional callback)
+  "Call the harness's METHOD with PARAMS from a task board.
+METHOD is an ACP method, \"_harness/NAME\" for the bus method NAME.  A
+failure shows on the board, as WHAT failing, as one of the board's own
+requests would; CALLBACK, when non-nil, is called with the result.
+For the commands of `harness-ui-tasks-action-functions', which run in
+the board's buffer."
+  (harness-ui-tasks--request-then method params what callback))
+
 (defun harness-ui-tasks-open (&optional position)
   "Open the session of the task at point in POSITION.
 By default it takes the board's own position, replacing the board."
@@ -4800,19 +4838,6 @@ and with a backlog task the session that wrote it up."
       (user-error "This task is not waiting for your review"))
     task))
 
-(defun harness-ui-tasks--open-harness-p (task)
-  "Non-nil when TASK's worktree can be run as a harness of its own.
-That is a card waiting for review whose worktree holds harness.el and
-the live development loop scripts/dev.sh side by side: the work it
-handed in can then be tried live before verifying it, with Open
-harness in the card's menu (`harness-ui-tasks-open-harness')."
-  (and (equal (plist-get task :state) "review")
-       (not (harness-ui-tasks--archived-p task))
-       (let ((dir (plist-get task :worktree)))
-         (and (stringp dir)
-              (file-exists-p (expand-file-name "harness.el" dir))
-              (file-exists-p (expand-file-name "scripts/dev.sh" dir))))))
-
 (defun harness-ui-tasks-verify ()
   "Accept the work of the task at point, which waits for your review.
 In a git project its branch then goes through the merge queue, and the
@@ -4843,24 +4868,6 @@ Lisp, FEEDBACK is sent at once."
      ((harness-string-blank-p feedback) (user-error "Sending a task back needs feedback"))
      (t (harness-ui-tasks--request-then "_harness/task/reject" (list :id (plist-get task :id) :feedback feedback)
                                         "Sending the task back" #'harness-ui-tasks--say-sent-back)))))
-
-(defun harness-ui-tasks-open-harness ()
-  "Open an Emacs running the harness from the task's worktree.
-The task at point waits for your review, and its worktree is a
-checkout of the harness; the card's menu (`mouse-3') offers it then.
-This is not the task's session, which a click on the card's title
-opens."
-  (interactive)
-  (let* ((task (harness-ui-tasks--review-task))
-         (dir (plist-get task :worktree)))
-    (unless (harness-ui-tasks--open-harness-p task)
-      (user-error "This task's worktree is not a checkout of the harness"))
-    (harness-ui-tasks--request-then
-     "_harness/harness-dev/open" (list :path dir :focus t)
-     "Opening the worktree harness"
-     (lambda (info)
-       (message "Harness from %s is open in Emacs (socket %s)"
-                (abbreviate-file-name dir) (plist-get info :socket))))))
 
 (defun harness-ui-tasks--count-tasks (n)
   "N tasks in words: \"task\" for one, \"3 tasks\" for more."

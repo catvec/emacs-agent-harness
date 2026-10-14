@@ -39,9 +39,11 @@ OpenAI-compatible APIs and AWS Bedrock.
   to any tool.
 - **Permissions and sandboxing.** Four permission modes (Ask, Accept
   edits, Auto, YOLO), per-session directory access, and a kernel
-  sandbox for tool processes (bubblewrap or `systemd-run`).
+  sandbox for tool processes (bubblewrap or `systemd-run` on GNU/Linux,
+  MXC's `mxc-exec-mac` on macOS).
 - **Polite with your machine.** The tools that start processes (`bash`,
-  `elisp`, `ssh`, `open_harness`) hold a slot per machine -- one per
+  `elisp`, `ssh`, and those of plugins, such as the harness
+  repository's `open_harness`) hold a slot per machine -- one per
   processor plus a slight burst (`harness-tool-slots-count`), so a task
   board full of agents cannot start processes without end -- and the
   calls waiting go by session priority (low, medium or high; `C-c h +`
@@ -173,6 +175,7 @@ Optional dependencies:
 | Dependency | Used for |
 |---|---|
 | `bwrap` (bubblewrap) | Kernel sandbox for tool processes |
+| `mxc-exec-mac` (MXC, macOS 15+) | Kernel sandbox for tool processes on macOS |
 | `rg` (ripgrep) | Faster file search |
 | GitHub Copilot CLI 1.0 or later (`copilot`) | Models of a GitHub Copilot plan |
 | `OPENROUTER_API_KEY` or `OPENAI_API_KEY` | OpenRouter and OpenAI models |
@@ -871,6 +874,14 @@ tools. `~` is your home directory there as well, emptied, so
 session may use shows in it. The `elisp` tool's background Emacs runs
 in the same sandbox and sees the same directories, plus the harness's
 own Lisp (`harness.el` and `lisp/`), read-only, so it can load it.
+
+On macOS the sandbox is MXC's `mxc-exec-mac` (macOS 15 or later; set
+`harness-sandbox-mxc-program` when it is not on your `PATH`), which
+confines a command with Seatbelt rather than with mounts: the same
+directories are readable or writable at their own paths, but the rest
+of `~` cannot be read rather than being emptied, `/tmp` cannot be
+written (each command gets a private `$TMPDIR` instead, removed when
+it ends), and a command's output arrives only once it exits.
 
 Every permission request offers the same five answers, under the same
 names and keys wherever it shows (the chat, BTW, the popout, an ACP
@@ -2033,8 +2044,9 @@ call to one anyway, in every permission mode.
   anything that writes fails. That takes a sandbox that can confine the
   command; where none can (`harness-sandbox-policy` is `off`, the
   directory is on another host, neither bubblewrap nor `systemd-run` is
-  installed), the session has no bash at all, rather than an unconfined
-  one. `write_file`, `edit_file`, `ssh`, `elisp`, `spawn_agent` and the
+  installed, or on macOS MXC's `mxc-exec-mac`), the session has no bash
+  at all, rather than an unconfined one. `write_file`, `edit_file`,
+  `ssh`, `elisp`, `spawn_agent` and the
   other tools that change files or run code are not offered, and a call
   to one is denied for good, with a hint to put the change in a step of
   the plan.
@@ -2746,15 +2758,19 @@ verify or send back, `recap` writes the recaps on the cards,
   it does for a task that is pre-empted: the workers of its supervisor
   plan and its sub-agents are cancelled, and what they were on is
   reported to the task, to read when it carries on.
-- When the project is the harness itself, a card in *Ready for review*
-  whose worktree is a checkout of the harness also has **Open harness**
-  in its menu (right-click the card): it opens an Emacs running that
-  worktree's harness in an instance of its own, its frame raised, so
-  the work can be tried before it is verified. It is not a button on
+- When the project is the harness itself, and its own plugin is
+  loaded (see [Development](#development)), a card in *Ready for
+  review* whose worktree is a checkout of the harness also has
+  **Open harness** in its menu (right-click the card): it opens an
+  Emacs running that worktree's harness in an instance of its own,
+  its frame raised, so the work can be tried before it is verified.
+  It is not a button on
   the card; a click on the card's title opens the task's session, as
   on any card. The agent has the same as the `open_harness` tool, which
   starts such an instance for its own worktree and says how to drive it
-  (`scripts/dev.sh` with its socket).
+  (`scripts/dev.sh` with its socket). The socket is linked into the
+  session's temporary directory, so the agent's sandboxed commands
+  reach it.
 - These instances stop by themselves once nothing needs them. One
   opened for you to look at (Open harness, or the agent's
   `open_harness` with `focus`) stays until its task is done, archived
@@ -4103,6 +4119,127 @@ module.
 [docs/architecture.md](docs/architecture.md#modules-of-your-own) has
 the rest of the contract, such as how a module's events reach the UI.
 
+### A project's own plugins
+
+A project can carry harness modules of its own, for tools and commands
+that only make sense in it. The harness does not load them. The
+project's `.dir-locals.el` does, as Emacs applies any project's
+settings: an `eval` entry requires the plugin, and
+`harness-plugin-modules` names the plugin modules that the project's
+sessions use.
+
+```elisp
+;; my-project/.dir-locals.el
+((nil . ((eval . (let ((top (locate-dominating-file default-directory ".dir-locals.el")))
+                   ;; Not from a checkout nested in another, such as a task's worktree.
+                   (unless (locate-dominating-file
+                            (file-name-directory (directory-file-name top))
+                            (lambda (dir) (and (not (file-equal-p dir "~"))
+                                               (file-exists-p (expand-file-name ".git" dir)))))
+                     (require 'harness-deploy-plugin
+                              (expand-file-name ".harness/plugins/deploy/harness-deploy-plugin" top)))))
+         (harness-plugin-modules . (deploy)))))
+```
+
+The `unless` matters because Emacs trusts an entry wherever the same
+file is, and a task's worktree (in `.worktrees/` of the checkout) holds
+a copy of the project that its agent can change. With a plain
+`require`, visiting a file of a worktree would load that worktree's
+copy of the plugin into your Emacs, if no copy had loaded yet. With
+the `unless`, the plugin loads only from the main checkout.
+
+The plugin's files can be anywhere in the repository:
+
+```
+my-project/
+  .dir-locals.el
+  .harness/plugins/deploy/
+    harness-deploy-plugin.el  ; what .dir-locals.el requires
+    harness-deploy.el         ; module deploy: its tool, in the harness process
+    harness-ui-deploy.el      ; module ui-deploy: its command, in your Emacs
+```
+
+The same `.dir-locals.el` applies in your Emacs and in the harness
+process. So the file it requires loads each half once the part of the
+harness that half needs has loaded:
+
+```elisp
+;;; harness-deploy-plugin.el  -*- lexical-binding: t; -*-
+(let ((dir (file-name-directory load-file-name)))
+  (with-eval-after-load 'harness-tools
+    (require 'harness-deploy (expand-file-name "harness-deploy" dir)))
+  (with-eval-after-load 'harness-ui
+    (require 'harness-ui-deploy (expand-file-name "harness-ui-deploy" dir))))
+(provide 'harness-deploy-plugin)
+```
+
+The modules follow the rules of [modules of your
+own](#modules-of-your-own): `harness-NAME.el` holds module `NAME`, and
+`ui` modules run in your Emacs. A plugin module starts as soon as its
+file has loaded.
+
+Emacs decides whether the plugin loads, as it does for any project.
+Neither entry is safe as it is, so Emacs asks before applying them: the
+first time you visit a file of the project, and again whenever they
+change. Answering `!` trusts them for good, and Emacs saves them in
+`safe-local-variable-values`. Until then nothing of the plugin loads.
+
+The harness process cannot ask you anything. Before a session of the
+project starts, it applies the project's directory-local variables as
+your Emacs would, with what you trust there. Your Emacs passes it your
+settings for this, and every later change, so what you trust reaches
+new sessions without a restart. Entries you have not trusted are left
+out. Only a project whose variables set `harness-plugin-modules` has
+them applied there: the `eval` entries you trusted for editing your
+other projects never run in the harness process. The harness applies
+the variables of the project's main checkout, never those of a task's
+worktree: a change an agent makes in a worktree reaches the harness
+only once it is merged.
+
+A tool that a plugin module defines is offered only to the sessions
+whose list names that module. A session of any other project neither
+sees it nor can call it.
+
+Each session freezes its list when it starts, which is when it enters
+its sandbox, and keeps it, across restarts of the harness too. A
+sub-agent, a fork, a side conversation or a task that an agent submits
+takes the list of the session that started it. So the list changes
+only from outside every sandbox, when you trust a new value in your
+Emacs. An agent that rewrites `.dir-locals.el` changes nothing until
+you trust what it wrote.
+
+For the same reason the harness never applies a checkout that an agent
+could have made: one nested in another checkout, such as a task's
+worktree, one in a `.git` directory, or one in the sessions' temporary
+directories. A copy of your trusted `.dir-locals.el` there, beside
+plugin code of the agent's own, would otherwise load that code. A
+project nested in another checkout, such as a submodule, gets no
+plugins.
+
+A plugin is code from the repository, and it runs outside the sandbox
+with your Emacs's rights. Trust a project's plugin only if you trust
+the project that far. Emacs asks again when `.dir-locals.el` changes,
+but not when the plugin's own files change. Whoever can write those
+files writes code the harness runs: an agent working in the project's
+main checkout rather than a worktree, for example. The harness process
+loads a plugin's code once, so a change to it reaches the harness at
+the next `M-x harness-restart`.
+
+A plugin tells the harness about its tools the way a module of your
+own does:
+- it adds a tool to `harness-perms-extra-auto-allow-tools` when the
+  tool never needs approval;
+- it adds a tool to `harness-tool-slots-tools` when the tool starts
+  processes;
+- it adds its methods' prefix to `harness-acp-extra-method-prefixes`
+  when its UI half calls them;
+- a UI module adds actions to the menu of a task board card through
+  `harness-ui-tasks-action-functions`.
+
+The harness's own repository has one plugin, `.harness/plugins/dev/`,
+which its `.dir-locals.el` loads: the `open_harness` tool and the task
+board's Open harness (see [Development](#development)).
+
 Further documentation:
 
 - [DESIGN.md](DESIGN.md): the design the harness implements
@@ -4138,6 +4275,25 @@ module provides or uses, and commit the pages it writes;
 
 Tests that talk to real models run only when `HARNESS_INTEGRATION=1` is
 set. See [docs/dev-loop.md](docs/dev-loop.md) for the full workflow.
+
+The tools for developing the harness are not part of it. They are this
+repository's own plugin, in `.harness/plugins/dev/` (see
+[A project's own plugins](#a-projects-own-plugins)), which the
+repository's `.dir-locals.el` loads. To get them in the sessions and
+tasks that work on the harness, visit a file of your checkout and
+answer `!` when Emacs asks about its directory-local variables.
+
+They are:
+- the `open_harness` tool, which runs a worktree's harness in an Emacs
+  of its own for the agent to try its work in;
+- Open harness, in the menu of a task waiting for review (see
+  [Task board](#task-board)).
+
+A development Emacs (`scripts/dev.sh start`) never asks: it leaves out
+the directory-local variables that are not safe as they are, so it
+does not load the plugin. To try the plugin there, set
+`enable-local-variables` back to `t` in it, visit a file of the
+checkout and answer `!`.
 
 The libraries vendored in `lisp/vendor` have suites of their own.
 `scripts/test.sh` runs them with the harness's, and `scripts/lint.sh`

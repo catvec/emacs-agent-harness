@@ -2,6 +2,18 @@
 
 ;;; Commentary:
 
+;; A plugin of the harness's own repository, not a module of the
+;; harness: it is about developing the harness, so it lives in the
+;; repository's .harness/plugins/dev/.  The repository's .dir-locals.el
+;; loads it, once the user trusts that file's entries when Emacs asks
+;; (see harness-dev-plugin.el beside this file, and
+;; lisp/modules/harness-plugins.el), and names this module in
+;; `harness-plugin-modules', so the sessions of the repository's main
+;; checkout and of its task worktrees get its tool, and no other
+;; session does (see `harness-tools--in-scope-p').
+;; harness-ui-tools-dev.el beside it is its half in the user's Emacs:
+;; Open harness on the task board.
+;;
 ;; Verifying work on the harness itself means trying it in a running
 ;; Emacs.  The project's live development loop (scripts/dev.sh) starts
 ;; a dedicated `emacs -Q' daemon from a checkout -- a task's worktree,
@@ -18,12 +30,29 @@
 ;; - the `harness-dev/open' method, which the task board calls from
 ;;   Open harness, in the menu of a card waiting for review.
 ;;
-;; The tool is for this project only: sessions whose working directory
-;; or worktree is a checkout of the harness (`harness.el' and
-;; scripts/dev.sh side by side) are offered it, and any other directory
-;; is refused.  Starting the instance is repeatable and touches nothing
-;; of the session's own; the tool is in
-;; `harness-perms-auto-allow-tools', so it needs no approval.
+;; The tool opens checkouts of the harness only (`harness.el' and
+;; scripts/dev.sh side by side), and refuses any other directory.
+;; Starting the instance is repeatable and touches nothing of the
+;; session's own, so the plugin puts the tool in
+;; `harness-perms-extra-auto-allow-tools': it needs no approval.  It
+;; starts a whole Emacs, so it holds a slot of the machine
+;; (`harness-tool-slots-tools') as bash does; and the board calls its
+;; `harness-dev/' methods over ACP (`harness-acp-extra-method-prefixes').
+;;
+;; Sockets.  An instance's emacsclient socket is a file named after its
+;; checkout in `harness-tools-dev-socket-dir': .dev in the directory
+;; holding every session's temporary directory, /tmp/harness-UID/.dev/
+;; say.  Whoever opens a checkout -- an agent, a sub-agent of it, the
+;; board -- finds its instance there, and the path is short, as a
+;; socket's address must be.  An agent's shell runs in the sandbox,
+;; which shows the session's own temporary directory but neither that
+;; root nor Emacs's default socket directory.  So opening an instance
+;; links its socket into the temporary directory of the session that
+;; opened it, and the commands the tool lists name the link: a Unix
+;; socket is found by its inode, so emacsclient reaches the instance
+;; through the link, in the sandbox too.  An Emacs started from the
+;; sandbox ends with the command that started it, so an agent opens
+;; instances with the tool and only drives them from its shell.
 ;;
 ;; Lifetimes.  An instance is a whole Emacs with a harness of its own
 ;; inside, and nothing in it ever stops it.  So this module records the
@@ -77,6 +106,9 @@
 (require 'harness-tools)
 
 (defvar harness-state-directory)
+(defvar harness-session--tmp-root)
+
+(declare-function harness-session-tmp-root "harness-session" ())
 
 (defconst harness-tools-dev-tool "open_harness"
   "Name of the tool that opens a checkout's harness in an Emacs.")
@@ -106,6 +138,12 @@ longer than later ones."
   "Start of the socket of every instance this module opens.
 Only daemons under such a socket are ever stopped: the user's own dev
 daemon (scripts/dev.sh's default socket) never is.")
+
+(defconst harness-tools-dev--socket-subdir ".dev"
+  "Directory of the sockets, beside the sessions' temporary directories.
+See `harness-tools-dev-socket-dir'.  Its name has a dot, which the
+name of no session's temporary directory has (see
+`harness-session--tmp-name'), so it is never one of those.")
 
 (defvar harness-tools-dev--idle-timeout 3600
   "Seconds a session the user talks to may sit idle before its instance stops.
@@ -154,17 +192,6 @@ of this project are."
          (and (file-exists-p (expand-file-name harness-tools-dev--marker dir))
               (file-exists-p (expand-file-name harness-tools-dev--script dir))))))
 
-(defun harness-tools-dev--root (dir)
-  "Return the project root of DIR, or DIR itself."
-  (if (and dir (harness-method-exists-p 'project/root))
-      (or (ignore-errors (harness-call 'project/root dir)) dir)
-    dir))
-
-(defun harness-tools-dev--session-p (session)
-  "Non-nil when SESSION works in a checkout of the harness."
-  (cl-some (lambda (dir) (and dir (harness-tools-dev-checkout-p (harness-tools-dev--root dir))))
-           (list (plist-get session :worktree) (plist-get session :cwd))))
-
 (defun harness-tools-dev--session (ctx)
   "Return the session plist of CTX, or a minimal stand-in."
   (or (and (plist-get ctx :session-id)
@@ -203,6 +230,86 @@ reaches the same instance and two worktrees never share one."
 That is the directory scripts/dev.sh defaults to, beside the checkout."
   (file-name-as-directory (expand-file-name (concat "scripts/.dev/state-" socket) dir)))
 
+(defun harness-tools-dev-socket-dir ()
+  "Return the directory the instances' sockets are made in.
+That is `harness-tools-dev--socket-subdir' in the directory holding
+every session's temporary directory (`harness-session-tmp-root'): the
+same for every checkout and every session, so that a checkout opened
+from anywhere reaches the same instance.  It is short, as a socket's
+address must be (about a hundred bytes), and on the file system of the
+sessions' temporary directories, so that a socket can be linked into
+one (see `harness-tools-dev--link')."
+  (file-name-as-directory
+   (expand-file-name harness-tools-dev--socket-subdir
+                     (cond ((fboundp 'harness-session-tmp-root) (harness-session-tmp-root))
+                           ((and (boundp 'harness-session--tmp-root) harness-session--tmp-root))
+                           (t (expand-file-name (format "harness-%d" (user-uid))
+                                                temporary-file-directory))))))
+
+(defun harness-tools-dev-socket-path (socket)
+  "Return the file of the socket SOCKET in `harness-tools-dev-socket-dir'."
+  (expand-file-name socket (harness-tools-dev-socket-dir)))
+
+(defun harness-tools-dev--own-dir-p (dir)
+  "Non-nil when DIR is a directory of the user's own, not a symbolic link."
+  (let ((attrs (file-attributes (directory-file-name dir) 'integer)))
+    (and (eq t (file-attribute-type attrs))
+         (eql (file-attribute-user-id attrs) (user-uid)))))
+
+(defun harness-tools-dev--make-socket-dir ()
+  "Return `harness-tools-dev-socket-dir', made first when missing, or nil.
+It is made private to the user (mode 700), as is the root holding it
+when that is missing too: Emacs's server refuses a socket directory
+others can reach.  Nil, with a warning in the log, when it cannot be
+made, or the root is not a directory of the user's own (/tmp is
+shared): an instance then has its socket in Emacs's default directory,
+which the sandbox does not show."
+  (let* ((dir (harness-tools-dev-socket-dir))
+         (root (file-name-directory (directory-file-name dir))))
+    (condition-case err
+        (progn
+          (unless (file-attributes (directory-file-name root))
+            (with-file-modes #o700 (make-directory root t)))
+          (if (not (harness-tools-dev--own-dir-p root))
+              (progn (harness-log 'warn "tools-dev: no sockets in %s: %s is not a directory of your own"
+                                  dir root)
+                     nil)
+            (unless (file-attributes (directory-file-name dir))
+              (with-file-modes #o700 (make-directory dir t)))
+            dir))
+      (error (harness-log 'warn "tools-dev: cannot make %s: %s" dir (error-message-string err))
+             nil))))
+
+(defun harness-tools-dev--client-socket (socket)
+  "Return what emacsclient reaches the instance under SOCKET by.
+That is its file in `harness-tools-dev-socket-dir' when there is one,
+else SOCKET itself: an instance started by an older harness, or by
+hand, has its socket in Emacs's default directory."
+  (let ((path (harness-tools-dev-socket-path socket)))
+    (if (file-exists-p path) path socket)))
+
+(defun harness-tools-dev--link (socket sid)
+  "Link the socket SOCKET into the temporary directory of session SID.
+Return the link, or nil when SID has no temporary directory (see
+`session/tmp-dir') or SOCKET's file is not in
+`harness-tools-dev-socket-dir'.  The session's shell reaches that
+directory in the sandbox too, where it is bound read-write and the rest
+of /tmp is not shown; a Unix socket is found by its inode, so
+emacsclient reaches the instance through the link.  A link left there
+by an earlier instance is replaced.  On an error the log has a warning
+and the value is nil."
+  (let ((target (harness-tools-dev-socket-path socket))
+        (tmp (and sid (harness-method-exists-p 'session/tmp-dir)
+                  (ignore-errors (harness-call 'session/tmp-dir sid)))))
+    (when (and (stringp tmp) (file-exists-p target))
+      (let ((link (expand-file-name socket (file-name-as-directory tmp))))
+        (condition-case err
+            (progn (add-name-to-file target link t)
+                   link)
+          (error (harness-log 'warn "tools-dev: cannot link %s into %s: %s"
+                              target tmp (error-message-string err))
+                 nil))))))
+
 (defun harness-tools-dev--owner ()
   "Return the pid of the Emacs the instances this harness opens belong to.
 That is the Emacs the user runs: the parent of this harness process
@@ -223,29 +330,40 @@ instances running, for the harness started again to look after."
   "Run DIR's scripts/dev.sh with ARGS; return a promise of the result.
 TIMEOUT bounds the run, in seconds (default `harness-tools-dev-timeout').
 HARNESS_DEV_SOCKET names the checkout's instance, so every call of a
-checkout drives the same Emacs.  HARNESS_DEV_STATE is its state
-directory (`harness-tools-dev-state'), given rather than left to
-scripts/dev.sh, which keeps one it inherits: an instance opened from
-the harness of another one would share that one's state otherwise.
-HARNESS_DEV_OWNER names the Emacs the instance belongs to
-\(`harness-tools-dev--owner'), which the instance watches: it exits
-once that Emacs is gone."
-  (let ((socket (harness-tools-dev-socket dir)))
+checkout drives the same Emacs.  HARNESS_DEV_SOCKET_DIR is the
+directory its socket is in (`harness-tools-dev-socket-dir', made here
+when missing), the same whoever opens the checkout; it is empty when
+that directory cannot be had, and the socket is then in Emacs's default
+directory.  HARNESS_DEV_STATE is its state directory
+\(`harness-tools-dev-state'), given rather than left to scripts/dev.sh,
+which keeps one it inherits: an instance opened from the harness of
+another one would share that one's state otherwise.  HARNESS_DEV_OWNER
+names the Emacs the instance belongs to (`harness-tools-dev--owner'),
+which the instance watches: it exits once that Emacs is gone."
+  (let ((socket (harness-tools-dev-socket dir))
+        (socket-dir (harness-tools-dev--make-socket-dir)))
     (harness-run-command (cons (expand-file-name harness-tools-dev--script dir) args)
                          :cwd dir
                          :timeout (or timeout harness-tools-dev-timeout)
                          :name "harness-dev"
                          :env `(("HARNESS_DEV_SOCKET" . ,socket)
+                                ;; Empty rather than unset: an instance
+                                ;; opening another passes its own on.
+                                ("HARNESS_DEV_SOCKET_DIR" . ,(if socket-dir (directory-file-name socket-dir) ""))
                                 ("HARNESS_DEV_STATE" . ,(harness-tools-dev-state dir socket))
                                 ("HARNESS_DEV_OWNER" . ,(number-to-string (harness-tools-dev--owner)))))))
 
 (defun harness-tools-dev--describe (info &optional lifetime)
   "Return what the model is told about the instance INFO.
-LIFETIME, a sentence, says when the instance stops."
-  (let ((dir (abbreviate-file-name (plist-get info :path)))
-        (socket (plist-get info :socket)))
-    (format (concat "Harness from %s is running in an Emacs of its own (emacsclient socket %s, "
-                    "kept in that checkout's %s, where bash commands reach it), "
+LIFETIME, a sentence, says when the instance stops.  The commands name
+the socket by its link in the session's temporary directory when there
+is one, which the session's shell reaches in the sandbox too, else by
+its file, else by its name."
+  (let* ((dir (abbreviate-file-name (plist-get info :path)))
+         (link (plist-get info :link))
+         (socket (or link (plist-get info :socket-path) (plist-get info :socket)))
+         (arg (shell-quote-argument socket)))
+    (format (concat "Harness from %s is running in an Emacs of its own (emacsclient socket %s), "
                     "with its state and compiled files in %s.%s\n"
                     "Drive it from %s with:\n"
                     "  HARNESS_DEV_SOCKET=%s scripts/dev.sh shot [PATH]   # screenshot its frame\n"
@@ -254,12 +372,19 @@ LIFETIME, a sentence, says when the instance stops."
                     "  HARNESS_DEV_SOCKET=%s scripts/dev.sh errors   # recent *Messages* and warnings\n"
                     "  HARNESS_DEV_SOCKET=%s scripts/dev.sh reload   # load the source as it is now\n"
                     "  HARNESS_DEV_SOCKET=%s scripts/dev.sh stop\n"
+                    "%s"
+                    "`scripts/dev.sh start` run from your own shell starts an Emacs that ends with that "
+                    "command: if these commands say it is not running, call open_harness again.  "
                     "Opening it again reuses this instance.%s")
-            dir socket harness-tools-dev--socket-dir (abbreviate-file-name (plist-get info :state))
+            dir socket (abbreviate-file-name (plist-get info :state))
             (if (plist-get info :focused)
                 "  Its frame was raised and focused."
               "  Its frame stays lowered, so it does not steal focus.")
-            dir socket socket socket socket socket socket
+            dir arg arg arg arg arg arg
+            (if link
+                (concat "That socket is a link in your temporary directory, so these commands "
+                        "reach the instance from your shell, in the sandbox too.  ")
+              "")
             (if (and lifetime (not (string-empty-p lifetime))) (concat " " lifetime) ""))))
 
 (defun harness-tools-dev-start (dir &optional focus holder)
@@ -267,9 +392,13 @@ LIFETIME, a sentence, says when the instance stops."
 DIR must be a local checkout of the harness.  With FOCUS non-nil its
 frame is raised and focused once it is up; otherwise it stays lowered,
 so unattended starts never steal the user's focus.  The promise
-resolves to (:path DIR :socket SOCKET :state STATE :focused BOOL
-:output STRING); opening a checkout that is already open just ensures
-its frame exists.
+resolves to (:path DIR :socket SOCKET :socket-path FILE :link LINK
+:state STATE :focused BOOL :output STRING); opening a checkout that is
+already open just ensures its frame exists.  SOCKET is the socket's
+name, FILE its file in `harness-tools-dev-socket-dir' (nil when it is
+not there, as when that directory cannot be had), and LINK its link in
+the temporary directory of HOLDER's session (`harness-tools-dev--link'),
+or nil.
 
 HOLDER says who needs the instance, so that it can be stopped once
 nothing does (see Lifetimes in the Commentary).  It is a plist:
@@ -300,6 +429,9 @@ An instance being stopped is started again only once it has stopped."
                         (abbreviate-file-name dir)
                         (string-trim (concat (plist-get r :stdout) "\n" (plist-get r :stderr))))
                (let ((info (list :path dir :socket socket
+                                 :socket-path (let ((path (harness-tools-dev-socket-path socket)))
+                                                (and (file-exists-p path) path))
+                                 :link (harness-tools-dev--link socket (plist-get holder :session))
                                  :state (harness-tools-dev-state dir socket)
                                  :focused (and focus t)
                                  :output (string-trim (plist-get r :stdout)))))
@@ -581,11 +713,15 @@ Return nil while something does.  CTX is what
 (defun harness-tools-dev--parse-command (args)
   "Return (:socket SOCKET :path CHECKOUT) of an instance's command line ARGS.
 ARGS is the command line as one string.  `scripts/dev.sh start' runs
-`emacs -Q --daemon=SOCKET -l CHECKOUT/scripts/harness-dev.el'.  Return
-nil for any other command, including a daemon under another socket.
-`:path' is nil when the command line names no checkout."
+`emacs -Q --daemon=DIR/SOCKET -l CHECKOUT/scripts/harness-dev.el', DIR
+being `harness-tools-dev-socket-dir', or with `--daemon=SOCKET' when the
+socket is in Emacs's default directory, as an older harness had it.
+SOCKET is the socket's name either way.  Return nil for any other
+command, including a daemon under another socket.  `:path' is nil when
+the command line names no checkout."
   (when (and (stringp args)
-             (string-match (concat "\\(?:\\`\\| \\)--daemon=\\(" (regexp-quote harness-tools-dev--socket-prefix)
+             (string-match (concat "\\(?:\\`\\| \\)--daemon=\\(?:[^ ]*/\\)?\\("
+                                   (regexp-quote harness-tools-dev--socket-prefix)
                                    "[0-9a-f]+\\)\\(?: \\|\\'\\)")
                            args))
     (let ((socket (match-string 1 args)))
@@ -633,8 +769,10 @@ in an instance can open its own checkout, which is the same instance;
 it never stops itself."
   (when (eq harness-tools-dev--own-socket 'unknown)
     (setq harness-tools-dev--own-socket
-          (or (let ((name (daemonp)))
-                (and (stringp name) (string-prefix-p harness-tools-dev--socket-prefix name) name))
+          ;; `daemonp' is what `--daemon=' gave: the socket's file.
+          (or (let* ((daemon (daemonp))
+                     (name (and (stringp daemon) (file-name-nondirectory daemon))))
+                (and name (string-prefix-p harness-tools-dev--socket-prefix name) name))
               (let* ((default-directory "/")
                      (ppid (alist-get 'ppid (ignore-errors (process-attributes (emacs-pid))))))
                 (and ppid
@@ -656,20 +794,20 @@ it never stops itself."
 
 (defun harness-tools-dev--ask-to-exit (socket &optional path)
   "Ask the instance under SOCKET to exit, over emacsclient; return a promise.
-PATH is its checkout, where scripts/dev.sh puts the socket
-\(`harness-tools-dev--socket-dir'): emacsclient then runs there and
-names the socket from there, as its whole name can be longer than a
-Unix socket's 107 bytes.  When the checkout holds no such socket -- an
-instance an older scripts/dev.sh started, or a checkout that is gone --
-it asks under SOCKET alone, in the place Emacs puts a socket by
-default.  Nothing of the checkout runs for that, so it works when the
-checkout is gone too.  `-a false' keeps emacsclient from starting an
-Emacs when none answers, as an empty ALTERNATE_EDITOR would have it do."
+Nothing of its checkout runs for that, so it works when the checkout is
+gone too.  `-a false' keeps emacsclient from starting an Emacs when
+none answers, as an empty ALTERNATE_EDITOR would have it do.
+
+PATH is its checkout.  An instance started by hand, with scripts/dev.sh
+alone, has its socket there (`harness-tools-dev--socket-dir'):
+emacsclient then runs in the checkout and names the socket from there,
+as its whole name can be longer than a Unix socket's 107 bytes.  Any
+other is reached by its file (`harness-tools-dev--client-socket')."
   (let* ((relative (concat harness-tools-dev--socket-dir socket))
          (here (and (stringp path) (not (file-remote-p path))
                     (file-exists-p (expand-file-name relative path)))))
     (harness-run-command (list (harness-tools-dev--emacsclient) "-a" "false"
-                               "-s" (if here relative socket)
+                               "-s" (if here relative (harness-tools-dev--client-socket socket))
                                "--eval" "(kill-emacs)")
                          :cwd (if here path "/")
                          :timeout harness-tools-dev--exit-timeout :name "harness-dev-stop")))
@@ -888,7 +1026,7 @@ running Emacs."
 
 (harness-define-tool harness-tools-dev-tool
   :label "Open harness in Emacs"
-  :description "Start a separate Emacs instance running the harness (this program) from a checkout or task worktree of it, so harness changes can be tried and seen live. The instance gets a socket and state directory of its own, so it does not disturb the harness you run in; opening the same directory again reuses its instance. The result lists the commands that drive it through that checkout's scripts/dev.sh: screenshot its frame, send real keys, evaluate Lisp in it, read its messages, reload it, stop it. It stops by itself once nothing needs it: a task's when the task stops working (review, done, or stopped), a sub-agent's when its work is done, a conversation's when it is closed or long idle; with focus=true it is for the user to look at and stays until the task is done. Call the tool again to start it again. Only directories that are checkouts of the harness work (harness.el and scripts/dev.sh side by side); path defaults to the session's worktree, else its working directory."
+  :description "Start a separate Emacs instance running the harness (this program) from a checkout or task worktree of it, so harness changes can be tried and seen live. The instance gets a socket and state directory of its own, so it does not disturb the harness you run in; opening the same directory again reuses its instance. Its emacsclient socket is linked into your session's temporary directory, so the commands the result lists reach it from your shell, in the sandbox too. The result lists the commands that drive it through that checkout's scripts/dev.sh: screenshot its frame, send real keys, evaluate Lisp in it, read its messages, reload it, stop it. It stops by itself once nothing needs it: a task's when the task stops working (review, done, or stopped), a sub-agent's when its work is done, a conversation's when it is closed or long idle; with focus=true it is for the user to look at and stays until the task is done. Call the tool again to start it again. Only directories that are checkouts of the harness work (harness.el and scripts/dev.sh side by side); path defaults to the session's worktree, else its working directory."
   :schema '(:type "object"
             :properties (:path (:type "string"
                                 :description "The harness checkout or task worktree to open, absolute or relative to the working directory. Default: the session's worktree, else its working directory.")
@@ -943,14 +1081,29 @@ the unrecorded ones too.  The promise resolves to the sockets stopped."
 (harness-declare-event 'harness-dev/stopped
                        "(SOCKET PATH REASON) after an instance of the harness `open_harness' or the board opened was stopped because nothing needed it any more.")
 
-;;;; Project gating
+;;;; What the harness is told of the tool
 
-(defun harness-tools-dev--tools (names session)
-  "Keep `open_harness' in NAMES only for a session in a harness checkout.
-The catalogue (SESSION nil) keeps every tool."
-  (if (and session (not (harness-tools-dev--session-p session)))
-      (remove harness-tools-dev-tool names)
-    names))
+;; The harness's own tools are listed where each of these is decided;
+;; a plugin's tell it as they load.  At top level, so that a reload of
+;; the plugin tells it again.
+
+(defvar harness-acp-extra-method-prefixes)
+(defvar harness-perms-extra-auto-allow-tools)
+(defvar harness-tool-slots-tools)
+
+;; The board's Open harness calls `harness-dev/open' over ACP.
+(with-eval-after-load 'harness-acp
+  (add-to-list 'harness-acp-extra-method-prefixes "harness-dev/"))
+
+;; It only starts an Emacs running a checkout of the harness, in a
+;; state directory of its own, so verifying harness work live needs no
+;; prompt.
+(with-eval-after-load 'harness-perms
+  (add-to-list 'harness-perms-extra-auto-allow-tools harness-tools-dev-tool))
+
+;; It starts a whole Emacs, so a call holds a slot of the machine.
+(with-eval-after-load 'harness-tool-slots
+  (add-to-list 'harness-tool-slots-tools harness-tools-dev-tool t))
 
 ;;;; Init and reload
 
@@ -968,8 +1121,10 @@ The catalogue (SESSION nil) keeps every tool."
                              #'harness-tools-dev--sweep-now))))
 
 (defun harness-tools-dev--init ()
-  "Offer `open_harness' only to this project's sessions; look after the instances."
-  (harness-add-filter 'agent/tools #'harness-tools-dev--tools 50)
+  "Look after the instances `open_harness' and the board open.
+The harness offers the tool to the sessions that name this module in
+`harness-plugin-modules' only, as it does every tool of a project's
+plugin."
   (harness-add-filter 'worktree/before-remove #'harness-tools-dev--before-remove)
   (dolist (event harness-tools-dev--events)
     (harness-on event #'harness-tools-dev--schedule))
@@ -986,7 +1141,7 @@ looks after them."
         harness-tools-dev--sweep-timer nil))
 
 (harness-define-module 'tools-dev
-  :doc "The open_harness tool: run a checkout's harness in an Emacs of its own."
+  :doc "The open_harness tool (this repository's plugin): run a checkout's harness in an Emacs of its own."
   :requires '(tools)
   :init #'harness-tools-dev--init
   :shutdown #'harness-tools-dev--shutdown)

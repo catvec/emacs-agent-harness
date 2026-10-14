@@ -182,11 +182,14 @@ HARNESS_SERVER_TOKEN and HARNESS_SERVER_PARENT from the environment."
 ;;;; Parent
 
 (defun harness-server--user-set-p (sym)
-  "Non-nil when SYM holds a value the user chose rather than a file's default."
-  (and (boundp sym)
+  "Non-nil when SYM holds a value the user chose rather than a file's default.
+Its global value: what a buffer has of its own, such as a project's
+directory-local variable in a buffer visiting a file there, is that
+buffer's, and goes nowhere."
+  (and (default-boundp sym)
        (let ((standard (get sym 'standard-value)))
          (if standard
-             (not (equal (symbol-value sym)
+             (not (equal (default-value sym)
                          (ignore-errors (eval (car standard) t))))
            ;; Not defined in this Emacs: a module variable set from the init file.
            (null (symbol-file sym 'defvar))))))
@@ -213,6 +216,18 @@ process starts from `emacs -Q'.  These options decide how TRAMP
 connects (methods, users, jump hosts, connection sharing) and what a
 remote command finds there (`tramp-remote-path'), so the harness uses
 the user's, as their own Emacs does.")
+
+(defconst harness-server-dir-locals-variables
+  '(enable-local-variables enable-local-eval enable-dir-local-variables
+    safe-local-variable-values safe-local-eval-forms safe-local-variable-directories
+    ignored-local-variables ignored-local-variable-values)
+  "The user's settings that decide which directory-local variables apply.
+They are copied into the harness process when the user set them, and
+sent to it again whenever one changes (`plugins/trust'): it applies the
+directory-local variables of a session's project itself, as Emacs
+does, so that the project's .dir-locals.el loads the project's plugins
+\(see harness-plugins.el), and it takes what the user trusts in their
+own Emacs -- what they answered `!' to, say -- and nothing else.")
 
 (defconst harness-server--own-variables
   '(harness-process harness-module-directories harness-extra-module-directories
@@ -244,19 +259,20 @@ file's name tells, not its directory."
 
 (defun harness-server--forwarded ()
   "Return ((SYMBOL . VALUE) ...) to set in the harness process.
+Each is the global value, whatever buffer is current.
 `harness-extra-module-directories' goes as absolute directories: the
 process starts from `emacs -Q', whose `user-emacs-directory', which
 relative ones are relative to, may not be this Emacs's."
   (let (out)
     (mapatoms (lambda (sym) (when (harness-server--forwardable-p sym) (push sym out))))
     (dolist (sym harness-server-forward-variables)
-      (when (boundp sym) (cl-pushnew sym out)))
-    (dolist (sym harness-server--tramp-variables)
+      (when (default-boundp sym) (cl-pushnew sym out)))
+    (dolist (sym (append harness-server--tramp-variables harness-server-dir-locals-variables))
       (when (harness-server--user-set-p sym) (cl-pushnew sym out)))
     (append
      (cl-loop for sym in (cons 'harness-state-directory (delq 'harness-state-directory out))
-              if (harness-server--readable-p (symbol-value sym))
-              collect (cons sym (symbol-value sym))
+              if (harness-server--readable-p (default-value sym))
+              collect (cons sym (default-value sym))
               else do (harness-log 'warn "server: %s has no readable value; not forwarded" sym))
      (and (bound-and-true-p harness-extra-module-directories)
           (list (cons 'harness-extra-module-directories (harness--extra-module-directories)))))))

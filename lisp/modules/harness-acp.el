@@ -139,7 +139,7 @@ is never used for any other failure.")
   '("session/" "agent/" "provider/" "tools/list" "usage/" "fallback/" "worktree/" "merge/"
     "config/" "skills/" "permission/" "compaction/" "handoff/" "naming/" "sandbox/status"
     "harness/api" "harness/modules" "harness/version" "harness/reload" "harness/call"
-    "harness-dev/" "question/" "project/" "task/" "search/"
+    "question/" "project/" "task/" "plugins/" "search/"
     "notification/" "acp/remote-" "pet/" "version/" "insights/" "supervisor/" "seed/" "priority/"
     "secrets/" "commit-msg/"
     "decision/")
@@ -149,9 +149,10 @@ Modules of the user's own add theirs to
 
 (defvar harness-acp-extra-method-prefixes nil
   "More bus method name prefixes callable as `_harness/NAME'.
-A module of your own (see `harness-extra-module-directories') that
-offers methods to clients, such as its UI half in the user's Emacs,
-adds their prefix here as it loads, as \"hello/\" for `hello/greet':
+A module of your own (see `harness-extra-module-directories') or a
+project's plugin (see harness-plugins.el) that offers methods to
+clients, such as its UI half in the user's Emacs, adds their prefix
+here as it loads, as \"hello/\" for `hello/greet':
 
   (with-eval-after-load \\='harness-acp
     (add-to-list \\='harness-acp-extra-method-prefixes \"hello/\"))

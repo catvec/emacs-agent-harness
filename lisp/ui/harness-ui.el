@@ -669,6 +669,40 @@ tasks among them carry on once the process is back (see
                      (lambda (_) (message "Harness process reloaded"))
                      (lambda (e) (message "Harness process: %s" (harness-error-message e))))))
 
+;; The harness process applies the directory-local variables of a
+;; session's project itself, as Emacs does, so that the project's
+;; .dir-locals.el loads the project's plugins (see harness-plugins.el),
+;; taking what the user trusts in this Emacs.  It gets the user's
+;; settings for that when it starts (`harness-server-dir-locals-variables'),
+;; and a change made since -- the user answering `!' to Emacs's question
+;; about a project's variables, which trusts them -- reaches it at once.
+
+(defvar harness-ui--trust-timer nil
+  "Timer of the trust settings due to reach the harness process, or nil.")
+
+(defun harness-ui--send-trust ()
+  "Send the harness process this Emacs's settings for directory-local variables."
+  (setq harness-ui--trust-timer nil)
+  (when (and (eq harness-ui-connection-address 'process) harness-ui--server)
+    (let ((print-length nil) (print-level nil))
+      (harness-ui-notify "_harness/plugins/trust"
+                         (list :values (prin1-to-string
+                                        (cl-loop for var in harness-server-dir-locals-variables
+                                                 when (default-boundp var)
+                                                 collect (cons var (default-value var)))))))))
+
+(defun harness-ui--trust-changed (_symbol _value operation where)
+  "Send the trust settings to the harness process, as OPERATION changed one.
+A variable watcher of `harness-server-dir-locals-variables'.  Only a
+change of the global value counts: neither a `let' nor a buffer's own
+value is the user's setting.  It goes once the change is made."
+  (when (and (memq operation '(set makunbound)) (null where)
+             (not (timerp harness-ui--trust-timer)))
+    (setq harness-ui--trust-timer (run-at-time 0 nil #'harness-ui--send-trust))))
+
+(dolist (var harness-server-dir-locals-variables)
+  (add-variable-watcher var #'harness-ui--trust-changed))
+
 (defun harness-ui--harness-modules ()
   "Return (TITLE . PROMISE) of the modules of the harness the UI talks to.
 For `harness-describe-modules-functions'.  Nil when that harness runs

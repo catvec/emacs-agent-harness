@@ -2363,21 +2363,54 @@ the same would carry the bar on."
         (should-error (harness-ui-tasks-verify) :type 'user-error)
         (should-error (harness-ui-tasks-reject) :type 'user-error)))))
 
+(ert-deftest harness-ui-tasks-action-functions-add-to-the-menu ()
+  "`harness-ui-tasks-action-functions' adds actions to a card's menu only.
+They follow the actions of the card's column, never become one of its
+buttons, and a function that fails adds none and breaks nothing."
+  (harness-ui-tasks-test-with
+    (let* ((harness-tasks-require-verification t)
+           (harness-ui-tasks-action-functions
+            (list (lambda (task)
+                    (and (equal (plist-get task :state) "review")
+                         '(("Look closer" harness-ui-tasks-test--look-closer))))
+                  (lambda (_task) (error "Broken"))))
+           (labels (lambda () (mapcar #'car (harness-ui-tasks--actions (harness-ui-tasks--task))))))
+      (harness-ui-tasks-test--type-and-submit board "Try the extra action")
+      (harness-ui-tasks-test--wait-text board "Ready for review  1\\(.\\|\n\\)*Try the extra action")
+      (harness-ui-tasks-test--goto-card board "Try the extra action")
+      (with-current-buffer board
+        (harness-ui-tasks--render)
+        (harness-ui-tasks-test--goto-card board "Try the extra action")
+        (let ((all (funcall labels)))
+          (should (member "Look closer" all))
+          ;; After the column's own actions.
+          (should (< (cl-position "Archive" all :test #'equal)
+                     (cl-position "Look closer" all :test #'equal))))
+        (should-not (assoc "Look closer" (harness-ui-tasks--actions (harness-ui-tasks--task) t)))
+        (should-not (string-match-p "\\[Look closer\\]" (harness-ui-tasks-test--board-text board)))
+        (should (string-match-p "\\[Verify\\] \\[Send back\\]" (harness-ui-tasks-test--board-text board)))
+        (should (equal (harness-ui-tasks--task) (harness-ui-tasks-task-at-point)))))))
+
+(declare-function harness-ui-tools-dev-open-p "harness-ui-tools-dev" (task))
+
 (ert-deftest harness-ui-tasks-review-offers-the-worktree-harness ()
   "A review card whose worktree is a harness checkout has Open harness in its menu.
-The card has no button for it, as it has none for its session, which a
-click on its title opens."
+This repository's plugin adds it (harness-ui-tools-dev.el, through
+`harness-ui-tasks-action-functions'), and its harness half opens the
+instance.  The card has no button for it, as it has none for its
+session, which a click on its title opens."
   (harness-ui-tasks-test-with
     (let ((harness-tasks-require-verification t)
           (checkout nil)
           (open-harness (lambda ()
                           (assoc "Open harness" (harness-ui-tasks--actions (harness-ui-tasks--task))))))
+      (harness-test-load-module 'ui-tools-dev)
       (harness-ui-tasks-test--type-and-submit board "Try the harness")
       (harness-ui-tasks-test--wait-text board "Ready for review  1\\(.\\|\n\\)*Try the harness")
       ;; Without a checkout of its own the card does not offer it.
       (harness-ui-tasks-test--goto-card board "Try the harness")
       (with-current-buffer board
-        (should-not (harness-ui-tasks--open-harness-p (harness-ui-tasks--task)))
+        (should-not (harness-ui-tools-dev-open-p (harness-ui-tasks--task)))
         (should-not (funcall open-harness)))
       ;; A worktree that is a checkout of the harness gets it in the menu.
       (setq checkout (harness-test-harness-checkout))
@@ -2386,7 +2419,7 @@ click on its title opens."
         (harness-tasks--set id :worktree checkout)
         (with-current-buffer board (harness-ui-tasks-refresh))
         (harness-test-wait (lambda () (with-current-buffer board
-                                        (harness-ui-tasks--open-harness-p (harness-ui-tasks--find id))))
+                                        (harness-ui-tools-dev-open-p (harness-ui-tasks--find id))))
                            5 "the board to know the task's worktree"))
       (harness-ui-tasks-test--goto-card board "Try the harness")
       (with-current-buffer board

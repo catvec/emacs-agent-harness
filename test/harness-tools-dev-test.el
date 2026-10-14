@@ -3,10 +3,13 @@
 ;;; Commentary:
 
 ;; The tool and method that run a checkout's harness in an Emacs of its
-;; own (harness-tools-dev.el), and the lifetimes of those Emacsen.  A
+;; own (harness-tools-dev.el, this repository's own plugin, in
+;; .harness/plugins/dev/), and the lifetimes of those Emacsen.  A
 ;; fake scripts/dev.sh in a temp checkout records what the launcher ran,
 ;; and stand-in sessions and tasks say who needs an instance, so no
-;; Emacs is started here but by the one test that stops a real daemon.
+;; Emacs is started here but by the test that stops a real daemon and
+;; the one that drives a real daemon from the sandbox.  The real
+;; scripts/dev.sh is tried with fake emacs and emacsclient programs.
 
 ;;; Code:
 
@@ -14,6 +17,20 @@
 (require 'harness-tools)
 
 (defvar harness-tools-dev--check-timer)
+(defvar harness-tools-dev--own-socket)
+(defvar harness-tools-dev--processes-function)
+(defvar harness-session--tmp-root)
+(defvar harness-sandbox-policy)
+(defvar harness-perms-extra-auto-allow-tools)
+(defvar harness-perms--auto-allow-tools)
+(defvar harness-tool-slots-tools)
+(defvar harness-acp-extra-method-prefixes)
+(defvar harness-acp-extension-prefixes)
+
+(declare-function harness-perms--mode-decision "harness-perms" (decision request))
+(declare-function harness-plugins--apply "harness-plugins" (dir))
+
+(declare-function harness-sandbox-detect "harness-sandbox" ())
 
 (defmacro harness-tools-dev-test-with (&rest body)
   "Load the tools registry and tools-dev on a fresh bus; run BODY."
@@ -131,23 +148,117 @@ collects the sockets that are."
       (delete-file (expand-file-name "scripts/dev.sh" dir))
       (should-not (harness-tools-dev-checkout-p dir)))))
 
-(ert-deftest harness-tools-dev-tool-is-for-this-project-only ()
-  "The tool is offered in a harness checkout, and nowhere else."
-  (harness-tools-dev-test-with
-    (let* ((dir (harness-test-harness-checkout))
-           (here (list :cwd dir))
-           (elsewhere (list :cwd (harness-test-temp-dir)))
-           (names (list "open_harness" "bash")))
-      (should (equal '("open_harness" "bash") (harness-tools-dev--tools names here)))
-      (should (equal '("bash") (harness-tools-dev--tools names elsewhere)))
-      ;; The catalogue (no session) keeps it.
-      (should (equal '("open_harness" "bash") (harness-tools-dev--tools names nil)))
-      ;; The real filter chain `tools/list' runs.
-      (should (member "open_harness" (harness-run-filter 'agent/tools names here)))
-      (should-not (member "open_harness" (harness-run-filter 'agent/tools names elsewhere)))
-      ;; A task worktree counts through the session's :worktree too.
-      (let ((worktree (list :cwd (harness-test-temp-dir) :worktree dir)))
-        (should (member "open_harness" (harness-run-filter 'agent/tools names worktree)))))))
+(ert-deftest harness-tools-dev-tool-is-for-the-sessions-that-name-it ()
+  "The tool is this repository's plugin's: the sessions naming it get it.
+tools-dev is a plugin module, which the harness did not load from a
+directory of its own (`harness-module-plugin-p').  So a session gets
+open_harness only when the plugin modules it froze name tools-dev, as
+this repository's .dir-locals.el has them do; another session neither
+gets it nor may call it, and the catalogue (no session) lists it.  This
+is the harness's rule for every tool of a project's plugin
+\(`harness-tools--in-scope-p')."
+  (harness-tools-dev-test-world
+    (let ((elsewhere (harness-test-temp-dir)))
+      (harness-tools-dev-test--session "here" :project harness-test-root :cwd harness-test-root)
+      (harness-tools-dev-test--session "elsewhere" :project elsewhere :cwd elsewhere)
+      ;; Stands in for the plugins module: the lists the sessions froze.
+      (harness-register-method 'plugins/of-session
+                               (lambda (id) (and (equal id "here") '(tools-dev))))
+      (should (harness-module-plugin-p 'tools-dev))
+      (should (member "open_harness" (harness-tools--names (harness-call 'session/get "here"))))
+      (should-not (member "open_harness" (harness-tools--names (harness-call 'session/get "elsewhere"))))
+      (should (member "open_harness" (harness-tools--names nil)))
+      (let ((result (harness-test-await
+                     (harness-call 'tools/execute "elsewhere"
+                                   (list :id "c1" :name "open_harness" :input (list :path elsewhere))))))
+        (should (plist-get result :is-error))
+        (should (string-prefix-p "Unknown tool open_harness" (plist-get result :content)))))))
+
+(defun harness-tools-dev-test--checkout (dir)
+  "Copy this repository's .dir-locals.el and its plugin to DIR; return DIR.
+DIR is made if missing: a checkout of the repository, as far as the
+plugin goes, wherever the tests run from."
+  (let ((plugin (expand-file-name ".harness/plugins/dev/" dir)))
+    (make-directory plugin t)
+    (copy-file (expand-file-name ".dir-locals.el" harness-test-root) (expand-file-name ".dir-locals.el" dir) t)
+    (dolist (file (directory-files (expand-file-name ".harness/plugins/dev/" harness-test-root) t "\\.el\\'"))
+      (copy-file file (expand-file-name (file-name-nondirectory file) plugin) t))
+    (file-name-as-directory dir)))
+
+(ert-deftest harness-tools-dev-repository-names-its-plugin ()
+  "This repository's .dir-locals.el loads the plugin and names tools-dev.
+Applied as the harness process applies a project's variables, with
+its entries trusted as Emacs's `!' trusts them, the `require' loads the
+plugin's process half -- module tools-dev, a plugin module, started --
+and the sessions of the repository get tools-dev.  Untrusted, nothing
+loads and they get none.  In a checkout nested in another, such as a
+task's worktree, which an agent writes, the entries name tools-dev all
+the same but load nothing: the plugin comes from a main checkout."
+  (harness-test-with-temp-state
+    (harness-test-reset-bus)
+    (dolist (m '(tools plugins))
+      (harness-test-load-module m))
+    (let* ((file (expand-file-name ".dir-locals.el" harness-test-root))
+           (entries (cdr (assq nil (with-temp-buffer
+                                     (insert-file-contents file)
+                                     (read (current-buffer))))))
+           (main (harness-tools-dev-test--checkout (harness-test-temp-dir)))
+           (worktree (harness-tools-dev-test--checkout (expand-file-name ".worktrees/task/" main)))
+           (enable-local-variables t)
+           (enable-local-eval 'maybe)
+           (dir-locals-directory-cache nil)
+           (dir-locals-class-alist nil))
+      (should (equal '(tools-dev) (cdr (assq 'harness-plugin-modules entries))))
+      (should (string-search "(require 'harness-dev-plugin" (prin1-to-string (cdr (assq 'eval entries)))))
+      (make-directory (expand-file-name ".git" main))
+      (with-temp-file (expand-file-name ".git" worktree) (insert "gitdir: " main ".git/worktrees/task\n"))
+      ;; As a fresh harness process: neither half has loaded.
+      (setq features (cl-set-difference features '(harness-dev-plugin harness-tools-dev)))
+      (remhash "open_harness" harness-tools)
+      (let ((safe-local-variable-values nil))
+        (should-not (harness-plugins--apply main))
+        (should-not (featurep 'harness-dev-plugin))
+        (should-not (harness-module-get 'tools-dev))
+        (should-not (harness-tool-get "open_harness")))
+      (let ((safe-local-variable-values entries))
+        (should (equal '(tools-dev) (harness-plugins--apply worktree)))
+        (should-not (featurep 'harness-dev-plugin))
+        (should-not (harness-tool-get "open_harness"))
+        (should (equal '(tools-dev) (harness-plugins--apply main))))
+      (should (featurep 'harness-tools-dev))
+      (should (harness-module-plugin-p 'tools-dev))
+      (should (harness-module-ready-p 'tools-dev))
+      (should (harness-tool-get "open_harness"))
+      (should (eq 'tools-dev (harness-tool-module (harness-tool-get "open_harness")))))))
+
+(ert-deftest harness-tools-dev-plugin-tells-the-harness-of-its-tool ()
+  "Loading the plugin tells the harness what its own modules list for theirs.
+open_harness needs no approval (`harness-perms-extra-auto-allow-tools'),
+holds a slot of the machine as bash does (`harness-tool-slots-tools'),
+and the board reaches `harness-dev/open' over ACP
+\(`harness-acp-extra-method-prefixes'); the harness's own lists name it
+nowhere."
+  (harness-test-with-temp-state
+    (harness-test-reset-bus)
+    (dolist (m '(project config tools provider perms))
+      (harness-test-load-module m))
+    (require 'harness-tool-slots)
+    (require 'harness-acp)
+    (let ((harness-perms-extra-auto-allow-tools nil)
+          (harness-tool-slots-tools (eval (car (get 'harness-tool-slots-tools 'standard-value)) t))
+          (harness-acp-extra-method-prefixes nil))
+      (should-not (member "open_harness" harness-perms--auto-allow-tools))
+      (should-not (member "open_harness" harness-tool-slots-tools))
+      (should-not (member "harness-dev/" harness-acp-extension-prefixes))
+      (harness-test-load-module 'tools-dev)
+      (should (member "open_harness" harness-perms-extra-auto-allow-tools))
+      (should (member "open_harness" harness-tool-slots-tools))
+      (should (member "harness-dev/" harness-acp-extra-method-prefixes))
+      (should (eq 'allow (plist-get (harness-perms--mode-decision
+                                     (list :behavior 'ask)
+                                     (list :session (list :id "s1" :permission-mode 'ask)
+                                           :tool "open_harness" :kind 'exec))
+                                    :behavior))))))
 
 (ert-deftest harness-tools-dev-tool-runs-the-live-loop ()
   "The tool runs the checkout's scripts/dev.sh with its own socket."
@@ -168,7 +279,92 @@ collects the sockets that are."
         ;; Its state is its own, whatever this Emacs inherited: an
         ;; instance opening another passes its own HARNESS_DEV_STATE on.
         (should (equal (harness-tools-dev-state dir (harness-tools-dev-socket dir))
-                       (cdr (assoc "state" (car calls)))))))))
+                       (cdr (assoc "state" (car calls)))))
+        ;; Its socket is in the root of the sessions' temporary
+        ;; directories, whoever opens it.
+        (should (equal (directory-file-name (harness-tools-dev-socket-dir))
+                       (cdr (assoc "socket_dir" (car calls)))))
+        (should (string-prefix-p (file-name-as-directory (expand-file-name harness-session--tmp-root))
+                                 (harness-tools-dev-socket-dir)))
+        ;; The result names the socket's file, there.
+        (should (string-search (concat "HARNESS_DEV_SOCKET="
+                                       (harness-tools-dev-socket-path (harness-tools-dev-socket dir))
+                                       " scripts/dev.sh shot")
+                               (plist-get result :content))))
+      ;; By default the socket's path is short enough for a socket's
+      ;; address, which holds about a hundred bytes.
+      (let ((harness-session--tmp-root nil))
+        (should (< (length (harness-tools-dev-socket-path (harness-tools-dev-socket dir))) 100))))))
+
+(ert-deftest harness-tools-dev-socket-directory-is-private ()
+  "The sockets' directory is private, in a root of the user's own.
+A root that is not, as somebody's symbolic link in a shared /tmp would
+be, is refused: the socket is then in Emacs's default directory."
+  (harness-tools-dev-test-with
+    (let* ((base (harness-test-temp-dir))
+           (harness-session--tmp-root (expand-file-name "root/" base)))
+      (should (equal (harness-tools-dev-socket-dir) (harness-tools-dev--make-socket-dir)))
+      (should (= #o700 (file-modes (harness-tools-dev-socket-dir))))
+      (should (= #o700 (file-modes harness-session--tmp-root)))
+      (let ((harness-session--tmp-root (expand-file-name "link/" base))
+            (dir (harness-test-harness-checkout)))
+        (make-symbolic-link (expand-file-name "root" base) (directory-file-name harness-session--tmp-root))
+        (should-not (harness-tools-dev--make-socket-dir))
+        (let ((result (harness-test-await (harness-tools-dev--open nil (list :cwd dir)))))
+          (should-not (plist-get result :is-error))
+          (should (equal "" (cdr (assoc "socket_dir" (car (harness-test-dev-invocations dir))))))
+          (should (string-search (concat "HARNESS_DEV_SOCKET=" (harness-tools-dev-socket dir) " scripts/dev.sh shot")
+                                 (plist-get result :content)))))
+      (delete-directory base t))))
+
+(ert-deftest harness-tools-dev-links-the-socket-into-the-sessions-directory ()
+  "Opening an instance links its socket into the session's temporary directory.
+The session's sandboxed shell reaches that directory, and the instance
+through the link; the result's commands name the link."
+  (harness-tools-dev-test-world
+    (let* ((dir (harness-test-harness-checkout))
+           (socket (harness-tools-dev-socket dir))
+           (fixed (harness-tools-dev-socket-path socket))
+           (tmp (lambda (id) (file-name-as-directory (expand-file-name id harness-session--tmp-root))))
+           (inode (lambda (file) (file-attribute-inode-number (file-attributes file)))))
+      ;; Two sessions have a temporary directory, the third none.
+      (harness-register-method 'session/tmp-dir
+                               (lambda (id)
+                                 (when (member id '("s1" "s2"))
+                                   (with-file-modes #o700 (make-directory (funcall tmp id) t))
+                                   (funcall tmp id))))
+      (dolist (id '("s1" "s2" "s3"))
+        (harness-tools-dev-test--session id :cwd dir :status 'running))
+      (let ((result (harness-tools-dev-test--open dir "s1"))
+            (link (expand-file-name socket (funcall tmp "s1"))))
+        (should-not (plist-get result :is-error))
+        (should (file-exists-p fixed))
+        (should (file-exists-p link))
+        (should (equal (funcall inode fixed) (funcall inode link)))
+        (should (string-search (concat "HARNESS_DEV_SOCKET=" (shell-quote-argument link) " scripts/dev.sh shot")
+                               (plist-get result :content)))
+        (should (string-search "link in your temporary directory" (plist-get result :content)))
+        ;; Another session opening it gets a link of its own.
+        (let ((other (expand-file-name socket (funcall tmp "s2"))))
+          (should (string-search (concat "HARNESS_DEV_SOCKET=" (shell-quote-argument other))
+                                 (plist-get (harness-tools-dev-test--open dir "s2") :content)))
+          (should (equal (funcall inode fixed) (funcall inode other))))
+        ;; What is left at the link's place, as by an earlier instance,
+        ;; gives way.
+        (delete-file link)
+        (with-temp-file link (insert "an earlier instance's socket\n"))
+        (should-not (equal (funcall inode fixed) (funcall inode link)))
+        (harness-tools-dev-test--open dir "s1")
+        (should (equal (funcall inode fixed) (funcall inode link))))
+      ;; A session with no temporary directory is given the socket's file.
+      (let ((content (plist-get (harness-tools-dev-test--open dir "s3") :content)))
+        (should (string-search (concat "HARNESS_DEV_SOCKET=" (shell-quote-argument fixed) " scripts/dev.sh shot")
+                               content))
+        (should-not (string-search "link in your temporary directory" content)))
+      ;; One opener of them all: the instance is the same.
+      (should (equal '("s1" "s2" "s3") (plist-get (harness-tools-dev--find socket) :sessions)))
+      (should (equal (list socket) (delete-dups (mapcar (lambda (call) (cdr (assoc "socket" call)))
+                                                        (harness-test-dev-invocations dir))))))))
 
 (ert-deftest harness-tools-dev-instances-belong-to-the-users-emacs ()
   "An instance belongs to the Emacs the harness process serves, else this one.
@@ -446,11 +642,39 @@ A restart of the harness process alone must not stop the instances."
                   "emacs -Q --daemon=harness-dev-0123456789ab -l /w/a b/scripts/harness-dev.el")))
   (should (equal '(:socket "harness-dev-0123456789ab" :path nil)
                  (harness-tools-dev--parse-command "emacs --daemon=harness-dev-0123456789ab")))
+  ;; The daemon is given its socket's file; the socket is its name still.
+  (should (equal '(:socket "harness-dev-0123456789ab" :path "/w/a b/")
+                 (harness-tools-dev--parse-command
+                  "emacs -Q --daemon=/tmp/harness-1000/.dev/harness-dev-0123456789ab -l /w/a b/scripts/harness-dev.el")))
   ;; The user's own dev daemon, and anything else, is not one.
   (should-not (harness-tools-dev--parse-command "emacs -Q --daemon=harness-v3 -l /w/scripts/harness-dev.el"))
+  (should-not (harness-tools-dev--parse-command "emacs -Q --daemon=/x/harness-v3 -l /w/scripts/harness-dev.el"))
+  (should-not (harness-tools-dev--parse-command "emacs -Q --daemon=/x/harness-dev-0123456789ab/y -l /w/scripts/harness-dev.el"))
   (should-not (harness-tools-dev--parse-command "emacs --daemon=harness-dev-xyz"))
   (should-not (harness-tools-dev--parse-command "emacs --batch -l harness-server.el"))
   (should-not (harness-tools-dev--parse-command nil)))
+
+(ert-deftest harness-tools-dev-knows-its-own-socket-by-its-file ()
+  "An instance tells its own socket from `daemonp', which is the socket's file."
+  (harness-tools-dev-test-with
+    (dolist (daemon '("/tmp/harness-1000/.dev/harness-dev-0123456789ab" "harness-dev-0123456789ab"))
+      (let ((harness-tools-dev--own-socket 'unknown))
+        (cl-letf (((symbol-function 'daemonp) (lambda () daemon)))
+          (should (equal "harness-dev-0123456789ab" (harness-tools-dev--own-socket))))))))
+
+(ert-deftest harness-tools-dev-reaches-an-instance-by-its-sockets-file ()
+  "emacsclient is given the socket's file when there is one, else its name.
+An instance an older harness started has its socket in Emacs's default
+directory, under its name."
+  (harness-tools-dev-test-with
+    (let* ((harness-session--tmp-root (harness-test-temp-dir))
+           (socket "harness-dev-0123456789ab")
+           (path (harness-tools-dev-socket-path socket)))
+      (should (equal socket (harness-tools-dev--client-socket socket)))
+      (harness-tools-dev--make-socket-dir)
+      (with-temp-file path)
+      (should (equal path (harness-tools-dev--client-socket socket)))
+      (delete-directory harness-session--tmp-root t))))
 
 (ert-deftest harness-tools-dev-stops-a-real-daemon ()
   "A daemon started the way scripts/dev.sh starts one is found and stopped."
@@ -482,6 +706,256 @@ A restart of the harness process alone must not stop the instances."
         (let ((left (funcall harness-tools-dev--processes-function)))
           (when (listp left)
             (dolist (daemon left) (ignore-errors (signal-process (plist-get daemon :pid) 'kill)))))))))
+
+;;;; The real scripts/dev.sh
+
+(defun harness-tools-dev-test--real-checkout ()
+  "Make a checkout of the harness with the real scripts/dev.sh; return it."
+  (let* ((dir (harness-test-harness-checkout))
+         (script (expand-file-name "scripts/dev.sh" dir)))
+    (copy-file (expand-file-name "scripts/dev.sh" harness-test-root) script t)
+    (set-file-modes script #o755)
+    dir))
+
+(defun harness-tools-dev-test--fake-bin ()
+  "Make a directory of fake `emacs' and `emacsclient' programs; return it.
+Each appends a line to calls.log there: `emacs STATE ARGS', STATE being
+HARNESS_DEV_STATE, and `emacsclient PWD ARGS'.  The fake emacs makes
+the file `--daemon=' names when that is a path, as the daemon makes its
+socket, and its directory; the fake emacsclient succeeds when the file
+its -s names exists, seen from where it runs, as the real one does when
+a daemon answers there."
+  (let ((bin (harness-test-temp-dir)))
+    (with-temp-file (expand-file-name "emacs" bin)
+      (insert "#!/bin/sh\n"
+              "printf 'emacs %s %s\\n' \"$HARNESS_DEV_STATE\" \"$*\" >> \"$(dirname \"$0\")/calls.log\"\n"
+              "for a in \"$@\"; do\n"
+              "  case \"$a\" in\n"
+              "    --daemon=*/*) s=${a#--daemon=}; mkdir -p \"${s%/*}\"; : > \"$s\" ;;\n"
+              "  esac\n"
+              "done\n"))
+    (with-temp-file (expand-file-name "emacsclient" bin)
+      (insert "#!/bin/sh\n"
+              "printf 'emacsclient %s %s\\n' \"$PWD\" \"$*\" >> \"$(dirname \"$0\")/calls.log\"\n"
+              "s=\n"
+              "while [ $# -gt 0 ]; do\n"
+              "  case \"$1\" in -s) s=$2; shift ;; esac\n"
+              "  shift\n"
+              "done\n"
+              "[ -n \"$s\" ] && [ -e \"$s\" ]\n"))
+    (dolist (program '("emacs" "emacsclient"))
+      (set-file-modes (expand-file-name program bin) #o755))
+    bin))
+
+(defun harness-tools-dev-test--calls (bin)
+  "Return the lines the fake programs in BIN logged, and forget them."
+  (let ((log (expand-file-name "calls.log" bin)))
+    (prog1 (and (file-exists-p log)
+                (with-temp-buffer (insert-file-contents log) (split-string (buffer-string) "\n" t)))
+      (when (file-exists-p log) (delete-file log)))))
+
+(defun harness-tools-dev-test--socket-arg (call)
+  "Return the socket emacsclient was given in CALL, a line of calls.log."
+  (cadr (member "-s" (split-string call " "))))
+
+(defun harness-tools-dev-test--dev-sh (dir bin env &rest args)
+  "Run DIR's scripts/dev.sh with ARGS, the fake programs of BIN first on PATH.
+ENV lists VAR=VALUE strings put before the environment.  The variables
+scripts/dev.sh reads and ENV does not set are unset: the suite may run
+in an agent's sandbox, or in an instance, which set them.  Return
+\(EXIT STDOUT STDERR)."
+  (let* ((default-directory dir)
+         (process-environment
+          (append env
+                  (list (concat "PATH=" (directory-file-name bin) ":" (getenv "PATH"))
+                        "HARNESS_DEV_TIMEOUT=10"
+                        "HARNESS_DEV_SOCKET" "HARNESS_DEV_SOCKET_DIR" "HARNESS_DEV_STATE" "HARNESS_SANDBOX")
+                  process-environment))
+         (err (make-temp-file "harness-dev-sh-stderr-")))
+    (unwind-protect
+        (with-temp-buffer
+          (let ((exit (apply #'call-process (expand-file-name "scripts/dev.sh" dir) nil (list t err) nil args)))
+            (list exit (buffer-string) (with-temp-buffer (insert-file-contents err) (buffer-string)))))
+      (delete-file err))))
+
+(ert-deftest harness-tools-dev-dev-sh-finds-the-socket ()
+  "scripts/dev.sh puts a named socket in HARNESS_DEV_SOCKET_DIR, or takes a path.
+With neither, the name is left to Emacs's default directory, as before."
+  (let* ((dir (harness-tools-dev-test--real-checkout))
+         (bin (harness-tools-dev-test--fake-bin))
+         (sockets (harness-test-temp-dir))
+         (name "harness-dev-0123456789ab")
+         (path (expand-file-name name sockets))
+         (state (expand-file-name (concat "scripts/.dev/state-" name) dir)))
+    (unwind-protect
+        (progn
+          ;; A name and a directory, given with a slash at its end.
+          (let ((r (harness-tools-dev-test--dev-sh dir bin (list (concat "HARNESS_DEV_SOCKET=" name)
+                                                                 (concat "HARNESS_DEV_SOCKET_DIR=" sockets))
+                                                   "start")))
+            (should (eql 0 (car r)))
+            (should (string-match-p "up, frame ready" (nth 1 r)))
+            (should-not (string-search "warning" (nth 2 r))))
+          (let* ((calls (harness-tools-dev-test--calls bin))
+                 (clients (cl-remove-if-not (lambda (call) (string-prefix-p "emacsclient " call)) calls)))
+            ;; The daemon is given the path, and its state is named
+            ;; after the socket's name.
+            (should (member (format "emacs %s -Q --daemon=%s -l %sscripts/harness-dev.el" state path dir) calls))
+            (should clients)
+            (should (equal (list path) (delete-dups (mapcar #'harness-tools-dev-test--socket-arg clients)))))
+          ;; A path, whatever the directory says.
+          (let ((r (harness-tools-dev-test--dev-sh dir bin (list (concat "HARNESS_DEV_SOCKET=" path)
+                                                                 "HARNESS_DEV_SOCKET_DIR=/nowhere")
+                                                   "status")))
+            (should (equal '(0 "running\n") (seq-take r 2))))
+          (should (equal (list path) (mapcar #'harness-tools-dev-test--socket-arg
+                                             (harness-tools-dev-test--calls bin))))
+          ;; A name alone: Emacs's default directory.
+          (let ((r (harness-tools-dev-test--dev-sh dir bin (list (concat "HARNESS_DEV_SOCKET=" name)) "status")))
+            (should (equal '(1 "not running\n") (seq-take r 2))))
+          (should (equal (list name) (mapcar #'harness-tools-dev-test--socket-arg
+                                             (harness-tools-dev-test--calls bin))))
+          ;; Nothing: the user's own dev daemon.
+          (harness-tools-dev-test--dev-sh dir bin nil "status")
+          (should (equal '("harness-v3") (mapcar #'harness-tools-dev-test--socket-arg
+                                                 (harness-tools-dev-test--calls bin)))))
+      (dolist (d (list dir bin sockets)) (delete-directory d t)))))
+
+(ert-deftest harness-tools-dev-dev-sh-reaches-a-long-socket-path ()
+  "A socket path too long for a socket's address is reached from its directory.
+`shot' sends its PATH absolute, since emacsclient's directory is then
+the socket's, which --eval takes for `default-directory'."
+  (let* ((dir (harness-tools-dev-test--real-checkout))
+         (bin (harness-tools-dev-test--fake-bin))
+         (base (harness-test-temp-dir))
+         (deep (file-name-as-directory (expand-file-name (make-string 90 ?d) base)))
+         (name "harness-dev-0123456789ab")
+         (path (expand-file-name name deep)))
+    (unwind-protect
+        (progn
+          (make-directory deep t)
+          (with-temp-file path)
+          (should (> (length path) 100))
+          (let ((r (harness-tools-dev-test--dev-sh dir bin (list (concat "HARNESS_DEV_SOCKET=" path))
+                                                   "shot" "rel.png")))
+            (should (eql 0 (car r)))
+            (should (equal (concat (expand-file-name "rel.png" dir) "\n") (nth 1 r))))
+          (let ((calls (harness-tools-dev-test--calls bin)))
+            (should (= 1 (length calls)))
+            (should (string-prefix-p "emacsclient " (car calls)))
+            (should (string-match " -s \\./\\([^ ]+\\) --eval (harness-dev-shot \"\\([^\"]+\\)\")\\'" (car calls)))
+            (should (equal name (match-string 1 (car calls))))
+            (should (equal (expand-file-name "rel.png" dir) (match-string 2 (car calls))))
+            ;; Run from the socket's directory.
+            (should (file-equal-p deep (nth 1 (split-string (car calls) " "))))))
+      (dolist (d (list dir bin base)) (delete-directory d t)))))
+
+(ert-deftest harness-tools-dev-dev-sh-warns-in-the-sandbox ()
+  "In the sandbox, scripts/dev.sh start warns its Emacs ends with the command.
+It starts it all the same: one command may start, drive and stop it."
+  (let* ((dir (harness-tools-dev-test--real-checkout))
+         (bin (harness-tools-dev-test--fake-bin))
+         (sockets (harness-test-temp-dir))
+         (env (list "HARNESS_SANDBOX=bwrap" "HARNESS_DEV_SOCKET=harness-dev-0123456789ab"
+                    (concat "HARNESS_DEV_SOCKET_DIR=" sockets))))
+    (unwind-protect
+        (let ((r (apply #'harness-tools-dev-test--dev-sh dir bin env '("start"))))
+          (should (eql 0 (car r)))
+          (should (string-match-p "warning: in the harness sandbox (bwrap) this Emacs ends with the command" (nth 2 r)))
+          (should (string-search "open_harness" (nth 2 r)))
+          (should (cl-some (lambda (call) (string-prefix-p "emacs " call)) (harness-tools-dev-test--calls bin)))
+          ;; Once it runs, nothing to warn about.
+          (let ((again (apply #'harness-tools-dev-test--dev-sh dir bin env '("start"))))
+            (should (eql 0 (car again)))
+            (should (string-match-p "already running" (nth 1 again)))
+            (should (equal "" (nth 2 again))))
+          (should-not (cl-some (lambda (call) (string-prefix-p "emacs " call)) (harness-tools-dev-test--calls bin))))
+      (dolist (d (list dir bin sockets)) (delete-directory d t)))))
+
+;;;; From the sandbox
+
+(ert-deftest harness-tools-dev-sandboxed-shell-drives-the-instance ()
+  "An agent's sandboxed shell drives the instance its session opened, by the link.
+A real daemon, started by the real scripts/dev.sh as the tool starts
+it, is driven from the real bwrap: there the sockets' directory is out
+of sight, and the link in the session's temporary directory reaches the
+daemon."
+  (harness-tools-dev-test-with
+    (dolist (m '(project config sandbox))
+      (harness-test-load-module m))
+    (harness-sandbox-detect)
+    (skip-unless (eq 'bwrap (plist-get (harness-call 'sandbox/status) :backend)))
+    (skip-unless (and (executable-find "emacs") (executable-find "emacsclient")))
+    (let* ((dir (harness-tools-dev-test--real-checkout))
+           (socket (harness-tools-dev-socket dir))
+           (fixed (harness-tools-dev-socket-path socket))
+           (tmp (file-name-as-directory (expand-file-name "s1" harness-session--tmp-root)))
+           (harness-sandbox-policy 'required)
+           (asked nil)
+           ;; Only the daemon this test starts is ever seen, or stopped.
+           (harness-tools-dev--processes-function
+            (lambda ()
+              (let ((all (harness-tools-dev-processes)))
+                (if (listp all)
+                    (cl-remove-if-not (lambda (daemon) (equal socket (plist-get daemon :socket))) all)
+                  all)))))
+      (unwind-protect
+          (let ((probe (harness-await (harness-run-command (harness-call 'sandbox/wrap dir '("true"))
+                                                           :cwd dir :timeout 20))))
+            (unless (eql 0 (plist-get probe :exit))
+              (ert-skip (format "bwrap cannot start here: %s" (string-trim (plist-get probe :stderr)))))
+            (with-temp-file (expand-file-name "scripts/harness-dev.el" dir)
+              (insert ";; The dev loop of a daemon with no display: no frame.\n"
+                      "(defun harness-dev-frame () t)\n"))
+            (with-file-modes #o700 (make-directory tmp t))
+            (harness-register-method 'session/exists-p (lambda (id) (equal id "s1")))
+            (harness-register-method 'session/get
+                                     (lambda (id)
+                                       (if (equal id "s1")
+                                           (list :id "s1" :cwd dir :status 'running :kind 'main
+                                                 :updated (float-time))
+                                         (error "No session %s" id))))
+            (harness-register-method 'session/tmp-dir (lambda (id) (and (equal id "s1") tmp)))
+            (unwind-protect
+                (let* ((info (harness-test-await (harness-tools-dev-start dir nil (list :session "s1")) 90))
+                       (link (plist-get info :link))
+                       (drive (lambda (socket command)
+                                (harness-test-await
+                                 (harness-run-command
+                                  (harness-call 'sandbox/wrap dir
+                                                (list "bash" "-c"
+                                                      (format "HARNESS_DEV_SOCKET=%s scripts/dev.sh %s"
+                                                              (shell-quote-argument socket) command))
+                                                :writable (list tmp))
+                                  :cwd dir :timeout 60)
+                                 70))))
+                  (should (file-exists-p fixed))
+                  (should (equal (expand-file-name socket tmp) link))
+                  ;; Through the link, the daemon answers.
+                  (let ((r (funcall drive link "eval '(+ 1 2)'")))
+                    (should (equal "3" (string-trim (plist-get r :stdout))))
+                    (should (eql 0 (plist-get r :exit))))
+                  ;; Its socket's own file is out of the sandbox's sight.
+                  (let ((r (funcall drive fixed "status")))
+                    (should (equal "not running" (string-trim (plist-get r :stdout))))
+                    (should (eql 1 (plist-get r :exit)))))
+              ;; The stop the harness makes, then whatever it takes.
+              (let ((ask (symbol-function 'harness-tools-dev--ask-to-exit)))
+                (cl-letf (((symbol-function 'harness-tools-dev--ask-to-exit)
+                           (lambda (socket &optional path)
+                             (harness-then (funcall ask socket path) (lambda (r) (setq asked r) r)))))
+                  (ignore-errors (harness-test-await (harness-call 'harness-dev/stop dir) 30))))
+              (unless (eql 0 (plist-get asked :exit))
+                (call-process "emacsclient" nil nil nil "-a" "false" "-s" fixed "--eval" "(kill-emacs)"))
+              (ignore-errors (harness-test-wait (lambda () (not (file-exists-p fixed))) 15 "the socket to go"))
+              (let ((left (funcall harness-tools-dev--processes-function)))
+                (when (listp left)
+                  (dolist (daemon left) (ignore-errors (signal-process (plist-get daemon :pid) 'kill))))))
+            ;; The harness asked the daemon to exit, through the socket's
+            ;; file, and it went, its socket with it.
+            (should (eql 0 (plist-get asked :exit)))
+            (should-not (file-exists-p fixed)))
+        (delete-directory dir t)))))
 
 (ert-deftest harness-tools-dev-stops-a-daemon-through-the-socket-in-its-checkout ()
   "A daemon whose socket is in its checkout, where scripts/dev.sh puts it,

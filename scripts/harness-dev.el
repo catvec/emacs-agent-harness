@@ -104,6 +104,15 @@ Without HARNESS_DEV_OWNER, as when started by hand, do nothing."
   ;; into a repository's .git, where the real harness keeps its task
   ;; boards.  Set it to t to try repository stores, in a scratch repository.
   (setq harness-tasks-store-in-repository nil)
+  ;; A daemon nobody watches must never stop on a question.  So
+  ;; directory-local variables that are not safe as they are -- the
+  ;; checkout's own .dir-locals.el, which loads its plugin
+  ;; (.harness/plugins/dev/) -- are left out rather than asked about,
+  ;; here and in the harness process this Emacs starts, which gets
+  ;; this setting.  To try the plugin here, set `enable-local-variables'
+  ;; back to t in this Emacs, visit a file of the checkout and answer
+  ;; `!' when Emacs asks.
+  (setq enable-local-variables :safe)
   (require 'harness)
   ;; Every module, so that every feature can be tried, unless
   ;; HARNESS_DEV_MODULES=default asks for the defaults: the core only.

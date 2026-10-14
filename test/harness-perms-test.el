@@ -204,15 +204,25 @@ project's rule about landing work first."
     (should (eq 'allow (harness-perms-test--behavior "hand_in" 'meta)))
     (should (null (funcall probe 'requests)))))
 
-(ert-deftest harness-perms-open-harness-needs-no-approval ()
-  ;; open_harness only starts an Emacs running a checkout of the harness,
-  ;; in a state directory of its own, so verifying harness work live needs
-  ;; no prompt, in every mode.
+(ert-deftest harness-perms-extra-auto-allow-tools-need-no-approval ()
+  "A module outside the harness may say a tool of its own needs no approval.
+It adds the tool to `harness-perms-extra-auto-allow-tools', as this
+repository's plugin does open_harness; the tool is then allowed in
+every mode, and `permission/rules' lists it with the harness's own.
+A standing rule still beats it."
   (harness-perms-test--setup :permission-mode 'ask)
-  (should (member "open_harness" harness-perms--auto-allow-tools))
-  (should (eq 'allow (harness-perms-test--behavior "open_harness" 'exec)))
-  (setq harness-perms-test--session (plist-put harness-perms-test--session :permission-mode 'auto))
-  (should (eq 'allow (harness-perms-test--behavior "open_harness" 'exec))))
+  ;; Not listed, the mode leaves it to be asked.
+  (should (eq 'ask (plist-get (harness-perms--mode-decision
+                               (list :behavior 'ask) (harness-perms-test--request "my_tool" 'exec))
+                              :behavior)))
+  (let ((harness-perms-extra-auto-allow-tools '("my_tool")))
+    (should (eq 'allow (harness-perms-test--behavior "my_tool" 'exec)))
+    (setq harness-perms-test--session (plist-put harness-perms-test--session :permission-mode 'auto))
+    (should (eq 'allow (harness-perms-test--behavior "my_tool" 'exec)))
+    (should (member "my_tool" (plist-get (harness-call 'permission/rules (plist-get harness-perms-test--session :id))
+                                         :auto-allow)))
+    (let ((harness-perms-rules '((:tool "my_tool" :behavior deny))))
+      (should (eq 'deny (harness-perms-test--behavior "my_tool" 'exec))))))
 
 (ert-deftest harness-perms-rules-beat-auto-allow ()
   ;; web_search used to ask, so a user may have answered deny-always: the
@@ -2814,7 +2824,13 @@ credentials: the ACP token and the settings forwarded to the harness
 process."
   (let* ((repo (harness-test-temp-dir))
          (build (harness-test-temp-dir))
-         (harness-directory build))
+         (harness-directory build)
+         ;; The modules a test loads are this tree's all the same, not
+         ;; a project's plugins (see `harness-module-plugin-p').
+         (harness-module-directories
+          (append harness-module-directories
+                  (mapcar (lambda (dir) (expand-file-name dir harness-test-root))
+                          '("lisp/modules" "lisp/ui")))))
     (harness-test-with-temp-state
       (let ((state harness-state-directory))
         (dolist (dir (list repo build))

@@ -4,11 +4,13 @@
 
 ;; Every process the harness spawns on behalf of a model can be routed
 ;; through a kernel sandbox.  Isolation is enforced by the kernel
-;; (mount and PID namespaces), not by policy: the permission mode is a
-;; prompt-level hint, this is the boundary.
+;; (mount and PID namespaces on GNU/Linux, Seatbelt on macOS), not by
+;; policy: the permission mode is a prompt-level hint, this is the
+;; boundary.
 ;;
 ;; A backend is picked when the module initialises, in preference
-;; order: `bwrap' (bubblewrap), `systemd-run --user', or none.  The
+;; order: `bwrap' (bubblewrap), `systemd-run --user', or none; on macOS
+;; `mxc' (MXC's mxc-exec-mac, below) or none.  The
 ;; `harness-sandbox-policy' setting from the config module decides what
 ;; happens when no backend exists:
 ;;
@@ -17,9 +19,9 @@
 ;;   preferred  the command runs unconfined, with a warning in the log;
 ;;   off        the command is always returned unchanged.
 ;;
-;; What the sandbox sees: read-only /usr and /etc (plus the usual
-;; /lib, /lib64, /bin, /sbin as symlinks or read-only binds), a fresh
-;; /proc, /dev and /tmp, and the session's working directory
+;; What the sandbox sees on GNU/Linux: read-only /usr and /etc (plus
+;; the usual /lib, /lib64, /bin, /sbin as symlinks or read-only binds),
+;; a fresh /proc, /dev and /tmp, and the session's working directory
 ;; read-write.  The home directory's contents are *not* mounted
 ;; (credentials such as ~/.npmrc or ~/.aws stay out of reach).  With
 ;; bwrap $HOME keeps its path, but an empty tmpfs covers it, so ~/x
@@ -40,6 +42,36 @@
 ;; hosted providers and most build tools need it; pass `:network nil'
 ;; to cut it, which is only correct for local models.
 ;;
+;; A confined command has HARNESS_SANDBOX set to the backend's name,
+;; `bwrap', `systemd' or `mxc', so a script can tell it runs confined:
+;; scripts/dev.sh warns that an Emacs it starts there ends with the
+;; command.
+;;
+;; On macOS the backend is MXC (Microsoft eXecution Container, see
+;; `harness-sandbox-mxc-program'): its executor, mxc-exec-mac, confines
+;; a command with Seatbelt, macOS's own sandbox, and needs macOS 15 or
+;; later.  It is the only backend looked for there, and is not looked
+;; for anywhere else.  Seatbelt allows what it is told and denies the
+;; rest, so what a command sees is a list of paths rather than mounts:
+;; MXC's baseline of system directories (/bin, /usr/bin, /usr/lib,
+;; /System, /Library...), the toolchain directories of
+;; `harness-sandbox--mxc-system-dirs' (Homebrew, MacPorts, Nix,
+;; /Applications) and `harness-sandbox-extra-read-only-dirs', all
+;; read-only; the working directory read-write; the `:writable' and
+;; `:readable' directories as they are given; and a private $TMPDIR,
+;; made for the command and removed when it ends.  $HOME keeps its
+;; path, but nothing in it can be read except what is shown there.
+;; MXC passes on none of the harness's environment, so the command's
+;; is written out whole: `process-environment' as it is when the
+;; command is wrapped, with TMPDIR, PWD, HARNESS_SANDBOX=mxc and a
+;; worktree's commit identity set.  `:network nil' denies the network,
+;; loopback included; otherwise it is open both ways, as bwrap leaves
+;; it.  `:read-only' leaves nothing writable but that $TMPDIR.  Unlike
+;; bwrap, MXC gives the command no PID namespace of its own; /tmp
+;; cannot be written there (a command uses $TMPDIR); and MXC hands the
+;; command's output on only when it ends, so the note under a running
+;; bash call shows none until then.
+;;
 ;; Remote working directories (TRAMP) are never wrapped: the sandbox
 ;; binaries and the mounts would have to exist on the remote host, and
 ;; the harness has no way to verify them there.  `sandbox/wrap'
@@ -49,10 +81,11 @@
 ;; shell, which only looks -- passes `:read-only': the working
 ;; directory, the git directories and every `:writable' entry are then
 ;; mounted read-only, and the command writes nothing but the sandbox's
-;; private /tmp.  It fails closed: where the command would run
-;; unconfined, with the `off' policy, in a remote directory or with no
-;; backend (whatever the policy), `sandbox/wrap' signals
-;; `harness-sandbox-unavailable' instead of returning it.
+;; private /tmp (its private $TMPDIR under MXC).  It fails closed:
+;; where the command would run unconfined, with the `off' policy, in a
+;; remote directory or with no backend (whatever the policy),
+;; `sandbox/wrap' signals `harness-sandbox-unavailable' instead of
+;; returning it.
 ;;
 ;; `:scratch' lists directories the caller made for the one command and
 ;; deletes after it, which the command writes even when it is
@@ -87,11 +120,14 @@
 
 (defcustom harness-sandbox-backend 'auto
   "Which sandbox backend to use.
-`auto' picks the first available of bwrap and systemd-run; a specific
-symbol forces that backend (and counts as unavailable when its
-executable is missing); `none' disables wrapping regardless of policy
-detection, subject to `harness-sandbox-policy'."
-  :type '(choice (const auto) (const bwrap) (const systemd) (const none))
+`auto' picks the first available of bwrap and systemd-run on GNU/Linux,
+and `mxc' (MXC's mxc-exec-mac, see `harness-sandbox-mxc-program') on
+macOS; a specific symbol forces that backend (and counts as unavailable
+when its executable is missing, or on a system it does not run on:
+`mxc' anywhere but macOS, `bwrap' and `systemd' on macOS); `none'
+disables wrapping regardless of policy detection, subject to
+`harness-sandbox-policy'."
+  :type '(choice (const auto) (const bwrap) (const systemd) (const mxc) (const none))
   :group 'harness)
 
 (defconst harness-sandbox--bwrap-program "bwrap"
@@ -99,6 +135,17 @@ detection, subject to `harness-sandbox-policy'."
 
 (defconst harness-sandbox--systemd-run-program "systemd-run"
   "Name or path of the systemd-run executable.")
+
+(defcustom harness-sandbox-mxc-program "mxc-exec-mac"
+  "Name or absolute path of MXC's macOS executor, mxc-exec-mac.
+MXC (Microsoft eXecution Container, https://github.com/microsoft/mxc)
+confines a command with macOS's Seatbelt; it needs macOS 15 or later,
+and neither root nor a daemon.  The executor comes in MXC's release
+builds and in its npm package (sdk/node/bin/ARCH/mxc-exec-mac), so it
+is often not on PATH: name its absolute path here then.  It is looked
+for on macOS only, when the sandbox module starts (see
+`harness-sandbox-detect')."
+  :type 'string :group 'harness)
 
 (defcustom harness-sandbox-extra-read-only-dirs nil
   "Additional directories bound read-only into every sandbox.
@@ -120,8 +167,18 @@ would hide them or be hidden by them.")
 (defconst harness-sandbox--system-dirs '("/lib" "/lib64" "/bin" "/sbin")
   "Top-level directories mirrored as symlinks or read-only binds.")
 
+(defvar harness-sandbox--mxc-system-dirs
+  '("/opt/homebrew" "/usr/local" "/opt/local" "/nix" "/Applications")
+  "Directories MXC's sandbox shows read-only, where they exist, besides its own.
+MXC's baseline shows the system's directories (/bin, /usr/bin,
+/usr/lib, /System, /Library and the like) and none of these, where the
+toolchains and programs a command runs often live: Homebrew
+\(/opt/homebrew on Apple silicon, /usr/local on Intel), MacPorts
+\(/opt/local), Nix (/nix) and the programs inside app bundles
+\(/Applications, Emacs's own among them).  bwrap shows all of /usr.")
+
 (defvar harness-sandbox--backend nil
-  "Backend chosen at initialisation: `bwrap', `systemd' or `none'.")
+  "Backend chosen at initialisation: `bwrap', `systemd', `mxc' or `none'.")
 
 (defvar harness-sandbox--available nil
   "Backends whose executables were found at initialisation.")
@@ -134,12 +191,22 @@ would hide them or be hidden by them.")
 (defun harness-sandbox-detect ()
   "Find the available backends and choose one.
 Return the chosen backend symbol.  Safe to call again: it refreshes
-`harness-sandbox--available' and `harness-sandbox--backend'."
-  (let ((bwrap (executable-find harness-sandbox--bwrap-program))
-        (systemd (executable-find harness-sandbox--systemd-run-program)))
+`harness-sandbox--available' and `harness-sandbox--backend'.  On macOS
+only MXC is looked for (`harness-sandbox-mxc-program'), elsewhere only
+bwrap and systemd-run."
+  (let* ((darwin (eq system-type 'darwin))
+         (bwrap (and (not darwin) (executable-find harness-sandbox--bwrap-program)))
+         (systemd (and (not darwin) (executable-find harness-sandbox--systemd-run-program)))
+         (mxc (and darwin (stringp harness-sandbox-mxc-program)
+                   (not (string-empty-p harness-sandbox-mxc-program))
+                   ;; An absolute path, or one from ~, is found as it is.
+                   (executable-find (if (file-name-directory harness-sandbox-mxc-program)
+                                        (expand-file-name harness-sandbox-mxc-program)
+                                      harness-sandbox-mxc-program)))))
     (setq harness-sandbox--programs
           (delq nil (list (and bwrap (cons 'bwrap bwrap))
-                          (and systemd (cons 'systemd systemd)))))
+                          (and systemd (cons 'systemd systemd))
+                          (and mxc (cons 'mxc mxc)))))
     (setq harness-sandbox--available (mapcar #'car harness-sandbox--programs))
     (setq harness-sandbox--backend
           (pcase harness-sandbox-backend
@@ -445,7 +512,8 @@ under it too."
               append (list "--bind" source dest))
      (list "--unshare-pid" "--unshare-ipc" "--unshare-uts"
            "--die-with-parent" "--new-session"
-           "--chdir" cwd)
+           "--chdir" cwd
+           "--setenv" "HARNESS_SANDBOX" "bwrap")
      (and private (list "--setenv" "HOME" private))
      (unless network (list "--unshare-net"))
      (list "--")
@@ -501,10 +569,162 @@ too, so ~/x reaches them."
      (unless network (list "-p" "PrivateNetwork=yes"))
      (unless (harness-sandbox--home-inside-p cwd)
        (list "--setenv=HOME=/tmp"))
+     (list "--setenv=HARNESS_SANDBOX=systemd")
      (list "--")
      command)))
 
+;;;; MXC (macOS)
+
+;; MXC's Seatbelt executor takes the whole description of a command as
+;; JSON rather than as mount arguments.  What the command may read and
+;; write is an allowlist of real paths, on top of MXC's own baseline of
+;; read-only system directories: Seatbelt matches a path once its
+;; symbolic links are resolved, so a path given through a link would
+;; match nothing.  The command line runs with /bin/sh -c, in exactly the
+;; environment given, never the harness's own, so that is written out
+;; whole.
+
+(defun harness-sandbox--sh-quote (word)
+  "Return WORD quoted for a POSIX shell, one word that keeps it exactly.
+It goes between single quotes, inside which nothing is special, and
+each single quote in it is written '\\''."
+  (concat "'" (string-replace "'" "'\\''" word) "'"))
+
+(defun harness-sandbox--json-text-p (string)
+  "Non-nil when JSON can carry STRING: Unicode text, with no raw bytes."
+  (let ((limit (if (multibyte-string-p string) #x10FFFF #x7F)))
+    (cl-notany (lambda (c) (> c limit)) string)))
+
+(defun harness-sandbox--mxc-env (overrides)
+  "Return the environment of a command MXC runs, as NAME=VALUE strings.
+It is the one a process started now gets from `process-environment':
+the first entry of a name wins, and an entry without `=' leaves its
+name unset, as in Emacs.  OVERRIDES, (NAME . VALUE) pairs, replace
+their names' values or add them, at the end.  An entry holding raw
+bytes, which JSON cannot carry, is left out."
+  (let ((seen (make-hash-table :test 'equal))
+        (env nil))
+    (dolist (pair overrides) (puthash (car pair) t seen))
+    (dolist (entry process-environment)
+      (let* ((at (string-search "=" entry))
+             (name (if at (substring entry 0 at) entry)))
+        (unless (or (string-empty-p name) (gethash name seen))
+          (puthash name t seen)
+          (cond ((null at))
+                ((harness-sandbox--json-text-p entry) (push entry env))
+                (t (harness-log 'debug "sandbox: MXC cannot pass %s on, its value is no text" name))))))
+    (append (nreverse env)
+            (cl-loop for (name . value) in overrides collect (concat name "=" value)))))
+
+(defun harness-sandbox--mxc-path (path)
+  "Return the real path of PATH, as Seatbelt matches it, without a trailing slash."
+  (directory-file-name (file-truename (expand-file-name path))))
+
+(cl-defun harness-sandbox--mxc-command (program cwd command &key (network t) writable readable read-only tmp
+                                                 scratch)
+  "Build the MXC command line running COMMAND in CWD, on macOS.
+PROGRAM is MXC's executor, mxc-exec-mac, given the whole description
+of the command as base64-encoded JSON (`--config-base64').  NETWORK,
+WRITABLE, READABLE and READ-ONLY are as for
+`harness-sandbox--bwrap-command'.  TMP is the command's private
+temporary directory, which `sandbox/wrap' makes: $TMPDIR names it, it
+is writable, and the command line removes it when COMMAND ends.  The
+SCRATCH directories are writable too, whatever READ-ONLY says (see
+`harness-sandbox--scratch-mounts').
+
+Seatbelt allows what it is told and denies the rest, on top of MXC's
+baseline of read-only system directories.  Readable are
+`harness-sandbox--mxc-system-dirs' and
+`harness-sandbox-extra-read-only-dirs' that exist (unless a writable
+directory holds one: as with bwrap, that one covers it) and the
+READABLE directories; writable are CWD, the WRITABLE directories and
+files, a worktree's git directory and TMP.  The git directory's
+hooks, config, index and HEAD stay read-only, as with bwrap: the
+deepest path given decides.  Each path is given at its real path (see
+`harness-sandbox--mounts' for how the directories are found), since
+Seatbelt matches the real one.  READ-ONLY makes every one of them
+read-only but TMP, so that the command writes nothing else.
+
+Nothing else is shown, the home directory's contents included: $HOME
+keeps its path, and only what is shown under it can be read.  NETWORK
+nil denies all network access; otherwise the host's network, loopback
+included, is open both ways, as bwrap leaves it.  The command gets
+exactly the environment `process-environment' holds now (one given to
+the process later does not reach it), with TMPDIR, PWD,
+HARNESS_SANDBOX=mxc and a worktree's commit identity set.  MXC sets it
+no timeout: the harness kills the process tree itself, and finds the
+command in it by its parent processes.
+
+This only reads the file system: it writes nothing, TMP included."
+  (let* ((cwd (directory-file-name (expand-file-name cwd)))
+         (tmp (and tmp (harness-sandbox--mxc-path tmp)))
+         (mounts (harness-sandbox--mounts readable writable cwd nil))
+         (sources (lambda (mode)
+                    (cl-loop for (m source) in mounts when (eq m mode) collect source)))
+         (git (harness-sandbox--worktree-git cwd))
+         (common (and git (harness-sandbox--mxc-path (plist-get git :common))))
+         ;; Read-only inside the writable git directory; with READ-ONLY
+         ;; the whole of it is, as with bwrap.
+         (protected (and git (not read-only)
+                         (mapcar #'harness-sandbox--mxc-path (plist-get git :protected))))
+         (shown (delete-dups (delq nil (append (list (harness-sandbox--mxc-path cwd))
+                                               (funcall sources 'rw)
+                                               (list common)))))
+         (rw (cl-remove-if (lambda (path) (member path protected))
+                           (delq nil (append (unless read-only shown) (list tmp)
+                                             (mapcar (lambda (m) (harness-sandbox--mxc-path (car m)))
+                                                     (harness-sandbox--scratch-mounts scratch cwd))))))
+         (system (cl-loop for dir in (append harness-sandbox--mxc-system-dirs
+                                             harness-sandbox-extra-read-only-dirs)
+                          for path = (and (stringp dir) (not (file-remote-p dir))
+                                          (file-directory-p dir) (harness-sandbox--mxc-path dir))
+                          when (and path (not (cl-some (lambda (w) (harness-path-within-p w path)) rw)))
+                          collect path))
+         (ro (cl-remove-if (lambda (path) (member path rw))
+                           (delete-dups (append (and read-only shown) (funcall sources 'ro)
+                                                system protected))))
+         ;; The command's status is the command line's, after the
+         ;; private TMPDIR is gone.  A command killed by a signal leaves
+         ;; it behind; macOS clears what is old in its temporary
+         ;; directories itself.
+         (command-line (concat (mapconcat #'harness-sandbox--sh-quote command " ")
+                               (and tmp (concat "; s=$?; rm -rf -- " (harness-sandbox--sh-quote tmp)
+                                                "; exit $s"))))
+         (env (harness-sandbox--mxc-env
+               (append (and tmp (list (cons "TMPDIR" (file-name-as-directory tmp))))
+                       ;; As Emacs sets it for a process it starts itself.
+                       (list (cons "PWD" cwd)
+                             (cons "HARNESS_SANDBOX" "mxc"))
+                       (and git (harness-sandbox--git-env (plist-get git :common))))))
+         (net (if network "allow" "deny"))
+         (json (harness-json-encode
+                (list :version "1.0.0"
+                      :containment "seatbelt"
+                      :process (list :commandLine command-line
+                                     :cwd cwd
+                                     :env (harness-json-array env)
+                                     :timeout 0)
+                      :filesystem (list :readwritePaths (harness-json-array rw)
+                                        :readonlyPaths (harness-json-array ro))
+                      :network (list :egress (list :default net)
+                                     :ingress (list :default net :hostLoopback net))
+                      :seatbelt (list :nestedPty t)))))
+    (list program "--config-base64"
+          ;; Bytes: Emacs 29's `json-serialize' still gives text.
+          (base64-encode-string (if (multibyte-string-p json) (encode-coding-string json 'utf-8-unix) json)
+                                t))))
+
 ;;;; Methods
+
+(defun harness-sandbox--missing-programs (&optional list)
+  "Say that this system's sandbox programs are missing, for a message.
+GNU/Linux has bwrap and systemd-run, macOS MXC's mxc-exec-mac.  With
+LIST non-nil, only name them, as a list."
+  (let ((darwin (eq system-type 'darwin)))
+    (cond ((and list darwin) "mxc-exec-mac (MXC)")
+          (list "bwrap, systemd-run")
+          (darwin "mxc-exec-mac (MXC) is not available (see `harness-sandbox-mxc-program')")
+          (t "neither bwrap nor systemd-run is available"))))
 
 (defun harness-sandbox--refuse-read-only (command why)
   "Signal `harness-sandbox-unavailable': a read-only COMMAND cannot be confined.
@@ -530,14 +750,16 @@ well, so that the command can write nothing but the sandbox's private
 command and deletes after it, mounted writable whatever `:read-only'
 says, after everything else (see `harness-sandbox--scratch-mounts',
 which signals an error for one that would show writable what the
-sandbox hides or keeps read-only).  They ask for no confinement: where
-COMMAND runs unconfined it reaches them anyway.  A remote CWD or the
-`off' policy return COMMAND unchanged.
-Signals `harness-sandbox-unavailable' when the policy is `required' and
-no backend exists.  A `:read-only' command fails closed instead of
-running unconfined: it signals `harness-sandbox-unavailable' too for
-the `off' policy, for a remote CWD and for no backend, whatever the
-policy."
+sandbox hides or keeps read-only).  Under MXC, on macOS, the private
+/tmp is its private $TMPDIR, a directory made here for the command,
+which removes it when it ends; see `harness-sandbox--mxc-command'.
+They ask for no confinement: where COMMAND runs unconfined it reaches
+them anyway.  A remote CWD or the `off' policy return COMMAND
+unchanged.  Signals `harness-sandbox-unavailable' when the policy is
+`required' and no backend exists.  A `:read-only' command fails closed
+instead of running unconfined: it signals `harness-sandbox-unavailable'
+too for the `off' policy, for a remote CWD and for no backend, whatever
+the policy."
   (let ((policy (harness-sandbox--policy cwd))
         (network (if (plist-member opts :network) (plist-get opts :network) t))
         (writable (plist-get opts :writable))
@@ -562,13 +784,25 @@ policy."
       (harness-sandbox--systemd-command (alist-get 'systemd harness-sandbox--programs) cwd command
                                         :network network :writable writable :readable readable
                                         :read-only read-only :scratch scratch))
+     ((eq harness-sandbox--backend 'mxc)
+      ;; The command's own $TMPDIR, private as bwrap's /tmp is: MXC
+      ;; shows no shared temporary directory.
+      (let ((tmp (with-file-modes #o700 (make-temp-file "harness-sandbox-" t))))
+        (condition-case err
+            (harness-sandbox--mxc-command (alist-get 'mxc harness-sandbox--programs) cwd command
+                                          :network network :writable writable :readable readable
+                                          :read-only read-only :tmp tmp
+                                          :scratch scratch)
+          (error (ignore-errors (delete-directory tmp t))
+                 (signal (car err) (cdr err))))))
      (read-only
-      (harness-sandbox--refuse-read-only command "neither bwrap nor systemd-run is available"))
+      (harness-sandbox--refuse-read-only command (harness-sandbox--missing-programs)))
      ((eq policy 'required)
-      (harness-log 'error "sandbox: policy is `required' but no backend (bwrap, systemd-run) is available; refusing to run %S"
-                   (car command))
+      (harness-log 'error "sandbox: policy is `required' but no backend (%s) is available; refusing to run %S"
+                   (harness-sandbox--missing-programs t) (car command))
       (signal 'harness-sandbox-unavailable
-              (list "harness-sandbox-policy is `required' but neither bwrap nor systemd-run is available")))
+              (list (format "harness-sandbox-policy is `required' but %s"
+                            (harness-sandbox--missing-programs)))))
      (t
       (harness-log 'warn "sandbox: no backend available; running %S unconfined" (car command))
       command))))
@@ -1017,7 +1251,7 @@ OWN is the session's own worktree."
   "Non-nil when commands run in CWD are confined by a sandbox backend."
   (and cwd (not (file-remote-p cwd))
        (not (eq (harness-sandbox--policy cwd) 'off))
-       (memq harness-sandbox--backend '(bwrap systemd))
+       (memq harness-sandbox--backend '(bwrap systemd mxc))
        t))
 
 (harness-defmethod sandbox/check-command (cwd command &optional own)
@@ -1048,7 +1282,7 @@ backend, the `off' policy, a remote CWD) is never refused.  Return
   (harness-sandbox-detect))
 
 (harness-define-module 'sandbox
-  :doc "Kernel sandbox (bwrap / systemd-run) for spawned tool processes."
+  :doc "Kernel sandbox (bwrap / systemd-run / MXC on macOS) for spawned tool processes."
   :requires '(config)
   :init #'harness-sandbox--init)
 

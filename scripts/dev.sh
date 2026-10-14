@@ -23,12 +23,33 @@
 # task's worktree, so both ends name the socket through /proc/PID/cwd,
 # PID being a process that works in the checkout: the daemon itself
 # (harness-dev.el) and this script, for emacsclient.
+#
+# HARNESS_DEV_SOCKET is the daemon's emacsclient socket: a name, or the
+# path of the socket's file.  HARNESS_DEV_SOCKET_DIR puts a socket given
+# by name in that directory instead of the checkout's scripts/.dev/run;
+# harness-v3 is the name when unset.  The harness's open_harness gives a name and a directory, and links the socket into
+# the agent's temporary directory, where its sandboxed shell reaches it:
+# it lists the commands to run with that link as HARNESS_DEV_SOCKET.
+# HARNESS_DEV_STATE is the daemon's state directory (default
+# scripts/.dev/state-NAME, NAME being the socket's name).
+#
+# In the harness's sandbox (HARNESS_SANDBOX is set there) an Emacs this
+# script starts ends with the command that started it: `start' warns,
+# and starts it all the same, for a command that starts, drives and
+# stops it in one go.  For one that stays, call the open_harness tool.
 set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 SELF="$ROOT/scripts/$(basename "$0")"
 SOCKET=${HARNESS_DEV_SOCKET:-harness-v3}
+case "$SOCKET" in
+  /*) ;;
+  # Relative to here, not to $ROOT, where `start' runs the daemon.
+  */*) SOCKET="$PWD/$SOCKET" ;;
+  *) [ -n "${HARNESS_DEV_SOCKET_DIR:-}" ] && SOCKET="${HARNESS_DEV_SOCKET_DIR%/}/$SOCKET" ;;
+esac
+NAME=${SOCKET##*/}
 DEVDIR="$ROOT/scripts/.dev"
-export HARNESS_DEV_STATE=${HARNESS_DEV_STATE:-$DEVDIR/state-$SOCKET}
+export HARNESS_DEV_STATE=${HARNESS_DEV_STATE:-$DEVDIR/state-$NAME}
 mkdir -p "$DEVDIR"
 
 # This script works in the checkout, through which it names the socket;
@@ -45,11 +66,22 @@ esac
 
 # Never let a wedged daemon hang the script (or a caller) forever.
 DEV_TIMEOUT=${HARNESS_DEV_TIMEOUT:-60}
+# A socket's address holds about a hundred bytes (104 on macOS, 108 on
+# Linux), which the path of a socket in a session's temporary directory
+# can pass: emacsclient then connects from that directory, by a relative
+# name.  It sends its working directory along, which becomes
+# default-directory for --eval, so `shot' makes its PATH absolute first.
 ec() {
   local s=$SOCKPATH
   # With no socket in the checkout, look where Emacs puts sockets by
   # default: a daemon an older dev.sh started has its socket there.
   case $SOCKET in */*) ;; *) [ -S "$DEVDIR/run/$SOCKET" ] || s=$SOCKET ;; esac
+  case $SOCKET in
+    */*) if [ ${#SOCKET} -gt 100 ]; then
+           (cd "${SOCKET%/*}" && exec timeout "$DEV_TIMEOUT" emacsclient -s "./$NAME" "$@")
+           return
+         fi ;;
+  esac
   (cd "$HERE" && timeout "$DEV_TIMEOUT" emacsclient -s "$s" "$@")
 }
 alive() { ec --eval t >/dev/null 2>&1; }
@@ -58,6 +90,9 @@ cmd=${1:-status}; shift || true
 case "$cmd" in
   start)
     if alive; then echo "daemon $SOCKET already running"; else
+      if [ -n "${HARNESS_SANDBOX:-}" ]; then
+        echo "dev.sh: warning: in the harness sandbox ($HARNESS_SANDBOX) this Emacs ends with the command that started it; for one that stays, call the open_harness tool and drive it with the commands it lists" >&2
+      fi
       # Started in the checkout, which the daemon names its socket through.
       (cd "$ROOT" && emacs -Q --daemon="$SOCKET" -l "$ROOT/scripts/harness-dev.el" >"$DEVDIR/daemon.log" 2>&1)
       for _ in $(seq 1 50); do alive && break; sleep 0.2; done
@@ -72,7 +107,9 @@ case "$cmd" in
   # An Elisp string: only \ and " are escaped.  The shell's quoting of
   # printf %q would not do, as Lisp drops the backslash before a space.
   keys) ec --eval "(harness-dev-keys \"$(printf '%s' "$*" | sed 's/[\\"]/\\&/g')\")" ;;
-  shot) out=${1:-$DEVDIR/shot.png}; ec --eval "(harness-dev-shot \"$out\")" >/dev/null && echo "$out" ;;
+  shot) out=${1:-$DEVDIR/shot.png}
+        case "$out" in /*) ;; *) out="$PWD/$out" ;; esac
+        ec --eval "(harness-dev-shot \"$out\")" >/dev/null && echo "$out" ;;
   show) ec --eval "(harness-dev-show \"$1\")" ;;
   errors) ec --eval '(harness-dev-errors)' | sed 's/^"//;s/"$//' | sed 's/\\n/\n/g;s/\\"/"/g' ;;
   reload) ec --eval '(harness-reload)' ;;

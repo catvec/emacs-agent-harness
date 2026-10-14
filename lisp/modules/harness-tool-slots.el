@@ -5,8 +5,10 @@
 ;; Some tools start whole process trees.  bash runs a shell command --
 ;; a build, the test suite, or scripts/dev.sh, which starts another
 ;; Emacs with the harness in it.  elisp starts a batch Emacs for every
-;; call, ssh runs a command on another host, and open_harness starts a
-;; checkout's development Emacs.  One such call is meant to use the
+;; call, and ssh runs a command on another host; a module outside the
+;; harness may have such a tool too, as this repository's plugin has
+;; open_harness, which starts a checkout's development Emacs.  One such
+;; call is meant to use the
 ;; machine; several at once -- a task board running a handful of
 ;; sessions, each with sub-agents of its own, a model that tries
 ;; commands in parallel -- take it over, and whatever else the user
@@ -72,13 +74,15 @@ calls from queueing."
   :type 'integer
   :group 'harness)
 
-(defcustom harness-tool-slots-tools '("bash" "elisp" "ssh" "open_harness")
+(defcustom harness-tool-slots-tools '("bash" "elisp" "ssh")
   "Tools whose calls hold a slot of the machine they run on.
 They are the tools that start processes: a shell command (which may be
 a build, a test run, or a script that starts more Emacs), a batch
-Emacs, a command on another host, and a checkout's development Emacs.
-A tool that is not listed never waits.  Add a tool of your own that
-starts processes, or take one of these out to let it run freely."
+Emacs, and a command on another host.  A tool that is not listed never
+waits.  Add a tool of your own that starts processes, or take one of
+these out to let it run freely.  A module that defines such a tool --
+a project's plugin, say, such as this repository's open_harness, which
+starts an Emacs -- may add it here itself as it loads."
   :type '(repeat string)
   :group 'harness)
 

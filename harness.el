@@ -14,7 +14,11 @@
 ;; server) is a module under lisp/modules or lisp/ui.  A harness with
 ;; every module disabled starts, does nothing, and shows nothing.
 ;; Modules of the user's own live in `harness-extra-module-directories',
-;; outside the harness's tree, and load beside its own.
+;; outside the harness's tree, and load beside its own.  A project's
+;; plugins are no business of the loader: the project's .dir-locals.el
+;; requires them, as Emacs loads any project's Lisp, and the harness
+;; offers their tools to the sessions that name them (see
+;; harness-plugins.el and `harness-module-plugin-p').
 ;;
 ;; Out of the box only the core loads (`harness-core-modules'): sessions,
 ;; the turn loop, the default provider, the file, shell and Emacs tools,
@@ -285,6 +289,34 @@ never shadows a library."
   (string-match-p "\\`harness-ui\\(?:-\\|\\'\\)" (file-name-base file)))
 
 ;;;; Which modules load
+
+(defun harness--own-module-directories ()
+  "Return the directories the harness loads modules from, absolute.
+They are lisp/modules and lisp/ui in its tree, those of
+`harness-module-directories' and those of
+`harness-extra-module-directories', without a trailing slash."
+  (delete-dups
+   (append (mapcar (lambda (dir) (directory-file-name (harness--path dir)))
+                   (append '("lisp/modules" "lisp/ui") harness-module-directories))
+           (harness--extra-module-directories))))
+
+(defun harness-module-plugin-p (name)
+  "Non-nil when module NAME is a plugin, which the harness did not load.
+A module is the harness's own when the file it was registered from lies
+in one of the directories the harness loads modules from
+\(`harness--own-module-directories'), the user's own modules of
+`harness-extra-module-directories' included, or when it has no file,
+having been defined by hand.  Any other registered module came from
+code the harness never loads itself, such as a project's plugin, which
+the project's .dir-locals.el requires (see harness-plugins.el): its
+tools are offered only to the sessions whose `harness-plugin-modules'
+names it."
+  (let* ((module (harness-module-get name))
+         (file (and module (harness-module-file module))))
+    (and (stringp file)
+         (let ((dir (directory-file-name (file-name-directory (expand-file-name file)))))
+           (not (cl-some (lambda (own) (or (string= dir own) (ignore-errors (file-equal-p dir own))))
+                         (harness--own-module-directories)))))))
 
 (defun harness--module-kinds ()
   "Return the kinds of module this Emacs loads: ui, other, or both.

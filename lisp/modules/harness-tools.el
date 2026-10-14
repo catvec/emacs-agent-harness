@@ -50,6 +50,12 @@
 ;; in a session on that host.  A call that fails because TRAMP could not
 ;; connect says why and how to set the host up, whichever tool made it
 ;; (`harness-tools-remote-failure').
+;;
+;; A tool a project's plugin defines (see harness-plugins.el) is for the
+;; sessions that name the plugin's module in `harness-plugin-modules',
+;; as each froze the list when it started: no other session gets it,
+;; and a call from one is refused as a call of a tool that does not
+;; exist (`harness-tools--in-scope-p').
 
 ;;; Code:
 
@@ -59,6 +65,8 @@
 (require 'harness-util)
 
 (defvar harness-state-directory)
+
+(declare-function harness-module-plugin-p "harness" (name))
 
 (declare-function tramp-dissect-file-name "tramp" (name &optional nodefault))
 (declare-function tramp-get-method-parameter "tramp" (vec param &optional default))
@@ -171,7 +179,12 @@ fold the tool's calls into a summary block.  SUBJECT is a function of
 a call's input returning what the call is about (the path it reads,
 the command it runs) or nil; it follows the label in the call's title,
 see `harness-tool-title'.  TIMEOUT is how many seconds a call may run,
-by default `harness-tools--timeout'."
+by default `harness-tools--timeout'.
+
+The tool belongs to the module whose file defines it
+\(`harness-loading-module'), which a project's plugin decides for its
+tools by the name of its file, harness-NAME.el for module NAME, as the
+harness's own modules do."
   (unless (functionp handler) (error "Tool %s needs a handler" name))
   (unless (and (stringp label) (not (harness-string-blank-p label)))
     (error "Tool %s needs a :label, the name people read (such as \"Read file\")" name))
@@ -182,8 +195,7 @@ by default `harness-tools--timeout'."
                                    :handler handler :kind kind :paths-fn paths
                                    :coalescable coalescable :subject-fn subject
                                    :timeout timeout
-                                   :module (and (boundp 'harness--defining-module)
-                                                harness--defining-module))
+                                   :module (harness-loading-module))
            harness-tools)
   name)
 
@@ -814,6 +826,44 @@ than those of `harness-tools--corporate-net-tools', and the tools of
   (let ((tool (harness-tool-get name)))
     (and tool (harness-tools--corporate-off-p name (harness-tool-kind tool)))))
 
+;;;; Tools of a project's plugins
+
+(defun harness-tools--plugin (tool)
+  "Return the plugin module that defines TOOL, a `harness-tool', or nil.
+That is its module when the harness did not load it itself
+\(`harness-module-plugin-p'): a project's plugin, which the project's
+.dir-locals.el requires (see harness-plugins.el).  The harness's own
+tools, and those of modules of the user's own, have none."
+  (let ((module (harness-tool-module tool)))
+    (and module (fboundp 'harness-module-plugin-p)
+         (harness-module-plugin-p module)
+         module)))
+
+(defun harness-tools--session-plugins (session)
+  "Return the plugin modules SESSION uses, as it froze them, a list of names.
+The plugins module keeps them (`plugins/of-session'); without it no
+session uses any."
+  (let ((id (plist-get session :id)))
+    (and id (harness-method-exists-p 'plugins/of-session)
+         (condition-case err
+             (harness-call 'plugins/of-session id)
+           (error (harness-log 'warn "tools: the plugins of session %s: %s" id (harness-error-message err))
+                  nil)))))
+
+(defun harness-tools--in-scope-p (tool session &optional plugins)
+  "Non-nil when SESSION may have TOOL, a `harness-tool' or nil.
+A tool of a project's plugin (`harness-tools--plugin') is for the
+sessions whose plugin modules name its module, while that module is
+ready: PLUGINS, when given, else those SESSION froze when it started
+\(`harness-tools--session-plugins').  Any other tool, and a name no
+tool has, is for every session."
+  (let ((plugin (and tool (harness-tools--plugin tool))))
+    (or (null plugin)
+        (and session
+             (memq plugin (or plugins (harness-tools--session-plugins session)))
+             (harness-module-ready-p plugin)
+             t))))
+
 (defun harness-tools--corporate-refusal (name kind)
   "Return the decision refusing a call of tool NAME, of KIND, or nil.
 With `harness-corporate-mode' on, the tools of kind net other than web
@@ -843,11 +893,21 @@ never reaches the `permission/decide' chain; any other call does."
 (defun harness-tools--names (session)
   "Return the names of the tools SESSION gets, after `agent/tools'.
 In corporate mode no session gets the tools of kind net other than web
-search, nor ssh (`harness-tools--off-p').  Without SESSION, every
+search, nor ssh (`harness-tools--off-p').  Nor does a session get the
+tools of plugins its plugin list does not name
+\(`harness-tools--in-scope-p'): the `agent/tools' filters never see
+them.  Without SESSION, every
 registered tool: a catalogue, offered to no model."
   (let ((names (let (n) (maphash (lambda (k _) (push k n)) harness-tools) (sort n #'string<))))
     (if session
-        (cl-remove-if #'harness-tools--off-p (harness-run-filter 'agent/tools names session))
+        (let ((plugins (harness-tools--session-plugins session)))
+          (cl-remove-if #'harness-tools--off-p
+                        (harness-run-filter 'agent/tools
+                                            (cl-remove-if-not
+                                             (lambda (name)
+                                               (harness-tools--in-scope-p (harness-tool-get name) session plugins))
+                                             names)
+                                            session)))
       names)))
 
 (defun harness-tools--offered (session)
@@ -956,11 +1016,18 @@ model is told."
   "Return the spec of tool NAME or nil."
   (let ((tool (harness-tool-get name))) (and tool (harness-tool-spec tool))))
 
+(defvar harness-tools-calling-session nil
+  "The id of the session whose tool call is running, or nil.
+Bound while a tool's handler runs, not in what it leaves for later: a
+session made meanwhile, as task_submit makes one, is one that session
+started (see `harness-plugins--on-created').")
+
 (defun harness-tools--run-handler (tool input ctx)
   "Run TOOL's handler with INPUT under CTX; return a promise of its result.
 The result is normalised, and an error once the tool's timeout has
 passed.  A handler that signals, or whose promise rejects, fails the
-call with a result that says why (`harness-tools--failure')."
+call with a result that says why (`harness-tools--failure').
+`harness-tools-calling-session' is CTX's session while it runs."
   (harness-with-promise (resolve reject)
     (let* ((timeout (or (harness-tool-timeout tool) harness-tools--timeout))
            (timer nil)
@@ -978,7 +1045,8 @@ call with a result that says why (`harness-tools--failure')."
                                  (funcall finish (harness-tool-error
                                                   (format "Tool %s timed out after %ss" (harness-tool-name tool) timeout))))))
       (condition-case err
-          (let ((value (funcall (harness-tool-handler tool) input ctx)))
+          (let ((value (let ((harness-tools-calling-session (plist-get ctx :session-id)))
+                         (funcall (harness-tool-handler tool) input ctx))))
             (if (harness-promise-p value)
                 (harness-then value finish fail)
               (funcall finish value)))
@@ -1006,6 +1074,9 @@ announces the result as `tools/finished' after this;
 The `permission/decide' chain decides first; in corporate mode a call of
 a tool of kind net is denied without asking it, unless it is a web
 search, and so is a call of ssh (`harness-tools--corporate-refusal').
+A call of a plugin's tool that the session's plugin list does not
+name fails as one of a tool that does not exist would
+\(`harness-tools--in-scope-p').
 What the tool returns goes through the `tools/output' filter (before
 the size guard) and then the `tools/result' filter; the text it reports
 as progress or as a note goes through `tools/output-text' before it is
@@ -1026,7 +1097,7 @@ secrets in all three."
                                           (harness-tools--output-text text session-id))))))
     (harness-emit 'tools/started session-id call)
     (cond
-     ((null tool)
+     ((or (null tool) (not (harness-tools--in-scope-p tool session)))
       (let ((r (harness-tool-error (format "Unknown tool %s. Available: %s" name
                                            (mapconcat (lambda (s) (plist-get s :name))
                                                       (harness-call 'tools/list session-id) ", ")))))

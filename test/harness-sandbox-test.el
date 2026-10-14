@@ -72,7 +72,12 @@ re-detected before BODY and restored afterwards."
             (should at)
             (should (< (cl-position "/tmp" cmd :test #'equal) at))
             (should (< at (cl-position "--bind" cmd :test #'equal))))
-          (should-not (member "--setenv" (seq-take-while (lambda (a) (not (equal a "--"))) cmd)))
+          ;; The only variable set is the sandbox's marker: $HOME keeps
+          ;; its value.
+          (should (equal '(("HARNESS_SANDBOX" "bwrap"))
+                         (cl-loop for tail on (seq-take-while (lambda (a) (not (equal a "--"))) cmd)
+                                  when (equal (car tail) "--setenv")
+                                  collect (list (cadr tail) (caddr tail)))))
           ;; Network stays on by default.
           (should-not (member "--unshare-net" cmd))
           ;; Neither home directory is ever a bind's source.
@@ -120,6 +125,9 @@ re-detected before BODY and restored afterwards."
         (should (harness-sandbox-test--subseq-p (list "-p" (concat "BindPaths=" (directory-file-name cwd))) cmd))
         (should (harness-sandbox-test--subseq-p (list "-p" (concat "ReadWritePaths=" (directory-file-name cwd))) cmd))
         (should-not (member "PrivateNetwork=yes" cmd))
+        ;; The command can tell it runs confined.
+        (should (member "--setenv=HARNESS_SANDBOX=systemd"
+                        (seq-take-while (lambda (a) (not (equal a "--"))) cmd)))
         (should (equal command (cdr (member "--" cmd)))))
       (let ((cmd (harness-call 'sandbox/wrap cwd command :network nil)))
         (should (harness-sandbox-test--subseq-p '("-p" "PrivateNetwork=yes") cmd))))
@@ -193,7 +201,7 @@ nothing written there reaches it."
             (with-temp-file (expand-file-name "secret-in-real-home" home)
               (insert "must not show\n"))
             (let* ((cmd (harness-call 'sandbox/wrap cwd
-                                      (list "sh" "-c" (format "echo HOME=$HOME; ls -A $HOME; cat %ssecret-in-real-home 2>&1; touch ~/left-behind 2>&1; touch outside-test 2>&1 || true; echo ok" home))))
+                                      (list "sh" "-c" (format "echo HOME=$HOME; echo SANDBOX=$HARNESS_SANDBOX; ls -A $HOME; cat %ssecret-in-real-home 2>&1; touch ~/left-behind 2>&1; touch outside-test 2>&1 || true; echo ok" home))))
                    (r (harness-await (harness-run-command cmd :cwd cwd :timeout 20))))
               (when (and (not (eql 0 (plist-get r :exit)))
                          (string-match-p "bwrap:" (plist-get r :stderr)))
@@ -204,6 +212,8 @@ nothing written there reaches it."
                      (lines (split-string out "\n" t)))
                 (should (member "ok" lines))
                 (should (member (concat "HOME=" (directory-file-name home)) lines))
+                ;; The command can tell it runs confined.
+                (should (member "SANDBOX=bwrap" lines))
                 ;; Nothing from the real home directory shows up, and the
                 ;; file in it cannot be read.
                 (let ((real-entries (directory-files home nil "\\`[^.]" t)))
@@ -1115,6 +1125,425 @@ was somewhere else."
     (should (equal before (harness-sandbox-test--git wt "rev-parse" "HEAD")))
     (should (string-empty-p (harness-sandbox-test--git wt "status" "--porcelain")))
     (should-not (string-match-p "inside" (harness-sandbox-test--git root "branch" "--list")))))
+
+;;;; MXC, on macOS
+
+;; Everything here but the last tests runs on any system: the command
+;; line is built and read back, and run by /bin/sh as MXC would run it,
+;; or by a stand-in for mxc-exec-mac.  Only the last ones need a Mac
+;; with MXC, and skip elsewhere.
+
+(defun harness-sandbox-test--detect-on-macos (available)
+  "Detect the backends as on macOS, `executable-find' finding only AVAILABLE.
+AVAILABLE is an alist of program name to path, as for
+`harness-sandbox-test-with-executables'.  Only the detection runs as on
+macOS; what follows sees the backend it chose."
+  (let ((system-type 'darwin))
+    (harness-sandbox-test-with-executables available nil)))
+
+(defun harness-sandbox-test--mxc-config (cmd)
+  "Return the configuration that MXC command line CMD gives its executor, parsed."
+  (should (= 3 (length cmd)))
+  (should (equal "--config-base64" (nth 1 cmd)))
+  (harness-json-parse (decode-coding-string (base64-decode-string (nth 2 cmd)) 'utf-8)))
+
+(defun harness-sandbox-test--mxc-env (config name)
+  "Return the values that CONFIG's environment gives NAME, one per entry."
+  (cl-loop for entry in (harness-plist-get-in config '(:process :env))
+           when (string-prefix-p (concat name "=") entry)
+           collect (substring entry (1+ (length name)))))
+
+(defun harness-sandbox-test--mxc-network (config)
+  "Return CONFIG's egress default, ingress default and loopback ingress."
+  (mapcar (lambda (path) (harness-plist-get-in config (cons :network path)))
+          '((:egress :default) (:ingress :default) (:ingress :hostLoopback))))
+
+(defun harness-sandbox-test--real (path)
+  "Return PATH's real path without a trailing slash, as MXC is given it."
+  (directory-file-name (file-truename path)))
+
+(ert-deftest harness-sandbox-mxc-detection ()
+  "MXC is looked for on macOS only, and bwrap and systemd-run everywhere else."
+  (harness-sandbox-test--setup)
+  (let ((harness-sandbox-backend 'auto)
+        (harness-sandbox-policy 'preferred)
+        (programs '(("mxc-exec-mac" . "/opt/mxc/bin/mxc-exec-mac")
+                    ("bwrap" . "/usr/bin/bwrap")
+                    ("systemd-run" . "/usr/bin/systemd-run"))))
+    (unwind-protect
+        (progn
+          (let ((system-type 'darwin))
+            (harness-sandbox-test-with-executables programs
+              (should (eq 'mxc (plist-get (harness-call 'sandbox/status) :backend)))
+              (should (equal '(mxc) (plist-get (harness-call 'sandbox/status) :available)))
+              (should (equal '((mxc . "/opt/mxc/bin/mxc-exec-mac")) harness-sandbox--programs)))
+            ;; Forced, it is MXC or nothing there.
+            (let ((harness-sandbox-backend 'mxc))
+              (harness-sandbox-test-with-executables programs
+                (should (eq 'mxc (plist-get (harness-call 'sandbox/status) :backend))))
+              (harness-sandbox-test-with-executables '(("bwrap" . "/usr/bin/bwrap"))
+                (should (eq 'none (plist-get (harness-call 'sandbox/status) :backend)))
+                (should-not (plist-get (harness-call 'sandbox/status) :available))))
+            (let ((harness-sandbox-backend 'bwrap))
+              (harness-sandbox-test-with-executables programs
+                (should (eq 'none (plist-get (harness-call 'sandbox/status) :backend)))))
+            ;; The executor named by a path, from ~ here, is found there.
+            (let* ((harness-sandbox-mxc-program "~/mxc/mxc-exec-mac")
+                   (path (expand-file-name "~/mxc/mxc-exec-mac"))
+                   (asked nil))
+              (cl-letf (((symbol-function 'executable-find)
+                         (lambda (name &optional _remote) (push name asked) (and (equal name path) name))))
+                (harness-sandbox-detect)
+                (should (eq 'mxc harness-sandbox--backend))
+                (should (equal (list (cons 'mxc path)) harness-sandbox--programs))
+                (should (equal (list path) asked)))))
+          ;; GNU/Linux: the same programs give bwrap and systemd-run, and
+          ;; never MXC, even forced.
+          (let ((system-type 'gnu/linux))
+            (harness-sandbox-test-with-executables programs
+              (should (eq 'bwrap (plist-get (harness-call 'sandbox/status) :backend)))
+              (should (equal '(bwrap systemd) (plist-get (harness-call 'sandbox/status) :available))))
+            (let ((harness-sandbox-backend 'mxc))
+              (harness-sandbox-test-with-executables programs
+                (should (eq 'none (plist-get (harness-call 'sandbox/status) :backend)))))))
+      (harness-sandbox-detect))))
+
+(ert-deftest harness-sandbox-mxc-config ()
+  "The MXC command line carries the whole command as JSON: what runs,
+where, in which environment, what it may read and write and whether
+it has the network."
+  (harness-sandbox-test--setup)
+  (harness-sandbox-test-with-home home
+    (let* ((cwd (harness-test-temp-dir))
+           (tmp (harness-test-temp-dir))
+           (granted (harness-test-temp-dir))
+           (readable (harness-test-temp-dir))
+           (system (harness-test-temp-dir))
+           (extra (harness-test-temp-dir))
+           (vendor (file-name-as-directory (expand-file-name "vendor" cwd)))
+           (harness-sandbox--mxc-system-dirs (list system "/nonexistent/harness-test-dir"))
+           ;; One inside the working directory, which shows it read-write anyway.
+           (harness-sandbox-extra-read-only-dirs (list extra vendor))
+           (process-environment (append (list "HARNESS_TEST_FIRST=one" "HARNESS_TEST_UNSET"
+                                              "HARNESS_TEST_FIRST=two" "HARNESS_TEST_UNSET=set"
+                                              "TMPDIR=/elsewhere/" "HARNESS_SANDBOX=outer"
+                                              "PWD=/elsewhere")
+                                        process-environment))
+           (build (lambda (&rest opts)
+                    (harness-sandbox-test--mxc-config
+                     ;; The home directory is never shown read-only.
+                     (apply #'harness-sandbox--mxc-command "/opt/mxc/mxc-exec-mac" cwd '("bash" "-c" "true")
+                            :writable (list granted) :readable (list readable home) :tmp tmp opts))))
+           (real #'harness-sandbox-test--real))
+      (make-directory vendor)
+      (unwind-protect
+          (progn
+            (let* ((config (funcall build))
+                   (process (plist-get config :process))
+                   (env (lambda (name) (harness-sandbox-test--mxc-env config name))))
+              (should (equal "1.0.0" (plist-get config :version)))
+              (should (equal "seatbelt" (plist-get config :containment)))
+              (should (equal (directory-file-name cwd) (plist-get process :cwd)))
+              (should (eql 0 (plist-get process :timeout)))
+              (should (eq t (harness-plist-get-in config '(:seatbelt :nestedPty))))
+              ;; The words quoted, then the private TMPDIR removed.
+              (should (equal (format "'bash' '-c' 'true'; s=$?; rm -rf -- '%s'; exit $s" (funcall real tmp))
+                             (plist-get process :commandLine)))
+              ;; The host's network, both ways and loopback too, by default.
+              (should (equal '("allow" "allow" "allow") (harness-sandbox-test--mxc-network config)))
+              ;; Writable: the working directory, what was granted and the
+              ;; private TMPDIR, at their real paths.
+              (should (equal (list (funcall real cwd) (funcall real granted) (funcall real tmp))
+                             (harness-plist-get-in config '(:filesystem :readwritePaths))))
+              ;; Readable: what was asked for but the home directory, the
+              ;; toolchain directories and the extra ones that exist, but
+              ;; not one the working directory holds.
+              (should (equal (list (funcall real readable) (funcall real system) (funcall real extra))
+                             (harness-plist-get-in config '(:filesystem :readonlyPaths))))
+              ;; The environment: the first entry of a name wins, a bare
+              ;; name unsets it, and the sandbox's own come on top.
+              (should (equal '("one") (funcall env "HARNESS_TEST_FIRST")))
+              (should-not (funcall env "HARNESS_TEST_UNSET"))
+              (should (equal (list (file-name-as-directory (funcall real tmp))) (funcall env "TMPDIR")))
+              (should (equal '("mxc") (funcall env "HARNESS_SANDBOX")))
+              (should (equal (list (directory-file-name cwd)) (funcall env "PWD")))
+              (should (equal (list (getenv "PATH")) (funcall env "PATH")))
+              ;; $HOME keeps its path.
+              (should (equal (list (directory-file-name home)) (funcall env "HOME"))))
+            ;; The network cut, loopback too.
+            (should (equal '("deny" "deny" "deny") (harness-sandbox-test--mxc-network (funcall build :network nil))))
+            ;; Read-only: only the private TMPDIR is writable; the working
+            ;; directory and the granted one are readable, and an extra
+            ;; one inside the working directory stays.
+            (let ((config (funcall build :read-only t)))
+              (should (equal (list (funcall real tmp)) (harness-plist-get-in config '(:filesystem :readwritePaths))))
+              (should (equal (mapcar real (list cwd granted readable system extra vendor))
+                             (harness-plist-get-in config '(:filesystem :readonlyPaths))))
+              (should (equal '("allow" "allow" "allow") (harness-sandbox-test--mxc-network config))))
+            ;; Without a private directory: nothing to remove, nothing
+            ;; writable read-only, and $TMPDIR as it was.
+            (let ((config (harness-sandbox-test--mxc-config
+                           (harness-sandbox--mxc-command "mxc-exec-mac" cwd '("true") :read-only t))))
+              (should (equal "'true'" (harness-plist-get-in config '(:process :commandLine))))
+              (should-not (harness-plist-get-in config '(:filesystem :readwritePaths)))
+              (should (equal '("/elsewhere/") (harness-sandbox-test--mxc-env config "TMPDIR")))))
+        (dolist (dir (list cwd tmp granted readable system extra))
+          (delete-directory dir t))))))
+
+(ert-deftest harness-sandbox-mxc-leaves-out-what-json-cannot-carry ()
+  "An environment entry holding raw bytes is left out rather than failing every command."
+  (harness-sandbox-test--setup)
+  (let* ((cwd (harness-test-temp-dir))
+         (process-environment (append (list (concat "HARNESS_TEST_RAW=" (string #x3FFFFF))
+                                            (concat "HARNESS_TEST_BYTES=" (encode-coding-string "é" 'utf-8))
+                                            "HARNESS_TEST_TEXT=é")
+                                      process-environment))
+         (config (harness-sandbox-test--mxc-config (harness-sandbox--mxc-command "mxc-exec-mac" cwd '("true")))))
+    (should-not (harness-sandbox-test--mxc-env config "HARNESS_TEST_RAW"))
+    (should-not (harness-sandbox-test--mxc-env config "HARNESS_TEST_BYTES"))
+    (should (equal '("é") (harness-sandbox-test--mxc-env config "HARNESS_TEST_TEXT")))
+    (delete-directory cwd t)))
+
+(ert-deftest harness-sandbox-mxc-command-line-runs-the-words-as-they-are ()
+  "The command line MXC gives /bin/sh -c runs the command's words exactly,
+passes its exit status on and removes the private TMPDIR."
+  (harness-sandbox-test--setup)
+  (skip-unless (file-executable-p "/bin/sh"))
+  (let* ((cwd (harness-test-temp-dir))
+         (words (list "it's" "two words" "$HOME" "back\\slash" "" "*" "\"q\"" "`x`" "new\nline" "'" "a'b'c"))
+         (run (lambda (command)
+                (let* ((tmp (harness-test-temp-dir))
+                       (line (harness-plist-get-in
+                              (harness-sandbox-test--mxc-config
+                               (harness-sandbox--mxc-command "mxc-exec-mac" cwd command :tmp tmp))
+                              '(:process :commandLine))))
+                  (with-temp-file (expand-file-name "left-behind" tmp) (insert "x\n"))
+                  (prog1 (with-temp-buffer
+                           (let ((default-directory cwd))
+                             (list (call-process "/bin/sh" nil t nil "-c" line) (buffer-string))))
+                    (should-not (file-exists-p tmp)))))))
+    (unwind-protect
+        (progn
+          (should (equal (list 0 (concat (mapconcat #'identity words "|") "|"))
+                         (funcall run (append '("printf" "%s|") words))))
+          (should (equal '(3 "") (funcall run '("sh" "-c" "exit 3"))))
+          (should (equal '(0 "zero:one\n") (funcall run '("sh" "-c" "echo \"$0:$1\"" "zero" "one")))))
+      (delete-directory cwd t))))
+
+(ert-deftest harness-sandbox-mxc-worktree-git ()
+  "A worktree's git directory is writable but its hooks, config, index and
+HEAD are not; read-only, the whole of it is; git has the commit identity."
+  (harness-sandbox-test--setup)
+  (let* ((repo (harness-sandbox-test--worktree))
+         (wt (cdr repo))
+         (common (harness-sandbox-test--real (expand-file-name ".git" (car repo))))
+         (harness-sandbox--mxc-system-dirs nil)
+         (harness-sandbox-extra-read-only-dirs nil)
+         (build (lambda (dir &rest opts)
+                  (harness-sandbox-test--mxc-config
+                   (apply #'harness-sandbox--mxc-command "mxc-exec-mac" dir '("true") opts)))))
+    (unwind-protect
+        (progn
+          (let ((config (funcall build wt)))
+            (should (equal (list (harness-sandbox-test--real wt) common)
+                           (harness-plist-get-in config '(:filesystem :readwritePaths))))
+            (should (equal (mapcar (lambda (name) (concat common "/" name)) '("hooks" "config" "index" "HEAD"))
+                           (harness-plist-get-in config '(:filesystem :readonlyPaths))))
+            (should (equal '("Sandbox Test") (harness-sandbox-test--mxc-env config "GIT_AUTHOR_NAME")))
+            (should (equal '("sandbox@example.invalid") (harness-sandbox-test--mxc-env config "GIT_COMMITTER_EMAIL"))))
+          (let ((config (funcall build wt :read-only t)))
+            (should-not (harness-plist-get-in config '(:filesystem :readwritePaths)))
+            (should (equal (list (harness-sandbox-test--real wt) common)
+                           (harness-plist-get-in config '(:filesystem :readonlyPaths))))
+            (should (equal '("Sandbox Test") (harness-sandbox-test--mxc-env config "GIT_AUTHOR_NAME"))))
+          ;; A main checkout needs nothing extra: its .git is inside it.
+          (let ((config (funcall build (car repo))))
+            (should (equal (list (harness-sandbox-test--real (car repo)))
+                           (harness-plist-get-in config '(:filesystem :readwritePaths))))
+            (should-not (harness-plist-get-in config '(:filesystem :readonlyPaths)))))
+      (delete-directory (file-name-directory (directory-file-name (car repo))) t))))
+
+(ert-deftest harness-sandbox-mxc-wrap ()
+  "On macOS `sandbox/wrap' runs a command through MXC, with a private
+TMPDIR of its own; without MXC there, the refusals name its executor."
+  (harness-sandbox-test--setup)
+  (let* ((cwd (harness-test-temp-dir))
+         (real-cwd (harness-sandbox-test--real cwd))
+         (harness-sandbox-policy 'preferred)
+         (harness-sandbox-backend 'auto)
+         (harness-sandbox--mxc-system-dirs nil)
+         (harness-sandbox-extra-read-only-dirs nil)
+         (made nil)
+         (tmpdir (lambda (cmd)
+                   (let ((dir (car (harness-sandbox-test--mxc-env (harness-sandbox-test--mxc-config cmd) "TMPDIR"))))
+                     (push dir made)
+                     dir))))
+    (unwind-protect
+        (progn
+          (harness-sandbox-test--detect-on-macos '(("mxc-exec-mac" . "/opt/mxc/mxc-exec-mac")))
+          (should (eq 'mxc (plist-get (harness-call 'sandbox/status) :backend)))
+          (should (equal '(mxc) (plist-get (harness-call 'sandbox/status) :available)))
+          (should (eq t (harness-call 'sandbox/confined-p cwd)))
+          (should-not (harness-call 'sandbox/confined-p "/ssh:example.invalid:/srv/"))
+          (let* ((cmd (harness-call 'sandbox/wrap cwd '("bash" "-c" "true") :network nil))
+                 (config (harness-sandbox-test--mxc-config cmd))
+                 (dir (funcall tmpdir cmd)))
+            (should (equal "/opt/mxc/mxc-exec-mac" (car cmd)))
+            ;; Made for the command, private, named in the configuration.
+            (should (file-directory-p dir))
+            (should (= #o700 (file-modes dir)))
+            (should (equal (list real-cwd (directory-file-name dir))
+                           (harness-plist-get-in config '(:filesystem :readwritePaths))))
+            (should (string-search (concat "rm -rf -- " (harness-sandbox--sh-quote (directory-file-name dir)))
+                                   (harness-plist-get-in config '(:process :commandLine))))
+            (should (equal '("deny" "deny" "deny") (harness-sandbox-test--mxc-network config)))
+            ;; Each command has a directory of its own.
+            (should-not (equal dir (funcall tmpdir (harness-call 'sandbox/wrap cwd '("true"))))))
+          ;; Read-only: nothing writable but its TMPDIR.
+          (let* ((cmd (harness-call 'sandbox/wrap cwd '("true") :read-only t :writable (list cwd)))
+                 (config (harness-sandbox-test--mxc-config cmd))
+                 (dir (funcall tmpdir cmd)))
+            (should (equal (list (directory-file-name dir))
+                           (harness-plist-get-in config '(:filesystem :readwritePaths))))
+            (should (equal (list real-cwd) (harness-plist-get-in config '(:filesystem :readonlyPaths)))))
+          ;; The policy off: unchanged, and a read-only command refused.
+          (let ((harness-sandbox-policy 'off))
+            (should (equal '("true") (harness-call 'sandbox/wrap cwd '("true"))))
+            (should-error (harness-call 'sandbox/wrap cwd '("true") :read-only t) :type 'harness-sandbox-unavailable)
+            (should-not (harness-call 'sandbox/confined-p cwd)))
+          ;; On macOS without MXC, nothing confines a read-only command,
+          ;; and the refusal names MXC's executor.
+          (let ((system-type 'darwin))
+            (harness-sandbox-test-with-executables '(("bwrap" . "/usr/bin/bwrap"))
+              (should (eq 'none (plist-get (harness-call 'sandbox/status) :backend)))
+              (should-not (harness-call 'sandbox/confined-p cwd))
+              (let ((err (should-error (harness-call 'sandbox/wrap cwd '("true") :read-only t)
+                                       :type 'harness-sandbox-unavailable)))
+                (should (string-match-p "mxc-exec-mac (MXC) is not available" (cadr err))))
+              (let* ((harness-sandbox-policy 'required)
+                     (err (should-error (harness-call 'sandbox/wrap cwd '("true"))
+                                        :type 'harness-sandbox-unavailable)))
+                (should (string-match-p "mxc-exec-mac (MXC)" (cadr err))))
+              (should (equal '("true") (harness-call 'sandbox/wrap cwd '("true"))))))
+          ;; On GNU/Linux they name bwrap and systemd-run, as before.
+          (let ((system-type 'gnu/linux))
+            (harness-sandbox-test-with-executables nil
+              (let ((err (should-error (harness-call 'sandbox/wrap cwd '("true") :read-only t)
+                                       :type 'harness-sandbox-unavailable)))
+                (should (string-match-p "neither bwrap nor systemd-run is available" (cadr err)))))))
+      (dolist (dir made) (ignore-errors (delete-directory dir t)))
+      (harness-sandbox-detect)
+      (delete-directory cwd t))))
+
+(defun harness-sandbox-test--fake-mxc (dir)
+  "Write a stand-in for MXC's mxc-exec-mac in DIR and return its path.
+It runs the command its configuration describes as mxc-exec-mac does,
+but unconfined: the command line with /bin/sh -c, in its cwd, with
+exactly its environment (Emacs, which runs it, sets PWD), passing its
+output, its standard error and its exit status on."
+  (let ((script (expand-file-name "mxc-exec-mac" dir))
+        (lisp (expand-file-name "fake-mxc.el" dir)))
+    (with-temp-file lisp
+      (insert ";;; fake-mxc.el --- a stand-in for mxc-exec-mac  -*- lexical-binding: t; -*-\n"
+              (prin1-to-string
+               '(let* ((b64 (cadr (member "--config-base64" command-line-args-left)))
+                       (config (json-parse-string (decode-coding-string (base64-decode-string b64) 'utf-8)
+                                                  :object-type 'plist :array-type 'list))
+                       (process (plist-get config :process))
+                       (default-directory (file-name-as-directory (plist-get process :cwd)))
+                       (process-environment (plist-get process :env))
+                       (status (progn
+                                 (setq command-line-args-left nil)
+                                 (call-process "/bin/sh" nil '((:file "/dev/stdout") "/dev/stderr") nil
+                                               "-c" (plist-get process :commandLine)))))
+                  (kill-emacs (if (integerp status) status 1))))
+              "\n"))
+    (with-temp-file script
+      (insert "#!/bin/sh\n"
+              (format "exec %s -Q --batch -l %s \"$@\"\n"
+                      (shell-quote-argument (expand-file-name invocation-name invocation-directory))
+                      (shell-quote-argument lisp))))
+    (set-file-modes script #o755)
+    script))
+
+(ert-deftest harness-sandbox-mxc-runs-through-a-stand-in ()
+  "End to end on any system, mxc-exec-mac being a stand-in that runs the
+command unconfined: the command `sandbox/wrap' gives runs in its
+directory with its environment, its output, standard error and exit
+status come back, and its private TMPDIR is gone afterwards."
+  (harness-sandbox-test--setup)
+  (skip-unless (file-executable-p "/bin/sh"))
+  (let* ((bin (harness-test-temp-dir))
+         (cwd (harness-test-temp-dir))
+         (fake (harness-sandbox-test--fake-mxc bin))
+         (harness-sandbox-policy 'required)
+         (harness-sandbox-backend 'auto)
+         (harness-sandbox--mxc-system-dirs nil)
+         (process-environment (cons "HARNESS_TEST_PASSED=yes" process-environment)))
+    (unwind-protect
+        (progn
+          (harness-sandbox-test--detect-on-macos (list (cons "mxc-exec-mac" fake)))
+          (should (eq 'mxc (plist-get (harness-call 'sandbox/status) :backend)))
+          (let* ((cmd (harness-call 'sandbox/wrap cwd
+                                    (list "bash" "-c" (concat "pwd; echo \"sandbox=$HARNESS_SANDBOX passed=$HARNESS_TEST_PASSED\";"
+                                                              " echo \"$TMPDIR\"; echo kept > \"$TMPDIR/scratch\" && cat \"$TMPDIR/scratch\";"
+                                                              " echo made > made.txt; echo oops >&2; exit 7"))))
+                 (tmpdir (car (harness-sandbox-test--mxc-env (harness-sandbox-test--mxc-config cmd) "TMPDIR")))
+                 (r (harness-await (harness-run-command cmd :cwd cwd :timeout 60) 70)))
+            (should (equal fake (car cmd)))
+            (should (eql 7 (plist-get r :exit)))
+            (should (equal (list (directory-file-name cwd) "sandbox=mxc passed=yes" tmpdir "kept")
+                           (split-string (plist-get r :stdout) "\n" t)))
+            (should (equal "oops\n" (plist-get r :stderr)))
+            (should (file-exists-p (expand-file-name "made.txt" cwd)))
+            (should-not (file-exists-p tmpdir))))
+      (harness-sandbox-detect)
+      (delete-directory bin t)
+      (delete-directory cwd t))))
+
+(ert-deftest harness-sandbox-mxc-real-run-confines ()
+  "Under the real MXC, on macOS, a command writes its directory and its
+TMPDIR but no other, reads nothing of the home directory, and with
+:read-only writes nothing but its TMPDIR."
+  (harness-sandbox-test--setup)
+  (skip-unless (and (eq system-type 'darwin) (executable-find harness-sandbox-mxc-program)))
+  (harness-sandbox-detect)
+  (skip-unless (eq 'mxc (plist-get (harness-call 'sandbox/status) :backend)))
+  (harness-sandbox-test-with-home home
+    (let* ((cwd (harness-test-temp-dir))
+           (sibling (harness-test-temp-dir))
+           (key (expand-file-name ".ssh/id_test" home))
+           (harness-sandbox-policy 'required)
+           (run (lambda (script &rest opts)
+                  (harness-await (harness-run-command (apply #'harness-call 'sandbox/wrap cwd (list "sh" "-c" script) opts)
+                                                      :cwd cwd :timeout 60)
+                                 70))))
+      (harness-sandbox-test--write key "s3cret\n")
+      (unwind-protect
+          (let ((probe (funcall run "true")))
+            ;; Skipped only when MXC cannot start at all, as on a macOS
+            ;; before 15.
+            (unless (eql 0 (plist-get probe :exit))
+              (ert-skip (format "mxc-exec-mac cannot start here: %s" (string-trim (plist-get probe :stderr)))))
+            (let ((r (funcall run (mapconcat
+                                   #'identity
+                                   (list "echo x > in-cwd && echo cwd-written"
+                                         "echo x > \"$TMPDIR/t\" && echo tmp-written"
+                                         (format "echo x > %s 2>/dev/null && echo sibling-written || echo sibling-refused"
+                                                 (shell-quote-argument (expand-file-name "f" sibling)))
+                                         (format "cat %s 2>/dev/null || echo key-hidden" (shell-quote-argument key))
+                                         "echo $HARNESS_SANDBOX")
+                                   "; "))))
+              (should (equal "cwd-written\ntmp-written\nsibling-refused\nkey-hidden\nmxc\n" (plist-get r :stdout)))
+              (should (file-exists-p (expand-file-name "in-cwd" cwd)))
+              (should-not (file-exists-p (expand-file-name "f" sibling))))
+            (let ((r (funcall run (concat "echo x > ro.txt 2>/dev/null && echo cwd-written || echo cwd-refused; "
+                                          "echo x > \"$TMPDIR/t\" && cat \"$TMPDIR/t\"")
+                              :read-only t)))
+              (should (equal "cwd-refused\nx\n" (plist-get r :stdout)))
+              (should-not (file-exists-p (expand-file-name "ro.txt" cwd)))))
+        (delete-directory cwd t)
+        (delete-directory sibling t)))))
 
 ;;;; Scratch directories
 

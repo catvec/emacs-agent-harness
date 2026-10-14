@@ -15,13 +15,15 @@ module needs something more, add it here first.
  State          session, agent, config, project, store, usage, insights, fallback,
                 retry, naming, judge, compaction, handoff, worktree, merge, tasks,
                 tasks-notify, supervisor, seed, skills, perms, decisions, sandbox,
-                notifications, secrets, redact
+                notifications, secrets, redact, plugins
  Completion     provider, provider-openai, provider-deepseek, provider-claude,
                 provider-bedrock, provider-copilot
  Tool calls     tools, tools-fs, tools-shell, tools-ssh, tools-emacs, tools-emacs-eval,
                 tools-web, tools-agent, tools-question, tools-plan, tools-todo,
                 tools-session-info, tools-sessions, tools-events, tools-notify,
-                tools-handin, tools-compact, tools-dev
+                tools-handin, tools-compact
+                 (and this repository's own plugin: .harness/plugins/dev/, tools-dev
+                 and ui-tools-dev; see Projects' plugins)
  ------------------------------- bus (lisp/harness-core.el)
  Core           harness.el (loader, reload), harness-core (methods, events, filters,
                 promises, modules), harness-util (json, ids, paths, the thinking-level
@@ -425,6 +427,114 @@ A minimal pair, in `~/.config/emacs/harness-modules/`, with
 `harness-server-loads-extra-modules-on-each-side`
 (test/harness-server-test.el) runs such a pair, one module in each
 process.
+
+## Projects' plugins
+
+A project may carry modules of its own, for what only makes sense in
+it: its plugins.  The harness's own repository has one,
+.harness/plugins/dev/ (tools-dev and ui-tools-dev: `open_harness` and
+the board's Open harness), which is why those are no modules of the
+harness.  The harness loads no plugin: Emacs does, as it applies any
+project's directory-local variables (lisp/modules/harness-plugins.el,
+module `plugins`).
+
+- Loading.  The project's .dir-locals.el requires the plugin in an
+  `eval` entry and names the plugin modules its sessions use in
+  `harness-plugin-modules` (the repository's own .dir-locals.el is the
+  example; its `eval` loads nothing from a checkout nested in another,
+  such as a task's worktree, since in the user's Emacs a worktree's
+  copy of the trusted entry would load the worktree's plugin files).
+  The required file loads each half once what it needs has
+  loaded (`with-eval-after-load` of harness-tools, of a UI library), as
+  .harness/plugins/dev/harness-dev-plugin.el does, since both Emacsen
+  apply the same entries.  A module defined after `harness-started` by
+  code other than the loader starts by itself at the next turn of the
+  event loop, unless `harness-disabled-modules` names it
+  (`harness-define-module`); `harness-plugins--apply` starts those it
+  loaded at once.  A plugin's code loads once per process (`require`):
+  neither `harness-reload` nor `harness-auto-reload-mode` reloads it.
+- Trust.  A plugin is the project's Emacs Lisp, run outside the
+  sandbox, so Emacs's own trust decides: neither entry is safe as it is
+  (`harness-plugin-modules` has no `safe-local-variable`), so the
+  user's Emacs asks, and `!` records them in
+  `safe-local-variable-values`.  The harness process asks nobody:
+  `harness-plugins--apply` runs `hack-dir-local-variables-non-file-buffer`
+  in a buffer of its own with `enable-local-variables` `:safe` (nil
+  stays nil; `:all`, or a directory that `safe-local-variable-directories`
+  names, gives `:all`), so only what is safe or trusted applies, and
+  only for a project whose variables set `harness-plugin-modules`
+  (`harness-plugins--names-modules-p` reads them first, evaluating
+  nothing): other projects' trusted `eval` entries never run in the
+  process.  The user's settings (`harness-server-dir-locals-variables`)
+  reach it as the user set them when it starts
+  (`harness-server--forwarded`, their global values) and, whenever one
+  changes in the user's Emacs, through `plugins/trust` (a variable
+  watcher in harness-ui.el).  It applies
+  the variables of the session's project's main checkout
+  (`harness-files-owning-checkout`), never a linked worktree's, nor a
+  remote one's.  `harness-plugin-modules` is the init file's alone
+  besides: `harness-config-hidden-options` keeps it off the settings
+  page and `config/set`.
+- Freezing.  A session takes its list as it starts, which is when it
+  enters the jail: `harness-plugins--on-created`, a subscriber of
+  `session/created`, keeps it in the session's `:ext` under `:plugins`
+  (names as strings, `:false` for none), where it stays across
+  restarts.  A session with a `:parent-id` (fork, sub-agent, side
+  conversation), or made while a tool call of another session runs
+  (`harness-tools-calling-session`, which `harness-tools--run-handler`
+  binds around a handler: task_submit's task), takes that session's
+  frozen list, or none once it is gone; any other, what its checkout
+  names then.  No checkout a jailed agent could have made is applied
+  (`harness-plugins--planted-p`, in `harness-plugins--checkout`): one
+  in the sessions' temporary root, in a .git directory, or below
+  another checkout (ancestors up to the home directory, exclusive),
+  however the session reached it -- its own directory or a worktree's
+  .git file -- since a copy of a trusted .dir-locals.el is trusted
+  wherever it is.  Nothing a session
+  does changes its list or its children's; only the user trusting a new
+  value, outside every jail, changes what the next sessions get.  A
+  session from before this freezes its list the first time
+  `plugins/of-session` is asked for it.  After a restart,
+  `plugins/of-session` applies a session's checkout (and its parents')
+  once per process first, so the plugin's code is there again.
+- Scope.  `harness-module-plugin-p NAME` is true for a module whose
+  file (`harness-module-file`) lies outside the directories the harness
+  loads modules from (`harness--own-module-directories`: lisp/modules,
+  lisp/ui, `harness-module-directories`,
+  `harness-extra-module-directories`).  A tool belongs to the module of
+  the harness-NAME.el file loading as it is defined, else to the module
+  the loader is loading (`harness-loading-module`).  A plugin module's
+  tool is offered to, and callable by, only the sessions whose frozen
+  list names that module, once it is ready (see the tools contract,
+  `harness-tools--in-scope-p`).  Methods and events are not scoped: a
+  plugin's methods are callable by any client once their prefix is in
+  `harness-acp-extra-method-prefixes`.
+- Registration.  What the harness lists for its own tools a plugin
+  adds as it loads, at top level: methods' prefixes to
+  `harness-acp-extra-method-prefixes`, tools that need no approval to
+  `harness-perms-extra-auto-allow-tools`, tools that start processes
+  to `harness-tool-slots-tools`, and actions on a task board's cards to
+  `harness-ui-tasks-action-functions` (UI side).
+- This repository's tests find its plugins' modules as they find
+  lisp/modules' (`harness-test-load-module`,
+  `harness-test-plugin-directories`), and scripts/lint.sh compiles
+  them.  A development Emacs (scripts/harness-dev.el) sets
+  `enable-local-variables` to `:safe`, so it never asks and loads no
+  plugin unless its user trusts it there.
+
+Methods of `plugins`:
+
+| Method | Params | Returns |
+|---|---|---|
+| `plugins/of-session` | id | the plugin modules session ID froze, a list of symbols (freezing it first when it has not; nil for no such session) |
+| `plugins/trust` | values: an alist of `harness-server-dir-locals-variables` and their values, printed | the names of the variables set (any other variable is ignored) |
+
+Both are callable over ACP as `_harness/plugins/...`.
+
+test/harness-plugins-test.el, `harness-core-plugin-modules-are-those-the-harness-did-not-load`
+(test/harness-core-test.el), `harness-tools-a-plugins-tools-are-for-the-sessions-naming-it`
+(test/harness-tools-test.el) and `harness-tools-dev-repository-names-its-plugin`
+(test/harness-tools-dev-test.el) hold this.
 
 ## Vendored libraries
 
@@ -2196,7 +2306,12 @@ which otherwise leaves the model with no answer to its call at all.
 - `tools/list &optional SESSION-ID` → TOOL-SPECs `(:name :label
   :description :schema :kind :coalescable)`, filtered through sync
   filter `agent/tools` (value: list of names; args: session).  Without
-  SESSION-ID every registered tool: how UIs learn the labels.
+  SESSION-ID every registered tool: how UIs learn the labels.  A tool
+  a plugin module defines (`harness-module-plugin-p` of its
+  `harness-tool-module`) is for the sessions whose frozen plugin list
+  names that module (`plugins/of-session`), once it is ready: any other
+  session never gets it, and `agent/tools` never sees it for that
+  session (`harness-tools--in-scope-p`; see Projects' plugins).
 - `tools/execute SESSION-ID CALL` (CALL = `(:id :name :input)`) → promise of
   RESULT.  Pipeline: lookup → `permission/decide` (async filter) →
   handler (with `harness-tools--timeout`) → sync filter `tools/output`
@@ -2215,6 +2330,9 @@ which otherwise leaves the model with no answer to its call at all.
   `tools/execute-approved` runs both as well.  A filter that signals is
   skipped by `harness-run-filter`, so a filter that has to hold text
   back catches its own errors and returns something safe in its place.
+  The lookup fails, "Unknown tool NAME. Available: …", for a tool
+  nobody registered and for a plugin's tool called from a session
+  whose list does not name its module.
 - `tools/note SESSION-ID CALL-ID TEXT` is what a running call says of
   itself beyond its one progress line: a line, or a few, for people to
   read, which the agent keeps on the call
@@ -2693,6 +2811,9 @@ non-interactive session it stays a denial.
   `notify`, which only reaches the user through the notification
   providers they set up, so unattended sessions can say they need them,
   and `hand_in`, which only records a task's report and ends the turn.
+  So are those a module outside the harness adds to
+  `harness-perms-extra-auto-allow-tools` (`harness-perms--auto-allow-p`),
+  as the harness repository's plugin adds `open_harness`.
   So are the tools in `harness-perms--inspection-tools`, which only
   inspect the harness or the user's live Emacs: `emacs_buffers`,
   `emacs_buffer`, `emacs_windows`, `emacs_describe`,
@@ -2916,21 +3037,28 @@ see perms) and an "always" answer to the cold-cache question (kind
 ### sandbox
 
 - `sandbox/wrap CWD COMMAND-LIST &optional (:network t :writable (…) :readable (…) :read-only nil :scratch (…))` →
-  command list (bwrap / systemd-run / plain).  `sandbox/status` →
-  `(:backend bwrap|systemd|none :available (…) :policy …)`.  Fails closed
+  command list (bwrap / systemd-run / mxc-exec-mac / plain).
+  `sandbox/status` → `(:backend bwrap|systemd|mxc|none :available (…)
+  :policy …)`.  `harness-sandbox-detect` looks for bwrap and
+  systemd-run on GNU/Linux and for `harness-sandbox-mxc-program` on
+  macOS only; a backend forced off its platform is `none`.  Fails closed
   when `harness-sandbox-policy` is `required` and no backend exists.
+  A confined command has `HARNESS_SANDBOX` set to the backend's name,
+  `bwrap`, `systemd` or `mxc`, so a script can tell it runs confined
+  (`scripts/dev.sh start` warns that an Emacs it starts there ends with
+  the command).
   Without the sandbox module the bash and elisp tools fail closed for
-  `required` too (`harness-tools-shell--wrap`), rather than running the
-  command unconfined.
+  `required` too (`harness-tools-shell--wrap`), rather than running the command
+  unconfined.
 - `:read-only`, for a caller that needs a command to change nothing (a
   supervising session's shell, which only looks), mounts the working
   directory, the git directories and every `:writable` entry read-only
   as well, so the command writes nothing but the sandbox's private
-  /tmp.  It fails closed whatever the policy: where the command would
-  run unconfined, with the `off` policy, in a remote CWD or with no
-  backend, `sandbox/wrap` signals `harness-sandbox-unavailable` instead
-  of returning COMMAND.  `sandbox/confined-p CWD` says beforehand
-  whether it can be had.
+  /tmp (its private `$TMPDIR` under MXC).  It fails closed whatever the
+  policy: where the command would run unconfined, with the `off`
+  policy, in a remote CWD or with no backend, `sandbox/wrap` signals
+  `harness-sandbox-unavailable` instead of returning COMMAND.
+  `sandbox/confined-p CWD` says beforehand whether it can be had.
 - `:scratch` lists directories the caller made for the one command and
   deletes after it, which the command writes even when it is
   `:read-only`: the elisp tool's background Emacs leaves its result in
@@ -3025,6 +3153,35 @@ see perms) and an "always" answer to the cold-cache question (kind
   `worktree/prune` and `worktree/remove`, which run outside the sandbox.
   Commands that run unconfined (no backend, policy `off`, remote CWD)
   are never refused.  The perms module's sandbox guard calls it.
+- MXC, on macOS (`harness-sandbox--mxc-command`): the wrapped command
+  is `PROGRAM --config-base64 B64`, the whole command as JSON (version
+  1.0.0, containment `seatbelt`, `nestedPty`, no MXC timeout), which
+  `mxc-exec-mac` runs as `/bin/sh -c` in CWD.  Seatbelt confines by
+  path rather than by mounts, so the same directories go as an
+  allowlist at their real paths: read-write CWD, the `rw` sources of
+  `harness-sandbox--mounts` and a worktree's common git directory;
+  read-only its `ro` sources, the toolchain directories that exist
+  (`harness-sandbox--mxc-system-dirs`: Homebrew, /usr/local, MacPorts,
+  Nix, /Applications) and `harness-sandbox-extra-read-only-dirs`, each
+  unless a writable one holds it, and the protected git paths, which
+  stay read-only inside the writable git directory (the deepest rule
+  wins).  MXC's own baseline gives the system (/bin, /usr, /System,
+  /Library, /private/etc…).  `sandbox/wrap` makes a private 0700
+  directory the command's `$TMPDIR`, writable, and the command line
+  removes it after the command, keeping its status (a command killed by
+  a signal leaves it for macOS to clear).  MXC passes no environment on:
+  the command gets `process-environment` (the first entry of a name
+  wins, a bare name unsets it, an entry JSON cannot carry is left out)
+  with `TMPDIR`, `PWD`, `HARNESS_SANDBOX=mxc` and the git identity set;
+  `$HOME` keeps its path, unreadable but for what is shown.  The network
+  is allowed all ways (egress, ingress and host loopback, which MXC
+  takes only with ingress) or denied all ways.  `:read-only` leaves
+  only `$TMPDIR` writable and shows CWD, the writable directories and
+  the common git directory read-only.  Unlike bwrap the command gets no
+  PID namespace (only a session of its own), `/tmp` cannot be written,
+  and MXC hands the output over only when the command exits, so the
+  bash tool's live note shows nothing until then.  MXC needs macOS 15
+  or later.
 
 ### agent
 
@@ -4153,8 +4310,9 @@ loads on its own.
     -f`, past local changes and any lock.  Task archive and the worktree
     list's `d` go through it.  Before git runs, the async filter
     `worktree/before-remove` (value nil, args ROOT PATH) lets whatever
-    runs from the worktree let go of it: tools-dev stops the Emacs that
-    `open_harness` started there.
+    runs from the worktree let go of it: the harness repository's
+    plugin (tools-dev) stops the Emacs that `open_harness` started
+    there.
   - `worktree/prune` runs `git worktree prune -v` outside the sandbox,
     where git sees every worktree, so it prunes only worktrees really
     gone, and skips locked ones as git does.  It returns git's lines plus
@@ -6773,7 +6931,7 @@ TRAMP prefixes come from the session host):
 | `task_wait` | Wait for tasks | task_id / task_ids, until (settled/done/needs-input/active/review/merging/changed; settled counts review, and a written-up backlog task unless an auto-queued backlog hands it on to the queue), mode, timeout_seconds | read (needs no approval: `harness-perms--inspection-tools`) |
 | `hand_in` | Hand in the finished work | summary, evidence (image/video/file/code/note/tool_call, each with a caption), cannot_continue (cannot finish: to user input, nothing merges), no_merge (informational: verify completes without the merge queue) | meta (task sessions only; needs no approval: `harness-perms--auto-allow-tools`) |
 | `compact` | Compact the conversation | kind (summary/brief/transcript/fresh/truncate, default summary), mode (queue/interrupt, default queue), reason | meta (tools-compact; offered to every session, so an agent compacts its own conversation) |
-| `open_harness` | Open harness in Emacs | path (default: the session's worktree, else its cwd), focus (for the user: stays until the task is done) | exec (tools-dev; offered in a checkout of the harness only; the instance stops by itself once nothing needs it; needs no approval: `harness-perms--auto-allow-tools`) |
+| `open_harness` | Open harness in Emacs | path (default: the session's worktree, else its cwd), focus (for the user: stays until the task is done) | exec (tools-dev, the harness repository's own plugin: offered only to the sessions whose plugin list names it, as the repository's .dir-locals.el does once the user trusts it; the instance stops by itself once nothing needs it; needs no approval: the plugin adds it to `harness-perms-extra-auto-allow-tools`) |
 | `notify` | Notification | message, title, urgency (low/normal/critical), providers, url | meta (needs no approval: `harness-perms--auto-allow-tools`) |
 | `notification_providers` | Notification providers | (none) | read (needs no approval: `harness-perms--inspection-tools`) |
 | `merge_done` | Finish merge | none | meta (merge module) |
@@ -6836,7 +6994,14 @@ allowlist does not name it.
 
 `open_harness` (`tools-dev`) opens a second Emacs running the harness
 from a checkout of this project -- a task's worktree, say -- so harness
-changes can be tried live instead of only read.  It runs that
+changes can be tried live instead of only read.  It is no module of the
+harness but the plugin of the harness's own repository
+(.harness/plugins/dev/harness-tools-dev.el, with its UI half
+harness-ui-tools-dev.el; see Projects' plugins): the repository's
+.dir-locals.el loads it once the user trusts that file's entries, and
+names it in `harness-plugin-modules`, so the harness offers its tool to
+the sessions of the repository, its task worktrees' included, and to
+no other.  It runs that
 checkout's own live development loop (`scripts/dev.sh start`) with
 `HARNESS_DEV_SOCKET=harness-dev-HASH`, a socket derived from the
 checkout's true name, so the same worktree reuses its instance and two
@@ -6844,25 +7009,54 @@ worktrees never share one; the instance's state and compiled files stay
 in that checkout's `scripts/.dev/state-SOCKET`, passed as
 `HARNESS_DEV_STATE` (dev.sh keeps one it inherits, so an instance
 opened by the harness of another would share that one's state).  The
-instance's server socket is in that checkout too, at
-`scripts/.dev/run/SOCKET` (`harness-tools-dev--socket-dir`), not in
-`$XDG_RUNTIME_DIR`: the bash tool's sandbox shows the checkout and
-hides `$XDG_RUNTIME_DIR`, so the agent drives the instance from bash.
-A Unix socket's path holds 107 bytes at most, too few for a worktree's,
-so `scripts/harness-dev.el` sets `server-socket-dir` to
-`/proc/PID/cwd/scripts/.dev/run/`, PID being the daemon, which dev.sh
-starts in the checkout, and dev.sh names it through its own
-`/proc/$$/cwd`.  The result lists the
-`scripts/dev.sh` commands that drive it (shot, keys, eval, errors,
-reload, stop) prefixed with that socket.  `path` defaults to the
-session's worktree, else its cwd; a directory that is not a checkout
-(`harness.el` and `scripts/dev.sh` side by side) is refused.  The sync
-filter `agent/tools` drops the tool outside such checkouts: it is for
-this project only.  The bus method `harness-dev/open PATH &optional
-FOCUS` does the same for the UI (focus raises the frame); Open harness
-in the menu of a task board's review card calls it, and the tool
-is in `harness-perms--auto-allow-tools', so the agent needs no approval
-to use it.
+result lists the `scripts/dev.sh` commands that drive it (shot, keys,
+eval, errors, reload, stop) prefixed with that socket (which of its
+names, below).  `path` defaults to the session's worktree, else its
+cwd; a directory that is not a checkout
+(`harness.el` and `scripts/dev.sh` side by side) is refused.  The bus
+method `harness-dev/open PATH &optional FOCUS` does the same for the UI
+(focus raises the frame); Open harness, which the plugin's UI half adds
+to the menu of a task board's review card whose worktree is such a
+checkout (`harness-ui-tasks-action-functions`), calls it.  As it loads
+the plugin adds `harness-dev/` to `harness-acp-extra-method-prefixes`,
+the tool to `harness-perms-extra-auto-allow-tools`, so the agent needs
+no approval to use it, and to `harness-tool-slots-tools`, since a call
+starts a whole Emacs.
+
+Without `HARNESS_DEV_SOCKET_DIR`, as when scripts/dev.sh is run by
+hand, the socket is in the checkout, at `scripts/.dev/run/SOCKET`
+(`harness-tools-dev--socket-dir`), which the bash tool's sandbox shows
+and `$XDG_RUNTIME_DIR` it hides; a Unix socket's path holds 107 bytes
+at most, too few for a worktree's, so `scripts/harness-dev.el` sets
+`server-socket-dir` to `/proc/PID/cwd/scripts/.dev/run/`, PID being the
+daemon, which dev.sh starts in the checkout, and dev.sh names it
+through its own `/proc/$$/cwd`.  The tool gives the socket another
+place, whose path is shorter and which works without /proc.
+
+The socket's file has a fixed, short path, the same for every opener,
+so they all reach one daemon and the path stays far below the limit of
+a socket's address (104 bytes on macOS, 108 on Linux):
+`HARNESS_DEV_SOCKET_DIR` is the `.dev` directory beside the sessions'
+temporary directories (`harness-tools-dev-socket-dir`:
+/tmp/harness-UID/.dev/, made 0700).  When the sessions' root is not a
+directory of the user's own, it is refused with a warning, dev.sh
+gets the variable empty and the socket falls back to the checkout's
+`scripts/.dev/run`.  An agent's sandboxed shell sees its own temporary
+directory but not that one, and an Emacs started from that shell ends
+with its command, so the tool starts the daemon outside the sandbox
+and `harness-tools-dev--link` makes a hard link to its socket in the
+opening session's temporary directory (`session/tmp-dir`), replacing
+whatever had that name there.  A Unix socket is found by its inode,
+so the link reaches the daemon from the sandbox.  The result
+(`:socket`, `:socket-path`, `:link`) names the link in the commands'
+`HARNESS_DEV_SOCKET`, else the socket's file, else its name, and says
+that a `scripts/dev.sh start` from the agent's own shell would end
+with that command.  To dev.sh, HARNESS_DEV_SOCKET is a name (in
+`HARNESS_DEV_SOCKET_DIR` when that is set, else in the checkout's
+`scripts/.dev/run`) or a path.  It connects to a path over 100 bytes from its
+directory by a relative name, makes the path given to `shot`
+absolute, and warns when `start` runs under `HARNESS_SANDBOX` (see
+sandbox).
 
 Instances stop once nothing needs them, since nothing inside one ever
 stops it.  `tools-dev` records each instance it opens, and who for, in
@@ -6898,22 +7092,23 @@ model when its instance stops (`harness-tools-dev--lifetime`).
 The sweep (`harness-tools-dev--sweep`) runs a minute after the module
 starts and every ten minutes after that.  It reads the process table
 (`harness-tools-dev-processes`: this user's Emacs processes whose
-command line is `--daemon=harness-dev-HASH -l
-CHECKOUT/scripts/harness-dev.el`) and forgets the records of
+command line is `--daemon=[DIR/]harness-dev-HASH -l
+CHECKOUT/scripts/harness-dev.el`, the directory being the sockets' one,
+absent for the instances of older harnesses) and forgets the records of
 instances that no longer run.  It adopts an unrecorded instance whose
 checkout is the worktree of one of this harness's tasks or sessions,
 or is gone, then checks everything.  Any other instance is someone
 else's and stays, and so does the one this harness runs in (its
-`daemonp`, or its parent's command line, see
-`harness-tools-dev--own-socket`).
+`daemonp`, the socket's file, or the bare name an older harness gave;
+or its parent's command line, see `harness-tools-dev--own-socket`).
 
 Stopping (`harness-tools-dev--stop`) runs `emacsclient -a false -s
-scripts/.dev/run/SOCKET --eval (kill-emacs)`, the emacsclient of
-Emacs's own `invocation-directory`, in the checkout: a short relative
-path to the socket there.  When the checkout holds no such socket, as
-for an instance an older dev.sh started, or the checkout is gone, it
-runs `-s SOCKET` from `/`, which finds a socket in the default place,
-so nothing of the checkout has to exist.  A daemon still running
+SOCKET --eval (kill-emacs)`, from Emacs's own `invocation-directory`,
+so nothing of the checkout has to exist.  SOCKET is the socket's
+file when it exists, else its name, for an instance an older harness
+started (`harness-tools-dev--client-socket`); for an instance started
+by dev.sh alone, whose socket is in the checkout, it runs in the
+checkout with a short relative path to it.  A daemon still running
 `harness-tools-dev--kill-grace` seconds later has its process tree
 killed with TERM, then KILL.  The record is forgotten and
 `harness-dev/stopped` (SOCKET PATH REASON) is emitted.  The
@@ -7704,9 +7899,10 @@ Options:
 - `harness-tool-slots-burst` (default 2): calls more than the count that
   may run at once, so that a limit sized for long commands does not make
   every short one wait.
-- `harness-tool-slots-tools` (default bash, elisp, ssh and
-  open_harness): the tools whose calls hold a slot.  A tool not named
-  never waits.
+- `harness-tool-slots-tools` (default bash, elisp and ssh): the tools
+  whose calls hold a slot.  A tool not named never waits.  A module
+  outside the harness whose tool starts processes adds it as it loads:
+  the harness repository's plugin adds open_harness.
 - `harness-tool-slots-machine-function`: the function that says which
   machine a call runs on, `harness-tool-slots-default-machine` by
   default.  That keys an ssh call by the host its `:host` names, and any
@@ -8061,12 +8257,13 @@ such harness method: NAME".
 Extension methods: any bus method whose name starts with `session/`,
 `agent/`, `provider/`, `tools/list`, `usage/`, `fallback/`, `worktree/`, `merge/`,
 `config/`, `skills/`, `permission/`, `question/`, `compaction/`, `handoff/`, `naming/`,
-`project/`, `task/`, `search/`, `notification/`, `sandbox/status`, `harness-dev/`, `harness/api`,
+`project/`, `task/`, `plugins/`, `search/`, `notification/`, `sandbox/status`, `harness/api`,
 `harness/modules`, `harness/version`, `harness/reload`, `harness/call`, `acp/remote-`,
 `pet/`, `version/`, `insights/`, `supervisor/`, `seed/`, `priority/`,
 `secrets/`, `commit-msg/` (`harness-acp-extension-prefixes`), or with one of
 `harness-acp-extra-method-prefixes`, which modules of the user's own
-add to (see Modules of your own), is callable as `_harness/NAME` with a
+and projects' plugins add to (see Modules of your own; the harness
+repository's plugin adds `harness-dev/`), is callable as `_harness/NAME` with a
 params object whose keys become the plist arguments (`{"id": …}` →
 `:id`).  Methods take a single plist argument on the wire; the ACP
 layer maps positional bus signatures through a small table.
@@ -9928,14 +10125,20 @@ is not at the end of the range.  A high task wears `↑`
 pending card's "queued X ago" counts from when the task joined the
 queue (`harness-ui-tasks--queued-since`: `:queued-at`, else
 `:returned`, else `:created`).  `I` or
-[Add session] makes an ongoing session a task.  A card in Ready for
-review whose worktree is itself a checkout of the harness gets Open
-harness in its menu (`mouse-3`, `harness-ui-tasks-open-harness`; no
-button, the title's click opening the session as on every card): it
-starts the worktree's own live development loop in an Emacs of its
-own, frame raised, through `harness-dev/open`, so the work can be
-tried before it is verified.  That instance stops once the task is
-done, archived or deleted (see tools-dev).  `b` or [BTW] (or the
+[Add session] makes an ongoing session a task.  A card's menu
+(`mouse-3`) has the actions of its column, then those the functions
+of `harness-ui-tasks-action-functions` add for it: each is called with
+the task and returns (LABEL COMMAND) entries, whose command runs with
+point on the card (`harness-ui-tasks-task-at-point`,
+`harness-ui-tasks-request`).  They are never one of the card's
+buttons (`harness-ui-tasks--actions` with OWN), and a function that
+fails adds nothing.  The harness repository's own plugin adds Open
+harness this way (ui-tools-dev, `harness-ui-tools-dev-open-harness`)
+for a card in Ready for review whose worktree is itself a checkout of
+the harness: it starts the worktree's own live development loop in an
+Emacs of its own, frame raised, through `harness-dev/open`, so the
+work can be tried before it is verified.  That instance stops once the
+task is done, archived or deleted (see tools-dev).  `b` or [BTW] (or the
 usual BTW command) opens a BTW side conversation over the board about
 its tasks (`task/btw CWD &optional NAME MODEL`): a new `btw` session at
 the project root, on `harness-btw-model` applied to `harness-model` as

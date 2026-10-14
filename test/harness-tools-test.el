@@ -125,10 +125,12 @@ array), as OpenAI did for hand_in, whose evidence item requires no key."
     (dolist (m '(session agent skills perms tasks merge notifications))
       (harness-test-load-module m))
     ;; Every tools-* module, so a new one cannot be left out by hand,
-    ;; as tools-dev was when open_harness left Claude Code with no tools.
-    (dolist (file (directory-files (expand-file-name "lisp/modules" harness-test-root)
-                                   nil "\\`harness-\\(tools-.*\\)\\.el\\'"))
-      (harness-test-load-module (intern (substring file 8 -3))))
+    ;; as tools-dev was when open_harness left Claude Code with no tools;
+    ;; those of this repository's own plugins too, where tools-dev is now.
+    (dolist (dir (cons (expand-file-name "lisp/modules" harness-test-root)
+                       (harness-test-plugin-directories)))
+      (dolist (file (directory-files dir nil "\\`harness-\\(tools-.*\\)\\.el\\'"))
+        (harness-test-load-module (intern (substring file 8 -3)))))
     (let ((specs (harness-call 'tools/list)))
       (should (member "hand_in" (mapcar (lambda (s) (plist-get s :name)) specs)))
       (should (member "open_harness" (mapcar (lambda (s) (plist-get s :name)) specs)))
@@ -285,6 +287,64 @@ array), as OpenAI did for hand_in, whose evidence item requires no key."
       (puthash sid (list :phase 'writing :since (float-time)) harness-agent--activities)
       (harness-emit 'agent/activity-changed sid (gethash sid harness-agent--activities))
       (should (equal '("thinking" "starting") seen)))))
+
+;;;; Tools of a project's plugins
+
+(ert-deftest harness-tools-a-plugins-tools-are-for-the-sessions-naming-it ()
+  "A tool of a plugin module is offered to the sessions that name the module.
+The plugin's file decides its module: harness-NAME.el, loaded by a
+`require' as a project's .dir-locals.el loads it, not by the harness.
+A session gets the tool only when the plugin modules it froze name the
+module, and only while the module is ready; any other neither gets it
+nor may call it: the call fails as a call of a tool that does not exist
+would.  The catalogue lists it, and a tool of the harness's own is
+everyone's."
+  (harness-tools-test-with
+    (let* ((plugin (harness-test-temp-dir))
+           (file (expand-file-name "harness-plugtool.el" plugin))
+           (plugins '(("in" plugtool) ("out" other)))
+           (names (lambda (id) (harness-tools--names (list :id id)))))
+      (with-temp-file file
+        (insert ";;; -*- lexical-binding: t -*-\n")
+        (dolist (form '((require 'harness-tools)
+                        (harness-define-tool "plug_tool" :label "Plug tool"
+                                             :handler (lambda (_input _ctx) "plugged"))
+                        (harness-define-module 'plugtool :requires '(tools))
+                        (provide 'harness-plugtool)))
+          (prin1 form (current-buffer))
+          (insert "\n")))
+      (harness-define-tool "plain_tool" :label "Plain tool" :handler (lambda (_input _ctx) "plain"))
+      (harness-add-filter 'permission/decide (lambda (_d next &rest _) (funcall next (list :behavior 'allow))) 10)
+      (harness-register-method 'session/get (lambda (id) (list :id id :cwd plugin)))
+      ;; Stands in for the plugins module: the lists the sessions froze.
+      (harness-register-method 'plugins/of-session (lambda (id) (cdr (assoc id plugins))))
+      (unwind-protect
+          (progn
+            (require 'harness-plugtool file)
+            (should (eq 'plugtool (harness-tool-module (harness-tool-get "plug_tool"))))
+            (should (harness-module-plugin-p 'plugtool))
+            ;; Not ready yet: nobody gets it.
+            (should-not (member "plug_tool" (funcall names "in")))
+            (should (harness-module-start 'plugtool))
+            (should (member "plug_tool" (funcall names "in")))
+            (should-not (member "plug_tool" (funcall names "out")))
+            (should-not (member "plug_tool" (funcall names "nobody")))
+            (should (member "plain_tool" (funcall names "out")))
+            (should (member "plug_tool" (harness-tools--names nil)))
+            (should (equal "plugged"
+                           (plist-get (harness-test-await
+                                       (harness-call 'tools/execute "in" (list :id "c1" :name "plug_tool")))
+                                      :content)))
+            (let ((result (harness-test-await
+                           (harness-call 'tools/execute "out" (list :id "c2" :name "plug_tool")))))
+              (should (plist-get result :is-error))
+              (should (string-prefix-p "Unknown tool plug_tool" (plist-get result :content))))
+            ;; Without the plugins module no session has a plugin's tools.
+            (harness-unregister-method 'plugins/of-session)
+            (should-not (member "plug_tool" (funcall names "in")))
+            (should (member "plain_tool" (funcall names "in"))))
+        (setq features (delq 'harness-plugtool features))
+        (delete-directory plugin t)))))
 
 ;;;; What a tool prints is filtered before anything keeps it
 

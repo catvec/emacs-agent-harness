@@ -125,6 +125,8 @@ reaching a custom file."
 (ert-deftest harness-config-describe-lists-global-options-and-hides-secrets ()
   (harness-config-test-with
     (setq harness-config-test-api-key "sk-very-secret")
+    ;; So that the option it hides is defined.
+    (require 'harness-plugins)
     (let* ((d (harness-call 'config/describe sub))
            (keys (mapcar (lambda (s) (plist-get s :key)) (plist-get d :settings)))
            (level (harness-config-test--setting d "harness-log-level"))
@@ -136,7 +138,8 @@ reaching a custom file."
       (should (member "core" (mapcar (lambda (m) (plist-get m :name)) (plist-get d :modules))))
       ;; What decides how the harness starts or talks to the UI is left out.
       (dolist (hidden '("harness-process" "harness-state-directory" "harness-module-directories"
-                        "harness-extra-module-directories" "harness-auto-reload-mode"))
+                        "harness-extra-module-directories" "harness-plugin-modules"
+                        "harness-auto-reload-mode"))
         (should-not (member hidden keys)))
       (should-not (cl-some (lambda (k) (string-prefix-p "harness-acp-" k)) keys))
       ;; A secret says whether it is set, never what it is.
@@ -176,7 +179,11 @@ reaching a custom file."
                     (harness-config-test-api-key "sk" :scope project)
                     (harness-model "x" :scope nowhere)
                     (not-a-harness-option 1 :scope global)
-                    (harness-process nil :scope global)))
+                    (harness-process nil :scope global)
+                    ;; Which plugins' tools sessions get: a project's trusted
+                    ;; .dir-locals.el says, or the init file.
+                    (harness-plugin-modules (tools-dev) :scope global)
+                    (harness-plugin-modules (tools-dev) :scope project)))
       (should-error (apply #'harness-call 'config/set (car call) (cadr call) :cwd sub (cddr call))))
     (should-error (harness-call 'config/set 'harness-model "(unclosed" :printed t :scope 'global))
     (should-error (harness-call 'config/set 'harness-model "\"a\" \"b\"" :printed t :scope 'global))

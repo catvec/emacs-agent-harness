@@ -19,6 +19,19 @@
 (dolist (d '("lisp" "lisp/modules" "lisp/ui" "test"))
   (add-to-list 'load-path (expand-file-name d harness-test-root)))
 
+(defun harness-test-plugin-directories ()
+  "Return the directories of this repository's own plugins, absolute.
+They are in its .harness/plugins/, which its .dir-locals.el loads (see
+harness-plugins.el); its tests load their modules as those of
+lisp/modules, with `harness-test-load-module'."
+  (let ((dir (expand-file-name ".harness/plugins/" harness-test-root)))
+    (and (file-directory-p dir)
+         (cl-remove-if-not #'file-directory-p (directory-files dir t "\\`[^.]")))))
+
+;; Last, so that no file of theirs shadows one of the harness's.
+(dolist (d (harness-test-plugin-directories))
+  (add-to-list 'load-path d t))
+
 (require 'harness)
 (require 'harness-core)
 (require 'harness-util)
@@ -142,13 +155,18 @@ when it starts (harness-readonly.el)."
   (setq harness-readonly--policies nil))
 
 (defun harness-test-load-module (name)
-  "Load module NAME from lisp/modules or lisp/ui, as `harness-start' would."
+  "Load module NAME as `harness-start' would, and start it.
+It is found in lisp/modules or lisp/ui, else in one of this
+repository's own plugins (`harness-test-plugin-directories')."
   (let ((file (cl-some (lambda (dir)
-                         (let ((f (expand-file-name (format "%s/harness-%s.el" dir name) harness-test-root)))
+                         (let ((f (expand-file-name (format "harness-%s.el" name)
+                                                    (expand-file-name dir harness-test-root))))
                            (and (file-exists-p f) f)))
-                       '("lisp/modules" "lisp/ui"))))
+                       (append '("lisp/modules" "lisp/ui") (harness-test-plugin-directories)))))
     (unless file (error "No module %s" name))
-    (let ((harness--defining-module name))
+    ;; Its source is what the module records as its file, as at start.
+    (let ((harness--defining-module name)
+          (harness--defining-file file))
       (harness-load-compiled file))
     (harness-module-start name)))
 
@@ -261,9 +279,11 @@ session's sandbox, where $HOME is the sandbox's own empty home."
 (defun harness-test-harness-checkout ()
   "Make a directory that looks like a checkout of the harness.
 harness.el and an executable scripts/dev.sh are there; the script
-appends its cwd, arguments, HARNESS_DEV_SOCKET, HARNESS_DEV_OWNER and
-HARNESS_DEV_STATE to invocation.log in the checkout and exits 0.
-Return the directory."
+appends its cwd, arguments, HARNESS_DEV_SOCKET, HARNESS_DEV_SOCKET_DIR,
+HARNESS_DEV_OWNER and HARNESS_DEV_STATE to invocation.log in the
+checkout and exits 0.  Its `start' with a socket and a socket directory
+leaves an empty file in place of the socket there, as the daemon would
+make the socket.  Return the directory."
   (let* ((dir (file-name-as-directory (make-temp-file "harness-checkout-" t)))
          (scripts (expand-file-name "scripts/" dir))
          (script (expand-file-name "dev.sh" scripts)))
@@ -275,8 +295,12 @@ Return the directory."
               "printf 'cwd=%s\\n' \"$PWD\" >> \"$PWD/invocation.log\"\n"
               "printf 'args=%s\\n' \"$*\" >> \"$PWD/invocation.log\"\n"
               "printf 'socket=%s\\n' \"$HARNESS_DEV_SOCKET\" >> \"$PWD/invocation.log\"\n"
+              "printf 'socket_dir=%s\\n' \"$HARNESS_DEV_SOCKET_DIR\" >> \"$PWD/invocation.log\"\n"
               "printf 'owner=%s\\n' \"$HARNESS_DEV_OWNER\" >> \"$PWD/invocation.log\"\n"
               "printf 'state=%s\\n' \"$HARNESS_DEV_STATE\" >> \"$PWD/invocation.log\"\n"
+              "if [ \"$1\" = start ] && [ -n \"$HARNESS_DEV_SOCKET_DIR\" ] && [ -n \"$HARNESS_DEV_SOCKET\" ]; then\n"
+              "  : > \"$HARNESS_DEV_SOCKET_DIR/$HARNESS_DEV_SOCKET\"\n"
+              "fi\n"
               "exit 0\n"))
     (set-file-modes script #o755)
     dir))
@@ -284,7 +308,7 @@ Return the directory."
 (defun harness-test-dev-invocations (dir)
   "Return the fake dev loop's invocations recorded in DIR, oldest first.
 Each invocation is an alist of the script's fields (cwd, args, socket,
-owner, state)."
+socket_dir, owner, state)."
   (let ((log (expand-file-name "invocation.log" dir)))
     (when (file-exists-p log)
       (with-temp-buffer

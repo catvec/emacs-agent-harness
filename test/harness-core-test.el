@@ -864,6 +864,103 @@ edit, naming the file, and picks up a good one."
         (delete-directory tree t)
         (delete-directory config t)))))
 
+;;;; Projects' plugins
+
+(defvar harness-core-test--seen nil "What the files a test loads saw, newest first.")
+(defvar harness-core-test--inits nil "The modules a test saw start, newest first.")
+
+(ert-deftest harness-core-plugin-modules-are-those-the-harness-did-not-load ()
+  "A module is a plugin when the harness did not load it from its own directories.
+Those are lisp/modules and lisp/ui in its tree and the directories of
+`harness-extra-module-directories'; a module registered from a file
+anywhere else -- a project's plugin, which its .dir-locals.el requires
+-- is a plugin, and one without a file, defined by hand, is not.  The
+loader knows no plugin directory: a project's .harness/plugins/ is
+none of its."
+  (harness-test-reset-bus)
+  (let* ((config (harness-test-temp-dir))
+         (project (harness-test-temp-dir))
+         (mine (expand-file-name "my-modules/" config))
+         (plugin (expand-file-name ".harness/plugins/dev/" project))
+         (user-emacs-directory config)
+         (harness-extra-module-directories '("my-modules"))
+         (define (lambda (name file)
+                   (let ((harness--defining-module name)
+                         (harness--defining-file file))
+                     (harness-define-module name)))))
+    (unwind-protect
+        (progn
+          (make-directory mine t)
+          (make-directory plugin t)
+          (funcall define 'own (harness--path "lisp/modules/harness-own.el"))
+          (funcall define 'ui-own (harness--path "lisp/ui/harness-ui-own.el"))
+          (funcall define 'mine (expand-file-name "harness-mine.el" mine))
+          (funcall define 'hello (expand-file-name "harness-hello.el" plugin))
+          (harness-define-module 'by-hand)
+          (should-not (harness-module-plugin-p 'own))
+          (should-not (harness-module-plugin-p 'ui-own))
+          (should-not (harness-module-plugin-p 'mine))
+          (should-not (harness-module-plugin-p 'by-hand))
+          (should-not (harness-module-plugin-p 'unknown))
+          (should (harness-module-plugin-p 'hello))
+          ;; The loader looks in its own directories only.
+          (let ((harness-process nil)
+                (harness-module-directories '("lisp/modules" "lisp/ui")))
+            (should-not (cl-some (lambda (f) (string-prefix-p project f)) (harness--module-files)))))
+      (harness-test-reset-bus)
+      (dolist (dir (list config project)) (delete-directory dir t)))))
+
+(ert-deftest harness-core-loading-module-follows-the-file ()
+  "What a file loading defines belongs to the module the file is named after.
+harness-NAME.el, or its compiled copy, holds module NAME, whoever loads
+it: even while the harness loads a module of its own, as when that
+module's `provide' lets a project's plugin load.  A file of another
+name keeps the module the harness is loading, and outside any load
+there is none."
+  (let* ((dir (harness-test-temp-dir))
+         (plugin (expand-file-name "harness-hello.el" dir))
+         (other (expand-file-name "hello-util.el" dir))
+         (seen nil))
+    (unwind-protect
+        (progn
+          (harness-core-test--write-elisp plugin '(push (cons 'hello (harness-loading-module)) harness-core-test--seen))
+          (harness-core-test--write-elisp other '(push (cons 'util (harness-loading-module)) harness-core-test--seen))
+          (setq harness-core-test--seen nil)
+          (let ((harness--defining-module 'tools))
+            (load plugin nil t)
+            (load other nil t)
+            (should (eq 'tools (harness-loading-module))))
+          (setq seen harness-core-test--seen)
+          (should (equal '((util . tools) (hello . hello)) seen))
+          (should-not (harness-loading-module)))
+      (delete-directory dir t))))
+
+(ert-deftest harness-core-late-modules-start-by-themselves ()
+  "A module that code other than the harness defines once it started starts.
+It starts as soon as the file defining it has loaded, not before, so
+an init function defined further down is there.  One the harness
+loads itself, or one defined before the harness started, waits for
+the harness, and `harness-disabled-modules' keeps one from starting."
+  (harness-test-reset-bus)
+  (setq harness-core-test--inits nil)
+  (let ((harness-started t)
+        (harness-disabled-modules '(off)))
+    (harness-define-module 'late :init (lambda () (push 'late harness-core-test--inits)))
+    (harness-define-module 'off :init (lambda () (push 'off harness-core-test--inits)))
+    (let ((harness--defining-module 'loaded))
+      (harness-define-module 'loaded :init (lambda () (push 'loaded harness-core-test--inits))))
+    (should-not harness-core-test--inits)
+    (harness-test-wait (lambda () (harness-module-ready-p 'late)) 5 "the late module")
+    (accept-process-output nil 0.05)
+    (should (equal '(late) harness-core-test--inits))
+    (should (eq 'registered (harness-module-state (harness-module-get 'off))))
+    (should (eq 'registered (harness-module-state (harness-module-get 'loaded)))))
+  (let ((harness-started nil))
+    (harness-define-module 'early)
+    (accept-process-output nil 0.05)
+    (should (eq 'registered (harness-module-state (harness-module-get 'early)))))
+  (harness-test-reset-bus))
+
 ;;;; Which modules load
 
 (defvar harness-core-test--inits nil

@@ -243,6 +243,7 @@ once, in the first.")
 
 (defconst harness-config-hidden-options
   '(harness-process harness-module-directories harness-extra-module-directories
+    harness-plugin-modules
     harness-enabled-modules harness-disabled-modules
     harness-state-directory harness-server-emacs harness-server-forward-variables
     harness-server-init-file harness-corporate-mode)
@@ -250,8 +251,11 @@ once, in the first.")
 They decide how the harness starts and how its process reaches the UI,
 which a running harness cannot change under itself, or, for
 `harness-corporate-mode', what the harness may do at all, which no
-settings page or ACP client may change.  `config/set' and `config/unset'
-refuse them: set them in the init file.")
+settings page or ACP client may change.  `harness-plugin-modules' says
+which plugins' tools sessions get: a project's .dir-locals.el names
+them, which Emacs asks you to trust, and the init file the ones for
+every project (see harness-plugins.el).  `config/set' and
+`config/unset' refuse them: set them in the init file.")
 
 (defconst harness-config-secret-regexp "-\\(?:api-key\\|token\\|secret\\|password\\)\\'"
   "Options whose names match this hold secrets.

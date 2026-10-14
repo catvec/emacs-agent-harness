@@ -207,7 +207,7 @@
 
 (defconst harness-perms--auto-allow-tools
   '("ask_user" "plan" "todo_write" "skill_search" "skill_load"
-    "web_search" "notify" "hand_in" "open_harness" "rerun_approved")
+    "web_search" "notify" "hand_in" "rerun_approved")
   "Tools that never need approval, in every permission mode.
 `rerun_approved' is included because it can run only a call the user
 approved by hand (`permission/approve-denied'): asking again about the
@@ -221,13 +221,32 @@ whatever URL the agent names.  `notify' only reaches the user, through
 the notification providers they set up, so unattended sessions can
 tell them when they are needed.  `hand_in' only records a task's
 report and ends the turn: whether the work is ready is the user's
-call when they review it, never the judge's.  `open_harness' only
-starts an Emacs running a checkout of this project's harness, in a
-state directory of its own, so verifying harness work live needs no
-prompt.  The tools that inspect the harness are in
+call when they review it, never the judge's.  Modules outside the
+harness add theirs to `harness-perms-extra-auto-allow-tools'.  The
+tools that inspect the harness are in
 `harness-perms--inspection-tools'.  Standing rules in
 `harness-perms-rules' are checked first and can still deny any of
 these tools.")
+
+(defvar harness-perms-extra-auto-allow-tools nil
+  "Tools of modules outside the harness that never need approval.
+A module of your own (see `harness-extra-module-directories') or a
+project's plugin (see harness-plugins.el) adds a tool here as it
+loads, as `harness-perms--auto-allow-tools' lists the harness's own:
+
+  (with-eval-after-load \\='harness-perms
+    (add-to-list \\='harness-perms-extra-auto-allow-tools \"my_tool\"))
+
+Only a tool that does nothing a user would want to approve belongs
+here.  Standing rules in `harness-perms-rules' are checked first and
+can still deny it.")
+
+(defun harness-perms--auto-allow-p (tool)
+  "Non-nil when TOOL, a tool name, never needs approval.
+That is a tool of `harness-perms--auto-allow-tools' or of
+`harness-perms-extra-auto-allow-tools'."
+  (or (member tool harness-perms--auto-allow-tools)
+      (member tool harness-perms-extra-auto-allow-tools)))
 
 (defconst harness-perms--inspection-tools
   '("emacs_buffers" "emacs_buffer" "emacs_windows" "emacs_describe" "emacs_find_definition" "emacs_messages"
@@ -1891,7 +1910,7 @@ DECISION is returned unchanged when the mode leaves the question open."
     (cond
      ;; Rules come first: the user's explicit answer beats the defaults.
      (rule (harness-perms--rule-decision rule (plist-get session :id)))
-     ((member tool harness-perms--auto-allow-tools)
+     ((harness-perms--auto-allow-p tool)
       (list :behavior 'allow :reason (format "%s never needs approval" tool)))
      ;; Inspecting the harness itself never needs approval, whatever
      ;; the mode: its tools, and reads of its code and state.
@@ -3882,7 +3901,8 @@ only reads may read (see `harness-perms-inspection-dirs' and
   (let ((session (harness-perms--session session-id)))
     (list :mode (harness-perms--mode-of session)
           :non-interactive (and (harness-perms--non-interactive-p session) t)
-          :auto-allow (append harness-perms--auto-allow-tools harness-perms--inspection-tools)
+          :auto-allow (append harness-perms--auto-allow-tools harness-perms-extra-auto-allow-tools
+                              harness-perms--inspection-tools)
           :session (gethash session-id harness-perms--session-rules)
           :always harness-perms-rules
           :roots (harness-perms-roots session)
