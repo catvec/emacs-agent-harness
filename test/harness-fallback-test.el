@@ -316,65 +316,87 @@ and forgets it when someone picks a model by hand."
       (harness-fallback-test-prompt sid "four")
       (should (equal '("beta:b-mini") (harness-fallback-test-models-asked))))))
 
-(ert-deftest harness-fallback-prefers-the-first-entry-that-works ()
-  "The list is an order of preference: a session on a lower entry runs on
-the first entry that works, goes back to its own model when that entry
-runs out, and moves up again once the entry comes back."
+(ert-deftest harness-fallback-keeps-the-model-it-was-given ()
+  "A session stays on the model it was given while that works, wherever
+the list puts it: the default model, then one picked by hand.  With
+Opus first in the list and DeepSeek-V4.1-Flash, the default, second, a
+session on Flash is not moved to Opus."
   (harness-fallback-test-with
-    (setq harness-fallback-models '("beta" "alpha"))
+    (setq harness-fallback-models '("beta:b-pro" "alpha:a-mid"))
     (let ((sid (harness-fallback-test-session "alpha:a-mid"))
           (switched nil))
       (harness-on 'fallback/switched (lambda (&rest args) (push args switched)))
-      ;; beta is the first entry, so the turn runs there, not on alpha.
+      (should (eq 'end-turn (plist-get (harness-fallback-test-prompt sid "one") :stop-reason)))
+      (should (equal '("alpha:a-mid") (harness-fallback-test-models-asked)))
+      (should (equal "alpha:a-mid" (plist-get (harness-call 'session/get sid) :model)))
+      ;; A model picked by hand sticks as well.
+      (harness-call 'session/update sid :model "alpha:a-tiny")
+      (setq harness-fallback-test-requests nil)
+      (should (eq 'end-turn (plist-get (harness-fallback-test-prompt sid "two") :stop-reason)))
+      (should (equal '("alpha:a-tiny") (harness-fallback-test-models-asked)))
+      (should (equal "alpha:a-tiny" (plist-get (harness-call 'session/get sid) :model)))
+      (should-not switched)
+      (should-not (cl-some (lambda (h) (string-match-p "works again\\|carries on with" h))
+                           (harness-fallback-test-hints sid)))
+      (should-not (plist-get (harness-call 'fallback/status) :moved)))))
+
+(ert-deftest harness-fallback-goes-back-once-a-quota-comes-back ()
+  "A session whose own model ran out carries on with the list's first
+entry that works, and goes back to its own model on the turn after the
+limit resets, without anyone clearing the mark: Claude Max first, and
+DeepSeek while Claude's quota is used up."
+  (harness-fallback-test-with
+    (setq harness-fallback-models '("alpha" "beta"))
+    (harness-call 'fallback/mark "alpha" :until (+ (float-time) 1.2) :reason "5h window used up")
+    (let ((sid (harness-fallback-test-session "alpha:a-mid")))
       (should (eq 'end-turn (plist-get (harness-fallback-test-prompt sid "one") :stop-reason)))
       (should (equal '("beta:b-flash") (harness-fallback-test-models-asked)))
-      (should (equal "beta:b-flash" (plist-get (harness-call 'session/get sid) :model)))
-      (should (equal (list (list sid "alpha:a-mid" "beta:b-flash" 'up)) (nreverse switched)))
-      (should (cl-some (lambda (h) (string-match-p "Beta works again, so this session goes back up to Beta Flash" h))
+      (should (cl-some (lambda (h) (string-match-p "Alpha is out of quota until [0-9]+:[0-9]+, so this session carries on with Beta Flash" h))
                        (harness-fallback-test-hints sid)))
-      ;; beta runs out: its own model carries on, and says why.
-      (harness-call 'fallback/mark "beta" :kind 'billing :reason "Insufficient Balance")
+      ;; The window resets: the mark ends on its own, and the turn after
+      ;; it goes back without anyone clearing it.
+      (harness-test-wait (lambda () (not (gethash "alpha" harness-fallback--marks))) 5 "the mark to end")
       (setq harness-fallback-test-requests nil)
       (should (eq 'end-turn (plist-get (harness-fallback-test-prompt sid "two") :stop-reason)))
       (should (equal '("alpha:a-mid") (harness-fallback-test-models-asked)))
       (should (equal "alpha:a-mid" (plist-get (harness-call 'session/get sid) :model)))
-      (should (cl-some (lambda (h) (string-match-p "Beta is out of money, so this session carries on with a-mid" h))
+      (should (cl-some (lambda (h) (string-match-p "Alpha works again, so this session goes back to a-mid" h))
                        (harness-fallback-test-hints sid)))
-      ;; beta works again: the next turn moves up, and stays there.
-      (should (harness-call 'fallback/clear "beta"))
+      (should-not (plist-get (harness-call 'fallback/status) :moved)))))
+
+(ert-deftest harness-fallback-climbs-back-up-the-list ()
+  "While its own model is still out, a session moves back up the list as
+a more preferred entry works again, then goes back to its own model."
+  (harness-fallback-test-with
+    (setq harness-fallback-models '("beta:b-flash" "beta:b-mini"))
+    (harness-call 'fallback/mark "alpha")
+    (harness-call 'fallback/mark "beta:b-flash")
+    (let ((sid (harness-fallback-test-session "alpha:a-mid"))
+          (switched nil))
+      (harness-on 'fallback/switched (lambda (&rest args) (push args switched)))
+      (should (eq 'end-turn (plist-get (harness-fallback-test-prompt sid "one") :stop-reason)))
+      (should (equal '("beta:b-mini") (harness-fallback-test-models-asked)))
+      ;; The first entry works again: up to it, its own model still out.
+      (should (harness-call 'fallback/clear "beta:b-flash"))
+      (setq harness-fallback-test-requests nil)
+      (should (eq 'end-turn (plist-get (harness-fallback-test-prompt sid "two") :stop-reason)))
+      (should (equal '("beta:b-flash") (harness-fallback-test-models-asked)))
+      (should (cl-some (lambda (h) (string-match-p "Beta works again, so this session goes back up to Beta Flash" h))
+                       (harness-fallback-test-hints sid)))
+      ;; Its own model works again: back to it.
+      (should (harness-call 'fallback/clear "alpha"))
       (setq harness-fallback-test-requests nil)
       (should (eq 'end-turn (plist-get (harness-fallback-test-prompt sid "three") :stop-reason)))
-      (should (equal '("beta:b-flash") (harness-fallback-test-models-asked)))
-      (should (equal (list (list sid "alpha:a-mid" "beta:b-flash" 'up)
-                           (list sid "beta:b-flash" "alpha:a-mid" 'out)
-                           (list sid "alpha:a-mid" "beta:b-flash" 'up))
-                     (nreverse switched))))))
-
-(ert-deftest harness-fallback-goes-back-up-once-a-quota-comes-back ()
-  "A mark that ends on its own lets the session move back up: the
-preferred entry is used again on the turn after its quota resets."
-  (harness-fallback-test-with
-    (setq harness-fallback-models '("beta" "alpha"))
-    (harness-call 'fallback/mark "beta" :until (+ (float-time) 1.2) :reason "5h window used up")
-    (let ((sid (harness-fallback-test-session "alpha:a-mid")))
-      ;; The first entry is out, so its own model runs and nothing moves.
-      (should (eq 'end-turn (plist-get (harness-fallback-test-prompt sid "one") :stop-reason)))
       (should (equal '("alpha:a-mid") (harness-fallback-test-models-asked)))
-      (should (equal "alpha:a-mid" (plist-get (harness-call 'session/get sid) :model)))
-      ;; The window resets: the mark ends on its own, and the turn after
-      ;; it goes back up without anyone clearing it.
-      (harness-test-wait (lambda () (not (gethash "beta" harness-fallback--marks))) 5 "the mark to end")
-      (setq harness-fallback-test-requests nil)
-      (should (eq 'end-turn (plist-get (harness-fallback-test-prompt sid "two") :stop-reason)))
-      (should (equal '("beta:b-flash") (harness-fallback-test-models-asked)))
-      (should (equal "beta:b-flash" (plist-get (harness-call 'session/get sid) :model)))
-      (should (cl-some (lambda (h) (string-match-p "Beta works again, so this session goes back up to Beta Flash" h))
-                       (harness-fallback-test-hints sid))))))
+      (should (equal (list (list sid "alpha:a-mid" "beta:b-mini" 'out)
+                           (list sid "beta:b-mini" "beta:b-flash" 'up)
+                           (list sid "beta:b-flash" "alpha:a-mid" 'back))
+                     (nreverse switched)))
+      (should-not (plist-get (harness-call 'fallback/status) :moved)))))
 
 (ert-deftest harness-fallback-unlisted-provider-keeps-its-own-model-first ()
   "A session whose provider the list does not name runs on its own model
-first, the list behind it: the order is a preference among the providers
-it names, a fallback for the rest."
+too: every session keeps its own model first, the list behind it."
   (harness-fallback-test-with
     (setq harness-fallback-models '("beta"))
     (let ((sid (harness-fallback-test-session "alpha:a-mid"))

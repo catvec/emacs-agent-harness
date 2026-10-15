@@ -3747,13 +3747,14 @@ of use when a provider runs out of quota or money, first entry first:
 each entry a provider id (that provider's model of the same
 [tier](#model-tiers), or of the nearest tier it has, shown with the
 thinking level the tier names: `simple→DeepSeek-V4.1-Flash low`) or one
-model id.  Sessions run on the first entry that has not run out and
-move back up to a higher one as soon as its quota comes back; a
-session's own model takes its provider's place in that order, and a
-provider the list does not name keeps its own model first, the list
-behind it.  There `f` adds an entry, `c` forgets that one ran out so it
-is tried again, `M-<up>` and `M-<down>` move the entry at point, and `d`
-removes it.
+model id.  A session keeps the model it was given -- the default, one
+picked with `C-c h m`, a task's -- while that works; once it runs out,
+the session carries on with the first entry that has not, moves back
+up the list as entries come back, and returns to its own model as soon
+as its quota does.  To prefer Claude, put the default model on Claude
+and list what comes after it.  There `f` adds an entry, `c` forgets
+that one ran out so it is tried again, `M-<up>` and `M-<down>` move the
+entry at point, and `d` removes it.
 
 `C` (or the header's `[compare]`, `M-x harness-cost-compare`) answers
 "how much would this have cost using a different provider?": it

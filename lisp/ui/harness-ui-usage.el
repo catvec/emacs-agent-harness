@@ -814,7 +814,7 @@ absent."
                                                entries)))))
       (insert (propertize
                (if entries
-                   "  the list is the order of preference, first used to last; sessions move back up it as entries come back\n"
+                   "  used in this order once a session's own model runs out, until that model works again\n"
                  "  sessions stop when their provider runs out — add where to carry on\n")
                'face 'harness-dim-face))
       (dolist (entry entries)

@@ -842,6 +842,7 @@ are not cut, and the states after the names line up."
       (should (string-match-p "Fallback" text))
       (should (string-match-p "1\\. Demo" text))
       (should (string-match-p "available" text))
+      (should (string-match-p "used in this order once a session's own model runs out" text))
       (should-not (string-match-p "out of quota" text)))
     ;; A mark shows what ran out, and [try now] clears it.
     (harness-call 'fallback/mark "demo" :kind 'quota :reason "hit the limit")

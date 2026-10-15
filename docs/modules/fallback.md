@@ -28,12 +28,15 @@ steps (`agent/step-error`: the provider's `:error-kind`, else the
 error's text) and from the providers' quota reports (a plan window
 used up, unless extra usage pays for calls).
 
-The list is read as an order of preference, first used to last used:
-its first entry is the preferred provider.  A session runs on the
-first entry that has not run out, and moves back up to a higher one
-as soon as that works again; its own model takes its provider's place
-in the order, and a provider the list does not name keeps its own
-model first, the list behind it.
+A session's own model -- the one it was given: the default model, a
+model picked by hand (`harness-set-model`), a task's -- always comes
+first, and the fallback never moves a session off it while it works.
+Once it runs out, the session carries on with the first entry of the
+list that has not: the list is the order of preference among the
+fallbacks, first used to last used.  While away, the session moves
+back up the list as entries work again, and back to its own model as
+soon as that works again.  A setup that prefers Claude thus puts the
+default model on Claude, the list naming what comes after it.
 The switch happens before a turn (`agent/before-turn`, ahead of
 compaction, which must judge the new model's window) and after a
 failed step, which then runs again.  A session handed to a provider

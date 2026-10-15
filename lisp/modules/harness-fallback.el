@@ -19,12 +19,15 @@
 ;; error's text) and from the providers' quota reports (a plan window
 ;; used up, unless extra usage pays for calls).
 ;;
-;; The list is read as an order of preference, first used to last used:
-;; its first entry is the preferred provider.  A session runs on the
-;; first entry that has not run out, and moves back up to a higher one
-;; as soon as that works again; its own model takes its provider's place
-;; in the order, and a provider the list does not name keeps its own
-;; model first, the list behind it.
+;; A session's own model -- the one it was given: the default model, a
+;; model picked by hand (`harness-set-model'), a task's -- always comes
+;; first, and the fallback never moves a session off it while it works.
+;; Once it runs out, the session carries on with the first entry of the
+;; list that has not: the list is the order of preference among the
+;; fallbacks, first used to last used.  While away, the session moves
+;; back up the list as entries work again, and back to its own model as
+;; soon as that works again.  A setup that prefers Claude thus puts the
+;; default model on Claude, the list naming what comes after it.
 ;; The switch happens before a turn (`agent/before-turn', ahead of
 ;; compaction, which must judge the new model's window) and after a
 ;; failed step, which then runs again.  A session handed to a provider
@@ -53,16 +56,21 @@ An entry is a provider id, such as \"deepseek\", standing for that
 provider's model of similar ability to the session's (its model of the
 same tier, simple, medium, hard or frontier, or of the nearest tier it
 has a model for), or a model id, PROVIDER:MODEL, used as it
-is: (\"claude\" \"deepseek:deepseek-flash\") uses Claude Code first and
-DeepSeek-V4.1-Flash once Claude's quota is used up.
+is: with (\"claude\" \"deepseek:deepseek-flash\"), a session on Claude
+Code carries on with DeepSeek-V4.1-Flash once Claude's quota is used
+up, and a session on another provider that runs out carries on with
+Claude Code first.
 
-A session's own model takes its provider's place in that order: a
-session on the second entry moves back up to the first as soon as it
-works again (when its limit resets, or an hour on when the provider did
-not say).  A provider the list does not name keeps its own model first,
-with the list behind it.  nil leaves sessions on their provider, which
-then stop.  The usage dashboard (\\[harness-usage]) shows and edits this
-list beside the plans' quota."
+A session's own model -- the one it was given: the default model, one
+picked by hand (\\[harness-set-model]), a task's -- always comes
+first: the fallback never moves a session off it while it works.  A
+session moved off it moves back up this list as entries work again,
+and back to its own model as soon as that works again (when its limit
+resets, or an hour on when the provider did not say).  A setup that
+prefers Claude puts the default model (`harness-model') on Claude, this
+list naming what comes after it.  nil leaves sessions on their
+provider, which then stop.  The usage dashboard (\\[harness-usage])
+shows and edits this list beside the plans' quota."
   :type '(repeat (string :tag "Provider or model id" :names (provider model)))
   :group 'harness)
 
@@ -475,33 +483,30 @@ nil when there is none."
 
 (defun harness-fallback--preference (own)
   "Return the models to try for a session whose own model is OWN, best first.
-The entries of `harness-fallback-models' in order, each resolved with
-`harness-fallback--entry-model'; OWN is inserted just before the first
-entry of its own provider, and a provider the list does not name keeps
-OWN first, before every entry.  Each result is (MODEL . ENTRY), ENTRY
-being the list entry the model stands for, or nil for OWN at the head."
-  (let* ((pid (harness-fallback--provider-of own))
-         (placed nil)
-         (out nil))
-    (dolist (entry harness-fallback-models)
-      (let ((model (harness-fallback--entry-model entry own)))
-        (when (and model (not placed)
-                   (equal (harness-fallback--provider-of model) pid))
-          (setq placed t)
-          (push (cons own entry) out))
-        (when model (push (cons model entry) out))))
-    (setq out (nreverse out))
-    (if placed out (cons (cons own nil) out))))
+OWN, then the entries of `harness-fallback-models' in order, each
+resolved with `harness-fallback--entry-model'; an entry that stands for
+no model, or for OWN itself, is left out.  OWN comes first whatever the
+list says: the list orders what a session carries on with once its own
+model is out, and never outranks the model the session was given.
+Each result is (MODEL . ENTRY), ENTRY being the list entry the model
+stands for, or nil for OWN."
+  (cons (cons own nil)
+        (delq nil (mapcar (lambda (entry)
+                            (let ((model (harness-fallback--entry-model entry own)))
+                              (and model (not (equal model own)) (cons model entry))))
+                          harness-fallback-models))))
 
 (defun harness-fallback-choose (session)
   "Return the model SESSION should run on now, as (:model ID :back BOOL :entry E).
 The models to try are, most preferred first, those of
 `harness-fallback--preference' for the session's own model -- the one it
-had before the fallback moved it, else its model.  The first model that
+had before the fallback moved it, else its model: that model first,
+then the entries of `harness-fallback-models'.  The first model that
 has not run out, whose provider is registered and which its provider's
 catalogue does not deny wins; the session's own model is only judged by
-whether it is out.  `:back' is non-nil when that is its own model again.
-Nil when everything is out."
+whether it is out, so a session whose own model works stays on it.
+`:back' is non-nil when that is its own model again.  Nil when
+everything is out."
   (let* ((sid (plist-get session :id))
          (current (plist-get session :model))
          (own (or (plist-get (gethash sid harness-fallback--moved) :original) current))
@@ -530,7 +535,8 @@ Nil when everything is out."
 (defun harness-fallback--switch (session target why &optional mark)
   "Move SESSION to model TARGET; WHY says why, and MARK is what ran out.
 WHY is `out' (MARK put the model being left out), `back' (its own model
-works again) or `up' (a more preferred entry works again).  The change
+works again) or `up' (a more preferred entry of the list works again
+while the session's own model is still out).  The change
 is the session's own setting, made silently, with a hint of this
 module's saying why; `fallback/switched' announces it.  The session's
 own model is remembered while it runs on another."
@@ -610,10 +616,11 @@ list is set."
 
 (defun harness-fallback--before-turn (value next session)
   "`agent/before-turn' handler: move SESSION to the model it should run on.
-VALUE and NEXT are the filter's.  A model that is out gives way to the
-first of `harness-fallback-models' that is not, a session on a lower
-entry moves back up to a higher one that works again, and a session
-moved earlier goes back to its own model once that works again."
+VALUE and NEXT are the filter's.  A session whose own model works stays
+on it.  A model that is out gives way to the first of
+`harness-fallback-models' that is not; a session moved earlier moves
+back up to a higher entry that works again while its own model is
+still out, and goes back to its own model once that works again."
   (when (plist-get value :proceed)
     (condition-case err
         (let* ((mark (harness-fallback-mark-of (plist-get session :model)))
