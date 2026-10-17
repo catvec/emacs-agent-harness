@@ -1,0 +1,11 @@
+{
+  "name": "harness-client-e2e",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "flows": "node run_flows.mjs"
+  },
+  "devDependencies": {
+    "playwright": "^1.55.0"
+  }
+}

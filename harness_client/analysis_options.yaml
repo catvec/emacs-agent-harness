@@ -1,0 +1,20 @@
+include: package:flutter_lints/flutter.yaml
+
+linter:
+  rules:
+    use_null_aware_elements: false
+    prefer_initializing_formals: false
+    unnecessary_underscores: false
+    prefer_conditional_assignment: false
+    library_private_types_in_public_api: false
+
+analyzer:
+  errors:
+    deprecated_member_use: ignore
+  exclude:
+    - build/**
+    - android/**
+    - ios/**
+    - web/**
+    - macos/**
+    - linux/**

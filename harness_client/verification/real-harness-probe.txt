@@ -1,0 +1,9 @@
+agent: emacs-agent-harness 3.0.0
+protocol: 1 · harness: true · extensions: 148
+features: Sessions, Live transcript, Permission prompts, Rich nodes, Activity, Usage, Question images, Fork, Providers, Harness info
+sessions in /tmp/harness-1000/250518d6-5c4a-4a88-80ea-786fae171597/real-harness/project: 2
+created session da81df8a-373e-4d15-b3c5-b13ac78835ef
+prompt stopped: end_turn
+updates: {user_message_chunk: 1, _harness/node: 9, _harness/activity: 7, agent_thought_chunk: 2, _harness/session: 2, agent_message_chunk: 3, tool_call: 1, tool_call_update: 1}
+nodes: 6 (user, thinking, assistant, tool-call, tool-result, assistant)
+OK

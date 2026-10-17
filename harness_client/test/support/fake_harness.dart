@@ -1,0 +1,1607 @@
+import 'dart:async';
+import 'dart:convert';
+
+import 'package:harness_client/src/acp/acp_message.dart';
+import 'package:harness_client/src/acp/acp_transport.dart';
+import 'package:harness_client/src/acp/connection_target.dart';
+
+/// In-memory ACP transport: the client's writes go to [onSend], the harness's
+/// messages arrive on [messages].
+class FakeTransport implements AcpTransport {
+  FakeTransport();
+
+  final _incoming = StreamController<String>.broadcast();
+  final _done = Completer<void>();
+  void Function(String message)? onSend;
+  bool _open = true;
+
+  @override
+  Stream<String> get messages => _incoming.stream;
+
+  @override
+  Future<void> get done => _done.future;
+
+  @override
+  bool get isOpen => _open;
+
+  @override
+  String get description => 'memory://fake-harness';
+
+  @override
+  void send(String message) {
+    if (!_open) throw StateError('closed');
+    onSend?.call(message);
+  }
+
+  void harnessSend(String message) {
+    if (_open) _incoming.add(message);
+  }
+
+  @override
+  Future<void> close([String? reason]) async {
+    if (!_open) return;
+    _open = false;
+    await _incoming.close();
+    if (!_done.isCompleted) _done.complete();
+  }
+}
+
+/// A small, scripted harness that speaks real ACP JSON-RPC over [FakeTransport].
+/// It mirrors the shapes of the emacs-agent-harness closely enough to exercise
+/// every client flow, and can pretend to be a plain ACP agent with
+/// [enhanced] false.
+class FakeHarness {
+  FakeHarness({this.enhanced = true, this.token, this.failAuthOnce = false}) {
+    if (enhanced) {
+      methods.addAll({
+        'session/list',
+        'session/get',
+        'session/nodes',
+        'session/update',
+        'session/fork',
+        'session/delete',
+        'agent/activity',
+        'agent/prompt',
+        'priority/set',
+        'permission/pending',
+        'permission/answer',
+        'permission/deny',
+        'question/pending',
+        'question/answer',
+        'question/image',
+        'question/cancel',
+        'task/list',
+        'task/get',
+        'task/submit',
+        'task/start',
+        'task/queue',
+        'task/verify',
+        'task/reject',
+        'task/prompt',
+        'task/retry',
+        'task/cancel',
+        'task/complete',
+        'task/archive',
+        'task/slots',
+        'task/settings',
+        'task/toggle-queue',
+        'task/toggle-backlog-mode',
+        'usage/totals',
+        'usage/summary',
+        'usage/live-all',
+        'usage/rates',
+        'usage/budgets',
+        'insights/projects',
+        'provider/list',
+        'provider/models',
+        'harness/version',
+        'harness/modules',
+        'config/describe',
+      });
+      events.addAll({
+        'session/created',
+        'session/node-added',
+        'session/node-updated',
+        'agent/turn-started',
+        'agent/turn-ended',
+        'agent/activity-changed',
+        'agent/stream',
+        'question/asked',
+        'task/changed',
+        'task/review',
+        'task/done',
+        'usage/live-updated',
+        'usage/rates-updated',
+        'usage/budgets-changed',
+        'session/status',
+        'permission/requested',
+      });
+    }
+    _seed();
+  }
+
+  final bool enhanced;
+  final String? token;
+  final bool failAuthOnce;
+  final methods = <String>{};
+  final events = <String>{};
+  bool authenticated = false;
+  bool authFailed = false;
+  FakeTransport? transport;
+  final Map<String, Map<String, Object?>> sessions = {};
+  final Map<String, List<Map<String, Object?>>> nodes = {};
+  final Map<String, Map<String, Object?>> tasks = {};
+  final List<Map<String, Object?>> permissionAnswers = [];
+  final List<Map<String, Object?>> questionAnswers = [];
+  final List<String> prompts = [];
+  final List<String> requestsByClient = [];
+  final Map<String, Completer<Map<String, Object?>>> _serverRequests = {};
+  final Map<String, Map<String, Object?>> _serverRequestParams = {};
+  void Function(String message)? writer;
+  int _nextServerRequest = 1;
+  int _generated = 0;
+
+  Future<AcpTransport> Function(ConnectionTarget target, String token)
+  get connector => (ConnectionTarget target, String token) async {
+    return attach();
+  };
+
+  FakeTransport attach() {
+    final fake = FakeTransport();
+    transport = fake;
+    fake.onSend = _receive;
+    return fake;
+  }
+
+  /// For a server wrapper: hand a client's raw message to the harness.
+  void handleMessage(String message) => _receive(message);
+
+  Future<AcpTransport> open(ConnectionTarget target, String token) =>
+      connector(target, token);
+
+  void _seed() {
+    final now = DateTime.now();
+    sessions['s1'] = {
+      'id': 's1',
+      'name': 'Design the merge queue',
+      'kind': 'main',
+      'project': '/Users/noah/Code/emacs-agent-harness/',
+      'cwd': '/Users/noah/Code/emacs-agent-harness/',
+      'model': 'claude:claude-fable-5-1',
+      'permissionMode': 'ask',
+      'status': 'idle',
+      'created':
+          now.subtract(const Duration(days: 2)).millisecondsSinceEpoch / 1000,
+      'updated':
+          now.subtract(const Duration(minutes: 12)).millisecondsSinceEpoch /
+          1000,
+      'lastMessage':
+          now.subtract(const Duration(minutes: 12)).millisecondsSinceEpoch /
+          1000,
+      'usage': {
+        'input': 42000,
+        'output': 8100,
+        'cacheRead': 31000,
+        'cacheWrite': 1200,
+        'cost': 0.73,
+        'listCost': 0.73,
+        'context': 52300,
+        'lastOutput': 900,
+        'turns': 14,
+      },
+      'contextWindow': 200000,
+      'todos': [
+        {
+          'id': 't1',
+          'text': 'Read the merge queue and its tests',
+          'status': 'done',
+        },
+        {
+          'id': 't2',
+          'text': 'Sketch the queue states on a card',
+          'status': 'done',
+        },
+        {
+          'id': 't3',
+          'text': 'Implement the Flutter board view',
+          'status': 'in-progress',
+        },
+        {
+          'id': 't4',
+          'text': 'Drive the flows in an emulator',
+          'status': 'pending',
+        },
+      ],
+      'plan': 'Ship a native client for the harness.',
+      'pending': [],
+      'queue': [],
+    };
+    sessions['s2'] = {
+      'id': 's2',
+      'name': 'Fix duplicate task titles',
+      'kind': 'main',
+      'project': '/Users/noah/Code/emacs-agent-harness/',
+      'cwd': '/Users/noah/Code/emacs-agent-harness/.worktrees/task-fix-titles/',
+      'model': 'claude:claude-fable-5-1',
+      'permissionMode': 'accept-edits',
+      'status': 'blocked',
+      'created':
+          now.subtract(const Duration(hours: 1)).millisecondsSinceEpoch / 1000,
+      'updated':
+          now.subtract(const Duration(minutes: 3)).millisecondsSinceEpoch /
+          1000,
+      'lastMessage':
+          now.subtract(const Duration(minutes: 3)).millisecondsSinceEpoch /
+          1000,
+      'usage': {
+        'input': 8800,
+        'output': 2100,
+        'cacheRead': 6000,
+        'cost': 0.12,
+        'listCost': 0.12,
+        'context': 11800,
+        'lastOutput': 300,
+        'turns': 3,
+      },
+      'contextWindow': 200000,
+      'todos': [],
+      'pending': [
+        {
+          'id': 'p-s2',
+          'kind': 'permission',
+          'created':
+              now.subtract(const Duration(minutes: 3)).millisecondsSinceEpoch /
+              1000,
+          'payload': {
+            'tool': 'bash',
+            'kind': 'exec',
+            'title': 'Run the test suite',
+            'call-id': 'call-fix-1',
+            'input': {'command': 'flutter test test/sessions_test.dart'},
+            'cwd': '/Users/noah/Code/emacs-agent-harness/.worktrees/task-fix-titles/',
+            'paths': [
+              '/Users/noah/Code/emacs-agent-harness/.worktrees/task-fix-titles/',
+            ],
+          },
+        },
+      ],
+      'queue': [],
+    };
+    sessions['s3'] = {
+      'id': 's3',
+      'name': 'Polish the iOS sheet',
+      'kind': 'fork',
+      'project': '/Users/noah/Code/emacs-agent-harness/',
+      'cwd': '/Users/noah/Code/emacs-agent-harness/',
+      'model': 'copilot:gpt-5.2-codex',
+      'permissionMode': 'auto',
+      'status': 'running',
+      'created':
+          now.subtract(const Duration(minutes: 40)).millisecondsSinceEpoch /
+          1000,
+      'updated':
+          now.subtract(const Duration(seconds: 40)).millisecondsSinceEpoch /
+          1000,
+      'lastMessage':
+          now.subtract(const Duration(minutes: 1)).millisecondsSinceEpoch /
+          1000,
+      'usage': {
+        'input': 12000,
+        'output': 4300,
+        'cacheRead': 9000,
+        'cost': 0.18,
+        'listCost': 0.18,
+        'context': 21000,
+        'lastOutput': 500,
+        'turns': 5,
+      },
+      'contextWindow': 128000,
+      'todos': [
+        {
+          'id': 'p1',
+          'text': 'Match the iOS sheet motion',
+          'status': 'in-progress',
+        },
+        {'id': 'p2', 'text': 'Check the dark palette', 'status': 'pending'},
+      ],
+      'pending': [],
+      'queue': [],
+    };
+    sessions['s4'] = {
+      'id': 's4',
+      'name': 'Investigate cache misses',
+      'kind': 'btw',
+      'project': '/Users/noah/Code/other-project/',
+      'cwd': '/Users/noah/Code/other-project/',
+      'model': 'deepseek:deepseek-chat',
+      'permissionMode': 'ask',
+      'status': 'inactive',
+      'created':
+          now.subtract(const Duration(days: 4)).millisecondsSinceEpoch / 1000,
+      'updated':
+          now.subtract(const Duration(days: 1)).millisecondsSinceEpoch / 1000,
+      'lastMessage':
+          now.subtract(const Duration(days: 1)).millisecondsSinceEpoch / 1000,
+      'usage': {
+        'input': 22000,
+        'output': 5100,
+        'cacheRead': 900,
+        'cost': 0.21,
+        'listCost': 0.21,
+        'context': 27300,
+        'lastOutput': 400,
+        'turns': 8,
+      },
+      'contextWindow': 128000,
+      'todos': [],
+      'pending': [],
+      'queue': [],
+    };
+    nodes['s1'] = [
+      _node('n1', 'user', 'Give me the tour of the merge queue.'),
+      _node(
+        'n2',
+        'assistant',
+        'The merge queue has three moving parts:\n\n1. **Queued** branches wait for a slot.\n2. **Merging** runs one at a time.\n3. **Conflicts** go back to the task’s own session.\n\n```dart\nfinal queue = MergeQueue();\n```\n\nWant me to open a task for the board view?',
+        meta: {'model': 'claude:claude-fable-5-1'},
+      ),
+      _node(
+        'n3',
+        'tool-call',
+        '',
+        tool: 'read_file',
+        callId: 'call-1',
+        title: 'Read file: docs/modules/merge.md',
+        input: {'path': 'docs/modules/merge.md'},
+      ),
+      _node(
+        'n4',
+        'tool-result',
+        '',
+        callId: 'call-1',
+        output: 'The merge queue merges one branch at a time…',
+      ),
+      _node(
+        'n5',
+        'assistant',
+        'The module is clear: the UI only needs to show states, never drive the merge.',
+        meta: {'model': 'claude:claude-fable-5-1'},
+      ),
+      _node('n6', 'hint', 'Context compacted from 214k tokens to 52k.'),
+    ];
+    nodes['s2'] = [
+      _node(
+        'm1',
+        'user',
+        'Run the session tests before we rename the duplicate titles.',
+      ),
+      _node(
+        'm2',
+        'tool-call',
+        '',
+        tool: 'bash',
+        callId: 'call-fix-1',
+        title: 'Run the test suite',
+        input: {'command': 'flutter test test/sessions_test.dart'},
+      ),
+    ];
+    nodes['s3'] = [
+      _node('p1', 'user', 'Make the bottom sheet feel native on iOS.'),
+      _node(
+        'p2',
+        'thinking',
+        'The sheet needs the large radius, a grabber and spring motion.',
+      ),
+      _node(
+        'p3',
+        'assistant',
+        'I’m matching the sheet to the system motion and checking the dark palette now.',
+      ),
+      _node(
+        'p4',
+        'tool-call',
+        '',
+        tool: 'edit_file',
+        callId: 'call-ios-1',
+        title: 'Edit file: lib/sheet.dart',
+        input: {'path': 'lib/sheet.dart'},
+      ),
+    ];
+    nodes['s4'] = [
+      _node('c1', 'user', 'Why did the prompt cache miss twice?'),
+      _node(
+        'c2',
+        'assistant',
+        'The cache lapsed between the two calls: the first was 11 minutes after the last write.',
+      ),
+    ];
+
+    tasks['task-1'] = {
+      'id': 'task-1',
+      'name': 'Build the Flutter ACP client',
+      'prompt': 'Create a Flutter client that speaks ACP and uses the harness extensions.',
+      'state': 'active',
+      'column': 'active',
+      'priority': 'high',
+      'project': '/Users/noah/Code/emacs-agent-harness/',
+      'cwd': '/Users/noah/Code/emacs-agent-harness/.worktrees/task-flutter/',
+      'session': 's3',
+      'branch': 'task/flutter-acp-client',
+      'worktree':
+          '/Users/noah/Code/emacs-agent-harness/.worktrees/task-flutter/',
+      'created':
+          now.subtract(const Duration(hours: 3)).millisecondsSinceEpoch / 1000,
+      'updated':
+          now.subtract(const Duration(minutes: 2)).millisecondsSinceEpoch /
+          1000,
+    };
+    tasks['task-2'] = {
+      'id': 'task-2',
+      'name': 'Review the emulator screenshots',
+      'prompt': 'Check every flow and screenshot on both device sizes.',
+      'state': 'review',
+      'column': 'review',
+      'priority': 'medium',
+      'project': '/Users/noah/Code/emacs-agent-harness/',
+      'cwd': '/Users/noah/Code/emacs-agent-harness/.worktrees/task-screens/',
+      'branch': 'task/screenshots',
+      'created':
+          now.subtract(const Duration(hours: 2)).millisecondsSinceEpoch / 1000,
+      'updated':
+          now.subtract(const Duration(minutes: 9)).millisecondsSinceEpoch /
+          1000,
+      'report': {
+        'summary': 'All flows pass at 390×844 and 412×915; screenshots are in screenshots/.',
+        'evidence': [
+          {
+            'image': 'screenshots/android-chat.png',
+            'caption': 'Chat with a tool card',
+          },
+          {'note': 'flutter test: 38 passing'},
+        ],
+        'reproduction': 'Open the app, connect to the preview harness, and walk Sessions → Tasks.',
+      },
+    };
+    tasks['task-3'] = {
+      'id': 'task-3',
+      'name': 'Cache the model catalogue',
+      'prompt': 'Remember provider/model results for a minute.',
+      'state': 'pending',
+      'column': 'pending',
+      'priority': 'low',
+      'project': '/Users/noah/Code/emacs-agent-harness/',
+      'cwd': '/Users/noah/Code/emacs-agent-harness/',
+      'created':
+          now.subtract(const Duration(minutes: 50)).millisecondsSinceEpoch /
+          1000,
+      'updated':
+          now.subtract(const Duration(minutes: 40)).millisecondsSinceEpoch /
+          1000,
+    };
+    tasks['task-4'] = {
+      'id': 'task-4',
+      'name': 'Answer the permission',
+      'prompt': 'The test suite needs to run.',
+      'state': 'active',
+      'column': 'needs-input',
+      'priority': 'high',
+      'project': '/Users/noah/Code/emacs-agent-harness/',
+      'cwd': '/Users/noah/Code/emacs-agent-harness/.worktrees/task-fix-titles/',
+      'session': 's2',
+      'branch': 'task/fix-titles',
+      'created':
+          now.subtract(const Duration(minutes: 30)).millisecondsSinceEpoch /
+          1000,
+      'updated':
+          now.subtract(const Duration(minutes: 3)).millisecondsSinceEpoch /
+          1000,
+    };
+    tasks['task-5'] = {
+      'id': 'task-5',
+      'name': 'Write the migration notes',
+      'prompt': 'Write up what moved in the protocol.',
+      'state': 'pending',
+      'column': 'backlog',
+      'priority': 'medium',
+      'backlog': true,
+      'project': '/Users/noah/Code/emacs-agent-harness/',
+      'cwd': '/Users/noah/Code/emacs-agent-harness/',
+      'created':
+          now.subtract(const Duration(hours: 5)).millisecondsSinceEpoch / 1000,
+      'updated':
+          now.subtract(const Duration(hours: 4)).millisecondsSinceEpoch / 1000,
+    };
+    tasks['task-6'] = {
+      'id': 'task-6',
+      'name': 'Ship the session list',
+      'prompt': 'A native session list.',
+      'state': 'done',
+      'column': 'done',
+      'priority': 'medium',
+      'project': '/Users/noah/Code/emacs-agent-harness/',
+      'cwd': '/Users/noah/Code/emacs-agent-harness/',
+      'created':
+          now.subtract(const Duration(days: 1)).millisecondsSinceEpoch / 1000,
+      'updated':
+          now.subtract(const Duration(hours: 20)).millisecondsSinceEpoch / 1000,
+      'verified': true,
+    };
+  }
+
+  Map<String, Object?> _node(
+    String id,
+    String kind,
+    String content, {
+    String? tool,
+    String? title,
+    String? callId,
+    Map<String, Object?>? input,
+    String? output,
+    bool isError = false,
+    Map<String, Object?>? meta,
+  }) {
+    final map = <String, Object?>{
+      'id': id,
+      'kind': kind,
+      'content': content,
+      'ts': DateTime.now().millisecondsSinceEpoch / 1000,
+      if (tool != null) 'tool': tool,
+      if (title != null) 'title': title,
+      if (callId != null) 'callId': callId,
+      if (input != null) 'input': input,
+      if (output != null) 'output': output,
+      if (isError) 'isError': true,
+      if (meta != null) 'meta': meta,
+    };
+    return map;
+  }
+
+  void _receive(String raw) {
+    final message = asMap(jsonDecode(raw));
+    final method = asString(message['method']);
+    final id = message['id'];
+    if (method != null) {
+      if (id == null) {
+        _notification(method, asMap(message['params']));
+      } else {
+        requestsByClient.add(method);
+        unawaited(_request(method, asMap(message['params']), id));
+      }
+      return;
+    }
+    if (id != null) {
+      final key = '$id';
+      final completer = _serverRequests.remove(key);
+      if (completer != null && !completer.isCompleted) {
+        completer.complete({
+          'result': message['result'],
+          'error': message['error'],
+        });
+      }
+    }
+  }
+
+  void _notification(String method, JsonMap params) {
+    if (method == 'session/cancel') {
+      final sid = asString(params['sessionId']);
+      if (sid != null) _setStatus(sid, 'idle');
+    }
+  }
+
+  Future<void> _request(String method, JsonMap params, Object? id) async {
+    try {
+      if (method == 'initialize') {
+        _respond(id, _initializeResult());
+        return;
+      }
+      if (method == 'authenticate') {
+        if (token != null && asString(params['token']) != token) {
+          _respondError(id, -32000, 'Invalid token');
+          return;
+        }
+        authenticated = true;
+        _respond(id, const <String, Object?>{});
+        return;
+      }
+      if (token != null && !authenticated) {
+        _respondError(id, -32000, 'Authentication required');
+        return;
+      }
+      if (!enhanced && method.startsWith('_harness/')) {
+        _respondError(id, -32601, 'Method not found: $method');
+        return;
+      }
+      if (method == 'session/list') {
+        final cwd = asString(params['cwd']);
+        final list = sessions.values
+            .where(
+              (session) => cwd == null || cwd.isEmpty || session['cwd'] == cwd,
+            )
+            .map(
+              (session) =>
+                  enhanced ? _sessionInfo(session) : _plainSessionInfo(session),
+            )
+            .toList();
+        _respond(id, {
+          'sessions': list,
+          if (enhanced && list.length > 2) 'nextCursor': 'page-2',
+        });
+        return;
+      }
+      if (method == 'session/load') {
+        final sid = asString(params['sessionId']);
+        if (sid == null || !sessions.containsKey(sid)) {
+          _respondError(id, -32603, 'No session $sid');
+          return;
+        }
+        _replay(sid);
+        _respond(id, const <String, Object?>{});
+        return;
+      }
+      if (method == 'session/new') {
+        final sid = 's${sessions.length + 1}';
+        final cwd = asString(params['cwd']) ?? '/tmp';
+        final harness = asMap(params['_harness']);
+        sessions[sid] = {
+          'id': sid,
+          'name': asString(harness['name']) ?? 'New session',
+          'kind': 'main',
+          'project': cwd,
+          'cwd': cwd,
+          'model': asString(harness['model']) ?? 'claude:claude-fable-5-1',
+          'permissionMode': 'ask',
+          'status': 'idle',
+          'created': DateTime.now().millisecondsSinceEpoch / 1000,
+          'updated': DateTime.now().millisecondsSinceEpoch / 1000,
+          'contextWindow': 200000,
+          'todos': [],
+          'pending': [],
+          'queue': [],
+        };
+        nodes[sid] = [];
+        _respond(id, {
+          'sessionId': sid,
+          'modes': {
+            'currentModeId': 'ask',
+            'availableModes': [
+              {'id': 'ask', 'name': 'Ask'},
+              {'id': 'accept-edits', 'name': 'Accept edits'},
+              {'id': 'auto', 'name': 'Auto'},
+              {'id': 'yolo', 'name': 'YOLO'},
+            ],
+          },
+        });
+        return;
+      }
+      if (method == 'session/prompt') {
+        final sid = asString(params['sessionId']);
+        if (sid == null) {
+          _respondError(id, -32602, 'sessionId required');
+          return;
+        }
+        prompts.add(_promptText(params['prompt']));
+        _streamTurn(sid, _promptText(params['prompt']), id);
+        return;
+      }
+      if (method == 'session/cancel') {
+        _respond(id, const <String, Object?>{});
+        return;
+      }
+      if (method == 'session/set_mode') {
+        final sid = asString(params['sessionId']);
+        final mode = asString(params['modeId']);
+        if (sid != null && sessions[sid] != null && mode != null) {
+          sessions[sid]!['permissionMode'] = mode;
+          _pushSession(sid);
+        }
+        _respond(id, const <String, Object?>{});
+        return;
+      }
+      if (method == 'session/set_model') {
+        final sid = asString(params['sessionId']);
+        final model = asString(params['modelId']);
+        if (sid != null && sessions[sid] != null && model != null) {
+          sessions[sid]!['model'] = model;
+          _pushSession(sid);
+        }
+        _respond(id, const <String, Object?>{});
+        return;
+      }
+      if (method == '_harness/session/list') {
+        _respond(id, enhanced ? sessions.values.toList() : const <Object?>[]);
+        return;
+      }
+      if (method == '_harness/session/get') {
+        final sid = asString(params['id']);
+        _respond(id, sessions[sid] ?? const <String, Object?>{});
+        return;
+      }
+      if (method == '_harness/session/nodes') {
+        final sid = asString(params['id']);
+        _respond(id, nodes[sid] ?? const <Object?>[]);
+        return;
+      }
+      if (method == '_harness/session/update') {
+        final sid = asString(params['id']);
+        final name = asString(params['name']);
+        if (sid != null && sessions[sid] != null && name != null) {
+          sessions[sid]!['name'] = name;
+          _pushSession(sid);
+        }
+        _respond(id, sessions[sid] ?? const <String, Object?>{});
+        return;
+      }
+      if (method == '_harness/session/fork') {
+        final parent = asString(params['id']);
+        final sid = 'fork-${++_generated}';
+        final copy = Map<String, Object?>.from(sessions[parent] ?? {});
+        copy['id'] = sid;
+        copy['name'] = 'Fork: ${copy['name']}';
+        copy['kind'] = 'fork';
+        copy['status'] = 'idle';
+        sessions[sid] = copy;
+        nodes[sid] = List<Map<String, Object?>>.from(nodes[parent] ?? const []);
+        _respond(id, copy);
+        return;
+      }
+      if (method == '_harness/session/delete') {
+        final sid = asString(params['id']);
+        if (sid != null) {
+          sessions.remove(sid);
+          nodes.remove(sid);
+        }
+        _respond(id, const <String, Object?>{});
+        return;
+      }
+      if (method == '_harness/agent/activity') {
+        _respond(id, const <String, Object?>{});
+        return;
+      }
+      if (method == '_harness/priority/set') {
+        _respond(id, const <String, Object?>{});
+        return;
+      }
+      if (method == '_harness/permission/pending') {
+        final sid = asString(params['session-id']);
+        _respond(
+          id,
+          enhanced
+              ? (sessions[sid]?['pending'] as List? ?? const [])
+              : const [],
+        );
+        return;
+      }
+      if (method == '_harness/question/pending') {
+        _respond(id, const <Object?>[]);
+        return;
+      }
+      if (method == '_harness/permission/answer') {
+        permissionAnswers.add(asMap(params['answer']));
+        _respond(id, const <String, Object?>{});
+        return;
+      }
+      if (method == '_harness/question/answer') {
+        questionAnswers.add(asMap(params['answer']));
+        _respond(id, const <String, Object?>{});
+        return;
+      }
+      if (method == '_harness/question/image') {
+        _respond(id, {
+          'mime': 'image/svg+xml',
+          'data': base64Encode(utf8.encode(_sampleSvg)),
+        });
+        return;
+      }
+      if (method == '_harness/task/list') {
+        _respond(id, enhanced ? tasks.values.toList() : const <Object?>[]);
+        return;
+      }
+      if (method == '_harness/task/get') {
+        _respond(
+          id,
+          tasks[asString(params['id'])] ?? const <String, Object?>{},
+        );
+        return;
+      }
+      if (method == '_harness/task/slots') {
+        _respond(id, {
+          'project':
+              asString(params['cwd']) ??
+              '/Users/noah/Code/emacs-agent-harness/',
+          'limit': 3,
+          'suspended': false,
+          'holders': [
+            {
+              'id': 'task-1',
+              'title': 'Build the Flutter ACP client',
+              'priority': 'high',
+            },
+            {
+              'id': 'task-4',
+              'title': 'Answer the permission',
+              'priority': 'high',
+            },
+          ],
+          'queue': [
+            {
+              'id': 'task-3',
+              'title': 'Cache the model catalogue',
+              'priority': 'low',
+              'reason': '',
+            },
+          ],
+          'waits': [],
+        });
+        return;
+      }
+      if (method == '_harness/task/settings') {
+        _respond(id, {
+          'maxRunning': 3,
+          'queueSuspended': false,
+          'backlogMode': 'manual',
+          'requireVerification': true,
+          'model': 'claude:claude-fable-5-1',
+          'permissionMode': 'auto',
+        });
+        return;
+      }
+      if (method == '_harness/task/submit') {
+        final taskId = 'task-${tasks.length + 1}';
+        final opts = asMap(params['opts']);
+        final task = {
+          'id': taskId,
+          'name': _firstLine(asString(params['prompt']) ?? 'New task'),
+          'prompt': params['prompt'],
+          'state': 'pending',
+          'column': opts['refine'] == true ? 'backlog' : 'pending',
+          'priority': asString(opts['priority']) ?? 'medium',
+          'project':
+              asString(params['cwd']) ??
+              '/Users/noah/Code/emacs-agent-harness/',
+          'cwd': asString(params['cwd']),
+          'created': DateTime.now().millisecondsSinceEpoch / 1000,
+          'updated': DateTime.now().millisecondsSinceEpoch / 1000,
+          if (opts['refine'] == true) 'backlog': true,
+        };
+        tasks[taskId] = task;
+        _event('task/changed', [task]);
+        _respond(id, task);
+        return;
+      }
+      if (method.startsWith('_harness/task/')) {
+        final action = method.substring('_harness/task/'.length);
+        final taskId = asString(params['id']);
+        final task = tasks[taskId];
+        if (task != null) {
+          if (action == 'start') {
+            task['state'] = 'active';
+            task['column'] = 'active';
+          } else if (action == 'queue') {
+            task['state'] = 'pending';
+            task['column'] = 'pending';
+            task['backlog'] = false;
+          } else if (action == 'verify') {
+            task['state'] = 'done';
+            task['column'] = 'done';
+            task['verified'] = true;
+          } else if (action == 'reject') {
+            task['state'] = 'active';
+            task['column'] = 'active';
+            task['feedback'] = [
+              ...(task['feedback'] as List? ?? const []),
+              {
+                'text': params['feedback'],
+                'at': DateTime.now().millisecondsSinceEpoch / 1000,
+              },
+            ];
+          } else if (action == 'complete') {
+            task['state'] = 'done';
+            task['column'] = 'done';
+          } else if (action == 'cancel') {
+            tasks.remove(taskId);
+            _event('task/deleted', [taskId]);
+            _respond(id, task);
+            return;
+          } else if (action == 'archive') {
+            task['archived'] = true;
+            tasks.remove(taskId);
+            _event('task/deleted', [taskId]);
+            _respond(id, task);
+            return;
+          } else if (action == 'retry') {
+            task['state'] = 'active';
+            task['column'] = 'active';
+          }
+          _event('task/changed', [task]);
+        }
+        _respond(id, task ?? const <String, Object?>{});
+        return;
+      }
+      if (method == '_harness/usage/totals') {
+        _respond(id, {
+          'input': 84800,
+          'output': 19600,
+          'cache-read': 46000,
+          'cache-write': 2100,
+          'cost': 1.24,
+          'list-cost': 1.51,
+          'calls': 30,
+        });
+        return;
+      }
+      if (method == '_harness/usage/summary') {
+        final groupBy = asString(params['group-by']) ?? 'project';
+        final rows = switch (groupBy) {
+          'model' => [
+            {
+              'key': 'claude:claude-fable-5-1',
+              'input': 62000,
+              'output': 14100,
+              'cache-read': 31000,
+              'cache-write': 1200,
+              'cost': 0.91,
+              'list-cost': 1.07,
+              'calls': 18,
+            },
+            {
+              'key': 'copilot:gpt-5.2-codex',
+              'input': 12000,
+              'output': 4300,
+              'cache-read': 9000,
+              'cost': 0.18,
+              'list-cost': 0.18,
+              'calls': 6,
+            },
+            {
+              'key': 'deepseek:deepseek-chat',
+              'input': 10800,
+              'output': 1200,
+              'cache-read': 6000,
+              'cache-write': 900,
+              'cost': 0.15,
+              'list-cost': 0.26,
+              'calls': 6,
+            },
+          ],
+          'project' => [
+            {
+              'key': '/Users/noah/Code/emacs-agent-harness/',
+              'main': '/Users/noah/Code/emacs-agent-harness/',
+              'input': 72800,
+              'output': 18400,
+              'cache-read': 40000,
+              'cache-write': 2100,
+              'cost': 1.09,
+              'list-cost': 1.33,
+              'calls': 24,
+            },
+            {
+              'key': '/Users/noah/Code/other-project/',
+              'main': '/Users/noah/Code/other-project/',
+              'input': 12000,
+              'output': 1200,
+              'cache-read': 6000,
+              'cost': 0.15,
+              'list-cost': 0.18,
+              'calls': 6,
+            },
+          ],
+          _ => _days(),
+        };
+        _respond(id, rows);
+        return;
+      }
+      if (method == '_harness/usage/live-all') {
+        _respond(id, [
+          {
+            'session': 's1',
+            'context': 52300,
+            'output': 900,
+            'estimated': false,
+          },
+          {'session': 's3', 'context': 21000, 'output': 500, 'estimated': true},
+        ]);
+        return;
+      }
+      if (method == '_harness/usage/rates') {
+        _respond(id, [
+          {
+            'session': 's1',
+            'rate': 42.0,
+            'output': 900,
+            'seconds': 21.4,
+            'calls': 2,
+            'model': 'claude:claude-fable-5-1',
+          },
+        ]);
+        return;
+      }
+      if (method == '_harness/usage/budgets') {
+        _respond(id, [
+          {
+            'id': 'b1',
+            'scope': 'project',
+            'target': '/Users/noah/Code/emacs-agent-harness/',
+            'amount': 25,
+            'hard': true,
+          },
+          {
+            'id': 'b2',
+            'scope': 'period',
+            'period': 'month',
+            'amount': 80,
+            'hard': false,
+          },
+        ]);
+        return;
+      }
+      if (method == '_harness/insights/projects') {
+        _respond(id, [
+          '/Users/noah/Code/emacs-agent-harness/',
+          '/Users/noah/Code/other-project/',
+        ]);
+        return;
+      }
+      if (method == '_harness/provider/list') {
+        _respond(id, [
+          {'id': 'claude', 'label': 'Claude', 'doc': 'Anthropic'},
+          {'id': 'copilot', 'label': 'GitHub Copilot', 'doc': 'Copilot CLI'},
+          {'id': 'deepseek', 'label': 'DeepSeek', 'doc': 'DeepSeek API'},
+        ]);
+        return;
+      }
+      if (method == '_harness/provider/models') {
+        _respond(id, [
+          {
+            'id': 'claude:claude-fable-5-1',
+            'name': 'Claude Fable 5.1',
+            'provider': 'claude',
+            'context-window': 200000,
+          },
+          {
+            'id': 'claude:claude-haiku-4-5',
+            'name': 'Claude Haiku 4.5',
+            'provider': 'claude',
+            'context-window': 200000,
+          },
+          {
+            'id': 'copilot:gpt-5.2-codex',
+            'name': 'GPT-5.2 Codex',
+            'provider': 'copilot',
+            'context-window': 128000,
+          },
+          {
+            'id': 'deepseek:deepseek-chat',
+            'name': 'DeepSeek Chat',
+            'provider': 'deepseek',
+            'context-window': 128000,
+          },
+        ]);
+        return;
+      }
+      if (method == '_harness/harness/version') {
+        _respond(id, {
+          'version': '0.9.4',
+          'emacs': '31.1',
+          'protocolVersion': 1,
+        });
+        return;
+      }
+      if (method == '_harness/harness/modules') {
+        _respond(id, [
+          {
+            'name': 'session',
+            'description': 'Conversations',
+            'optional': false,
+          },
+          {'name': 'agent', 'description': 'The turn loop', 'optional': false},
+          {'name': 'tasks', 'description': 'Task mode', 'optional': true},
+          {
+            'name': 'usage',
+            'description': 'Cost accounting',
+            'optional': false,
+          },
+          {
+            'name': 'acp-remote',
+            'description': 'Phone pairing',
+            'optional': true,
+          },
+        ]);
+        return;
+      }
+      if (method == '_harness/config/describe') {
+        _respond(id, {
+          'cwd': '/Users/noah/Code/emacs-agent-harness/',
+          'inProject': true,
+        });
+        return;
+      }
+      if (method == '_harness/session/test-hang') {
+        // Deliberately never answers; the client's close must reject it.
+        return;
+      }
+      _respondError(id, -32601, 'Method not found: $method');
+    } catch (error) {
+      _respondError(id, -32603, '$error');
+    }
+  }
+
+  Map<String, Object?> _initializeResult() => {
+    'protocolVersion': 1,
+    'agentInfo': {
+      'name': enhanced ? 'emacs-agent-harness' : 'Plain ACP agent',
+      'version': enhanced ? '0.9.4' : '2.0.0',
+    },
+    'agentCapabilities': {
+      'loadSession': true,
+      'promptCapabilities': {
+        'image': true,
+        'audio': false,
+        'embeddedContext': true,
+      },
+      'sessionCapabilities': {'list': <String, Object?>{}},
+    },
+    if (enhanced)
+      '_harness': {
+        'methods': methods.toList()..sort(),
+        'events': events.toList()..sort(),
+      },
+    'authMethods': [
+      if (token != null)
+        {
+          'id': 'token',
+          'name': 'Shared secret',
+          'description': 'Call authenticate with the token',
+        },
+    ],
+  };
+
+  Map<String, Object?> _sessionInfo(Map<String, Object?> session) => {
+    'sessionId': session['id'],
+    'cwd': session['cwd'],
+    'title': session['name'],
+    'updatedAt': DateTime.fromMillisecondsSinceEpoch(
+      ((session['updated'] as num) * 1000).round(),
+    ).toUtc().toIso8601String(),
+    '_meta': {
+      'status': session['status'],
+      'kind': session['kind'],
+      'model': session['model'],
+      'project': session['project'],
+    },
+  };
+
+  Map<String, Object?> _plainSessionInfo(Map<String, Object?> session) => {
+    'sessionId': session['id'],
+    'cwd': session['cwd'],
+    'title': session['name'],
+    'updatedAt': DateTime.fromMillisecondsSinceEpoch(
+      ((session['updated'] as num) * 1000).round(),
+    ).toUtc().toIso8601String(),
+  };
+
+  void _replay(String sid) {
+    final session = sessions[sid];
+    if (session == null) return;
+    _send('session/update', {
+      'sessionId': sid,
+      'update': _sessionUpdate(session),
+    });
+    for (final node in nodes[sid] ?? const <Map<String, Object?>>[]) {
+      for (final update in _updatesForNode(node, replay: true)) {
+        _send('session/update', {'sessionId': sid, 'update': update});
+      }
+    }
+    if (enhanced) {
+      _send('session/update', {
+        'sessionId': sid,
+        'update': {'sessionUpdate': '_harness/session', 'session': session},
+      });
+    }
+  }
+
+  List<Map<String, Object?>> _updatesForNode(
+    Map<String, Object?> node, {
+    bool replay = true,
+  }) {
+    final kind = asString(node['kind']);
+    final id = asString(node['id']);
+    final list = <Map<String, Object?>>[];
+    final harness = {'nodeId': id};
+    switch (kind) {
+      case 'user':
+        list.add({
+          'sessionUpdate': 'user_message_chunk',
+          'content': {'type': 'text', 'text': node['content']},
+          '_harness': harness,
+        });
+      case 'assistant':
+        list.add({
+          'sessionUpdate': 'agent_message_chunk',
+          'content': {'type': 'text', 'text': node['content']},
+          '_harness': harness,
+        });
+      case 'thinking':
+        list.add({
+          'sessionUpdate': 'agent_thought_chunk',
+          'content': {'type': 'text', 'text': node['content']},
+          '_harness': harness,
+        });
+      case 'tool-call':
+        list.add({
+          'sessionUpdate': 'tool_call',
+          'toolCallId': node['callId'],
+          'title': node['title'],
+          'kind': 'read',
+          'status': 'in_progress',
+          'rawInput': node['input'],
+          '_harness': {...harness, 'tool': node['tool']},
+        });
+      case 'tool-result':
+        list.add({
+          'sessionUpdate': 'tool_call_update',
+          'toolCallId': node['callId'],
+          'status': 'completed',
+          'rawOutput': node['output'],
+          '_harness': harness,
+        });
+      case 'hint':
+        list.add({
+          'sessionUpdate': 'agent_message_chunk',
+          'content': {'type': 'text', 'text': node['content']},
+          '_harness': harness,
+        });
+    }
+    if (enhanced) list.add({'sessionUpdate': '_harness/node', 'node': node});
+    return list;
+  }
+
+  void _streamTurn(String sid, String text, Object? requestId) async {
+    final session = sessions[sid];
+    if (session == null) {
+      _respondError(requestId, -32603, 'No session');
+      return;
+    }
+    final slow = text.toLowerCase().contains('slowly');
+    final pace = slow ? 900 : 25;
+    _setStatus(sid, 'running', event: 'agent/turn-started');
+    final userNode = _node('u-${++_generated}', 'user', text);
+    (nodes[sid] ??= []).add(userNode);
+    for (final update in _updatesForNode(userNode)) {
+      _send('session/update', {'sessionId': sid, 'update': update});
+    }
+    await _delay(slow ? 800 : 30);
+    _activity(sid, {'phase': 'thinking', 'since': _now()});
+    await _delay(slow ? 700 : 0);
+    final thought = _node(
+      't-${++_generated}',
+      'thinking',
+      'The request asks me to work through the harness. I’ll check the relevant state first.',
+    );
+    (nodes[sid] ??= []).add(thought);
+    _send('session/update', {
+      'sessionId': sid,
+      'update': {
+        'sessionUpdate': 'agent_thought_chunk',
+        'content': {'type': 'text', 'text': thought['content']},
+        '_harness': {'nodeId': thought['id']},
+      },
+    });
+    await _delay(pace);
+    _activity(sid, {'phase': 'writing', 'since': _now()});
+    final answerId = 'a-${++_generated}';
+    const first =
+        'I’m on it. The **sessions** view can stay live while you work: ';
+    const second = 'streams, tool calls and requests all arrive over ACP.\n\n';
+    for (final chunk in [first, second]) {
+      _send('session/update', {
+        'sessionId': sid,
+        'update': {
+          'sessionUpdate': 'agent_message_chunk',
+          'content': {'type': 'text', 'text': chunk},
+          '_harness': {'nodeId': answerId},
+        },
+      });
+      await _delay(pace);
+    }
+    if (text.toLowerCase().contains('permission')) {
+      await _delay(30);
+      final response = await _requestClient('session/request_permission', {
+        'sessionId': sid,
+        'toolCall': {
+          'toolCallId': 'call-perm-1',
+          'title': 'Run the full test suite',
+          'kind': 'execute',
+          'rawInput': {'command': 'flutter test'},
+        },
+        'options': [
+          {'optionId': 'allow-once', 'name': 'Allow', 'kind': 'allow_once'},
+          {
+            'optionId': 'allow-session',
+            'name': 'Allow for session',
+            'kind': 'allow_always',
+          },
+          {
+            'optionId': 'allow-always',
+            'name': 'Always allow',
+            'kind': 'allow_always',
+          },
+          {'optionId': 'deny-once', 'name': 'Deny', 'kind': 'reject_once'},
+          {
+            'optionId': 'deny-always',
+            'name': 'Always deny',
+            'kind': 'reject_always',
+          },
+        ],
+        '_harness': {
+          'pendingId': 'perm-1',
+          'tool': 'bash',
+          'cwd': session['cwd'],
+          'paths': [session['cwd']],
+        },
+      });
+      permissionAnswers.add(asMap(response['result']));
+      final outcome = asMap(asMap(response['result'])['outcome']);
+      final allowed =
+          asString(outcome['optionId'])?.startsWith('allow') == true;
+      final callId = 'call-perm-1';
+      final call = _node(
+        'c-${++_generated}',
+        'tool-call',
+        '',
+        tool: 'bash',
+        callId: callId,
+        title: 'Run the full test suite',
+        input: {'command': 'flutter test'},
+      );
+      (nodes[sid] ??= []).add(call);
+      _send('session/update', {
+        'sessionId': sid,
+        'update': {
+          'sessionUpdate': 'tool_call',
+          'toolCallId': callId,
+          'title': call['title'],
+          'kind': 'execute',
+          'status': 'in_progress',
+          'rawInput': call['input'],
+          '_harness': {'nodeId': call['id'], 'tool': 'bash'},
+        },
+      });
+      _activity(sid, {
+        'phase': 'tool',
+        'since': _now(),
+        'tool': 'bash',
+        'title': 'Run the full test suite',
+        'count': 1,
+      });
+      await _delay(400);
+      final result = _node(
+        'r-${++_generated}',
+        'tool-result',
+        '',
+        callId: callId,
+        output: allowed
+            ? 'All 38 tests passed in 41.2s.'
+            : 'Permission denied: the command did not run.',
+        isError: !allowed,
+      );
+      (nodes[sid] ??= []).add(result);
+      _send('session/update', {
+        'sessionId': sid,
+        'update': {
+          'sessionUpdate': 'tool_call_update',
+          'toolCallId': callId,
+          'status': allowed ? 'completed' : 'failed',
+          'rawOutput': result['output'],
+          '_harness': {'nodeId': result['id']},
+        },
+      });
+    }
+    if (text.toLowerCase().contains('question')) {
+      await _delay(40);
+      final response = await _requestClient('_harness/ask_user', {
+        'sessionId': sid,
+        'requestId': 'q-1',
+        'question': 'Which layout should the tablet session view use?',
+        'options': [
+          'Split: list and transcript',
+          'Tabs: sessions and tasks',
+          'Focus: one conversation',
+        ],
+        'diagrams': [
+          {
+            'type': 'ascii',
+            'text': '┌────────┬──────────────┐\n│ list   │ transcript   │\n│        │              │\n└────────┴──────────────┘',
+          },
+          {
+            'type': 'ascii',
+            'text': '┌───────┬───────┐\n│ 1     │ 2     │\n│       │       │\n└───────┴───────┘',
+          },
+          {
+            'type': 'ascii',
+            'text': '┌──────────────────────┐\n│    conversation      │\n│                      │\n└──────────────────────┘',
+          },
+        ],
+        'cowboy': {
+          'preview': 'The prompt cache is cold. Compacting costs less than carrying on.',
+          'choices': [
+            {'label': 'Compact the summary', 'cost-text': '~\$0.04'},
+            {'label': 'Use the transcript', 'cost-text': '~\$0.11'},
+            {'label': 'Carry on uncached', 'cost-text': '~\$0.42'},
+          ],
+        },
+      });
+      questionAnswers.add(asMap(response['result']));
+    }
+    await _delay(slow ? 900 : 30);
+    _send('session/update', {
+      'sessionId': sid,
+      'update': {
+        'sessionUpdate': 'plan',
+        'entries': [
+          {
+            'content': 'Read the state layer',
+            'status': 'completed',
+            'priority': 'medium',
+          },
+          {
+            'content': 'Wire the ACP view',
+            'status': 'in_progress',
+            'priority': 'medium',
+          },
+          {
+            'content': 'Check it in an emulator',
+            'status': 'pending',
+            'priority': 'medium',
+          },
+        ],
+      },
+    });
+    final finalNode = _node(
+      answerId,
+      'assistant',
+      'I’m done with this step. The transcript is live and the task board is one tap away.',
+      meta: {'model': session['model']},
+    );
+    (nodes[sid] ??= []).add(finalNode);
+    if (enhanced) {
+      _send('session/update', {
+        'sessionId': sid,
+        'update': {'sessionUpdate': '_harness/node', 'node': finalNode},
+      });
+    }
+    _setStatus(sid, 'idle', event: 'agent/turn-ended');
+    _respond(requestId, {
+      'stopReason': 'end_turn',
+      '_harness': {'reason': 'end-turn', 'duration': 1.2},
+    });
+  }
+
+  Future<Map<String, Object?>> _requestClient(
+    String method,
+    Map<String, Object?> params,
+  ) {
+    final id = 'srv-${++_nextServerRequest}';
+    final completer = Completer<Map<String, Object?>>();
+    _serverRequests[id] = completer;
+    _serverRequestParams[id] = params;
+    _send(method, params, id: id);
+    return completer.future;
+  }
+
+  void _activity(String sid, Map<String, Object?> activity) {
+    if (!enhanced) return;
+    _send('session/update', {
+      'sessionId': sid,
+      'update': {'sessionUpdate': '_harness/activity', 'activity': activity},
+    });
+  }
+
+  void _setStatus(String sid, String status, {String? event}) {
+    final session = sessions[sid];
+    if (session == null) return;
+    session['status'] = status;
+    session['updated'] = _now();
+    _pushSession(sid);
+    if (event != null) {
+      _event(event, [sid, status == 'idle' ? 'end-turn' : null]);
+    }
+  }
+
+  void _pushSession(String sid) {
+    final session = sessions[sid];
+    if (session == null || !enhanced) return;
+    _send('session/update', {
+      'sessionId': sid,
+      'update': {'sessionUpdate': '_harness/session', 'session': session},
+    });
+  }
+
+  void _event(String event, List<Object?> args) {
+    if (!enhanced) return;
+    _send('_harness/event', {'event': event, 'args': args});
+  }
+
+  void _write(String message) {
+    final sink = writer;
+    if (sink != null) {
+      sink(message);
+    } else {
+      transport?.harnessSend(message);
+    }
+  }
+
+  void _respond(Object? id, Object? result) {
+    _write(jsonEncode({'jsonrpc': '2.0', 'id': id, 'result': result}));
+  }
+
+  void _respondError(Object? id, int code, String message) {
+    _write(
+      jsonEncode({
+        'jsonrpc': '2.0',
+        'id': id,
+        'error': {'code': code, 'message': message},
+      }),
+    );
+  }
+
+  void _send(String method, Map<String, Object?> params, {String? id}) {
+    _write(
+      jsonEncode({
+        'jsonrpc': '2.0',
+        if (id != null) 'id': id,
+        'method': method,
+        'params': params,
+      }),
+    );
+  }
+
+  double _now() => DateTime.now().millisecondsSinceEpoch / 1000;
+
+  Future<void> _delay(int ms) =>
+      Future<void>.delayed(Duration(milliseconds: ms));
+
+  List<Map<String, Object?>> _days() {
+    final now = DateTime.now();
+    return [
+      for (var offset = 6; offset >= 0; offset--)
+        {
+          'key': _date(now.subtract(Duration(days: offset))),
+          'cost': [0.12, 0.3, 0.08, 0.44, 0.21, 0.05, 0.04][6 - offset],
+          'list-cost': [0.14, 0.33, 0.09, 0.5, 0.24, 0.06, 0.05][6 - offset],
+          'input': 8000 + offset * 1000,
+          'output': 2000 + offset * 100,
+          'cache-read': 4000,
+          'cache-write': 200,
+          'calls': 3 + offset,
+        },
+    ];
+  }
+
+  String _date(DateTime date) =>
+      '${date.year.toString().padLeft(4, '0')}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}';
+
+  String _promptText(Object? prompt) =>
+      asList(prompt)
+          .map((block) => asString(asMap(block)['text']) ?? '')
+          .join(' ');
+
+  String _firstLine(String text) {
+    final line = text.split('\n').first.trim();
+    return line.length <= 60 ? line : '${line.substring(0, 59)}…';
+  }
+
+  Map<String, Object?> _sessionUpdate(Map<String, Object?> session) => {
+    'sessionUpdate': '_harness/session',
+    'session': session,
+  };
+}
+
+const _sampleSvg = '''
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="180" viewBox="0 0 320 180">
+  <rect x="8" y="8" width="140" height="164" rx="12" fill="#eef0f4"/>
+  <rect x="160" y="8" width="152" height="164" rx="12" fill="#e6f4ec"/>
+  <text x="78" y="94" font-family="sans-serif" font-size="14" text-anchor="middle" fill="#444">sessions</text>
+  <text x="236" y="94" font-family="sans-serif" font-size="14" text-anchor="middle" fill="#2f7d5b">transcript</text>
+</svg>
+''';

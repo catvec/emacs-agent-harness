@@ -1,0 +1,1310 @@
+import 'package:flutter/cupertino.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+
+import '../theme/harness_theme.dart';
+import 'platform_style.dart';
+
+class HarnessPage extends StatelessWidget {
+  const HarnessPage({
+    super.key,
+    required this.title,
+    required this.body,
+    this.actions = const [],
+    this.leading,
+    this.bottom,
+    this.backgroundColor,
+    this.resizeToAvoidBottomInset = true,
+    this.centerTitle = false,
+  });
+
+  final String title;
+  final Widget body;
+  final List<Widget> actions;
+  final Widget? leading;
+  final Widget? bottom;
+  final Color? backgroundColor;
+  final bool resizeToAvoidBottomInset;
+  final bool centerTitle;
+
+  @override
+  Widget build(BuildContext context) {
+    if (HarnessStyle.isCupertino(context)) {
+      return CupertinoPageScaffold(
+        backgroundColor: backgroundColor,
+        navigationBar: CupertinoNavigationBar(
+          middle: Semantics(header: true, child: Text(title)),
+          leading: leading,
+          trailing: actions.isEmpty
+              ? null
+              : Row(mainAxisSize: MainAxisSize.min, children: _spread(actions)),
+        ),
+        child: Material(
+          type: MaterialType.transparency,
+          child: SafeArea(child: body),
+        ),
+      );
+    }
+    return Scaffold(
+      backgroundColor: backgroundColor,
+      appBar: AppBar(
+        title: Text(title),
+        leading: leading,
+        actions: actions,
+        centerTitle: centerTitle,
+      ),
+      body: SafeArea(top: false, child: body),
+      bottomNavigationBar: bottom,
+      resizeToAvoidBottomInset: resizeToAvoidBottomInset,
+    );
+  }
+
+  List<Widget> _spread(List<Widget> children) {
+    final out = <Widget>[];
+    for (final child in children) {
+      if (out.isNotEmpty) out.add(const SizedBox(width: 2));
+      out.add(child);
+    }
+    return out;
+  }
+}
+
+class HarnessIconButton extends StatelessWidget {
+  const HarnessIconButton({
+    super.key,
+    required this.icon,
+    required this.label,
+    this.onPressed,
+    this.color,
+    this.size = 22,
+  });
+
+  final IconData icon;
+  final String label;
+  final VoidCallback? onPressed;
+  final Color? color;
+  final double size;
+
+  @override
+  Widget build(BuildContext context) {
+    final effective = onPressed == null
+        ? (color ?? Theme.of(context).colorScheme.onSurface).withValues(
+            alpha: 0.3,
+          )
+        : (color ?? Theme.of(context).colorScheme.onSurface);
+    if (HarnessStyle.isCupertino(context)) {
+      return Semantics(
+        button: true,
+        label: label,
+        child: CupertinoButton(
+          padding: EdgeInsets.zero,
+          minimumSize: const Size(40, 40),
+          onPressed: onPressed,
+          child: Icon(icon, size: size, color: effective),
+        ),
+      );
+    }
+    return IconButton(
+      tooltip: label,
+      onPressed: onPressed,
+      icon: Icon(icon, size: size, color: effective),
+    );
+  }
+}
+
+class HarnessPrimaryButton extends StatelessWidget {
+  const HarnessPrimaryButton({
+    super.key,
+    required this.label,
+    required this.onPressed,
+    this.icon,
+    this.expand = false,
+    this.busy = false,
+    this.destructive = false,
+  });
+
+  final String label;
+  final VoidCallback? onPressed;
+  final IconData? icon;
+  final bool expand;
+  final bool busy;
+  final bool destructive;
+
+  @override
+  Widget build(BuildContext context) {
+    final child = Row(
+      mainAxisSize: expand ? MainAxisSize.max : MainAxisSize.min,
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        if (busy)
+          Padding(
+            padding: const EdgeInsets.only(right: 10),
+            child: SizedBox(
+              width: 16,
+              height: 16,
+              child: HarnessStyle.isCupertino(context)
+                  ? const CupertinoActivityIndicator(radius: 8)
+                  : const CircularProgressIndicator(strokeWidth: 2),
+            ),
+          )
+        else if (icon != null)
+          Padding(
+            padding: const EdgeInsets.only(right: 8),
+            child: Icon(icon, size: 18),
+          ),
+        Flexible(
+          child: Text(
+            label,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(fontWeight: FontWeight.w600),
+          ),
+        ),
+      ],
+    );
+    if (HarnessStyle.isCupertino(context)) {
+      return SizedBox(
+        width: expand ? double.infinity : null,
+        child: CupertinoButton(
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 13),
+          borderRadius: BorderRadius.circular(14),
+          color: destructive
+              ? CupertinoColors.systemRed.resolveFrom(context)
+              : CupertinoTheme.of(context).primaryColor,
+          onPressed: busy ? null : onPressed,
+          child: DefaultTextStyle(
+            style: const TextStyle(
+              color: CupertinoColors.white,
+              fontSize: 15,
+              fontWeight: FontWeight.w600,
+            ),
+            child: child,
+          ),
+        ),
+      );
+    }
+    return SizedBox(
+      width: expand ? double.infinity : null,
+      child: FilledButton(
+        onPressed: busy ? null : onPressed,
+        style: destructive
+            ? FilledButton.styleFrom(
+                backgroundColor: Theme.of(context).colorScheme.error,
+                foregroundColor: Theme.of(context).colorScheme.onError,
+              )
+            : null,
+        child: child,
+      ),
+    );
+  }
+}
+
+class HarnessSecondaryButton extends StatelessWidget {
+  const HarnessSecondaryButton({
+    super.key,
+    required this.label,
+    required this.onPressed,
+    this.icon,
+    this.expand = false,
+    this.destructive = false,
+  });
+
+  final String label;
+  final VoidCallback? onPressed;
+  final IconData? icon;
+  final bool expand;
+  final bool destructive;
+
+  @override
+  Widget build(BuildContext context) {
+    final text = Row(
+      mainAxisSize: expand ? MainAxisSize.max : MainAxisSize.min,
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        if (icon != null)
+          Padding(
+            padding: const EdgeInsets.only(right: 8),
+            child: Icon(icon, size: 18),
+          ),
+        Flexible(child: Text(label, overflow: TextOverflow.ellipsis)),
+      ],
+    );
+    if (HarnessStyle.isCupertino(context)) {
+      final color = destructive
+          ? CupertinoColors.systemRed.resolveFrom(context)
+          : CupertinoTheme.of(context).primaryColor;
+      return SizedBox(
+        width: expand ? double.infinity : null,
+        child: CupertinoButton(
+          padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
+          borderRadius: BorderRadius.circular(14),
+          color: color.withValues(alpha: 0.11),
+          onPressed: onPressed,
+          child: DefaultTextStyle(
+            style: TextStyle(
+              color: color,
+              fontSize: 15,
+              fontWeight: FontWeight.w600,
+            ),
+            child: text,
+          ),
+        ),
+      );
+    }
+    return SizedBox(
+      width: expand ? double.infinity : null,
+      child: OutlinedButton(
+        onPressed: onPressed,
+        style: destructive
+            ? OutlinedButton.styleFrom(
+                foregroundColor: Theme.of(context).colorScheme.error,
+                side: BorderSide(
+                  color: Theme.of(context).colorScheme.error
+                      .withValues(alpha: 0.4),
+                ),
+              )
+            : null,
+        child: text,
+      ),
+    );
+  }
+}
+
+class HarnessTextButton extends StatelessWidget {
+  const HarnessTextButton({
+    super.key,
+    required this.label,
+    required this.onPressed,
+    this.icon,
+    this.destructive = false,
+  });
+
+  final String label;
+  final VoidCallback? onPressed;
+  final IconData? icon;
+  final bool destructive;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = destructive
+        ? (HarnessStyle.isCupertino(context)
+              ? CupertinoColors.systemRed.resolveFrom(context)
+              : Theme.of(context).colorScheme.error)
+        : (HarnessStyle.isCupertino(context)
+              ? CupertinoTheme.of(context).primaryColor
+              : Theme.of(context).colorScheme.primary);
+    if (HarnessStyle.isCupertino(context)) {
+      return CupertinoButton(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+        minimumSize: const Size(0, 36),
+        onPressed: onPressed,
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (icon != null) ...[
+              Icon(icon, size: 17, color: color),
+              const SizedBox(width: 6),
+            ],
+            Text(
+              label,
+              style: TextStyle(
+                color: color,
+                fontSize: 15,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+    return TextButton.icon(
+      onPressed: onPressed,
+      icon: icon == null ? null : Icon(icon, size: 18),
+      label: Text(label),
+      style: destructive ? TextButton.styleFrom(foregroundColor: color) : null,
+    );
+  }
+}
+
+class HarnessTextField extends StatelessWidget {
+  const HarnessTextField({
+    super.key,
+    this.controller,
+    this.focusNode,
+    this.hint,
+    this.obscure = false,
+    this.maxLines = 1,
+    this.minLines,
+    this.keyboardType,
+    this.textInputAction,
+    this.onChanged,
+    this.onSubmitted,
+    this.enabled = true,
+    this.prefix,
+    this.suffix,
+    this.autofocus = false,
+    this.style,
+    this.contentPadding,
+  });
+
+  final TextEditingController? controller;
+  final FocusNode? focusNode;
+  final String? hint;
+  final bool obscure;
+  final int maxLines;
+  final int? minLines;
+  final TextInputType? keyboardType;
+  final TextInputAction? textInputAction;
+  final ValueChanged<String>? onChanged;
+  final ValueChanged<String>? onSubmitted;
+  final bool enabled;
+  final Widget? prefix;
+  final Widget? suffix;
+  final bool autofocus;
+  final TextStyle? style;
+  final EdgeInsets? contentPadding;
+
+  @override
+  Widget build(BuildContext context) {
+    if (HarnessStyle.isCupertino(context)) {
+      return CupertinoTextField(
+        controller: controller,
+        focusNode: focusNode,
+        placeholder: hint,
+        obscureText: obscure,
+        maxLines: maxLines,
+        minLines: minLines,
+        keyboardType: keyboardType,
+        textInputAction: textInputAction,
+        onChanged: onChanged,
+        onSubmitted: onSubmitted,
+        enabled: enabled,
+        autofocus: autofocus,
+        style: style ?? CupertinoTheme.of(context).textTheme.textStyle,
+        padding:
+            contentPadding ??
+            const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
+        prefix: prefix == null
+            ? null
+            : Padding(padding: const EdgeInsets.only(left: 12), child: prefix),
+        suffix: suffix == null
+            ? null
+            : Padding(padding: const EdgeInsets.only(right: 8), child: suffix),
+        decoration: BoxDecoration(
+          color: CupertinoColors.secondarySystemBackground.resolveFrom(context),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(
+            color: CupertinoColors.separator.resolveFrom(context),
+          ),
+        ),
+      );
+    }
+    return TextField(
+      controller: controller,
+      focusNode: focusNode,
+      obscureText: obscure,
+      maxLines: maxLines,
+      minLines: minLines,
+      keyboardType: keyboardType,
+      textInputAction: textInputAction,
+      onChanged: onChanged,
+      onSubmitted: onSubmitted,
+      enabled: enabled,
+      autofocus: autofocus,
+      style: style,
+      decoration: InputDecoration(
+        hintText: hint,
+        prefixIcon: prefix,
+        suffixIcon: suffix,
+        contentPadding: contentPadding,
+      ),
+    );
+  }
+}
+
+class HarnessSwitch extends StatelessWidget {
+  const HarnessSwitch({
+    super.key,
+    required this.value,
+    required this.onChanged,
+    this.activeColor,
+  });
+
+  final bool value;
+  final ValueChanged<bool>? onChanged;
+  final Color? activeColor;
+
+  @override
+  Widget build(BuildContext context) {
+    if (HarnessStyle.isCupertino(context)) {
+      return CupertinoSwitch(
+        value: value,
+        onChanged: onChanged,
+        activeTrackColor:
+            activeColor ?? CupertinoTheme.of(context).primaryColor,
+      );
+    }
+    return Switch(
+      value: value,
+      onChanged: onChanged,
+      activeThumbColor: activeColor,
+    );
+  }
+}
+
+class HarnessSegmented<T extends Object> extends StatelessWidget {
+  const HarnessSegmented({
+    super.key,
+    required this.options,
+    required this.value,
+    required this.onChanged,
+  });
+
+  final List<(T, String)> options;
+  final T value;
+  final ValueChanged<T> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    if (HarnessStyle.isCupertino(context)) {
+      return CupertinoSlidingSegmentedControl<T>(
+        groupValue: value,
+        onValueChanged: (next) {
+          if (next != null) {
+            HapticFeedback.selectionClick();
+            onChanged(next);
+          }
+        },
+        thumbColor: CupertinoTheme.of(context).barBackgroundColor,
+        backgroundColor: CupertinoColors.secondarySystemBackground.resolveFrom(
+          context,
+        ),
+        children: {
+          for (final option in options)
+            option.$1: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 7),
+              child: Text(
+                option.$2,
+                style: const TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+        },
+      );
+    }
+    return SegmentedButton<T>(
+      segments: [
+        for (final option in options)
+          ButtonSegment<T>(value: option.$1, label: Text(option.$2)),
+      ],
+      selected: {value},
+      showSelectedIcon: false,
+      onSelectionChanged: (selection) {
+        if (selection.isNotEmpty) onChanged(selection.first);
+      },
+      style: ButtonStyle(
+        visualDensity: VisualDensity.compact,
+        textStyle: const WidgetStatePropertyAll(
+          TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+        ),
+      ),
+    );
+  }
+}
+
+class HarnessPill extends StatelessWidget {
+  const HarnessPill({
+    super.key,
+    required this.label,
+    this.selected = false,
+    this.onTap,
+    this.icon,
+    this.count,
+    this.color,
+  });
+
+  final String label;
+  final bool selected;
+  final VoidCallback? onTap;
+  final IconData? icon;
+  final int? count;
+  final Color? color;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final dark = theme.brightness == Brightness.dark;
+    final accent = color ?? theme.colorScheme.primary;
+    final background = selected
+        ? accent.withValues(alpha: dark ? 0.24 : 0.12)
+        : (dark ? const Color(0xFF1D1D21) : HarnessColors.paperRaised);
+    final border = selected
+        ? accent.withValues(alpha: 0.5)
+        : theme.colorScheme.outlineVariant;
+    return Semantics(
+      button: onTap != null,
+      selected: onTap == null ? null : selected,
+      label: label,
+      child: GestureDetector(
+        onTap: onTap == null
+            ? null
+            : () {
+                HapticFeedback.selectionClick();
+                onTap!();
+              },
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 180),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          decoration: BoxDecoration(
+            color: background,
+            borderRadius: BorderRadius.circular(999),
+            border: Border.all(color: border),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (icon != null) ...[
+                Icon(
+                  icon,
+                  size: 15,
+                  color: selected ? accent : theme.colorScheme.onSurfaceVariant,
+                ),
+                const SizedBox(width: 6),
+              ],
+              Text(
+                label,
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  color: selected ? accent : theme.colorScheme.onSurface,
+                ),
+              ),
+              if (count != null) ...[
+                const SizedBox(width: 6),
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 6,
+                    vertical: 1,
+                  ),
+                  decoration: BoxDecoration(
+                    color: selected
+                        ? accent
+                        : theme.colorScheme.surfaceContainerHigh,
+                    borderRadius: BorderRadius.circular(999),
+                  ),
+                  child: Text(
+                    '$count',
+                    style: TextStyle(
+                      fontSize: 10,
+                      fontWeight: FontWeight.w700,
+                      color: selected
+                          ? Colors.white
+                          : theme.colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class HarnessTap extends StatefulWidget {
+  const HarnessTap({
+    super.key,
+    required this.child,
+    this.onTap,
+    this.borderRadius,
+    this.selected = false,
+  });
+
+  final Widget child;
+  final VoidCallback? onTap;
+  final BorderRadius? borderRadius;
+  final bool selected;
+
+  @override
+  State<HarnessTap> createState() => _HarnessTapState();
+}
+
+class _HarnessTapState extends State<HarnessTap> {
+  bool _down = false;
+
+  void _setDown(bool value) {
+    if (!mounted) return;
+    setState(() => _down = value);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (HarnessStyle.isCupertino(context)) {
+      final dark = CupertinoTheme.of(context).brightness == Brightness.dark;
+      return GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: widget.onTap == null
+            ? null
+            : () {
+                HapticFeedback.selectionClick();
+                widget.onTap!();
+              },
+        onTapDown: widget.onTap == null ? null : (_) => _setDown(true),
+        onTapUp: widget.onTap == null ? null : (_) => _setDown(false),
+        onTapCancel: widget.onTap == null ? null : () => _setDown(false),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 90),
+          color: _down
+              ? (dark ? const Color(0x14FFFFFF) : const Color(0x0A000000))
+              : Colors.transparent,
+          child: widget.child,
+        ),
+      );
+    }
+    return Material(
+      color: Colors.transparent,
+      borderRadius: widget.borderRadius,
+      child: InkWell(
+        borderRadius: widget.borderRadius,
+        onTap: widget.onTap == null
+            ? null
+            : () {
+                HapticFeedback.selectionClick();
+                widget.onTap!();
+              },
+        child: widget.child,
+      ),
+    );
+  }
+}
+
+class HarnessActivity extends StatelessWidget {
+  const HarnessActivity({super.key, this.radius = 9, this.color});
+  final double radius;
+  final Color? color;
+
+  @override
+  Widget build(BuildContext context) {
+    if (HarnessStyle.isCupertino(context)) {
+      return CupertinoActivityIndicator(radius: radius, color: color);
+    }
+    return SizedBox(
+      width: radius * 2,
+      height: radius * 2,
+      child: CircularProgressIndicator(
+        strokeWidth: 2.2,
+        color: color ?? Theme.of(context).colorScheme.primary,
+      ),
+    );
+  }
+}
+
+class HarnessSectionHeader extends StatelessWidget {
+  const HarnessSectionHeader({
+    super.key,
+    required this.label,
+    this.trailing,
+    this.padding = const EdgeInsets.fromLTRB(20, 22, 20, 10),
+  });
+
+  final String label;
+  final Widget? trailing;
+  final EdgeInsets padding;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Padding(
+      padding: padding,
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              label.toUpperCase(),
+              style: TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 1.1,
+                color: theme.colorScheme.onSurfaceVariant.withValues(
+                  alpha: 0.75,
+                ),
+              ),
+            ),
+          ),
+          if (trailing != null) trailing!,
+        ],
+      ),
+    );
+  }
+}
+
+class HarnessStatusPill extends StatelessWidget {
+  const HarnessStatusPill({
+    super.key,
+    required this.label,
+    required this.color,
+    this.icon,
+    this.compact = true,
+  });
+
+  final String label;
+  final Color color;
+  final IconData? icon;
+  final bool compact;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: EdgeInsets.symmetric(
+        horizontal: compact ? 8 : 10,
+        vertical: compact ? 3 : 5,
+      ),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.13),
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: color.withValues(alpha: 0.25)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (icon != null) ...[
+            Icon(icon, size: 11, color: color),
+            const SizedBox(width: 4),
+          ] else ...[
+            Container(
+              width: 6,
+              height: 6,
+              decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+            ),
+            const SizedBox(width: 5),
+          ],
+          Text(
+            label,
+            style: TextStyle(
+              fontSize: compact ? 10.5 : 12,
+              fontWeight: FontWeight.w600,
+              decoration: TextDecoration.none,
+              color: color,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class HarnessErrorBanner extends StatelessWidget {
+  const HarnessErrorBanner({
+    super.key,
+    required this.message,
+    this.onDismiss,
+    this.actionLabel,
+    this.onAction,
+  });
+
+  final String message;
+  final VoidCallback? onDismiss;
+  final String? actionLabel;
+  final VoidCallback? onAction;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final color = theme.colorScheme.error;
+    return Container(
+      margin: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+      padding: const EdgeInsets.fromLTRB(14, 12, 8, 12),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.09),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: color.withValues(alpha: 0.22)),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.error_outline_rounded, color: color, size: 19),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              message,
+              style: TextStyle(
+                fontSize: 13,
+                color: theme.colorScheme.onSurface,
+              ),
+            ),
+          ),
+          if (actionLabel != null)
+            HarnessTextButton(label: actionLabel!, onPressed: onAction),
+          if (onDismiss != null)
+            HarnessIconButton(
+              icon: Icons.close_rounded,
+              label: 'Dismiss',
+              size: 18,
+              onPressed: onDismiss,
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class HarnessEmptyState extends StatelessWidget {
+  const HarnessEmptyState({
+    super.key,
+    required this.icon,
+    required this.title,
+    required this.message,
+    this.action,
+  });
+
+  final IconData icon;
+  final String title;
+  final String message;
+  final Widget? action;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Center(
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 72,
+              height: 72,
+              decoration: BoxDecoration(
+                color: theme.colorScheme.primary.withValues(alpha: 0.09),
+                shape: BoxShape.circle,
+                border: Border.all(
+                  color: theme.colorScheme.primary.withValues(alpha: 0.16),
+                ),
+              ),
+              child: Icon(icon, size: 30, color: theme.colorScheme.primary),
+            ),
+            const SizedBox(height: 20),
+            Text(
+              title,
+              textAlign: TextAlign.center,
+              style: theme.textTheme.titleMedium?.copyWith(
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            const SizedBox(height: 8),
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 340),
+              child: Text(
+                message,
+                textAlign: TextAlign.center,
+                style: theme.textTheme.bodyMedium?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                  height: 1.45,
+                ),
+              ),
+            ),
+            if (action != null) ...[const SizedBox(height: 22), action!],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class HarnessBadge extends StatelessWidget {
+  const HarnessBadge({super.key, required this.count, this.color});
+  final int count;
+  final Color? color;
+
+  @override
+  Widget build(BuildContext context) {
+    final tint = color ?? Theme.of(context).colorScheme.error;
+    return Container(
+      constraints: const BoxConstraints(minWidth: 18),
+      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+      decoration: BoxDecoration(
+        color: tint,
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Text(
+        count > 99 ? '99+' : '$count',
+        textAlign: TextAlign.center,
+        style: const TextStyle(
+          color: Colors.white,
+          fontSize: 10,
+          fontWeight: FontWeight.w700,
+          decoration: TextDecoration.none,
+        ),
+      ),
+    );
+  }
+}
+
+class HarnessSheetHandle extends StatelessWidget {
+  const HarnessSheetHandle({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Container(
+        width: 38,
+        height: 4,
+        margin: const EdgeInsets.only(top: 10, bottom: 8),
+        decoration: BoxDecoration(
+          color: Theme.of(context).colorScheme.onSurface
+              .withValues(alpha: 0.16),
+          borderRadius: BorderRadius.circular(2),
+        ),
+      ),
+    );
+  }
+}
+
+class HarnessInfoRow extends StatelessWidget {
+  const HarnessInfoRow({
+    super.key,
+    required this.label,
+    required this.value,
+    this.monospace = false,
+  });
+
+  final String label;
+  final String value;
+  final bool monospace;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 5),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 116,
+            child: Text(
+              label,
+              style: TextStyle(
+                fontSize: 13,
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ),
+          Expanded(
+            child: SelectableText(
+              value,
+              style: TextStyle(
+                fontSize: 13,
+                fontFamily: monospace ? 'monospace' : null,
+                color: theme.colorScheme.onSurface,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// A bottom sheet styled like the platform's own.
+Future<T?> showHarnessSheet<T>({
+  required BuildContext context,
+  required WidgetBuilder builder,
+}) {
+  if (HarnessStyle.isCupertino(context)) {
+    return showCupertinoModalPopup<T>(
+      context: context,
+      builder: (sheetContext) => Container(
+        constraints: BoxConstraints(
+          maxHeight: MediaQuery.sizeOf(sheetContext).height * 0.88,
+        ),
+        decoration: BoxDecoration(
+          color: CupertinoTheme.of(sheetContext).scaffoldBackgroundColor,
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+        ),
+        child: Material(
+          type: MaterialType.transparency,
+          child: SafeArea(
+            top: false,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const HarnessSheetHandle(),
+                Flexible(child: builder(sheetContext)),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+  return showModalBottomSheet<T>(
+    context: context,
+    isScrollControlled: true,
+    useSafeArea: true,
+    showDragHandle: true,
+    backgroundColor: Theme.of(context).colorScheme.surface,
+    shape: const RoundedRectangleBorder(
+      borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+    ),
+    builder: builder,
+  );
+}
+
+Future<T?> showHarnessDialog<T>({
+  required BuildContext context,
+  required String title,
+  String? message,
+  Widget? content,
+  String? confirmLabel,
+  String? cancelLabel,
+  bool destructive = false,
+}) {
+  final cupertino = HarnessStyle.isCupertino(context);
+  if (cupertino) {
+    return showCupertinoDialog<T>(
+      context: context,
+      builder: (dialogContext) => CupertinoAlertDialog(
+        title: Text(title),
+        content:
+            content ??
+            (message == null
+                ? null
+                : Padding(
+                    padding: const EdgeInsets.only(top: 6),
+                    child: Text(message),
+                  )),
+        actions: [
+          if (cancelLabel != null)
+            CupertinoDialogAction(
+              onPressed: () => Navigator.of(dialogContext).pop(),
+              child: Text(cancelLabel),
+            ),
+          if (confirmLabel != null)
+            CupertinoDialogAction(
+              isDestructiveAction: destructive,
+              isDefaultAction: !destructive,
+              onPressed: () => Navigator.of(dialogContext).pop(true),
+              child: Text(confirmLabel),
+            ),
+        ],
+      ),
+    );
+  }
+  return showDialog<T>(
+    context: context,
+    builder: (dialogContext) => AlertDialog(
+      title: Text(title),
+      content: content ?? (message == null ? null : Text(message)),
+      actions: [
+        if (cancelLabel != null)
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: Text(cancelLabel),
+          ),
+        if (confirmLabel != null)
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            style: destructive
+                ? TextButton.styleFrom(
+                    foregroundColor: Theme.of(dialogContext).colorScheme.error,
+                  )
+                : null,
+            child: Text(confirmLabel),
+          ),
+      ],
+    ),
+  );
+}
+
+class HarnessMenuItem<T> {
+  const HarnessMenuItem({
+    required this.value,
+    required this.label,
+    this.icon,
+    this.destructive = false,
+  });
+  final T value;
+  final String label;
+  final IconData? icon;
+  final bool destructive;
+}
+
+Future<T?> showHarnessMenu<T>({
+  required BuildContext context,
+  required List<HarnessMenuItem<T>> items,
+  String? title,
+}) async {
+  if (items.isEmpty) return null;
+  if (HarnessStyle.isCupertino(context)) {
+    return showCupertinoModalPopup<T>(
+      context: context,
+      builder: (popupContext) => CupertinoActionSheet(
+        title: title == null ? null : Text(title),
+        actions: [
+          for (final item in items)
+            CupertinoActionSheetAction(
+              isDestructiveAction: item.destructive,
+              onPressed: () => Navigator.of(popupContext).pop(item.value),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  if (item.icon != null) ...[
+                    Icon(item.icon, size: 18),
+                    const SizedBox(width: 8),
+                  ],
+                  Text(item.label),
+                ],
+              ),
+            ),
+        ],
+        cancelButton: CupertinoActionSheetAction(
+          isDefaultAction: true,
+          onPressed: () => Navigator.of(popupContext).pop(),
+          child: const Text('Cancel'),
+        ),
+      ),
+    );
+  }
+  return showModalBottomSheet<T>(
+    context: context,
+    showDragHandle: true,
+    builder: (sheetContext) => SafeArea(
+      top: false,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (title != null)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
+              child: Text(
+                title,
+                style: Theme.of(sheetContext).textTheme.titleSmall
+                    ?.copyWith(fontWeight: FontWeight.w700),
+              ),
+            ),
+          for (final item in items)
+            ListTile(
+              leading: item.icon == null ? null : Icon(item.icon),
+              title: Text(
+                item.label,
+                style: item.destructive
+                    ? TextStyle(color: Theme.of(sheetContext).colorScheme.error)
+                    : null,
+              ),
+              onTap: () => Navigator.of(sheetContext).pop(item.value),
+            ),
+          const SizedBox(height: 8),
+        ],
+      ),
+    ),
+  );
+}
+
+Future<String?> showHarnessTextPrompt({
+  required BuildContext context,
+  required String title,
+  String? message,
+  String? hint,
+  String initial = '',
+  String confirmLabel = 'Save',
+  bool multiline = false,
+}) async {
+  final controller = TextEditingController(text: initial);
+  final cupertino = HarnessStyle.isCupertino(context);
+  final result = await showDialog<String>(
+    context: context,
+    builder: (dialogContext) {
+      final field = HarnessTextField(
+        controller: controller,
+        hint: hint,
+        autofocus: true,
+        maxLines: multiline ? 5 : 1,
+        minLines: multiline ? 3 : null,
+        textInputAction: multiline
+            ? TextInputAction.newline
+            : TextInputAction.done,
+        onSubmitted: multiline
+            ? null
+            : (value) => Navigator.of(dialogContext).pop(value),
+      );
+      if (cupertino) {
+        return CupertinoAlertDialog(
+          title: Text(title),
+          content: Padding(
+            padding: const EdgeInsets.only(top: 12),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if (message != null) ...[
+                  Text(message),
+                  const SizedBox(height: 12),
+                ],
+                field,
+              ],
+            ),
+          ),
+          actions: [
+            CupertinoDialogAction(
+              onPressed: () => Navigator.of(dialogContext).pop(),
+              child: const Text('Cancel'),
+            ),
+            CupertinoDialogAction(
+              isDefaultAction: true,
+              onPressed: () => Navigator.of(dialogContext).pop(controller.text),
+              child: Text(confirmLabel),
+            ),
+          ],
+        );
+      }
+      return AlertDialog(
+        title: Text(title),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (message != null) ...[Text(message), const SizedBox(height: 12)],
+            field,
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(controller.text),
+            child: Text(confirmLabel),
+          ),
+        ],
+      );
+    },
+  );
+  controller.dispose();
+  return result;
+}
+
+IconData adaptiveIcon(
+  BuildContext context,
+  IconData material,
+  IconData cupertino,
+) => HarnessStyle.isCupertino(context) ? cupertino : material;
+
+Widget adaptiveChevron(BuildContext context, {Color? color}) {
+  if (HarnessStyle.isCupertino(context)) {
+    return Icon(
+      CupertinoIcons.chevron_forward,
+      size: 16,
+      color: color ?? CupertinoColors.tertiaryLabel.resolveFrom(context),
+    );
+  }
+  return Icon(
+    Icons.chevron_right_rounded,
+    size: 20,
+    color:
+        color ??
+        Theme.of(context).colorScheme.onSurfaceVariant.withValues(alpha: 0.5),
+  );
+}

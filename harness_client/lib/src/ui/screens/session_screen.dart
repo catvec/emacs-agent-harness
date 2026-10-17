@@ -1,0 +1,965 @@
+import 'dart:async';
+
+import 'package:flutter/cupertino.dart';
+import 'package:flutter/material.dart';
+
+import '../../models/activity.dart';
+import '../../models/session.dart';
+import '../../models/task.dart';
+import '../../models/transcript.dart';
+import '../../models/usage.dart';
+import '../../state/app_controller.dart';
+import '../../state/session_controller.dart';
+import '../adaptive/adaptive_widgets.dart';
+import '../adaptive/platform_style.dart';
+import '../app_scope.dart';
+import '../format.dart';
+import '../navigation.dart';
+import '../theme/harness_theme.dart';
+import '../widgets/interaction_card.dart';
+import '../widgets/message_composer.dart';
+import '../widgets/transcript_view.dart';
+
+class SessionScreen extends StatefulWidget {
+  const SessionScreen({
+    super.key,
+    required this.sessionId,
+    this.embedded = false,
+  });
+
+  final String sessionId;
+  final bool embedded;
+
+  @override
+  State<SessionScreen> createState() => _SessionScreenState();
+}
+
+class _SessionScreenState extends State<SessionScreen> {
+  late AppController _app;
+  late SessionController _controller;
+  bool _bound = false;
+  int _scrollTick = 0;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (!_bound) {
+      _app = HarnessScope.appOf(context);
+      _controller = _app.sessionController(widget.sessionId);
+      _bound = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _app.openSession(widget.sessionId);
+      });
+    }
+  }
+
+  @override
+  void didUpdateWidget(SessionScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.sessionId != widget.sessionId) {
+      _controller = _app.sessionController(widget.sessionId);
+      _scrollTick++;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _app.openSession(widget.sessionId);
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    if (!widget.embedded && _bound) {
+      _app.closeSession();
+    }
+    super.dispose();
+  }
+
+  Future<void> _rename() async {
+    final current = _controller.summary?.displayTitle ?? '';
+    final name = await showHarnessTextPrompt(
+      context: context,
+      title: 'Rename session',
+      initial: current,
+      hint: 'A short title',
+      confirmLabel: 'Rename',
+    );
+    if (name != null && name.trim().isNotEmpty) {
+      await _controller.rename(name.trim());
+    }
+  }
+
+  Future<void> _fork() async {
+    final id = await _controller.fork();
+    if (id == null || !mounted) return;
+    if (widget.embedded) {
+      _app.openSession(id);
+    } else {
+      await Navigator.of(context).pushReplacement(
+        harnessRoute(context, (context) => SessionScreen(sessionId: id)),
+      );
+    }
+  }
+
+  Future<void> _delete() async {
+    final confirmed = await showHarnessDialog<bool>(
+      context: context,
+      title: 'Delete this session?',
+      message:
+          'The transcript and its temporary files are removed from the harness. '
+          'This cannot be undone.',
+      confirmLabel: 'Delete',
+      cancelLabel: 'Cancel',
+      destructive: true,
+    );
+    if (confirmed != true) return;
+    final removed = await _controller.deleteSession();
+    if (removed && mounted) {
+      if (widget.embedded) {
+        _app.closeSession();
+      } else {
+        Navigator.of(context).pop();
+      }
+    }
+  }
+
+  Future<void> _chooseModel() async {
+    final models = [
+      for (final provider in _app.server?.providers ?? const [])
+        for (final model in provider.models) model,
+    ];
+    if (models.isEmpty) {
+      final value = await showHarnessTextPrompt(
+        context: context,
+        title: 'Change model',
+        message: 'The harness takes provider:model.',
+        initial: _controller.summary?.model ?? '',
+        hint: 'provider:model',
+        confirmLabel: 'Use model',
+      );
+      if (value != null && value.trim().isNotEmpty) {
+        await _controller.setModel(value.trim());
+      }
+      return;
+    }
+    final chosen = await showHarnessMenu<String>(
+      context: context,
+      title: 'Model',
+      items: [
+        for (final model in models)
+          HarnessMenuItem(
+            value: model.id,
+            label: model.name == model.id
+                ? model.id
+                : '${model.name} · ${model.id}',
+            icon: Icons.memory_rounded,
+          ),
+      ],
+    );
+    if (chosen != null) await _controller.setModel(chosen);
+  }
+
+  Future<void> _chooseMode() async {
+    final chosen = await showHarnessMenu<String>(
+      context: context,
+      title: 'Permission mode',
+      items: const [
+        HarnessMenuItem(
+          value: 'ask',
+          label: 'Ask · reads allowed, the rest asks',
+          icon: Icons.help_outline_rounded,
+        ),
+        HarnessMenuItem(
+          value: 'accept-edits',
+          label: 'Accept edits · reads and writes allowed',
+          icon: Icons.edit_outlined,
+        ),
+        HarnessMenuItem(
+          value: 'auto',
+          label: 'Auto · a judge decides each call',
+          icon: Icons.auto_awesome_rounded,
+        ),
+        HarnessMenuItem(
+          value: 'yolo',
+          label: 'YOLO · everything inside the project',
+          icon: Icons.bolt_rounded,
+        ),
+      ],
+    );
+    if (chosen != null) await _controller.setMode(chosen);
+  }
+
+  Future<void> _choosePriority() async {
+    final chosen = await showHarnessMenu<String>(
+      context: context,
+      title: 'Session priority',
+      items: const [
+        HarnessMenuItem(
+          value: 'high',
+          label: 'High',
+          icon: Icons.keyboard_double_arrow_up_rounded,
+        ),
+        HarnessMenuItem(
+          value: 'medium',
+          label: 'Medium',
+          icon: Icons.drag_handle_rounded,
+        ),
+        HarnessMenuItem(
+          value: 'low',
+          label: 'Low',
+          icon: Icons.keyboard_double_arrow_down_rounded,
+        ),
+      ],
+    );
+    if (chosen != null) await _controller.setPriority(chosen);
+  }
+
+  List<Widget> _actions(BuildContext context) {
+    final caps = _app.capability;
+    return [
+      HarnessIconButton(
+        icon: adaptiveIcon(
+          context,
+          Icons.refresh_rounded,
+          CupertinoIcons.arrow_clockwise,
+        ),
+        label: 'Reload transcript',
+        onPressed: () => _controller.open(force: true),
+      ),
+      HarnessIconButton(
+        icon: adaptiveIcon(
+          context,
+          Icons.more_horiz_rounded,
+          CupertinoIcons.ellipsis_circle,
+        ),
+        label: 'Session menu',
+        onPressed: () async {
+          final action = await showHarnessMenu<String>(
+            context: context,
+            title: _controller.summary?.displayTitle ?? 'Session',
+            items: [
+              const HarnessMenuItem(
+                value: 'refresh',
+                label: 'Reload transcript',
+                icon: Icons.refresh_rounded,
+              ),
+              if (caps?.renameSession == true)
+                const HarnessMenuItem(
+                  value: 'rename',
+                  label: 'Rename',
+                  icon: Icons.edit_outlined,
+                ),
+              if (caps?.fork == true)
+                const HarnessMenuItem(
+                  value: 'fork',
+                  label: 'Fork conversation',
+                  icon: Icons.call_split_rounded,
+                ),
+              if (caps?.priority == true)
+                const HarnessMenuItem(
+                  value: 'priority',
+                  label: 'Priority',
+                  icon: Icons.sort_rounded,
+                ),
+              const HarnessMenuItem(
+                value: 'model',
+                label: 'Change model',
+                icon: Icons.memory_rounded,
+              ),
+              if (caps?.setMode == true)
+                const HarnessMenuItem(
+                  value: 'mode',
+                  label: 'Permission mode',
+                  icon: Icons.shield_outlined,
+                ),
+              if (caps?.deleteSession == true)
+                const HarnessMenuItem(
+                  value: 'delete',
+                  label: 'Delete session',
+                  icon: Icons.delete_outline_rounded,
+                  destructive: true,
+                ),
+            ],
+          );
+          if (!mounted) return;
+          switch (action) {
+            case 'refresh':
+              await _controller.open(force: true);
+            case 'rename':
+              await _rename();
+            case 'fork':
+              await _fork();
+            case 'priority':
+              await _choosePriority();
+            case 'model':
+              await _chooseModel();
+            case 'mode':
+              await _chooseMode();
+            case 'delete':
+              await _delete();
+          }
+        },
+      ),
+    ];
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!_bound) {
+      return const SizedBox.shrink();
+    }
+    return AnimatedBuilder(
+      animation: Listenable.merge([_controller, _app.settings, _app]),
+      builder: (context, _) {
+        final summary =
+            _controller.summary ?? _app.summaryFor(widget.sessionId);
+        final title = summary?.displayTitle ?? 'Session';
+        final body = _buildBody(context, summary);
+        if (widget.embedded) {
+          return Material(
+            type: MaterialType.transparency,
+
+            child: Column(
+              children: [
+                _EmbeddedHeader(
+                  title: title,
+                  summary: summary,
+                  controller: _controller,
+                  actions: _actions(context),
+                  onClose: _app.closeSession,
+                ),
+                Expanded(child: body),
+              ],
+            ),
+          );
+        }
+        return HarnessPage(
+          title: title,
+          actions: _actions(context),
+          body: body,
+        );
+      },
+    );
+  }
+
+  Widget _buildBody(BuildContext context, SessionSummary? summary) {
+    final theme = Theme.of(context);
+    final controller = _controller;
+    if (_controller.deleted) {
+      return Column(
+        children: [
+          Expanded(
+            child: HarnessEmptyState(
+              icon: Icons.delete_outline_rounded,
+              title: 'Session deleted',
+              message: 'This conversation is gone from the harness.',
+              action: HarnessPrimaryButton(
+                label: 'Back to sessions',
+                onPressed: () {
+                  if (widget.embedded) {
+                    _app.closeSession();
+                  } else {
+                    Navigator.of(context).maybePop();
+                  }
+                },
+              ),
+            ),
+          ),
+        ],
+      );
+    }
+    final plan = controller.transcript.plan;
+    return Column(
+      children: [
+        _MetaStrip(
+          app: _app,
+          controller: controller,
+          summary: summary,
+          onModel: _chooseModel,
+          onMode: _chooseMode,
+        ),
+        if (controller.error != null)
+          HarnessErrorBanner(
+            message: controller.error!,
+            onDismiss: controller.clearError,
+            actionLabel: 'Retry',
+            onAction: () => controller.open(force: true),
+          ),
+        Expanded(
+          child: controller.loading && controller.transcript.items.isEmpty
+              ? Center(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      HarnessActivity(radius: 11),
+                      const SizedBox(height: 14),
+                      Text(
+                        'Loading the conversation…',
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: theme.colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ],
+                  ),
+                )
+              : TranscriptView(
+                  items: controller.transcript.items,
+                  showThinking: _app.settings.showThinking,
+                  streaming: controller.promptInFlight,
+                  scrollTick: _scrollTick,
+                ),
+        ),
+        if (plan.isNotEmpty && controller.currentInteraction == null)
+          _PlanStrip(plan: plan),
+        if (controller.promptInFlight ||
+            controller.activity != null ||
+            controller.currentInteraction != null)
+          _ActivityBar(
+            activity: controller.activity,
+            waiting: controller.currentInteraction != null,
+            running: controller.promptInFlight,
+          ),
+        if (controller.currentInteraction != null)
+          ConstrainedBox(
+            constraints: BoxConstraints(
+              maxHeight:
+                  MediaQuery.sizeOf(context).height *
+                  (controller.currentInteraction!.isQuestion ? 0.64 : 0.46),
+            ),
+            child: InteractionCard(controller: controller),
+          ),
+        MessageComposer(
+          running: controller.promptInFlight,
+          cancelling: controller.cancelling,
+          canAttach: _app.capability?.promptImages == true,
+          awaitingAnswer: controller.currentInteraction != null,
+          enabled: controller.currentInteraction == null,
+          onStop: controller.cancel,
+          onSend: (text, attachments) {
+            setState(() => _scrollTick++);
+            unawaited(controller.send(text, attachments: attachments));
+          },
+        ),
+      ],
+    );
+  }
+}
+
+class _EmbeddedHeader extends StatelessWidget {
+  const _EmbeddedHeader({
+    required this.title,
+    required this.summary,
+    required this.controller,
+    required this.actions,
+    required this.onClose,
+  });
+
+  final String title;
+  final SessionSummary? summary;
+  final SessionController controller;
+  final List<Widget> actions;
+  final VoidCallback onClose;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Container(
+      padding: const EdgeInsets.fromLTRB(18, 12, 8, 10),
+      decoration: BoxDecoration(
+        color: HarnessStyle.isCupertino(context)
+            ? CupertinoTheme.of(context).barBackgroundColor
+            : theme.colorScheme.surface,
+        border: Border(
+          bottom: BorderSide(color: theme.colorScheme.outlineVariant),
+        ),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.titleMedium?.copyWith(
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: -0.3,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  [
+                    projectName(summary?.project ?? summary?.cwd),
+                    modelName(summary?.model),
+                    statusLabel(summary?.status),
+                  ].where((part) => part.isNotEmpty).join(' · '),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.labelSmall?.copyWith(
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          ...actions,
+          HarnessIconButton(
+            icon: Icons.close_rounded,
+            label: 'Close conversation',
+            size: 19,
+            onPressed: onClose,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _MetaStrip extends StatelessWidget {
+  const _MetaStrip({
+    required this.app,
+    required this.controller,
+    required this.summary,
+    required this.onModel,
+    required this.onMode,
+  });
+
+  final AppController app;
+  final SessionController controller;
+  final SessionSummary? summary;
+  final VoidCallback onModel;
+  final VoidCallback onMode;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final s = summary;
+    final usage = s?.usage;
+    final contextWindow = s?.contextWindow;
+    final contextUsed = usage?.contextInUse ?? 0;
+    final status = controller.currentInteraction != null
+        ? 'blocked'
+        : s?.status;
+    final statusColor = HarnessColors.status(status, theme.brightness);
+    final task = _taskForSession(app, s?.id);
+    return Container(
+      decoration: BoxDecoration(
+        border: Border(
+          bottom: BorderSide(
+            color: theme.colorScheme.outlineVariant.withValues(alpha: 0.6),
+          ),
+        ),
+      ),
+      padding: const EdgeInsets.fromLTRB(12, 5, 12, 5),
+      child: Wrap(
+        spacing: 6,
+        runSpacing: 5,
+        children: [
+          _MetaChip(
+            icon: controller.currentInteraction != null
+                ? Icons.front_hand_rounded
+                : Icons.circle,
+            label: controller.currentInteraction != null
+                ? 'Needs you'
+                : statusLabel(status),
+            color: statusColor,
+            onTap: null,
+          ),
+          _MetaChip(
+            icon: Icons.folder_outlined,
+            label: projectName(s?.project ?? s?.cwd),
+            onTap: null,
+          ),
+          _MetaChip(
+            icon: Icons.memory_rounded,
+            label: modelName(s?.model),
+            onTap: onModel,
+          ),
+          _MetaChip(
+            icon: Icons.shield_outlined,
+            label: permissionLabel(s?.permissionMode),
+            onTap: app.capability?.setMode == true ? onMode : null,
+          ),
+          if (contextWindow != null && contextWindow > 0)
+            _MetaChip(
+              icon: Icons.stacked_line_chart_rounded,
+              label:
+                  '${formatTokens(contextUsed)} / ${formatTokens(contextWindow)}',
+              trailing: SizedBox(
+                width: 42,
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(2),
+                  child: LinearProgressIndicator(
+                    value: (contextUsed / contextWindow).clamp(0.0, 1.0),
+                    minHeight: 3,
+                    backgroundColor: theme.colorScheme.surfaceContainerHigh,
+                    color: (contextUsed / contextWindow) > 0.8
+                        ? HarnessColors.amber
+                        : theme.colorScheme.primary,
+                  ),
+                ),
+              ),
+              onTap: null,
+            ),
+          if ((usage?.cost ?? 0) > 0)
+            _MetaChip(
+              icon: Icons.payments_outlined,
+              label: formatMoney(usage!.cost),
+              onTap: null,
+            ),
+          if (task != null)
+            _MetaChip(
+              icon: Icons.checklist_rtl_rounded,
+              label: task.title,
+              color: HarnessColors.column(task.columnName, theme.brightness),
+              onTap: null,
+            ),
+        ],
+      ),
+    );
+  }
+
+  HarnessTask? _taskForSession(AppController app, String? id) {
+    if (id == null) return null;
+    for (final task in app.tasks?.tasks ?? const <HarnessTask>[]) {
+      if (task.sessionId == id) return task;
+    }
+    return null;
+  }
+}
+
+class _MetaChip extends StatelessWidget {
+  const _MetaChip({
+    required this.icon,
+    required this.label,
+    this.onTap,
+    this.color,
+    this.trailing,
+  });
+
+  final IconData icon;
+  final String label;
+  final VoidCallback? onTap;
+  final Color? color;
+  final Widget? trailing;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final tint = color ?? theme.colorScheme.onSurfaceVariant;
+    final content = Container(
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+      decoration: BoxDecoration(
+        color: (color ?? theme.colorScheme.onSurfaceVariant).withValues(
+          alpha: 0.07,
+        ),
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(
+          color: (color ?? theme.colorScheme.outlineVariant).withValues(
+            alpha: 0.25,
+          ),
+        ),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 12, color: tint),
+          const SizedBox(width: 5),
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 170),
+            child: Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: 10.5,
+                fontWeight: FontWeight.w600,
+                color: tint,
+              ),
+            ),
+          ),
+          if (onTap != null) ...[
+            const SizedBox(width: 3),
+            Icon(Icons.expand_more_rounded, size: 12, color: tint),
+          ],
+        ],
+      ),
+    );
+    if (onTap == null) return content;
+    return HarnessTap(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(999),
+      child: content,
+    );
+  }
+}
+
+class _PlanStrip extends StatelessWidget {
+  const _PlanStrip({required this.plan});
+  final List<PlanEntry> plan;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final done = plan.where((entry) => entry.isDone).length;
+    final active = plan.where((entry) => entry.isActive).firstOrNull;
+    final progress = plan.isEmpty ? 0.0 : done / plan.length;
+    return HarnessTap(
+      onTap: () => _showPlan(context),
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(16, 8, 12, 8),
+        decoration: BoxDecoration(
+          color: theme.colorScheme.primary.withValues(alpha: 0.04),
+          border: Border(
+            top: BorderSide(
+              color: theme.colorScheme.outlineVariant.withValues(alpha: 0.6),
+            ),
+          ),
+        ),
+        child: Row(
+          children: [
+            Icon(
+              Icons.map_outlined,
+              size: 15,
+              color: theme.colorScheme.primary,
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Row(
+                    children: [
+                      Text(
+                        'Plan',
+                        style: theme.textTheme.labelSmall?.copyWith(
+                          fontWeight: FontWeight.w700,
+                          color: theme.colorScheme.primary,
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                      Text(
+                        '$done / ${plan.length}',
+                        style: theme.textTheme.labelSmall?.copyWith(
+                          color: theme.colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 3),
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(2),
+                    child: LinearProgressIndicator(
+                      value: progress,
+                      minHeight: 3,
+                      backgroundColor: theme.colorScheme.surfaceContainerHigh,
+                      color: theme.colorScheme.primary,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            if (active != null) ...[
+              const SizedBox(width: 10),
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 160),
+                child: Text(
+                  active.content,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.labelSmall?.copyWith(
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ),
+            ],
+            const SizedBox(width: 6),
+            Icon(
+              Icons.expand_less_rounded,
+              size: 17,
+              color: theme.colorScheme.onSurfaceVariant,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _showPlan(BuildContext context) {
+    showHarnessSheet<void>(
+      context: context,
+      builder: (sheetContext) => Padding(
+        padding: const EdgeInsets.fromLTRB(20, 4, 20, 24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Plan',
+              style: Theme.of(sheetContext).textTheme.titleLarge
+                  ?.copyWith(fontWeight: FontWeight.w700),
+            ),
+            const SizedBox(height: 14),
+            ConstrainedBox(
+              constraints: BoxConstraints(
+                maxHeight: MediaQuery.sizeOf(sheetContext).height * 0.65,
+              ),
+              child: SingleChildScrollView(
+                child: Column(
+                  children: [
+                    for (final entry in plan)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 10),
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Icon(
+                              entry.isDone
+                                  ? Icons.check_circle_rounded
+                                  : entry.isActive
+                                  ? Icons.radio_button_checked_rounded
+                                  : Icons.radio_button_unchecked_rounded,
+                              size: 19,
+                              color: entry.isDone
+                                  ? HarnessColors.moss
+                                  : entry.isActive
+                                  ? Theme.of(sheetContext).colorScheme.primary
+                                  : Theme.of(sheetContext)
+                                        .colorScheme
+                                        .onSurfaceVariant,
+                            ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Text(
+                                entry.content,
+                                style: TextStyle(
+                                  fontSize: 14,
+                                  height: 1.4,
+                                  decoration: entry.isDone
+                                      ? TextDecoration.lineThrough
+                                      : null,
+                                  color: entry.isDone
+                                      ? Theme.of(sheetContext)
+                                            .colorScheme
+                                            .onSurfaceVariant
+                                      : null,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _ActivityBar extends StatefulWidget {
+  const _ActivityBar({
+    required this.activity,
+    required this.waiting,
+    required this.running,
+  });
+
+  final TurnActivity? activity;
+  final bool waiting;
+  final bool running;
+
+  @override
+  State<_ActivityBar> createState() => _ActivityBarState();
+}
+
+class _ActivityBarState extends State<_ActivityBar> {
+  Timer? _timer;
+
+  @override
+  void initState() {
+    super.initState();
+    _timer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted) setState(() {});
+    });
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final activity = widget.activity;
+    final label =
+        widget.waiting && (activity == null || activity.phase == 'checking')
+        ? 'Waiting for your answer'
+        : activity?.label ?? (widget.running ? 'Working' : '');
+    if (label.isEmpty) return const SizedBox.shrink();
+    final since = activity?.since;
+    final elapsed = since == null ? null : DateTime.now().difference(since);
+    final color = widget.waiting
+        ? HarnessColors.amber
+        : theme.colorScheme.primary;
+    return Container(
+      padding: const EdgeInsets.fromLTRB(16, 6, 16, 6),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.04),
+        border: Border(
+          top: BorderSide(
+            color: theme.colorScheme.outlineVariant.withValues(alpha: 0.5),
+          ),
+        ),
+      ),
+      child: Row(
+        children: [
+          if (widget.waiting)
+            Icon(Icons.front_hand_rounded, size: 14, color: color)
+          else
+            HarnessActivity(radius: 7, color: color),
+          const SizedBox(width: 9),
+          Expanded(
+            child: Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: theme.textTheme.labelSmall?.copyWith(
+                color: color,
+                fontWeight: FontWeight.w600,
+                fontSize: 11,
+              ),
+            ),
+          ),
+          if (elapsed != null)
+            Text(
+              _formatElapsed(elapsed),
+              style: theme.textTheme.labelSmall?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant.withValues(
+                  alpha: 0.6,
+                ),
+                fontSize: 10,
+                fontFeatures: const [FontFeature.tabularFigures()],
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  String _formatElapsed(Duration duration) {
+    if (duration.inSeconds < 60) return '${duration.inSeconds}s';
+    final minutes = duration.inMinutes;
+    final seconds = duration.inSeconds % 60;
+    return '${minutes}m ${seconds.toString().padLeft(2, '0')}s';
+  }
+}
+
+extension _FirstOrNull<T> on Iterable<T> {
+  T? get firstOrNull => isEmpty ? null : first;
+}
