@@ -2730,6 +2730,49 @@ off.  The transcript is left as it was."
               (should-not compose-quote-inline-mode)
               (should (equal transcript (buffer-substring-no-properties (point-min) (harness-compose--front)))))))))))
 
+(ert-deftest harness-ui-chat-quote-keeps-the-thread-it-answers ()
+  "An answer that quotes nothing is quoted with the message it answers nested.
+The user answered the agent's message inline; the agent's answer to that
+quotes nothing itself, so quoting it brings the user's reply -- the parts
+it quotes and the answers under them -- along one quote level deeper, and
+the thread of a specific thing can be read back in order.  A message that
+quotes something carries the thread already, and is quoted as it stands."
+  (harness-ui-chat-test-with
+    (let ((compose-quote-inline-hint nil)
+          (inhibit-message t))
+      (let ((sid (harness-ui-chat-test-session "Thread")))
+        (harness-call 'session/append sid '(:kind user :content "please check the build"))
+        (harness-call 'session/append sid '(:kind assistant :content "The build is green. The deploy is pending."))
+        (harness-call 'session/append sid '(:kind user :content "> The build is green.\n\nGood.\n\n> The deploy is pending.\n\nI will watch it."))
+        (harness-call 'session/append sid '(:kind assistant :content "All green in the logs."))
+        (let ((buf (harness-ui-chat-test-open sid)))
+          (with-current-buffer buf
+            (save-window-excursion
+              (set-window-buffer nil buf)
+              (goto-char harness-compose-end)
+              (execute-kbd-macro (kbd "C-c >"))
+              (should (equal (concat "> All green in the logs.\n"
+                                     ">\n"
+                                     "> > > The build is green.\n"
+                                     "> >\n"
+                                     "> > Good.\n"
+                                     "> >\n"
+                                     "> > > The deploy is pending.\n"
+                                     "> >\n"
+                                     "> > I will watch it.\n"
+                                     "\n")
+                             (harness-compose-text)))))))
+      (let ((sid (harness-ui-chat-test-session "Thread that quotes")))
+        (harness-call 'session/append sid '(:kind user :content "status?"))
+        (harness-call 'session/append sid '(:kind assistant :content "> status?\n\nAll green."))
+        (let ((buf (harness-ui-chat-test-open sid)))
+          (with-current-buffer buf
+            (save-window-excursion
+              (set-window-buffer nil buf)
+              (goto-char harness-compose-end)
+              (execute-kbd-macro (kbd "C-c >"))
+              (should (equal "> > status?\n>\n> All green.\n\n" (harness-compose-text))))))))))
+
 ;;;; Queue
 
 (ert-deftest harness-ui-chat-queue-add-edit-remove ()

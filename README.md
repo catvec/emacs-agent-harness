@@ -160,8 +160,8 @@ OpenAI-compatible APIs and AWS Bedrock.
 | A lasting answer, undone from another session: both offer [Redo] | An "always" cold-cache answer, and a chat it decided for |
 | ![The task slots page: four slots in use, each a box with its task, priority, state and time at work; the queue by priority, the next four in line, and how long tasks waited for a slot this week](docs/media/slots.png) | |
 | A project's task slots: who holds them, who waits, for how long | |
-| ![A chat whose agent replied in three paragraphs, the reply quoted in the compose box with C-c > and answered inline: the middle of the long paragraph elided as [...], the quote split in two with an answer under each part](docs/media/quote-reply.png) | |
-| Answering a reply inline: `C-c >` quotes it, `C-c [` elides what you skip as `[...]`, `M-RET` splits the quote to answer a part | |
+| ![A chat whose agent replied in three paragraphs, the reply quoted in the compose box with C-c > and answered inline: the middle of the long paragraph elided as [...], the quote split in two with an answer under each part](docs/media/quote-reply.png) | ![A chat whose agent answered a reply that quoted it: the agent's answer quoted in the compose box with the thread under it one level deeper, the user's answers and the agent's message they quoted, and an answer typed under the agent's line](docs/media/quote-thread.png) |
+| Answering a reply inline: `C-c >` quotes it, `C-c [` elides what you skip as `[...]`, `M-RET` splits the quote to answer a part | The thread kept: the message the reply answers, and what that answered, nested under the quote |
 
 ## Requirements
 
@@ -666,10 +666,9 @@ so `C-c .` is how you aim a key at a panel from there (see
 | `C-c C-s` | Search the transcript |
 | `C-c C-t` | Show or hide the session's todo list |
 | `C-c C-w` | Copy the last reply |
-| `C-c >` | Quote, to reply: the selected text, or the agent's reply or plan at point (elsewhere the one above it, from the box the last), goes in the compose box as a Markdown quote, point under it. A selection keeps its code blocks, inline code and links as Markdown, and leaves out what a fold hides. It is the [compose-quote](lisp/vendor/compose-quote/README.md) library's command (see *Answering inline*, below). `C-c h >` does it for the selection of any buffer (see [Prompting with the region](#prompting-with-the-region)) |
+| `C-c >` | Quote, to reply: the selected text, or the agent's reply or plan at point (elsewhere the one above it, from the box the last), goes in the compose box as a Markdown quote, point under it. An answer that quotes nothing comes with the message it answers nested under it, so a thread's replies quote each other. A selection keeps its code blocks, inline code and links as Markdown, and leaves out what a fold hides. It is the [compose-quote](lisp/vendor/compose-quote/README.md) library's command (see *Answering inline*, below). `C-c h >` does it for the selection of any buffer (see [Prompting with the region](#prompting-with-the-region)) |
 | `M-RET` | In a quote in the compose box: split it where point is, to answer that part: the quote above, an empty line for your answer, the quote below |
 | `C-c [` | In a quote in the compose box: elide the region, or the rest of its paragraph from point (with `C-u`, the rest of the quote), leaving `[...]`, so a bit of front matter stays for context |
-| `C-c >` | Quote, to reply: the selected text, or the agent's reply or plan at point (elsewhere the one above it, from the box the last), goes in the compose box as a Markdown quote, point under it. A selection keeps its code blocks, inline code and links as Markdown, and leaves out what a fold hides |
 | `C-c C-e` | Jump to the bottom; while the window is scrolled away from it, the header line shows `↓ newer messages`, which does the same |
 | `C-c C-r` | Redraw the buffer |
 | `C-c C-z` | Bury the session: its window shows the buffer it showed before (a side window closes) |
@@ -702,6 +701,31 @@ library's, which the harness vendors in `lisp/vendor/compose-quote`. It
 needs nothing of the harness and works in any Emacs buffer, a mail reply
 too: `(add-hook 'message-mode-hook #'compose-quote-mode)` gives
 `message-mode` the same three keys.
+
+The thread keeps its quotes. An answer that quotes nothing of its own is
+quoted with the message it answers nested under it, one `>` level
+deeper, so the replies of a thread quote each other and what the thread
+is about reads back in order:
+
+```
+> All green in the logs.
+>
+> > > The build is green.
+> >
+> > Good.
+> >
+> > > The deploy is pending.
+> >
+> > I will watch it.
+```
+
+A message that quotes something already is quoted as it stands: its
+writer answered inline, so it carries the thread itself. The agent
+answers inline too: a message of yours that quotes the agent's and
+answers under the quotes is sent to the model with a note saying so, so
+its answer keeps the quotes and goes on under them, and the thread a
+thing is discussed in goes on from both sides. The note is the
+harness's own, and the transcript keeps your message as you wrote it.
 
 Drag a file from your file browser onto a chat or the task board and it
 attaches. Drag a *link* — an image from a web page, a video, any address

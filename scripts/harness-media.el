@@ -2440,6 +2440,58 @@ picture shows it."
       (harness-media--capture "quote-reply"))
     (harness-call 'session/delete id)))
 
+(defun harness-media-shot-quote-thread ()
+  "A reply quoted in the compose box with the thread it answers.
+The session is a short exchange about webhooks: the agent says a failed
+delivery is retried once, the user answers both parts of that inline,
+and the agent answers that it changed them.  From the box, C-c > quotes
+the agent's answer, and under it the reply it answers, one level
+deeper: what that reply quoted is deeper still, so the thread's replies
+quote each other and it reads back in order.  The agent's line is split
+with M-RET there and the user's answer typed under it.  Point ends in
+the box, after the answer.  The session is made here and deleted after,
+so no other picture shows it."
+  (let ((id (harness-media--new-session :name "Retry failed webhooks"
+                                        :model "claude:claude-opus-5-5"
+                                        :permission-mode 'accept-edits)))
+    (harness-call 'session/append id
+                  (list :kind 'user :content "How long do we wait before retrying a failed webhook?"))
+    (harness-call 'session/append id
+                  (list :kind 'assistant :content "A failed delivery is retried once, 30 seconds later.\n\nIf it fails again it is logged and dropped."))
+    (harness-call 'session/append id
+                  (list :kind 'user :content "> A failed delivery is retried once, 30 seconds later.\n\nMake it three tries.\n\n> If it fails again it is logged and dropped.\n\nLog the URL too."))
+    (harness-call 'session/append id
+                  (list :kind 'assistant :content "Changed: three tries, 30 seconds apart, and the URL is in the log line."))
+    (let* ((buffer (harness-media--chat-shot id "acme/webhooks.py"))
+           (chat (get-buffer-window buffer))
+           (code (car (delq chat (window-list nil 'nomini)))))
+      (select-window chat)
+      (with-current-buffer buffer
+        ;; From the box, C-c > quotes the agent's last reply and, under
+        ;; it, the inline reply it answers, the agent's message that
+        ;; reply quoted under that.
+        (goto-char harness-compose-end)
+        (harness-media--keys "C-c >")
+        (harness-media--box-expect "\\`> Changed: three tries")
+        (harness-media--box-expect "> > > A failed delivery is retried once, 30 seconds later\\.")
+        (harness-media--box-expect "> > Log the URL too\\.")
+        ;; The agent's line answered: M-RET splits the quote there, and
+        ;; the answer goes on the empty line under it.
+        (harness-media--box-goto "Changed: three tries[^\n]*" t)
+        (harness-media--keys "M-RET")
+        (harness-media--box-expect "log line\\.\n\n\n\n> > > A failed delivery")
+        (harness-media--type "Good. Ship it with the release.")
+        (harness-media--box-expect "log line\\.\n\nGood\\. Ship it with the release\\."))
+      ;; The box has grown: the frame fits the chat as it stands.
+      (harness-media--fit (max (harness-media--text-lines chat) (harness-media--text-lines code)) 30)
+      (harness-media--to-bottom buffer)
+      ;; Scrolling put point at the box's end; the picture has it after
+      ;; the answer typed under the agent's line.
+      (with-current-buffer buffer
+        (harness-media--box-goto "Good\\. Ship it with the release\\." t))
+      (harness-media--capture "quote-thread"))
+    (harness-call 'session/delete id)))
+
 (defun harness-media--text-lines (window)
   "Return how many lines the text of WINDOW's buffer takes in WINDOW.
 Images taller than a line count as they are drawn; the padding that
@@ -3346,8 +3398,9 @@ afterwards."
     ;; would count in the usage pictures' totals.
     ("chat-denied" . harness-media-shot-chat-denied)
     ("chat-denied-approved" . harness-media-shot-chat-denied-approved)
-    ;; Likewise: it asks a session of its own, deleted after the picture.
-    ("quote-reply" . harness-media-shot-quote-reply))
+    ;; Likewise: they ask a session of their own, deleted after the picture.
+    ("quote-reply" . harness-media-shot-quote-reply)
+    ("quote-thread" . harness-media-shot-quote-thread))
   "Every picture, as (NAME . FUNCTION), in the order they are taken.")
 
 ;;;; Entry point

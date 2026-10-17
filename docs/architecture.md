@@ -9384,10 +9384,17 @@ right before each labelled image of a user message for every provider
 `harness-blocks-text` leaves out the image placeholder of a
 labelled image the text names already, and a file's `@name` when the
 text has an @ reference to it (`harness-names-file-p`), so a
-file the box referenced is not named twice in the transcript.  These
-three live in `harness-util` (the agent's old names are aliases of
-them): the chat reads a queued message with them as the agent will
-record it (`harness-queued-message-node`).  Queued
+file the box referenced is not named twice in the transcript.  A user
+message that answers the model inline -- quotes a part of its message
+and answers under the quote (`harness-agent--inline-reply-p`) -- gets a
+note of the harness's too, saying to answer the same way, quoting each
+part answered (`harness-agent--inline-reply-note`).  Only the model
+reads it: it is added to the request the harness builds, never to the
+transcript, which keeps the message as the user wrote it.  A message
+that only quotes, a region prompt say, is not answered inline and gets
+none.  These three live in `harness-util` (the agent's old names are
+aliases of them): the chat reads a queued message with them as the agent
+will record it (`harness-queued-message-node`).  Queued
 items sent as one message number their images on across it
 (`harness-agent--queue-blocks`, tokens rewritten with them).  The chat
 styles the references of what a user message attached in its text -- the
@@ -9491,6 +9498,16 @@ by setting what the library asks of a host:
   thinking point is on, else the nearest response or plan above point,
   so the last one from the box; a report popout's
   `harness-ui-report--quote` its summary.
+- A chat's message comes with the thread it answers
+  (`harness-chat--quote-markdown`): an answer that quotes nothing itself
+  is quoted with the message it answers nested under it, one `>` level
+  deeper, so the replies of a thread quote each other and it reads back
+  in order.  A message that holds a quote of its own is quoted as it
+  stands: its writer answered inline, so it carries the thread already,
+  and nesting its parent too would say the same thing twice
+  (`harness-chat--quoted-markdown-p`, `harness-chat--answering-block`,
+  the newest user message older than it among the blocks the transcript
+  holds).
 - `compose-quote-insert-hook` has `harness-compose--quoted` on it in the
   box's buffer: the box may be out of sight, so it counts a jump
   (`harness-compose--jumps`), which makes its windows follow it again,
@@ -9514,7 +9531,12 @@ two keys and nothing else: it outranks the host's map while point is in
 a quote, so any other key it took -- `C-c .`, say, which a host may bind
 for the box -- would stop working there
 (`harness-ui-compose-quote-leaves-the-box-keys` checks every key of the
-box).
+box).  The thread of a specific thing goes on from both sides: the chat
+quotes a message with the message it answers nested under it (see
+above), and a message of the user's that answers the model inline
+reaches it with a note saying to answer the same way
+(`harness-agent--inline-reply-note`), so its answers quote the parts
+they answer in turn.
 
 The harness's own quoting names are obsolete aliases of the library's:
 `harness-compose-quote-reply`, `harness-compose-quote-string` and

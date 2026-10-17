@@ -541,6 +541,29 @@ A task the user attached is such an attachment; files are as they were."
       (should (equal "see this\n\nTask t-1: it fails on main"
                      (plist-get (car (harness-call 'session/nodes id)) :content))))))
 
+(ert-deftest harness-agent-inline-reply-is-answered-the-same-way ()
+  "A user message that answers the model inline is sent with a note saying so.
+The note is the harness's own: only the model reads it, while the
+transcript keeps the message as the user wrote it.  A message that only
+quotes -- a region prompt, a selection pasted in -- is not answered
+inline and gets no note, and neither does one that quotes nothing."
+  (harness-agent-test-with
+    (let ((id (harness-agent-test-hosted-session))
+          (reply "> The build is green.\n\nGood.\n\n> The deploy is pending.\n\nI will watch it."))
+      (harness-agent-test-define-hosted
+       (lambda (_prompt) '((:type text :delta "Right.") (:type done :stop-reason end-turn))))
+      (should (eq 'end-turn (plist-get (harness-test-await (harness-call 'agent/prompt id reply)) :stop-reason)))
+      (let ((user (cl-find-if (lambda (m) (eq 'user (plist-get m :role)))
+                              (plist-get (car (last harness-agent-test-requests)) :messages))))
+        (should (equal (list (list :type "text" :text reply)
+                             (list :type "text" :text harness-agent--inline-reply-note))
+                       (plist-get user :content))))
+      (should (equal reply (plist-get (car (harness-call 'session/nodes id)) :content))))
+    (should-not (harness-agent--inline-reply-p
+                 (list (list :type "text"
+                             :text "From `ratelimit.py` (lines 1-2):\n\n> calls = 0\n> def f(): pass"))))
+    (should-not (harness-agent--inline-reply-p (list (list :type "text" :text "status?"))))))
+
 (defun harness-agent-test-image (dir)
   "Write a PNG image in DIR and return its file name."
   (let ((file (expand-file-name "shot.png" dir)))

@@ -4624,22 +4624,70 @@ See `harness-chat-next-action'."
                 (harness-chat-block-content block))))
     (and (stringp text) (not (string-blank-p text)) text)))
 
+(defconst harness-chat--quoted-line-regexp "^[ \t]*>"
+  "Regexp matching a line of a Markdown block quote in a message.
+See `harness-chat--quoted-markdown-p'.")
+
+(defun harness-chat--quoted-markdown-p (text)
+  "Non-nil when TEXT holds a line of a Markdown block quote.
+A message the user answered inline holds one, and so does a reply that
+answers such a message (`harness-chat--quote-markdown')."
+  (and (stringp text) (string-match-p harness-chat--quoted-line-regexp text) t))
+
+(defun harness-chat--answering-block (block)
+  "Return the block of the message BLOCK answers, or nil.
+That is the newest user message older than BLOCK among the blocks the
+transcript holds."
+  (when-let* ((pos (cl-position (harness-chat-block-id block) harness-chat--order :test #'equal)))
+    (cl-loop for id in (nthcdr (1+ pos) harness-chat--order)
+             for older = (gethash id harness-chat--blocks)
+             when (and older (equal (harness-chat-block-kind older) "user")
+                       (harness-chat--block-markdown older))
+             return older)))
+
+(defun harness-chat--quote-markdown (block)
+  "Return the Markdown to quote for BLOCK, the thread it answers with it.
+BLOCK's own Markdown, and under it, one quote level deeper, the message
+it answers when that message is an inline reply BLOCK does not already
+carry in its own text: an answer that quotes nothing itself quotes what
+it answers, so the thread of a specific thing keeps the responses it
+holds and can be read back in order.  A message that quotes already --
+one whose writer answered inline -- carries the thread itself, and is
+quoted as it stands (`harness-chat--quoted-markdown-p').  Only a
+response or a plan is an answer, and only it comes with its thread;
+thinking does not."
+  (let ((text (harness-chat--block-markdown block)))
+    (if (or (null text)
+            (not (member (harness-chat-block-kind block) '("assistant" "plan")))
+            (harness-chat--quoted-markdown-p text))
+        text
+      (let* ((parent (harness-chat--answering-block block))
+             (above (and parent (harness-chat--block-markdown parent))))
+        (if (harness-chat--quoted-markdown-p above)
+            (concat text "\n\n" (compose-quote-string above))
+          text)))))
+
 (defun harness-chat--quote-at-point ()
-  "Return the Markdown of the agent's message to quote from point, or nil.
+  "Return the Markdown of the message to quote from point, or nil.
 That is the response, plan or thinking point is on; anywhere else -- a
 tool call, the user's message, the compose box -- the response or plan
-nearest above point, so the agent's last one from the box.  The chat's
-`compose-quote-function', for \\[compose-quote-reply]."
+nearest above point, so the agent's last one from the box.  The message
+comes with the thread it answers, as `harness-chat--quote-markdown'
+leaves it.  The chat's `compose-quote-function', for
+\\[compose-quote-reply]."
   (let* ((id (get-text-property (point) 'harness-chat-node))
-         (here (and id (gethash id harness-chat--blocks))))
-    (or (and here (member (harness-chat-block-kind here) '("assistant" "plan" "thinking"))
-             (harness-chat--block-markdown here))
-        (cl-loop for id in harness-chat--order
-                 for block = (gethash id harness-chat--blocks)
-                 for start = (and block (harness-chat-block-start block))
-                 thereis (and start (marker-position start) (< start (point))
-                              (member (harness-chat-block-kind block) '("assistant" "plan"))
-                              (harness-chat--block-markdown block))))))
+         (here (and id (gethash id harness-chat--blocks)))
+         (block (if (and here (member (harness-chat-block-kind here)
+                                      '("assistant" "plan" "thinking")))
+                    here
+                  (cl-loop for id in harness-chat--order
+                           for older = (gethash id harness-chat--blocks)
+                           for start = (and older (harness-chat-block-start older))
+                           when (and start (marker-position start) (< start (point))
+                                     (member (harness-chat-block-kind older) '("assistant" "plan"))
+                                     (harness-chat--block-markdown older))
+                           return older))))
+    (and block (harness-chat--quote-markdown block))))
 
 (defun harness-chat-tab ()
   "Complete in the compose box; elsewhere expand or collapse the block at point."
@@ -4927,8 +4975,11 @@ buffer's; pressed again, from outside the box or with a prefix argument
 they go on to the buffer's.
 
 \\<harness-chat-mode-map>\\[compose-quote-reply] quotes the region, or the agent's message at point, in
-the box, to reply to it; from the box, the agent's last message.  Answer
-a quote inline, part by part: in a quote in the box,
+the box, to reply to it; from the box, the agent's last message.  An
+answer that quotes nothing of its own is quoted with the message it
+answers nested under it, so the replies of a thread quote each other and
+it reads back in order.  Answer a quote inline, part by part: in a quote
+in the box,
 \\<compose-quote-inline-mode-map>\\[compose-quote-split] splits it where point is, to answer that part, and
 \\[compose-quote-elide] elides the region, or the rest of the paragraph, as [...].
 \\[harness-prompt-region] does the same for the region, here and in any

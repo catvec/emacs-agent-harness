@@ -109,6 +109,27 @@ They are what the providers take as an image of a tool result.")
   "\n\n[The image this call returned is no longer attached, to keep the request small; read the file again to see it.]"
   "Added to a tool result whose image `harness-agent-history-images' left out.")
 
+(defconst harness-agent--inline-reply-note
+  "[This message answers yours inline: each line that starts with \"> \" quotes a part of your earlier message, and the lines under it are the user's answer to that part.  Answer the same way: quote the part you answer with \"> \", keeping the quotes that are already there, and write your answer under it, so the thread reads in order.]"
+  "Added to a user message that answers the model inline.
+Only the model reads it; the transcript keeps the message as the user
+wrote it (`harness-agent--inline-reply-p').")
+
+(defun harness-agent--inline-reply-p (blocks)
+  "Non-nil when BLOCKS, a user message, answers the model inline.
+That is a line of the message from \"> \" on with, further down, a line
+of its own: the user's answer under the part it quotes.  A message that
+only quotes -- a region prompt, a selection pasted in -- has no such
+line, and is not answered inline."
+  (let ((quoted nil))
+    (catch 'found
+      (dolist (block blocks)
+        (when (equal (plist-get block :type) "text")
+          (dolist (line (split-string (or (plist-get block :text) "") "\n"))
+            (cond ((string-match-p "\\`[ \t]*>" line) (setq quoted t))
+                  ((and quoted (not (string-blank-p line))) (throw 'found t))))))
+      nil)))
+
 (defun harness-agent--image-gone-note (path)
   "Return what a tool result says of its image, the file at PATH, once unreadable."
   (format "\n\n[The image this call returned (%s) is gone; read the file again to see it.]" path))
@@ -462,14 +483,19 @@ returned as it is."
 Each block as `harness-agent--prepare-block' leaves it, and an image
 with a label after a text block of its token, [image 1]: the text of
 the message names its images by their tokens, and the model must tell
-which image each one means."
-  (mapcan (lambda (b)
-            (let ((ready (harness-agent--prepare-block b session))
-                  (label (harness-agent--image-label b)))
-              (if label
-                  (list (list :type "text" :text (format "[%s]" label)) ready)
-                (list ready))))
-          blocks))
+which image each one means.  A message that answers the model inline
+gets `harness-agent--inline-reply-note' after its text, which only the
+model reads: the transcript keeps the message as the user wrote it."
+  (let ((ready (mapcan (lambda (b)
+                         (let ((ready (harness-agent--prepare-block b session))
+                               (label (harness-agent--image-label b)))
+                           (if label
+                               (list (list :type "text" :text (format "[%s]" label)) ready)
+                             (list ready))))
+                       blocks)))
+    (if (harness-agent--inline-reply-p blocks)
+        (append ready (list (list :type "text" :text harness-agent--inline-reply-note)))
+      ready)))
 
 (defun harness-agent--prepare-messages (session messages)
   "Return MESSAGES with the content of each user message ready for SESSION.
