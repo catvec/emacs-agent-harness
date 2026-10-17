@@ -13,6 +13,9 @@
 (defvar harness-tasks--starting)
 (defvar harness-tasks--waking)
 (defvar harness-tasks--joining)
+(defvar harness-tasks--superseding)
+(defvar harness-tasks--message-starts)
+(defvar harness-tasks--write-up-messages)
 (defvar harness-tasks--naming)
 (defvar harness-tasks--blocked-at)
 (defvar harness-tasks--lend-timers)
@@ -63,6 +66,9 @@ turn `harness-tasks-require-verification' on themselves."
      (clrhash harness-tasks--table)
      (clrhash harness-tasks--starting)
      (clrhash harness-tasks--waking)
+     (clrhash harness-tasks--superseding)
+     (clrhash harness-tasks--message-starts)
+     (clrhash harness-tasks--write-up-messages)
      (clrhash harness-tasks--naming)
      ;; No earlier test's blocked session or lend timer reaches this one.
      (clrhash harness-tasks--blocked-at)
@@ -1443,6 +1449,105 @@ sends it the task itself, not a \"carry on\"."
           (should-not (harness-node-sender request))
           (should (equal (harness-sender-system "tasks") (harness-node-sender start))))))))
 
+(defun harness-tasks-test-last-assistant-text (sid)
+  "The text of the newest assistant message of session SID, or nil."
+  (when-let* ((node (cl-find 'assistant (reverse (harness-call 'session/nodes sid))
+                             :key (lambda (n) (plist-get n :kind)))))
+    (plist-get node :content)))
+
+(ert-deftest harness-tasks-a-message-starts-a-backlog-task ()
+  "A message from the user to a backlog session starts the task.
+It is not more feedback on the write-up: `task/prompt' (the board's
+[Refine]) is that."
+  (harness-tasks-test-with
+    (let ((harness-tasks-max-running nil)
+          (harness-provider-demo-script-override
+           `((:type text :delta ,harness-tasks-test-write-up) (:type done :stop-reason end-turn))))
+      (let* ((id (harness-tasks-test-refine "the parser chokes on nested quotes"))
+             (sid (harness-tasks-test-session-id id)))
+        (harness-tasks-test-wait-state id 'pending)
+        (should (plist-get (harness-tasks-test-task id) :backlog))
+        (setq harness-provider-demo-script-override
+              '((:type text :delta "Working on it.") (:type done :stop-reason end-turn)))
+        ;; What the session chat sends: a message, not task/prompt.
+        (harness-call 'agent/prompt sid "start")
+        (harness-tasks-test-wait-state id 'done)
+        (let ((task (harness-tasks-test-task id)))
+          (should-not (plist-get task :backlog))
+          (should (eq 'end-turn (plist-get task :outcome)))
+          ;; The write-up it had is the work's prompt; it was not rewritten.
+          (should (equal harness-tasks-test-write-up (plist-get task :prompt)))
+          (should (equal "Working on it." (harness-tasks-test-last-assistant-text sid))))
+        ;; The user's words stay in the transcript, and the task's own
+        ;; start message follows them.
+        (let ((texts (harness-tasks-test-user-texts sid)))
+          (should (= 3 (length texts)))
+          (should (equal "start" (nth 1 texts)))
+          (should (string-match-p (regexp-quote harness-tasks-test-write-up) (nth 2 texts))))))))
+
+(ert-deftest harness-tasks-start-supersedes-a-running-write-up ()
+  "task/start stops a write-up that runs and starts the task when it ends.
+The write-up's end never finishes it, rewrites its prompt or takes the
+task to review: the work turn runs afterwards."
+  (harness-tasks-test-with
+    (let ((harness-tasks-max-running nil)
+          (harness-provider-demo-script-override '((:type text :delta "Still writing it up"))))
+      (let* ((id (harness-tasks-test-refine "a slow idea"))
+             (sid (harness-tasks-test-session-id id)))
+        (harness-test-wait (lambda () (harness-tasks--turn-p (harness-tasks-test-task id)))
+                           5 "the write-up turn")
+        (should (eq 'refining (harness-tasks-test-state id)))
+        (setq harness-provider-demo-script-override
+              '((:type text :delta "Working on it.") (:type done :stop-reason end-turn)))
+        (let ((view (harness-call 'task/start id)))
+          ;; Out of the backlog at once, and starting: the write-up turn
+          ;; that is stopping can no longer decide anything for the task.
+          (should-not (plist-get view :backlog))
+          (should (memq (plist-get view :state) '(active done))))
+        (harness-tasks-test-wait-state id 'done)
+        (let ((task (harness-tasks-test-task id)))
+          (should (eq 'end-turn (plist-get task :outcome)))
+          ;; The write-up never finished: the prompt is what it had, and
+          ;; the work turn after the stopped write-up is the one that ran.
+          (should (equal "a slow idea" (plist-get task :prompt)))
+          (should-not (plist-get task :refined))
+          (should (equal "Working on it." (harness-tasks-test-last-assistant-text sid))))
+        ;; The task's start message is the second message; the stopped
+        ;; write-up wrote no final reply into the transcript.
+        (let ((texts (harness-tasks-test-user-texts sid)))
+          (should (= 2 (length texts)))
+          (should (string-match-p (regexp-quote harness-tasks--start-message) (nth 1 texts)))
+          (should (string-match-p "a slow idea" (nth 1 texts))))))))
+
+(ert-deftest harness-tasks-a-message-supersedes-a-running-write-up ()
+  "A message the user writes while a write-up runs starts the task.
+The write-up is stopped, never finishes, and the work turn runs after it."
+  (harness-tasks-test-with
+    (let ((harness-tasks-max-running nil)
+          (harness-provider-demo-script-override '((:type text :delta "Still writing it up"))))
+      (let* ((id (harness-tasks-test-refine "a slow idea"))
+             (sid (harness-tasks-test-session-id id)))
+        (harness-test-wait (lambda () (harness-tasks--turn-p (harness-tasks-test-task id)))
+                           5 "the write-up turn")
+        (should (eq 'refining (harness-tasks-test-state id)))
+        (setq harness-provider-demo-script-override
+              '((:type text :delta "Working on it.") (:type done :stop-reason end-turn)))
+        ;; What the session chat sends while the write-up runs: it steers
+        ;; the turn, and the task starts once the stopped turn is gone.
+        (harness-call 'agent/prompt sid "start")
+        (harness-tasks-test-wait-state id 'done)
+        (let ((task (harness-tasks-test-task id)))
+          (should-not (plist-get task :backlog))
+          (should (eq 'end-turn (plist-get task :outcome)))
+          ;; The write-up never finished: the prompt is what it had.
+          (should (equal "a slow idea" (plist-get task :prompt)))
+          (should-not (plist-get task :refined))
+          (should (equal "Working on it." (harness-tasks-test-last-assistant-text sid))))
+        (let ((texts (harness-tasks-test-user-texts sid)))
+          (should (= 3 (length texts)))
+          (should (equal "start" (nth 1 texts)))
+          (should (string-match-p (regexp-quote harness-tasks--start-message) (nth 2 texts))))))))
+
 (ert-deftest harness-tasks-queue-a-backlog-task ()
   "task/queue puts a backlog task back in the queue; a free slot starts it.
 Its work still opens with the write-up and the request it came from."
@@ -1798,7 +1903,7 @@ reaches the current tasks, still reaches it by its column."
     (let ((harness-provider-demo-script-override '((:type text :delta "Thinking about it"))))
       (let* ((id (harness-tasks-test-refine "a slow idea"))
              (sid (plist-get (harness-tasks-test-task id) :session)))
-        (should-error (harness-call 'task/start id))
+        ;; A start would supersede the write-up; a hand edit waits for it.
         (should-error (harness-call 'task/update id "by hand"))
         (should (harness-call 'task/cancel id))
         (harness-test-wait (lambda () (eq 'cancelled (plist-get (harness-tasks-test-task id) :outcome)))

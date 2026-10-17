@@ -341,12 +341,12 @@ once the minimum interval since the last build began is over."
       ;; The chat lists the attaching command for the menu.
       (let ((attach (harness-ui-quick-search-test--entry "harness-compose-add-attachment" chat))
             (elsewhere (harness-ui-quick-search-test--entry "harness-compose-add-attachment" plain)))
-        (should (equal "Attach file" (plist-get attach :label)))
+        (should (equal "Attach file or task" (plist-get attach :label)))
         (should (equal "Chat" (plist-get attach :where)))
         (should (equal "C-c C-a" (plist-get attach :keys)))
         (should (eq t (plist-get attach :here)))
         ;; Elsewhere it is there too, but does not run there.
-        (should (equal "Attach file" (plist-get elsewhere :label)))
+        (should (equal "Attach file or task" (plist-get elsewhere :label)))
         (should (eq :false (plist-get elsewhere :here))))
       ;; A command under the prefix, from anywhere.
       (let ((model (harness-ui-quick-search-test--entry "harness-set-model" plain)))

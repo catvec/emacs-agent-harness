@@ -3229,7 +3229,8 @@ Each is called without arguments in the chat buffer on every render of
 the tail and returns a string, or nil for nothing.  The strings go
 between the queue and the attachments, in order, read-only and above
 the compose box.  Add to it buffer-locally, with a symbol, so a reload
-redefines it.  The task module shows its review banner this way.")
+redefines it.  The task modules show their review and backlog banners
+this way.")
 
 (defvar harness-chat-tool-body-functions nil
   "Functions giving a tool call block a body of their own.

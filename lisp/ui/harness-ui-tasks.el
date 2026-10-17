@@ -80,6 +80,15 @@
 ;; and the sessions and commands it found above them
 ;; (harness-ui-tasks-search.el, through `harness-ui-tasks-filter').
 ;;
+;; A backlog task's own session shows a banner above its compose box:
+;; that it waits in the Backlog, or is being written up, with the card's
+;; [Start now] and, while it waits, [Queue it].  A message typed in that
+;; session starts the task, whether it waits or its write-up still runs,
+;; which the message stops; feedback on the write-up is the board's
+;; [Refine].  [Start now] supersedes a write-up that runs the same way:
+;; it stops it and starts the task with the write-up it has when the
+;; turn has ended.
+;;
 ;; Priority: a task is low, medium (the default) or high priority, and
 ;; that priority is its session's -- every task has its session from
 ;; submission, holding the level, so the board and the queues the
@@ -159,6 +168,7 @@
 (require 'subr-x)
 (require 'project)
 (require 'text-property-search)
+(require 'button)
 (require 'harness-core)
 (require 'harness-util)
 (require 'harness-files)
@@ -196,6 +206,11 @@ it is, the toggle above the compose box switches it per board."
   "The completed mark." :group 'harness-ui-tasks)
 (defface harness-task-review-face '((t :inherit success :weight bold))
   "Tasks waiting for your review: their mark, heading and count." :group 'harness-ui-tasks)
+(defface harness-chat-backlog-face
+  '((((background light)) :background "#eef1f8" :extend t)
+    (((background dark)) :background "#202534" :extend t))
+  "Background of a backlog task's banner in its session: the board's Backlog."
+  :group 'harness-ui-tasks)
 (defface harness-task-merging-face '((t :inherit harness-dim-face))
   "The mark of a task waiting in the merge queue." :group 'harness-ui-tasks)
 (defface harness-task-choice-face '((t :inherit bold))
@@ -272,6 +287,9 @@ show it (see `harness-ui-tasks-toggle-subtitle').")
 (defvar harness-ui-tasks-board-map)
 (defvar harness-ui-btw-start-function)
 (defvar harness-ui-btw-about)
+(defvar harness-chat-panel-functions)
+(defvar harness-chat-placeholder)
+
 (declare-function harness-btw "harness-ui-btw")
 (declare-function harness-ui-popout-at-point "harness-ui-popout")
 (declare-function harness-ui-popout-try-at-point "harness-ui-popout")
@@ -5116,6 +5134,217 @@ the board; a failure shows on the board too."
   (harness-ui-tasks--fetch (current-buffer))
   (harness-ui-refresh-sessions))
 
+;;;; The backlog in a session
+;;
+;; A backlog task's session is where the task was written up, and the
+;; chat there is where the user looks at it.  Nothing said which task it
+;; was or how to start it: the board was the only place with [Start
+;; now].  So a session whose task waits in the backlog, or is being
+;; written up, gets a banner above its compose box saying so, with the
+;; same [Start now] and [Queue it] as the card.  The box says what a
+;; message does there: it starts the task (harness-tasks.el), whether
+;; the write-up waits in the backlog or still runs, in which case the
+;; message stops it first; feedback on the write-up is the board's
+;; [Refine].
+
+(defvar harness-ui-tasks--session-tasks (make-hash-table :test 'equal)
+  "Session id -> the task record of that session, as last heard.")
+
+(defvar harness-ui-tasks--session-tasks-asked (make-hash-table :test 'equal)
+  "Session ids whose task was looked up once.")
+
+(defconst harness-ui-tasks--backlog-hints
+  '("Message…  sending stops the write-up and starts the task"
+    "Message…  sending starts the task")
+  "What this session's compose box asks for while its task is in the backlog.
+The first while a write-up runs, which the message stops and starts the
+task; the second while the task waits, when the message starts it.")
+
+(defun harness-ui-tasks--chat-buffer (sid)
+  "Return the live chat buffer showing session SID, or nil."
+  (cl-find-if (lambda (buffer)
+                (equal (buffer-local-value 'harness-ui-session-id buffer) sid))
+              (buffer-list)))
+
+(defun harness-ui-tasks--redraw-session (sid)
+  "Draw the tail of SID's chat buffer again, when it shows."
+  (when-let* ((buffer (harness-ui-tasks--chat-buffer sid)))
+    (with-current-buffer buffer
+      (when (functionp harness-compose-redraw-function)
+        (funcall harness-compose-redraw-function)))))
+
+(defun harness-ui-tasks--fetch-session-task (sid)
+  "Look up SID's task and redraw the banner of its chat.
+A session that is no task's is remembered as such, so the lookup
+happens once per session."
+  (harness-ui-call
+   "_harness/task/for-session" (list :session-id sid)
+   (lambda (task)
+     (if (and task (plist-get task :id))
+         (puthash sid task harness-ui-tasks--session-tasks)
+       (remhash sid harness-ui-tasks--session-tasks))
+     (harness-ui-tasks--redraw-session sid))
+   #'ignore))
+
+(defun harness-ui-tasks--session-task (sid)
+  "Return SID's task record when it is a task's, else nil."
+  (when (and (stringp sid) (not (string-empty-p sid)))
+    (unless (gethash sid harness-ui-tasks--session-tasks-asked)
+      (puthash sid t harness-ui-tasks--session-tasks-asked)
+      (harness-ui-tasks--fetch-session-task sid))
+    (gethash sid harness-ui-tasks--session-tasks)))
+
+(defun harness-ui-tasks--on-session-task-event (event args)
+  "Keep the session task records in step with EVENT and its ARGS.
+The banner of an open session follows its task, and a session that
+becomes a task's, or stops being one, is looked up again."
+  (pcase event
+    ((or "task/changed" "task/review" "task/done")
+     (let ((task (car args)))
+       (when-let* ((sid (plist-get task :session)))
+         (if (and task (plist-get task :id))
+             (puthash sid task harness-ui-tasks--session-tasks)
+           (remhash sid harness-ui-tasks--session-tasks))
+         (harness-ui-tasks--redraw-session sid))))
+    ("task/deleted"
+     (let ((id (car args)))
+       (maphash (lambda (sid task)
+                  (when (equal id (plist-get task :id))
+                    (remhash sid harness-ui-tasks--session-tasks)
+                    (harness-ui-tasks--redraw-session sid)))
+                (copy-hash-table harness-ui-tasks--session-tasks))))))
+
+(defun harness-ui-tasks--backlog-session-p (task)
+  "Non-nil when TASK is a session's task that has not started.
+That is one waiting in the backlog, or being written up for it."
+  (and task
+       (not (harness-ui-tasks--archived-p task))
+       (or (and (equal (plist-get task :state) "pending")
+                (harness-ui-tasks--backlog-p task))
+           (harness-ui-tasks--refining-p task))))
+
+(defun harness-ui-tasks--with-face (string face)
+  "Return STRING on FACE, under the faces it has already."
+  (if (fboundp 'harness-chat--face)
+      (harness-chat--face string face)
+    (let ((s (copy-sequence string)))
+      (add-face-text-property 0 (length s) face t s)
+      s)))
+
+(defun harness-ui-tasks--chat-button (label action help)
+  "Return a button string LABEL running ACTION, with HELP."
+  (propertize (buttonize label (lambda (_) (funcall action)) nil help)
+              "mouse-face" 'highlight))
+
+(defun harness-ui-tasks--backlog-banner (task)
+  "Return the banner of TASK, a session's backlog task.
+It says whether the task waits for the user or is being written up,
+and offers the card's [Start now] and, while it waits, [Queue it]."
+  (let* ((writing (harness-ui-tasks--writing-p task))
+         (stopped (and (harness-ui-tasks--refining-p task) (not writing)))
+         (title (harness-ui-tasks--title task))
+         (start (harness-ui-tasks--chat-button
+                 "[Start now]" #'harness-ui-tasks-session-start
+                 "Start the task now with its write-up, even while it is being written up"))
+         (queue (when (and (not writing)
+                           (equal (plist-get task :state) "pending")
+                           (harness-ui-tasks--backlog-p task))
+                  (concat " "
+                          (harness-ui-tasks--chat-button
+                           "[Queue it]" #'harness-ui-tasks-session-queue
+                           "Put it in the pending queue, to start when a slot frees"))))
+         (line (cond
+                (writing "An agent is writing it up: a message stops it and starts the task.")
+                (stopped (format "Its write-up stopped (%s): start it with what it has."
+                                 (or (plist-get task :outcome) "stopped")))
+                (t "Waiting for you to start it: a message starts the task."))))
+    (concat
+     " " (propertize (concat (harness-ui-icon 'harness-icon-task-backlog)
+                             " Waiting in the Backlog")
+                     'face 'harness-task-attention-face)
+     "\n"
+     "   " (propertize title 'face 'bold 'wrap-prefix "   ") "\n"
+     "   " (propertize line 'face 'harness-hint-face 'wrap-prefix "   ") "\n"
+     "   " start queue "\n"
+     "   " (propertize (if writing
+                         "C-c C-c stops it and starts the task; Refine on the board sends feedback"
+                       "C-c C-c sends a message, which starts the task")
+                     'face 'harness-hint-face)
+     "\n ")))
+
+(defun harness-ui-tasks--backlog-placeholder (task shown)
+  "Say in the compose box what a message does for TASK, shown when SHOWN.
+The message starts the task, and stops a write-up still running, which
+is what the box says.  A box another module gave a hint is left alone."
+  (cond
+   ((not shown)
+    (when (member harness-chat-placeholder harness-ui-tasks--backlog-hints)
+      (kill-local-variable 'harness-chat-placeholder)))
+   ((and (stringp harness-chat-placeholder)
+         (not (member harness-chat-placeholder harness-ui-tasks--backlog-hints)))
+    nil)
+   ((harness-ui-tasks--writing-p task)
+    (setq-local harness-chat-placeholder (nth 0 harness-ui-tasks--backlog-hints)))
+   (t (setq-local harness-chat-placeholder (nth 1 harness-ui-tasks--backlog-hints)))))
+
+(defun harness-ui-tasks--backlog-panel ()
+  "Return the banner when this session's task waits in the backlog.
+On `harness-chat-panel-functions': nil for a session that is no task's,
+or whose task has started, and until the task is known."
+  (when (bound-and-true-p harness-ui-session-id)
+    (let* ((sid harness-ui-session-id)
+           (task (harness-ui-tasks--session-task sid))
+           (shown (harness-ui-tasks--backlog-session-p task)))
+      (harness-ui-tasks--backlog-placeholder task shown)
+      (when shown
+        (harness-ui-tasks--with-face (harness-ui-tasks--backlog-banner task)
+                                     'harness-chat-backlog-face)))))
+
+(defun harness-ui-tasks--session-backlog-task ()
+  "Return this session's task, which has to wait in the backlog."
+  (let ((task (harness-ui-tasks--session-task harness-ui-session-id)))
+    (unless (harness-ui-tasks--backlog-session-p task)
+      (user-error "This session's task is not waiting in the backlog"))
+    task))
+
+(defun harness-ui-tasks-session-start ()
+  "Start the backlog task of this session now, even with every slot busy.
+The task starts with its write-up; a write-up still running is stopped
+first, and the task starts once it has ended.  This is the [Start now]
+of the banner above the session's compose box, as the card's."
+  (interactive)
+  (let* ((task (harness-ui-tasks--session-backlog-task))
+         (id (plist-get task :id))
+         (sid (or (plist-get task :session) harness-ui-session-id)))
+    (harness-ui-call
+     "_harness/task/start" (list :id id)
+     (lambda (view)
+       (when (and view (plist-get view :id))
+         (puthash sid view harness-ui-tasks--session-tasks))
+       (harness-ui-tasks--redraw-session sid)
+       (message "Starting the task"))
+     (lambda (e) (message "Could not start the task: %s" (harness-error-message e))))))
+
+(defun harness-ui-tasks-session-queue ()
+  "Put this session's backlog task in the pending queue.
+It starts on its own as soon as its project has a free slot; the
+banner's [Start now] starts it at once instead."
+  (interactive)
+  (let* ((task (harness-ui-tasks--session-backlog-task))
+         (id (plist-get task :id))
+         (sid (or (plist-get task :session) harness-ui-session-id)))
+    (unless (and (equal (plist-get task :state) "pending")
+                 (harness-ui-tasks--backlog-p task))
+      (user-error "Only a task waiting in the backlog can be queued; start this one now instead"))
+    (harness-ui-call
+     "_harness/task/queue" (list :id id)
+     (lambda (view)
+       (when (and view (plist-get view :id))
+         (puthash sid view harness-ui-tasks--session-tasks))
+       (harness-ui-tasks--redraw-session sid)
+       (message "Queued"))
+     (lambda (e) (message "Could not queue the task: %s" (harness-error-message e))))))
+
 ;;;; Module
 
 (defun harness-ui-tasks--init ()
@@ -5124,6 +5353,8 @@ They follow the harness's events, sessions, output rates, live token
 figures and quotas, and a timer redraws the visible ones so their
 elapsed times run."
   (add-hook 'harness-ui-event-functions #'harness-ui-tasks--on-event)
+  (add-hook 'harness-ui-event-functions #'harness-ui-tasks--on-session-task-event)
+  (add-hook 'harness-chat-panel-functions #'harness-ui-tasks--backlog-panel)
   (add-hook 'harness-ui-sessions-changed-hook #'harness-ui-tasks--on-sessions-changed)
   (add-hook 'harness-ui-rate-functions #'harness-ui-tasks--on-rate)
   (add-hook 'harness-ui-live-functions #'harness-ui-tasks--on-live)

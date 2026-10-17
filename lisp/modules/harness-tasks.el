@@ -81,9 +81,18 @@
 ;; (`:backlog'): the scheduler never starts it, only `task/start' does,
 ;; so the backlog survives restarts until someone picks a task.  Its
 ;; session is the one that refined it: starting moves that session into
-;; the task's worktree and tells it to do the work.  A message to a
-;; backlog task's session is feedback on the write-up, which the agent
-;; rewrites.  `task/queue' (the board's [Queue it]) puts a backlog task
+;; the task's worktree and tells it to do the work.  A message the user
+;; writes in that session while the task waits in the backlog starts
+;; it, as a message to a returned task does, and one written while its
+;; write-up runs stops the write-up and starts it all the same.
+;; Feedback on the write-up goes through `task/refine' or `task/prompt'
+;; (the board's [Refine] and its reply box) instead, and a message
+;; queued while a write-up ran stays feedback.  `task/start' (the
+;; board's [Start now]) also supersedes a write-up still running: it
+;; stops that turn and starts the task with the write-up it has when the
+;; turn has ended, so the stopped write-up never finishes the task or
+;; takes it to review.
+;; `task/queue' (the board's [Queue it]) puts a backlog task
 ;; back in the pending queue, where the scheduler starts it like any
 ;; queued task -- as soon as its project has a free slot -- the write-up
 ;; kept for the start.
@@ -853,6 +862,36 @@ task's own end: the task is waiting in the queue, not at work.  Once
 that turn has ended, the work its session left running outside it
 stops (`harness-tasks--stop-outstanding').  A task pre-empted
 \(`harness-tasks--preempt') is returned to pending this way too.")
+
+(defvar harness-tasks--superseding (make-hash-table :test 'equal)
+  "Task ids whose write-up is being stopped so the task can start.
+A start (`task/start', or the [Start now] of a session's backlog
+banner), or a message the user writes in the session while the write-up
+runs (`harness-tasks--supersede-on-message'), clears the task's
+`:backlog' and stops the turn writing it up; `harness-tasks--on-turn-ended'
+then starts the task (`harness-tasks--start'), so neither the write-up's
+end nor the turn it was stopped into can finish the write-up or drive
+the task to review.  The same mark makes a turn a user's message to a
+waiting backlog task would start wait (`harness-tasks--message-starts'):
+`harness-tasks--before-turn' refuses that turn, and the task starts once
+it is over.")
+
+(defvar harness-tasks--message-starts (make-hash-table :test 'equal)
+  "Task ids a user's message to a backlog session is about to start.
+`harness-tasks--on-message' marks the task when the message reaches a
+backlog task that has not started; `harness-tasks--before-turn' then
+refuses the turn the message would start, and the task starts in a turn
+of its own, with its start message (`harness-tasks--superseding').  A
+message that steers a running write-up stops it instead
+\(`harness-tasks--supersede-on-message'); only what `task/refine' or
+`task/prompt' sends (`harness-tasks--refine-turn') and a message the
+session queued while the write-up ran are feedback on it.")
+
+(defvar harness-tasks--write-up-messages (make-hash-table :test 'equal)
+  "Session id -> t while `harness-tasks--refine-turn' sends a message.
+The `agent/message' filters run in that call: `harness-tasks--on-message'
+takes the mark out, so the message is the write-up feedback it is,
+while a message the user sends the session directly starts the task.")
 
 (defvar harness-tasks--worktrees-made (make-hash-table :test 'equal)
   "Task id -> promise of the worktree being made for it.
@@ -2845,8 +2884,10 @@ task started by hand was not waiting for a slot and records nothing."
          (waits (and (harness-tasks--queued-p task)
                      (harness-tasks--waits-after task started))))
     (puthash id t harness-tasks--starting)
-    (apply #'harness-tasks--set id :state 'active :outcome nil :error nil :duplicate-of nil
-           :returned nil :started started :finished nil :queued-at nil
+    (remhash id harness-tasks--message-starts)
+    (remhash id harness-tasks--superseding)
+    (apply #'harness-tasks--set id :state 'active :backlog nil :outcome nil :error nil
+           :duplicate-of nil :returned nil :started started :finished nil :queued-at nil
            (and waits (list :waits waits)))
     (cond
      ((harness-tasks--main-tree-p task)
@@ -3260,8 +3301,18 @@ session deals with it (`harness-tasks--aside') and the message, its
 sender kept, opens with `harness-tasks--aside-message' instead.  The
 harness's own messages (FROM a system sender) are left alone, and so
 is a task whose worktree was removed: a turn they start makes the task
-active all the same (`harness-tasks--on-turn-started').  Return the
-blocks to deliver."
+active all the same (`harness-tasks--on-turn-started').
+
+A message from the user to a backlog task that has not started starts
+the task, as one to a returned task does, rather than rewriting its
+write-up: `harness-tasks--before-turn' refuses the turn the message
+would start, and the task starts in a turn of its own
+\(`harness-tasks--superseding').  A message written while the write-up
+runs starts it too, stopping the write-up first
+\(`harness-tasks--supersede-on-message').  Feedback on the write-up is
+what `task/refine' and `task/prompt' send (marked by
+`harness-tasks--refine-turn'), and what waited in the session's queue
+while a write-up ran.  Return the blocks to deliver."
   ;; A message of the user's that restarts a stopped task shows it at
   ;; work at once, before the turn it starts actually begins.
   (let ((waking (and (null (harness-sender-kind (plist-get info :from)))
@@ -3271,8 +3322,32 @@ blocks to deliver."
   (let* ((task (harness-tasks--by-session session-id))
          (id (plist-get task :id))
          (from (plist-get info :from))
-         (kind (harness-sender-kind from)))
+         (kind (harness-sender-kind from))
+         ;; `task/refine' and `task/prompt' mark the message they send:
+         ;; it is feedback on a write-up, not the start a message to a
+         ;; backlog task is.
+         (write-up-message (prog1 (and id (gethash session-id harness-tasks--write-up-messages))
+                             (remhash session-id harness-tasks--write-up-messages))))
     (cond
+     ;; A message the user queued while the task waited or was written
+     ;; up stays the queue's: it is feedback on the write-up it was
+     ;; queued under (`agent/send-queue').
+     ((and task (null kind) (harness-tasks--refinement-p task)
+           (not write-up-message) (plist-get info :queued))
+      blocks)
+     ;; A message the user writes in the session starts the task, as one
+     ;; to a returned task does, also while its write-up runs: it is no
+     ;; feedback on the write-up unless the board's Refine sends it
+     ;; (`write-up-message').
+     ((and task (null kind) (harness-tasks--refinement-p task)
+           (not write-up-message) (plist-get info :steering))
+      (harness-tasks--supersede-on-message task)
+      blocks)
+     ((and task (null kind) (harness-tasks--refinement-p task)
+           (not write-up-message))
+      (harness-log 'info "task %s: a message to its session starts it, not more of its write-up" id)
+      (puthash id t harness-tasks--message-starts)
+      blocks)
      ((not (and task
                 (eq (plist-get task :state) 'review)
                 (not (plist-get task :worktree-removed))))
@@ -3504,7 +3579,7 @@ too."
        t))
 
 (defun harness-tasks--before-turn (value next session)
-  "Hold back a turn of SESSION while its task waits in the queue.
+  "Hold back a turn of SESSION while its task waits, or to start it.
 An `agent/before-turn' stage: VALUE is the gate so far, (:proceed t
 :message (:text TEXT :from FROM)), NEXT continues the chain.  A task
 waiting for a slot does not work around the limit through its session
@@ -3512,17 +3587,34 @@ waiting for a slot does not work around the limit through its session
 saying why (`harness-tasks--waiting-message').  The message stays in the
 transcript, so it reaches the agent with the turn that starts the task
 \(`harness-tasks--start-paused'), and the refused turn says nothing
-about the task (`harness-tasks--on-turn-ended')."
+about the task (`harness-tasks--on-turn-ended').
+
+A user's message to a waiting backlog task (`harness-tasks--message-starts')
+is the same: the turn it would start is refused, the task leaves the
+backlog as it is (`harness-tasks--abandon-write-up'), and the start
+this refusal ends with runs the task and carries its start message,
+not the message itself (`harness-tasks--on-turn-ended')."
   (let ((task (and (plist-get value :proceed)
                    (harness-tasks--by-session (plist-get session :id)))))
     (funcall next
-             (if (and task (harness-tasks--holds-turns-p
-                            task (plist-get (plist-get value :message) :from)))
-                 (progn
-                   (harness-log 'info "task %s: its session takes no turn while it waits in the queue"
-                                (plist-get task :id))
-                   (list :proceed nil :reason (harness-tasks--waiting-message task)))
-               value)))
+             (cond
+              ((and task (gethash (plist-get task :id) harness-tasks--superseding))
+               ;; A start is waiting for the write-up's turn to end: no
+               ;; message starts a turn in it now.
+               (harness-log 'info "task %s: it is starting; the turn the message would run is refused"
+                            (plist-get task :id))
+               (list :proceed nil :reason "the task is starting"))
+              ((and task (gethash (plist-get task :id) harness-tasks--message-starts))
+               (harness-log 'info "task %s: the user's message starts it; the turn it would run is refused"
+                            (plist-get task :id))
+               (harness-tasks--abandon-write-up task)
+               (list :proceed nil :reason "the task is starting"))
+              ((and task (harness-tasks--holds-turns-p
+                          task (plist-get (plist-get value :message) :from)))
+               (harness-log 'info "task %s: its session takes no turn while it waits in the queue"
+                            (plist-get task :id))
+               (list :proceed nil :reason (harness-tasks--waiting-message task)))
+              (t value))))
   nil)
 
 ;;;; Refinement
@@ -3777,19 +3869,80 @@ the model stop: the reminder only nudges."
     (harness-tasks--set id :state 'refining :outcome 'error :error (harness-error-message err)
                         :duplicate-of nil)))
 
+(defun harness-tasks--abandon-write-up (task)
+  "Take TASK, a backlog one, out of the backlog for a start.
+`:backlog' goes and the task is active from now, though its work begins
+only when the turn writing it up has ended
+\(`harness-tasks--superseding'): `harness-tasks--on-turn-ended' starts it
+then.  Marking it keeps that turn's end from finishing the write-up.
+Return the task's view."
+  (let ((id (plist-get task :id)))
+    (puthash id t harness-tasks--superseding)
+    (remhash id harness-tasks--message-starts)
+    (harness-tasks--set id :state 'active :backlog nil :queued-at nil
+                        :outcome nil :error nil :duplicate-of nil :finished nil
+                        :waiting "starting the task")))
+
+(defun harness-tasks--supersede (task)
+  "Stop TASK's write-up turn and start TASK once it has ended.
+TASK is a backlog task whose write-up runs.  Its backlog goes at once
+\(`harness-tasks--abandon-write-up'), and `agent/cancel' stops the turn;
+its end then starts the task (`harness-tasks--on-turn-ended') rather
+than finishing a write-up the start has superseded.  Return the task's
+view."
+  (let ((id (plist-get task :id))
+        (sid (plist-get task :session)))
+    (harness-tasks--abandon-write-up task)
+    (harness-log 'info "task %s: its write-up is being stopped so the task can start" id)
+    (when (and sid (harness-method-exists-p 'agent/cancel))
+      (harness-call 'agent/cancel sid))
+    (harness-call 'task/get id)))
+
+(defun harness-tasks--supersede-on-message (task)
+  "Stop TASK's write-up for the user's message that is steering it.
+TASK is a backlog task a turn writes up.  The task leaves the backlog
+as the message starts it (`harness-tasks--abandon-write-up'); the write-up
+turn is stopped once the message has been recorded on it, which the
+`agent/message' filter this runs in cannot do itself, and its end then
+starts the task (`harness-tasks--on-turn-ended')."
+  (let ((id (plist-get task :id)))
+    (harness-tasks--abandon-write-up task)
+    (harness-log 'info "task %s: the user's message stops its write-up; starting it" id)
+    (harness-run-soon
+     (lambda ()
+       ;; A write-up that ended by itself before this started the task
+       ;; already, having cleared the mark; cancel no turn of the work.
+       (when (and (gethash id harness-tasks--superseding)
+                  (let ((current (gethash id harness-tasks--table)))
+                    (and current (harness-tasks--turn-p current))))
+         (when-let* ((current (gethash id harness-tasks--table))
+                     (sid (plist-get current :session)))
+           (when (harness-method-exists-p 'agent/cancel)
+             (harness-call 'agent/cancel sid))))))))
+
 (defun harness-tasks--refine-turn (id sid blocks &optional opts)
   "Prompt task ID's session SID with BLOCKS for a write-up.
 OPTS are the `agent/prompt' options, such as who sends the message.
 The turn's end finishes the refinement (`harness-tasks--on-turn-ended');
-this only adds the error a failed turn reports."
-  (harness-then (harness-call-async 'agent/prompt sid blocks opts)
-                (lambda (result)
-                  (let ((task (gethash id harness-tasks--table)))
-                    (when (and task (eq (plist-get task :state) 'refining)
-                               (plist-get task :outcome) (not (plist-get task :error))
-                               (plist-get result :error))
-                      (harness-tasks--set id :error (format "%s" (plist-get result :error))))))
-                (lambda (e) (harness-tasks--refine-failed id e))))
+this only adds the error a failed turn reports.  The message is marked
+as the write-up's (`harness-tasks--write-up-messages'), so a user's
+message `task/refine' or `task/prompt' sends is feedback on the
+write-up even while a backlog task otherwise starts on a message."
+  (puthash sid t harness-tasks--write-up-messages)
+  (let ((promise (condition-case err
+                     (harness-call-async 'agent/prompt sid blocks opts)
+                   (error (remhash sid harness-tasks--write-up-messages)
+                          (signal (car err) (cdr err))))))
+    ;; The message filters ran in the call above; the mark is not needed.
+    (remhash sid harness-tasks--write-up-messages)
+    (harness-then promise
+                  (lambda (result)
+                    (let ((task (gethash id harness-tasks--table)))
+                      (when (and task (eq (plist-get task :state) 'refining)
+                                 (plist-get task :outcome) (not (plist-get task :error))
+                                 (plist-get result :error))
+                        (harness-tasks--set id :error (format "%s" (plist-get result :error))))))
+                  (lambda (e) (harness-tasks--refine-failed id e)))))
 
 (defun harness-tasks--refine-blocks (task text)
   "Return the message that gives TASK to its write-up: the task, then TEXT."
@@ -3884,33 +4037,38 @@ when it names none) and its message as `:error'.  Only a reply naming a
 task of this harness, or what looks like one of its ids, refuses: a
 write-up that merely opens \"Duplicate of a task …\" is a write-up.
 In auto backlog mode the task goes on from the backlog to the pending
-queue (`harness-tasks--auto-queue')."
-  (let* ((task (harness-tasks--get id))
-         (sid (plist-get task :session))
-         (handed-in (and sid (gethash sid harness-tasks--plans-submitted)))
-         (reply (and (not handed-in) (eq reason 'end-turn) sid
-                     (harness-tasks--last-reply sid)))
-         (refusal (and reply (harness-tasks--refusal reply)))
-         (of (and refusal (harness-tasks--duplicate-of task (car refusal))))
-         (refuse (and refusal (or of (string-match-p "\\`t-[A-Za-z0-9]+\\'" (car refusal))))))
-    (when sid (remhash sid harness-tasks--plans-submitted))
-    (cond
-     ;; The plan was handed in during the turn (`task/hand-in-plan'): the
-     ;; task is in the backlog with it, whatever the turn did after.
-     (handed-in nil)
-     ((harness-string-blank-p reply)
-      (harness-tasks--set id :state 'refining :duplicate-of nil
-                          :outcome (if (eq reason 'end-turn) 'error reason)
-                          :error (and (eq reason 'end-turn) "the agent wrote no task description")))
-     (refuse
-      (harness-log 'info "task %s: its write-up refused it as a duplicate of %s" id (car refusal))
-      (harness-tasks--set id :state 'refining :outcome 'duplicate
-                          :duplicate-of of :error (cdr refusal)))
-     (t
-      ;; First, so that the backlog task's views say it joins the queue.
-      (harness-tasks--auto-queue id)
-      (harness-tasks--set id :state 'pending :backlog t :prompt (string-trim reply)
-                          :refined (float-time) :outcome nil :error nil :duplicate-of nil)))))
+queue (`harness-tasks--auto-queue').  A turn that ended after a start
+superseded the write-up finishes nothing: the task is no backlog task
+then, and this leaves it to the start."
+  (let ((current (harness-tasks--get id)))
+    (if (not (harness-tasks--refinement-p current))
+        (harness-log 'info "task %s: the end of its write-up turn came after it started; no write-up" id)
+      (let* ((task current)
+             (sid (plist-get task :session))
+             (handed-in (and sid (gethash sid harness-tasks--plans-submitted)))
+             (reply (and (not handed-in) (eq reason 'end-turn) sid
+                         (harness-tasks--last-reply sid)))
+             (refusal (and reply (harness-tasks--refusal reply)))
+             (of (and refusal (harness-tasks--duplicate-of task (car refusal))))
+             (refuse (and refusal (or of (string-match-p "\\`t-[A-Za-z0-9]+\\'" (car refusal))))))
+        (when sid (remhash sid harness-tasks--plans-submitted))
+        (cond
+         ;; The plan was handed in during the turn (`task/hand-in-plan'): the
+         ;; task is in the backlog with it, whatever the turn did after.
+         (handed-in nil)
+         ((harness-string-blank-p reply)
+          (harness-tasks--set id :state 'refining :duplicate-of nil
+                              :outcome (if (eq reason 'end-turn) 'error reason)
+                              :error (and (eq reason 'end-turn) "the agent wrote no task description")))
+         (refuse
+          (harness-log 'info "task %s: its write-up refused it as a duplicate of %s" id (car refusal))
+          (harness-tasks--set id :state 'refining :outcome 'duplicate
+                              :duplicate-of of :error (cdr refusal)))
+         (t
+          ;; First, so that the backlog task's views say it joins the queue.
+          (harness-tasks--auto-queue id)
+          (harness-tasks--set id :state 'pending :backlog t :prompt (string-trim reply)
+                              :refined (float-time) :outcome nil :error nil :duplicate-of nil)))))))
 
 ;;;; Reports
 ;;
@@ -4048,8 +4206,11 @@ nothing merged; a round that handed in work needing no merge (`hand_in'
 with `:no-merge') completes without joining the merge queue.  A round
 that ends without a report handed in gets one saying so
 (`harness-tasks--missing-report').
-A refinement turn puts its write-up in the backlog.  A clean end of a
-turn is not the end of the work while something the session started
+A refinement turn puts its write-up in the backlog.  The turn a start
+superseded (`harness-tasks--superseding') is no refinement either: the
+start stopped it, so its end starts the task with its start message
+and never finishes the write-up or takes the task to review.  A clean
+end of a turn is not the end of the work while something the session started
 still runs outside it (`harness-tasks--outstanding'): the task then
 neither goes to review nor merges, but stays active, with the text of
 what runs as its `:waiting' until its state next changes.  The turn the
@@ -4093,6 +4254,12 @@ while it waits, do not start it again: the return starts nothing."
           (when (harness-tasks--pre-empted-p task)
             (harness-tasks--preempted-hint id))
           (harness-tasks--stop-outstanding id))))
+       ((gethash id harness-tasks--superseding)
+        ;; A start stopped the write-up: this turn is the write-up's
+        ;; abrupt end, never the task's work, and the task starts now.
+        (remhash id harness-tasks--superseding)
+        (harness-log 'info "task %s: the write-up it superseded ended; starting it" id)
+        (harness-tasks--start (harness-tasks--get id)))
        ((harness-tasks--refinement-p task) (harness-tasks--finish-refinement id reason))
        ((harness-tasks--queued-p task)
         (setq skip (harness-tasks--returned-p task)))
@@ -4181,15 +4348,21 @@ A session that never received the task gets the task itself."
                        (cl-find 'user (harness-call 'session/nodes sid) :key (lambda (n) (plist-get n :kind))))))
     (harness-log 'info "task %s: resuming session %s after a restart" id sid)
     (puthash id t harness-tasks--starting)
-    (harness-catch (harness-call-async 'agent/prompt sid
+    ;; A write-up cut short is written up again, not started: its message
+    ;; is the write-up's, even when it is the task itself the session
+    ;; never got (`harness-tasks--write-up-messages').
+    (when (harness-tasks--refinement-p task)
+      (puthash sid t harness-tasks--write-up-messages))
+    (let ((promise (harness-call-async 'agent/prompt sid
                                        (if begun
                                            (list (list :type "text" :text harness-tasks--resume-prompt))
                                          (harness-tasks--blocks task))
                                        ;; Carrying on after a restart is the
                                        ;; harness's doing; the task itself is
                                        ;; the user's.
-                                       (and begun (harness-tasks--from-harness)))
-                   (lambda (e) (harness-tasks--fail id e)))))
+                                       (and begun (harness-tasks--from-harness)))))
+      (remhash sid harness-tasks--write-up-messages)
+      (harness-catch promise (lambda (e) (harness-tasks--fail id e))))))
 
 (defun harness-tasks--work-begun-p (task)
   "Non-nil when TASK's session got its work: a user message since it started.
@@ -4827,17 +5000,22 @@ new mode."
 (harness-defmethod task/start (id)
   "Start pending task ID now, even when every slot of its project is taken.
 A backlog task starts too (or `task/queue' leaves it to the queue), and
-so does one whose write-up stopped (with the prompt it has), but not
-one an agent is writing up right now.  A
+so does one whose write-up stopped (with the prompt it has).  A start
+supersedes a write-up that is still running: its turn is stopped
+\(`harness-tasks--supersede'), its write-up is never finished, and the
+task starts with the write-up it has once that turn has ended.  A
 task returned to pending starts in the session that already worked on
 it, which carries on where it stopped (`harness-tasks--start-paused').
 Its project's queue being suspended (task/suspend-queue) does not hold
 this up: an explicit start always starts the task."
   (let ((task (harness-tasks--get id)))
     (unless (memq (plist-get task :state) '(pending refining)) (error "Task %s already started" id))
-    (when (harness-tasks--turn-p task)
-      (error "Task %s is still being written up; wait for it or stop it" id))
-    (harness-tasks--start task)
+    (cond
+     ((harness-tasks--turn-p task)
+      (unless (harness-tasks--refinement-p task)
+        (error "Task %s is working already" id))
+      (harness-tasks--supersede task))
+     (t (harness-tasks--start task)))
     (harness-call 'task/get id)))
 
 (harness-defmethod task/queue (id)
@@ -4918,7 +5096,11 @@ so it takes the new one too."
 OPTS `:from' says who sent the message when the user did not, as
 `agent/prompt' takes it: another session's agent
 \(`harness-sender-session'), as task_control's message sends it.
-Before a backlog task starts, TEXT is feedback on its write-up.  While
+Before a backlog task starts, TEXT is feedback on its write-up, which
+this sends as such even while the task waits to be started: the
+board's [Refine] and its reply box send this way, while a message the
+user writes in the task's own session starts the task, stopping a
+write-up that is still running (`harness-tasks--on-message').  While
 the task waits for review, the user's TEXT sends it back as the
 feedback, as `task/reject' does; another session's is no review and
 does not (`harness-tasks--on-message').
@@ -4965,7 +5147,17 @@ carry-on."
         (harness-tasks--set id :merge-attempts 0
                             :recap nil :recap-at nil :recap-turns nil :recap-tools nil)
         (if (harness-tasks--refinement-p task)
-            (harness-tasks--refine-turn id sid blocks opts)
+            (progn
+              ;; A message the board sends a backlog task is feedback on
+              ;; its write-up whatever the task waits for
+              ;; (`harness-tasks--refine-turn' marks it), and the task is
+              ;; writing it up from now.
+              (when (and (eq (plist-get task :state) 'pending)
+                         (harness-tasks--backlog-p task))
+                (harness-tasks--set id :state 'refining :outcome nil :error nil
+                                    :duplicate-of nil
+                                    :note (or (plist-get task :note) (plist-get task :prompt))))
+              (harness-tasks--refine-turn id sid blocks opts))
           (harness-catch (harness-call-async 'agent/prompt sid blocks opts)
                          (lambda (e) (harness-tasks--fail id e)))))))
     t))

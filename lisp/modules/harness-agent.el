@@ -867,15 +867,18 @@ A turn still running in it (it was closed mid-turn) keeps it running."
     (when (gethash session-id harness-agent--turns)
       (harness-call 'session/set-status session-id 'running))))
 
-(defun harness-agent--message (session-id blocks from steering)
+(defun harness-agent--message (session-id blocks from steering &optional queued)
   "Return BLOCKS, a message delivered to SESSION-ID, as the filters leave it.
 The sync filter `agent/message' gets BLOCKS and its arguments
-SESSION-ID and (:from FROM :steering STEERING): FROM is who sent the
-message (nil for the user, see `agent/prompt'), STEERING is non-nil
-when the message steers the running turn rather than starting one.
+SESSION-ID and (:from FROM :steering STEERING :queued QUEUED): FROM is
+who sent the message (nil for the user, see `agent/prompt'), STEERING
+is non-nil when the message steers the running turn rather than
+starting one, and QUEUED is non-nil when it is the session's queue going
+out (`agent/send-queue') rather than a message written now.
 Each filter returns the blocks to deliver.  A filter that returns
 none leaves the message as it was, so a message is never emptied."
-  (or (harness-run-filter 'agent/message blocks session-id (list :from from :steering steering))
+  (or (harness-run-filter 'agent/message blocks session-id
+                          (list :from from :steering steering :queued queued))
       blocks))
 
 (defun harness-agent--message-images (blocks)
@@ -916,6 +919,9 @@ harness (`harness-sender-system') or another session's agent
 \(`harness-sender-session').  The message's node keeps it in its
 `:meta' (a queued item keeps it too), so UIs show who sent it; the
 model gets the message as a user message all the same.
+OPTS `:queued' says the message is the session's queue going out
+\(`agent/send-queue'), not one written now: the `agent/message' filters
+get it as `:queued', so a module can treat it as what the queue kept.
 An inactive session is resumed first: sending to it brings it back.
 Blank text blocks are dropped; a message left empty signals an error,
 so no turn, steering message or queued item is ever empty.
@@ -934,12 +940,13 @@ call the harness made and cannot be continued."
          (queue (harness-json-true-p (plist-get opts :queue)))
          (attachments (and queue (plist-get opts :attachments)))
          (from (let ((f (plist-get opts :from))) (and (harness-sender-kind f) f)))
+         (queued (plist-get opts :queued))
          (turn (gethash session-id harness-agent--turns)))
     (unless (or blocks attachments)
       (signal 'harness-error (list "Nothing to send: the message is empty")))
     (unless queue
       (harness-agent--reanimate session-id)
-      (setq blocks (harness-agent--message session-id blocks from (and turn t))))
+      (setq blocks (harness-agent--message session-id blocks from (and turn t) queued)))
     (cond
      (queue
       (harness-call 'session/queue session-id (harness-agent--blocks-text blocks) attachments from)
@@ -1994,7 +2001,8 @@ already -- no turn starts and the promise resolves to
 \(:stop-reason nothing-queued).  While a turn runs the messages steer
 it, like any message sent then, and reach the model at its next step.
 The message is the user's when any item is, else from the first item's
-sender."
+sender.  It goes as the queue's (`:queued'), so `agent/message' filters
+can tell it from a message written now."
   (let* ((items (cl-remove-if (lambda (it) (and (harness-string-blank-p (plist-get it :text))
                                                 (null (plist-get it :attachments))))
                               (harness-call 'session/queue-take session-id qids)))
@@ -2002,7 +2010,7 @@ sender."
          (from (harness-agent--queue-sender items)))
     (if (null blocks)
         (harness-resolved (list :stop-reason 'nothing-queued))
-      (harness-call 'agent/prompt session-id blocks (and from (list :from from))))))
+      (harness-call 'agent/prompt session-id blocks (list :from from :queued t)))))
 
 (harness-defmethod agent/running (&optional session-id)
   "Return running session ids, or non-nil when SESSION-ID is running."

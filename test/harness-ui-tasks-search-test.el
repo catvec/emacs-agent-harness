@@ -541,7 +541,7 @@ being written stays a message."
         (should-not (harness-ui-tasks--searching-p))
         (should-not harness-quick-search-box-mode)
         (should-not harness-ui-tasks--target)
-        (should (equal "Half a task" (harness-compose-text)))
+        (should (equal "Half a task @notes.txt " (harness-compose-text)))
         (should (= 1 (length harness-compose-attachments)))
         (should (harness-compose-in-p))
         ;; From a card: point goes back to it.
@@ -551,7 +551,7 @@ being written stays a message."
         (should (harness-compose-in-p))
         (harness-ui-tasks-compose-quit)
         (should (equal id (get-text-property (point) 'harness-task-id)))
-        (should (equal "Half a task" (harness-compose-text)))
+        (should (equal "Half a task @notes.txt " (harness-compose-text)))
         ;; A message to the task's session, half written, stays one.
         (harness-ui-tasks-compose-reset)
         (goto-char (point-min))

@@ -64,6 +64,10 @@
 (declare-function harness-ui--store-live "harness-ui")
 (declare-function harness-ui-tasks--board-key "harness-ui-tasks")
 (declare-function harness-ui-tasks--card-buttons "harness-ui-tasks")
+(declare-function harness-chat-buffer "harness-ui-chat" (id))
+
+(defvar harness-chat--loading)
+(defvar harness-chat-placeholder)
 
 (defmacro harness-ui-tasks-test-with (&rest body)
   "Load the state layer, the priority plugin, tasks, ACP and the board UI; run BODY.
@@ -1424,7 +1428,7 @@ Charlie's card says it is #2 in line, and why."
                                (harness-call 'task/queue-order default-directory))
                        (harness-ui-tasks-test--column-ids 'pending))))
       (harness-ui-tasks-test--show-subtitle board "Charlie")
-      (should (string-match-p "#2 in line · returned, carries on where it stopped"
+      (should (string-match-p "#2 in line · paused"
                               (harness-ui-tasks-test--card-text board "Charlie"))))))
 
 (ert-deftest harness-ui-tasks-click-the-priority-arrow ()
@@ -5466,6 +5470,141 @@ The draft stays in the box and so does point, where it was."
                               append (cl-loop for item across column
                                               when (and (consp item) (stringp (car item))) collect item))))
         (should (member '("C-c ." "A board key, from the box" harness-compose-panel-key) entries))))))
+
+;;;; The backlog banner in a task's session
+
+(defconst harness-ui-tasks-test-write-up
+  "Fix nested quotes in the parser\n\n- Handle nested quotes in `parse-args'.\n- Done when the quote tests pass."
+  "What the demo provider writes a backlog task up as.")
+
+(defun harness-ui-tasks-test--chat (sid)
+  "Open SID's chat buffer in the selected window and wait for it to load."
+  (let ((buffer (harness-chat-buffer sid)))
+    (set-window-buffer (selected-window) buffer)
+    (harness-test-wait (lambda () (not (buffer-local-value 'harness-chat--loading buffer)))
+                       10 "the session to load")
+    buffer))
+
+(defun harness-ui-tasks-test--chat-text (buffer)
+  "BUFFER's text, without properties."
+  (with-current-buffer buffer
+    (buffer-substring-no-properties (point-min) (point-max))))
+
+(defun harness-ui-tasks-test--wait-chat-text (buffer regexp)
+  "Wait until BUFFER's text matches REGEXP."
+  (harness-test-wait (lambda () (string-match-p regexp (harness-ui-tasks-test--chat-text buffer)))
+                     10 (format "the session to show %s" regexp)))
+
+(defun harness-ui-tasks-test--push-chat-button (buffer label)
+  "Push the button LABEL in BUFFER, as a click on it does."
+  (with-current-buffer buffer
+    (save-excursion
+      (goto-char (point-min))
+      (let (pos)
+        (while (and (not pos) (search-forward label nil t))
+          (when (button-at (match-beginning 0)) (setq pos (match-beginning 0))))
+        (unless pos (error "No %s button in %s" label (buffer-name)))
+        (push-button pos)))))
+
+(defun harness-ui-tasks-test--refine (&optional script)
+  "Submit a task written up for the backlog; return its id.
+SCRIPT is the provider's, or nil for a complete write-up."
+  (setq harness-provider-demo-script-override
+        (or script
+            `((:type text :delta ,harness-ui-tasks-test-write-up)
+              (:type done :stop-reason end-turn))))
+  (plist-get (harness-call 'task/submit default-directory
+                           "the parser chokes on nested quotes" (list :refine t))
+             :id))
+
+(ert-deftest harness-ui-tasks-backlog-session-banner ()
+  "A waiting backlog task's session says so, and its [Start now] starts it.
+The compose box says that sending a message there starts the task."
+  (harness-ui-tasks-test-with
+    (harness-test-load-module 'ui-chat)
+    (let* ((id (harness-ui-tasks-test--refine))
+           (sid (plist-get (harness-call 'task/get id) :session)))
+      (harness-test-wait (lambda () (eq 'pending (plist-get (harness-call 'task/get id) :state)))
+                         10 "the write-up to finish")
+      (should (plist-get (harness-call 'task/get id) :backlog))
+      (let ((chat (harness-ui-tasks-test--chat sid)))
+        (harness-ui-tasks-test--wait-chat-text chat "Waiting in the Backlog")
+        (let ((text (harness-ui-tasks-test--chat-text chat)))
+          (should (string-match-p "\\[Start now\\]" text))
+          (should (string-match-p "\\[Queue it\\]" text))
+          (should (string-match-p "a message starts the task" text)))
+        (with-current-buffer chat
+          (should (equal "Message…  sending starts the task" harness-chat-placeholder)))
+        (setq harness-provider-demo-script-override
+              '((:type text :delta "Working on it.") (:type done :stop-reason end-turn)))
+        (harness-ui-tasks-test--push-chat-button chat "[Start now]")
+        (harness-test-wait (lambda () (eq 'done (plist-get (harness-call 'task/get id) :state)))
+                           10 "the task to be done")
+        (harness-ui-tasks-test--wait-chat-text chat "Working on it.")
+        (harness-test-wait
+         (lambda () (not (string-match-p "Waiting in the Backlog"
+                                         (harness-ui-tasks-test--chat-text chat))))
+         5 "the banner to go")
+        (should-not (plist-get (harness-call 'task/get id) :backlog))))))
+
+(ert-deftest harness-ui-tasks-backlog-session-banner-supersedes-write-up ()
+  "A write-up running in its session says so, and [Start now] supersedes it.
+The box says a message stops the write-up and starts the task."
+  (harness-ui-tasks-test-with
+    (harness-test-load-module 'ui-chat)
+    (let* ((id (harness-ui-tasks-test--refine '((:type text :delta "Still writing it up"))))
+           (sid (plist-get (harness-call 'task/get id) :session)))
+      (harness-test-wait (lambda () (harness-call 'agent/running sid))
+                         10 "the write-up to run")
+      (let ((chat (harness-ui-tasks-test--chat sid)))
+        (harness-ui-tasks-test--wait-chat-text chat "An agent is writing it up")
+        (let ((text (harness-ui-tasks-test--chat-text chat)))
+          (should (string-match-p "\\[Start now\\]" text))
+          (should-not (string-match-p "\\[Queue it\\]" text)))
+        (with-current-buffer chat
+          (should (equal "Message…  sending stops the write-up and starts the task"
+                         harness-chat-placeholder)))
+        (setq harness-provider-demo-script-override
+              '((:type text :delta "Working on it.") (:type done :stop-reason end-turn)))
+        (harness-ui-tasks-test--push-chat-button chat "[Start now]")
+        (harness-test-wait (lambda () (eq 'done (plist-get (harness-call 'task/get id) :state)))
+                           10 "the task to start and be done")
+        (should-not (plist-get (harness-call 'task/get id) :backlog))
+        ;; The stopped write-up never rewrote the task's prompt.
+        (should (equal "the parser chokes on nested quotes"
+                       (plist-get (harness-call 'task/get id) :prompt)))))))
+
+(ert-deftest harness-ui-tasks-backlog-session-message-starts-through-a-write-up ()
+  "A message typed in a writing-up session stops it and starts the task.
+This is the report's case: typing \"start\" where the task is written up
+runs the task, not another write-up."
+  (harness-ui-tasks-test-with
+    (harness-test-load-module 'ui-chat)
+    (let* ((id (harness-ui-tasks-test--refine '((:type text :delta "Still writing it up"))))
+           (sid (plist-get (harness-call 'task/get id) :session)))
+      (harness-test-wait (lambda () (harness-call 'agent/running sid))
+                         10 "the write-up to run")
+      (let ((chat (harness-ui-tasks-test--chat sid)))
+        (harness-ui-tasks-test--wait-chat-text chat "An agent is writing it up")
+        (setq harness-provider-demo-script-override
+              '((:type text :delta "Working on it.") (:type done :stop-reason end-turn)))
+        (with-current-buffer chat
+          (goto-char harness-compose-end)
+          (insert "start")
+          (harness-chat-send))
+        (harness-test-wait (lambda () (eq 'done (plist-get (harness-call 'task/get id) :state)))
+                           10 "the message to start the task")
+        (should-not (plist-get (harness-call 'task/get id) :backlog))
+        (should (equal "Working on it."
+                       (plist-get (car (last (cl-remove-if-not
+                                              (lambda (n) (eq (plist-get n :kind) 'assistant))
+                                              (harness-call 'session/nodes sid))))
+                                  :content)))
+        ;; The message that started it stays in the transcript.
+        (should (member "start"
+                        (mapcar (lambda (n) (plist-get n :content))
+                                (cl-remove-if-not (lambda (n) (eq (plist-get n :kind) 'user))
+                                                  (harness-call 'session/nodes sid)))))))))
 
 (provide 'harness-ui-tasks-test)
 ;;; harness-ui-tasks-test.el ends here
