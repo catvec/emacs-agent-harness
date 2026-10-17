@@ -115,7 +115,12 @@
 ;; and the answer grants or denies the pattern.  No other prompt has one: the
 ;; mode asking, or the judge objecting, is about the call itself, whose
 ;; paths the jail already let through, so its answers for the session
-;; or for always record a rule for the tool.
+;; or for always record a rule for the tool.  For a shell command they
+;; can record a narrower rule for the commands it runs instead, read
+;; from the command line's syntax tree (see "Commands a lasting answer
+;; allows"): "Always allow" on `gcloud compute instances list' covers
+;; gcloud, not every bash call, and on `gcloud ... && gsutil ...' both
+;; programs.  A command the reader cannot read keeps the tool-wide rule.
 ;; Roots and rules alike are directories or patterns (see
 ;; `harness-perms--within-p').
 ;;
@@ -283,23 +288,38 @@ the files below a directory, such as grep, may not.")
 
 (defcustom harness-perms-rules nil
   "Standing permission rules that apply to every session.
-Each rule is a plist (:tool NAME :kind KIND :path PATTERN :behavior
-allow|deny).  NAME is a tool name or nil for any tool; KIND is a tool
-kind or nil for any kind.  PATTERN, when there is one, limits the rule
-to calls with paths: a glob (`*' within a name, `**' across
-directories) or a directory, which stands for everything in it,
-absolute or relative to the session's working directory.  An allow
-rule then needs every path of the call to match it, a deny rule any
-one.  A shell command's paths, for an allow rule, are the ones its
-command line names outside the session's directories, or where it
-runs when it names none there; a deny rule weighs every path it names
-and where it runs.  The first matching rule wins.  Rules are added
+Each rule is a plist (:tool NAME :kind KIND :path PATTERN :commands
+COMMANDS :behavior allow|deny).  NAME is a tool name or nil for any
+tool; KIND is a tool kind or nil for any kind.  PATTERN, when there is
+one, limits the rule to calls with paths: a glob (`*' within a name,
+`**' across directories) or a directory, which stands for everything
+in it, absolute or relative to the session's working directory.  An
+allow rule then needs every path of the call to match it, a deny rule
+any one.  A shell command's paths, for an allow rule, are the ones its
+command line names outside the session's directories, or where it runs
+when it names none there; a deny rule weighs every path it names and
+where it runs.
+
+COMMANDS, when there is one, limits the rule to shell commands and to
+what they run, read from the command line's syntax tree: each pattern
+is a program or a list of words from the program on, such as
+((\"gcloud\" \"compute\") (\"gsutil\")).  An allow rule needs every
+command of the call to match one pattern, a deny rule any one; a
+command it cannot read matches neither.  A permission prompt about a
+shell command records such a rule for the commands it runs (see
+`harness-perms--command-rule-prefixes'), so \"Always allow\" on
+`gcloud compute instances list' covers gcloud rather than every bash
+call, and on `gcloud ... && gsutil ...' covers both programs.  A tool
+prompt about a tool that runs no command records the rule for the
+whole tool, as before; a rule that names no commands, such as one
+saved before command patterns existed, covers every call of its tool.
+The first matching rule wins.  Rules are added
 here when a permission request is answered with scope `always': a tool
-prompt's answer holds for its tool, and \"Always deny\" for a path
-outside the allowed directories holds for the prompt's pattern,
-whatever the tool.  The note the session's transcript gets then can
-take such a rule back (`permission/undo') and, once taken back, record
-it again (`permission/redo'), from any session (see
+prompt's answer holds for its tool, or its commands, and \"Always
+deny\" for a path outside the allowed directories holds for the
+prompt's pattern, whatever the tool.  The note the session's transcript
+gets then can take such a rule back (`permission/undo') and, once
+taken back, record it again (`permission/redo'), from any session (see
 harness-decisions.el)."
   :type '(repeat
           (plist
@@ -316,6 +336,9 @@ harness-decisions.el)."
                            (symbol :tag "Other kind")))
             (:path (string :tag "Path pattern" :value "docs/**"
                            :doc "Glob the call's paths must match, such as ~/notes/** or src/*.el."))
+            (:commands (repeat :tag "Command patterns"
+                               :doc "Programs or words from them the call's commands must match, such as ((\"gcloud\" \"compute\") (\"gsutil\"))."
+                               (sexp :tag "Pattern")))
             (:behavior (choice :tag "Decision" :value deny
                                :doc "What the rule decides."
                                (const :tag "Allow" allow) (const :tag "Deny" deny)
@@ -389,7 +412,9 @@ See `harness-perms--judge-waiting'.")
   "Answer options offered to the user for a permission request.
 The prompt is about the call, not about where it reaches: the rule
 `allow-session', `allow-always' and `deny-always' record holds for the
-tool (see `permission/answer').")
+tool, or for the commands a shell call runs when the prompt worked
+them out (see `permission/answer' and
+`harness-perms--command-rule-prefixes').")
 
 (defconst harness-perms-dir-options '(allow-once allow-session allow-always deny-once deny-always)
   "Answer options offered when a tool call reaches outside the allowed directories.
@@ -1039,11 +1064,12 @@ it carries on there instead of stopping.  Otherwise return \"\"."
 ;; tool's working directory), not what the command does there: `ls
 ;; ~/.claude' runs in the project and reads elsewhere.  A prompt about
 ;; it and the rules about paths need what it reaches, so that is read
-;; off the command line: the words that are paths, as
-;; `harness-perms--command-paths' finds them.  It is a best-effort
-;; reading, not a shell parser, and the jail does not use it: a command
-;; is confined by the sandbox and decided by the mode and the judge,
-;; which read it whole.
+;; off the command line's syntax tree (see "The shell's syntax tree"):
+;; `harness-perms--command-paths' takes the words that are paths, from
+;; every command the line runs, with their programs left out.  The
+;; reading is best-effort, and the jail does not use it: a command is
+;; confined by the sandbox and decided by the mode and the judge, which
+;; read it whole.
 ;;
 ;; What the call is about, its subject (`harness-perms--subject-paths'),
 ;; is then the paths it names outside the session's directories, or,
@@ -1053,100 +1079,9 @@ it carries on there instead of stopping.  Otherwise return \"\"."
 ;; one of them; a deny rule applies to any path the call names or runs
 ;; in.
 
-(defconst harness-perms--shell-keywords
-  '("!" "{" "}" "if" "then" "else" "elif" "fi" "do" "done" "while" "until"
-    "for" "in" "case" "esac" "select" "function" "time")
-  "Shell words after which a command, not an argument, comes.")
-
-(defconst harness-perms--shell-prefixes
-  '("sudo" "doas" "env" "exec" "command" "builtin" "nohup" "nice" "ionice" "xargs"
-    "stdbuf" "chronic" "unbuffer")
-  "Programs that run the command following them and their options.")
-
 (defconst harness-perms--pseudo-files
   "\\`/\\(?:dev/\\(?:null\\|zero\\|full\\|random\\|urandom\\|tty\\|stdin\\|stdout\\|stderr\\|fd/[0-9]+\\)\\|proc/self/fd/[0-9]+\\)\\'"
   "Regexp of the files a command names that hold nothing of anyone's.")
-
-(defun harness-perms--shell-words (command)
-  "Return the words of shell COMMAND as (WORD . PROGRAM) pairs, in order.
-Quotes and backslashes are undone and comments left out.  PROGRAM is
-non-nil for the word a command starts with, the program it runs: the
-first word of the line or after an operator (`;', `&', `|', `(', `$(',
-`<(', an opening backquote), after NAME=VALUE assignments and keywords
-such as `then', and after a prefix such as `sudo' or `xargs' and its
-options.  A word after a redirection (`>', `<') is no program, and
-neither is one after the end of a substitution or a subshell.  It is
-a best-effort reading, not a parser: $HOME and other expansions stay
-as written, and a here-document's lines are read as commands."
-  (let ((i 0) (n (length command))
-        (word nil)                      ; the word being read
-        (program t)                     ; t, `prefix' or nil: a command comes next
-        (target nil)                    ; the next word follows a redirection
-        (backquoted nil)                ; inside `...`
-        (words nil))
-    (cl-labels ((finish ()
-                  (when word
-                    (cond
-                     (target (push (cons word nil) words) (setq target nil))
-                     ((not program) (push (cons word nil) words))
-                     ((or (string-match-p "\\`[A-Za-z_][A-Za-z0-9_]*=" word)
-                          (and (eq program 'prefix) (string-prefix-p "-" word)))
-                      ;; An assignment, or an option of a prefix: the
-                      ;; command is still to come.
-                      (push (cons word nil) words))
-                     ((member word harness-perms--shell-keywords) (push (cons word t) words))
-                     (t (push (cons word t) words)
-                        (setq program (and (member word harness-perms--shell-prefixes) 'prefix))))
-                    (setq word nil)))
-                (add (s) (setq word (concat word s)))
-                (peek (k) (and (< (+ i k) n) (aref command (+ i k))))
-                (command-starts () (finish) (setq program t target nil)))
-      (while (< i n)
-        (let ((c (aref command i)))
-          (cond
-           ((memq c '(?\s ?\t)) (finish))
-           ((eq c ?\n) (command-starts))
-           ((eq c ?\\)
-            (unless (eq (peek 1) ?\n) (add (string (or (peek 1) ?\\))))
-            (setq i (1+ i)))
-           ((eq c ?')
-            (let ((end (or (cl-position ?' command :start (1+ i)) n)))
-              (add (substring command (1+ i) end))
-              (setq i end)))
-           ((eq c ?\")
-            (setq i (1+ i))
-            (add "")
-            (while (and (< i n) (not (eq (aref command i) ?\")))
-              (if (and (eq (aref command i) ?\\) (memq (peek 1) '(?\" ?\\ ?$ ?` ?\n)))
-                  (progn (unless (eq (peek 1) ?\n) (add (string (peek 1))))
-                         (setq i (+ i 2)))
-                (add (string (aref command i)))
-                (setq i (1+ i)))))
-           ((and (eq c ?#) (null word))
-            (setq i (1- (or (cl-position ?\n command :start i) n))))
-           ((or (memq c '(?> ?<)) (and (eq c ?&) (eq (peek 1) ?>)))
-            ;; A redirection: >, >>, >|, >&, &>, &>>, <, <<, <<<, <&.
-            ;; <( and >( are process substitutions, which run a command.
-            (finish)
-            (if (eq (peek 1) ?\()
-                (setq program t i (1+ i))
-              (when (eq c ?&) (setq i (1+ i)))
-              (while (memq (peek 1) '(?> ?< ?| ?&)) (setq i (1+ i)))
-              (setq target t)))
-           ((and (eq c ?$) (eq (peek 1) ?\())
-            (command-starts)
-            (setq i (1+ i)))
-           ;; What follows a substitution or a subshell is an argument,
-           ;; or an operator that starts a command again.
-           ((or (eq c ?\)) (and (eq c ?`) backquoted))
-            (finish)
-            (setq program nil target nil backquoted nil))
-           ((eq c ?`) (command-starts) (setq backquoted t))
-           ((memq c '(?\; ?& ?| ?\()) (command-starts))
-           (t (add (string c)))))
-        (setq i (1+ i)))
-      (finish))
-    (nreverse words)))
 
 (defun harness-perms--path-word (word)
   "Return the path shell WORD names, as written, or nil.
@@ -1175,13 +1110,14 @@ That is the `:command' of an exec call, such as the bash tool's."
 
 (defun harness-perms--command-paths (request)
   "Return the paths REQUEST's shell command names, absolute, or nil.
-They are the words `harness-perms--path-word' takes for paths, other
-than the programs the command runs (see `harness-perms--shell-words')
-and files such as /dev/null; relative ones are relative to where the
-command runs.  On this machine an absolute word counts only when its
-first directory exists, so a pattern such as /api/v1 in a grep is no
-path; on a remote host none is looked up, and words starting with ~
-are left out, since only that host knows its home."
+They are the words `harness-perms--path-word' takes for paths, read
+from the command line's syntax tree with the programs the command runs
+left out (see `harness-perms--shell-ast-path-words'), and files such as
+/dev/null; relative ones are relative to where the command runs.  On
+this machine an absolute word counts only when its first directory
+exists, so a pattern such as /api/v1 in a grep is no path; on a remote
+host none is looked up, and words starting with ~ are left out, since
+only that host knows its home."
   (when-let* ((command (harness-perms--command request)))
     (condition-case err
         (let* ((dir (harness-perms--command-dir request))
@@ -1191,8 +1127,9 @@ are left out, since only that host knows its home."
                (remote (or (file-remote-p dir) (plist-get (plist-get request :session) :host)))
                (local-dir (or (file-remote-p dir 'localname) dir))
                paths)
-          (pcase-dolist (`(,word . ,program) (harness-perms--shell-words command))
-            (let ((value (and (not program) (harness-perms--path-word word))))
+          (dolist (word (harness-perms--shell-ast-path-words
+                         (harness-perms--shell-ast command)))
+            (let ((value (harness-perms--path-word word)))
               (when (and value (not (string-match-p "\n" value)))
                 (let ((path (cond ((not remote) (expand-file-name value dir))
                                   ((string-prefix-p "~" value) nil)
@@ -1243,6 +1180,1016 @@ rule."
       (append (list :named-paths named
                     :subject-paths (harness-perms--subject-paths (append (list :named-paths named) request)))
               request))))
+
+;;;; The shell's syntax tree
+;;
+;; A lasting answer to a shell command should not have to be about the
+;; whole tool: `gcloud storage ls ...' and `gsutil ls ...' are the work
+;; of a session over a service, and a user who lets one run usually
+;; wants every command that runs those programs to run too, not every
+;; `rm', `make' and `python' in every project.  What a command runs is
+;; read from a syntax tree of its command line, not from its first
+;; word:
+;;
+;;   gcloud compute instances list --project p | grep running
+;;
+;; is a pipeline of two commands, `sudo -u me gcloud ...' runs gcloud
+;; after a wrapper and its options, `x=$(gcloud ...) ...' runs the
+;; substitution's command too, and an `if', a loop or a subshell runs
+;; each command in its body.  A rule made from the tree names the
+;; programs and the words they have in common, so the rule for the line
+;; above covers gcloud and grep, while one for
+;;
+;;   gcloud compute instances list && gcloud compute instances describe x
+;;
+;; covers the prefix `gcloud compute instances'.  A rule is a prefix,
+;; not the exact line: a later `gcloud compute instances list' matches
+;; it, and so does `gcloud compute instances delete', which starts with
+;; the same words.  What the answer trusts is the programs and the
+;; subcommands its call shared, never the arguments it happened to
+;; pass; a command of another program (gsutil) does not match.
+;;
+;; The tree is the one reading of a command line the permission system
+;; uses: what a lasting answer covers
+;; (`harness-perms--command-rule-prefixes'), the paths the call is about
+;; (`harness-perms--command-paths') and the read-only cloud commands
+;; the mode stage allows (`harness-perms--read-only-cloud-p') all come
+;; from it.  It is a best-effort reading of the shell grammar.  It is
+;; never a security boundary: whatever it reads, the sandbox confines
+;; the command and the jail, the mode and the judge decide it.  A
+;; command it cannot read is left to the whole tool, as before.
+;;
+;; A node is a plist:
+;;   (:kind list         :items NODES)          ; `a; b', `a && b', ...
+;;   (:kind pipeline     :items NODES)          ; `a | b'
+;;   (:kind command      :program "gcloud"
+;;                       :words (...)           ; every word it runs
+;;                       :command-words (...)   ; from the program on
+;;                       :path-words (...)      ; the words that may be paths
+;;                       :substitutions ASTS)   ; commands in its words
+;;   (:kind subshell     :body NODE)            ; `( ... )' and `{ ...; }'
+;;   (:kind noop         :path-words (...)      ; `[[ ... ]]', assignments
+;;                       :substitutions ASTS)
+;; A `:command' node's `:command-words' leave out assignments and the
+;; wrappers that run another command (`sudo', `env', `xargs' ...), so
+;; they start at the program the caller asked for.  Its `:path-words'
+;; are its words without the programs, with what a redirection names.
+;; `:substitutions' may hang off any node: the commands a command
+;; substitution in its words, condition, loop data or case pattern runs.
+
+(defconst harness-perms--shell-wrappers
+  '(("sudo" "-u" "--user" "-g" "--group" "-p" "--prompt" "-C" "--close-from"
+     "-h" "--host" "-r" "--role" "-t" "--type" "-U" "--other-user"
+     "-T" "--command-timeout" "-D" "--chdir" "-R" "--chroot")
+    ("doas" "-u" "-C")
+    ("env" "-u" "--unset" "-C" "--chdir" "-S" "--split-string")
+    ("exec" "-a")
+    ("command" "-a")
+    ("nice" "-n" "--adjustment")
+    ("ionice" "-c" "--class" "-n" "--classdata" "-p" "--pid" "-P" "--pgid"
+     "-u" "--uid")
+    ("xargs" "-a" "--arg-file" "-d" "--delimiter" "-E" "-e" "--eof"
+     "-I" "--replace" "-L" "--max-lines" "-n" "--max-args" "-P" "--max-procs"
+     "-s" "--max-chars" "--process-slot-var")
+    ("timeout" "-s" "--signal" "-k" "--kill-after" "--preserve-status")
+    ("stdbuf" "-i" "--input" "-o" "--output" "-e" "--error")
+    ("nohup")
+    ("builtin")
+    ("chronic" "-v" "--verbose")
+    ("unbuffer" "-p")
+    ("time" "-p"))
+  "Programs that run the command following them and their options.
+Each entry is (PROGRAM . OPTIONS-THAT-TAKE-A-WORD); other options of
+the program take none.  A command rule made from a command line starts
+at the program after them, so `sudo -u me gcloud ...' is about gcloud,
+not sudo.  A wrapper with no command after it is the program itself,
+as `nohup' alone runs nohup.")
+
+(defconst harness-perms--shell-wrapper-programs
+  (mapcar #'car harness-perms--shell-wrappers)
+  "The programs of `harness-perms--shell-wrappers'.")
+
+(defun harness-perms--shell-skip-quoted (command i quote)
+  "Return the position just past the QUOTE that closes the string at I in COMMAND.
+I is the index of the first character inside the string; QUOTE is the
+quote character.  A backslash escapes the next character in double
+quotes and backquotes, not in single quotes.  A string that never
+closes runs to the end of COMMAND."
+  (let ((n (length command)))
+    (cond
+     ((eq quote ?')
+      (let ((end (cl-position ?' command :start i)))
+        (if end (1+ end) n)))
+     (t
+      (while (and (< i n) (not (eq (aref command i) quote)))
+        (setq i (if (eq (aref command i) ?\\) (min n (+ i 2)) (1+ i))))
+      (min n (1+ i))))))
+
+(defun harness-perms--shell-balanced-end (command i open close depth)
+  "Return the index just past DEPTH matching OPEN/CLOSE pairs in COMMAND.
+I is the index just after the first OPEN.  Quotes, backslash escapes
+and nested OPEN/CLOSE pairs are handled."
+  (let ((n (length command)))
+    (while (and (< i n) (> depth 0))
+      (let ((c (aref command i)))
+        (cond
+         ((eq c ?\\) (setq i (min n (+ i 2))))
+         ((eq c ?') (setq i (harness-perms--shell-skip-quoted command (1+ i) ?')))
+         ((eq c ?\") (setq i (harness-perms--shell-skip-quoted command (1+ i) ?\")))
+         ((eq c ?`) (setq i (harness-perms--shell-skip-quoted command (1+ i) ?`)))
+         ((eq c open) (setq depth (1+ depth) i (1+ i)))
+         ((eq c close) (setq depth (1- depth) i (1+ i)))
+         (t (setq i (1+ i))))))
+    i))
+
+(defun harness-perms--shell-substitutions (text)
+  "Return the syntax trees of the command substitutions in shell TEXT.
+`$(...)', backquotes and `<( ... )'/`>( ... )' are read, inside double
+quotes too; single quotes hold them literally.  Used for the text of a
+condition, which is no command of its own but can run commands in a
+substitution."
+  (let ((i 0) (n (length text)) (double nil) (subs nil))
+    (while (< i n)
+      (let ((c (aref text i)))
+        (cond
+         ((eq c ?\\) (setq i (min n (+ i 2))))
+         ((eq c ?\")
+          (setq double (not double))
+          (setq i (1+ i)))
+         ((and (eq c ?') (not double))
+          (setq i (harness-perms--shell-skip-quoted text (1+ i) ?')))
+         ((and (eq c ?$) (eq (and (< (1+ i) n) (aref text (1+ i))) ?\())
+          (if (eq (and (< (+ i 2) n) (aref text (+ i 2))) ?\()
+              (let* ((stop (harness-perms--shell-balanced-end text (+ i 3) ?\( ?\) 2))
+                     (inner (substring text (+ i 3) (max (+ i 3) (- stop 2)))))
+                (unless (harness-string-blank-p inner)
+                  (setq subs (append (reverse (harness-perms--shell-substitutions inner)) subs)))
+                (setq i stop))
+            (let* ((stop (harness-perms--shell-balanced-end text (+ i 2) ?\( ?\) 1))
+                   (inner (substring text (+ i 2) (max (+ i 2) (1- stop)))))
+              (unless (harness-string-blank-p inner)
+                (push (harness-perms--shell-ast inner) subs))
+              (setq i stop))))
+         ((eq c ?`)
+          (let* ((stop (harness-perms--shell-skip-quoted text (1+ i) ?`))
+                 (inner (substring text (1+ i) (max (1+ i) (1- stop)))))
+            (unless (harness-string-blank-p inner)
+              (push (harness-perms--shell-ast inner) subs))
+            (setq i stop)))
+         ((and (memq c '(?< ?>)) (eq (and (< (1+ i) n) (aref text (1+ i))) ?\())
+          (let* ((stop (harness-perms--shell-balanced-end text (+ i 2) ?\( ?\) 1))
+                 (inner (substring text (+ i 2) (max (+ i 2) (1- stop)))))
+            (unless (harness-string-blank-p inner)
+              (push (harness-perms--shell-ast inner) subs))
+            (setq i stop)))
+         (t (setq i (1+ i))))))
+    (nreverse (delq nil subs))))
+
+(defun harness-perms--shell-tokenize (command)
+  "Return the tokens of shell COMMAND, in order.
+A token is (:type word :text TEXT :quoted BOOL :substitutions ASTS),
+\(:type op :text OP), (:type redirect :text OP :fd FD) or (:type
+condition :text TEXT).  A word has its quotes and escapes undone; a
+command substitution stays in its text as written, and the command
+lines it holds are in `:substitutions'.  A here-document's body is
+left out."
+  (let ((i 0) (n (length command))
+        (tokens nil)
+        (word nil) (quoted nil) (subs nil)
+        (heredocs nil) (heredoc-expect nil))
+    (cl-labels
+        ((finish ()
+           (when (or word subs)
+             (when heredoc-expect
+               (push (cons (or word "") (eq heredoc-expect 'strip)) heredocs)
+               (setq heredoc-expect nil))
+             (push (list :type 'word :text (or word "")
+                         :quoted (and quoted t)
+                         :substitutions (nreverse subs))
+                   tokens)
+             (setq word nil quoted nil subs nil)))
+         (add (s) (setq word (concat word s)))
+         (add-sub (ast)
+           (when ast (push ast subs) (setq quoted t)))
+         (push-op (text) (push (list :type 'op :text text) tokens))
+         (push-redirect (text fd)
+           (push (list :type 'redirect :text text :fd fd) tokens))
+         (peek (k) (and (< (+ i k) n) (aref command (+ i k))))
+         (skip-to-newline ()
+           (setq i (or (cl-position ?\n command :start i) n)))
+         (consume-heredocs ()
+           (while heredocs
+             (let* ((spec (pop heredocs))
+                    (delimiter (car spec))
+                    (strip (cdr spec))
+                    (found nil))
+               (while (and (< i n) (not found))
+                 (let* ((end (or (cl-position ?\n command :start i) n))
+                        (line (substring command i end)))
+                   (setq i (min n (1+ end)))
+                   (when (and strip (string-prefix-p "\t" line))
+                     (setq line (replace-regexp-in-string "\\`\t+" "" line)))
+                   (when (equal line delimiter)
+                     (setq found t)))))))
+         (double-quoted (start)
+           ;; START is just inside the opening quote; return the index
+           ;; just past the closing one.
+           (let ((j start) (end nil))
+             (add "")
+             (while (and (< j n) (not end))
+               (let ((c (aref command j)))
+                 (cond
+                  ((eq c ?\")
+                   (setq end (1+ j)))
+                  ((eq c ?\\)
+                   (let ((next (and (< (1+ j) n) (aref command (1+ j)))))
+                     (cond
+                      ((null next) (add "\\") (setq j (1+ j)))
+                      ((eq next ?\n) (setq j (+ j 2)))
+                      (t (add (string next)) (setq j (+ j 2))))))
+                  ((and (eq c ?$) (eq (and (< (1+ j) n) (aref command (1+ j))) ?\())
+                   (if (eq (and (< (+ j 2) n) (aref command (+ j 2))) ?\()
+                       ;; $(( ... )): arithmetic, no command in it.
+                       (let ((stop (harness-perms--shell-balanced-end
+                                    command (+ j 3) ?\( ?\) 2)))
+                         (add (substring command j stop))
+                         (setq j stop))
+                     (let* ((stop (harness-perms--shell-balanced-end
+                                   command (+ j 2) ?\( ?\) 1))
+                            (inner (substring command (+ j 2) (max (+ j 2) (1- stop)))))
+                       (add (format "$(%s)" inner))
+                       (unless (harness-string-blank-p inner)
+                         (add-sub (harness-perms--shell-ast inner)))
+                       (setq j stop))))
+                  ((eq c ?`)
+                   (let* ((stop (harness-perms--shell-skip-quoted command (1+ j) ?`))
+                          (inner (substring command (1+ j) (max (1+ j) (1- stop)))))
+                     (add (format "`%s`" inner))
+                     (unless (harness-string-blank-p inner)
+                       (add-sub (harness-perms--shell-ast inner)))
+                     (setq j stop)))
+                  (t (add (string c)) (setq j (1+ j))))))
+             (setq quoted t)
+             (setq i (or end n)))))
+      (while (< i n)
+        (let ((c (aref command i)))
+          (cond
+           ((memq c '(?\s ?\t ?\r)) (finish) (setq i (1+ i)))
+           ((eq c ?\n)
+            (finish)
+            (push-op "\n")
+            (setq i (1+ i))
+            (consume-heredocs))
+           ;; A comment starts a word only at its beginning.
+           ((and (eq c ?#) (null word) (null subs))
+            (skip-to-newline))
+           ((eq c ?\\)
+            (let ((next (peek 1)))
+              (cond ((null next) (add "\\") (setq i (1+ i)))
+                    ((eq next ?\n) (setq i (+ i 2)))
+                    (t (add (string next)) (setq quoted t) (setq i (+ i 2))))))
+           ((eq c ?')
+            (let ((end (or (cl-position ?' command :start (1+ i)) n)))
+              (add (substring command (1+ i) end))
+              (setq quoted t)
+              (setq i (min n (1+ end)))))
+           ((and (eq c ?$) (memq (peek 1) '(?' ?\")))
+            (if (eq (peek 1) ?')
+                (let ((end (or (cl-position ?' command :start (+ i 2)) n)))
+                  (setq i (+ i 2))
+                  (add (substring command i end))
+                  (setq quoted t)
+                  (setq i (min n (1+ end))))
+              (setq i (+ i 2))
+              (double-quoted i)))
+           ((eq c ?\")
+            (double-quoted (1+ i)))
+           ((and (eq c ?$) (eq (peek 1) ?\())
+            (if (eq (peek 2) ?\()
+                (let ((stop (harness-perms--shell-balanced-end command (+ i 3) ?\( ?\) 2)))
+                  (add (substring command i stop))
+                  (setq i stop))
+              (let* ((stop (harness-perms--shell-balanced-end command (+ i 2) ?\( ?\) 1))
+                     (inner (substring command (+ i 2) (max (+ i 2) (1- stop)))))
+                (add (format "$(%s)" inner))
+                (unless (harness-string-blank-p inner)
+                  (add-sub (harness-perms--shell-ast inner)))
+                (setq i stop))))
+           ((and (eq c ?$) (eq (peek 1) ?{))
+            (let ((stop (harness-perms--shell-balanced-end command (+ i 2) ?{ ?} 1)))
+              (add (substring command i stop))
+              (setq quoted t)
+              (setq i stop)))
+           ((eq c ?`)
+            (let* ((stop (harness-perms--shell-skip-quoted command (1+ i) ?`))
+                   (inner (substring command (1+ i) (max (1+ i) (1- stop)))))
+              (add (format "`%s`" inner))
+              (unless (harness-string-blank-p inner)
+                (add-sub (harness-perms--shell-ast inner)))
+              (setq i stop)))
+           ;; `[[ ... ]]' and `(( ... ))' are conditions: they run no
+           ;; command of their own.
+           ((and (eq c ?\[) (eq (peek 1) ?\[) (null word))
+            (let* ((stop (or (string-match "\\]\\]" command (+ i 2)) n))
+                   (text (substring command i (min n (+ stop 2)))))
+              (push (list :type 'condition :text text
+                          :substitutions (harness-perms--shell-substitutions text))
+                    tokens)
+              (setq i (min n (+ stop 2)))))
+           ((and (eq c ?\() (eq (peek 1) ?\() (null word))
+            (let* ((stop (harness-perms--shell-balanced-end command (+ i 2) ?\( ?\) 2))
+                   (text (substring command i stop)))
+              (push (list :type 'condition :text text
+                          :substitutions (harness-perms--shell-substitutions
+                                          (substring text 2 (max 2 (- (length text) 2)))))
+                    tokens)
+              (setq i stop)))
+           ;; Process substitutions run a command, and are words.
+           ((and (memq c '(?< ?>)) (eq (peek 1) ?\())
+            (let* ((stop (harness-perms--shell-balanced-end command (+ i 2) ?\( ?\) 1))
+                   (inner (substring command (+ i 2) (max (+ i 2) (1- stop)))))
+              (add (substring command i stop))
+              (unless (harness-string-blank-p inner)
+                (add-sub (harness-perms--shell-ast inner)))
+              (setq quoted t)
+              (setq i stop)))
+           ((and (eq c ?&) (eq (peek 1) ?>))
+            (finish)
+            (let ((start i))
+              (setq i (+ i 2))
+              (while (memq (peek 0) '(?>))
+                (setq i (1+ i)))
+              (push-redirect (substring command start i) nil)))
+           ((memq c '(?< ?>))
+            ;; `2>' is a file descriptor; a quoted "2" is the word 2.
+            (let ((fd (and word (not quoted)
+                           (string-match-p "\\`[0-9]+\\'" word) word))
+                  (start i))
+              (if fd (setq word nil) (finish))
+              (setq i (1+ i))
+              (cond
+               ((memq (peek 0) '(?< ?> ?| ?&))
+                (while (memq (peek 0) '(?< ?> ?| ?&))
+                  (setq i (1+ i))))
+               ((eq (peek 0) ?\() nil))  ; handled above
+              ;; `<<-' strips tabs from the here-document's body.
+              (when (and (eq c ?<) (eq (peek 0) ?-))
+                (setq i (1+ i)))
+              (let ((op (substring command start i)))
+                (push-redirect op fd)
+                (when (member op '("<<" "<<-"))
+                  (setq heredoc-expect (if (equal op "<<-") 'strip 'plain))))))
+           ((eq c ?|)
+            (finish)
+            (if (eq (peek 1) ?|)
+                (progn (push-op "||") (setq i (+ i 2)))
+              (if (eq (peek 1) ?&)
+                  (progn (push-op "|&") (setq i (+ i 2)))
+                (push-op "|")
+                (setq i (1+ i)))))
+           ((eq c ?\;)
+            (finish)
+            (cond ((and (eq (peek 1) ?\;) (eq (peek 2) ?&))
+                   (push-op ";;&") (setq i (+ i 3)))
+                  ((eq (peek 1) ?\;) (push-op ";;") (setq i (+ i 2)))
+                  ((eq (peek 1) ?&) (push-op ";&") (setq i (+ i 2)))
+                  (t (push-op ";") (setq i (1+ i)))))
+           ((eq c ?&)
+            (finish)
+            (if (eq (peek 1) ?&)
+                (progn (push-op "&&") (setq i (+ i 2)))
+              (push-op "&")
+              (setq i (1+ i))))
+           ((memq c '(?\( ?\)))
+            (finish)
+            (push-op (string c))
+            (setq i (1+ i)))
+           ((and (memq c '(?\{ ?\})) (null word)
+                 (or (null (peek 1)) (memq (peek 1) '(?\s ?\t ?\n ?\; ?& ?| ?\) ?\}))))
+            (push-op (string c))
+            (setq i (1+ i)))
+           (t (add (string c)) (setq i (1+ i))))))
+      (finish)
+      (nreverse tokens))))
+
+(defun harness-perms--shell-ast (command)
+  "Return the syntax tree of shell COMMAND, or nil.
+See the commentary above for its nodes.  A command the reader cannot
+parse gives nil; it is never an error."
+  (when (and (stringp command) (not (harness-string-blank-p command)))
+    (condition-case err
+        (let* ((tokens (vconcat (harness-perms--shell-tokenize command)))
+               (n (length tokens))
+               (pos 0))
+          (cl-labels
+              ((peek (&optional k)
+                 (let ((p (+ pos (or k 0))))
+                   (and (< p n) (aref tokens p))))
+               (advance ()
+                 (when (< pos n) (setq pos (1+ pos)))
+                 (peek))
+               (op-p (tok &optional text)
+                 (and tok (eq (plist-get tok :type) 'op)
+                      (or (null text) (equal text (plist-get tok :text)))))
+               (word-p (tok &optional text)
+                 (and tok (eq (plist-get tok :type) 'word)
+                      (or (null text)
+                          (and (not (plist-get tok :quoted))
+                               (equal text (plist-get tok :text))))))
+               (skip-newlines ()
+                 (while (op-p (peek) "\n") (advance)))
+               (skip-separators ()
+                 (while (or (op-p (peek) ";") (op-p (peek) "&")
+                            (op-p (peek) "\n"))
+                   (advance)))
+               (terminator-p (terms)
+                 (let ((tok (peek)))
+                   (and tok terms
+                        (if (eq (plist-get tok :type) 'op)
+                            (member (plist-get tok :text) terms)
+                          (and (eq (plist-get tok :type) 'word)
+                               (not (plist-get tok :quoted))
+                               (member (plist-get tok :text) terms))))))
+               (simple-end-p (terms words)
+                 (let ((tok (peek)))
+                   (or (null tok)
+                       (and (eq (plist-get tok :type) 'op)
+                            (member (plist-get tok :text)
+                                    '(";" "&" "&&" "||" "|" "|&" "\n"
+                                      "(" ")" "{" "}" ";;" ";&" ";;&")))
+                       ;; A word that ends the enclosing construct does
+                       ;; so only where a command could start: `echo
+                       ;; then' has then as its argument.
+                       (and (null words)
+                            (eq (plist-get tok :type) 'word)
+                            (not (plist-get tok :quoted))
+                            (member (plist-get tok :text) terms)))))
+               (parse-list (terms)
+                 (let (items)
+                   (skip-separators)
+                   (while (and (peek) (not (terminator-p terms)))
+                     (let ((before pos)
+                           (node (parse-and-or terms)))
+                       (when node (push node items))
+                       (if (= before pos)
+                           (advance)
+                         (skip-separators))))
+                   (list :kind 'list :items (nreverse (delq nil items)))))
+               (parse-and-or (terms)
+                 (let ((items nil))
+                   (push (parse-pipeline terms) items)
+                   (while (or (op-p (peek) "&&") (op-p (peek) "||"))
+                     (advance)
+                     (skip-newlines)
+                     (push (parse-pipeline terms) items))
+                   (setq items (delq nil (nreverse items)))
+                   (cond ((null items) nil)
+                         ((null (cdr items)) (car items))
+                         (t (list :kind 'list :items items)))))
+               (parse-pipeline (terms)
+                 (let ((again t))
+                   (while again
+                     (setq again nil)
+                     (when (word-p (peek) "!")
+                       (advance)
+                       (setq again t))
+                     (when (word-p (peek) "time")
+                       (advance)
+                       (while (and (word-p (peek))
+                                   (string-prefix-p "-" (plist-get (peek) :text)))
+                         (advance))
+                       (setq again t))))
+                 (let ((items (list (parse-command terms))))
+                   (while (or (op-p (peek) "|") (op-p (peek) "|&"))
+                     (advance)
+                     (skip-newlines)
+                     (push (parse-command terms) items))
+                   (setq items (delq nil (nreverse items)))
+                   (cond ((null items) nil)
+                         ((null (cdr items)) (car items))
+                         (t (list :kind 'pipeline :items items)))))
+               (parse-if ()
+                 (advance)              ; if
+                 (let ((items nil) (done nil))
+                   (while (not done)
+                     (push (parse-list '("then" "elif" "else" "fi")) items)
+                     (when (word-p (peek) "then") (advance))
+                     (push (parse-list '("elif" "else" "fi")) items)
+                     (cond
+                      ((word-p (peek) "elif") (advance))
+                      ((word-p (peek) "else")
+                       (advance)
+                       (push (parse-list '("fi")) items)
+                       (when (word-p (peek) "fi") (advance))
+                       (setq done t))
+                      (t (when (word-p (peek) "fi") (advance))
+                         (setq done t))))
+                   (list :kind 'list :items (nreverse (delq nil items)))))
+               (parse-loop ()
+                 (advance)              ; while / until
+                 (let ((condition (parse-list '("do" "done"))))
+                   (when (word-p (peek) "do") (advance))
+                   (let ((body (parse-list '("done"))))
+                     (when (word-p (peek) "done") (advance))
+                     (list :kind 'list :items (delq nil (list condition body))))))
+               (parse-for ()
+                 (advance)              ; for / select
+                 (let* ((subs nil) (data nil)
+                        (take (lambda (keep)
+                               (let ((tok (peek)))
+                                 (when (and tok (eq (plist-get tok :type) 'word))
+                                   (when keep (push (plist-get tok :text) data))
+                                   (dolist (sub (plist-get tok :substitutions))
+                                     (push sub subs)))
+                                 (advance)))))
+                   (when (word-p (peek)) (funcall take nil))
+                   (when (word-p (peek) "in")
+                     (funcall take nil)
+                     ;; What follows `in' is data until the line ends,
+                     ;; `do' among it if the user lists that word; a
+                     ;; substitution there still runs a command, and a
+                     ;; word there may name a path.
+                     (while (and (peek)
+                                 (not (op-p (peek) ";"))
+                                 (not (op-p (peek) "\n")))
+                       (funcall take t)))
+                   (skip-separators)
+                   (setq subs (nreverse subs)
+                         data (nreverse data))
+                   (let ((header (and (or subs data)
+                                      (list :kind 'noop
+                                            :path-words data
+                                            :substitutions subs))))
+                     (if (word-p (peek) "do")
+                         (progn
+                           (advance)
+                           (let ((body (parse-list '("done"))))
+                             (when (word-p (peek) "done") (advance))
+                             (if header
+                                 ;; The header's substitutions run before
+                                 ;; the body, and its data may name paths:
+                                 ;; keep both before it.
+                                 (list :kind 'list :items (list header body))
+                               body)))
+                       (or header (list :kind 'noop))))))
+               (parse-case ()
+                 (advance)              ; case
+                 (let* ((subs nil) (data nil) (items nil) (done nil)
+                        (take (lambda ()
+                               ;; A word skipped as the case's word or a
+                               ;; pattern can still run a substitution,
+                               ;; and may name a path.
+                               (let ((tok (peek)))
+                                 (when (and tok (eq (plist-get tok :type) 'word))
+                                   (push (plist-get tok :text) data)
+                                   (dolist (sub (plist-get tok :substitutions))
+                                     (push sub subs)))
+                                 (advance)))))
+                   (while (and (peek) (not (word-p (peek) "in")))
+                     (funcall take))
+                   (when (word-p (peek) "in") (advance))
+                   (while (not done)
+                     ;; Skip the pattern, up to its closing parenthesis.
+                     (while (and (peek) (not (op-p (peek) ")"))
+                                 (not (word-p (peek) "esac")))
+                       (funcall take))
+                     (cond
+                      ((or (null (peek)) (word-p (peek) "esac"))
+                       (when (word-p (peek) "esac") (advance))
+                       (setq done t))
+                      (t
+                       (advance)        ; )
+                       (push (parse-list '(";;" ";&" ";;&" "esac")) items)
+                       (cond
+                        ((or (op-p (peek) ";;") (op-p (peek) ";&") (op-p (peek) ";;&"))
+                         (advance))
+                        ((word-p (peek) "esac") (advance) (setq done t))))))
+                   (let ((header (and (or subs data)
+                                      (list :kind 'noop
+                                            :path-words (nreverse data)
+                                            :substitutions (nreverse subs)))))
+                     (list :kind 'list
+                           :items (append (and header (list header))
+                                          (nreverse (delq nil items)))))))
+               (parse-function (terms)
+                 (advance)              ; function
+                 (when (word-p (peek)) (advance))
+                 (when (and (op-p (peek) "(") (op-p (peek 1) ")"))
+                   (advance) (advance))
+                 (parse-command terms))
+               (parse-function-def (terms)
+                 (advance)              ; name
+                 (advance)              ; (
+                 (advance)              ; )
+                 (parse-command terms))
+               (parse-simple (terms)
+                 (let ((words nil) (entries nil) (subs nil) (any nil))
+                   (while (and (peek) (not (simple-end-p terms words)))
+                     (let ((tok (peek)))
+                       (setq any t)
+                       (pcase (plist-get tok :type)
+                         ('redirect
+                          (advance)
+                          ;; Its target is no command word, but it names
+                          ;; a path, and a substitution in it runs a
+                          ;; command.
+                          (when (word-p (peek))
+                            (push (list :text (plist-get (peek) :text) :word nil)
+                                  entries)
+                            (setq subs (append
+                                        (reverse (plist-get (peek) :substitutions))
+                                        subs))
+                            (advance)))
+                         ('word
+                          (advance)
+                          (push (list :text (plist-get tok :text) :word (length words))
+                                entries)
+                          (push (plist-get tok :text) words)
+                          (setq subs (append (reverse (plist-get tok :substitutions)) subs)))
+                         (_ (advance)))))
+                   (when any
+                     (setq words (nreverse words)
+                           entries (nreverse entries))
+                     (let ((command-words (harness-perms--shell-command-words words)))
+                       (if (null command-words)
+                           ;; Assignments and redirections alone run no
+                           ;; program, but a substitution in them does.
+                           (list :kind 'noop
+                                 :path-words (mapcar (lambda (entry)
+                                                       (plist-get entry :text))
+                                                     entries)
+                                 :substitutions (nreverse subs))
+                         (let ((programs (harness-perms--shell-word-programs
+                                          words command-words)))
+                           (list :kind 'command
+                                 :program (harness-perms--shell-program (car command-words))
+                                 :words words
+                                 :command-words command-words
+                                 :path-words (cl-loop
+                                              for entry in entries
+                                              unless (and (integerp (plist-get entry :word))
+                                                          (memq (plist-get entry :word)
+                                                                programs))
+                                              collect (plist-get entry :text))
+                                 :substitutions (nreverse subs))))))))
+               (parse-command (terms)
+                 (let ((tok (peek)))
+                   (cond
+                    ((null tok) nil)
+                    ((op-p tok "(")
+                     (advance)
+                     (let ((body (parse-list '(")"))))
+                       (when (op-p (peek) ")") (advance))
+                       (list :kind 'subshell :body body)))
+                    ((op-p tok "{")
+                     (advance)
+                     (let ((body (parse-list '("}"))))
+                       (when (op-p (peek) "}") (advance))
+                       (list :kind 'subshell :body body)))
+                    ((word-p tok "if") (parse-if))
+                    ((word-p tok "while") (parse-loop))
+                    ((word-p tok "until") (parse-loop))
+                    ((word-p tok "for") (parse-for))
+                    ((word-p tok "select") (parse-for))
+                    ((word-p tok "case") (parse-case))
+                    ((word-p tok "function") (parse-function terms))
+                    ((member (plist-get tok :type) '(condition))
+                     (advance)
+                     (list :kind 'noop
+                           :path-words (harness-perms--shell-condition-words
+                                        (plist-get tok :text))
+                           :substitutions (plist-get tok :substitutions)))
+                    ((and (word-p tok)
+                          (member (plist-get tok :text)
+                                  '("then" "else" "elif" "fi" "do" "done" "esac")))
+                     nil)
+                    ((and (word-p tok)
+                          (op-p (peek 1) "(") (op-p (peek 2) ")"))
+                     (parse-function-def terms))
+                    (t (parse-simple terms))))))
+            (parse-list nil)))
+      (error (harness-log 'debug "perms: could not read a shell command: %S" err)
+             nil))))
+
+(defun harness-perms--shell-ast-walk (node collect)
+  "Walk the syntax tree NODE, calling COLLECT with each command node.
+Commands in pipelines, lists, subshells, conditions, loops and
+substitutions are all visited; a `noop' node runs no program."
+  (when (consp node)
+    (pcase (plist-get node :kind)
+      ('command
+       (funcall collect node)
+       (dolist (sub (plist-get node :substitutions))
+         (harness-perms--shell-ast-walk sub collect)))
+      ('noop
+       ;; A condition or an assignment runs no program, but a
+       ;; substitution in it does.
+       (dolist (sub (plist-get node :substitutions))
+         (harness-perms--shell-ast-walk sub collect)))
+      (_
+       (dolist (item (plist-get node :items))
+         (harness-perms--shell-ast-walk item collect))
+       (dolist (sub (plist-get node :substitutions))
+         (harness-perms--shell-ast-walk sub collect))
+       (harness-perms--shell-ast-walk (plist-get node :body) collect)
+       (harness-perms--shell-ast-walk (plist-get node :else) collect)))))
+
+(defun harness-perms--shell-ast-commands (ast)
+  "Return the command nodes the syntax tree AST runs, in order.
+Commands in pipelines, lists, subshells, conditions, loops and
+substitutions are all included; a `noop' node runs no program."
+  (let (out)
+    (harness-perms--shell-ast-walk ast (lambda (node) (push node out)))
+    (nreverse out)))
+
+(defun harness-perms--shell-program (word)
+  "Return the program WORD names, without its directory."
+  (let ((base (file-name-nondirectory word)))
+    (if (string-empty-p base) word base)))
+
+(defun harness-perms--shell-wrapper-command (program words)
+  "Return the words WRAPPER PROGRAM's command starts at, or nil.
+WORDS are those after PROGRAM.  The wrapper's options are skipped, and
+so is its word for an option that takes one; `timeout' also takes the
+duration before its command."
+  (let ((taking (cdr (assoc program harness-perms--shell-wrappers))))
+    (while (and words (string-prefix-p "-" (car words)))
+      (let* ((word (pop words))
+             (name (car (split-string word "="))))
+        (when (and (member name taking)
+                   (not (string-match-p "=" word))
+                   words)
+          (pop words))))
+    (when (equal program "timeout")
+      (pop words))
+    words))
+
+(defun harness-perms--shell-command-words (words)
+  "Return WORDS from the program a command runs on, or nil.
+Leading assignments and the wrappers of `harness-perms--shell-wrappers'
+are left out, with their options: `FOO=1 sudo -n gcloud ...' starts at
+gcloud.  A wrapper with no command after it is the program itself."
+  (let ((rest words) (done nil) (result nil))
+    (while (and rest (not done))
+      (let* ((word (car rest))
+             (program (harness-perms--shell-program word)))
+        (cond
+         ((string-match-p "\\`[A-Za-z_][A-Za-z0-9_]*=" word)
+          (setq rest (cdr rest)))
+         ((member program harness-perms--shell-wrapper-programs)
+          (let ((next (harness-perms--shell-wrapper-command program (cdr rest))))
+            (if next
+                (setq rest next)
+              (setq result rest done t))))
+         (t (setq result rest done t)))))
+    result))
+
+(defun harness-perms--shell-word-programs (words command-words)
+  "Return the indices of WORDS that name programs.
+COMMAND-WORDS are WORDS from the program on, as
+`harness-perms--shell-command-words' returns them: the words before it
+are assignments and the wrappers that run it, with their options, and
+each wrapper program and the command's own program is a program."
+  (let* ((start (- (length words) (length command-words)))
+         (programs (list start))
+         (i 0))
+    (while (< i start)
+      (let ((word (nth i words)))
+        (if (string-match-p "\\`[A-Za-z_][A-Za-z0-9_]*=" word)
+            (setq i (1+ i))
+          ;; Before the program, what is no assignment is a wrapper
+          ;; and the options it takes; the next word is again one or
+          ;; the program (see `harness-perms--shell-command-words').
+          (push i programs)
+          (let* ((rest (nthcdr i words))
+                 (after (harness-perms--shell-wrapper-command
+                         (harness-perms--shell-program word)
+                         (cdr rest))))
+            (setq i (+ i 1 (- (length (cdr rest)) (length after))))))))
+    (nreverse programs)))
+
+(defun harness-perms--shell-condition-words (text)
+  "Return the words condition TEXT names, quotes undone.
+TEXT is a `[[ ... ]]' or `(( ... ))' token; its words are candidates for
+the paths a command line names, as they were before the tree kept it."
+  (condition-case nil
+      (let ((inner (string-trim (substring text 2 (max 2 (- (length text) 2))))))
+        (delq nil (mapcar (lambda (tok)
+                            (and (eq (plist-get tok :type) 'word)
+                                 (plist-get tok :text)))
+                          (harness-perms--shell-tokenize inner))))
+    (error nil)))
+
+(defun harness-perms--shell-ast-walk-nodes (node collect)
+  "Walk the syntax tree NODE, calling COLLECT with every node.
+Commands, noops, pipelines, lists, subshells and the substitutions in
+them are all visited."
+  (when (consp node)
+    (funcall collect node)
+    (pcase (plist-get node :kind)
+      ((or 'command 'noop)
+       (dolist (sub (plist-get node :substitutions))
+         (harness-perms--shell-ast-walk-nodes sub collect)))
+      (_
+       (dolist (item (plist-get node :items))
+         (harness-perms--shell-ast-walk-nodes item collect))
+       (dolist (sub (plist-get node :substitutions))
+         (harness-perms--shell-ast-walk-nodes sub collect))
+       (harness-perms--shell-ast-walk-nodes (plist-get node :body) collect)
+       (harness-perms--shell-ast-walk-nodes (plist-get node :else) collect)))))
+
+(defun harness-perms--shell-ast-path-words (ast)
+  "Return the words of AST that may name paths, in order.
+That is every command's `:path-words' -- its words without the
+programs it runs, a wrapper's program included -- a redirection's
+target, and the words of a condition, with the commands of every
+substitution.  A here-document's body is not read: it is data, not
+commands or paths."
+  (let (words)
+    (harness-perms--shell-ast-walk-nodes
+     ast (lambda (node)
+           (dolist (word (plist-get node :path-words))
+             (push word words))))
+    (nreverse words)))
+
+(defun harness-perms--command-rule-argument-p (word)
+  "Non-nil when WORD is an argument, not a subcommand, of a command rule.
+A word that names an option, a path, a URL, a variable, a glob or a
+number is something this call happens to pass, not a word that makes
+the command the same command next time."
+  (or (string-empty-p word)
+      (string-prefix-p "-" word)
+      (string-search "=" word)
+      (string-search "/" word)
+      (string-search "~" word)
+      (string-search "$" word)
+      (string-search "*" word)
+      (string-search "?" word)
+      (string-search "[" word)
+      (string-match-p "[ \t\n]" word)
+      (string-match-p "\\`[0-9]+\\'" word)))
+
+(defconst harness-perms--command-rule-depth 3
+  "Most words a command rule made from a call keeps from its start.
+A command rule begins with the program and may take the subcommands
+that calls of it share, such as `gcloud compute instances'; arguments
+are left out.")
+
+(defun harness-perms--command-common-prefix (lists)
+  "Return the words LISTS share at their start, kept to a subcommand.
+LISTS are command word lists, each starting with its program (see
+`harness-perms--shell-program').  The prefix stops before a word that
+is an argument (`harness-perms--command-rule-argument-p') and has at
+most `harness-perms--command-rule-depth' words."
+  (let ((prefix (car lists)))
+    (dolist (words (cdr lists))
+      (setq prefix (cl-loop for a in prefix
+                            for b in words
+                            while (equal a b)
+                            collect a)))
+    (setq prefix (cl-subseq prefix 0 (min (length prefix)
+                                          harness-perms--command-rule-depth)))
+    (let ((cut (cl-position-if #'harness-perms--command-rule-argument-p
+                               (cdr prefix))))
+      (when cut
+        (setq prefix (cl-subseq prefix 0 (1+ cut)))))
+    (or prefix (list (car (car lists))))))
+
+(defun harness-perms--command-rule-prefixes (command)
+  "Return the command prefixes a lasting answer to COMMAND would cover.
+Each prefix is a list of words starting with a program, such as
+\(\"gcloud\" \"compute\") or (\"gsutil\").  Every command the shell line
+runs, in a substitution or a loop too, is read (see
+`harness-perms--shell-ast'); commands that run the same program are
+grouped, and the words they share are kept, up to
+`harness-perms--command-rule-depth' and no argument.  A single command
+of a program gives the program alone, so an answer to `gcloud compute
+instances list' covers every gcloud command; several commands of it
+narrow that to the words they have in common, and the rule covers every
+later command that starts with those words.  Nil when the command
+cannot be read or runs no program."
+  (condition-case err
+      (let ((groups nil))
+        (dolist (node (harness-perms--shell-ast-commands
+                       (harness-perms--shell-ast command)))
+          (let ((program (plist-get node :program))
+                (words (plist-get node :command-words)))
+            (when (and program words)
+              (let ((entry (assoc program groups)))
+                (if entry
+                    (push words (cdr entry))
+                  (push (cons program (list words)) groups))))))
+        (let (prefixes)
+          (dolist (entry groups)
+            (let* ((program (car entry))
+                   (lists (mapcar (lambda (words)
+                                    (cons program (cdr words)))
+                                  (cdr entry)))
+                   (prefix (if (null (cdr lists))
+                               (list program)
+                             (harness-perms--command-common-prefix lists))))
+              (push prefix prefixes)))
+          (sort (delete-dups (nreverse prefixes))
+                (lambda (a b)
+                  (string< (mapconcat #'identity a " ")
+                           (mapconcat #'identity b " "))))))
+    (error (harness-log 'debug "perms: could not make a command rule: %S" err)
+           nil)))
+
+(defun harness-perms--command-pattern-title (prefixes)
+  "Return PREFIXES as a few words: `gcloud and gsutil'."
+  (let ((names (delq nil (mapcar (lambda (p) (and p (mapconcat #'identity p " ")))
+                                 prefixes))))
+    (pcase (length names)
+      (0 nil)
+      (1 (car names))
+      (2 (format "%s and %s" (car names) (cadr names)))
+      (_ (concat (string-join (butlast names) ", ")
+                 " and " (car (last names)))))))
+
+(defun harness-perms--rule-command-patterns (rule)
+  "Return the command patterns RULE lists, each a list of words.
+`:commands' may name programs as strings, one pattern of words as a
+list, or patterns as a list of lists, such as ((\"gcloud\" \"compute\")
+\(\"gsutil\")); a flat list of strings names one pattern for each."
+  (let ((commands (plist-get rule :commands)))
+    (cond
+     ((null commands) nil)
+     ((stringp commands)
+      (let ((word (string-trim commands)))
+        (and (not (string-empty-p word)) (list (list word)))))
+     ((and (listp commands) (cl-every #'stringp commands))
+      (delq nil (mapcar (lambda (word)
+                          (let ((word (string-trim word)))
+                            (and (not (string-empty-p word)) (list word))))
+                        commands)))
+     ((listp commands)
+      (delq nil (mapcar (lambda (pattern)
+                          (let ((words (cond ((stringp pattern) (list pattern))
+                                             ((listp pattern) pattern))))
+                            (setq words (delq nil
+                                              (mapcar (lambda (word)
+                                                        (and (stringp word)
+                                                             (not (string-empty-p (string-trim word)))
+                                                             (string-trim word)))
+                                                      words)))
+                            (and words words)))
+                        commands)))
+     (t nil))))
+
+(defun harness-perms--rule-command-title (rule)
+  "Return what command patterns RULE lists, in a few words, or nil."
+  (harness-perms--command-pattern-title (harness-perms--rule-command-patterns rule)))
+
+(defun harness-perms--command-pattern-matches-p (pattern words)
+  "Non-nil when WORDS starts with PATTERN, both beginning at a program.
+The first word matches when its program name is the same: a rule for
+gcloud also holds /usr/local/bin/gcloud."
+  (and (consp pattern) (consp words)
+       (<= (length pattern) (length words))
+       (equal (harness-perms--shell-program (car pattern))
+              (harness-perms--shell-program (car words)))
+       (equal (cdr pattern) (cl-subseq words 1 (length pattern)))))
+
+(defun harness-perms--request-shell-commands (request)
+  "Return the commands REQUEST's shell call runs, parsed, or nil.
+The commands are the nodes `harness-perms--shell-ast-commands' returns
+for its command line.  A request that is no shell command, or one whose
+command the reader cannot read, has none."
+  (when-let* ((command (harness-perms--command request)))
+    (condition-case err
+        (harness-perms--shell-ast-commands (harness-perms--shell-ast command))
+      (error (harness-log 'debug "perms: could not read the commands of a call: %S" err)
+             nil))))
+
+(defun harness-perms--with-shell-commands (request)
+  "Return REQUEST with the commands its shell call runs, parsed once.
+The copy carries them as `:shell-commands', which command rules take
+instead of reading the command line again."
+  (if (plist-member request :shell-commands)
+      request
+    (append (list :shell-commands (harness-perms--request-shell-commands request))
+            request)))
+
+(defun harness-perms--command-rule-matches-p (rule request deny)
+  "Non-nil when RULE's command patterns apply to REQUEST.
+An allow rule needs every command REQUEST's shell line runs to match
+one of RULE's patterns; a deny rule needs one of them to match.  A
+request that runs no command, or one the reader cannot read, never
+matches: a rule is then not what decides it."
+  (let ((patterns (harness-perms--rule-command-patterns rule))
+        (commands (if (plist-member request :shell-commands)
+                      (plist-get request :shell-commands)
+                    (harness-perms--request-shell-commands request))))
+    (and patterns commands
+         (funcall (if deny #'cl-some #'cl-every)
+                  (lambda (node)
+                    (let ((words (plist-get node :command-words)))
+                      (and words
+                           (cl-some (lambda (pattern)
+                                      (harness-perms--command-pattern-matches-p pattern words))
+                                    patterns))))
+                  commands))))
 
 ;;;; Patterns a prompt about a directory is answered for
 ;;
@@ -1739,13 +2686,21 @@ allow rule when the pattern covers every path the call is about (see
 the call runs in or names (see `harness-perms--within-p').  For a shell
 command an allow rule so holds the paths it names outside the
 session's directories, or where it runs when it names none there; a
-deny rule also stops it for a path it names inside them."
+deny rule also stops it for a path it names inside them.
+
+A rule with `:commands' (see `harness-perms--rule-command-patterns')
+applies only to shell commands, and only as its patterns say: an
+allow rule needs every command of the call to match one of them, a
+deny rule any one.  A call the reader cannot read matches neither."
   (let* ((tool (plist-get rule :tool))
          (kind (harness-perms--sym (plist-get rule :kind)))
+         (commands (plist-get rule :commands))
          (deny (eq (harness-perms--sym (plist-get rule :behavior)) 'deny))
          (pattern (harness-perms--rule-pattern rule (plist-get request :session))))
     (and (or (null tool) (equal tool (plist-get request :tool)))
          (or (null kind) (eq kind (harness-perms--call-kind request)))
+         (or (null commands)
+             (harness-perms--command-rule-matches-p rule request deny))
          (or (null pattern)
              (let ((paths (if deny (harness-perms--every-path request) (harness-perms--subject-paths request))))
                (and paths
@@ -1768,19 +2723,32 @@ first, so no answer overrides them."
 See `harness-perms--rules' for the order."
   (let* ((sid (plist-get (plist-get request :session) :id))
          (rules (harness-perms--rules sid))
-         ;; A command is read once, not once per rule about paths.
+         ;; A command is read once, not once per rule about paths or
+         ;; commands.
          (request (if (cl-some (lambda (r) (plist-get r :path)) rules)
                       (harness-perms--with-reach request)
+                    request))
+         (request (if (cl-some (lambda (r) (plist-get r :commands)) rules)
+                      (harness-perms--with-shell-commands request)
                     request)))
     (cl-find-if (lambda (r) (harness-perms--rule-matches-p r request)) rules)))
 
 (defun harness-perms--rule-subject (rule)
-  "Return what RULE is for, in a few words: its tool, its path, or both."
+  "Return what RULE is for, in a few words: its tool, path, commands or a mix.
+For a rule about the commands of a shell call it says the tool and the
+programs, such as \"bash (gcloud and gsutil)\", so a decision's reason
+and the messages of undo name what it holds for."
   (let* ((tool (plist-get rule :tool))
          (path (plist-get rule :path))
-         (path (and (stringp path) (not (harness-string-blank-p path)) (abbreviate-file-name path))))
-    (cond ((and tool path) (format "%s in %s" tool path))
-          ((or tool path))
+         (commands (harness-perms--rule-command-title rule))
+         (path (and (stringp path) (not (harness-string-blank-p path))
+                    (abbreviate-file-name path)))
+         (subject (cond ((and tool commands) (format "%s (%s)" tool commands))
+                        (commands (format "%s calls" commands))
+                        (tool tool))))
+    (cond ((and subject path) (format "%s in %s" subject path))
+          (subject subject)
+          (path path)
           (t "every tool"))))
 
 (defun harness-perms--rule-decision (rule &optional session-id)
@@ -1967,12 +2935,14 @@ DECISION is the current value and NEXT continues the chain."
 ;; that asks still get their prompt, as for every other shell command.
 ;;
 ;; The reading is deliberately narrow, so that a write, a deletion or
-;; an interactive login never takes it: every program of the command
-;; must be a cloud CLI of `harness-perms--cloud-clis', no word of it may
-;; hold a write verb (`harness-perms--cloud-write-words'), and a read
-;; verb must come among its first three words.  Whatever it cannot read
-;; that way falls through to the judge, which is told about read-only
-;; cloud work as well (see `harness-perms--judge-system').
+;; an interactive login never takes it: every command of the line, as
+;; the syntax tree reads it, must run a cloud CLI of
+;; `harness-perms--cloud-clis', no word of it may hold a write verb
+;; (`harness-perms--cloud-write-words'), a read verb must come among
+;; its first three words, and a wrapper such as `sudo' or `env' leaves
+;; it to the judge.  Whatever it cannot read that way falls through to
+;; the judge, which is told about read-only cloud work as well (see
+;; `harness-perms--judge-system').
 
 (defconst harness-perms--cloud-clis '("gcloud" "gsutil")
   "Cloud CLIs whose read-only queries need no approval.
@@ -2044,24 +3014,36 @@ word must start with a read verb (`harness-perms--cloud-read-words')."
                (when (> seen 3) (throw 'done read))))
            (throw 'done read)))))
 
+(defun harness-perms--shell-command-starts-at-program-p (node)
+  "Non-nil when NODE's command starts at its program, after assignments only.
+A wrapper such as `sudo' or `env', or a keyword, comes before it
+otherwise: the cloud reader stays out of such a command, as it always
+has, and leaves it to the judge."
+  (let ((words (plist-get node :words))
+        (command-words (plist-get node :command-words)))
+    (and command-words
+         (cl-every (lambda (word)
+                     (string-match-p "\\`[A-Za-z_][A-Za-z0-9_]*=" word))
+                   (cl-subseq words 0 (- (length words) (length command-words)))))))
+
 (defun harness-perms--read-only-cloud-p (request)
   "Non-nil when REQUEST runs read-only cloud CLI commands and nothing else.
-That is the case the mode stage allows without the judge: every program
-the shell command runs is a cloud CLI (`harness-perms--cloud-clis'),
-and each command it runs is read-only (see
+That is the case the mode stage allows without the judge: every command
+the shell line runs, read from its syntax tree, runs a cloud CLI
+\(`harness-perms--cloud-clis') and is read-only (see
 `harness-perms--cloud-group-p').  A command that runs anything else,
-or that the reader cannot read as a read-only cloud query, gives nil
-and goes on to the judge."
+one behind a wrapper, or one the reader cannot read as a read-only
+cloud query, gives nil and goes on to the judge."
   (when-let* ((command (harness-perms--command request)))
-    (let ((groups nil) (group nil) (any nil))
-      (dolist (pair (harness-perms--shell-words command))
-        (if (cdr pair)                   ; a program: a new command
-            (progn (when any (push (nreverse group) groups))
-                   (setq group (list (car pair))
-                         any t))
-          (when any (push (car pair) group))))
-      (when any (push (nreverse group) groups))
-      (and groups (cl-every #'harness-perms--cloud-group-p groups) t))))
+    (let ((nodes (harness-perms--shell-ast-commands
+                  (harness-perms--shell-ast command))))
+      (and nodes
+           (cl-every (lambda (node)
+                       (and (harness-perms--shell-command-starts-at-program-p node)
+                            (harness-perms--cloud-group-p
+                             (plist-get node :command-words))))
+                     nodes)
+           t))))
 
 ;;;; Auto mode: a cheap model judges
 
@@ -2720,7 +3702,9 @@ denied because nobody can answer.  The prompt is about the call
 itself, not about where it reaches: the jail already let its paths
 through, asking first about any outside the allowed directories.  So
 it offers no pattern, and its answers for the session or for always
-hold for the tool (see `harness-perms--answer-tool').  A shell
+hold for the tool, or for the commands a shell call runs (see
+`harness-perms--answer-tool'): the prompt says which, as `:commands'
+and their `:covers', and the UI words its answers with them.  A shell
 command's prompt still shows what the command reaches: the paths it
 names outside the session's directories, or where it runs when it
 names none there (`harness-perms--subject-paths'), and, as `:cwd',
@@ -2735,10 +3719,15 @@ where it runs."
       ;; A shell command is about the paths it names outside the
       ;; session's directories, else where it runs (see
       ;; `harness-perms--subject-paths'), and the prompt says where that
-      ;; is.
+      ;; is.  Its lasting answers are about the commands it runs, when
+      ;; they can be read.
       (let* ((request (harness-perms--with-reach request))
              (paths (harness-perms--subject-paths request))
              (cwd (and (harness-perms--command request) (harness-perms--command-dir request)))
+             (commands (and (harness-perms--command request)
+                            (harness-perms--command-rule-prefixes
+                             (harness-perms--command request))))
+             (covers (harness-perms--command-pattern-title commands))
              (pending (list :kind 'permission
                             :payload (append (list :tool (plist-get request :tool)
                                                    :input (plist-get request :input)
@@ -2746,11 +3735,14 @@ where it runs."
                                                    :paths paths
                                                    :call-id (plist-get request :call-id))
                                              (and cwd (list :cwd cwd))
+                                             (and commands (list :commands commands
+                                                                 :covers covers))
                                              (list :title (harness-perms-describe-request request)
                                                    :reason (harness-perms--judge-prompt-reason decision)
                                                    :options (harness-perms--tool-options)))))
              (pid (harness-call 'session/pending-add sid pending)))
-        (puthash pid (list :session-id sid :request request :next next :paths paths :cwd cwd)
+        (puthash pid (list :session-id sid :request request :next next :paths paths :cwd cwd
+                           :rule-commands commands)
                  harness-perms--waiting)
         (harness-emit 'permission/requested sid (plist-put (copy-sequence pending) :id pid)))))))
 
@@ -2819,11 +3811,14 @@ the final decision, or `continue' when a jail prompt hands the call on."
 Record session or standing rules, noted in the session's transcript
 where they can be undone (`harness-perms--note-recorded'), and let the
 tool call continue.  The prompt offered no pattern (see
-`harness-perms--ask'), so a rule holds for every call of the tool, a
-`:pattern' in ANSWER notwithstanding; the jail still decides where
-each call may reach."
+`harness-perms--ask'), so a rule holds for every call of the tool, or,
+when the call runs commands that could be read, for those commands:
+`:commands' are the prefixes the prompt worked out and showed, and a
+`:pattern' in ANSWER is ignored, as for a tool rule.  The jail still
+decides where each call may reach."
   (let* ((answer (harness-perms--parse-answer answer))
          (request (plist-get waiting :request))
+         (commands (plist-get waiting :rule-commands))
          (behavior (plist-get answer :behavior))
          (scope (plist-get answer :scope))
          (decision (list :behavior behavior :final t
@@ -2831,7 +3826,12 @@ each call may reach."
                                      (if (eq behavior 'allow) "allowed by the user"
                                        "denied by the user")))))
     (when (memq scope '(session always))
-      (harness-perms--add-rule-noted session-id (list :tool (plist-get request :tool) :behavior behavior) scope))
+      (harness-perms--add-rule-noted
+       session-id
+       (append (list :tool (plist-get request :tool))
+               (and commands (list :commands commands))
+               (list :behavior behavior))
+       scope))
     (harness-perms--resolve session-id pending-id answer)
     (funcall (plist-get waiting :next) decision)
     decision))
@@ -2860,17 +3860,20 @@ each call may reach."
         (abbreviate-file-name dir)
       (let* ((tool (plist-get rule :tool))
              (path (plist-get rule :path))
+             (commands (harness-perms--rule-command-title rule))
              (path (and (stringp path) (not (harness-string-blank-p path)) (abbreviate-file-name path))))
         (cond ((and tool path) (format "%s calls in %s" tool path))
+              ((and tool commands) (format "every %s call to %s" tool commands))
               (tool (format "every %s call" tool))
+              (commands (format "every %s call" commands))
               (path (format "%s to every tool" path))
               (t "every call"))))))
 
 (defun harness-perms--recorded-text (record)
   "Return the note that says what lasting answer RECORD does.
 RECORD is as `harness-node-permission' describes.  The note reads
-\"Always allowing every bash call, in every session\", say, or
-\"Allowing ~/src/other/ for this session\"."
+\"Always allowing every bash call to gcloud and gsutil, in every
+session\", say, or \"Allowing ~/src/other/ for this session\"."
   (let ((verb (if (and (not (stringp (plist-get record :dir)))
                        (eq (harness-perms--sym (plist-get (plist-get record :rule) :behavior)) 'deny))
                   "denying"
@@ -2936,6 +3939,10 @@ difference."
     (list (funcall text (plist-get rule :tool))
           (harness-perms--sym (plist-get rule :kind))
           (funcall text (plist-get rule :path))
+          (sort (copy-sequence (harness-perms--rule-command-patterns rule))
+                (lambda (a b)
+                  (string< (mapconcat #'identity a " ")
+                           (mapconcat #'identity b " "))))
           (harness-perms--sym (plist-get rule :behavior)))))
 
 (defun harness-perms--rule-from-record (rule)
@@ -2958,7 +3965,7 @@ and MESSAGE says why when it is not `undone'."
   (let* ((always (eq scope 'always))
          (rules (harness-perms--scope-rules session-id scope))
          (key (harness-perms--rule-key rule))
-         (subject (lambda (k) (list (nth 0 k) (nth 2 k))))
+         (subject (lambda (k) (list (nth 0 k) (nth 2 k) (nth 3 k))))
          (pos (or (cl-position rule rules :test #'equal)
                   (cl-position key rules :key #'harness-perms--rule-key :test #'equal))))
     (cond
@@ -3180,7 +4187,7 @@ OUTCOME is `done', `changed' or `gone', and MESSAGE says why when it is
 not `done'."
   (let* ((always (eq scope 'always))
          (key (harness-perms--rule-key rule))
-         (subject (lambda (k) (list (nth 0 k) (nth 2 k))))
+         (subject (lambda (k) (list (nth 0 k) (nth 2 k) (nth 3 k))))
          (there (cl-find (funcall subject key) (harness-perms--scope-rules session-id scope) :test #'equal
                          :key (lambda (r) (funcall subject (harness-perms--rule-key r))))))
     (cond

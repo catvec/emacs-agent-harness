@@ -945,18 +945,41 @@ own request), for the session, or always (as an entry of
 `harness-allowed-directories`, or a rule in `harness-perms-rules` for
 *Always deny*). Any other request, such as the permission mode asking
 about a file edit or a command, or the auto-mode judge objecting to
-one, is about the call itself and shows no pattern: *Allow for
-session*, *Always allow* and *Always deny* hold for every call of that
-tool, and a call outside the session's directories still asks for the
-directory first.
+one, is about the call itself and shows no pattern: for a tool that
+runs no command, *Allow for session*, *Always allow* and *Always deny*
+hold for every call of that tool, and a call outside the session's
+directories still asks for the directory first.
+
+For a shell command those answers are about what the command line
+runs, not about bash: the harness reads the line into a syntax tree of
+the commands it runs -- through pipes, `&&` and `;`, subshells,
+`$(...)` and backquotes, `if`, loops and `case`, and after a wrapper
+such as `sudo`, `env` or `xargs` -- and the panel says what a lasting
+answer would cover, on a line of its own and in the buttons' tooltips,
+such as `lasting answers: every gcloud and gsutil call`. A single
+command gives its program, so always allowing `gcloud compute instances
+list --project p` lets your other `gcloud` calls run without asking,
+while `rm`, `make` and unrelated commands still ask. A line with
+several commands of the same program keeps the words they share, up to
+three and never an argument, so two `gcloud compute instances` commands
+give `gcloud compute instances` rather than all of gcloud. A rule is a
+prefix: it matches a later command that starts with those words, such as
+`gcloud compute instances delete`, not the arguments the call happened
+to pass. A line that also runs something else needs that command covered
+too, so allowing
+`gcloud ... && rm -rf build` does not let a later `gcloud ... && rm -rf
+~` run. A command the reader cannot read keeps the whole-tool answer,
+and the note says so. *Always deny* is scoped the same way: denying a
+`rm` call refuses later calls that run `rm`, not every command.
 
 An answer that lasts -- *Allow for session*, *Always allow*, *Always
 deny* -- leaves a note in the session's chat, under the call it
 answered, whether you answered in the chat, a popout, the session list
-or the task board: `Always allowing every bash call, in every session
-[Undo]`. `[Undo]` takes back what that answer recorded, the rule or
-the directory, for the session or from `harness-perms-rules` and
-`harness-allowed-directories`, and nothing else. The call it answered
+or the task board: `Always allowing every bash call to gcloud and
+gsutil, in every session [Undo]`. `[Undo]` takes back what that answer
+recorded, the rule or the directory, for the session or from
+`harness-perms-rules` and `harness-allowed-directories`, and nothing
+else. The call it answered
 stays allowed or denied. Once undone the note is struck through and
 offers `[Redo]`, which records it again, and then `[Undo]` again. When
 the rule has changed since, edited in Settings say, or another answer
@@ -1005,10 +1028,13 @@ run in the project, says `runs in: ~/proj` and, below it, `paths:
 ~/.claude/projects/x`, so it shows what the command reaches and not
 only where it runs; like any prompt about a call, it has no pattern.
 A command that names nothing outside the session's directories is
-about where it runs, as before. Paths are read from the
-command line on a best-effort basis: absolute paths, `~` and `$HOME`
-paths, and `./` or `../` paths, but not the program being run or
-`/dev/null`. An allowing rule must cover every path the command names
+about where it runs, as before. Paths are read from the same syntax
+tree that scopes a lasting answer, from every command the line runs: a
+pipeline, a list, a subshell or a substitution all contribute the paths
+they name, a redirection's target counts wherever it stands, and a
+here-document's body is data, not paths. The words kept are absolute
+paths, `~` and `$HOME` paths, and `./` or `../` paths, but not the
+program being run or `/dev/null`. An allowing rule must cover every path the command names
 outside the session's directories, so allowing commands in the project
 does not let one that reaches elsewhere through. A denying rule stops
 a command that names any path it covers.

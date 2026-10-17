@@ -65,12 +65,14 @@ A record is a plist: `:id' `:kind' (\"permission\" or \"question\"),
 `:respond' (the ACP callback, when a client owns the request, else nil),
 `:connection' (the UI connection it came on, so an answer still goes out
 on it), `:created', and what its panel draws: `:title' `:tool' `:tool-kind'
-`:input' `:paths' `:cwd' `:pattern' `:dir' `:reason' `:options' for a
-permission (`:paths' are what the call is about, `:cwd' where a shell
-command runs, `:pattern' the glob the answer holds for, and
-`:edited-pattern' the one the user typed), `:question' `:options'
-`:diagrams' for a question.  A permission also has the `:call-id' of
-the tool call that waits on it.")
+`:input' `:paths' `:cwd' `:pattern' `:dir' `:commands' `:covers'
+`:reason' `:options' for a permission (`:paths' are what the call is
+about, `:cwd' where a shell command runs, `:pattern' the glob the
+answer holds for, and `:edited-pattern' the one the user typed;
+`:commands' are the command patterns a shell call's lasting answers
+hold for, and `:covers' words them for the panel), `:question'
+`:options' `:diagrams' for a question.  A permission also has the
+`:call-id' of the tool call that waits on it.")
 
 (defvar harness-ui-pending--diagrams (make-hash-table :test 'equal)
   "Session id -> (PID . INDEX) of the diagram its panel shows.
@@ -232,6 +234,7 @@ ITEM is (:id :kind :payload) in the wire shape."
             :tool (plist-get payload :tool) :tool-kind (harness-ui-pending--str (plist-get payload :kind))
             :input (plist-get payload :input) :paths (plist-get payload :paths) :cwd (plist-get payload :cwd)
             :dir (plist-get payload :dir) :pattern (plist-get payload :pattern)
+            :commands (plist-get payload :commands) :covers (plist-get payload :covers)
             :reason (plist-get payload :reason)
             :options (plist-get payload :options)))))
 
@@ -306,25 +309,30 @@ harness runs in a process of its own.")
 (defun harness-ui-pending-answer-help (r option)
   "Say what answering permission record R with OPTION does, in a few words.
 The answers are the same for every request, but not what they cover:
-the call itself, whose tool a lasting answer holds for; the pattern of
-a call reaching outside the allowed directories, which allow-once lets
-that call reach; or the directory an agent asked for, which allow-once
-grants until the session's turn ends."
+the call itself, whose tool a lasting answer holds for, or whose
+commands when the call is a shell command the harness read; the
+pattern of a call reaching outside the allowed directories, which
+allow-once lets that call reach; or the directory an agent asked for,
+which allow-once grants until the session's turn ends."
   (let ((pattern (or (harness-ui-pending--permission-pattern r)
                      (and (plist-get r :dir) (abbreviate-file-name (format "%s" (plist-get r :dir))))))
         (tool (or (plist-get r :tool) "this tool"))
+        (covers (plist-get r :covers))
         (request (harness-ui-pending--dir-request-p r)))
     (pcase option
       ("allow-once" (cond ((and request pattern) (format "Allow %s until this turn ends" pattern))
                           (pattern (format "Let this call reach %s, this time" pattern))
                           (t "Allow this call, this time")))
-      ("allow-session" (if pattern (format "Allow %s for this session" pattern)
-                         (format "Allow every %s call for this session" tool)))
-      ("allow-always" (if pattern (format "Always allow %s, in every session" pattern)
-                        (format "Always allow every %s call, in every session" tool)))
+      ("allow-session" (cond (pattern (format "Allow %s for this session" pattern))
+                             (covers (format "Allow every %s call for this session" covers))
+                             (t (format "Allow every %s call for this session" tool))))
+      ("allow-always" (cond (pattern (format "Always allow %s, in every session" pattern))
+                            (covers (format "Always allow every %s call, in every session" covers))
+                            (t (format "Always allow every %s call, in every session" tool))))
       ("deny-once" (if request "Deny the request" "Deny this call"))
-      ("deny-always" (if pattern (format "Always deny %s, to every tool" pattern)
-                       (format "Always deny every %s call" tool)))
+      ("deny-always" (cond (pattern (format "Always deny %s, to every tool" pattern))
+                           (covers (format "Always deny every %s call" covers))
+                           (t (format "Always deny every %s call" tool))))
       (_ (harness-ui-pending-answer-label option)))))
 
 ;;;; Answering
@@ -333,15 +341,22 @@ grants until the session's turn ends."
   "Return the echo-area message after answering permission record R with OPTION.
 It says what the answer covered, as its button's tooltip did."
   (let ((shown (or (harness-ui-pending--permission-pattern r)
-                   (and (plist-get r :dir) (abbreviate-file-name (format "%s" (plist-get r :dir)))))))
+                   (and (plist-get r :dir) (abbreviate-file-name (format "%s" (plist-get r :dir))))))
+        (covers (plist-get r :covers)))
     (pcase option
       ("allow-once" (cond ((and shown (harness-ui-pending--dir-request-p r))
                            (format "Allowed %s until this turn ends" shown))
                           (shown (format "Allowed this call to reach %s" shown))
                           (t "Allowed this call")))
-      ("allow-session" (if shown (format "Allowed %s for this session" shown) "Allowed for this session"))
-      ("allow-always" (if shown (format "Always allowed %s" shown) "Always allowed"))
-      ("deny-always" (if shown (format "Always denied %s" shown) "Always denied"))
+      ("allow-session" (cond (shown (format "Allowed %s for this session" shown))
+                             (covers (format "Allowed every %s call for this session" covers))
+                             (t "Allowed for this session")))
+      ("allow-always" (cond (shown (format "Always allowed %s" shown))
+                            (covers (format "Always allowed every %s call" covers))
+                            (t "Always allowed")))
+      ("deny-always" (cond (shown (format "Always denied %s" shown))
+                           (covers (format "Always denied every %s call" covers))
+                           (t "Always denied")))
       (_ "Denied"))))
 
 (defun harness-ui-pending-answer-permission (session-id pid option &optional on-error)
@@ -712,11 +727,13 @@ out when they are just where it runs."
                         (equal (file-name-as-directory (car paths)) (file-name-as-directory cwd))))
          (about (and paths (not only-cwd)
                      (format "paths: %s" (mapconcat #'abbreviate-file-name paths " "))))
+         (covers (plist-get r :covers))
          (first (delq nil (list (and (plist-get r :tool-kind) (format "kind: %s" (plist-get r :tool-kind)))
                                 (and cwd (format "runs in: %s" (abbreviate-file-name cwd)))
                                 (and (not cwd) about)))))
     (delq nil (list (and first (string-join first "   "))
-                    (and cwd about)))))
+                    (and cwd about)
+                    (and covers (format "lasting answers: every %s call" covers))))))
 
 (defun harness-ui-pending--decorate (start end pid map)
   "Make START..END the panel of request PID, with keymap MAP.
@@ -1300,6 +1317,7 @@ clients, or the session's own pending list, answer it."
                :tool (plist-get extra :tool) :tool-kind (format "%s" (plist-get tc :kind))
                :input (plist-get tc :rawInput) :paths (plist-get extra :paths) :cwd (plist-get extra :cwd)
                :dir (plist-get extra :dir) :pattern (plist-get extra :pattern)
+               :commands (plist-get extra :commands) :covers (plist-get extra :covers)
                :reason (plist-get extra :reason)
                :options (plist-get params :options))))
       t)))

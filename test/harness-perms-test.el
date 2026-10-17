@@ -765,7 +765,10 @@ judge would be asked."
                        "gsutil ls -l gs://my-bucket"
                        "gsutil cat gs://my-bucket/log.txt"
                        "gsutil stat gs://my-bucket/object"
-                       "gcloud compute instances list && gcloud projects list"))
+                       "gcloud compute instances list && gcloud projects list"
+                       ;; A here-document's body is data, not commands:
+                       ;; what it says does not change what runs.
+                       "gcloud compute instances list <<EOF\ngcloud rm\nEOF"))
       (let ((d (harness-perms-test--exec command)))
         (should (eq 'allow (plist-get d :behavior)))
         (should (string-match-p "cloud" (plist-get d :reason)))))
@@ -3445,41 +3448,51 @@ Unconfined, it sees what the user sees, and goes on as before."
   "The settings page offers each part of a standing rule by name."
   (require 'harness-test-helpers)
   (let ((type (cadr (get 'harness-perms-rules 'custom-type))))
-    (should (equal '(:tool :kind :path :behavior) (harness-test-option-keys type)))
+    (should (equal '(:tool :kind :path :commands :behavior) (harness-test-option-keys type)))
     (harness-test-check-record-type type)
     (should (harness-test-fits-p type '(:tool "web_search" :behavior deny)))
     (should (harness-test-fits-p type '(:kind read :behavior allow)))
     (should (harness-test-fits-p type '(:tool "write_file" :path "/home/u/proj/lisp/**" :behavior allow)))
+    (should (harness-test-fits-p type '(:tool "bash" :commands (("gcloud" "compute") ("gsutil")) :behavior allow)))
     (should (harness-test-fits-p type '(:behavior "deny")))
     (should (harness-test-fits-p (get 'harness-perms-rules 'custom-type)
                                  '((:tool "bash" :kind exec :behavior deny) (:behavior allow))))))
 
 ;;;; What a shell command reaches
 
-(ert-deftest harness-perms-shell-words-mark-the-programs ()
-  "A command line is read into its words, each saying whether it is a program run."
-  (dolist (case '(("ls -la '/a b/c' | head -5"
-                   ("ls" . t) ("-la") ("/a b/c") ("head" . t) ("-5"))
-                  ;; Quotes and backslashes are undone, comments left out.
-                  ("echo \"say \\\"hi\\\" $x\" a\\ b # not /etc/passwd\ncat /etc/os-release"
-                   ("echo" . t) ("say \"hi\" $x") ("a b") ("cat" . t) ("/etc/os-release"))
-                  ;; What a redirection names is a file, wherever it stands.
-                  (">/tmp/out cmd 2>&1 arg &>>/tmp/log"
-                   ("/tmp/out") ("cmd" . t) ("2") ("1") ("arg") ("/tmp/log"))
-                  ;; Assignments, keywords, and prefixes with their options
-                  ;; come before the program.
-                  ("FOO=1 sudo -n env BAR=2 /usr/bin/python3 x.py && if true; then xargs -0 rm /y; fi"
-                   ("FOO=1") ("sudo" . t) ("-n") ("env" . t) ("BAR=2") ("/usr/bin/python3" . t) ("x.py")
-                   ("if" . t) ("true" . t) ("then" . t) ("xargs" . t) ("-0") ("rm" . t) ("/y") ("fi" . t))
-                  ;; Substitutions and subshells run commands; what follows
-                  ;; one is an argument again.
-                  ("x=$(cat /etc/hostname) y=`ls /srv`"
-                   ("x=") ("cat" . t) ("/etc/hostname") ("y=") ("ls" . t) ("/srv"))
-                  ("diff <(sort /a) /b; echo $(date) /c `pwd` /d"
-                   ("diff" . t) ("sort" . t) ("/a") ("/b") ("echo" . t) ("date" . t) ("/c") ("pwd" . t) ("/d"))
-                  ("(cd /x && make) 2>&1 | tee ./log"
-                   ("cd" . t) ("/x") ("make" . t) ("2") ("1") ("tee" . t) ("./log"))))
-    (should (equal (cdr case) (harness-perms--shell-words (car case)))))
+(ert-deftest harness-perms-shell-ast-names-the-words-that-may-be-paths ()
+  "The syntax tree says which words of a command line may name paths.
+It keeps each command's arguments, the target of a redirection wherever
+it stands, the words of a condition and the commands of a substitution,
+and leaves out the programs and wrappers it runs."
+  (let ((words (lambda (command)
+                 (harness-perms--shell-ast-path-words
+                  (harness-perms--shell-ast command)))))
+    ;; A pipeline's programs are left out, the arguments kept.
+    (should (equal '("-la" "/a b/c" "-5")
+                   (funcall words "ls -la '/a b/c' | head -5")))
+    ;; Quotes and backslashes are undone, comments left out.
+    (should (equal '("say \"hi\" $x" "a b" "/etc/os-release")
+                   (funcall words "echo \"say \\\"hi\\\" $x\" a\\ b # not /etc/passwd\ncat /etc/os-release")))
+    ;; A redirection's target is a path wherever it stands.
+    (should (equal '("/tmp/out" "1" "arg" "/tmp/log")
+                   (funcall words ">/tmp/out cmd 2>&1 arg &>>/tmp/log")))
+    ;; Assignments and wrapper options are kept, the programs not.
+    (should (equal '("FOO=1" "-n" "BAR=2" "x.py" "-0" "/y")
+                   (funcall words "FOO=1 sudo -n env BAR=2 /usr/bin/python3 x.py && if true; then xargs -0 rm /y; fi")))
+    ;; A condition's words are candidates; a substitution runs commands.
+    (should (equal '("-f" "/etc/foo" "ok")
+                   (funcall words "[[ -f /etc/foo ]] && echo ok")))
+    (should (equal '("x=$(cat /etc/hostname)" "y=`ls /srv`" "/etc/hostname" "/srv")
+                   (funcall words "x=$(cat /etc/hostname) y=`ls /srv`")))
+    (should (equal '("<(sort /a)" "/b" "/a" "$(date)" "/c" "`pwd`" "/d")
+                   (funcall words "diff <(sort /a) /b; echo $(date) /c `pwd` /d")))
+    ;; So are a loop's data and a case's patterns.
+    (should (equal '("~/projects/*" "$f")
+                   (funcall words "for f in ~/projects/*; do cat \"$f\"; done")))
+    (should (equal '("$file" "/etc/passwd" "/etc/passwd")
+                   (funcall words "case $file in /etc/passwd) cat /etc/passwd;; esac")))
+    (should-not (harness-perms--shell-ast-path-words nil)))
   ;; The words that are paths: absolute, from home, or plainly relative.
   (should (equal "/etc/x" (harness-perms--path-word "/etc/x")))
   (should (equal "~/.claude" (harness-perms--path-word "$HOME/.claude")))
@@ -3513,6 +3526,11 @@ Unconfined, it sees what the user sees, and goes on as before."
     (should (equal (list (directory-file-name cwd)) (funcall paths (format "grep -r %s/v1 ." nowhere))))
     (should-not (funcall paths "git status"))
     (should-not (funcall paths "printf '/etc\n/usr'"))
+    ;; A substitution runs a command that names a path; a here-document's
+    ;; body is data, and names nothing.
+    (should (equal (list (expand-file-name "~/.ssh/key"))
+                   (funcall paths "echo $(cat ~/.ssh/key)")))
+    (should-not (funcall paths "cat <<EOF\n/etc/passwd\nEOF"))
     ;; Only a shell command has any.
     (should-not (harness-perms--command-paths (list :session harness-perms-test--session :tool "t" :kind 'read
                                                     :input '(:command "ls /etc") :paths (list cwd))))
@@ -3552,8 +3570,8 @@ When it names none there, it is about where it runs, as before."
 The prompt used to name, and offer as its pattern, the directory the
 command runs in, while the judge spoke of another one.  It names what
 the command reaches and where it runs; being about the call itself, it
-offers no pattern, and remembering the answer holds for the tool (see
-`harness-perms-tool-prompt-remembers-for-the-tool')."
+offers no pattern, and remembering the answer holds for the commands it
+runs (see `harness-perms-command-rule-prefixes')."
   (let* ((s (harness-perms-test--setup :permission-mode 'auto))
          (cwd (harness-perms-test--real (plist-get s :cwd)))
          (projects (file-name-as-directory (expand-file-name "projects" (harness-perms-test--real (harness-test-temp-dir)))))
@@ -3576,6 +3594,9 @@ offers no pattern, and remembering the answer holds for the tool (see
       (should (equal (list (concat projects "x")) (plist-get payload :paths)))
       (should (equal cwd (plist-get payload :cwd)))
       (should-not (plist-member payload :pattern))
+      ;; It says what a lasting answer would cover: ls, not every bash call.
+      (should (equal '(("ls")) (plist-get payload :commands)))
+      (should (equal "ls" (plist-get payload :covers)))
       ;; So does the list of waiting prompts.
       (let ((listed (plist-get (car (harness-call 'permission/pending "s1")) :payload)))
         (should (equal (list (concat projects "x")) (plist-get listed :paths)))
@@ -3583,16 +3604,17 @@ offers no pattern, and remembering the answer holds for the tool (see
         (should-not (plist-get listed :pattern)))
       (harness-call 'permission/answer "s1" (plist-get pending :id) "allow-session")
       (should (eq 'allow (plist-get (harness-test-await p) :behavior))))
-    ;; The answer holds for the tool, not for where the command reached.
-    (should (equal (list (list :tool "bash" :behavior 'allow))
+    ;; The answer holds for ls, not for where the command reached.
+    (should (equal (list (list :tool "bash" :commands '(("ls")) :behavior 'allow))
                    (gethash "s1" harness-perms--session-rules)))
     (should (= 1 (length (funcall judge))))
-    ;; So another command, reading there or staying in the project, runs
-    ;; without the judge.
-    (dolist (command (list (format "cat %sx/a %sy" projects projects) "git status"))
+    ;; So another ls, reading there or staying in the project, runs
+    ;; without the judge; a command that is not ls still asks.
+    (dolist (command (list (format "ls %sx/a %sy" projects projects) "ls -la"))
       (let ((d (harness-perms-test--decide (harness-perms-test--bash command))))
         (should (eq 'allow (plist-get d :behavior)))
-        (should (equal "allowed by a standing rule for bash" (plist-get d :reason)))))
+        (should (equal "allowed by a standing rule for bash (ls)" (plist-get d :reason)))))
+    (should-not (harness-perms--find-rule (harness-perms-test--bash "git status")))
     (should (= 1 (length (funcall judge))))))
 
 (ert-deftest harness-perms-command-rules-weigh-what-it-reaches ()
@@ -3634,6 +3656,207 @@ A deny rule stops it for any path it runs in or names."
       (let ((d (harness-perms-test--decide (harness-perms-test--bash (format "cat %sa" outside)))))
         (should (eq 'deny (plist-get d :behavior)))
         (should (equal "no user available" (plist-get d :reason)))))))
+
+(ert-deftest harness-perms-shell-ast-finds-every-command-a-line-runs ()
+  "A shell line is read into a syntax tree of the commands it runs.
+Pipelines, substitutions, subshells, ifs, loops and case bodies are
+walked; assignments, redirections, here-document bodies and comments
+are not commands, and a wrapper's options are not its program."
+  (let ((commands (lambda (command)
+                    (mapcar (lambda (node)
+                              (list (plist-get node :program)
+                                    (plist-get node :command-words)))
+                            (harness-perms--shell-ast-commands
+                             (harness-perms--shell-ast command))))))
+    (should (equal '(("gcloud" ("gcloud" "storage" "ls" "--project" "p"))
+                     ("grep" ("grep" "running")))
+                   (funcall commands "gcloud storage ls --project p | grep running")))
+    ;; A wrapper runs the command after it, not itself.
+    (should (equal '(("gcloud" ("gcloud" "storage" "ls")))
+                   (funcall commands "FOO=1 sudo -u me -n gcloud storage ls")))
+    (should (equal '(("gcloud" ("gcloud" "storage" "ls")))
+                   (funcall commands "env -u HOME gcloud storage ls")))
+    (should (equal '(("gcloud" ("gcloud" "storage" "ls")))
+                   (funcall commands "timeout -s KILL 5 gcloud storage ls")))
+    ;; Substitutions run commands, even in an assignment.
+    (should (equal '(("gcloud" ("gcloud" "instances" "list"))
+                     ("echo" ("echo" "yes")))
+                   (funcall commands "x=$(gcloud instances list) y=1; echo yes")))
+    (should (equal '(("gcloud" ("gcloud" "ls")) ("echo" ("echo" "yes")))
+                   (funcall commands "if gcloud ls; then echo yes; fi")))
+    (should (equal '(("gcloud" ("gcloud" "cp" "$f" "gs://b")))
+                   (funcall commands "for f in a b; do gcloud cp \"$f\" gs://b; done")))
+    ;; `do' in the list is data, not the loop's `do'.
+    (should (equal '(("gcloud" ("gcloud" "ls")))
+                   (funcall commands "for f in do re; do gcloud ls; done")))
+    ;; A substitution in a redirection target runs a command too.
+    (should (equal '(("echo" ("echo" "hi")) ("mktemp" ("mktemp")))
+                   (funcall commands "echo hi > $(mktemp)")))
+    ;; A quoted number is a word, not a file descriptor.
+    (should (equal '(("echo" ("echo" "2")))
+                   (funcall commands "echo \"2\">out")))
+    (should (equal '(("gcloud" ("gcloud" "ls")))
+                   (funcall commands "case x in a) gcloud ls;; esac")))
+    (should (equal '(("cd" ("cd" "/x")) ("gcloud" ("gcloud" "ls"))
+                     ("tee" ("tee" "log")))
+                   (funcall commands "(cd /x && gcloud ls) 2>&1 | tee log")))
+    ;; A condition runs no command, but a substitution in one does.
+    (should (equal '(("gcloud" ("gcloud" "ls")))
+                   (funcall commands "[[ -f x ]] && gcloud ls")))
+    (should (equal '(("gcloud" ("gcloud" "ls")) ("gsutil" ("gsutil" "ls")))
+                   (funcall commands "[[ -f x && \"$(gcloud ls)\" ]] && gsutil ls")))
+    (should (equal '(("echo" ("echo" "ok")))
+                   (funcall commands "[[ '$(gcloud ls)' ]] && echo ok")))
+    (should (equal '(("gcloud" ("gcloud" "ls")))
+                   (funcall commands "(( $(gcloud ls) ))")))
+    ;; So do substitutions in a loop's data and a case's word or pattern.
+    (should (equal '(("gcloud" ("gcloud" "ls")) ("echo" ("echo" "$f")))
+                   (funcall commands "for f in $(gcloud ls); do echo $f; done")))
+    (should (equal '(("gcloud" ("gcloud" "ls")) ("echo" ("echo" "x")))
+                   (funcall commands "case $(gcloud ls) in a) echo x;; esac")))
+    (should (equal '(("cat" ("cat")) ("echo" ("echo" "done")))
+                   (funcall commands "cat <<EOF\ngcloud rm\ngsutil\nEOF\necho done")))
+    ;; Comments are no commands, and quotes are undone, as words are.
+    (should (equal '(("echo" ("echo" "hi")))
+                   (funcall commands "echo hi # gcloud rm")))
+    (should (equal '(("echo" ("echo" "a b" "x")))
+                   (funcall commands "echo \"a b\" x")))
+    ;; A function's body is read, though it runs only when called.
+    (should (equal '(("gcloud" ("gcloud" "ls")) ("f" ("f")))
+                   (funcall commands "function f { gcloud ls; }; f")))
+    (should-not (harness-perms--shell-ast "   "))
+    (should-not (harness-perms--shell-ast-commands nil))))
+
+(ert-deftest harness-perms-command-rule-prefixes-keep-what-commands-share ()
+  "A command rule begins at the program and keeps the words commands share.
+A single command of a program gives the program alone; several give
+their longest common subcommand, never an argument."
+  (let ((prefixes (lambda (command) (harness-perms--command-rule-prefixes command))))
+    (should (equal '(("gcloud")) (funcall prefixes "gcloud storage ls")))
+    (should (equal '(("gcloud")) (funcall prefixes "gcloud compute instances list --project p")))
+    (should (equal '(("gcloud" "compute" "instances"))
+                   (funcall prefixes "gcloud compute instances list && gcloud compute instances describe x")))
+    (should (equal '(("gcloud" "storage" "cp"))
+                   (funcall prefixes "gcloud storage cp a b && gcloud storage cp c d")))
+    ;; Arguments and options end the shared words.
+    (should (equal '(("gcloud"))
+                   (funcall prefixes "gcloud --project p compute list && gcloud --project q compute list")))
+    (should (equal '(("git")) (funcall prefixes "git status && git log --oneline")))
+    ;; Different programs each keep their own.
+    (should (equal '(("gcloud") ("gsutil"))
+                   (funcall prefixes "gcloud storage ls && gsutil ls")))
+    (should (equal '(("gcloud") ("grep"))
+                   (funcall prefixes "gcloud storage ls | grep running")))
+    (should (equal '(("gcloud") ("gsutil") ("rm"))
+                   (funcall prefixes "gcloud ls && gsutil ls && rm -rf x")))
+    ;; The answer does not depend on the order the commands run in.
+    (should (equal '(("gcloud") ("gsutil"))
+                   (funcall prefixes "gsutil ls && gcloud ls")))
+    ;; Wrappers are left out of what the rule names.
+    (should (equal '(("gcloud")) (funcall prefixes "sudo -u me gcloud storage ls")))
+    ;; An assignment's substitution is still a command.
+    (should (equal '(("echo") ("gcloud"))
+                   (funcall prefixes "x=$(gcloud instances list); echo hi")))
+    ;; A line with no readable command has no rule.
+    (should-not (funcall prefixes "   "))
+    (should-not (funcall prefixes "FOO=1"))
+    ;; Several patterns read as one phrase.
+    (should (equal "gcloud and gsutil"
+                   (harness-perms--command-pattern-title '(("gcloud") ("gsutil")))))
+    (should (equal "gcloud compute instances"
+                   (harness-perms--command-pattern-title '(("gcloud" "compute" "instances")))))
+    (should (equal "gcloud, gsutil and rm"
+                   (harness-perms--command-pattern-title '(("gcloud") ("gsutil") ("rm")))))))
+
+(ert-deftest harness-perms-command-rules-match-the-commands-they-name ()
+  "A command rule holds a shell call by what its command line runs.
+An allow rule needs every command to match one of its patterns; a deny
+rule needs any one.  A call the reader cannot read matches neither, and
+a rule naming no commands still holds the whole tool."
+  (let* ((session (list :id "s1" :cwd default-directory))
+         (request (lambda (command)
+                    (append (list :session session :tool "bash" :kind 'exec
+                                  :paths (list default-directory))
+                            (and command (list :input (list :command command))))))
+         (matches (lambda (rule command)
+                    (and (harness-perms--rule-matches-p rule (funcall request command)) t)))
+         (allow '(:tool "bash" :commands (("gcloud")) :behavior allow))
+         (sub '(:tool "bash" :commands (("gcloud" "compute")) :behavior allow))
+         (deny '(:tool "bash" :commands (("gcloud")) :behavior deny)))
+    (should (funcall matches allow "gcloud storage ls"))
+    (should (funcall matches allow "sudo -u me gcloud storage ls > /tmp/out"))
+    (should (funcall matches allow "/usr/local/bin/gcloud storage ls"))
+    (should-not (funcall matches allow "gsutil ls"))
+    (should-not (funcall matches allow "echo hi"))
+    ;; Every command the line runs must match, or the rule is not enough.
+    (should-not (funcall matches allow "gcloud storage ls && rm -rf x"))
+    (should-not (funcall matches allow "gcloud storage ls | tee out"))
+    (should (funcall matches sub "gcloud compute instances list"))
+    (should (funcall matches sub "gcloud compute"))
+    (should-not (funcall matches sub "gcloud storage ls"))
+    (should-not (funcall matches sub "gcloud"))
+    ;; A deny rule holds for any command it names.
+    (should (funcall matches deny "gcloud storage ls"))
+    (should (funcall matches deny "gcloud storage ls && gsutil ls"))
+    (should-not (funcall matches deny "gsutil ls"))
+    ;; No command line, no match: the rule cannot say what the call runs.
+    (should-not (funcall matches allow nil))
+    (should-not (funcall matches allow "FOO=1"))
+    ;; A rule of the whole tool still holds every call of it.
+    (should (funcall matches '(:tool "bash" :behavior allow) "gcloud storage ls"))
+    (should (funcall matches '(:tool "bash" :behavior allow) "rm -rf x"))
+    (should-not (funcall matches '(:tool "t_exec" :commands (("gcloud")) :behavior allow)
+                         "gcloud storage ls"))
+    ;; A pattern may be a program, a flat list of programs, or word lists.
+    (should (funcall matches '(:tool "bash" :commands "gcloud" :behavior allow) "gcloud ls"))
+    (should (funcall matches '(:tool "bash" :commands ("gcloud" "gsutil") :behavior allow) "gsutil ls"))
+    (should (funcall matches '(:tool "bash" :commands ("gcloud") :behavior allow) "gcloud ls"))))
+
+(ert-deftest harness-perms-command-answers-record-and-note-their-commands ()
+  "A lasting answer to a shell call records a rule for its commands.
+The prompt says what they are, the note words it, and another command
+of the same programs runs without asking while one that is not is
+still asked about."
+  (harness-perms-test--with-notes
+    (let ((p (harness-call 'tools/execute sid
+                           (list :id "c1" :name "t_exec"
+                                 :input '(:command "gcloud storage ls && gsutil ls")))))
+      (harness-test-wait (lambda () (harness-call 'session/pending sid)) 2 "the prompt")
+      (let ((payload (plist-get (car (harness-call 'session/pending sid)) :payload)))
+        (should (equal '(("gcloud") ("gsutil")) (plist-get payload :commands)))
+        (should (equal "gcloud and gsutil" (plist-get payload :covers))))
+      (harness-call 'permission/answer sid
+                    (plist-get (car (harness-call 'session/pending sid)) :id)
+                    "allow-always")
+      (should (equal "ran" (plist-get (harness-test-await p) :content))))
+    (should (equal '((:tool "t_exec" :commands (("gcloud") ("gsutil")) :behavior allow))
+                   harness-perms-rules))
+    (let ((note (car (last (harness-perms-test--notes sid)))))
+      (should (equal "Always allowing every t_exec call to gcloud and gsutil, in every session"
+                     (plist-get note :content))))
+    ;; The rule holds both programs, and only commands of them.
+    (should (harness-perms--find-rule
+             (plist-put (copy-sequence
+                         (harness-perms-test--bash "sudo gcloud compute instances list && gsutil ls"))
+                        :tool "t_exec")))
+    (should-not (harness-perms--find-rule
+                 (plist-put (copy-sequence (harness-perms-test--bash "gcloud ls && rm -rf x"))
+                            :tool "t_exec")))
+    ;; Undo takes the command rule back, not some other rule.
+    (should (eq 'undone (car (harness-perms-test--undo sid (car (last (harness-perms-test--notes sid)))))))
+    (should-not harness-perms-rules)
+    ;; A single command's answer covers its program.
+    (harness-perms-test--answered sid "t_exec" '(:command "gcloud compute instances list") "allow-session")
+    (should (equal '((:tool "t_exec" :commands (("gcloud")) :behavior allow))
+                   (gethash sid harness-perms--session-rules)))
+    (should (equal "Allowing every t_exec call to gcloud for this session"
+                   (plist-get (car (last (harness-perms-test--notes sid))) :content)))
+    ;; A deny answer is scoped the same way.
+    (harness-perms-test--answered sid "t_exec" '(:command "rm -rf build") "deny-always")
+    (should (equal (list '(:tool "t_exec" :commands (("rm")) :behavior deny))
+                   harness-perms-rules))
+    (should (equal "Always denying every t_exec call to rm, in every session"
+                   (plist-get (car (last (harness-perms-test--notes sid))) :content)))))
 
 ;;;; Notes of lasting answers, and their undo
 
@@ -3703,17 +3926,17 @@ changes nothing."
     (setq harness-perms-rules (list '(:tool "web_fetch" :behavior deny)))
     (let ((r (harness-perms-test--answered sid "t_exec" '(:command "make") "allow-always")))
       (should (equal "ran" (plist-get r :content))))
-    (should (equal '((:tool "t_exec" :behavior allow) (:tool "web_fetch" :behavior deny)) harness-perms-rules))
+    (should (equal '((:tool "t_exec" :commands (("make")) :behavior allow) (:tool "web_fetch" :behavior deny)) harness-perms-rules))
     (let* ((nodes (harness-call 'session/nodes sid))
            (note (car (last nodes))))
       ;; Right under the call it answers, a hint the model never gets.
       (should (equal '(tool-call hint) (mapcar (lambda (n) (plist-get n :kind)) nodes)))
-      (should (equal "Always allowing every t_exec call, in every session" (plist-get note :content)))
-      (should (equal '(:scope always :rule (:tool "t_exec" :behavior allow) :undo offered)
+      (should (equal "Always allowing every t_exec call to make, in every session" (plist-get note :content)))
+      (should (equal '(:scope always :rule (:tool "t_exec" :commands (("make")) :behavior allow) :undo offered)
                      (harness-node-permission note)))
       (should-not (string-match-p "Always allowing" (format "%S" (harness-call 'session/messages sid))))
       (setq harness-perms-test--saved nil harness-perms-test--announced nil)
-      (should (equal '(undone . "Undone: no longer always allowing every t_exec call, in every session")
+      (should (equal '(undone . "Undone: no longer always allowing every t_exec call to make, in every session")
                      (harness-perms-test--undo sid note)))
       ;; Only that rule went, saved again, and an open settings page hears so.
       (should (equal '((:tool "web_fetch" :behavior deny)) harness-perms-rules))
@@ -3721,12 +3944,12 @@ changes nothing."
       (should (memq 'harness-perms-rules harness-perms-test--announced))
       (let ((record (harness-perms-test--record sid note)))
         (should (eq 'undone (plist-get record :undo)))
-        (should (equal "Undone: no longer always allowing every t_exec call, in every session"
+        (should (equal "Undone: no longer always allowing every t_exec call to make, in every session"
                        (plist-get record :result))))
       ;; Undone once: the same rule recorded again since stays.
-      (harness-perms-add-rule sid '(:tool "t_exec" :behavior allow) 'always)
+      (harness-perms-add-rule sid '(:tool "t_exec" :commands (("make")) :behavior allow) 'always)
       (should (eq 'undone (car (harness-perms-test--undo sid note))))
-      (should (member '(:tool "t_exec" :behavior allow) harness-perms-rules)))
+      (should (member '(:tool "t_exec" :commands (("make")) :behavior allow) harness-perms-rules)))
     ;; A once answer records nothing, and notes nothing.
     (harness-perms-test--answered sid "t_read" (list :path (expand-file-name "x" (harness-test-temp-dir))) "allow-once")
     (should (= 1 (length (harness-perms-test--notes sid))))
@@ -3738,12 +3961,12 @@ changes nothing."
 takes that back from where it was recorded; the call keeps its answer."
   (harness-perms-test--with-notes
     (pcase-dolist (`(,answer ,text ,record ,denied)
-                   '(("allow-session" "Allowing every t_exec call for this session"
-                      (:scope session :rule (:tool "t_exec" :behavior allow)) nil)
-                     ("deny-session" "Denying every t_exec call for this session"
-                      (:scope session :rule (:tool "t_exec" :behavior deny)) t)
-                     ("deny-always" "Always denying every t_exec call, in every session"
-                      (:scope always :rule (:tool "t_exec" :behavior deny)) t)))
+                   '(("allow-session" "Allowing every t_exec call to make for this session"
+                      (:scope session :rule (:tool "t_exec" :commands (("make")) :behavior allow)) nil)
+                     ("deny-session" "Denying every t_exec call to make for this session"
+                      (:scope session :rule (:tool "t_exec" :commands (("make")) :behavior deny)) t)
+                     ("deny-always" "Always denying every t_exec call to make, in every session"
+                      (:scope always :rule (:tool "t_exec" :commands (("make")) :behavior deny)) t)))
       (let ((r (harness-perms-test--answered sid "t_exec" '(:command "make") answer))
             (note (car (last (harness-perms-test--notes sid)))))
         (should (eq denied (and (plist-get r :denied) t)))
@@ -3764,12 +3987,13 @@ One saved again in another form, but saying the same, is still undone."
   (harness-perms-test--with-notes
     (harness-perms-test--answered sid "t_exec" '(:command "make") "allow-always")
     (let ((note (car (last (harness-perms-test--notes sid)))))
-      ;; Edited on the settings page: the rule now denies exec calls.
-      (harness-call 'config/set 'harness-perms-rules '((:tool "t_exec" :kind exec :behavior deny)) :scope 'global)
+      ;; Edited on the settings page: the rule now denies those commands.
+      (harness-call 'config/set 'harness-perms-rules
+                    '((:tool "t_exec" :commands (("make")) :behavior deny)) :scope 'global)
       (setq harness-perms-test--saved nil)
-      (should (equal '(changed . "Not undone: the saved rule for t_exec has changed since (in Settings, say), so it stays as it is")
+      (should (equal '(changed . "Not undone: the saved rule for t_exec (make) has changed since (in Settings, say), so it stays as it is")
                      (harness-perms-test--undo sid note)))
-      (should (equal '((:tool "t_exec" :kind exec :behavior deny)) harness-perms-rules))
+      (should (equal '((:tool "t_exec" :commands (("make")) :behavior deny)) harness-perms-rules))
       (should-not harness-perms-test--saved)
       (let ((record (harness-perms-test--record sid note)))
         (should (eq 'changed (plist-get record :undo)))
@@ -3777,7 +4001,8 @@ One saved again in another form, but saying the same, is still undone."
     ;; Saved again with its keys in another order and a string: the same rule.
     (setq harness-perms-rules nil)
     (harness-perms-test--answered sid "t_exec" '(:command "make") "allow-always")
-    (setq harness-perms-rules (list '(:behavior "allow" :tool "t_exec") '(:tool "web_fetch" :behavior deny)))
+    (setq harness-perms-rules (list '(:behavior "allow" :commands (("make")) :tool "t_exec")
+                                    '(:tool "web_fetch" :behavior deny)))
     (should (eq 'undone (car (harness-perms-test--undo sid (car (last (harness-perms-test--notes sid)))))))
     (should (equal '((:tool "web_fetch" :behavior deny)) harness-perms-rules))))
 
@@ -3792,7 +4017,7 @@ rule lost when the harness restarted.  Nothing else is touched."
     (harness-perms-test--answered sid "t_exec" '(:command "make") "allow-always")
     (setq harness-perms-rules (list '(:tool "web_fetch" :behavior deny)))
     (setq harness-perms-test--saved nil)
-    (should (equal '(gone . "Nothing to undo: the saved rules no longer have one for t_exec")
+    (should (equal '(gone . "Nothing to undo: the saved rules no longer have one for t_exec (make)")
                    (harness-perms-test--undo sid (car (last (harness-perms-test--notes sid))))))
     (should (equal '((:tool "web_fetch" :behavior deny)) harness-perms-rules))
     (should-not harness-perms-test--saved)))
@@ -3948,27 +4173,27 @@ again, and undo takes it back again; its note follows every move."
       (should id)
       (should (eq 'permission (plist-get decision :kind)))
       (should (eq 'done (plist-get decision :state)))
-      (should (equal "Always allowing every t_exec call, in every session" (plist-get decision :text)))
+      (should (equal "Always allowing every t_exec call to make, in every session" (plist-get decision :text)))
       (should (equal sid (plist-get decision :session)))
       (should (equal (plist-get note :id) (plist-get decision :node)))
       ;; The note's own record is as it always was.
-      (should (equal '(:scope always :rule (:tool "t_exec" :behavior allow) :undo offered)
+      (should (equal '(:scope always :rule (:tool "t_exec" :commands (("make")) :behavior allow) :undo offered)
                      (harness-node-permission note)))
-      (should (equal '(undone . "Undone: no longer always allowing every t_exec call, in every session")
+      (should (equal '(undone . "Undone: no longer always allowing every t_exec call to make, in every session")
                      (harness-perms-test--undo sid note)))
       (should (equal '((:tool "web_fetch" :behavior deny)) harness-perms-rules))
       (should (eq 'undone (plist-get (harness-perms-test--record sid note) :undo)))
       (should (eq 'undone (plist-get (harness-call 'decision/get id) :state)))
       ;; Redo: the rule is saved again, and an open settings page hears so.
       (setq harness-perms-test--saved nil harness-perms-test--announced nil)
-      (should (equal '(done . "Redone: always allowing every t_exec call, in every session")
+      (should (equal '(done . "Redone: always allowing every t_exec call to make, in every session")
                      (harness-perms-test--redo sid note)))
-      (should (equal '((:tool "t_exec" :behavior allow) (:tool "web_fetch" :behavior deny)) harness-perms-rules))
+      (should (equal '((:tool "t_exec" :commands (("make")) :behavior allow) (:tool "web_fetch" :behavior deny)) harness-perms-rules))
       (should (eq 'harness-perms-rules (car (car harness-perms-test--saved))))
       (should (memq 'harness-perms-rules harness-perms-test--announced))
       (let ((record (harness-perms-test--record sid note)))
         (should (eq 'offered (plist-get record :undo)))
-        (should (equal "Redone: always allowing every t_exec call, in every session" (plist-get record :result))))
+        (should (equal "Redone: always allowing every t_exec call to make, in every session" (plist-get record :result))))
       ;; Redoing what is in effect changes nothing.
       (should (eq 'done (car (harness-perms-test--redo sid note))))
       (should (= 2 (length harness-perms-rules)))
@@ -3985,23 +4210,23 @@ nor a session's rule once the session is gone: the decision ends there."
     (let ((first (car (last (harness-perms-test--notes sid)))))
       (harness-perms-test--undo sid first)
       (harness-perms-test--answered sid "t_exec" '(:command "make") "allow-always")
-      (should (equal '(changed . "Not redone: the saved rules have that rule for t_exec again already")
+      (should (equal '(changed . "Not redone: the saved rules have that rule for t_exec (make) again already")
                      (harness-perms-test--redo sid first)))
-      (should (equal '((:tool "t_exec" :behavior allow)) harness-perms-rules))
+      (should (equal '((:tool "t_exec" :commands (("make")) :behavior allow)) harness-perms-rules))
       (should (eq 'changed (plist-get (harness-perms-test--record sid first) :undo)))
       ;; It ended: no undo either.  The later answer's note owns the rule.
       (should (eq 'changed (car (harness-perms-test--undo sid first))))
-      (should (equal '((:tool "t_exec" :behavior allow)) harness-perms-rules))
+      (should (equal '((:tool "t_exec" :commands (("make")) :behavior allow)) harness-perms-rules))
       (should (eq 'undone (car (harness-perms-test--undo sid (car (last (harness-perms-test--notes sid))))))))
     ;; Changed after the undo.
     (setq harness-perms-rules nil)
     (harness-perms-test--answered sid "t_exec" '(:command "make") "deny-session")
     (let ((note (car (last (harness-perms-test--notes sid)))))
       (harness-perms-test--undo sid note)
-      (puthash sid (list '(:tool "t_exec" :behavior allow)) harness-perms--session-rules)
-      (should (equal '(changed . "Not redone: this session's rule for t_exec has changed since, so it stays as it is")
+      (puthash sid (list '(:tool "t_exec" :commands (("make")) :behavior allow)) harness-perms--session-rules)
+      (should (equal '(changed . "Not redone: this session's rule for t_exec (make) has changed since, so it stays as it is")
                      (harness-perms-test--redo sid note)))
-      (should (equal '((:tool "t_exec" :behavior allow)) (gethash sid harness-perms--session-rules))))
+      (should (equal '((:tool "t_exec" :commands (("make")) :behavior allow)) (gethash sid harness-perms--session-rules))))
     ;; A session's rule needs its session.
     (clrhash harness-perms--session-rules)
     (harness-perms-test--answered sid "t_exec" '(:command "make") "allow-session")
@@ -4019,7 +4244,7 @@ it changes what the calls of every session meet, and its note follows."
   (harness-perms-test--with-decisions
     (let ((other (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir) :permission-mode 'ask) :id))
           (run (lambda (session call-id)
-                 (harness-call 'tools/execute session (list :id call-id :name "t_exec" :input nil)))))
+                 (harness-call 'tools/execute session (list :id call-id :name "t_exec" :input '(:command "make"))))))
       (harness-perms-test--answered sid "t_exec" '(:command "make") "allow-always")
       (let ((id (harness-node-decision (car (last (harness-perms-test--notes sid))))))
         ;; The other session's call runs at once: the saved rule allows it.
@@ -4104,7 +4329,7 @@ in effect recorded names none."
                  ;; As the agent does: the call, its result, then `agent/tool-result'.
                  (harness-call 'session/append session (list :kind 'tool-call :tool "t_exec" :call-id call-id))
                  (let* ((result (harness-test-await
-                                 (harness-call 'tools/execute session (list :id call-id :name "t_exec" :input nil))))
+                                 (harness-call 'tools/execute session (list :id call-id :name "t_exec" :input '(:command "make")))))
                         (node (harness-call 'session/append session
                                             (list :kind 'tool-result :call-id call-id
                                                   :output (plist-get result :content)

@@ -2507,16 +2507,19 @@ non-interactive session it stays a denial.
   runs, which is all the jail checks (the sandbox confines the command,
   and the mode and the judge read it whole).  For an `exec` call with a
   `:command`, `harness-perms--command-paths` reads the paths the
-  command line names: a best-effort word scan (quotes, backslashes,
-  comments, `;` `&` `|` `(` `$(` and backquotes, redirections) that
-  keeps words that are absolute, start with `~` or `$HOME`, or with
-  `./` or `../`, and the values of `--option=…` and `NAME=…` words;
-  not the programs it runs (the first word of a command, after
-  assignments, keywords and prefixes such as `sudo` or `xargs`), not
-  `/dev/null` and the like, and on this machine not an absolute word
+  command line names from the same syntax tree that scopes a lasting
+  answer (`harness-perms--shell-ast`, see below): every command the
+  line runs, in a pipeline, a list, a subshell or a substitution,
+  contributes its `:path-words` (its words less the programs and the
+  wrappers that run them), and a redirection's target is a path
+  wherever it stands.  It keeps words that are absolute, start with `~`
+  or `$HOME`, or with `./` or `../`, and the values of `--option=…` and
+  `NAME=…` words;
+  not `/dev/null` and the like, and on this machine not an absolute word
   whose first directory does not exist, so a `/api/v1` in a grep is no
   path (on a remote host nothing is looked up, and `~` words are left
-  out).  The paths are on the host the command runs on, its
+  out).  A here-document's body is data, not paths.  The paths are on
+  the host the command runs on, its
   directory's: the session's for bash, the ssh tool's host for ssh.  The call is about its subject paths
   (`harness-perms--subject-paths`): the ones it names outside the
   session's directories, or, when it names none there, where it runs,
@@ -2675,27 +2678,57 @@ non-interactive session it stays a denial.
 - Session directory grants are stored on the session record
   (`:allowed-dirs`), so they survive restarts and forks inherit them.
 - Rules are plists `(:tool NAME-or-nil :kind KIND-or-nil :path PATTERN-or-nil
-  :behavior allow|deny)`; session rules live in memory, always-rules in
-  `harness-perms-rules`.  A rule with a `:path` (absolute, or relative to
-  the session's cwd) applies to calls with paths only: an allow rule when
-  the pattern holds every path of the call, a deny rule when it holds
-  any.  For a shell command an allow rule needs every subject path (the
-  ones it names outside the session's directories, else where it runs),
-  so a rule for the project no longer lets `rm -rf ~` run in it; a deny
-  rule holds when any path it names, inside or out, or where it runs
-  lies in the pattern.  The mode stage checks them first, before the
-  auto-allow list and the mode.  A tool prompt (the mode asking, or the
-  auto judge objecting) is about the call itself, whose paths the jail
-  already let through: it offers no pattern, and its allow-session /
-  allow-always / deny-always answers record `(:tool NAME :behavior B)`,
-  for every call of the tool, a `:pattern` in the answer notwithstanding.
+  :commands COMMANDS-or-nil :behavior allow|deny)`; session rules live
+  in memory, always-rules in `harness-perms-rules`.  A rule with a
+  `:path` (absolute, or relative to the session's cwd) applies to calls
+  with paths only: an allow rule when the pattern holds every path of
+  the call, a deny rule when it holds any.  For a shell command an allow
+  rule needs every subject path (the ones it names outside the session's
+  directories, else where it runs), so a rule for the project no longer
+  lets `rm -rf ~` run in it; a deny rule holds when any path it names,
+  inside or out, or where it runs lies in the pattern.  A rule with
+  `:commands` applies to shell calls only, by what their command lines
+  run: each command pattern is a program or a list of words from the
+  program on (`("gcloud" "compute")`, `("gsutil")`); an allow rule needs
+  every command the line runs to match one pattern, a deny rule any one.
+  Commands are read from the command line's syntax tree
+  (`harness-perms--shell-ast`): pipelines, lists, subshells, `if`,
+  loops, `case`, command substitutions and the command after a wrapper
+  such as `sudo`, `env` or `xargs` all count, while assignments,
+  redirections, here-document bodies and comments are no commands.
+  The paths a call names (`harness-perms--command-paths`) and the
+  read-only cloud queries the mode stage allows
+  (`harness-perms--read-only-cloud-p`) are read from the same tree, so
+  one reading of a command line decides what a lasting answer covers,
+  what a path rule sees and what needs no judge.
+  A lasting answer to a shell call records one of these rules
+  (`harness-perms--command-rule-prefixes`): one command gives its
+  program, and commands of the same program give the words they share,
+  up to three and never an argument, so `gcloud ... && gsutil ...`
+  records both programs and two `gcloud compute instances` commands
+  record `gcloud compute instances`.  A pattern is a prefix: it holds
+  every later command that starts with those words, `gcloud compute
+  instances delete` included, never the arguments the call happened to
+  pass.  A call whose command line cannot be read keeps the whole-tool
+  rule below.  The mode stage checks the
+  rules first, before the auto-allow list and the mode.  A tool prompt
+  (the mode asking, or the auto judge objecting) is about the call
+  itself, whose paths the jail already let through: it offers no
+  pattern, and its allow-session / allow-always / deny-always answers
+  record `(:tool NAME :behavior B)`, for every call of the tool, or
+  `(:tool NAME :commands COMMANDS :behavior B)` when the call is a shell
+  command whose commands were read, a `:pattern` in the answer
+  notwithstanding.
 - Events `permission/requested SID PENDING` (PENDING `(:id :kind permission
   :payload (:tool :input :kind :paths :call-id :title :options))`, plus
-  `:dir`, `:pattern` and `:reason` for a directory prompt; a tool
-  prompt's `:paths` are its subject paths, and a shell command's prompt
-  has `:cwd`, where it runs; a confirmation has `:confirm t` and its own
-  `:reason`; UIs offer only the listed `:options`, and
-  show a pattern only when there is one),
+  `:dir`, `:pattern` and `:reason` for a directory prompt, and for a
+  shell command `:commands` and `:covers`, the command patterns a
+  lasting answer would record and a few words for them ("gcloud and
+  gsutil"); a tool prompt's `:paths` are its subject paths, and a shell
+  command's prompt has `:cwd`, where it runs; a confirmation has
+  `:confirm t` and its own `:reason`; UIs offer only the listed
+  `:options`, show a pattern only when there is one, and word a lasting
+  answer with `:covers` when there is one),
   `permission/decided SID REQUEST DECISION`, `permission/dir-allowed SID DIR`,
   `permission/dir-revoked SID DIR` (a grant revoked, or one until the
   turn ends gone with its turn).
@@ -2710,13 +2743,15 @@ non-interactive session it stays a denial.
   exception: it offers allow-once and deny-once only, for the call.
 - An answer that lasts is noted in the session's transcript, whoever
   gave it (the chat, a popout, a view, an ACP client): a rule recorded
-  (an allow or a deny for the session or always on a tool prompt, a
-  deny for the session or always on a directory prompt) or a directory
+  (an allow or a deny for the session or always on a tool prompt -- for
+  the whole tool, or for the commands a shell call runs -- a deny for
+  the session or always on a directory prompt) or a directory
   granted (allow-session or allow-always on the jail's prompt or
   `request_directory_access`) appends a hint
   (`harness-perms--note-recorded`, through `session/append` before the
   call goes on, so it sits under the call) saying what, such as
-  "Always allowing every bash call, in every session", with the record
+  "Always allowing every bash call to gcloud and gsutil, in every
+  session" (or "every bash call" for a whole-tool rule), with the record
   in its `:meta` `:permission` (see Node).  A rule or a grant that was
   there already gives a note with nothing to undo (no `:undo`, and the
   text says "already so").  allow-once records nothing and gives no
@@ -2735,14 +2770,16 @@ non-interactive session it stays a denial.
   and a note tried already returns what it got and changes nothing
   (`none` for one with nothing to undo).  A rule is looked up
   by value, the rule as recorded first, then one equal in substance
-  (`harness-perms--rule-key`: tool, kind, path and behavior, compared
-  trimmed and with symbols as strings, so a rule Settings saved back
-  still counts); `undone` removes it from the session's rules or from
-  `harness-perms-rules`, saved.  A rule for the same tool and path that
-  says something else since (edited in Settings, say) is `changed` and
-  stays, and with none left the outcome is `gone`; session rules live
-  in memory and a fork starts without them, so that is what a session
-  note gets after a restart, or in a fork, which copies the note.  A
+  (`harness-perms--rule-key`: tool, kind, path, commands and behavior,
+  compared trimmed and with symbols as strings and command patterns in
+  a settled order, so a rule Settings saved back still counts);
+  `undone` removes it from the session's rules or from
+  `harness-perms-rules`, saved.  A rule for the same tool, path and
+  commands that says something else since (edited in Settings, say) is
+  `changed` and stays, and with none left the outcome is `gone`;
+  session rules live in memory and a fork starts without them, so that
+  is what a session note gets after a restart, or in a fork, which
+  copies the note.  A
   directory: the entry recorded, or one that expands to it, is removed
   (`permission/dir-revoked`); an entry that still covers it, a parent
   put in its place say, is `changed` and stays; else `gone`.  The

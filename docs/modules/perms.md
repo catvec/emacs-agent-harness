@@ -124,7 +124,12 @@ for.  The user may edit it, more or less specific, before answering,
 and the answer grants or denies the pattern.  No other prompt has one: the
 mode asking, or the judge objecting, is about the call itself, whose
 paths the jail already let through, so its answers for the session
-or for always record a rule for the tool.
+or for always record a rule for the tool.  For a shell command they
+can record a narrower rule for the commands it runs instead, read
+from the command line's syntax tree (see "Commands a lasting answer
+allows"): "Always allow" on `gcloud compute instances list` covers
+gcloud, not every bash call, and on `gcloud ... && gsutil ...` both
+programs.  A command the reader cannot read keeps the tool-wide rule.
 Roots and rules alike are directories or patterns (see
 `harness-perms--within-p`).
 

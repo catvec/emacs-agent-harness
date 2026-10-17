@@ -217,9 +217,11 @@ Otherwise it stays pending, and the session's own list answers it."
             (should (harness-ui-pending--on-permission
                      (list :sessionId "drawn"
                            :toolCall (list :toolCallId "c1" :title "Bash: ls" :kind "execute")
-                           :_harness (list :pendingId "p9" :tool "bash"))
+                           :_harness (list :pendingId "p9" :tool "bash"
+                                           :commands '(("ls")) :covers "ls"))
                      respond))
             (should (equal "c1" (plist-get (harness-ui-pending-record "drawn" "p9") :call-id)))
+            (should (equal "ls" (plist-get (harness-ui-pending-record "drawn" "p9") :covers)))
             (harness-ui-pending-answer-permission "drawn" "p9" "allow-once")
             (should (equal '((:outcome (:outcome "selected" :optionId "allow-once"))
                              (:answer "yes"))
@@ -577,7 +579,8 @@ a directory); the item's id is KIND's name."
     (list :id (symbol-name kind) :kind "permission"
           :payload (pcase kind
                      ('tool (list :title "Bash: ls -la" :tool "bash" :kind "exec"
-                                  :input '(:command "ls -la") :options options))
+                                  :input '(:command "ls -la") :commands '(("ls")) :covers "ls"
+                                  :options options))
                      ('jail (list :title "Read /srv/notes/todo.org" :tool "read_file" :kind "read"
                                   :input '(:path "/srv/notes/todo.org") :paths '("/srv/notes/todo.org")
                                   :dir "/srv/notes/" :pattern "/srv/notes/**" :options options))
@@ -618,7 +621,7 @@ says what the answer covered."
       (harness-ui-pending-popout sid)
       (with-current-buffer (harness-ui-popout-buffer (list 'pending sid))
         (should (= 3 (how-many (regexp-quote row) (point-min) (point-max)))))
-      (should (equal "Always allowed" (funcall press "tool" "a")))
+      (should (equal "Always allowed every ls call" (funcall press "tool" "a")))
       (harness-test-wait (lambda () harness-ui-pending-test-answers) 5 "the tool call answered")
       (should (equal (list 'permission sid "tool" "allow-always") (car harness-ui-pending-test-answers)))
       (should (equal "Allowed this call to reach /srv/notes/**" (funcall press "jail" "y")))
@@ -637,10 +640,10 @@ says what the answer covered."
                    (harness-ui-pending-answer-help (harness-ui-pending-record sid pid) option))))
       (harness-ui-pending-sync sid (mapcar #'harness-ui-pending-test-item '(tool jail dir)))
       (should (equal "Allow this call, this time" (funcall help "tool" "allow-once")))
-      (should (equal "Allow every bash call for this session" (funcall help "tool" "allow-session")))
-      (should (equal "Always allow every bash call, in every session" (funcall help "tool" "allow-always")))
+      (should (equal "Allow every ls call for this session" (funcall help "tool" "allow-session")))
+      (should (equal "Always allow every ls call, in every session" (funcall help "tool" "allow-always")))
       (should (equal "Deny this call" (funcall help "tool" "deny-once")))
-      (should (equal "Always deny every bash call" (funcall help "tool" "deny-always")))
+      (should (equal "Always deny every ls call" (funcall help "tool" "deny-always")))
       (should (equal "Let this call reach /srv/notes/**, this time" (funcall help "jail" "allow-once")))
       (should (equal "Allow /srv/notes/** for this session" (funcall help "jail" "allow-session")))
       (should (equal "Always allow /srv/notes/**, in every session" (funcall help "jail" "allow-always")))
@@ -654,6 +657,16 @@ says what the answer covered."
       ;; A pattern the user edited is what the answers hold for.
       (harness-ui-pending-set-pattern sid "dir" "/srv/api/types/**")
       (should (equal "Allow /srv/api/types/** until this turn ends" (funcall help "dir" "allow-once")))
+      ;; A shell prompt says what its lasting answers cover, and the
+      ;; panel keeps saying it while it waits.
+      (with-temp-buffer
+        (let ((harness-ui-session-id sid))
+          (harness-ui-pending--insert-permission (harness-ui-pending-record sid "tool")))
+        (should (string-search "lasting answers: every ls call" (buffer-string)))
+        (goto-char (point-min))
+        (search-forward "[Always allow]")
+        (should (equal "Always allow every ls call, in every session (a)"
+                       (get-text-property (1- (point)) 'help-echo))))
       ;; The panel's buttons carry it, with their keys.
       (with-temp-buffer
         (let ((harness-ui-session-id sid))
@@ -1160,7 +1173,7 @@ the notes when it opens, and its [Undo] takes the rule back."
             (harness-ui-pending-popout sid)
             (funcall press "a")
             (should (equal "ran" (plist-get (harness-test-await call) :content))))
-          (should (equal '((:tool "t_make" :behavior allow)) harness-perms-rules))
+          (should (equal '((:tool "t_make" :commands (("make")) :behavior allow)) harness-perms-rules))
           ;; Allow for session, from the popout the task board's SPC opens.
           (let ((call (funcall ask "t_deploy" "deploy")))
             (cl-letf (((symbol-function 'harness-ui-tasks--fetch) (lambda (&rest _) nil)))
@@ -1176,7 +1189,7 @@ the notes when it opens, and its [Undo] takes the rule back."
               (call-interactively (key-binding (kbd "SPC"))))
             (funcall press "s")
             (should (equal "ran" (plist-get (harness-test-await call) :content))))
-          (should (equal '((:tool "t_deploy" :behavior allow)) (gethash sid harness-perms--session-rules)))
+          (should (equal '((:tool "t_deploy" :commands (("deploy")) :behavior allow)) (gethash sid harness-perms--session-rules)))
           ;; The chat, opened afterwards, has both notes under their calls.
           (let ((buf (harness-chat-buffer sid))
                 (find (lambda (buf text)
@@ -1184,9 +1197,9 @@ the notes when it opens, and its [Undo] takes the rule back."
                           (save-excursion (goto-char (point-min)) (search-forward text nil t))))))
             (harness-test-wait (lambda () (with-current-buffer buf (and (not harness-chat--loading) harness-compose-end)))
                                5 "the chat loaded")
-            (harness-test-wait (lambda () (funcall find buf "Allowing every t_deploy call for this session  [Undo]"))
+            (harness-test-wait (lambda () (funcall find buf "Allowing every t_deploy call to deploy for this session  [Undo]"))
                                5 "the notes in the chat")
-            (should (funcall find buf "Always allowing every t_make call, in every session  [Undo]"))
+            (should (funcall find buf "Always allowing every t_make call to make, in every session  [Undo]"))
             (let ((shown nil))
               (cl-letf (((symbol-function 'message)
                          (lambda (fmt &rest args) (when fmt (push (apply #'format fmt args) shown)))))
@@ -1194,12 +1207,12 @@ the notes when it opens, and its [Undo] takes the rule back."
                   (goto-char (- (funcall find buf "in every session  [Undo]") 2))
                   (harness-chat-push))
                 (harness-test-wait (lambda () shown) 5 "the echo area"))
-              (should (equal '("Undone: no longer always allowing every t_make call, in every session") shown)))
+              (should (equal '("Undone: no longer always allowing every t_make call to make, in every session") shown)))
             (should-not harness-perms-rules)
-            (harness-test-wait (lambda () (funcall find buf "Always allowing every t_make call, in every session  undone"))
+            (harness-test-wait (lambda () (funcall find buf "Always allowing every t_make call to make, in every session  undone"))
                                5 "the note redrawn")
             ;; The other answer's rule stays, and so does its [Undo].
-            (should (equal '((:tool "t_deploy" :behavior allow)) (gethash sid harness-perms--session-rules)))
+            (should (equal '((:tool "t_deploy" :commands (("deploy")) :behavior allow)) (gethash sid harness-perms--session-rules)))
             (should (funcall find buf "for this session  [Undo]"))))))))
 
 ;;;; A panel's key, from the box

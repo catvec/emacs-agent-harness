@@ -347,14 +347,25 @@ They are the keywords that start an indented line, as in
       (setq start (match-end 0)))
     (nreverse (delete-dups keys))))
 
+(defun harness-test--widget-properties (type)
+  "Return the keyword properties of the customize widget TYPE.
+They come after its kind and arguments: `(repeat (string) :tag \"X\")'
+has them from `:tag' on, as a scalar widget such as `(string :tag
+\"X\")' does."
+  (let ((tail (cdr type)))
+    (while (and tail (not (keywordp (car tail))))
+      (pop tail))
+    tail))
+
 (defun harness-test-check-record-type (type)
   "Check that every key of the record TYPE has a name and starts from a value that fits."
   (dolist (option (plist-get (cdr type) :options))
-    (let ((vtype (cadr option)))
+    (let* ((vtype (cadr option))
+           (props (harness-test--widget-properties vtype)))
       (unless (eq (car-safe vtype) 'const)
-        (should (plist-get (cdr vtype) :tag)))
-      (when (plist-member (cdr vtype) :value)
-        (should (harness-test-fits-p vtype (plist-get (cdr vtype) :value)))))))
+        (should (plist-get props :tag)))
+      (when (plist-member props :value)
+        (should (harness-test-fits-p vtype (plist-get props :value)))))))
 
 (defvar harness-acp--server-enabled)
 (declare-function harness-acp-connect "harness-acp")

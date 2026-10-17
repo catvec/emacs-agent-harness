@@ -76,7 +76,8 @@ the values are data, written as they would be after a quote.
  (harness-sandbox-policy . required)
  (harness-allowed-directories . ("~/work/"))
  (harness-perms-rules . ((:tool "web_fetch" :behavior deny)
-                         (:path "~/.ssh/" :behavior deny)))
+                         (:path "~/.ssh/" :behavior deny)
+                         (:tool "bash" :commands (("rm")) :behavior deny)))
  (harness-allowed-models . ("claude:*" "bedrock:*")))
 ```
 
@@ -209,9 +210,11 @@ not used, and the BTW keeps its session's model.
   policy value for every request, whatever a session record says.
 - **Standing rules** (`harness-perms-rules`).  The policy's rules are
   weighed before a session's own (the answers given for the session),
-  so no answer overrides them.  No answer records a standing rule: the
-  prompts leave out Always allow and Always deny, and one given anyway
-  (an older client) holds for the session.
+  so no answer overrides them.  A rule may name the commands a shell
+  call runs (`:commands (("gcloud") ("gsutil"))`), as an answer's rule
+  does.  No answer records a standing rule: the prompts leave out
+  Always allow and Always deny, and one given anyway (an older client)
+  holds for the session.
 - **Allowed directories** (`harness-allowed-directories`).  The list is
   the policy's: no directory prompt offers Always allow, and the global
   entries cannot be revoked from the directory list.  A person in front

@@ -1647,7 +1647,10 @@ A request about a path outside the allowed directories carries the glob
 pattern it is answered for in `_harness.pattern'; a client may answer
 for another one with `_harness.pattern' in its result, next to the
 outcome.  A shell command's request carries where it runs in
-`_harness.cwd', and in `_harness.paths' what it is about."
+`_harness.cwd', in `_harness.paths' what it is about, and, when the
+harness read its command line, the commands its lasting answers would
+cover in `_harness.commands', with a few words for them in
+`_harness.covers' (see `harness-perms--command-rule-prefixes')."
   (let* ((payload (or (plist-get pending :payload) pending))
          (pid (plist-get pending :id)))
     (harness-acp--request-clients
@@ -1664,6 +1667,8 @@ outcome.  A shell command's request carries where it runs in
                            :cwd (plist-get payload :cwd)
                            :dir (plist-get payload :dir)
                            :pattern (plist-get payload :pattern)
+                           :commands (plist-get payload :commands)
+                           :covers (plist-get payload :covers)
                            :reason (plist-get payload :reason)))
      (lambda (result)
        (let* ((outcome (plist-get result :outcome))
