@@ -1,0 +1,11 @@
+$ cd harness_client && flutter --version
+Flutter 3.47.7 • channel stable • https://github.com/flutter/flutter.git
+Framework • revision abaf9c5237 (9 days ago) • 2026-10-08 09:51:21 -0700
+Engine • hash d8a2d6c768c334d53e16277f837970ffa1e2de81 (revision deb287481e) (9 days ago) • 2026-10-07 17:09:12.000Z
+Tools • Dart 3.13.5 • DevTools 2.60.0
+
+$ cd /tmp && flutter --version
+Flutter 3.16.4 • channel stable • https://github.com/flutter/flutter.git
+Framework • revision 2e9cb0aa71 (2 years, 10 months ago) • 2023-12-11 14:35:13 -0700
+Engine • revision 54a7145303
+Tools • Dart 3.2.3 • DevTools 2.28.4

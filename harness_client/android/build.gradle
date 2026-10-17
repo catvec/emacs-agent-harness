@@ -1,0 +1,45 @@
+// The root Android build file is Groovy on purpose. Older Flutter releases
+// (3.16 and earlier) only look for android/build.gradle when deciding whether
+// a project uses the Android embedding, and silently fall back to the
+// embedding-v1 manifest path when they find only build.gradle.kts. This app
+// uses embedding v2; the Groovy file lets those Flutter tools find the real
+// manifest at app/src/main/AndroidManifest.xml instead of reporting a missing
+// one.
+//
+// The module and settings files stay in Kotlin DSL; Flutter and Gradle support
+// a mixed project.
+allprojects {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+def newBuildDir = rootProject.layout.buildDirectory.dir("../../build").get()
+rootProject.layout.buildDirectory.set(newBuildDir)
+
+subprojects {
+    project.layout.buildDirectory.set(newBuildDir.dir(project.name))
+}
+
+subprojects {
+    afterEvaluate { p ->
+        def androidExt = p.extensions.findByName('android')
+        if (androidExt != null) {
+            // Flutter 3.47's default NDK (28.2), Build-Tools 36.0.0, Platform
+            // 35 and CMake 3.22 are not installed in every Android SDK. Use the
+            // components that are present so AGP does not try to download them
+            // into a read-only SDK directory. Override the values in
+            // gradle.properties when your SDK has different versions.
+            androidExt.ndkVersion = p.findProperty('harness.ndkVersion') ?: '30.0.14904198'
+            androidExt.buildToolsVersion = p.findProperty('harness.buildToolsVersion') ?: '36.1.0'
+            androidExt.compileSdk = (p.findProperty('harness.compileSdk') ?: '36') as int
+            androidExt.externalNativeBuild.cmake.version =
+                p.findProperty('harness.cmakeVersion') ?: '4.1.2'
+        }
+    }
+}
+
+tasks.register("clean", Delete) {
+    delete rootProject.layout.buildDirectory
+}

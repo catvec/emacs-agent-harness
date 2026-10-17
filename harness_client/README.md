@@ -55,12 +55,30 @@ not offered.
 
 ## Quick start
 
-Requires Flutter 3.47+ / Dart 3.13+.
+Requires Flutter 3.47.7 / Dart 3.13.5. The version is pinned in
+`.flutter-version`. Run the installer once; it downloads that SDK into
+`~/.local/share/flutter-versions` (or uses it if it is already there) and
+installs a small `~/.local/bin/flutter` launcher that selects the pinned SDK
+inside this directory. Other projects keep using the default Flutter SDK.
 
 ```sh
+tool/install_flutter.sh
 flutter pub get
 flutter run -d macos          # or: flutter run -d <android-device>
 ```
+
+If you prefer not to install the launcher, `tool/flutter` is the same
+per-project selector and can be run directly (`tool/flutter build apk`).
+
+Older Flutter tooling (3.16 and earlier) can misreport this project as using
+the deleted Android v1 embedding. Those releases only look for a Groovy
+`android/build.gradle`; without one they check the wrong manifest path and
+report that `android/AndroidManifest.xml` is missing. This project is on
+embedding v2 (`app/src/main/AndroidManifest.xml` carries `flutterEmbedding=2`
+and `MainActivity` extends the v2 `FlutterActivity`) and ships a Groovy root
+build file for that check, but those releases also cannot resolve the
+project's Dart 3.13 dependencies. Use the pinned SDK above, or any Flutter
+release that understands a mixed Groovy/Kotlin Gradle project.
 
 Or run the web build:
 
@@ -91,6 +109,12 @@ as Tailscale. Cleartext traffic is enabled for `ws://` on a
 local network, and the `INTERNET` permission is declared in the release
 manifest. iOS and macOS prompts for local-network access are declared too;
 macOS has the outgoing-network entitlement.
+
+The Android build pins the NDK, Build-Tools, platform and CMake versions that
+AGP uses in every module (`harness.*` in `android/gradle.properties`), because
+Flutter 3.47's defaults are newer than the components in some SDK
+installations. Change those four values to the versions installed on your
+machine if the build reports a missing SDK package.
 
 ## Graceful extension detection
 

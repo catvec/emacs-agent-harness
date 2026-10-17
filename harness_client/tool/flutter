@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# Flutter launcher that honours the SDK pinned by the nearest .flutter-version.
+#
+# `harness_client` is built with Flutter 3.47.7 (Dart 3.13.5). Older Flutter
+# releases (3.16 and earlier) only recognise a Groovy android/build.gradle and
+# otherwise mistake this embedding-v2 project for an embedding-v1 one, so a
+# plain `flutter build apk` from an old SDK fails with a misleading warning.
+#
+# Install this script as ~/.local/bin/flutter with tool/install_flutter.sh.
+# Projects without a .flutter-version keep using the default SDK.
+set -euo pipefail
+
+find_version_file() {
+  local dir="$PWD"
+  while :; do
+    if [ -f "$dir/.flutter-version" ]; then
+      printf '%s\n' "$dir/.flutter-version"
+      return 0
+    fi
+    if [ "$dir" = "/" ]; then
+      return 1
+    fi
+    dir="$(dirname "$dir")"
+  done
+}
+
+read_version() {
+  sed -e 's/#.*//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' "$1" | head -n 1
+}
+
+default_sdk="${FLUTTER_DEFAULT_SDK:-$HOME/.local/share/flutter}"
+versions_dir="${FLUTTER_VERSIONS_DIR:-$HOME/.local/share/flutter-versions}"
+
+if version_file="$(find_version_file)"; then
+  version="$(read_version "$version_file")"
+  version="${version#v}"
+  if [ -n "$version" ]; then
+    sdk="$versions_dir/$version"
+    if [ ! -x "$sdk/bin/flutter" ]; then
+      project_dir="$(dirname "$version_file")"
+      cat >&2 <<EOF
+Flutter $version is pinned by $version_file, but it is not installed at $sdk.
+
+Install it with:
+  $project_dir/tool/install_flutter.sh
+or set FLUTTER_VERSIONS_DIR if your SDKs live somewhere else.
+EOF
+      exit 1
+    fi
+    exec "$sdk/bin/flutter" "$@"
+  fi
+fi
+
+if [ ! -x "$default_sdk/bin/flutter" ]; then
+  echo "flutter: no Flutter SDK found at $default_sdk" >&2
+  exit 127
+fi
+exec "$default_sdk/bin/flutter" "$@"
