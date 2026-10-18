@@ -102,19 +102,60 @@ python3 -m http.server 8080 --directory build/web
 ```
 
 The Android APK is built with the debug key so it installs directly; it needs
-Android 7 (API 24) or newer. This is a local-network test client: the token is
-kept in the app's shared preferences when *Remember* is on, not in a platform
-keychain, and `ws://` is cleartext. Use it on a trusted network, or a VPN such
-as Tailscale. Cleartext traffic is enabled for `ws://` on a
-local network, and the `INTERNET` permission is declared in the release
-manifest. iOS and macOS prompts for local-network access are declared too;
-macOS has the outgoing-network entitlement.
+Android 7 (API 24) or newer. `tool/qr_install.sh` builds and installs it over
+Wi-Fi from the terminal, with no cable (see *Installing on a phone over
+Wi-Fi*). This is a local-network test client: the token is kept in the app's
+shared preferences when *Remember* is on, not in a platform keychain, and
+`ws://` is cleartext. Use it on a trusted network, or a VPN such as Tailscale.
+Cleartext traffic is enabled for `ws://` on a local network, and the `INTERNET`
+permission is declared in the release manifest. iOS and macOS prompts for
+local-network access are declared too; macOS has the outgoing-network
+entitlement.
 
 The Android build pins the NDK, Build-Tools, platform and CMake versions that
 AGP uses in every module (`harness.*` in `android/gradle.properties`), because
 Flutter 3.47's defaults are newer than the components in some SDK
 installations. Change those four values to the versions installed on your
 machine if the build reports a missing SDK package.
+
+## Installing on a phone over Wi-Fi
+
+`tool/qr_install.sh` builds the Android APK when needed and installs it on a
+phone over the local network, with no USB cable. The phone pairs as a wireless
+debugging device by scanning a QR code shown in the terminal, then adb installs
+the APK and opens the app:
+
+```sh
+tool/qr_install.sh                 # build if needed, pair, install, open
+tool/qr_install.sh --build         # rebuild first
+tool/qr_install.sh --debug         # build/install the debug APK
+tool/qr_install.sh --no-launch     # install without opening the app
+```
+
+On Android 11 or newer, enable *Developer options*, open *Wireless debugging*
+and tap *Pair device with QR code*, then scan the code the script prints. The
+phone and the computer must be on the same network. The script finds adb in
+`ADB`, `PATH`, or the Android SDK (`ANDROID_HOME`, `ANDROID_SDK_ROOT` and the
+usual install locations); the QR code is drawn by `tool/qr_terminal.py` in
+Unicode blocks, so `qrencode` is not needed.
+
+A phone that adb already sees (connected by USB, or paired earlier) is used
+directly. Emulators are ignored unless named with `--device SERIAL`, and more
+than one connected phone also needs `--device`.
+
+For a phone where wireless debugging is unavailable, `--serve` starts a small
+HTTP server on the local network instead. Scan its QR code with the phone's
+camera, download the APK and install it, allowing installs from that browser
+when Android asks:
+
+```sh
+tool/qr_install.sh --serve
+```
+
+`--serve` listens on every interface and serves only that APK. If it prints an
+address the phone cannot reach (a VPN interface, say), pass the right one with
+`--address 192.168.1.10`. Both the pairing code and the download URL are meant
+for a trusted local network; the phone needs Android 7 (API 24) or newer.
 
 ## Graceful extension detection
 
@@ -183,7 +224,7 @@ lib/src/models/       sessions, transcript reducer, tasks, usage, activity
 lib/src/services/     typed HarnessApi over ACP and _harness
 lib/src/state/        connection, sessions, tasks, usage, interactions
 lib/src/ui/           adaptive widgets, theme, screens and transcript widgets
-tool/                 preview ACP server, real-harness probe
+tool/                 preview ACP server, real-harness probe, QR phone installer
 test/                 unit, reducer and widget-flow tests
 e2e/                  Playwright mobile-emulated flows and screenshots
 ```
@@ -208,6 +249,8 @@ e2e/                  Playwright mobile-emulated flows and screenshots
 flutter analyze                    # no issues
 flutter test                       # 21 tests: ACP, capabilities, reducer,
                                    # connection parsing, 10 widget flows
+python3 tool/test_qr_tools.py      # QR encoder against qrencode, the phone
+                                   # installer with a fake adb, the APK server
 ```
 
 The widget tests drive the real `AcpClient` against an in-memory ACP server

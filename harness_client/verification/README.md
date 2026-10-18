@@ -21,6 +21,10 @@
 - `web-prod-smoke.txt` / `production-web.png` — the production web build,
   served as a static site and connected to the preview harness, with no page
   errors.
+- `qr-install.txt` — the QR phone installer: the tool tests, the encoder
+  checked against qrencode and the harness's own encoder, a full install
+  through a fake adb, and the QR decoded from the rendered terminal output
+  (`qr-install.png`); `qr-install-serve.png` is the `--serve` download mode.
 
 The toolchain pieces above are reproducible: `tool/install_flutter.sh` installs
 the pinned Flutter SDK under `~/.local/share/flutter-versions` and installs the

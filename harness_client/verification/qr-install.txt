@@ -1,0 +1,145 @@
+# QR phone installer verification
+
+Run on 2026-10-17 from `harness_client` in the task worktree.  No phone or
+Android SDK is visible to this sandbox, so the adb side is a fake adb that
+prints the same mDNS, pair, connect and install output a phone/adb would; the
+QR side is checked independently against `qrencode` and the harness's own
+encoder.
+
+## Unit and end-to-end tests
+
+```text
+$ python3 tool/test_qr_tools.py
+test_bad_timeout (__main__.InstallScriptTest.test_bad_timeout) ... ok
+test_help (__main__.InstallScriptTest.test_help) ... ok
+test_install_failure_is_explained (__main__.InstallScriptTest.test_install_failure_is_explained) ... ok
+test_no_launch (__main__.InstallScriptTest.test_no_launch) ... ok
+test_pairs_and_installs (__main__.InstallScriptTest.test_pairs_and_installs) ... ok
+test_qr_timeout (__main__.InstallScriptTest.test_qr_timeout) ... ok
+test_uses_an_already_connected_device (__main__.InstallScriptTest.test_uses_an_already_connected_device) ... ok
+test_ansi_render (__main__.QrEncodeTest.test_ansi_render) ... ok
+test_largest_version (__main__.QrEncodeTest.test_largest_version) ... ok
+test_masks_differ (__main__.QrEncodeTest.test_masks_differ) ... ok
+test_multibyte_text_is_utf8 (__main__.QrEncodeTest.test_multibyte_text_is_utf8) ... ok
+test_size_and_quiet_zone (__main__.QrEncodeTest.test_size_and_quiet_zone) ... ok
+test_symbols_match_qrencode (__main__.QrEncodeTest.test_symbols_match_qrencode) ... ok
+test_too_much_text (__main__.QrEncodeTest.test_too_much_text) ... ok
+test_version_grows_with_the_text (__main__.QrEncodeTest.test_version_grows_with_the_text) ... ok
+test_apk_download (__main__.ServeApkTest.test_apk_download) ... serve_apk: "GET /harness.apk HTTP/1.1" 200 -
+ok
+test_landing_page (__main__.ServeApkTest.test_landing_page) ... serve_apk: "GET / HTTP/1.1" 200 -
+ok
+test_unknown_path (__main__.ServeApkTest.test_unknown_path) ... serve_apk: code 404, message Not Found
+serve_apk: "GET /etc/passwd HTTP/1.1" 404 -
+ok
+
+----------------------------------------------------------------------
+Ran 18 tests in 5.791s
+
+OK
+```
+
+`test_symbols_match_qrencode` encodes every test string at L, M, Q and H and
+checks that qrencode's symbol equals one of the eight masks this encoder
+produces; `test_largest_version` does the same at version 40.
+`test_ansi_render` decodes the printed half blocks back into modules and
+compares them with the matrix, so a shifted or reused row fails.
+
+```text
+$ python3 -m py_compile tool/qr_terminal.py tool/serve_apk.py tool/test_qr_tools.py
+py_compile: ok
+
+$ shellcheck tool/qr_install.sh
+shellcheck: ok
+
+$ bash -n tool/qr_install.sh
+bash -n: ok
+```
+
+## The project's full check
+
+The worktree's own test run, unrelated Lisp suites included (among them
+`harness-ui-qr-test`, the harness QR encoder's nine tests):
+
+```text
+$ scripts/test.sh
+...
+ok    harness-ui-qr-test.el      Ran 9 tests, 9 results as expected, 0 unexpected
+...
+test.sh: 129 files, 0 failed, 288s wall (16 at a time)
+```
+
+## The encoder matches the harness's own
+
+The encoder is a port of `harness-ui-qr.el`'s (`harness-qr-encode`).  A batch
+Emacs encoded 100 cases (26 strings, including UTF-8 and the 69-byte pairing
+payload, at L/M/Q/H); all 100 matched the Python encoder in version, chosen
+mask and every module.
+
+```text
+ok 100 bad 0
+```
+
+## A full install, with a fake adb
+
+`--apk` points at a stand-in file so no Gradle build is needed; the fake adb
+advertises a pairing service, accepts the password from the QR, advertises the
+debug port, and reports the install:
+
+```text
+$ FAKE_ADB_STATE=... ADB=.../adb \
+    tool/qr_install.sh --no-build --apk .../app.apk --timeout 15
+
+On the phone:
+  Settings -> System -> Developer options -> Wireless debugging
+  -> Pair device with QR code, then scan this code.
+
+The phone and this computer must be on the same network.  Waiting up to
+15 seconds for the code to be scanned ...
+
+[QR code shown]
+
+Paired with 192.168.7.42.
+connected to 192.168.7.42:42345
+Installing app.apk on 192.168.7.42:42345 ...
+Installed.
+Opened Harness on the phone.
+
+Harness is on the phone.  In the app, connect to the harness's ws:// address
+(Emacs: C-c h P, [start serving]) and its token from acp-token.
+```
+
+The fake adb calls were:
+
+```text
+devices
+mdns services
+pair 192.168.7.42:37111 DS7Sf7bOfshCYu4y7WAYo
+devices
+mdns services
+connect 192.168.7.42:42345
+devices
+-s 192.168.7.42:42345 install -r .../app.apk
+-s 192.168.7.42:42345 shell am start -W -n app.harness.client/app.harness.harness_client.MainActivity
+```
+
+`verification/qr-install.png` is the ANSI output above rendered with solid
+terminal cells.  `zxing-cpp` decodes its QR code to exactly the pairing text
+the fake adb accepted:
+
+```text
+QRCode WIFI:T:ADB;S:ADB_WIFI_ikU3jbKOMgO7vC-ViSSWk;P:DS7Sf7bOfshCYu4y7WAYo;;
+```
+
+The `--serve` branch was exercised through `ServeApkTest`: the APK is served
+with `Content-Type: application/vnd.android.package-archive` and
+`Content-Disposition: attachment; filename="Harness.apk"`, the landing page
+renders, and paths outside those two are 404.  Running
+`serve_apk.py --address 192.168.7.42` prints a QR code which `zxing-cpp`
+decodes to the download URL:
+
+```text
+QRCode http://192.168.7.42:43103/Harness.apk
+```
+
+`verification/qr-install-serve.png` is that output, rendered the same way.
