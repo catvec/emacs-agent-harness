@@ -130,6 +130,8 @@ tool/qr_install.sh                 # build if needed, pair, install, open
 tool/qr_install.sh --build         # rebuild first
 tool/qr_install.sh --debug         # build/install the debug APK
 tool/qr_install.sh --no-launch     # install without opening the app
+tool/qr_install.sh --no-image      # keep the QR text-only, no image window
+tool/qr_install.sh --connect 192.168.1.7:41234  # skip pairing, use that port
 ```
 
 On Android 11 or newer, enable *Developer options*, open *Wireless debugging*
@@ -138,6 +140,19 @@ phone and the computer must be on the same network. The script finds adb in
 `ADB`, `PATH`, or the Android SDK (`ANDROID_HOME`, `ANDROID_SDK_ROOT` and the
 usual install locations); the QR code is drawn by `tool/qr_terminal.py` in
 Unicode blocks, so `qrencode` is not needed.
+
+The code is shown on a fresh screen, so a code from an earlier run is not
+beside it for the camera to pick, and at error-correction level L to keep it
+less dense. On a graphical desktop a large copy also opens in an image viewer
+(the same code; close it when the phone is paired); `--no-image` keeps it
+text-only.
+
+After pairing, the phone's debugging port can take a few seconds to appear, and
+adb's mDNS cache can hold an old port. The script only tries addresses on the
+phone it just paired with, retries every published port until one answers, and
+does not give up on the first refused connection. If the port never appears,
+open *Wireless debugging* on the phone, read the *IP address & port* shown
+there, and pass it with `--connect`.
 
 A phone that adb already sees (connected by USB, or paired earlier) is used
 directly. Emulators are ignored unless named with `--device SERIAL`, and more

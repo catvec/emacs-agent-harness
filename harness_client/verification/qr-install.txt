@@ -1,26 +1,72 @@
 # QR phone installer verification
 
-Run on 2026-10-17 from `harness_client` in the task worktree.  No phone or
+Run on 2026-10-18 from `harness_client` in the task worktree.  No phone or
 Android SDK is visible to this sandbox, so the adb side is a fake adb that
 prints the same mDNS, pair, connect and install output a phone/adb would; the
 QR side is checked independently against `qrencode` and the harness's own
 encoder.
+
+## The failure this fixes
+
+The first real run (in an Emacs `vterm` buffer) paired with `192.168.1.119`
+and then reported:
+
+```text
+Paired with 192.168.1.119.
+qr_install: could not connect to 192.168.1.117:46037: failed to connect to '192.168.1.117:46037': Connection refused
+```
+
+`192.168.1.117` was a different device's stale `_adb-tls-connect._tcp`
+record.  The phone's own record on `192.168.1.119` had not appeared yet, and
+the old fallback took *any* connect service, tried it once and exited.  The
+same run also showed the QR problem: each attempt printed a new code under the
+previous one, and the `.....` progress line kept growing and scrolling the
+screen while the phone was pointed at it.
+
+The fixes:
+
+- The code is drawn on a cleared screen (only in a real terminal), at error
+  correction level L (version 4 for the 68-byte pairing text, 41 modules with
+  the quiet zone) instead of M (version 5, 45 modules).
+- The progress is one line overwritten in place with `\r`, so it never scrolls
+  the code away; nothing prints the old dots anymore.
+- On a desktop a large copy (about 800 px, 20 px per module) opens in `feh`
+  (or the default viewer through `xdg-open`); `--no-image` keeps it text-only.
+- Pairing uses the service name the QR asked the phone to publish, not the
+  first `_adb-tls-pairing._tcp` record (a pairing-code dialog can leave one
+  behind).
+- `adb pair`'s `[guid=...]` is kept.  Connect services are tried only on the
+  address that paired, preferring the guid.  A refused connection is retried
+  for the whole timeout, and an `adb devices` serial is accepted only when it
+  carries that address or guid.  The old fallback to another host is gone.
+- If the port never appears, the error tells the user to read the phone's
+  *Wireless debugging* IP and port and run `--connect IP:PORT`, which is now an
+  option; it skips pairing and connects directly.
 
 ## Unit and end-to-end tests
 
 ```text
 $ python3 tool/test_qr_tools.py
 test_bad_timeout (__main__.InstallScriptTest.test_bad_timeout) ... ok
+test_connect_address_skips_pairing (__main__.InstallScriptTest.test_connect_address_skips_pairing) ... ok
+test_explains_when_the_debugging_port_does_not_open (__main__.InstallScriptTest.test_explains_when_the_debugging_port_does_not_open) ... ok
 test_help (__main__.InstallScriptTest.test_help) ... ok
+test_ignores_connect_service_of_another_host (__main__.InstallScriptTest.test_ignores_connect_service_of_another_host) ... ok
 test_install_failure_is_explained (__main__.InstallScriptTest.test_install_failure_is_explained) ... ok
 test_no_launch (__main__.InstallScriptTest.test_no_launch) ... ok
+test_pairing_skips_another_pairing_server (__main__.InstallScriptTest.test_pairing_skips_another_pairing_server) ... ok
 test_pairs_and_installs (__main__.InstallScriptTest.test_pairs_and_installs) ... ok
 test_qr_timeout (__main__.InstallScriptTest.test_qr_timeout) ... ok
+test_retries_a_stale_port_on_the_same_host (__main__.InstallScriptTest.test_retries_a_stale_port_on_the_same_host) ... ok
 test_uses_an_already_connected_device (__main__.InstallScriptTest.test_uses_an_already_connected_device) ... ok
 test_ansi_render (__main__.QrEncodeTest.test_ansi_render) ... ok
+test_large_image_uses_a_viewer (__main__.QrEncodeTest.test_large_image_uses_a_viewer) ... ok
 test_largest_version (__main__.QrEncodeTest.test_largest_version) ... ok
 test_masks_differ (__main__.QrEncodeTest.test_masks_differ) ... ok
 test_multibyte_text_is_utf8 (__main__.QrEncodeTest.test_multibyte_text_is_utf8) ... ok
+test_pairing_code_is_compact_at_level_l (__main__.QrEncodeTest.test_pairing_code_is_compact_at_level_l) ... ok
+test_png_cli (__main__.QrEncodeTest.test_png_cli) ... ok
+test_png_dimensions_and_pixels (__main__.QrEncodeTest.test_png_dimensions_and_pixels) ... ok
 test_size_and_quiet_zone (__main__.QrEncodeTest.test_size_and_quiet_zone) ... ok
 test_symbols_match_qrencode (__main__.QrEncodeTest.test_symbols_match_qrencode) ... ok
 test_too_much_text (__main__.QrEncodeTest.test_too_much_text) ... ok
@@ -34,16 +80,30 @@ serve_apk: "GET /etc/passwd HTTP/1.1" 404 -
 ok
 
 ----------------------------------------------------------------------
-Ran 18 tests in 5.791s
+Ran 27 tests in 35.448s
 
 OK
 ```
+
+`test_ignores_connect_service_of_another_host` is the exact regression: the
+fake advertises `192.168.1.117:46037` while the phone is paired at
+`192.168.1.119`, and the phone's port appears a few seconds later.  The test
+asserts the run succeeds and that **no** `connect 192.168.1.117` call was
+made.  `test_retries_a_stale_port_on_the_same_host` advertises
+`192.168.1.119:46037` first, refuses it, then publishes `:42345`; the run
+retries and installs.  `test_explains_when_the_debugging_port_does_not_open`
+checks the `--connect IP:PORT` advice and again that the foreign host is never
+tried.  `test_pairing_skips_another_pairing_server` puts a stale pairing-code
+dialog service first and checks `adb pair` is only sent to the QR's own name.
 
 `test_symbols_match_qrencode` encodes every test string at L, M, Q and H and
 checks that qrencode's symbol equals one of the eight masks this encoder
 produces; `test_largest_version` does the same at version 40.
 `test_ansi_render` decodes the printed half blocks back into modules and
 compares them with the matrix, so a shifted or reused row fails.
+`test_png_dimensions_and_pixels` checks the PNG header and the quiet zone and
+finder pixels; `test_large_image_uses_a_viewer` starts a fake `feh` and checks
+it is asked to show the generated file.
 
 ```text
 $ python3 -m py_compile tool/qr_terminal.py tool/serve_apk.py tool/test_qr_tools.py
@@ -62,12 +122,17 @@ The worktree's own test run, unrelated Lisp suites included (among them
 `harness-ui-qr-test`, the harness QR encoder's nine tests):
 
 ```text
-$ scripts/test.sh
+$ HARNESS_TEST_JOBS=8 scripts/test.sh
 ...
 ok    harness-ui-qr-test.el      Ran 9 tests, 9 results as expected, 0 unexpected
 ...
-test.sh: 129 files, 0 failed, 288s wall (16 at a time)
+test.sh: 129 files, 0 failed, 317s wall (8 at a time)
 ```
+
+A first full run at 16 jobs had one unrelated, timing-sensitive failure in
+`harness-retry-test` (`harness-retry-drops-a-stream-cut-in-the-middle`); it
+passed alone (`7 tests, 0 unexpected`) and the full run above passed all 129
+files.
 
 ## The encoder matches the harness's own
 
@@ -84,29 +149,34 @@ ok 100 bad 0
 
 `--apk` points at a stand-in file so no Gradle build is needed; the fake adb
 advertises a pairing service, accepts the password from the QR, advertises the
-debug port, and reports the install:
+debug port, and reports the install.  This run also advertises a stale connect
+service on `192.168.1.117`, the host from the real failure:
 
 ```text
-$ FAKE_ADB_STATE=... ADB=.../adb \
-    tool/qr_install.sh --no-build --apk .../app.apk --timeout 15
+$ FAKE_ADB_STATE=... ADB=.../adb QR_INSTALL_PAIR_NAME=ADB_WIFI_ikU3jbKOMgO7vC-ViSSWk \
+    FAKE_PHONE_IP=192.168.1.119 tool/qr_install.sh --no-build --apk .../app.apk \
+    --timeout 10 --no-image
 
 On the phone:
   Settings -> System -> Developer options -> Wireless debugging
   -> Pair device with QR code, then scan this code.
 
 The phone and this computer must be on the same network.  Waiting up to
-15 seconds for the code to be scanned ...
+10 seconds for the code to be scanned.
 
-[QR code shown]
+[QR code, 41 modules wide including its 4-module quiet zone]
 
-Paired with 192.168.7.42.
-connected to 192.168.7.42:42345
-Installing app.apk on 192.168.7.42:42345 ...
+Paired with 192.168.1.119.
+Waiting for the phone's debugging port ...
+connected to 192.168.1.119:42345
+Connected to 192.168.1.119:42345.
+Installing app.apk on 192.168.1.119:42345 ...
 Installed.
 Opened Harness on the phone.
 
 Harness is on the phone.  In the app, connect to the harness's ws:// address
 (Emacs: C-c h P, [start serving]) and its token from acp-token.
+For hot reload while the phone is connected: tool/flutter run -d 192.168.1.119:42345
 ```
 
 The fake adb calls were:
@@ -114,32 +184,51 @@ The fake adb calls were:
 ```text
 devices
 mdns services
-pair 192.168.7.42:37111 DS7Sf7bOfshCYu4y7WAYo
+mdns services
+pair 192.168.1.119:37111 ZIXEUUcWv19NwK69aKvoI
 devices
 mdns services
-connect 192.168.7.42:42345
+connect 192.168.1.119:42345
 devices
--s 192.168.7.42:42345 install -r .../app.apk
--s 192.168.7.42:42345 shell am start -W -n app.harness.client/app.harness.harness_client.MainActivity
+-s 192.168.1.119:42345 install -r .../app.apk
+-s 192.168.1.119:42345 shell am start -W -n app.harness.client/app.harness.harness_client.MainActivity
 ```
 
-`verification/qr-install.png` is the ANSI output above rendered with solid
-terminal cells.  `zxing-cpp` decodes its QR code to exactly the pairing text
-the fake adb accepted:
+There is no `connect 192.168.1.117:46037` in that log, although the fake
+advertised it the whole time.
+
+## The codes decode
+
+The terminal output from the successful PTY run was rendered to a PNG with
+solid terminal cells (the same grid the real vterm shows).  `zxing-cpp` reads
+`qr-install-scan.png` and `qr-install.png` as the exact pairing text:
 
 ```text
-QRCode WIFI:T:ADB;S:ADB_WIFI_ikU3jbKOMgO7vC-ViSSWk;P:DS7Sf7bOfshCYu4y7WAYo;;
+QRCode WIFI:T:ADB;S:ADB_WIFI_ikU3jbKOMgO7vC-ViSSWk;P:hGavpxs2VUYtwfB5L8oax;;
 ```
 
-The `--serve` branch was exercised through `ServeApkTest`: the APK is served
-with `Content-Type: application/vnd.android.package-archive` and
-`Content-Disposition: attachment; filename="Harness.apk"`, the landing page
-renders, and paths outside those two are 404.  Running
-`serve_apk.py --address 192.168.7.42` prints a QR code which `zxing-cpp`
-decodes to the download URL:
+`qr-install-scan.png` is the cleared screen during the wait: instruction,
+the 41-wide code, and the single `Waiting for the phone to scan the code ...`
+line below it.  `qr-install.png` is the same screen after the fake phone
+paired at `192.168.1.119`, connected to `:42345`, installed and launched.  The
+pairing text is a stale, single-use code; it is only an artifact.
+
+The PNG written by `qr_terminal.py --png` (and opened by `--open`) was
+decoded the same way at 820×820 (20 px per module, 41 modules including the
+quiet zone) to the same text; `verification/qr-install-large.png` is that
+image.
+
+## The `--serve` branch
+
+`verification/qr-install-serve.png` is `serve_apk.py` with `--address
+192.168.7.42` and a fake APK; `zxing-cpp` decodes its code to the download
+URL:
 
 ```text
-QRCode http://192.168.7.42:43103/Harness.apk
+QRCode http://192.168.7.42:34281/Harness.apk
 ```
 
-`verification/qr-install-serve.png` is that output, rendered the same way.
+`ServeApkTest` also exercises the APK response
+(`application/vnd.android.package-archive`, `Content-Disposition`), the
+landing page, and 404s.  `--serve` now clears the screen for its code too and
+opens the same large image, unless `--no-image` is given.

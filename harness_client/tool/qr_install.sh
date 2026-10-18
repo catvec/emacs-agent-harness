@@ -27,6 +27,10 @@ launch=1
 serve=0
 serve_address=""
 timeout=180
+image=auto
+connect_hint=""
+# Tests set this to a known mDNS pairing name; normally it is random.
+pair_name_override="${QR_INSTALL_PAIR_NAME:-}"
 
 usage() {
   cat <<EOF
@@ -41,7 +45,10 @@ Options:
   --debug          use and build the debug APK instead of the release one
   --apk PATH       install PATH (implies --no-build)
   --device SERIAL  install on an already connected device (its adb serial)
+  --connect ADDR   connect to ADDR (IP:PORT, e.g. from Wireless debugging)
+                   instead of pairing by QR code
   --no-launch      do not open the app after installing it
+  --no-image       do not open the large QR image in a viewer
   --serve          serve the APK over HTTP and show its URL as a QR code
                    instead of pairing adb (the phone downloads and installs it)
   --address ADDR   with --serve, put ADDR in the URL instead of detecting it
@@ -58,11 +65,13 @@ Environment:
 Examples:
   tool/qr_install.sh                  # release build, install, open
   tool/qr_install.sh --build          # rebuild, then install
+  tool/qr_install.sh --connect 192.168.1.7:41234  # skip the QR, use this port
   tool/qr_install.sh --serve          # download over HTTP instead of adb
 
 Android 11 or newer: Settings -> System -> Developer options -> Wireless
 debugging -> Pair device with QR code.  The phone and this computer must be on
-the same network.
+the same network.  The QR code is also opened as a large image when this is a
+graphical terminal; --no-image keeps it text-only.
 EOF
 }
 
@@ -91,7 +100,14 @@ while [ $# -gt 0 ]; do
       device="$2"
       shift
       ;;
+    --connect)
+      [ $# -ge 2 ] || die "--connect needs IP:PORT"
+      connect_hint="$2"
+      shift
+      ;;
     --no-launch) launch=0 ;;
+    --no-image) image=0 ;;
+    --image) image=1 ;;
     --serve) serve=1 ;;
     --address)
       [ $# -ge 2 ] || die "--address needs an IP address or host name"
@@ -140,7 +156,8 @@ fi
 # Serve the APK over HTTP for phones without wireless debugging.
 if [ "$serve" = 1 ]; then
   serve_args=()
-  [ -n "$serve_address" ] && serve_args=(--address "$serve_address")
+  [ -n "$serve_address" ] && serve_args+=(--address "$serve_address")
+  [ "$image" = 0 ] && serve_args+=(--no-image)
   exec python3 "$tool_dir/serve_apk.py" ${serve_args[@]+"${serve_args[@]}"} "$apk"
 fi
 
@@ -172,18 +189,71 @@ find_adb() {
 
 adb="$(find_adb)"
 
+# Clear/status escapes need a real terminal, not a pipe or an Emacs comint
+# buffer (which sets TERM=dumb and shows control characters literally).
+tty_ok=0
+if [ -t 1 ] && [ -n "${TERM:-}" ] && [ "${TERM}" != dumb ]; then
+  tty_ok=1
+fi
+
 device_serials() {
   "$adb" devices 2>/dev/null | awk 'NR > 1 && $2 == "device" { print $1 }'
 }
 
-pairing_services() {
-  "$adb" mdns services 2>/dev/null |
-    awk '$2 ~ /^_adb-tls-pairing\._tcp\.?$/ { print $3 }'
+device_rows() {
+  "$adb" devices 2>/dev/null | awk 'NR > 1 && NF >= 2 { print $1 "\t" $2 }'
 }
 
-connect_services() {
+# The mDNS services adb has seen: instance name, service type, address.
+mdns_rows() {
   "$adb" mdns services 2>/dev/null |
-    awk '$2 ~ /^_adb-tls-connect\._tcp\.?$/ { print $3 }'
+    awk 'NF >= 3 && $2 ~ /^_adb-tls-(pairing|connect)\._tcp\.?$/ {
+           print $1 "\t" $2 "\t" $3
+         }'
+}
+
+pairing_addrs() {
+  mdns_rows | awk -F '\t' '$2 ~ /pairing/ { print $3 }'
+}
+
+status_line() {
+  [ "$tty_ok" = 1 ] || return 0
+  printf '\r%s\033[K' "$1"
+}
+
+clear_status() {
+  [ "$tty_ok" = 1 ] || return 0
+  printf '\r\033[K'
+}
+
+# Draw the code on a clean screen, so an older code from a previous run is not
+# beside it for the camera to pick, and keep the terminal QR and a large image
+# window showing the same thing while the phone scans.
+show_qr() {
+  local qrtext="$1" args=(--level L)
+  if [ "$image" != 0 ] &&
+      { [ "$image" = 1 ] || { [ "$tty_ok" = 1 ] && [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; }; }; then
+    args+=(--open)
+  fi
+  if [ "$tty_ok" = 1 ]; then
+    printf '\033[2J\033[H'
+    note "Wireless debugging > Pair device with QR code"
+  fi
+  python3 "$tool_dir/qr_terminal.py" ${args[@]+"${args[@]}"} "$qrtext"
+  note ""
+}
+
+# A serial belongs to the phone just paired if it carries the phone's address
+# or its mDNS guid.  Never accept another device that happens to be connected.
+serial_matches() {
+  case "$1" in
+    "$paired_host":*) return 0 ;;
+  esac
+  [ -n "$guid" ] || return 1
+  case "$1" in
+    "$guid"*|*"$guid"*) return 0 ;;
+  esac
+  return 1
 }
 
 # Pick a connected device, or pair one by QR code.
@@ -209,14 +279,43 @@ else
   fi
 fi
 
+# An explicit address is the recovery path when the phone shows its debugging
+# port in Settings but mDNS has gone quiet.
+if [ -z "$serial" ] && [ -n "$connect_hint" ]; then
+  if "$adb" -s "$connect_hint" get-state >/dev/null 2>&1; then
+    serial="$connect_hint"
+  else
+    note "Connecting to $connect_hint ..."
+    output="$("$adb" connect "$connect_hint" 2>&1 || true)"
+    case "$output" in
+      *"connected to"*|*"already connected"*) note "$output" ;;
+      *) die "could not connect to $connect_hint: $output" ;;
+    esac
+    hint_host="${connect_hint%:*}"
+    deadline=$((SECONDS + 30))
+    while [ "$SECONDS" -lt "$deadline" ] && [ -z "$serial" ]; do
+      while IFS=$'\t' read -r cand state; do
+        [ "$state" = device ] || continue
+        case "$cand" in
+          "$connect_hint"|"$hint_host":*) serial="$cand"; break ;;
+        esac
+      done < <(device_rows)
+      [ -n "$serial" ] || sleep 1
+    done
+    [ -n "$serial" ] || die "connected to $connect_hint, but adb does not list it as a device"
+  fi
+fi
+
 if [ -z "$serial" ]; then
-  read -r pair_name pair_password < <(python3 - <<'PY'
+  read -r pair_name pair_password < <(python3 - "$pair_name_override" <<'PY'
 import secrets
 import string
+import sys
 
 alphabet = string.ascii_letters + string.digits
-name = "ADB_WIFI_" + "".join(secrets.choice(alphabet) for _ in range(14)) + "-" + \
-    "".join(secrets.choice(alphabet) for _ in range(6))
+name = sys.argv[1] or (
+    "ADB_WIFI_" + "".join(secrets.choice(alphabet) for _ in range(14)) + "-" +
+    "".join(secrets.choice(alphabet) for _ in range(6)))
 password = "".join(secrets.choice(alphabet) for _ in range(21))
 print(name, password)
 PY
@@ -230,84 +329,157 @@ On the phone:
   -> Pair device with QR code, then scan this code.
 
 The phone and this computer must be on the same network.  Waiting up to
-$timeout seconds for the code to be scanned ...
+$timeout seconds for the code to be scanned.
 EOF
 
-  python3 "$tool_dir/qr_terminal.py" "$qrtext"
-  note ""
+  # A pairing server left over from a previous try is not ours; its password
+  # will not match.  Ours is the one that asked for this service name.
+  baseline_pairing=" $(pairing_addrs | tr '\n' ' ') "
+  show_qr "$qrtext"
 
   paired=""
-  paired_host=""
+  guid=""
+  last_pair_error=""
+  pair_start=$SECONDS
   deadline=$((SECONDS + timeout))
+  fallback_at=$((SECONDS + 8))
+  last_pair_addr=""
+  last_pair_try=-10
   while [ "$SECONDS" -lt "$deadline" ]; do
-    while IFS= read -r service; do
-      [ -n "$service" ] || continue
-      if output="$("$adb" pair "$service" "$pair_password" 2>&1)"; then
+    services="$(mdns_rows)"
+    candidate=""
+    while IFS=$'\t' read -r name type addr; do
+      [ -n "$addr" ] || continue
+      case "$type" in _adb-tls-pairing*) ;; *) continue ;; esac
+      case "$name" in
+        "$pair_name"|"$pair_name"*) candidate="$addr"; break ;;
+      esac
+    done <<< "$(printf '%s\n' "$services" | awk -F '\t' '$2 ~ /pairing/')"
+
+    if [ -z "$candidate" ] && [ "$SECONDS" -ge "$fallback_at" ]; then
+      # Some Android versions add a suffix to the requested name; after a
+      # few seconds accept a new pairing server, then any of them.
+      while IFS=$'\t' read -r name type addr; do
+        [ -n "$addr" ] || continue
+        case "$type" in _adb-tls-pairing*) ;; *) continue ;; esac
+        case "$baseline_pairing" in *" $addr "*) continue ;; esac
+        candidate="$addr"
+        break
+      done <<< "$(printf '%s\n' "$services" | awk -F '\t' '$2 ~ /pairing/')"
+      if [ -z "$candidate" ]; then
+        candidate="$(printf '%s\n' "$services" |
+          awk -F '\t' '$2 ~ /pairing/ { print $3; exit }')"
+      fi
+    fi
+
+    if [ -n "$candidate" ] &&
+        { [ "$candidate" != "$last_pair_addr" ] ||
+          [ $((SECONDS - last_pair_try)) -ge 3 ]; }; then
+      last_pair_addr="$candidate"
+      last_pair_try=$SECONDS
+      if output="$("$adb" pair "$candidate" "$pair_password" 2>&1)"; then
         case "$output" in
           *[Ss]uccess*)
-            paired="$service"
+            paired="$candidate"
+            guid="$(printf '%s\n' "$output" |
+              sed -n 's/.*\[guid=\([^]]*\)\].*/\1/p' | tail -n 1)"
             break
             ;;
         esac
       fi
-    done < <(pairing_services)
-    [ -n "$paired" ] && break
-    printf '.'
+      last_pair_error="$output"
+    fi
+    status_line "Waiting for the phone to scan the code ... $((SECONDS - pair_start))s"
     sleep 1
   done
-  printf '\n'
-  [ -n "$paired" ] || die "timed out waiting for the phone; check that wireless debugging is on and the network is the same"
+  clear_status
+  if [ -z "$paired" ]; then
+    [ -z "$last_pair_error" ] || printf 'qr_install: last adb pair error: %s\n' "$last_pair_error" >&2
+    die "timed out waiting for the phone; check that wireless debugging is on and the network is the same"
+  fi
 
   paired_host="${paired%:*}"
-  note "Paired with ${paired_host}."
+  note "Paired with $paired_host."
 
-  # The phone advertises its wireless debugging port over mDNS once paired,
-  # and adb may also auto-connect to that mDNS service by itself.
-  connect_addr=""
+  # Wireless debugging may publish its TLS port only after pairing.  The
+  # connect record can also be stale for a few seconds, so try every record
+  # for this phone, and only this phone, until one answers.
+  note "Waiting for the phone's debugging port ..."
+  connect_start=$SECONDS
   deadline=$((SECONDS + timeout))
+  last_connect_try=-10
+  last_connect_error=""
+  connect_ok=""
   while [ "$SECONDS" -lt "$deadline" ]; do
-    while IFS= read -r line; do
-      case "$line" in emulator-*) continue ;; esac
-      serial="$line"
-      break
-    done < <(device_serials)
-    [ -n "$serial" ] && break
-    fallback=""
-    while IFS= read -r service; do
-      [ -n "$service" ] || continue
-      [ -n "$fallback" ] || fallback="$service"
-      if [ "${service%:*}" = "$paired_host" ]; then
-        connect_addr="$service"
+    while IFS=$'\t' read -r cand state; do
+      [ "$state" = device ] || continue
+      if serial_matches "$cand"; then
+        serial="$cand"
         break
       fi
-    done < <(connect_services)
-    [ -n "$connect_addr" ] && break
-    if [ -n "$fallback" ]; then
-      connect_addr="$fallback"
-      break
+    done < <(device_rows)
+    [ -n "$serial" ] && break
+
+    if [ $((SECONDS - last_connect_try)) -ge 3 ]; then
+      last_connect_try=$SECONDS
+      services="$(mdns_rows)"
+      # First the service whose instance name carries the guid adb reported
+      # when it paired; then any other connect service on the same address.
+      if [ -n "$guid" ]; then
+        while IFS=$'\t' read -r name type addr; do
+          [ -n "$addr" ] || continue
+          case "$type" in _adb-tls-connect*) ;; *) continue ;; esac
+          case "$name" in "$guid"*) ;; *) continue ;; esac
+          # The guid comes from this pairing, so this is the same phone even
+          # if it moved to another address; only a foreign service without
+          # its guid is refused.
+          output="$("$adb" connect "$addr" 2>&1 || true)"
+          case "$output" in
+            *"connected to"*|*"already connected"*)
+              if [ "$addr" != "$connect_ok" ]; then
+                clear_status
+                note "$output"
+                connect_ok="$addr"
+              fi
+              ;;
+            *) last_connect_error="$output" ;;
+          esac
+        done <<< "$(printf '%s\n' "$services" | awk -F '\t' '$2 ~ /connect/')"
+      fi
+      while IFS=$'\t' read -r name type addr; do
+        [ -n "$addr" ] || continue
+        case "$type" in _adb-tls-connect*) ;; *) continue ;; esac
+        [ "${addr%:*}" = "$paired_host" ] || continue
+        if [ -n "$guid" ]; then
+          case "$name" in "$guid"*) continue ;; esac
+        fi
+        output="$("$adb" connect "$addr" 2>&1 || true)"
+        case "$output" in
+          *"connected to"*|*"already connected"*)
+            if [ "$addr" != "$connect_ok" ]; then
+              clear_status
+              note "$output"
+              connect_ok="$addr"
+            fi
+            ;;
+          *) last_connect_error="$output" ;;
+        esac
+      done <<< "$(printf '%s\n' "$services" | awk -F '\t' '$2 ~ /connect/')"
     fi
+    status_line "Waiting for the phone's debugging port ... $((SECONDS - connect_start))s"
     sleep 1
   done
-
+  clear_status
   if [ -z "$serial" ]; then
-    [ -n "$connect_addr" ] || die "paired, but the phone did not advertise a debugging port; try again or use --serve"
-    output="$("$adb" connect "$connect_addr" 2>&1 || true)"
-    case "$output" in
-      *"connected to"*|*"already connected"*) note "$output" ;;
-      *) die "could not connect to $connect_addr: $output" ;;
-    esac
-    deadline=$((SECONDS + 30))
-    while [ "$SECONDS" -lt "$deadline" ] && [ -z "$serial" ]; do
-      while IFS= read -r line; do
-        if [ "$line" = "$connect_addr" ]; then
-          serial="$line"
-          break
-        fi
-      done < <(device_serials)
-      [ -n "$serial" ] || sleep 1
-    done
-    [ -n "$serial" ] || die "connected to $connect_addr, but adb does not list it as a device"
+    [ -z "$last_connect_error" ] ||
+      printf 'qr_install: last adb connect error: %s\n' "$last_connect_error" >&2
+    note "Paired with $paired_host, but its wireless debugging port did not open." >&2
+    note "Open Developer options > Wireless debugging on the phone, read the" >&2
+    note "'IP address & port' shown there, then run:" >&2
+    note "  tool/qr_install.sh --connect IP:PORT" >&2
+    exit 1
   fi
+  note "Connected to $serial."
 fi
 
 note "Installing ${apk##*/} on $serial ..."

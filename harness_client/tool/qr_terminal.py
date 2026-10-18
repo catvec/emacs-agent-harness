@@ -5,13 +5,20 @@
 with this, so installing on a phone needs neither a USB cable nor the
 `qrencode' package.  The encoder follows ISO/IEC 18004 in byte mode, error
 correction levels L, M, Q and H, versions 1 to 40; the terminal renderer uses
-Unicode half blocks (or `##' with --ascii).
+Unicode half blocks (or `##' with --ascii), and --png writes the same symbol as
+a PNG for an image viewer.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
+import shutil
+import struct
+import subprocess
 import sys
+import tempfile
+import zlib
 
 Level = str
 
@@ -421,6 +428,92 @@ def render(matrix: dict, margin: int = 4, ascii: bool = False, indent: int = 0) 
     return "\n".join(lines) + "\n"
 
 
+def png_bytes(matrix: dict, scale: int = 10, margin: int = 4) -> bytes:
+    """Return a black-on-white PNG of MATRIX, SCALE pixels per module."""
+    if scale < 1:
+        raise ValueError("scale must be at least 1")
+    if margin < 0:
+        raise ValueError("margin must not be negative")
+    size = matrix["size"]
+    rows = matrix["modules"]
+    pixels = (size + margin * 2) * scale
+    border = b"\xff" * (margin * scale)
+    raw = bytearray()
+    blank = b"\x00" + b"\xff" * pixels
+    for _ in range(margin * scale):
+        raw += blank
+    for row in rows:
+        line = bytearray(border)
+        for dark in row:
+            line += (b"\x00" if dark else b"\xff") * scale
+        line += border
+        scanline = b"\x00" + bytes(line)
+        for _ in range(scale):
+            raw += scanline
+    for _ in range(margin * scale):
+        raw += blank
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return (struct.pack(">I", len(data)) + kind + data
+                + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF))
+
+    header = struct.pack(">IIBBBBB", pixels, pixels, 8, 0, 0, 0, 0)
+    return (b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR", header)
+            + chunk(b"IDAT", zlib.compress(bytes(raw), 9))
+            + chunk(b"IEND", b""))
+
+
+def write_png(matrix: dict, path: str, scale: int = 10, margin: int = 4) -> None:
+    with open(path, "wb") as output:
+        output.write(png_bytes(matrix, scale, margin))
+
+
+# Keep the viewer's Popen alive: it is detached and outlives this process, and
+# dropping the object while it runs makes subprocess warn when it is collected.
+_VIEWERS: list[subprocess.Popen] = []
+
+
+def open_image(path: str) -> bool:
+    """Open a PNG in an image viewer on this desktop, best effort.
+
+    `feh' is small and goes straight to the image; a desktop's default viewer
+    through xdg-open is the fallback.  The viewer runs in the background so the
+    caller keeps waiting for the phone.
+    """
+    if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        return False
+    commands = []
+    feh = shutil.which("feh")
+    if feh and os.environ.get("DISPLAY"):
+        commands.append([feh, "--auto-zoom", "--scale-down", "--geometry",
+                         "800x800", "--title", "Harness QR", path])
+    xdg_open = shutil.which("xdg-open")
+    if xdg_open:
+        commands.append([xdg_open, path])
+    for command in commands:
+        try:
+            process = subprocess.Popen(
+                command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, start_new_session=True)
+            _VIEWERS.append(process)
+            return True
+        except OSError:
+            continue
+    return False
+
+
+def show_image(matrix: dict, scale: int = 20, margin: int = 4) -> str | None:
+    """Write a temporary PNG and open it; return its path, or None."""
+    fd, path = tempfile.mkstemp(prefix="harness-qr-", suffix=".png")
+    os.close(fd)
+    try:
+        write_png(matrix, path, scale, margin)
+    except OSError:
+        return None
+    return path if open_image(path) else None
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Draw a QR code in the terminal (byte mode, versions 1-40).")
@@ -433,6 +526,12 @@ def main(argv: list[str] | None = None) -> int:
                         help="draw with ## and spaces instead of half blocks")
     parser.add_argument("--indent", type=int, default=0,
                         help="spaces before every line (default 0)")
+    parser.add_argument("--png", metavar="PATH",
+                        help="also write a PNG to PATH")
+    parser.add_argument("--scale", type=int, default=10,
+                        help="pixels per module in the PNG (default 10)")
+    parser.add_argument("--open", action="store_true",
+                        help="open a large PNG in an image viewer")
     args = parser.parse_args(argv)
     text = args.text
     if text is None:
@@ -441,12 +540,27 @@ def main(argv: list[str] | None = None) -> int:
         text = sys.stdin.read().rstrip("\n")
     if args.margin < 0:
         parser.error("--margin must not be negative")
+    if args.scale < 1:
+        parser.error("--scale must be positive")
     try:
         qr = encode(text, args.level)
     except ValueError as exc:
         print(f"qr_terminal: {exc}", file=sys.stderr)
         return 1
     sys.stdout.write(render(qr, args.margin, args.ascii, args.indent))
+    if args.png:
+        try:
+            write_png(qr, args.png, args.scale, args.margin)
+        except OSError as exc:
+            print(f"qr_terminal: cannot write {args.png}: {exc}", file=sys.stderr)
+            return 1
+    if args.open:
+        path = show_image(qr, max(args.scale, 20), args.margin)
+        if path:
+            print(f"qr_terminal: large QR image: {path}", file=sys.stderr)
+        else:
+            print("qr_terminal: no image viewer found; use the code above",
+                  file=sys.stderr)
     return 0
 
 

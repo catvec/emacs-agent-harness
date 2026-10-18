@@ -22,9 +22,13 @@
   served as a static site and connected to the preview harness, with no page
   errors.
 - `qr-install.txt` — the QR phone installer: the tool tests, the encoder
-  checked against qrencode and the harness's own encoder, a full install
-  through a fake adb, and the QR decoded from the rendered terminal output
-  (`qr-install.png`); `qr-install-serve.png` is the `--serve` download mode.
+  checked against qrencode and the harness's own encoder, the foreign-host and
+  stale-port mDNS regressions that caused `192.168.1.117:46037` to be tried,
+  and a full install through a fake adb.  `qr-install-scan.png` is the clean
+  screen with the code being scanned; `qr-install.png` is the finished run;
+  `qr-install-large.png` is the large image the viewer opens;
+  `qr-install-serve.png` is the `--serve` download mode.  The QR decodes back
+  to the exact pairing text in every capture.
 
 The toolchain pieces above are reproducible: `tool/install_flutter.sh` installs
 the pinned Flutter SDK under `~/.local/share/flutter-versions` and installs the

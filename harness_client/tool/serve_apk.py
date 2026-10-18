@@ -124,6 +124,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="address to put in the URL and QR code (default: detect)")
     parser.add_argument("--download-name", default="Harness.apk",
                         help="file name the phone saves (default Harness.apk)")
+    parser.add_argument("--no-image", action="store_true",
+                        help="do not open the QR code in an image viewer")
     args = parser.parse_args(argv)
 
     apk = os.path.abspath(args.apk)
@@ -146,15 +148,29 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     port = server.server_address[1]
     url = f"http://{address}:{port}/{download_name}"
+    qr = qr_terminal.encode(url, "M")
 
-    print(f"Serving {apk} ({os.path.getsize(apk) / 1024 / 1024:.1f} MB) at")
+    # A fresh screen keeps an older code from a previous run out of the
+    # camera's view.  A pipe or an Emacs comint buffer (TERM=dumb) gets the
+    # text without control characters.
+    tty = (sys.stdout.isatty() and os.environ.get("TERM", "")
+           not in ("", "dumb"))
+    if tty:
+        print("\033[2J\033[H", end="")
+    print(f"Serving {os.path.basename(apk)} "
+          f"({os.path.getsize(apk) / 1024 / 1024:.1f} MB) at")
     print(f"  {url}")
     print()
     print("Scan this code with the phone's camera to download the app.")
     print("The phone and this computer must be on the same network.")
     print()
-    sys.stdout.write(qr_terminal.render(qr_terminal.encode(url, "M")))
+    sys.stdout.write(qr_terminal.render(qr))
     print()
+    if (not args.no_image and tty
+            and (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))):
+        path = qr_terminal.show_image(qr)
+        if path:
+            print(f"Large QR image: {path}")
     print("Press Ctrl-C to stop serving.")
     sys.stdout.flush()
     try:

@@ -14,14 +14,18 @@ without a phone.
 from __future__ import annotations
 
 import http.client
+import io
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
+from unittest import mock
 
 TOOL_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, TOOL_DIR)
@@ -159,6 +163,69 @@ class QrEncodeTest(unittest.TestCase):
                 expected[y + margin][x + margin] = qr["modules"][y][x]
         self.assertEqual(decoded, expected)
 
+    def test_pairing_code_is_compact_at_level_l(self):
+        text = ("WIFI:T:ADB;S:ADB_WIFI_abcdefghijklmn-abcdef;"
+                "P:abcdefghijklmnopqrstu;;")
+        self.assertEqual(qr_terminal.encode(text, "L")["version"], 4)
+        self.assertEqual(len(qr_terminal.render(
+            qr_terminal.encode(text, "L")).splitlines()), 21)
+
+    def test_png_dimensions_and_pixels(self):
+        qr = qr_terminal.encode("hello", "M")
+        data = qr_terminal.png_bytes(qr, scale=4, margin=3)
+        self.assertTrue(data.startswith(b"\x89PNG\r\n\x1a\n"))
+        width, height = struct.unpack(">II", data[16:24])
+        pixels = (qr["size"] + 6) * 4
+        self.assertEqual((width, height), (pixels, pixels))
+        # The top-left corner is quiet zone (white); the finder starts dark.
+        try:
+            from PIL import Image
+        except ImportError:
+            self.skipTest("Pillow is not installed")
+        image = Image.open(io.BytesIO(data)).convert("L")
+        self.assertEqual(image.getpixel((0, 0)), 255)
+        self.assertEqual(image.getpixel((12, 12)), 0)
+
+    def test_png_cli(self):
+        path = os.path.join(tempfile.mkdtemp(prefix="harness-qr-png-"), "qr.png")
+        result = subprocess.run(
+            [sys.executable, os.path.join(TOOL_DIR, "qr_terminal.py"),
+             "--level", "L", "--scale", "5", "--margin", "2", "--png", path,
+             "hello"],
+            capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(os.path.isfile(path))
+        with open(path, "rb") as f:
+            self.assertEqual(f.read(8), b"\x89PNG\r\n\x1a\n")
+        os.unlink(path)
+        os.rmdir(os.path.dirname(path))
+
+    def test_large_image_uses_a_viewer(self):
+        tmp = tempfile.mkdtemp(prefix="harness-qr-viewer-")
+        log = os.path.join(tmp, "calls")
+        fake = os.path.join(tmp, "feh")
+        with open(fake, "w") as f:
+            f.write('#!/bin/sh\nprintf "%s\\n" "$*" > ' + log + "\n")
+        os.chmod(fake, 0o755)
+        path = None
+        try:
+            with mock.patch.dict(os.environ, {
+                    "PATH": tmp + os.pathsep + os.environ.get("PATH", ""),
+                    "DISPLAY": ":1", "WAYLAND_DISPLAY": ""}):
+                path = qr_terminal.show_image(qr_terminal.encode("hello", "M"),
+                                              scale=2)
+                self.assertIsNotNone(path)
+                self.assertTrue(os.path.isfile(path))
+                deadline = time.time() + 2
+                while not os.path.exists(log) and time.time() < deadline:
+                    time.sleep(0.02)
+                with open(log) as f:
+                    self.assertIn(path, f.read())
+        finally:
+            if path and os.path.exists(path):
+                os.unlink(path)
+            shutil.rmtree(tmp, ignore_errors=True)
+
     def test_masks_differ(self):
         qr = qr_terminal.encode("mask test", "M")
         self.assertIn(qr["mask"], range(8))
@@ -231,9 +298,19 @@ def flag(name):
 def touch(name):
     open(os.path.join(state, name), "w").close()
 
-ip = "192.168.7.42"
+def number(name, default=0):
+    try:
+        with open(os.path.join(state, name)) as f:
+            return int(f.read().strip())
+    except (OSError, ValueError):
+        return default
+
+ip = os.environ.get("FAKE_PHONE_IP", "192.168.7.42")
+other = os.environ.get("FAKE_OTHER_IP", "192.168.1.117")
 pair_port = "37111"
 connect_port = "42345"
+pairing_name = os.environ.get("QR_INSTALL_PAIR_NAME", "ADB_WIFI_testpair-abcdef")
+guid = "adb-phone-abc"
 serial = ip + ":" + connect_port
 
 if args == ["devices"]:
@@ -241,24 +318,46 @@ if args == ["devices"]:
     if flag("preconnected") or flag("connected"):
         print(serial + "\tdevice")
 elif args[:2] == ["mdns", "services"]:
+    count = number("mdns_count") + 1
+    with open(os.path.join(state, "mdns_count"), "w") as f:
+        f.write(str(count))
     print("List of discovered mdns services")
+    if flag("stale_pairing"):
+        print("adb-other\t_adb-tls-pairing._tcp\t" + other + ":38291")
+    if not flag("no_pairing") and count > number("pairing_after", 0):
+        print(pairing_name + "\t_adb-tls-pairing._tcp\t" + ip + ":" + pair_port)
     if flag("paired"):
-        print("adb-phone-abc\t_adb-tls-connect._tcp\t" + ip + ":" + connect_port)
-    elif not flag("no_pairing"):
-        print("adb-phone-abc\t_adb-tls-pairing._tcp\t" + ip + ":" + pair_port)
+        if flag("stale_connect"):
+            print("adb-other\t_adb-tls-connect._tcp\t" + other + ":46037")
+        if flag("stale_same_host"):
+            print("adb-stale\t_adb-tls-connect._tcp\t" + ip + ":46037")
+        if not flag("no_phone_connect"):
+            since = count - number("paired_mdns_count")
+            if since > number("connect_after", 0):
+                print(guid + "\t_adb-tls-connect._tcp\t" + ip + ":" + connect_port)
 elif args[0] == "pair":
-    assert args[1] == ip + ":" + pair_port, args
+    if args[1] != ip + ":" + pair_port:
+        print("Failed: Wrong password or connection was dropped.")
+        sys.exit(1)
     assert args[2], "no pairing code"
+    with open(os.path.join(state, "paired_mdns_count"), "w") as f:
+        f.write(str(number("mdns_count")))
     touch("paired")
-    print("Successfully paired to " + args[1] + " [guid=adb-phone-abc]")
+    print("Successfully paired to " + args[1] + " [guid=" + guid + "]")
 elif args[0] == "connect":
-    assert args[1] == serial, args
-    touch("connected")
-    print("connected to " + args[1])
+    addr = args[1]
+    if addr == ip + ":" + connect_port:
+        touch("connected")
+        print("connected to " + addr)
+    else:
+        print("failed to connect to '" + addr + "': Connection refused")
 elif args[0] == "disconnect":
     print("disconnected " + args[1])
 elif args[0] == "-s" and len(args) >= 3 and args[2] == "get-state":
-    print("device")
+    if flag("preconnected") or flag("connected"):
+        print("device")
+    else:
+        sys.exit(1)
 elif args[0] == "-s" and len(args) >= 4 and args[2] == "install":
     assert os.path.isfile(args[4]), args
     if flag("install_fail"):
@@ -296,6 +395,10 @@ class InstallScriptTest(unittest.TestCase):
     def flag(self, name):
         open(os.path.join(self.state, name), "w").close()
 
+    def set_number(self, name, value):
+        with open(os.path.join(self.state, name), "w") as f:
+            f.write(str(value))
+
     def calls(self):
         with open(os.path.join(self.state, "log")) as f:
             return f.read().splitlines()
@@ -303,8 +406,12 @@ class InstallScriptTest(unittest.TestCase):
     def has_flag(self, name):
         return os.path.exists(os.path.join(self.state, name))
 
-    def run_install(self, *args, timeout=30):
-        env = dict(os.environ, ADB=self.adb, FAKE_ADB_STATE=self.state)
+    def run_install(self, *args, timeout=30, **env_extra):
+        env = dict(os.environ)
+        env.update(ADB=self.adb, FAKE_ADB_STATE=self.state,
+                   QR_INSTALL_PAIR_NAME="ADB_WIFI_testpair-abcdef",
+                   FAKE_PHONE_IP="192.168.7.42")
+        env.update(env_extra)
         return subprocess.run(
             [os.path.join(TOOL_DIR, "qr_install.sh"), "--no-build",
              "--apk", self.apk, *args],
@@ -347,6 +454,64 @@ class InstallScriptTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("signed with another key", result.stdout)
         self.assertIn("uninstall app.harness.client", result.stdout)
+
+    def test_pairing_skips_another_pairing_server(self):
+        # A pairing-code dialog (or a previous run) can leave its own pairing
+        # service advertised.  The QR asks the phone for this service name, so
+        # only that one may be paired.
+        self.flag("stale_pairing")
+        result = self.run_install("--timeout", "10")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = self.calls()
+        self.assertFalse(any(call.startswith("pair 192.168.1.117:")
+                             for call in calls), calls)
+        self.assertTrue(any(call.startswith("pair 192.168.7.42:37111 ")
+                            for call in calls), calls)
+
+    def test_ignores_connect_service_of_another_host(self):
+        # The regression: the phone paired at .119, but .117 still advertised
+        # an old _adb-tls-connect service.  The old code connected to .117.
+        self.flag("stale_connect")
+        self.set_number("connect_after", 3)
+        result = self.run_install("--timeout", "15", FAKE_PHONE_IP="192.168.1.119")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = self.calls()
+        self.assertFalse(any(call.startswith("connect 192.168.1.117:")
+                             for call in calls), calls)
+        self.assertIn("connect 192.168.1.119:42345", calls)
+        self.assertIn("Installed.", result.stdout)
+
+    def test_retries_a_stale_port_on_the_same_host(self):
+        # The first published port for the phone can be a stale one; a refused
+        # connect must not end the run.
+        self.flag("stale_same_host")
+        self.set_number("connect_after", 4)
+        result = self.run_install("--timeout", "15", FAKE_PHONE_IP="192.168.1.119")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = self.calls()
+        self.assertIn("connect 192.168.1.119:46037", calls)
+        self.assertIn("connect 192.168.1.119:42345", calls)
+        self.assertIn("Installed.", result.stdout)
+
+    def test_explains_when_the_debugging_port_does_not_open(self):
+        self.flag("stale_connect")
+        self.flag("no_phone_connect")
+        result = self.run_install("--timeout", "3", FAKE_PHONE_IP="192.168.1.119")
+        self.assertNotEqual(result.returncode, 0)
+        calls = self.calls()
+        self.assertFalse(any(call.startswith("connect 192.168.1.117:")
+                             for call in calls), calls)
+        self.assertIn("wireless debugging port did not open", result.stderr)
+        self.assertIn("qr_install.sh --connect IP:PORT", result.stderr)
+
+    def test_connect_address_skips_pairing(self):
+        result = self.run_install("--connect", "192.168.7.42:42345",
+                                  "--timeout", "10")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = self.calls()
+        self.assertFalse(any(call.startswith("pair ") for call in calls), calls)
+        self.assertIn("connect 192.168.7.42:42345", calls)
+        self.assertIn("Installed.", result.stdout)
 
     def test_qr_timeout(self):
         self.flag("no_pairing")
