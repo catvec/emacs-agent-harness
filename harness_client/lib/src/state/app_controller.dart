@@ -133,7 +133,9 @@ class AppController extends ChangeNotifier {
       if (generation != _connectionGeneration) return;
       phase = ConnectionPhase.connected;
       _notify();
-      await settings.rememberConnectionDetails(address, token);
+      // Remembering is a convenience; a slow preference store must not stop
+      // the initial loads after a successful connection.
+      unawaited(settings.rememberConnectionDetails(address, token));
       _scheduleInitialLoads();
     } on AcpException catch (failure) {
       if (failure.isAuthRequired) {
@@ -165,7 +167,7 @@ class AppController extends ChangeNotifier {
       phase = ConnectionPhase.connected;
       _notify();
       if (address != null) {
-        await settings.rememberConnectionDetails(address!, token);
+        unawaited(settings.rememberConnectionDetails(address!, token));
       }
       _scheduleInitialLoads();
     } on AcpException catch (failure) {
@@ -192,7 +194,7 @@ class AppController extends ChangeNotifier {
       phase = ConnectionPhase.connected;
       _notify();
       if (address != null) {
-        await settings.rememberConnectionDetails(address!, '');
+        unawaited(settings.rememberConnectionDetails(address!, ''));
       }
       _scheduleInitialLoads();
     } on AcpException catch (failure) {

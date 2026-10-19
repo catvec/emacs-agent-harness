@@ -4,7 +4,6 @@ import 'package:flutter/material.dart';
 
 import 'src/state/app_controller.dart';
 import 'src/state/settings_controller.dart';
-import 'src/ui/adaptive/mark.dart';
 import 'src/ui/adaptive/platform_style.dart';
 import 'src/ui/app_scope.dart';
 import 'src/ui/screens/connect_screen.dart';
@@ -23,33 +22,42 @@ class HarnessApp extends StatefulWidget {
 
 class _HarnessAppState extends State<HarnessApp> {
   late final AppController _app;
-  bool _ready = false;
 
   @override
   void initState() {
     super.initState();
     _app = widget.appController ?? AppController(settings: widget.settings);
-    _boot();
+    _configure();
   }
 
-  Future<void> _boot() async {
-    await widget.settings.load();
-    if (kIsWeb) {
-      final query = Uri.base.queryParameters;
-      final platform = query['platform']?.toLowerCase();
-      if (platform == 'cupertino' || platform == 'apple' || platform == 'ios') {
-        await widget.settings.setPreviewPlatform(PreviewPlatform.cupertino);
-      } else if (platform == 'material' || platform == 'android') {
-        await widget.settings.setPreviewPlatform(PreviewPlatform.material);
-      }
-      switch (query['theme']) {
-        case 'light':
-          await widget.settings.setThemeMode(ThemeMode.light);
-        case 'dark':
-          await widget.settings.setThemeMode(ThemeMode.dark);
-      }
+  /// Read local preferences in the background.  The client's first screen is
+  /// the connection screen, and it must not wait for the platform's
+  /// preference store: a plugin that is missing, blocked or unresponsive used
+  /// to leave the app on a splash screen, with no way to enter an address.
+  Future<void> _configure() async {
+    try {
+      await widget.settings.load();
+    } catch (error) {
+      // SettingsController.load already falls back to its defaults; this
+      // catch keeps a test or a platform override from taking the app down
+      // before the connection screen is shown.
+      debugPrint('Harness: could not load local settings: $error');
+      return;
     }
-    if (mounted) setState(() => _ready = true);
+    if (!mounted || !kIsWeb) return;
+    final query = Uri.base.queryParameters;
+    final platform = query['platform']?.toLowerCase();
+    if (platform == 'cupertino' || platform == 'apple' || platform == 'ios') {
+      await widget.settings.setPreviewPlatform(PreviewPlatform.cupertino);
+    } else if (platform == 'material' || platform == 'android') {
+      await widget.settings.setPreviewPlatform(PreviewPlatform.material);
+    }
+    switch (query['theme']) {
+      case 'light':
+        await widget.settings.setThemeMode(ThemeMode.light);
+      case 'dark':
+        await widget.settings.setThemeMode(ThemeMode.dark);
+    }
   }
 
   @override
@@ -93,7 +101,7 @@ class _HarnessAppState extends State<HarnessApp> {
                 }
                 return child ?? const SizedBox.shrink();
               },
-              home: _ready ? _RootGate(app: _app) : const _SplashScreen(),
+              home: _RootGate(app: _app),
             ),
           ),
         );
@@ -125,50 +133,6 @@ class _RootGate extends StatelessWidget {
           child: child,
         );
       },
-    );
-  }
-}
-
-class _SplashScreen extends StatelessWidget {
-  const _SplashScreen();
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Scaffold(
-      backgroundColor: theme.colorScheme.surface,
-      body: Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            HarnessMark(size: 46, color: theme.colorScheme.primary),
-            const SizedBox(height: 18),
-            Text(
-              'Harness',
-              style: theme.textTheme.headlineSmall?.copyWith(
-                fontWeight: FontWeight.w700,
-                letterSpacing: -0.8,
-              ),
-            ),
-            const SizedBox(height: 10),
-            Text(
-              'Opening the line to your agents…',
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
-              ),
-            ),
-            const SizedBox(height: 22),
-            SizedBox(
-              width: 22,
-              height: 22,
-              child: CircularProgressIndicator(
-                strokeWidth: 2.2,
-                color: theme.colorScheme.primary,
-              ),
-            ),
-          ],
-        ),
-      ),
     );
   }
 }

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
@@ -25,6 +27,7 @@ class _ConnectScreenState extends State<ConnectScreen> {
   final _tokenFocus = FocusNode();
   bool _obscure = true;
   bool _remember = true;
+  bool _rememberTouched = false;
   String? _localError;
 
   @override
@@ -34,10 +37,29 @@ class _ConnectScreenState extends State<ConnectScreen> {
     _address = TextEditingController(text: settings.address);
     _token = TextEditingController(text: settings.token);
     _remember = settings.rememberConnection;
+    // The connection screen is shown before preferences have been read.  Fill
+    // in the remembered address and token when they arrive, without
+    // overwriting anything already typed.
+    settings.addListener(_settingsChanged);
+  }
+
+  void _settingsChanged() {
+    if (!mounted) return;
+    final settings = widget.app.settings;
+    if (_address.text.isEmpty && settings.address.isNotEmpty) {
+      _address.text = settings.address;
+    }
+    if (_token.text.isEmpty && settings.token.isNotEmpty) {
+      _token.text = settings.token;
+    }
+    if (!_rememberTouched && _remember != settings.rememberConnection) {
+      setState(() => _remember = settings.rememberConnection);
+    }
   }
 
   @override
   void dispose() {
+    widget.app.settings.removeListener(_settingsChanged);
     _address.dispose();
     _token.dispose();
     _tokenFocus.dispose();
@@ -53,7 +75,11 @@ class _ConnectScreenState extends State<ConnectScreen> {
       setState(() => _localError = failure.message);
       return;
     }
-    await HarnessScope.settingsOf(context).setRememberConnection(_remember);
+    // Saving is best-effort and must not delay the connection when the
+    // platform's preference store is slow or unavailable.
+    unawaited(
+      HarnessScope.settingsOf(context).setRememberConnection(_remember),
+    );
     await widget.app.connect(_address.text, token: _token.text.trim());
     if (mounted) {
       // The connection screen is replaced on success; this only keeps a
@@ -158,8 +184,10 @@ class _ConnectScreenState extends State<ConnectScreen> {
                         obscure: _obscure,
                         remember: _remember,
                         busy: busy,
-                        onRemember: (value) =>
-                            setState(() => _remember = value),
+                        onRemember: (value) => setState(() {
+                          _remember = value;
+                          _rememberTouched = true;
+                        }),
                         onObscure: () => setState(() => _obscure = !_obscure),
                         onConnect: busy ? null : _connect,
                       ),
