@@ -19,15 +19,16 @@
 ;; (harness-ui-handoff.el), the other place a conversation is carried
 ;; over at a cost.
 ;;
-;; A key answers once -- b, s, t, f, c -- and its capital always: B, S,
-;; T, F or C makes the choice `harness-cowboy-default' and stops the
-;; asking (`harness-cowboy-ask'), saved as any setting is.  q answers
-;; not now: the message waits, and goes with the next one.  The keys
-;; work while point is on the panel, a click on a choice from anywhere;
-;; digits pick an option as on any question, and text typed in the box
-;; answers it too ("transcript", "always brief"); in the box, where the
-;; keys type, C-c . and a key press it on the panel
-;; (`harness-compose-panel-key'), which the panel's last line says.
+;; A key answers once -- b, s, t, f, c, i -- and its capital always: B,
+;; S, T, F, C or I makes the choice `harness-cowboy-default' and stops
+;; the asking (`harness-cowboy-ask'), saved as any setting is.  i
+;; ignores the cold cache: the whole conversation goes and nothing is
+;; added to it.  q answers not now: the message waits, and goes with the
+;; next one.  The keys work while point is on the panel, a click on a
+;; choice from anywhere; digits pick an option as on any question, and
+;; text typed in the box answers it too ("transcript", "always brief");
+;; in the box, where the keys type, C-c . and a key press it on the
+;; panel (`harness-compose-panel-key'), which the panel's last line says.
 ;; Whatever is chosen, the model can search and read the conversation
 ;; left out with the session_history tool, which the panel says when
 ;; the session has it.
@@ -57,7 +58,8 @@ The switch banner's amber: both carry a conversation over at a cost."
   :group 'harness-ui-cowboy)
 
 (defconst harness-ui-cowboy-keys
-  '(("brief" ?b) ("summary" ?s) ("transcript" ?t) ("fresh" ?f) ("carry-on" ?c) ("hold" ?q))
+  '(("brief" ?b) ("summary" ?s) ("transcript" ?t) ("fresh" ?f) ("carry-on" ?c)
+    ("ignore" ?i) ("hold" ?q))
   "The choices of the cold-cache question and their keys, in order.
 Each entry is (CHOICE KEY): CHOICE as the harness names it (see
 `harness-cowboy-choices'), KEY the key that answers with it on the
@@ -69,6 +71,7 @@ panel.  Its capital answers \"always\", but for `hold'.")
     ("transcript" "Transcript file" "the conversation goes to a file the model reads as it needs")
     ("fresh" "Start afresh" "nothing is carried over; the model looks back when it needs to")
     ("carry-on" "Carry on" "the whole conversation goes again, uncached")
+    ("ignore" "Ignore" "send the whole context as it is, adding nothing")
     ("hold" "Not now" "the message waits; nothing is sent yet"))
   "Label and description of each choice, for a question that brings none.")
 
@@ -233,7 +236,7 @@ price of carrying on is on its row below."
         (key (cadr (assoc choice harness-ui-cowboy-keys))))
     (concat (plist-get entry :label) (if cost (format " (%s)" cost) "") ": " (plist-get entry :what) "."
             (if (and by (member choice '("brief" "summary"))) (format "\nWritten by %s." by) "")
-            (if (and (numberp after) (> after 0) (not (member choice '("carry-on" "hold"))))
+            (if (and (numberp after) (> after 0) (not (member choice '("carry-on" "ignore" "hold"))))
                 (format "\nThe conversation then holds ~%s tokens." (harness-format-tokens after))
               "")
             (format "\nPress %c on this panel, or click%s."
@@ -274,7 +277,7 @@ price of carrying on is on its row below."
   (concat
    (propertize "   " 'wrap-prefix "   ")
    (harness-ui-kbd " B ") " " (harness-ui-kbd " S ") " " (harness-ui-kbd " T ") " "
-   (harness-ui-kbd " F ") " " (harness-ui-kbd " C ")
+   (harness-ui-kbd " F ") " " (harness-ui-kbd " C ") " " (harness-ui-kbd " I ")
    (propertize " the same, from now on without asking\n" 'face 'harness-dim-face)
    (if (harness-json-true-p (plist-get info :history))
        (propertize "   Whichever you choose, the model can search and read the conversation it leaves out (session_history).\n"

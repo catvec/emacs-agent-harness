@@ -29,15 +29,16 @@ cost and what it does.  Its amber is the switch banner's
 (harness-ui-handoff.el), the other place a conversation is carried
 over at a cost.
 
-A key answers once -- b, s, t, f, c -- and its capital always: B, S,
-T, F or C makes the choice `harness-cowboy-default` and stops the
-asking (`harness-cowboy-ask`), saved as any setting is.  q answers
-not now: the message waits, and goes with the next one.  The keys
-work while point is on the panel, a click on a choice from anywhere;
-digits pick an option as on any question, and text typed in the box
-answers it too ("transcript", "always brief"); in the box, where the
-keys type, C-c . and a key press it on the panel
-(`harness-compose-panel-key`), which the panel's last line says.
+A key answers once -- b, s, t, f, c, i -- and its capital always: B,
+S, T, F, C or I makes the choice `harness-cowboy-default` and stops
+the asking (`harness-cowboy-ask`), saved as any setting is.  i
+ignores the cold cache: the whole conversation goes and nothing is
+added to it.  q answers not now: the message waits, and goes with the
+next one.  The keys work while point is on the panel, a click on a
+choice from anywhere; digits pick an option as on any question, and
+text typed in the box answers it too ("transcript", "always brief");
+in the box, where the keys type, C-c . and a key press it on the
+panel (`harness-compose-panel-key`), which the panel's last line says.
 Whatever is chosen, the model can search and read the conversation
 left out with the session_history tool, which the panel says when
 the session has it.

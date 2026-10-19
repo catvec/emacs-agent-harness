@@ -39,6 +39,8 @@ longer uses, which caches nothing for the model the message goes to
 - `fresh`      nothing carried over: the model starts afresh and looks
                back when it needs to; no model asked;
 - `carry-on`   the whole conversation, uncached, as before;
+- `ignore`     the same, and nothing else: no note, no compaction,
+               nothing added to the conversation at all;
 - `hold`       not now: the message is kept and the turn does not start.
 
 Whatever goes first, the conversation stays on record: a compaction

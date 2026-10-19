@@ -1415,9 +1415,10 @@ the chat (or its popout) shows it in place of the cache panel:
     t  Transcript file  free              the conversation goes to a file the model reads as it needs
     f  Start afresh     free              nothing is carried over; the model looks back when it needs to
     c  Carry on         ~$0.315 uncached  the whole conversation goes again, uncached
+    i  Ignore           ~$0.315 uncached  send the whole context as it is, adding nothing
     q  Not now                            the message waits; nothing is sent yet
 
-    B   S   T   F   C  the same, from now on without asking
+    B   S   T   F   C   I  the same, from now on without asking
    Whichever you choose, the model can search and read the conversation it leaves out (session_history).
    or type a choice below: “transcript”, “always brief”
 ```
@@ -1426,10 +1427,11 @@ A key with point on the panel, or a click on a choice, answers it; so
 does a digit, or a choice typed in the message box ("transcript",
 "always brief"). The compaction goes first, then the message, which
 sees only what stands in for the conversation. Carry on sends it as
-before, and not now keeps the message, unsent, until the next one goes
-with it. Whatever you pick, the model can look back with
-`session_history`. Another session's agent cannot answer the question
-for you.
+before and says so in a note; Ignore sends it as before and adds
+nothing to the conversation at all — no note, no compaction. Not now
+keeps the message, unsent, until the next one goes with it. Whatever
+you pick, the model can look back with `session_history`. Another
+session's agent cannot answer the question for you.
 
 A capital letter, or "always" with a choice, makes that choice the
 default and stops the asking (`harness-cowboy-default`,

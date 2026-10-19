@@ -29,6 +29,8 @@
 ;; - `fresh'      nothing carried over: the model starts afresh and looks
 ;;                back when it needs to; no model asked;
 ;; - `carry-on'   the whole conversation, uncached, as before;
+;; - `ignore'     the same, and nothing else: no note, no compaction,
+;;                nothing added to the conversation at all;
 ;; - `hold'       not now: the message is kept and the turn does not start.
 ;;
 ;; Whatever goes first, the conversation stays on record: a compaction
@@ -109,6 +111,7 @@
     (transcript "Transcript file" "the conversation goes to a file the model reads as it needs")
     (fresh "Start afresh" "nothing is carried over; the model looks back when it needs to")
     (carry-on "Carry on" "the whole conversation goes again, uncached")
+    (ignore "Ignore" "send the whole context as it is, adding nothing")
     (hold "Not now" "the message waits; nothing is sent yet"))
   "What a message to a session whose prompt cache went cold can do first.
 Each entry is (CHOICE LABEL WHAT), in the order they are offered.
@@ -130,15 +133,17 @@ call and result in a line, never a payload -- so it never pays for the
 whole conversation; `summary' has the session's model summarise all of it,
 reading it uncached; `transcript' writes the conversation to a file
 the model reads as it needs, and `fresh' carries nothing over, neither
-asking any model; `carry-on' sends it all again as before.  Whatever
-it is, the model can search and read the conversation it replaced with
-the session_history tool."
+asking any model; `carry-on' sends it all again as before and says so
+in a hint; `ignore' sends it all again and adds nothing at all, no hint
+included.  Whatever it is, the model can search and read the
+conversation it replaced with the session_history tool."
   :type '(choice (const :tag "Brief summary: a cheap model reads the narrative, tool calls in brief" brief)
                  (const :tag "Summary: the session's model reads all of it, uncached" summary)
                  (const :tag "Transcript file: the model reads what it needs" transcript)
                  (const :tag "Start afresh: nothing carried over" fresh)
-                 (const :tag "Carry on: the whole conversation, uncached" carry-on))
-  :safe (lambda (v) (memq v '(brief summary transcript fresh carry-on)))
+                 (const :tag "Carry on: the whole conversation, uncached" carry-on)
+                 (const :tag "Ignore: send the whole context, adding nothing" ignore))
+  :safe (lambda (v) (memq v '(brief summary transcript fresh carry-on ignore)))
   :group 'harness)
 
 (defcustom harness-cowboy-ask t
@@ -266,6 +271,7 @@ A switch the policy sets wins, then the session's own, then
 Carrying on costs sending the context as things are; holding nothing."
   (pcase choice
     ('carry-on (plist-get estimate :carry-on))
+    ('ignore (plist-get estimate :carry-on))
     ('hold nil)
     (_ (plist-get (harness-cowboy--kind-estimate estimate choice) :cost))))
 
@@ -276,7 +282,7 @@ carrying on what the uncached context costs."
   (let ((cost (harness-cowboy--cost estimate choice)))
     (cond ((memq choice '(transcript fresh)) "free")
           ((not (numberp cost)) nil)
-          ((eq choice 'carry-on) (format "~%s uncached" (harness-format-cost cost)))
+          ((memq choice '(carry-on ignore)) (format "~%s uncached" (harness-format-cost cost)))
           (t (format "~%s" (harness-format-cost cost))))))
 
 (defun harness-cowboy--duration (seconds)
@@ -420,6 +426,8 @@ would have said; nil otherwise."
 
 (defconst harness-cowboy--words
   '((hold "not now" "hold" "later" "cancel" "skip" "dismiss")
+    (ignore "ignore" "send whole context" "send the whole context" "send whole conversation"
+            "send the whole conversation" "send it all" "nothing" "leave it")
     (fresh "afresh" "fresh" "from scratch")
     (carry-on "carry on" "carry-on" "carryon" "continue" "keep going" "go on" "as is" "full")
     (transcript "transcript" "file")
@@ -427,11 +435,13 @@ would have said; nil otherwise."
     (summary "summary" "summarise" "summarize"))
   "Words that name a choice in a typed answer, the first choice to match winning.
 `hold' comes first, so an answer that says not to do anything does
-not; `brief' before `summary', so \"brief summary\" is brief.")
+not; `ignore' before `carry-on', so \"ignore, send it all\" ignores
+rather than carries on with a note; `brief' before `summary', so \"brief
+summary\" is brief.")
 
 (defconst harness-cowboy--keys
   '(("b" . brief) ("s" . summary) ("t" . transcript) ("f" . fresh) ("c" . carry-on)
-    ("q" . hold) ("h" . hold) ("n" . hold))
+    ("i" . ignore) ("q" . hold) ("h" . hold) ("n" . hold))
   "One-letter answers, the keys of the chat's panel.")
 
 (defun harness-cowboy-parse-answer (text)
@@ -439,7 +449,7 @@ not; `brief' before `summary', so \"brief summary\" is brief.")
 ALWAYS is non-nil when TEXT says \"always\": the choice becomes the
 default and the question stops.  TEXT may be a choice's name (brief,
 carry-on), its label or an option as offered (\"Brief summary (~$0.01)\"),
-its number among the options, its key (b, s, t, f, c, q) or words
+its number among the options, its key (b, s, t, f, c, i, q) or words
 naming it (see `harness-cowboy--words').  Nil when it names none."
   (let* ((case-fold-search t)
          (raw (downcase (string-trim (or text ""))))
@@ -503,7 +513,9 @@ cannot be saved, as when the policy sets it."
 (defun harness-cowboy--decision-text (choice)
   "Return what an \"always\" answer of CHOICE does, in words."
   (format "Always %s when the prompt cache is cold, without asking"
-          (harness-cowboy--choice-text choice nil)))
+          (if (eq choice 'ignore)
+              "ignore it and send the whole context"
+            (harness-cowboy--choice-text choice nil))))
 
 (defun harness-cowboy--record-decision (session-id choice before)
   "Keep the \"always\" answer of CHOICE in SESSION-ID as a lasting decision.
@@ -697,6 +709,10 @@ CONTEXT, a number of tokens or nil, is what carrying on sends again."
     ('summary "compacting into a summary first")
     ('transcript "writing the conversation to a transcript file first")
     ('fresh "starting afresh")
+    ('ignore (format "ignoring the cold cache and carrying on with the whole conversation%s"
+                     (if (and (numberp context) (> context 0))
+                         (format ", ~%s tokens uncached" (harness-format-tokens context))
+                       "")))
     (_ (format "carrying on with the whole conversation%s"
                (if (and (numberp context) (> context 0))
                    (format ", ~%s tokens uncached" (harness-format-tokens context))
@@ -786,13 +802,18 @@ VALUE is the `agent/before-turn' value the turn goes on with; ESTIMATE
 lasting decision an \"always\" answer kept just now, which the hint
 saying what goes first names (`harness-cowboy--hint-meta').  `hold'
 stops the turn, with `harness-cowboy--hold-reason'; a session deleted
-meanwhile has no turn."
+meanwhile has no turn.  `ignore' does nothing at all: the message goes
+with the whole conversation and no hint is added to it."
   (harness-emit 'cowboy/decided session-id choice by)
   (cond
    ((not (harness-call 'session/exists-p session-id))
     (harness-resolved (list :proceed nil)))
    ((eq choice 'hold)
     (harness-resolved (list :proceed nil :reason harness-cowboy--hold-reason)))
+   ;; Ignoring the cold cache leaves the conversation exactly as it is:
+   ;; no compaction, no note, nothing but the message.
+   ((eq choice 'ignore)
+    (harness-resolved value))
    (t
     (let ((session (harness-call 'session/get session-id)))
       (harness-cowboy--hint session-id (harness-cowboy--hint-text choice by session estimate)
@@ -844,11 +865,12 @@ never finds it cold, and its first turn would send the whole
 conversation uncached.  This does what the gate does for a session
 nobody is asked about: it takes `harness-cowboy-default' (never `hold'),
 emits `cowboy/decided', adds a hint saying so to SESSION-ID and, unless
-the choice is `carry-on', compacts as the gate does, with the same
-fallbacks: a brief or full summary that cannot be made gives way to the
-transcript file, and that to carrying on, each said in a hint.  As in
-the gate, the compaction node's `:meta' `:cowboy' holds the choice and
-who decided.
+the choice is `carry-on' or `ignore', compacts as the gate does, with
+the same fallbacks: a brief or full summary that cannot be made gives
+way to the transcript file, and that to carrying on, each said in a
+hint.  `carry-on' adds the hint and compacts nothing; `ignore' adds
+nothing at all.  As in the gate, the compaction node's `:meta' `:cowboy'
+holds the choice and who decided.
 
 The promise resolves with the choice taken, a symbol, or with nil when
 nothing was done: the context is under `harness-cowboy-min-context',
@@ -879,10 +901,12 @@ OPTS keys:
           ;; Whoever the caller says decided, what was done is the default
           ;; for a session no warm cache holds: the hint says so, and
           ;; names the "always" answer that set the default, if one did.
-          (harness-cowboy--hint session-id
-                                (harness-cowboy--hint-text choice 'cold-start session estimate (plist-get opts :why))
-                                (harness-cowboy--hint-meta 'cold-start))
-          (if (eq choice 'carry-on)
+          ;; Ignoring adds no hint at all: nothing is done to the conversation.
+          (unless (eq choice 'ignore)
+            (harness-cowboy--hint session-id
+                                  (harness-cowboy--hint-text choice 'cold-start session estimate (plist-get opts :why))
+                                  (harness-cowboy--hint-meta 'cold-start)))
+          (if (memq choice '(carry-on ignore))
               (harness-resolved choice)
             (harness-then (harness-cowboy--compact session-id choice by)
                           (lambda (_) choice)

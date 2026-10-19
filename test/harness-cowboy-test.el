@@ -203,17 +203,18 @@ conversation."
                               (plist-get payload :question)))
       ;; Every choice, with its cost; the default says so.
       (let ((options (plist-get payload :options)))
-        (should (= 6 (length options)))
+        (should (= 7 (length options)))
         (should (string-match-p "\\`Brief summary (~\\$[0-9.]+, the default)\\'" (nth 0 options)))
         (should (string-match-p "\\`Summary (~\\$[0-9.]+)\\'" (nth 1 options)))
         (should (equal "Transcript file (free)" (nth 2 options)))
         (should (equal "Start afresh (free)" (nth 3 options)))
         (should (string-match-p "\\`Carry on (~\\$[0-9.]+ uncached)\\'" (nth 4 options)))
-        (should (equal "Not now" (nth 5 options))))
+        (should (string-match-p "\\`Ignore (~\\$[0-9.]+ uncached)\\'" (nth 5 options)))
+        (should (equal "Not now" (nth 6 options))))
       (should (plist-get payload :allow-free-text))
       ;; What a client draws more than the question with.
       (should (equal "brief" (plist-get info :default)))
-      (should (equal '("brief" "summary" "transcript" "fresh" "carry-on" "hold")
+      (should (equal '("brief" "summary" "transcript" "fresh" "carry-on" "ignore" "hold")
                      (mapcar (lambda (c) (plist-get c :choice)) (plist-get info :choices))))
       (should (equal "free" (plist-get (nth 2 (plist-get info :choices)) :cost-text)))
       (should (eq t (plist-get info :history)))
@@ -280,6 +281,49 @@ conversation."
       (let ((text (harness-cowboy-test--request-text (car harness-cowboy-test--requests))))
         (should (string-match-p "first" text))
         (should (string-match-p "second" text))))))
+
+(ert-deftest harness-cowboy-ignore-sends-everything-and-adds-nothing ()
+  "Ignore carries on with the whole conversation, uncached, and writes no
+hint and no compaction: the conversation goes on as if nothing happened."
+  (harness-cowboy-test-with
+    (let ((sid (harness-cowboy-test-session)))
+      (let ((p (harness-call 'agent/prompt sid "just go on")))
+        (harness-cowboy-test--answer sid "ignore")
+        (should (eq 'end-turn (plist-get (harness-test-await p 10) :stop-reason))))
+      (should-not (harness-cowboy-test--compactions sid))
+      ;; No note of what went first: nothing is added to the conversation.
+      (should-not (harness-cowboy-test--hints sid))
+      (should-not (harness-call 'question/pending sid))
+      (should (member "just go on"
+                      (mapcar (lambda (n) (plist-get n :content)) (harness-call 'session/nodes sid))))
+      ;; The request carried the whole conversation and the message.
+      (let ((text (harness-cowboy-test--request-text (car harness-cowboy-test--requests))))
+        (should (string-match-p "please refactor the parser" text))
+        (should (string-match-p "just go on" text)))
+      ;; That request stamped a warm cache again: nothing asks any more.
+      (should-not (harness-cowboy-cold-p (harness-call 'session/get sid) (float-time))))))
+
+(ert-deftest harness-cowboy-always-ignore-goes-on-silently ()
+  "Always ignore makes ignoring the default and stops the asking; later
+cold caches go on with no question, no compaction and no hint."
+  (harness-cowboy-test-with
+    (let ((sid (harness-cowboy-test-session)))
+      (let ((p (harness-call 'agent/prompt sid "one")))
+        (harness-cowboy-test--answer sid "always ignore")
+        (harness-test-await p 10))
+      (should (eq 'ignore harness-cowboy-default))
+      (should-not harness-cowboy-ask)
+      (should-not (harness-cowboy-test--compactions sid))
+      (should-not (harness-cowboy-test--hints sid))
+      ;; Cold again: nobody is asked and nothing is added before the message.
+      (harness-call 'session/usage-add sid '(:input 10 :output 10 :cache-read 400 :context 430 :cache-at 1000.0))
+      (harness-test-await (harness-call 'agent/prompt sid "two") 10)
+      (should-not (harness-call 'question/pending sid))
+      (should-not (harness-cowboy-test--compactions sid))
+      (should-not (harness-cowboy-test--hints sid))
+      (let ((text (harness-cowboy-test--request-text (car harness-cowboy-test--requests))))
+        (should (string-match-p "one" text))
+        (should (string-match-p "two" text))))))
 
 (ert-deftest harness-cowboy-the-next-request-restamps-the-cache ()
   "After a cowboy compaction the first request that follows stamps the new cache.
@@ -803,6 +847,17 @@ The newest comes first."
       (should (eq 'brief (harness-test-await (harness-call 'cowboy/compact sid) 10)))
       (should (equal "brief" (harness-node-compaction-kind (car (harness-cowboy-test--compactions sid))))))))
 
+(ert-deftest harness-cowboy-compact-ignores-when-that-is-the-default ()
+  "Ignoring is a default too: cowboy/compact compacts nothing and adds no hint."
+  (harness-cowboy-test-with
+    (let ((harness-cowboy-default 'ignore)
+          (sid (harness-cowboy-test-fork))
+          (hints nil))
+      (setq hints (harness-cowboy-test--hints sid))
+      (should (eq 'ignore (harness-test-await (harness-call 'cowboy/compact sid) 10)))
+      (should-not (harness-cowboy-test--compactions sid))
+      (should (equal hints (harness-cowboy-test--hints sid))))))
+
 (ert-deftest harness-cowboy-compact-honours-the-minimum-context ()
   "A context under `harness-cowboy-min-context' goes as it is: no decision, no hint."
   (harness-cowboy-test-with
@@ -930,11 +985,16 @@ with \"always\" or without."
                   ("fresh" fresh) ("Start afresh (free)" fresh) ("from scratch" fresh) ("f" fresh)
                   ("carry on" carry-on) ("carry-on" carry-on) ("c" carry-on) ("continue" carry-on)
                   ("Carry on (~$0.42 uncached)" carry-on) ("5" carry-on)
-                  ("not now" hold) ("q" hold) ("hold" hold) ("6" hold) ("Not now" hold) ("later" hold)))
+                  ("ignore" ignore) ("i" ignore) ("Ignore (~$0.42 uncached)" ignore)
+                  ("ignore, send whole context" ignore) ("send whole context" ignore)
+                  ("send it all" ignore) ("nothing" ignore) ("6" ignore)
+                  ("not now" hold) ("q" hold) ("hold" hold) ("7" hold) ("Not now" hold) ("later" hold)))
     (should (equal (cons (cadr case) nil) (harness-cowboy-parse-answer (car case)))))
   (should (equal '(fresh . t) (harness-cowboy-parse-answer "always fresh")))
   (should (equal '(brief . t) (harness-cowboy-parse-answer "Always: brief")))
   (should (equal '(carry-on . t) (harness-cowboy-parse-answer "always carry on")))
+  (should (equal '(ignore . t) (harness-cowboy-parse-answer "always ignore")))
+  (should (equal '(ignore) (harness-cowboy-parse-answer "Ignore, send whole context")))
   (should (equal '(transcript . t) (harness-cowboy-parse-answer "\"always transcript\"")))
   (should (equal '(transcript . t) (harness-cowboy-parse-answer "transcript, always")))
   (should-not (harness-cowboy-parse-answer "purple"))
@@ -950,6 +1010,7 @@ with \"always\" or without."
     (should (equal "free" (harness-cowboy-cost-text nil 'fresh)))
     (should (equal "~$0.010" (harness-cowboy-cost-text estimate 'brief)))
     (should (string-suffix-p " uncached" (harness-cowboy-cost-text estimate 'carry-on)))
+    (should (string-suffix-p " uncached" (harness-cowboy-cost-text estimate 'ignore)))
     (should-not (harness-cowboy-cost-text estimate 'hold))
     (should-not (harness-cowboy-cost-text nil 'summary))))
 

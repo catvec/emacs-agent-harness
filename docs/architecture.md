@@ -4002,14 +4002,16 @@ as it is, all of the conversation uncached, without a decision.
 - The choices (`harness-cowboy-choices`): `brief`, `summary`,
   `transcript` and `fresh` compact as `compaction/compact` does, with
   `:meta (:cowboy (:choice C :by BY))`, before the message; `carry-on`
-  sends the conversation as it is; `hold` stops the turn (`:proceed`
-  nil, reason "not now: …"), the message staying in the transcript to
-  go with the next one.  A summary that fails falls back to `transcript`
-  (`:fallback` in the meta), and that to `carry-on`, each said in a
-  hint: the message always goes unless held.  A hint says what went
-  first and why ("as you chose", "the default for a session that does
-  not wait for you", …).  While the compaction runs the session is
-  `running` with the activity `(:phase compacting)`
+  sends the conversation as it is and says so in a hint; `ignore` sends
+  it as it is and adds nothing at all (no hint, no compaction, no
+  status change); `hold` stops the turn (`:proceed` nil, reason "not
+  now: …"), the message staying in the transcript to go with the next
+  one.  A summary that fails falls back to `transcript` (`:fallback` in
+  the meta), and that to `carry-on`, each said in a hint: the message
+  always goes unless held.  A hint says what went first and why ("as
+  you chose", "the default for a session that does not wait for you",
+  …), except for `ignore`, which leaves no hint.  While the compaction
+  runs the session is `running` with the activity `(:phase compacting)`
   (`agent/note-activity`).
 - Asked unless `harness-cowboy-ask` is nil or the session is
   non-interactive (the policy's `harness-non-interactive`, else the
@@ -4064,10 +4066,11 @@ as it is, all of the conversation uncached, without a decision.
   With `harness-cowboy-min-context` above 0 and a context
   (`compaction/estimate`) under it, it does nothing and resolves nil,
   with no hint.  Otherwise it takes `harness-cowboy-default` (never
-  `hold`), emits `cowboy/decided SID CHOICE BY`, adds a hint and, unless
-  the choice is `carry-on`, compacts as the gate does (`:meta (:cowboy
-  (:choice C :by BY))`, the fallbacks included).  It does not mark the
-  session busy: no turn is running.  It resolves with the choice taken,
+  `hold`), emits `cowboy/decided SID CHOICE BY`, adds a hint (none for
+  `ignore`) and, unless the choice is `carry-on` or `ignore`, compacts
+  as the gate does (`:meta (:cowboy (:choice C :by BY))`, the
+  fallbacks included).  It does not mark the session busy: no turn is
+  running.  It resolves with the choice taken,
   a symbol, and never rejects: an error is logged and resolves nil.
   OPTS: `:by` SYMBOL, BY, default `cold-start`; `:why` STRING, which
   opens the hint in place of "Prompt cache cold since HH:MM", a time a
@@ -8944,7 +8947,7 @@ key, a button, its cost and what it does, the default marked, the
 tooltip naming the writer and the context after it; and a footer with
 the capitals that answer "always", a line about session_history when
 the session has it, and the typed answers.  Its keymap
-(`harness-ui-cowboy-keys`: b s t f c q, capitals for "always") has
+(`harness-ui-cowboy-keys`: b s t f c i q, capitals for "always") has
 `harness-ui-pending-question-map` as its parent, so digits pick an
 option as on any question; answers go through
 `harness-ui-pending-answer-question` (`harness-ui-cowboy-answer`), and
