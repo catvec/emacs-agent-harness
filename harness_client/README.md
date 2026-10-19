@@ -122,30 +122,40 @@ machine if the build reports a missing SDK package.
 
 `tool/qr_install.sh` builds the Android APK when needed and installs it on a
 phone over the local network, with no USB cable. The phone pairs as a wireless
-debugging device by scanning a QR code shown in the terminal, then adb installs
-the APK and opens the app:
+debugging device, then adb installs the APK and opens the app:
 
 ```sh
-tool/qr_install.sh                 # build if needed, pair, install, open
+tool/qr_install.sh                 # build if needed, pair by code, install, open
 tool/qr_install.sh --build         # rebuild first
 tool/qr_install.sh --debug         # build/install the debug APK
+tool/qr_install.sh --qr            # pair by scanning a QR code instead
 tool/qr_install.sh --no-launch     # install without opening the app
-tool/qr_install.sh --no-image      # keep the QR text-only, no image window
+tool/qr_install.sh --no-image      # with --qr, keep the QR text-only
 tool/qr_install.sh --connect 192.168.1.7:41234  # skip pairing, use that port
 ```
 
 On Android 11 or newer, enable *Developer options*, open *Wireless debugging*
-and tap *Pair device with QR code*, then scan the code the script prints. The
-phone and the computer must be on the same network. The script finds adb in
-`ADB`, `PATH`, or the Android SDK (`ANDROID_HOME`, `ANDROID_SDK_ROOT` and the
-usual install locations); the QR code is drawn by `tool/qr_terminal.py` in
-Unicode blocks, so `qrencode` is not needed.
+and tap *Pair device with pairing code*. Keep that dialog open: the script
+finds the phone with mDNS, asks for the six digits shown there, pairs, and
+installs the app. The phone and the computer must be on the same network. If
+mDNS cannot find the dialog, pass the *IP address & port* it shows with
+`--pair-address 192.168.1.7:37111`; `--pair-code 123456` supplies the code
+without prompting. The script finds adb in `ADB`, `PATH`, or the Android SDK
+(`ANDROID_HOME`, `ANDROID_SDK_ROOT` and the usual install locations).
 
-The code is shown on a fresh screen, so a code from an earlier run is not
-beside it for the camera to pick, and at error-correction level L to keep it
-less dense. On a graphical desktop a large copy also opens in an image viewer
-(the same code; close it when the phone is paired); `--no-image` keeps it
-text-only.
+The pairing-code flow sends no QR code to the phone. Android's QR pairing
+format is really a Wi-Fi network code (`WIFI:T:ADB;S:service;P:password;;`),
+even though it only carries an adb service name and password. Some phone camera
+apps read such a code as a network to join, which takes the phone off its
+current Wi-Fi. `--qr` still offers the one-scan flow, but it shows the code on
+a fresh screen, with a warning to scan it from *Wireless debugging* and not
+with the camera app. Its service name is also longer than the 32-byte Wi-Fi
+SSID limit, so a camera cannot use it as a network, while the wireless
+debugging scanner passes it to mDNS (which allows 63 bytes). The code is drawn
+by `tool/qr_terminal.py` in Unicode blocks at error-correction level L, so
+`qrencode` is not needed. On a graphical desktop a large copy also opens in an
+image viewer (the same code; close it when the phone is paired); `--no-image`
+keeps it text-only.
 
 After pairing, the phone's debugging port can take a few seconds to appear, and
 adb's mDNS cache can hold an old port. The script only tries addresses on the
@@ -169,8 +179,8 @@ tool/qr_install.sh --serve
 
 `--serve` listens on every interface and serves only that APK. If it prints an
 address the phone cannot reach (a VPN interface, say), pass the right one with
-`--address 192.168.1.10`. Both the pairing code and the download URL are meant
-for a trusted local network; the phone needs Android 7 (API 24) or newer.
+`--address 192.168.1.10`. The pairing credentials and the download URL are
+meant for a trusted local network; the phone needs Android 7 (API 24) or newer.
 
 ## Graceful extension detection
 

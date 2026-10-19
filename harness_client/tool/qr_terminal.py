@@ -3,7 +3,9 @@
 
 `tool/qr_install.sh' shows the Wi-Fi pairing code for adb wireless debugging
 with this, so installing on a phone needs neither a USB cable nor the
-`qrencode' package.  The encoder follows ISO/IEC 18004 in byte mode, error
+`qrencode' package.  `--pairing' prints the service name and password for that
+code (the name is longer than a Wi-Fi SSID, so a camera cannot use the code as
+a network).  The encoder follows ISO/IEC 18004 in byte mode, error
 correction levels L, M, Q and H, versions 1 to 40; the terminal renderer uses
 Unicode half blocks (or `##' with --ascii), and --png writes the same symbol as
 a PNG for an image viewer.
@@ -13,7 +15,9 @@ from __future__ import annotations
 
 import argparse
 import os
+import secrets
 import shutil
+import string
 import struct
 import subprocess
 import sys
@@ -24,6 +28,23 @@ Level = str
 
 LEVELS = {"L": 0, "M": 1, "Q": 2, "H": 3}
 LEVEL_BITS = {"L": 1, "M": 0, "Q": 3, "H": 2}
+
+
+def pairing_credentials(name: str | None = None) -> tuple[str, str]:
+    """Return the service name and password for an adb QR pairing code.
+
+    Android stores the code in the Wi-Fi QR format, but the S: field is an mDNS
+    service name and P: is the pairing password, not a Wi-Fi SSID and key.  A
+    generated name is longer than a Wi-Fi SSID (32 bytes) so a camera app that
+    reads the code as a network cannot join it; an mDNS instance name may be up
+    to 63 bytes, and the wireless debugging scanner passes it through intact.
+    """
+    alphabet = string.ascii_letters + string.digits
+    if not name:
+        name = "studio-" + "".join(secrets.choice(alphabet) for _ in range(32))
+    password = "".join(secrets.choice(alphabet) for _ in range(21))
+    return name, password
+
 
 # Error correction codewords per block, by level (L M Q H) then version.
 ECC_PER_BLOCK = [
@@ -518,6 +539,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Draw a QR code in the terminal (byte mode, versions 1-40).")
     parser.add_argument("text", nargs="?", help="text to encode (default: read stdin)")
+    parser.add_argument("--pairing", nargs="?", const="", metavar="NAME",
+                        help="print a pairing service NAME and password instead of drawing a code")
     parser.add_argument("--level", default="M", choices=list(LEVELS),
                         help="error correction level (default M)")
     parser.add_argument("--margin", type=int, default=4,
@@ -533,6 +556,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--open", action="store_true",
                         help="open a large PNG in an image viewer")
     args = parser.parse_args(argv)
+    if args.pairing is not None:
+        name, password = pairing_credentials(args.pairing or None)
+        print(name, password)
+        return 0
     text = args.text
     if text is None:
         if sys.stdin.isatty():

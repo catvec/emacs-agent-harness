@@ -21,14 +21,18 @@
 - `web-prod-smoke.txt` / `production-web.png` — the production web build,
   served as a static site and connected to the preview harness, with no page
   errors.
-- `qr-install.txt` — the QR phone installer: the tool tests, the encoder
-  checked against qrencode and the harness's own encoder, the foreign-host and
+- `qr-install.txt` — the phone installer: the tool tests, the encoder checked
+  against qrencode and the harness's own encoder, the foreign-host and
   stale-port mDNS regressions that caused `192.168.1.117:46037` to be tried,
-  and a full install through a fake adb.  `qr-install-scan.png` is the clean
-  screen with the code being scanned; `qr-install.png` is the finished run;
-  `qr-install-large.png` is the large image the viewer opens;
-  `qr-install-serve.png` is the `--serve` download mode.  The QR decodes back
-  to the exact pairing text in every capture.
+  and a full install through a fake adb.  It also covers the Wi-Fi-disconnect
+  fix: the default pairing-code flow sends no QR code, and `--qr` uses a
+  service name longer than a Wi-Fi SSID so a camera cannot join it as a
+  network.  `qr-install-code.png` is the default pairing-code run;
+  `qr-install-scan.png` is the `--qr` screen being scanned, with its warning;
+  `qr-install.png` is a finished `--qr` run; `qr-install-large.png` is the
+  large image the viewer opens; `qr-install-serve.png` is the `--serve`
+  download mode.  The QR decodes back to the exact pairing text in every
+  capture.
 
 The toolchain pieces above are reproducible: `tool/install_flutter.sh` installs
 the pinned Flutter SDK under `~/.local/share/flutter-versions` and installs the

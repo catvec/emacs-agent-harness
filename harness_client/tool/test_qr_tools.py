@@ -60,6 +60,7 @@ class QrEncodeTest(unittest.TestCase):
         "hello world",
         "0123456789",
         "WIFI:T:ADB;S:ADB_WIFI_abcdefghijklmn-abcdef;P:abcdefghijklmnopqrstu;;",
+        "WIFI:T:ADB;S:studio-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa;P:bbbbbbbbbbbbbbbbbbbbb;;",
         "https://example.com/a/b?c=d&e=f",
         "héllo 🌍",
         "x" * 50,
@@ -163,9 +164,38 @@ class QrEncodeTest(unittest.TestCase):
                 expected[y + margin][x + margin] = qr["modules"][y][x]
         self.assertEqual(decoded, expected)
 
+    def test_pairing_credentials_are_not_a_wifi_ssid(self):
+        name, password = qr_terminal.pairing_credentials()
+        self.assertTrue(name.startswith("studio-"))
+        self.assertGreater(len(name.encode()), 32)  # not a valid Wi-Fi SSID
+        self.assertLessEqual(len(name.encode()), 63)  # a valid mDNS name
+        self.assertEqual(len(password), 21)
+        self.assertTrue(all(c.isalnum() or c == "-" for c in name + password))
+
+    def test_pairing_credentials_take_an_override(self):
+        name, password = qr_terminal.pairing_credentials("ADB_WIFI_testpair")
+        self.assertEqual(name, "ADB_WIFI_testpair")
+        self.assertEqual(len(password), 21)
+
+    def test_pairing_cli(self):
+        result = subprocess.run(
+            [sys.executable, os.path.join(TOOL_DIR, "qr_terminal.py"),
+             "--pairing", "studio-test"],
+            capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        name, password = result.stdout.split()
+        self.assertEqual(name, "studio-test")
+        self.assertEqual(len(password), 21)
+
     def test_pairing_code_is_compact_at_level_l(self):
-        text = ("WIFI:T:ADB;S:ADB_WIFI_abcdefghijklmn-abcdef;"
-                "P:abcdefghijklmnopqrstu;;")
+        # The QR service name is deliberately longer than a Wi-Fi SSID (32
+        # bytes), so a camera that reads the code as a Wi-Fi network cannot
+        # join it.  It is still short enough for an mDNS instance name (63
+        # bytes) and keeps the symbol at version 4.
+        name = "studio-" + "a" * 32
+        self.assertEqual(len(name), 39)
+        text = "WIFI:T:ADB;S:" + name + ";P:" + "b" * 21 + ";;"
+        self.assertEqual(len(text), 78)
         self.assertEqual(qr_terminal.encode(text, "L")["version"], 4)
         self.assertEqual(len(qr_terminal.render(
             qr_terminal.encode(text, "L")).splitlines()), 21)
@@ -340,6 +370,10 @@ elif args[0] == "pair":
         print("Failed: Wrong password or connection was dropped.")
         sys.exit(1)
     assert args[2], "no pairing code"
+    expected = os.environ.get("FAKE_PAIR_CODE")
+    if expected and args[2] != expected:
+        print("Failed: Wrong password or connection was dropped.")
+        sys.exit(1)
     with open(os.path.join(state, "paired_mdns_count"), "w") as f:
         f.write(str(number("mdns_count")))
     touch("paired")
@@ -406,7 +440,7 @@ class InstallScriptTest(unittest.TestCase):
     def has_flag(self, name):
         return os.path.exists(os.path.join(self.state, name))
 
-    def run_install(self, *args, timeout=30, **env_extra):
+    def run_install(self, *args, timeout=30, stdin=None, **env_extra):
         env = dict(os.environ)
         env.update(ADB=self.adb, FAKE_ADB_STATE=self.state,
                    QR_INSTALL_PAIR_NAME="ADB_WIFI_testpair-abcdef",
@@ -415,21 +449,63 @@ class InstallScriptTest(unittest.TestCase):
         return subprocess.run(
             [os.path.join(TOOL_DIR, "qr_install.sh"), "--no-build",
              "--apk", self.apk, *args],
-            capture_output=True, text=True, timeout=timeout, env=env)
+            capture_output=True, text=True, timeout=timeout, env=env,
+            stdin=stdin)
 
     def test_pairs_and_installs(self):
-        result = self.run_install("--timeout", "10")
+        # The default flow asks for the six-digit code and never prints a
+        # Wi-Fi QR code, so it cannot take the phone off its network.
+        result = self.run_install("--pair-code", "123456", "--timeout", "10",
+                                  FAKE_PAIR_CODE="123456")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Pairing address: 192.168.7.42:37111", result.stdout)
         self.assertIn("Paired with 192.168.7.42", result.stdout)
         self.assertIn("Installed.", result.stdout)
         self.assertIn("Opened Harness", result.stdout)
+        self.assertNotIn("WIFI:T:ADB", result.stdout)
+        self.assertNotIn("\033[47;30m", result.stdout)
         calls = self.calls()
-        self.assertTrue(any(call.startswith("pair 192.168.7.42:37111 ") for call in calls))
+        self.assertTrue(any(call == "pair 192.168.7.42:37111 123456"
+                            for call in calls), calls)
         self.assertIn("connect 192.168.7.42:42345", calls)
         self.assertTrue(any(" install -r " + self.apk in call for call in calls))
         self.assertTrue(any("shell am start" in call for call in calls))
         self.assertTrue(self.has_flag("installed"))
         self.assertTrue(self.has_flag("launched"))
+
+    def test_qr_mode_still_pairs(self):
+        result = self.run_install("--qr", "--timeout", "10")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Pair device with QR code", result.stdout)
+        self.assertIn("\033[47;30m", result.stdout)
+        self.assertIn("Paired with 192.168.7.42", result.stdout)
+        self.assertIn("Installed.", result.stdout)
+        self.assertTrue(any(call.startswith("pair 192.168.7.42:37111 ")
+                            for call in self.calls()))
+
+    def test_a_wrong_pairing_code_is_explained(self):
+        result = self.run_install("--pair-code", "123456", "--timeout", "10",
+                                  FAKE_PAIR_CODE="654321")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("could not pair with 192.168.7.42:37111", result.stderr)
+        self.assertIn("Wrong password", result.stderr)
+
+    def test_pair_address_skips_mdns_discovery(self):
+        self.flag("no_pairing")
+        result = self.run_install("--pair-address", "192.168.7.42:37111",
+                                  "--pair-code", "123456", "--timeout", "10",
+                                  FAKE_PAIR_CODE="123456")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Pairing address: 192.168.7.42:37111", result.stdout)
+        self.assertIn("Installed.", result.stdout)
+
+    def test_explains_when_no_pairing_service_is_found(self):
+        self.flag("no_pairing")
+        result = self.run_install("--timeout", "2", stdin=subprocess.DEVNULL)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Could not find the phone's pairing service", result.stderr)
+        self.assertIn("--pair-address", result.stderr)
+        self.assertNotIn("\033[47;30m", result.stdout)
 
     def test_uses_an_already_connected_device(self):
         self.flag("preconnected")
@@ -460,7 +536,7 @@ class InstallScriptTest(unittest.TestCase):
         # service advertised.  The QR asks the phone for this service name, so
         # only that one may be paired.
         self.flag("stale_pairing")
-        result = self.run_install("--timeout", "10")
+        result = self.run_install("--qr", "--timeout", "10")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         calls = self.calls()
         self.assertFalse(any(call.startswith("pair 192.168.1.117:")
@@ -473,7 +549,7 @@ class InstallScriptTest(unittest.TestCase):
         # an old _adb-tls-connect service.  The old code connected to .117.
         self.flag("stale_connect")
         self.set_number("connect_after", 3)
-        result = self.run_install("--timeout", "15", FAKE_PHONE_IP="192.168.1.119")
+        result = self.run_install("--qr", "--timeout", "15", FAKE_PHONE_IP="192.168.1.119")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         calls = self.calls()
         self.assertFalse(any(call.startswith("connect 192.168.1.117:")
@@ -486,7 +562,7 @@ class InstallScriptTest(unittest.TestCase):
         # connect must not end the run.
         self.flag("stale_same_host")
         self.set_number("connect_after", 4)
-        result = self.run_install("--timeout", "15", FAKE_PHONE_IP="192.168.1.119")
+        result = self.run_install("--qr", "--timeout", "15", FAKE_PHONE_IP="192.168.1.119")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         calls = self.calls()
         self.assertIn("connect 192.168.1.119:46037", calls)
@@ -496,7 +572,7 @@ class InstallScriptTest(unittest.TestCase):
     def test_explains_when_the_debugging_port_does_not_open(self):
         self.flag("stale_connect")
         self.flag("no_phone_connect")
-        result = self.run_install("--timeout", "3", FAKE_PHONE_IP="192.168.1.119")
+        result = self.run_install("--qr", "--timeout", "3", FAKE_PHONE_IP="192.168.1.119")
         self.assertNotEqual(result.returncode, 0)
         calls = self.calls()
         self.assertFalse(any(call.startswith("connect 192.168.1.117:")
@@ -515,7 +591,7 @@ class InstallScriptTest(unittest.TestCase):
 
     def test_qr_timeout(self):
         self.flag("no_pairing")
-        result = self.run_install("--timeout", "2")
+        result = self.run_install("--qr", "--timeout", "2")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("timed out waiting for the phone", result.stderr)
 
@@ -523,7 +599,9 @@ class InstallScriptTest(unittest.TestCase):
         result = subprocess.run([os.path.join(TOOL_DIR, "qr_install.sh"), "--help"],
                                 capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0)
-        self.assertIn("Pair device with QR code", result.stdout)
+        self.assertIn("Pair device with pairing code", result.stdout)
+        self.assertIn("--qr", result.stdout)
+        self.assertIn("WIFI:T:ADB", result.stdout)
 
     def test_bad_timeout(self):
         result = self.run_install("--timeout", "soon")

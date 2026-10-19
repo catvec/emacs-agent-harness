@@ -1,17 +1,19 @@
 #!/usr/bin/env bash
 # Build the Harness Android app and install it on a phone over Wi-Fi, with no
-# USB cable.  The phone pairs as a wireless debugging device by scanning a QR
-# code shown here; adb then installs the APK over the local network.
+# USB cable.  The phone pairs as a wireless debugging device with the six-digit
+# pairing code it shows; adb then installs the APK over the local network.
 #
 #   tool/qr_install.sh                 build a release APK if needed, pair, install, launch
 #   tool/qr_install.sh --build         build first even if the APK is there
 #   tool/qr_install.sh --debug         use/build the debug APK
+#   tool/qr_install.sh --qr            pair by scanning a QR code instead of the
+#                                      six-digit code
 #   tool/qr_install.sh --serve         do not use adb: serve the APK and show its URL
 #                                      as a QR code, so a phone can download it
 #
 # On Android 11 or newer, turn on Developer options -> Wireless debugging and
-# tap "Pair device with QR code", then scan the code printed here.  The phone
-# and this computer must be on the same network.
+# open "Pair device with pairing code" (or, with --qr, "Pair device with QR
+# code").  The phone and this computer must be on the same network.
 set -euo pipefail
 
 tool_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -29,6 +31,9 @@ serve_address=""
 timeout=180
 image=auto
 connect_hint=""
+pair_mode=code
+pair_code=""
+pair_address=""
 # Tests set this to a known mDNS pairing name; normally it is random.
 pair_name_override="${QR_INSTALL_PAIR_NAME:-}"
 
@@ -37,7 +42,8 @@ usage() {
 Usage: tool/qr_install.sh [options]
 
 Build the Harness Android APK if needed and install it on a phone over Wi-Fi.
-The phone pairs with adb by scanning a QR code shown in this terminal.
+The phone pairs with adb through Wireless debugging; this terminal asks for the
+six-digit pairing code the phone shows.
 
 Options:
   --build          build the APK even when it already exists
@@ -46,13 +52,19 @@ Options:
   --apk PATH       install PATH (implies --no-build)
   --device SERIAL  install on an already connected device (its adb serial)
   --connect ADDR   connect to ADDR (IP:PORT, e.g. from Wireless debugging)
-                   instead of pairing by QR code
+                   instead of pairing
+  --qr             pair by scanning a wireless-debugging QR code instead of
+                   typing the six-digit code
+  --pair-code CODE the six digits shown by "Pair device with pairing code"
+                   (otherwise asked for when the phone is found)
+  --pair-address ADDR  the IP:PORT shown in that dialog, when mDNS cannot
+                   find the phone
   --no-launch      do not open the app after installing it
-  --no-image       do not open the large QR image in a viewer
+  --no-image       do not open the large QR image in a viewer (with --qr)
   --serve          serve the APK over HTTP and show its URL as a QR code
                    instead of pairing adb (the phone downloads and installs it)
   --address ADDR   with --serve, put ADDR in the URL instead of detecting it
-  --timeout N      seconds to wait for the phone to scan and connect (default 180)
+  --timeout N      seconds to wait for the phone to pair and connect (default 180)
   -h, --help       show this help
 
 Environment:
@@ -63,15 +75,22 @@ Environment:
                    which selects the SDK pinned in .flutter-version)
 
 Examples:
-  tool/qr_install.sh                  # release build, install, open
+  tool/qr_install.sh                  # release build, pair by code, install, open
   tool/qr_install.sh --build          # rebuild, then install
-  tool/qr_install.sh --connect 192.168.1.7:41234  # skip the QR, use this port
+  tool/qr_install.sh --qr             # pair by scanning a QR code instead
+  tool/qr_install.sh --connect 192.168.1.7:41234  # skip pairing, use this port
   tool/qr_install.sh --serve          # download over HTTP instead of adb
 
 Android 11 or newer: Settings -> System -> Developer options -> Wireless
-debugging -> Pair device with QR code.  The phone and this computer must be on
-the same network.  The QR code is also opened as a large image when this is a
-graphical terminal; --no-image keeps it text-only.
+debugging -> Pair device with pairing code.  Keep that dialog open; this script
+finds the phone with mDNS, asks for the six digits, then installs the app.  The
+phone and this computer must be on the same network.
+
+--qr shows the Android Studio-style pairing QR code instead.  That code is
+stored in Android's Wi-Fi QR format (WIFI:T:ADB;...), so scan it only from the
+Wireless debugging screen: a camera app can read it as a Wi-Fi network and take
+the phone off its current network.  The default pairing-code flow never sends a
+Wi-Fi QR code to the phone.
 EOF
 }
 
@@ -105,6 +124,17 @@ while [ $# -gt 0 ]; do
       connect_hint="$2"
       shift
       ;;
+    --qr) pair_mode=qr ;;
+    --pair-code)
+      [ $# -ge 2 ] || die "--pair-code needs the six digits shown on the phone"
+      pair_code="$2"
+      shift
+      ;;
+    --pair-address)
+      [ $# -ge 2 ] || die "--pair-address needs IP:PORT"
+      pair_address="$2"
+      shift
+      ;;
     --no-launch) launch=0 ;;
     --no-image) image=0 ;;
     --image) image=1 ;;
@@ -131,6 +161,16 @@ case "$timeout" in
   ""|*[!0-9]*) die "--timeout needs a positive number of seconds" ;;
 esac
 [ "$timeout" -gt 0 ] || die "--timeout needs a positive number of seconds"
+
+if [ -n "$pair_code" ]; then
+  case "$pair_code" in
+    [0-9][0-9][0-9][0-9][0-9][0-9]) ;;
+    *) die "--pair-code must be the six digits shown on the phone" ;;
+  esac
+fi
+if [ "$pair_mode" = qr ] && { [ -n "$pair_code" ] || [ -n "$pair_address" ]; }; then
+  die "--qr pairs by scanning a code; --pair-code and --pair-address are for the default code pairing"
+fi
 
 if [ -z "$apk" ]; then
   apk="$project_dir/build/app/outputs/flutter-apk/app-$build_mode.apk"
@@ -238,6 +278,7 @@ show_qr() {
   if [ "$tty_ok" = 1 ]; then
     printf '\033[2J\033[H'
     note "Wireless debugging > Pair device with QR code"
+    note "Scan it there, not with the camera app: a camera reads it as a Wi-Fi network."
   fi
   python3 "$tool_dir/qr_terminal.py" ${args[@]+"${args[@]}"} "$qrtext"
   note ""
@@ -306,20 +347,125 @@ if [ -z "$serial" ] && [ -n "$connect_hint" ]; then
   fi
 fi
 
-if [ -z "$serial" ]; then
-  read -r pair_name pair_password < <(python3 - "$pair_name_override" <<'PY'
-import secrets
-import string
-import sys
+# Find the phone's pairing dialog, or take the address the user read from it.
+# Sets pairing_addr.
+pairing_addr=""
+resolve_pairing_address() {
+  pairing_addr=""
+  if [ -n "$pair_address" ]; then
+    pairing_addr="$pair_address"
+    return 0
+  fi
+  local baseline all addr new_addr last_addr count start deadline
+  baseline=" $(pairing_addrs | tr '\n' ' ') "
+  start=$SECONDS
+  deadline=$((SECONDS + (timeout < 10 ? timeout : 10)))
+  count=0
+  last_addr=""
+  while :; do
+    all="$(pairing_addrs)"
+    new_addr=""
+    count=0
+    while IFS= read -r addr; do
+      [ -n "$addr" ] || continue
+      count=$((count + 1))
+      last_addr="$addr"
+      case "$baseline" in *" $addr "*) ;; *) new_addr="$addr" ;; esac
+    done <<< "$all"
+    # One service is the dialog the user just opened.  With several, prefer
+    # one that appeared after this run started; the others are stale.
+    if [ "$count" -eq 1 ]; then
+      pairing_addr="$(printf '%s\n' "$all" | head -n 1)"
+      clear_status
+      return 0
+    fi
+    if [ "$count" -gt 1 ] && [ -n "$new_addr" ]; then
+      pairing_addr="$new_addr"
+      clear_status
+      return 0
+    fi
+    [ "$SECONDS" -lt "$deadline" ] || break
+    status_line "Waiting for the phone's pairing dialog ... $((SECONDS - start))s"
+    sleep 1
+  done
+  clear_status
+  if [ "$count" -gt 0 ]; then
+    note "Several pairing services are advertised:"
+    while IFS= read -r addr; do
+      [ -n "$addr" ] && note "  $addr"
+    done <<< "$all"
+    pairing_addr="$last_addr"
+    note "Using the last one: $pairing_addr (pass --pair-address to choose another)."
+    return 0
+  fi
+  printf 'Type the IP:PORT shown by "Pair device with pairing code" (or Enter to cancel): '
+  read -r pairing_addr || true
+  [ -n "$pairing_addr" ] || {
+    note "Could not find the phone's pairing service with mDNS." >&2
+    note "Pass the IP:PORT shown by Pair device with pairing code with --pair-address." >&2
+    return 1
+  }
+  case "$pairing_addr" in
+    *:*) return 0 ;;
+    *) note "That is not an IP:PORT address." >&2; return 1 ;;
+  esac
+}
 
-alphabet = string.ascii_letters + string.digits
-name = sys.argv[1] or (
-    "ADB_WIFI_" + "".join(secrets.choice(alphabet) for _ in range(14)) + "-" +
-    "".join(secrets.choice(alphabet) for _ in range(6)))
-password = "".join(secrets.choice(alphabet) for _ in range(21))
-print(name, password)
-PY
-)
+# Pair with the six-digit code from "Pair device with pairing code".  This
+# sends no Wi-Fi QR code to the phone, so it cannot take it off its network.
+pair_with_code() {
+  cat <<EOF
+On the phone:
+  Settings -> System -> Developer options -> Wireless debugging
+  -> Pair device with pairing code.
+
+Keep that dialog open.  This computer finds the phone with mDNS, asks for the
+six digits, then installs the app.  The phone and this computer must be on the
+same network.
+EOF
+  resolve_pairing_address || exit 1
+  note "Pairing address: $pairing_addr"
+  local code="$pair_code" output
+  if [ -z "$code" ]; then
+    printf 'Six-digit pairing code shown on the phone: '
+    if [ -t 0 ]; then
+      read -r -s code || true
+      printf '\n'
+    else
+      read -r code || true
+      printf '\n'
+    fi
+  fi
+  [ -n "$code" ] || die "no pairing code given; pass --pair-code CODE (the six digits shown on the phone)"
+  case "$code" in
+    [0-9][0-9][0-9][0-9][0-9][0-9]) ;;
+    *) die "the pairing code must be six digits" ;;
+  esac
+  note "Pairing with $pairing_addr ..."
+  if output="$("$adb" pair "$pairing_addr" "$code" 2>&1)"; then
+    case "$output" in
+      *[Ss]uccess*) ;;
+      *) die "could not pair with $pairing_addr: $output" ;;
+    esac
+  else
+    die "could not pair with $pairing_addr: $output"
+  fi
+  paired="$pairing_addr"
+  guid="$(printf '%s\n' "$output" |
+    sed -n 's/.*\[guid=\([^]]*\)\].*/\1/p' | tail -n 1)"
+  paired_host="${paired%:*}"
+  note "Paired with $paired_host."
+}
+
+# Pair by scanning a QR code.  Android stores this code in the Wi-Fi QR format
+# (WIFI:T:ADB;...), even though it only carries a service name and password.
+# The service name is longer than the 32-byte Wi-Fi SSID limit, so a camera app
+# that reads the code as a network cannot join it; the wireless debugging
+# scanner passes the full name to mDNS, where 63 bytes are allowed.
+pair_with_qr() {
+  read -r pair_name pair_password < <(
+    python3 "$tool_dir/qr_terminal.py" --pairing "$pair_name_override"
+  )
   [ -n "$pair_name" ] && [ -n "$pair_password" ] || die "could not generate the pairing code"
   qrtext="WIFI:T:ADB;S:$pair_name;P:$pair_password;;"
 
@@ -328,8 +474,9 @@ On the phone:
   Settings -> System -> Developer options -> Wireless debugging
   -> Pair device with QR code, then scan this code.
 
-The phone and this computer must be on the same network.  Waiting up to
-$timeout seconds for the code to be scanned.
+Scan it from that screen, not with the camera app: the code is in Android's
+Wi-Fi QR format, and a camera can read it as a network to join.  The phone and
+this computer must be on the same network.  Waiting up to $timeout seconds.
 EOF
 
   # A pairing server left over from a previous try is not ours; its password
@@ -400,11 +547,14 @@ EOF
 
   paired_host="${paired%:*}"
   note "Paired with $paired_host."
+}
 
-  # Wireless debugging may publish its TLS port only after pairing.  The
-  # connect record can also be stale for a few seconds, so try every record
-  # for this phone, and only this phone, until one answers.
+# Wireless debugging may publish its TLS port only after pairing.  The connect
+# record can also be stale for a few seconds, so try every record for this
+# phone, and only this phone, until one answers.  Sets serial.
+wait_for_connection() {
   note "Waiting for the phone's debugging port ..."
+  local connect_start deadline last_connect_try last_connect_error connect_ok
   connect_start=$SECONDS
   deadline=$((SECONDS + timeout))
   last_connect_try=-10
@@ -480,6 +630,15 @@ EOF
     exit 1
   fi
   note "Connected to $serial."
+}
+
+if [ -z "$serial" ]; then
+  if [ "$pair_mode" = qr ]; then
+    pair_with_qr
+  else
+    pair_with_code
+  fi
+  wait_for_connection
 fi
 
 note "Installing ${apk##*/} on $serial ..."
