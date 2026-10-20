@@ -8,13 +8,15 @@ Run from harness_client:
 The QR encoder is checked against `qrencode' when it is installed (it builds
 the same symbols independently); the installer is driven with a fake adb so
 the pairing, connecting, installing and launching steps are all exercised
-without a phone.
+without a phone, and with a fake flutter so building, and repairing a pub
+cache that lost files, are exercised without the Flutter SDK.
 """
 
 from __future__ import annotations
 
 import http.client
 import io
+import json
 import os
 import re
 import shutil
@@ -30,6 +32,7 @@ from unittest import mock
 TOOL_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, TOOL_DIR)
 
+import check_pub_cache  # noqa: E402
 import qr_terminal  # noqa: E402
 import serve_apk  # noqa: E402
 
@@ -609,8 +612,22 @@ class InstallScriptTest(unittest.TestCase):
         self.assertIn("positive number of seconds", result.stderr)
 
 
-class BuildFreshnessTest(unittest.TestCase):
-    """The default run must not install an APK built before the app changed."""
+# A flutter that only builds: it logs its arguments and writes the APK.
+FAKE_BUILD_FLUTTER = '''#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >> "$FAKE_FLUTTER_LOG"
+out=build/app/outputs/flutter-apk/app-release.apk
+case " $* " in *" --debug "*) out=build/app/outputs/flutter-apk/app-debug.apk ;; esac
+mkdir -p "$(dirname "$out")"
+printf 'fresh apk\\n' > "$out"
+'''
+
+
+class BuildFixture(unittest.TestCase):
+    """The installer, copied into a project of its own, with a fake adb and a
+    fake flutter (FLUTTER, a script's source) that logs what it is asked."""
+
+    FLUTTER = FAKE_BUILD_FLUTTER
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="harness-qr-build-test-")
@@ -618,7 +635,8 @@ class BuildFreshnessTest(unittest.TestCase):
         self.tool = os.path.join(self.project, "tool")
         os.makedirs(self.tool)
         os.makedirs(os.path.join(self.project, "lib"))
-        for name in ("qr_install.sh", "qr_terminal.py", "serve_apk.py"):
+        for name in ("qr_install.sh", "qr_terminal.py", "serve_apk.py",
+                     "check_pub_cache.py"):
             shutil.copy2(os.path.join(TOOL_DIR, name),
                          os.path.join(self.tool, name))
         self.script = os.path.join(self.tool, "qr_install.sh")
@@ -647,14 +665,7 @@ class BuildFreshnessTest(unittest.TestCase):
         self.flutter_log = os.path.join(self.tmp, "flutter.log")
         self.flutter = os.path.join(self.tmp, "flutter")
         with open(self.flutter, "w") as f:
-            f.write('''#!/usr/bin/env bash
-set -euo pipefail
-printf '%s\\n' "$*" >> "$FAKE_FLUTTER_LOG"
-out=build/app/outputs/flutter-apk/app-release.apk
-case " $* " in *" --debug "*) out=build/app/outputs/flutter-apk/app-debug.apk ;; esac
-mkdir -p "$(dirname "$out")"
-printf 'fresh apk\\n' > "$out"
-''')
+            f.write(self.FLUTTER)
         os.chmod(self.flutter, 0o755)
 
     def tearDown(self):
@@ -677,10 +688,12 @@ printf 'fresh apk\\n' > "$out"
         except FileNotFoundError:
             return []
 
-    def run_install(self, *args):
+    def run_install(self, *args, **env_extra):
         env = dict(os.environ)
         env.update(ADB=self.adb, FAKE_ADB_STATE=self.state,
-                   FLUTTER=self.flutter, FAKE_FLUTTER_LOG=self.flutter_log)
+                   FLUTTER=self.flutter, FAKE_FLUTTER_LOG=self.flutter_log,
+                   FAKE_PUB_CACHE=os.path.join(self.tmp, "pub-cache"))
+        env.update(env_extra)
         return subprocess.run(
             [self.script, "--timeout", "10", "--no-launch", *args],
             capture_output=True, text=True, timeout=30, env=env,
@@ -689,6 +702,10 @@ printf 'fresh apk\\n' > "$out"
     def set_age(self, path, offset):
         stamp = time.time() + offset
         os.utime(path, (stamp, stamp))
+
+
+class BuildFreshnessTest(BuildFixture):
+    """The default run must not install an APK built before the app changed."""
 
     def test_missing_apk_builds_and_installs(self):
         result = self.run_install()
@@ -775,6 +792,401 @@ printf 'fresh apk\\n' > "$out"
         self.assertEqual(result.returncode, 0)
         self.assertIn("up to date", result.stdout)
         self.assertIn("newer than it", result.stdout)
+
+
+class PubCacheCheckTest(unittest.TestCase):
+    """check_pub_cache finds packages that lost files that `pub get` trusts."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="harness-pub-check-test-")
+        self.project = os.path.join(self.tmp, "app")
+        self.cache = os.path.join(self.tmp, "pub cache", "hosted", "pub.dev")
+        os.makedirs(os.path.join(self.project, "lib"))
+        os.makedirs(os.path.join(self.project, "test"))
+        os.makedirs(os.path.join(self.project, ".dart_tool"))
+        self.packages = {}
+        self.add_package("widget_kit", "1.2.3",
+                         ["lib/widget_kit.dart", "lib/src/impl.dart"])
+        # Like cupertino_icons: only assets, no lib/ at all.
+        self.add_package("icon_font", "0.1.0", ["assets/icons.ttf"])
+        self.write("lib/app.dart",
+                   "import 'package:widget_kit/widget_kit.dart' as kit;\n")
+        self.write_config()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def write(self, relative, text):
+        path = os.path.join(self.project, relative)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(text)
+
+    def add_package(self, name, version, files, root=None, pubspec=True):
+        root = root or os.path.join(self.cache, f"{name}-{version}")
+        for relative in files + (["pubspec.yaml"] if pubspec else []):
+            path = os.path.join(root, relative)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as f:
+                f.write("x\n")
+        self.packages[name] = root
+        return root
+
+    def write_config(self, uri=lambda root: "file://" + root.replace(" ", "%20")):
+        entries = [{"name": name, "rootUri": uri(root), "packageUri": "lib/"}
+                   for name, root in self.packages.items()]
+        entries.append({"name": "app", "rootUri": "../", "packageUri": "lib/"})
+        with open(os.path.join(self.project, ".dart_tool",
+                               "package_config.json"), "w") as f:
+            json.dump({"configVersion": 2, "packages": entries}, f)
+
+    def check(self):
+        return check_pub_cache.incomplete_packages(self.project)
+
+    def only_problem(self):
+        problems = self.check()
+        self.assertEqual(len(problems), 1, problems)
+        return problems[0]
+
+    def test_a_complete_cache_is_fine(self):
+        # icon_font has no lib/, and that is not damage.
+        self.assertEqual(self.check(), [])
+
+    def test_nothing_cached_yet_is_fine(self):
+        os.unlink(os.path.join(self.project, ".dart_tool", "package_config.json"))
+        self.assertEqual(self.check(), [])
+
+    def test_a_library_that_was_emptied_is_found(self):
+        # What a reinstall that was stopped half way leaves: lib/ is there and
+        # `pub get` still says "Got dependencies!", but its files are gone.
+        library = os.path.join(self.packages["widget_kit"], "lib")
+        shutil.rmtree(library)
+        os.mkdir(library)
+        root, label, problem = self.only_problem()
+        self.assertEqual(root, self.packages["widget_kit"])
+        self.assertEqual(label, "widget_kit 1.2.3")
+        self.assertEqual(problem, "lib/ is empty")
+
+    def test_an_emptied_library_is_found_even_when_nothing_imports_it(self):
+        self.write("lib/app.dart", "void main() {}\n")
+        shutil.rmtree(os.path.join(self.packages["widget_kit"], "lib", "src"))
+        os.unlink(os.path.join(self.packages["widget_kit"], "lib", "widget_kit.dart"))
+        self.assertEqual(self.only_problem()[2], "lib/ is empty")
+
+    def test_a_library_that_is_gone_is_found_when_the_app_imports_it(self):
+        shutil.rmtree(os.path.join(self.packages["widget_kit"], "lib"))
+        self.assertEqual(self.only_problem()[2], "lib/widget_kit.dart is missing")
+
+    def test_a_missing_file_the_app_imports_is_found(self):
+        os.unlink(os.path.join(self.packages["widget_kit"], "lib", "widget_kit.dart"))
+        self.assertEqual(self.only_problem()[2], "lib/widget_kit.dart is missing")
+
+    def test_a_missing_file_nothing_imports_is_not_looked_for(self):
+        os.unlink(os.path.join(self.packages["widget_kit"], "lib", "src", "impl.dart"))
+        self.assertEqual(self.check(), [])
+
+    def test_a_package_without_a_pubspec_is_found(self):
+        os.unlink(os.path.join(self.packages["widget_kit"], "pubspec.yaml"))
+        self.assertEqual(self.only_problem()[2], "pubspec.yaml is missing")
+
+    def test_a_package_that_is_not_there_is_left_to_pub_get(self):
+        shutil.rmtree(self.packages["widget_kit"])
+        self.assertEqual(self.check(), [])
+
+    def test_only_packages_in_the_hosted_cache_are_checked(self):
+        # A path dependency or an SDK package can have an empty lib/ (or none)
+        # for reasons of its own, and `pub cache repair` cannot fix it.
+        sibling = self.add_package("local_kit", "0.0.1", [],
+                                   root=os.path.join(self.tmp, "local_kit"))
+        os.makedirs(os.path.join(sibling, "lib"))
+        self.write_config(lambda root: os.path.relpath(
+            root, os.path.join(self.project, ".dart_tool")).replace(os.sep, "/")
+            if root == sibling else "file://" + root.replace(" ", "%20"))
+        self.assertEqual(self.check(), [])
+
+    def test_relative_and_encoded_root_uris_are_resolved(self):
+        library = os.path.join(self.packages["widget_kit"], "lib")
+        shutil.rmtree(library)
+        os.mkdir(library)
+        for uri in (lambda root: os.path.relpath(
+                        root, os.path.join(self.project, ".dart_tool")),
+                    lambda root: "file://" + root.replace(" ", "%20")):
+            self.write_config(uri)
+            self.assertEqual(self.only_problem()[1], "widget_kit 1.2.3")
+
+    def test_imports_are_read_from_lib_and_test(self):
+        self.write("lib/app.dart", "void main() {}\n")
+        self.write("test/app_test.dart",
+                   "import 'package:widget_kit/testing.dart';\n")
+        self.assertEqual(self.only_problem()[2], "lib/testing.dart is missing")
+
+    def test_alternatives_of_a_conditional_import_are_read(self):
+        self.write("lib/app.dart", "import 'stub.dart'\n"
+                   "    if (dart.library.io) 'package:widget_kit/io.dart'\n"
+                   "    if (dart.library.html) \"package:widget_kit/widget_kit.dart\";\n")
+        self.assertEqual(self.only_problem()[2], "lib/io.dart is missing")
+
+    def test_exports_count_and_comments_do_not(self):
+        self.write("lib/app.dart", "/// import 'package:widget_kit/commented.dart';\n"
+                   "// import 'package:widget_kit/also_commented.dart';\n"
+                   "export 'package:widget_kit/exported.dart' show Thing;\n")
+        self.assertEqual(self.only_problem()[2], "lib/exported.dart is missing")
+
+    def test_an_unreadable_configuration_is_an_error(self):
+        with open(os.path.join(self.project, ".dart_tool",
+                               "package_config.json"), "w") as f:
+            f.write("{not json")
+        with self.assertRaises(check_pub_cache.CheckError):
+            self.check()
+
+    def run_cli(self, *args):
+        return subprocess.run(
+            [sys.executable, "-I", os.path.join(TOOL_DIR, "check_pub_cache.py"),
+             *args], capture_output=True, text=True, timeout=20)
+
+    def test_cli_is_quiet_when_all_is_well(self):
+        result = self.run_cli(self.project)
+        self.assertEqual((result.returncode, result.stdout, result.stderr),
+                         (0, "", ""))
+
+    def test_cli_lists_what_is_wrong(self):
+        library = os.path.join(self.packages["widget_kit"], "lib")
+        shutil.rmtree(library)
+        os.mkdir(library)
+        result = self.run_cli(self.project)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("widget_kit 1.2.3: lib/ is empty", result.stdout)
+        self.assertIn(self.packages["widget_kit"], result.stdout)
+        self.assertIn("`flutter pub get` counts them as installed", result.stdout)
+
+    def test_cli_reports_an_unreadable_configuration(self):
+        with open(os.path.join(self.project, ".dart_tool",
+                               "package_config.json"), "w") as f:
+            f.write("[]")
+        result = self.run_cli(self.project)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("cannot read", result.stderr)
+
+    def test_cli_rejects_unknown_options(self):
+        result = self.run_cli("--fix")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("check_pub_cache.py [PROJECT]", result.stderr)
+
+    def test_cli_help(self):
+        result = self.run_cli("--help")
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("Find packages in the pub cache that lost their files",
+                      result.stdout)
+
+
+# A flutter that keeps its packages in $FAKE_PUB_CACHE the way pub does: `pub
+# get` downloads a package only when its directory is absent and trusts one
+# that is there, `pub cache repair` reinstalls them all, and `build apk` fails
+# the way the compiler does when a file of a package is gone.
+FAKE_PUB_FLUTTER = r"""#!/usr/bin/env python3
+import json
+import os
+import shutil
+import sys
+
+args = sys.argv[1:]
+with open(os.environ["FAKE_FLUTTER_LOG"], "a") as log:
+    log.write(" ".join(args) + "\n")
+cache = os.path.join(os.environ["FAKE_PUB_CACHE"], "hosted", "pub.dev")
+# name: (version, whether it has a lib/)
+PACKAGES = {"widget_kit": ("1.2.3", True), "icon_font": ("0.1.0", False)}
+
+
+def directory(name):
+    return os.path.join(cache, name + "-" + PACKAGES[name][0])
+
+
+def install(name):
+    version, has_lib = PACKAGES[name]
+    shutil.rmtree(directory(name), ignore_errors=True)
+    os.makedirs(directory(name))
+    with open(os.path.join(directory(name), "pubspec.yaml"), "w") as f:
+        f.write("name: " + name + "\nversion: " + version + "\n")
+    if has_lib:
+        os.makedirs(os.path.join(directory(name), "lib", "src"))
+        for relative in (name + ".dart", "src/impl.dart"):
+            with open(os.path.join(directory(name), "lib", relative), "w") as f:
+                f.write("// code\n")
+
+
+def pub_get():
+    for name in PACKAGES:
+        if not os.path.isdir(directory(name)):
+            install(name)
+    entries = [{"name": name, "rootUri": "file://" + directory(name),
+                "packageUri": "lib/"} for name in PACKAGES]
+    entries.append({"name": "app", "rootUri": "../", "packageUri": "lib/"})
+    os.makedirs(".dart_tool", exist_ok=True)
+    with open(".dart_tool/package_config.json", "w") as f:
+        json.dump({"configVersion": 2, "packages": entries}, f)
+
+
+if args[:2] == ["pub", "get"]:
+    pub_get()
+elif args[:3] == ["pub", "cache", "repair"]:
+    if os.environ.get("FAKE_REPAIR_BROKEN"):
+        sys.exit(0)
+    failed = False
+    for name in PACKAGES:
+        if (os.path.isdir(directory(name)) and
+                not os.path.isfile(os.path.join(directory(name), "pubspec.yaml"))):
+            # Like pub: it cannot load the package, but it removes it.
+            print('Failed to load package: Could not find a file named '
+                  '"pubspec.yaml" in "' + directory(name) + '".')
+            shutil.rmtree(directory(name))
+            failed = True
+        else:
+            install(name)
+    sys.exit(69 if failed else 0)
+elif args[:2] == ["build", "apk"]:
+    pub_get()
+    if os.environ.get("FAKE_BUILD_FAILS"):
+        print("FAILURE: Build failed with an exception.", file=sys.stderr)
+        sys.exit(3)
+    for name, (version, has_lib) in PACKAGES.items():
+        library = os.path.join(directory(name), "lib", name + ".dart")
+        if has_lib and not os.path.isfile(library):
+            print("lib/app.dart:1:8: Error: Error when reading '" + library +
+                  "': No such file or directory", file=sys.stderr)
+            print("Target kernel_snapshot_program failed: Exception",
+                  file=sys.stderr)
+            sys.exit(1)
+    out = "build/app/outputs/flutter-apk/app-release.apk"
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    with open(out, "w") as f:
+        f.write("fresh apk\n")
+else:
+    sys.exit(2)
+"""
+
+
+class PubCacheRepairTest(BuildFixture):
+    """A package that lost its files must not stop the install, nor be built on."""
+
+    FLUTTER = FAKE_PUB_FLUTTER
+
+    def setUp(self):
+        super().setUp()
+        self.app = os.path.join(self.project, "lib", "app.dart")
+        with open(self.app, "w") as f:
+            f.write("import 'package:widget_kit/widget_kit.dart';\n")
+        self.cache = os.path.join(self.tmp, "pub-cache", "hosted", "pub.dev")
+        self.widget_kit = os.path.join(self.cache, "widget_kit-1.2.3")
+
+    def fake_flutter(self, *args):
+        env = dict(os.environ, FAKE_FLUTTER_LOG=self.flutter_log,
+                   FAKE_PUB_CACHE=os.path.join(self.tmp, "pub-cache"))
+        subprocess.run([self.flutter, *args], cwd=self.project, env=env,
+                       check=True, capture_output=True)
+
+    def cached_before_the_first_build(self):
+        """A fresh checkout whose pub cache is full, but nothing says where."""
+        self.fake_flutter("pub", "get")
+        shutil.rmtree(os.path.join(self.project, ".dart_tool"))
+        os.unlink(self.flutter_log)
+
+    def built_before_the_app_changed(self):
+        """A built app and a package configuration, and then an app change."""
+        first = self.run_install()
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        os.unlink(self.flutter_log)
+        self.set_age(self.apk, -60)
+        self.set_age(self.app, 0)
+
+    def empty(self, directory):
+        shutil.rmtree(directory)
+        os.mkdir(directory)
+
+    def test_a_damaged_cache_is_repaired_before_the_build(self):
+        self.built_before_the_app_changed()
+        self.empty(os.path.join(self.widget_kit, "lib"))
+        result = self.run_install()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("widget_kit 1.2.3: lib/ is empty", result.stdout)
+        self.assertIn("Reinstalling the packages in pubspec.lock", result.stdout)
+        self.assertEqual(self.builds(), ["pub cache repair", "pub get",
+                                         "build apk --release"])
+        self.assertTrue(os.path.isfile(
+            os.path.join(self.widget_kit, "lib", "widget_kit.dart")))
+        self.assertIn("Installed.", result.stdout)
+
+    def test_damage_that_only_the_failed_build_shows_is_repaired(self):
+        self.cached_before_the_first_build()
+        self.empty(os.path.join(self.widget_kit, "lib"))
+        result = self.run_install()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        # The first build is the one that wrote the package configuration.
+        self.assertEqual(self.builds(), [
+            "build apk --release", "pub cache repair", "pub get",
+            "build apk --release"])
+        self.assertIn("Error when reading", result.stderr)
+        self.assertIn("widget_kit 1.2.3: lib/ is empty", result.stdout)
+        self.assertIn("Building the release APK again", result.stdout)
+        self.assertIn("Installed.", result.stdout)
+
+    def test_a_package_that_is_only_a_hollow_directory_is_reinstalled(self):
+        # `pub cache repair` fails for it (no pubspec.yaml to load) but removes
+        # it, and `pub get` downloads it again.
+        self.built_before_the_app_changed()
+        shutil.rmtree(self.widget_kit)
+        os.makedirs(os.path.join(self.widget_kit, "lib"))
+        result = self.run_install()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("widget_kit 1.2.3: pubspec.yaml is missing", result.stdout)
+        self.assertEqual(self.builds(), ["pub cache repair", "pub get",
+                                         "build apk --release"])
+        self.assertTrue(os.path.isfile(
+            os.path.join(self.widget_kit, "pubspec.yaml")))
+
+    def test_a_complete_cache_is_left_alone(self):
+        self.built_before_the_app_changed()
+        result = self.run_install()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.builds(), ["build apk --release"])
+        self.assertNotIn("Reinstalling", result.stdout)
+        self.assertNotIn("incomplete", result.stdout)
+
+    def test_a_failed_build_that_is_not_the_cache_is_not_retried(self):
+        self.built_before_the_app_changed()
+        result = self.run_install(FAKE_BUILD_FAILS="1")
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertEqual(self.builds(), ["build apk --release"])
+        self.assertIn("The build failed", result.stderr)
+        self.assertIn("pub cache repair", result.stderr)
+        self.assertNotIn("Installing", result.stdout)
+
+    def test_a_cache_that_stays_broken_stops_after_one_repair(self):
+        self.cached_before_the_first_build()
+        self.empty(os.path.join(self.widget_kit, "lib"))
+        result = self.run_install(FAKE_REPAIR_BROKEN="1")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(self.builds(), [
+            "build apk --release", "pub cache repair", "pub get"])
+        self.assertIn("still incomplete", result.stderr)
+        self.assertIn(self.widget_kit, result.stdout)
+        self.assertNotIn("Installing", result.stdout)
+
+    def test_a_known_broken_cache_that_cannot_be_repaired_still_builds(self):
+        # The package configuration may be stale; the build is the judge.
+        self.built_before_the_app_changed()
+        self.empty(os.path.join(self.widget_kit, "lib"))
+        result = self.run_install(FAKE_REPAIR_BROKEN="1")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("Building anyway", result.stdout)
+        self.assertEqual(self.builds(), [
+            "pub cache repair", "pub get", "build apk --release",
+            "pub cache repair", "pub get"])
+
+    def test_help_describes_the_cache_repair(self):
+        result = subprocess.run([self.script, "--help"], capture_output=True,
+                                text=True, timeout=10)
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("pub cache repair", result.stdout)
 
 
 if __name__ == "__main__":

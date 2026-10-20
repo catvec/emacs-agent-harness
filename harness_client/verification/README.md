@@ -33,6 +33,13 @@
   large image the viewer opens; `qr-install-serve.png` is the `--serve`
   download mode.  The QR decodes back to the exact pairing text in every
   capture.
+- `pub-cache-repair.txt` — the build that stops with `Error when reading
+  '.../.pub-cache/.../shared_preferences-2.5.6/lib/shared_preferences.dart': No
+  such file or directory` right after `pub get` said "Got dependencies!": how a
+  package loses its files without pub noticing, reproduced with the real
+  Flutter SDK, and `tool/qr_install.sh` finding the package, reinstalling the
+  packages of `pubspec.lock` with `flutter pub cache repair` and finishing the
+  install.
 
 The toolchain pieces above are reproducible: `tool/install_flutter.sh` installs
 the pinned Flutter SDK under `~/.local/share/flutter-versions` and installs the

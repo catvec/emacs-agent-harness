@@ -126,7 +126,9 @@ is older than the app sources: a change under `lib/`, `assets/` or `android/`,
 or to `pubspec.yaml`, `pubspec.lock` or `.flutter-version`, triggers a build.
 That matters because an APK left over from an earlier run would otherwise keep
 the phone on old code even after the app was fixed. The phone pairs as a
-wireless debugging device, then adb installs the APK and opens the app:
+wireless debugging device, then adb installs the APK and opens the app. A
+build that fails because a package in the pub cache lost its files is repaired
+and run again (see *Building the apps*):
 
 ```sh
 tool/qr_install.sh                 # build if stale, pair by code, install, open
@@ -254,7 +256,8 @@ lib/src/models/       sessions, transcript reducer, tasks, usage, activity
 lib/src/services/     typed HarnessApi over ACP and _harness
 lib/src/state/        connection, sessions, tasks, usage, interactions
 lib/src/ui/           adaptive widgets, theme, screens and transcript widgets
-tool/                 preview ACP server, real-harness probe, QR phone installer
+tool/                 preview ACP server, real-harness probe, phone installer,
+                      pub cache check
 test/                 unit, reducer and widget-flow tests
 e2e/                  Playwright mobile-emulated flows and screenshots
 ```
@@ -281,7 +284,8 @@ flutter test                       # 27 tests: ACP, capabilities, reducer,
                                    # connection parsing, boot, widget flows
 python3 tool/test_qr_tools.py      # QR encoder against qrencode, the phone
                                    # installer (pairing, install, build
-                                   # freshness) with a fake adb, the APK server
+                                   # freshness, pub cache repair) with a fake
+                                   # adb and flutter, the APK server
 ```
 
 The widget tests drive the real `AcpClient` against an in-memory ACP server
@@ -367,6 +371,28 @@ The Android build in this checkout used JDK 21 and Android SDK 36; set
 `JAVA_HOME` and `ANDROID_HOME` accordingly. Release builds use the generated
 debug signing config so they install for testing; replace it before publishing.
 The icon is generated from `assets/icon.png` with `dart run flutter_launcher_icons`.
+
+A build that stops with
+
+```
+Error: Error when reading '.../.pub-cache/hosted/pub.dev/NAME-VERSION/lib/NAME.dart': No such file or directory
+Target kernel_snapshot_program failed: Exception
+```
+
+straight after `flutter pub get` said "Got dependencies!" means a package in the
+pub cache lost its files. `pub get` counts a package as installed once its
+directory is in the cache and never looks inside, so it does not notice. A tool
+that was told to reinstall a package and was stopped half way leaves exactly
+this behind: a sandboxed shell sees only the parts of `~/.pub-cache` that were
+mounted into it, so pub tries to reinstall what it cannot see and deletes the
+real files of a directory that was mounted (in such a shell, set `PUB_CACHE`
+to a scratch directory).
+
+In this directory, `flutter pub cache repair` reinstalls the packages in
+`pubspec.lock`. It removes a package whose directory is empty and reports it as
+failed, so follow it with `flutter pub get`. `tool/qr_install.sh` does both by
+itself, before the build when `python3 tool/check_pub_cache.py` (which lists the
+incomplete packages) finds one, and after a build that failed.
 
 ## Preview server
 

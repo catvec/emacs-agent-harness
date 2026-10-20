@@ -51,6 +51,12 @@ A default run builds the APK when it is missing, or when a source file (under
 lib/, assets/ or android/, or pubspec.yaml, pubspec.lock or .flutter-version)
 is newer than it.  That keeps an install from silently carrying an old app.
 
+A build that fails with "Error when reading '.../.pub-cache/...': No such file
+or directory" means a package in the pub cache lost its files, which "flutter
+pub get" does not notice.  The script looks for such packages before the build
+and after a failed one, reinstalls the packages in pubspec.lock with "flutter
+pub cache repair", and builds again.
+
 Options:
   --build          build the APK even when it is up to date
   --no-build       never build; fail when the APK is missing
@@ -204,6 +210,63 @@ stale_source() {
   return 0
 }
 
+# `flutter pub get` counts a package as installed when its directory is in the
+# pub cache; it never looks inside.  A package that lost its files (a tool
+# that was told to reinstall it and was stopped half way will do that) still
+# gets "Got dependencies!", and the build then fails with
+#   Error: Error when reading '.../.pub-cache/.../lib/x.dart': No such file or directory
+# check_pub_cache.py finds such packages from .dart_tool/package_config.json
+# and prints them.  True when it did; false when it found none or could not
+# tell (it says why on stderr, and the build is the judge then).
+incomplete_packages() {
+  local status=0
+  python3 "$tool_dir/check_pub_cache.py" "$project_dir" || status=$?
+  [ "$status" -eq 1 ]
+}
+
+# Reinstall the packages in pubspec.lock; true when none is incomplete after.
+# "pub cache repair" exits non-zero for a package whose directory is empty (it
+# cannot read the pubspec.yaml) but still removes that directory, and "pub get"
+# downloads it again, so only the check afterwards tells whether it worked.
+repair_pub_cache() {
+  note "Reinstalling the packages in pubspec.lock (flutter pub cache repair) ..."
+  "$flutter" pub cache repair || true
+  "$flutter" pub get || true
+  ! incomplete_packages
+}
+
+# Build the APK.  A pub cache that is already known to be damaged is repaired
+# first; one that only shows after the build failed is repaired then, and the
+# build is tried once more.
+build_apk() {
+  local status=0
+  if incomplete_packages; then
+    repair_pub_cache || note "Building anyway; the build says whether that matters."
+  fi
+  "$flutter" build apk "--$build_mode" || status=$?
+  [ "$status" -ne 0 ] || return 0
+
+  # The build ran pub get, so the package configuration is current now.
+  if incomplete_packages; then
+    if repair_pub_cache; then
+      note "Building the $build_mode APK again ..."
+      status=0
+      "$flutter" build apk "--$build_mode" || status=$?
+      [ "$status" -ne 0 ] || return 0
+    else
+      note "The packages above are still incomplete: delete their directories," >&2
+      note "then run \"flutter pub get\" in $project_dir and try again." >&2
+    fi
+  else
+    note "" >&2
+    note "The build failed.  If the errors above name a file in the pub cache (.pub-cache)" >&2
+    note "that does not exist, a package there lost files that could not be found by" >&2
+    note "looking.  Reinstall every package in pubspec.lock with:" >&2
+    note "  (cd $project_dir && $flutter pub cache repair)" >&2
+  fi
+  exit "$status"
+}
+
 build_reason=""
 if [ "$build" != never ]; then
   if [ ! -f "$apk" ]; then
@@ -225,7 +288,7 @@ if [ -n "$build_reason" ]; then
     flutter="$(command -v flutter || true)"
   fi
   [ -n "$flutter" ] || die "Flutter not found; run tool/install_flutter.sh first or set FLUTTER"
-  "$flutter" build apk "--$build_mode"
+  build_apk
 fi
 [ -f "$apk" ] || die "APK not found: $apk (run without --no-build to build it)"
 
