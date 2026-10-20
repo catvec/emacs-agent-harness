@@ -24,15 +24,18 @@
 - `qr-install.txt` — the phone installer: the tool tests, the encoder checked
   against qrencode and the harness's own encoder, the foreign-host and
   stale-port mDNS regressions that caused `192.168.1.117:46037` to be tried,
-  and a full install through a fake adb.  It also covers the Wi-Fi-disconnect
-  fix: the default pairing-code flow sends no QR code, and `--qr` uses a
-  service name longer than a Wi-Fi SSID so a camera cannot join it as a
-  network.  `qr-install-code.png` is the default pairing-code run;
-  `qr-install-scan.png` is the `--qr` screen being scanned, with its warning;
-  `qr-install.png` is a finished `--qr` run; `qr-install-large.png` is the
-  large image the viewer opens; `qr-install-serve.png` is the `--serve`
-  download mode.  The QR decodes back to the exact pairing text in every
-  capture.
+  and a full install through a fake adb.  It covers the report "why doesn't qr
+  install show a qr code anymore?": a plain run shows the QR code again (the
+  six-digit code is `--code`), with what AOSP's Wireless debugging scanner does
+  with it, and the Wi-Fi-disconnect hardening that stays (a service name longer
+  than a Wi-Fi SSID, so a camera cannot join it as a network).
+  `qr-install-default.png` is a plain run in a real terminal waiting for the
+  scan, and `qr-install-default-done.png` the same run once paired;
+  `qr-install-code.png` is the `--code` (six-digit) flow;
+  `qr-install-scan.png` and `qr-install.png` are earlier renderings of the QR
+  screen and a finished run; `qr-install-large.png` is the large image the
+  viewer opens; `qr-install-serve.png` is the `--serve` download mode.  The QR
+  decodes back to the exact pairing text in every capture.
 - `pub-cache-repair.txt` — the build that stops with `Error when reading
   '.../.pub-cache/.../shared_preferences-2.5.6/lib/shared_preferences.dart': No
   such file or directory` right after `pub get` said "Got dependencies!": how a

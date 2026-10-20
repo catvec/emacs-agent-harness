@@ -3,124 +3,22 @@
 Run on 2026-10-19 from `harness_client` in the task worktree.  No phone or
 Android SDK is visible to this sandbox, so the adb side is a fake adb that
 prints the same mDNS, pair, connect and install output a phone/adb would; the
-QR side is checked independently against `qrencode`, `zxing-cpp` and the
-harness's own encoder.
+QR side is checked independently against `qrencode`, `ZXingReader` (zxing-cpp)
+and the harness's own encoder.  The terminal captures are of the real
+`tool/qr_install.sh` in a real tty (an Emacs `term` buffer in the worktree's dev
+harness, photographed with `scripts/dev.sh shot`, and a pty driven by a script),
+not mock-ups.
 
-## The failure this fixes
+## The report: a plain run no longer showed a QR code
 
-The installer used to show only the Android wireless-debugging QR code:
+> why doesnt qr install show a qr code anymore? qr code pair is an option in adb
 
-```text
-WIFI:T:ADB;S:ADB_WIFI_...;P:...;;
-```
-
-That is a Wi-Fi QR code by design: `S:` carries an mDNS service name and `P:`
-the pairing password, but Android's camera/QR stack can also read it as a Wi-Fi
-network called `ADB_WIFI_...` and a network password.  Scanning it with a
-camera (rather than *Wireless debugging -> Pair device with QR code*) makes the
-phone leave its current Wi-Fi to join that network.
-
-The fixes:
-
-- **The default flow no longer sends a QR code.**  It pairs with the six-digit
-  code from *Wireless debugging -> Pair device with pairing code*: the script
-  finds the phone's `_adb-tls-pairing._tcp` service over mDNS, asks for the six
-  digits, and runs `adb pair ADDRESS CODE`.  No Wi-Fi credential is ever shown
-  or scanned.  `--pair-address IP:PORT` and `--pair-code CODE` allow a
-  non-interactive run or bypass mDNS.
-- `--qr` keeps the one-scan flow but makes the code unusable as a Wi-Fi
-  network.  The service name is now `studio-` plus 32 random characters (39
-  bytes): longer than the 32-byte Wi-Fi SSID limit, so a camera cannot join it,
-  but still a valid mDNS instance name (63 bytes) that the wireless-debugging
-  scanner passes through.  The screen also warns to scan it from *Wireless
-  debugging*, not with the camera app.
-- The QR is still error-correction level L, version 4 (33 modules, 41 with the
-  quiet zone), so it stays as easy to scan as before.
-- The earlier fixes are kept: the code is shown on a cleared screen, the
-  progress is one overwritten line, pairing matches the QR's own service name,
-  connect services are restricted to the phone that paired (address or guid),
-  refused ports are retried, and `--connect` remains the recovery path.
-
-## Unit and end-to-end tests
+A plain `tool/qr_install.sh` printed the *Pair device with pairing code*
+instructions and a `Six-digit pairing code shown on the phone:` prompt, and
+never drew a QR code (this is the script as it was at `HEAD`, run against the
+same fake adb):
 
 ```text
-$ python3 tool/test_qr_tools.py
-test_a_wrong_pairing_code_is_explained ... ok
-test_bad_timeout ... ok
-test_connect_address_skips_pairing ... ok
-test_explains_when_no_pairing_service_is_found ... ok
-test_explains_when_the_debugging_port_does_not_open ... ok
-test_help ... ok
-test_ignores_connect_service_of_another_host ... ok
-test_install_failure_is_explained ... ok
-test_no_launch ... ok
-test_pair_address_skips_mdns_discovery ... ok
-test_pairing_skips_another_pairing_server ... ok
-test_pairs_and_installs ... ok
-test_qr_mode_still_pairs ... ok
-test_qr_timeout ... ok
-test_retries_a_stale_port_on_the_same_host ... ok
-test_uses_an_already_connected_device ... ok
-test_ansi_render ... ok
-test_large_image_uses_a_viewer ... ok
-test_largest_version ... ok
-test_masks_differ ... ok
-test_multibyte_text_is_utf8 ... ok
-test_pairing_cli ... ok
-test_pairing_code_is_compact_at_level_l ... ok
-test_pairing_credentials_are_not_a_wifi_ssid ... ok
-test_pairing_credentials_take_an_override ... ok
-test_png_cli ... ok
-test_png_dimensions_and_pixels ... ok
-test_size_and_quiet_zone ... ok
-test_symbols_match_qrencode ... ok
-test_too_much_text ... ok
-test_version_grows_with_the_text ... ok
-test_apk_download ... ok
-test_landing_page ... ok
-test_unknown_path ... ok
-
-----------------------------------------------------------------------
-Ran 34 tests in 40.352s
-
-OK
-```
-
-The new tests are the regression for this report:
-
-- `test_pairs_and_installs` runs the default code flow and asserts that the
-  output contains no `WIFI:T:ADB` text and no QR rendering
-  (`\033[47;30m`), while the fake adb sees `pair 192.168.7.42:37111 123456`.
-- `test_qr_mode_still_pairs` checks `--qr` still renders a QR and pairs.
-- `test_pairing_credentials_are_not_a_wifi_ssid` checks the generated name is
-  over 32 bytes and at most 63; `test_pairing_code_is_compact_at_level_l`
-  checks the 78-byte pairing text is still version 4 at level L.
-- `test_a_wrong_pairing_code_is_explained` and
-  `test_pair_address_skips_mdns_discovery` cover the code flow's error and
-  recovery paths.
-
-```text
-$ python3 -m py_compile tool/qr_terminal.py tool/serve_apk.py tool/test_qr_tools.py
-py_compile: ok
-
-$ shellcheck tool/qr_install.sh
-shellcheck: ok
-
-$ bash -n tool/qr_install.sh
-bash -n: ok
-```
-
-## A full install with the pairing code (the default)
-
-`--apk` points at a stand-in file so no Gradle build is needed.  The fake adb
-advertises the phone's `_adb-tls-pairing._tcp` service, accepts the six-digit
-code, advertises the debug port, and reports the install:
-
-```text
-$ FAKE_ADB_STATE=... ADB=.../adb FAKE_PHONE_IP=192.168.7.42 \
-    FAKE_PAIR_CODE=123456 tool/qr_install.sh --no-build --apk .../app.apk \
-    --pair-code 123456 --timeout 10
-
 On the phone:
   Settings -> System -> Developer options -> Wireless debugging
   -> Pair device with pairing code.
@@ -129,7 +27,142 @@ Keep that dialog open.  This computer finds the phone with mDNS, asks for the
 six digits, then installs the app.  The phone and this computer must be on the
 same network.
 Pairing address: 192.168.7.42:37111
-Pairing with 192.168.7.42:37111 ...
+Six-digit pairing code shown on the phone:
+```
+
+That was deliberate, and it went too far.  The report before this one ("the qr
+install script outputs a qr code which makes my phone disconnect from its
+current wifi", commit `aea2c83`) was answered by making the six-digit code the
+default and putting the QR code behind `--qr`.  But *Pair device with QR code*
+is a first-class option of Wireless debugging (Android Studio's pairing dialog
+uses it too), and this script is named for it.  The Wi-Fi drop comes from
+something else *reading* the code, not from showing it: the scanner behind that
+option does not join a network.  Read from the AOSP sources on 2026-10-19
+(`packages/apps/Settings` and `frameworks/base`, master):
+
+- `AdbQrcodeScannerFragment` (Wireless debugging > Pair device with QR code)
+  parses the scan with `AdbQrCode` and calls `enablePairingByQrCode(ssid,
+  preSharedKey)`.  Nothing in it touches Wi-Fi.
+- `AdbQrCode` requires the `WIFI:` scheme, `T:ADB`, and a non-empty `S:` and
+  `P:`.  There is no length limit on the service name: `WifiNetworkConfig`'s
+  validity check only wants it non-empty.
+- `AdbDebuggingManager.PairingThread` registers the phone's
+  `_adb-tls-pairing._tcp` mDNS service under that name
+  (`serviceInfo.setServiceName(mServiceName)`), which is what the script waits
+  for in `adb mdns services`.
+
+So what keeps a camera app from using the code is the service name that is
+longer than a Wi-Fi SSID; the QR code never had to be taken away.
+
+The fix:
+
+- **A plain run shows the QR code again.**  `--qr` still exists and means the
+  same, for anyone who gives it.
+- `--code` pairs with the six-digit code instead (the flow the earlier fix
+  added).  `--pair-code` and `--pair-address` only make sense there, so they ask
+  for it themselves.  `--qr` together with `--code`, `--pair-code` or
+  `--pair-address` is refused before anything runs.
+- What the earlier fix added stays: the service name is `studio-` plus 32
+  random characters (39 bytes), longer than the 32-byte Wi-Fi SSID limit, so a
+  camera cannot turn the code into a network; the screen and `--help` say to
+  scan from *Wireless debugging*, not with the camera app; the QR is still
+  error-correction level L, version 4 (33 modules, 41 with the quiet zone); the
+  code is shown on a cleared screen; pairing matches the QR's own service name;
+  connect services are restricted to the phone that paired (address or guid);
+  refused ports are retried; and `--connect` remains the recovery path.
+
+## Unit and end-to-end tests
+
+```text
+$ python3 tool/test_qr_tools.py
+  test_a_plain_run_shows_a_qr_code_to_scan ... ok
+  test_a_wrong_pairing_code_is_explained ... ok
+  test_bad_timeout ... ok
+  test_connect_address_skips_pairing ... ok
+  test_explains_when_no_pairing_service_is_found ... ok
+  test_explains_when_the_debugging_port_does_not_open ... ok
+  test_help ... ok
+  test_ignores_connect_service_of_another_host ... ok
+  test_install_failure_is_explained ... ok
+  test_no_launch ... ok
+  test_pair_address_skips_mdns_discovery ... ok
+  test_pairing_skips_another_pairing_server ... ok
+  test_pairs_and_installs ... ok
+  test_qr_and_code_are_not_asked_for_together ... ok
+  test_qr_mode_still_pairs ... ok
+  test_qr_timeout ... ok
+  test_retries_a_stale_port_on_the_same_host ... ok
+  test_the_qr_code_can_be_left_to_the_six_digit_code ... ok
+  test_uses_an_already_connected_device ... ok
+[BuildFreshnessTest, PubCacheCheckTest, PubCacheRepairTest, QrEncodeTest and
+ ServeApkTest: 54 more tests, all ok]
+
+----------------------------------------------------------------------
+Ran 73 tests in 46.681s
+
+OK
+```
+
+The new tests are the regression for this report:
+
+- `test_a_plain_run_shows_a_qr_code_to_scan` runs the installer with no pairing
+  option and asserts that it draws the QR code (`\033[47;30m` rows), says *Pair
+  device with QR code* and warns against the camera app, never asks for six
+  digits, pairs with `adb pair 192.168.7.42:37111 PASSWORD`, installs, and that
+  the drawn code is exactly the payload built from the service name the phone
+  advertises and that same `PASSWORD` (the test renders the payload itself and
+  finds those rows in the output).  Run against the script as it was at `HEAD`
+  it fails: that script printed the pairing-code instructions and stopped with
+  `no pairing code given` (exit 1).
+- `test_the_qr_code_can_be_left_to_the_six_digit_code` runs `--code`, types the
+  six digits on stdin, and asserts that no QR is drawn and `adb pair ... 123456`
+  is what runs.
+- `test_qr_and_code_are_not_asked_for_together` covers `--qr --code`,
+  `--code --qr`, `--qr --pair-code` and `--qr --pair-address`: each stops with
+  an explanation before adb is run at all.
+- Tests that relied on the old default now say what they mean:
+  `test_explains_when_no_pairing_service_is_found` passes `--code`;
+  `test_pairs_and_installs`, `test_pair_address_skips_mdns_discovery` and
+  `test_a_wrong_pairing_code_is_explained` give `--pair-code`/`--pair-address`,
+  which ask for the code flow themselves; `test_help` checks that the help leads
+  with the QR code, names `--code`, and keeps the camera-app warning.
+
+The same payload checked against a transcription of AOSP's `AdbQrCode` rules
+(scheme, `T:ADB`, non-empty `S:` and `P:`; my transcription of the Java, not
+the real parser) is accepted, and a wrong security type, an empty name or
+password, or a non-`WIFI:` text is refused:
+
+```text
+accepted: service name 'studio-hkQbR4r3UYZv1gRCXxQBCyNvjVMl53dI' (39 bytes), password 21 bytes
+service name <= 63 bytes (mDNS instance label): True | > 32 bytes (not a Wi-Fi SSID): True
+refused  WIFI:T:WPA;S:x;P:y;;       -> Invalid security type
+refused  WIFI:T:ADB;S:;P:y;;        -> Invalid format
+refused  WIFI:T:ADB;S:x;P:;;        -> Invalid format
+refused  https://x                  -> Invalid scheme
+```
+
+## A full install by a plain run (the default)
+
+A pty run of `tool/qr_install.sh --no-build --apk app.apk --no-image --timeout 30`
+with the fake adb advertising the pairing service after three polls (the
+screen clear and the QR rows are summarised; the status line is overwritten in
+place on a real terminal):
+
+```text
+On the phone:
+  Settings -> System -> Developer options -> Wireless debugging
+  -> Pair device with QR code, then scan this code.
+
+Scan it from that screen, not with the camera app: the code is in Android's
+Wi-Fi QR format, and a camera can read it as a network to join.  The phone and
+this computer must be on the same network.  Waiting up to 30 seconds.
+To type the six-digit pairing code instead, run again with --code.
+[screen cleared]
+Wireless debugging > Pair device with QR code
+Scan it there, not with the camera app: a camera reads it as a Wi-Fi network.
+[QR code, 21 rows of half blocks]
+
+Waiting for the phone to scan the code ... 1s
 Paired with 192.168.7.42.
 Waiting for the phone's debugging port ...
 connected to 192.168.7.42:42345
@@ -149,7 +182,9 @@ The fake adb calls were:
 devices
 mdns services
 mdns services
-pair 192.168.7.42:37111 123456
+mdns services
+mdns services
+pair 192.168.7.42:37111 b9mC3WPZXas7tTn6keuB1
 devices
 mdns services
 connect 192.168.7.42:42345
@@ -158,22 +193,39 @@ devices
 -s 192.168.7.42:42345 shell am start -W -n app.harness.client/app.harness.harness_client.MainActivity
 ```
 
-No `WIFI:T:ADB` text and no QR escape was written; `verification/qr-install-code.png`
-is this run in a terminal.  The interactive variant (no `--pair-code`) prompts
-`Six-digit pairing code shown on the phone:` and reads the six digits with
-echoing off; feeding `123456` to the same fake adb pairs and installs.
-
-## The `--qr` path
-
-The QR still pairs, now with a 39-byte service name.  A PTY run with the fake
-adb's pairing service delayed by two polls produced:
+`verification/qr-install-default.png` is a plain run in an Emacs `term` buffer
+(the worktree's dev harness) while it waits for the scan, and
+`verification/qr-install-default-done.png` is the same run after the fake phone
+paired.  `ZXingReader` reads the QR in both as:
 
 ```text
-Wireless debugging > Pair device with QR code
-Scan it there, not with the camera app: a camera reads it as a Wi-Fi network.
+QRCode WIFI:T:ADB;S:studio-hkQbR4r3UYZv1gRCXxQBCyNvjVMl53dI;P:Orv32pKu9STYIcfv4ooHb;;
+```
 
-[QR code, 41 modules wide including its 4-module quiet zone]
+(version 4, error-correction level L).  The text is a stale, single-use pairing
+code; it is only an artifact.  `qr-install-scan.png` and `qr-install.png` are
+earlier renderings of the same screen, from `--qr` runs (which is what a plain
+run now is); `qr-install-large.png` is the 820×820 PNG that `--open` shows (20
+pixels per module), which decodes to the same kind of 39-byte/21-byte pairing
+text.
 
+## The `--code` path
+
+`--code` shows no QR code.  A pty run in which the six digits are typed at the
+prompt (echo off) with the fake adb requiring `123456`:
+
+```text
+$ tool/qr_install.sh --no-build --apk app.apk --code --timeout 30
+On the phone:
+  Settings -> System -> Developer options -> Wireless debugging
+  -> Pair device with pairing code.
+
+Keep that dialog open.  This computer finds the phone with mDNS, asks for the
+six digits, then installs the app.  The phone and this computer must be on the
+same network.
+Pairing address: 192.168.7.42:37111
+Six-digit pairing code shown on the phone: 
+Pairing with 192.168.7.42:37111 ...
 Paired with 192.168.7.42.
 Waiting for the phone's debugging port ...
 connected to 192.168.7.42:42345
@@ -183,34 +235,22 @@ Installed.
 Opened Harness on the phone.
 ```
 
-The generated credentials in that run were 39 and 21 bytes:
+The fake adb saw `pair 192.168.7.42:37111 123456`; no `WIFI:T:ADB` text and no
+QR escape was written.  `verification/qr-install-code.png` is the same flow
+(`--pair-code 123456`, which asks for it too) in a terminal.
+
+The options that contradict each other stop at once:
 
 ```text
-studio-77sM9ebmiUvjoiyZGfUy8wP7wM5Kw7Z3 UnZPwUlMQECFYJDD1eEC3
+$ tool/qr_install.sh --qr --code
+qr_install: --qr and --code are different ways to pair; give only one
+$ tool/qr_install.sh --qr --pair-code 123456
+qr_install: --qr pairs by scanning a QR code; --pair-code and --pair-address are for pairing with the six-digit code (--code)
+$ tool/qr_install.sh --pair-address 192.168.7.42:37111 --qr
+qr_install: --qr pairs by scanning a QR code; --pair-code and --pair-address are for pairing with the six-digit code (--code)
 ```
 
-`verification/qr-install.png` is the finished screen; `zxing-cpp` reads its QR
-as:
-
-```text
-QRCode WIFI:T:ADB;S:studio-77sM9ebmiUvjoiyZGfUy8wP7wM5Kw7Z3;P:UnZPwUlMQECFYJDD1eEC3;;
-```
-
-The scan-time capture, `verification/qr-install-scan.png`, is the same screen
-with a different generated code and decodes to:
-
-```text
-QRCode WIFI:T:ADB;S:studio-QRtLXYl6qN83OHsfZ2WotKHEc8h0kyEW;P:IfB9r5diwsOUYFKZS3rwx;;
-```
-
-`verification/qr-install-large.png` is the 820×820 PNG that `--open` shows (20
-pixels per module); it decodes to the same 39-byte/21-byte pairing text.
-
-The QR text is a stale, single-use pairing code; it is only an artifact.  The
-service name is longer than a Wi-Fi SSID, so a camera cannot turn it into a
-network to join.  The wireless-debugging scanner does not limit the service
-name to 32 bytes (AOSP's `AdbQrCode` passes `S:` to `NsdManager`, whose instance
-names may be 63 bytes), so pairing still works.
+All three exit with status 1 and nothing is drawn or paired.
 
 ## The `--serve` branch
 
@@ -238,17 +278,33 @@ every module.
 ok 100 bad 0
 ```
 
-## The project's full check
+## Static checks and the project's full check
+
+```text
+$ python3 -m py_compile tool/qr_terminal.py tool/serve_apk.py tool/test_qr_tools.py tool/check_pub_cache.py
+py_compile: ok
+
+$ shellcheck tool/qr_install.sh
+shellcheck: ok
+
+$ bash -n tool/qr_install.sh
+bash -n: ok
+```
 
 The worktree's own test run, unrelated Lisp suites included (among them
-`harness-ui-qr-test`, the harness QR encoder's nine tests):
+`harness-ui-qr-test`, the harness QR encoder's nine tests), and its lint (exit
+status 0; the eight warnings it prints are in Lisp files this change does not
+touch):
 
 ```text
 $ HARNESS_TEST_JOBS=8 scripts/test.sh
 ...
 ok    harness-ui-qr-test.el      Ran 9 tests, 9 results as expected, 0 unexpected
 ...
-test.sh: 129 files, 0 failed, 386s wall (8 at a time)
+test.sh: 129 files, 0 failed, 434s wall (8 at a time)
+
+$ scripts/lint.sh
+(exit status 0)
 ```
 
 The worktree's full suite passed all 129 files on 2026-10-19.

@@ -126,43 +126,50 @@ is older than the app sources: a change under `lib/`, `assets/` or `android/`,
 or to `pubspec.yaml`, `pubspec.lock` or `.flutter-version`, triggers a build.
 That matters because an APK left over from an earlier run would otherwise keep
 the phone on old code even after the app was fixed. The phone pairs as a
-wireless debugging device, then adb installs the APK and opens the app. A
-build that fails because a package in the pub cache lost its files is repaired
-and run again (see *Building the apps*):
+wireless debugging device by scanning a QR code shown in the terminal, then adb
+installs the APK and opens the app. A build that fails because a package in the
+pub cache lost its files is repaired and run again (see *Building the apps*):
 
 ```sh
-tool/qr_install.sh                 # build if stale, pair by code, install, open
+tool/qr_install.sh                 # build if stale, show a QR code to pair with, install, open
 tool/qr_install.sh --build         # rebuild even when the APK is current
 tool/qr_install.sh --debug         # build/install the debug APK
 tool/qr_install.sh --no-build      # install the existing APK, warn if it is stale
-tool/qr_install.sh --qr            # pair by scanning a QR code instead
+tool/qr_install.sh --code          # pair with the six-digit pairing code instead
 tool/qr_install.sh --no-launch     # install without opening the app
-tool/qr_install.sh --no-image      # with --qr, keep the QR text-only
+tool/qr_install.sh --no-image      # keep the QR text-only, no image window
 tool/qr_install.sh --connect 192.168.1.7:41234  # skip pairing, use that port
 ```
 
 On Android 11 or newer, enable *Developer options*, open *Wireless debugging*
-and tap *Pair device with pairing code*. Keep that dialog open: the script
-finds the phone with mDNS, asks for the six digits shown there, pairs, and
-installs the app. The phone and the computer must be on the same network. If
-mDNS cannot find the dialog, pass the *IP address & port* it shows with
-`--pair-address 192.168.1.7:37111`; `--pair-code 123456` supplies the code
-without prompting. The script finds adb in `ADB`, `PATH`, or the Android SDK
-(`ANDROID_HOME`, `ANDROID_SDK_ROOT` and the usual install locations).
+and tap *Pair device with QR code*, then scan the code the script shows. The
+phone and the computer must be on the same network. The script finds adb in
+`ADB`, `PATH`, or the Android SDK (`ANDROID_HOME`, `ANDROID_SDK_ROOT` and the
+usual install locations); the QR code is drawn by `tool/qr_terminal.py` in
+Unicode blocks at error-correction level L, so `qrencode` is not needed. The
+code is shown on a fresh screen, so a code from an earlier run is not beside it
+for the scanner to pick. On a graphical desktop a large copy also opens in an
+image viewer (the same code; close it when the phone is paired); `--no-image`
+keeps it text-only. `--qr` asks for this explicitly; a plain run does the same.
 
-The pairing-code flow sends no QR code to the phone. Android's QR pairing
-format is really a Wi-Fi network code (`WIFI:T:ADB;S:service;P:password;;`),
+Scan the code from *Wireless debugging*, not with the camera app. Android's QR
+pairing format is really a Wi-Fi network code (`WIFI:T:ADB;S:service;P:password;;`),
 even though it only carries an adb service name and password. Some phone camera
 apps read such a code as a network to join, which takes the phone off its
-current Wi-Fi. `--qr` still offers the one-scan flow, but it shows the code on
-a fresh screen, with a warning to scan it from *Wireless debugging* and not
-with the camera app. Its service name is also longer than the 32-byte Wi-Fi
-SSID limit, so a camera cannot use it as a network, while the wireless
-debugging scanner passes it to mDNS (which allows 63 bytes). The code is drawn
-by `tool/qr_terminal.py` in Unicode blocks at error-correction level L, so
-`qrencode` is not needed. On a graphical desktop a large copy also opens in an
-image viewer (the same code; close it when the phone is paired); `--no-image`
-keeps it text-only.
+current Wi-Fi, so the screen repeats that warning. The script also makes the
+code useless as a network: its service name is `studio-` plus 32 random
+characters (39 bytes), longer than the 32-byte Wi-Fi SSID limit. The wireless
+debugging scanner does not mind: it takes any non-empty name and password,
+starts adb pairing, and never joins a network, and the phone advertises its
+pairing service over mDNS under that name (which allows 63 bytes).
+
+`--code` pairs with the six-digit code instead and shows no QR code at all. Tap
+*Pair device with pairing code* and keep that dialog open: the script finds the
+phone with mDNS, asks for the six digits shown there, pairs, and installs the
+app. If mDNS cannot find the dialog, pass the *IP address & port* it shows with
+`--pair-address 192.168.1.7:37111`; `--pair-code 123456` supplies the code
+without prompting. Both options ask for `--code` themselves, so they need not
+be combined with it; they cannot be combined with `--qr`.
 
 After pairing, the phone's debugging port can take a few seconds to appear, and
 adb's mDNS cache can hold an old port. The script only tries addresses on the

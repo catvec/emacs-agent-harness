@@ -443,7 +443,7 @@ class InstallScriptTest(unittest.TestCase):
     def has_flag(self, name):
         return os.path.exists(os.path.join(self.state, name))
 
-    def run_install(self, *args, timeout=30, stdin=None, **env_extra):
+    def run_install(self, *args, timeout=30, stdin=None, input=None, **env_extra):
         env = dict(os.environ)
         env.update(ADB=self.adb, FAKE_ADB_STATE=self.state,
                    QR_INSTALL_PAIR_NAME="ADB_WIFI_testpair-abcdef",
@@ -453,14 +453,71 @@ class InstallScriptTest(unittest.TestCase):
             [os.path.join(TOOL_DIR, "qr_install.sh"), "--no-build",
              "--apk", self.apk, *args],
             capture_output=True, text=True, timeout=timeout, env=env,
-            stdin=stdin)
+            stdin=stdin, input=input)
+
+    def pairing_password(self):
+        """The password the script gave `adb pair`, from the fake adb's log."""
+        for call in self.calls():
+            if call.startswith("pair "):
+                return call.split()[2]
+        self.fail("adb pair was never called: " + repr(self.calls()))
+
+    def test_a_plain_run_shows_a_qr_code_to_scan(self):
+        # The report: "why doesn't qr install show a qr code anymore?"  A plain
+        # run had been changed to ask for the six-digit code, so it drew no QR
+        # code, although Wireless debugging has a "Pair device with QR code"
+        # option for exactly this.  A plain run shows the code again.
+        result = self.run_install("--timeout", "10", stdin=subprocess.DEVNULL)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Pair device with QR code", result.stdout)
+        self.assertIn("\033[47;30m", result.stdout)
+        self.assertNotIn("Six-digit pairing code", result.stdout)
+        # It keeps warning not to scan the code with the camera app.
+        self.assertIn("not with the camera app", result.stdout)
+        # What is drawn is the code the phone scans: the password in it is the
+        # one adb then pairs with, under the service name the phone advertises.
+        payload = ("WIFI:T:ADB;S:ADB_WIFI_testpair-abcdef;P:"
+                   + self.pairing_password() + ";;")
+        self.assertIn(qr_terminal.render(qr_terminal.encode(payload, "L")),
+                      result.stdout)
+        self.assertIn("Paired with 192.168.7.42", result.stdout)
+        self.assertIn("Installed.", result.stdout)
+        self.assertTrue(self.has_flag("installed"))
+
+    def test_the_qr_code_can_be_left_to_the_six_digit_code(self):
+        # --code is how to pair with the code of "Pair device with pairing
+        # code" instead: it is asked for, and no QR code is drawn.
+        result = self.run_install("--code", "--timeout", "10",
+                                  input="123456\n", FAKE_PAIR_CODE="123456")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Pair device with pairing code", result.stdout)
+        self.assertIn("Six-digit pairing code shown on the phone:", result.stdout)
+        self.assertNotIn("\033[47;30m", result.stdout)
+        self.assertNotIn("Pair device with QR code", result.stdout)
+        self.assertIn("pair 192.168.7.42:37111 123456", self.calls())
+        self.assertIn("Installed.", result.stdout)
+
+    def test_qr_and_code_are_not_asked_for_together(self):
+        for args in (["--qr", "--code"],
+                     ["--qr", "--pair-code", "123456"],
+                     ["--qr", "--pair-address", "192.168.7.42:37111"],
+                     ["--code", "--qr"]):
+            result = self.run_install(*args, "--timeout", "10",
+                                      stdin=subprocess.DEVNULL)
+            self.assertNotEqual(result.returncode, 0, args)
+            self.assertRegex(result.stderr, r"--qr (and --code|pairs by scanning)",
+                             args)
+            self.assertNotIn("\033[47;30m", result.stdout, args)
+        # It is refused before adb is run at all.
+        self.assertFalse(os.path.exists(os.path.join(self.state, "log")))
 
     def test_pairs_and_installs(self):
-        # The default flow asks for the six-digit code and never prints a
-        # Wi-Fi QR code, so it cannot take the phone off its network.
+        # The six-digit flow (--pair-code asks for it) never prints a Wi-Fi QR
+        # code, so it cannot take the phone off its network.
         result = self.run_install("--pair-code", "123456", "--timeout", "10",
                                   FAKE_PAIR_CODE="123456")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Pair device with pairing code", result.stdout)
         self.assertIn("Pairing address: 192.168.7.42:37111", result.stdout)
         self.assertIn("Paired with 192.168.7.42", result.stdout)
         self.assertIn("Installed.", result.stdout)
@@ -477,6 +534,7 @@ class InstallScriptTest(unittest.TestCase):
         self.assertTrue(self.has_flag("launched"))
 
     def test_qr_mode_still_pairs(self):
+        # --qr is what a plain run does; it stays accepted for whoever gives it.
         result = self.run_install("--qr", "--timeout", "10")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("Pair device with QR code", result.stdout)
@@ -504,17 +562,21 @@ class InstallScriptTest(unittest.TestCase):
 
     def test_explains_when_no_pairing_service_is_found(self):
         self.flag("no_pairing")
-        result = self.run_install("--timeout", "2", stdin=subprocess.DEVNULL)
+        result = self.run_install("--code", "--timeout", "2",
+                                  stdin=subprocess.DEVNULL)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Could not find the phone's pairing service", result.stderr)
         self.assertIn("--pair-address", result.stderr)
         self.assertNotIn("\033[47;30m", result.stdout)
 
     def test_uses_an_already_connected_device(self):
+        # A phone adb already lists is used as it is: nothing is paired, so no
+        # QR code is drawn either.
         self.flag("preconnected")
         result = self.run_install("--timeout", "10")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("Using the connected device", result.stdout)
+        self.assertNotIn("\033[47;30m", result.stdout)
         calls = self.calls()
         self.assertEqual(calls[0], "devices")
         self.assertFalse(any(call.startswith("pair ") for call in calls))
@@ -602,9 +664,15 @@ class InstallScriptTest(unittest.TestCase):
         result = subprocess.run([os.path.join(TOOL_DIR, "qr_install.sh"), "--help"],
                                 capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0)
-        self.assertIn("Pair device with pairing code", result.stdout)
+        # The QR code is the way to pair unless --code asks for the six digits.
+        self.assertIn("Pair device with QR code", result.stdout)
+        self.assertIn("pair by scanning the QR code shown here (the default)",
+                      result.stdout)
         self.assertIn("--qr", result.stdout)
+        self.assertIn("--code", result.stdout)
+        self.assertIn("Pair device with pairing code", result.stdout)
         self.assertIn("WIFI:T:ADB", result.stdout)
+        self.assertIn("not with the camera app", result.stdout)
 
     def test_bad_timeout(self):
         result = self.run_install("--timeout", "soon")

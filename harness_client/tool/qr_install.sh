@@ -1,19 +1,20 @@
 #!/usr/bin/env bash
 # Build the Harness Android app and install it on a phone over Wi-Fi, with no
-# USB cable.  The phone pairs as a wireless debugging device with the six-digit
-# pairing code it shows; adb then installs the APK over the local network.
+# USB cable.  The phone pairs as a wireless debugging device by scanning a QR
+# code shown here; adb then installs the APK over the local network.
 #
 #   tool/qr_install.sh                 build a release APK if it is missing or
-#                                      older than the app sources, pair, install, launch
+#                                      older than the app sources, show a QR
+#                                      code to pair with, install, launch
 #   tool/qr_install.sh --build         build first even if the APK is current
 #   tool/qr_install.sh --debug         use/build the debug APK
-#   tool/qr_install.sh --qr            pair by scanning a QR code instead of the
-#                                      six-digit code
+#   tool/qr_install.sh --code          pair with the six-digit pairing code
+#                                      instead of scanning a QR code
 #   tool/qr_install.sh --serve         do not use adb: serve the APK and show its URL
 #                                      as a QR code, so a phone can download it
 #
 # On Android 11 or newer, turn on Developer options -> Wireless debugging and
-# open "Pair device with pairing code" (or, with --qr, "Pair device with QR
+# open "Pair device with QR code" (or, with --code, "Pair device with pairing
 # code").  The phone and this computer must be on the same network.
 set -euo pipefail
 
@@ -33,7 +34,11 @@ serve_address=""
 timeout=180
 image=auto
 connect_hint=""
-pair_mode=code
+# How the phone pairs: by scanning a QR code (the default, the "Pair device with
+# QR code" option of Wireless debugging) or with the six-digit code (--code).
+pair_mode=qr
+want_qr=0
+want_code=0
 pair_code=""
 pair_address=""
 # Tests set this to a known mDNS pairing name; normally it is random.
@@ -44,8 +49,9 @@ usage() {
 Usage: tool/qr_install.sh [options]
 
 Build the Harness Android APK if needed and install it on a phone over Wi-Fi.
-The phone pairs with adb through Wireless debugging; this terminal asks for the
-six-digit pairing code the phone shows.
+The phone pairs with adb through Wireless debugging: this terminal shows a QR
+code, and the phone scans it from Wireless debugging -> Pair device with QR
+code.  (--code pairs with the six-digit pairing code instead.)
 
 A default run builds the APK when it is missing, or when a source file (under
 lib/, assets/ or android/, or pubspec.yaml, pubspec.lock or .flutter-version)
@@ -65,14 +71,15 @@ Options:
   --device SERIAL  install on an already connected device (its adb serial)
   --connect ADDR   connect to ADDR (IP:PORT, e.g. from Wireless debugging)
                    instead of pairing
-  --qr             pair by scanning a wireless-debugging QR code instead of
-                   typing the six-digit code
+  --qr             pair by scanning the QR code shown here (the default)
+  --code           pair with the six-digit code of "Pair device with pairing
+                   code" instead of scanning a QR code
   --pair-code CODE the six digits shown by "Pair device with pairing code"
-                   (otherwise asked for when the phone is found)
+                   (implies --code; otherwise asked for when the phone is found)
   --pair-address ADDR  the IP:PORT shown in that dialog, when mDNS cannot
-                   find the phone
+                   find the phone (implies --code)
   --no-launch      do not open the app after installing it
-  --no-image       do not open the large QR image in a viewer (with --qr)
+  --no-image       do not open the large QR image in a viewer
   --serve          serve the APK over HTTP and show its URL as a QR code
                    instead of pairing adb (the phone downloads and installs it)
   --address ADDR   with --serve, put ADDR in the URL instead of detecting it
@@ -87,22 +94,27 @@ Environment:
                    which selects the SDK pinned in .flutter-version)
 
 Examples:
-  tool/qr_install.sh                  # release build, pair by code, install, open
+  tool/qr_install.sh                  # release build, pair by QR code, install, open
   tool/qr_install.sh --build          # rebuild, then install
-  tool/qr_install.sh --qr             # pair by scanning a QR code instead
+  tool/qr_install.sh --code           # pair with the six-digit code instead
   tool/qr_install.sh --connect 192.168.1.7:41234  # skip pairing, use this port
   tool/qr_install.sh --serve          # download over HTTP instead of adb
 
 Android 11 or newer: Settings -> System -> Developer options -> Wireless
-debugging -> Pair device with pairing code.  Keep that dialog open; this script
-finds the phone with mDNS, asks for the six digits, then installs the app.  The
-phone and this computer must be on the same network.
+debugging -> Pair device with QR code, then scan the code this shows.  The phone
+and this computer must be on the same network.
 
---qr shows the Android Studio-style pairing QR code instead.  That code is
-stored in Android's Wi-Fi QR format (WIFI:T:ADB;...), so scan it only from the
-Wireless debugging screen: a camera app can read it as a Wi-Fi network and take
-the phone off its current network.  The default pairing-code flow never sends a
-Wi-Fi QR code to the phone.
+Scan the code from that screen, not with the camera app.  Android stores this
+pairing QR code in its Wi-Fi QR format (WIFI:T:ADB;...), so a camera app can read
+it as a Wi-Fi network to join, which takes the phone off its current network.
+The service name in the code is longer than the 32 bytes a Wi-Fi network name
+may have, so it cannot be used as a network, while Wireless debugging's own
+scanner accepts it.
+
+--code pairs with the six-digit code instead: open Wireless debugging -> Pair
+device with pairing code and keep that dialog open; this script finds the phone
+with mDNS, asks for the six digits, then installs the app.  It never shows a
+Wi-Fi QR code.
 EOF
 }
 
@@ -137,7 +149,8 @@ while [ $# -gt 0 ]; do
       connect_hint="$2"
       shift
       ;;
-    --qr) pair_mode=qr ;;
+    --qr) want_qr=1 ;;
+    --code) want_code=1 ;;
     --pair-code)
       [ $# -ge 2 ] || die "--pair-code needs the six digits shown on the phone"
       pair_code="$2"
@@ -181,8 +194,15 @@ if [ -n "$pair_code" ]; then
     *) die "--pair-code must be the six digits shown on the phone" ;;
   esac
 fi
-if [ "$pair_mode" = qr ] && { [ -n "$pair_code" ] || [ -n "$pair_address" ]; }; then
-  die "--qr pairs by scanning a code; --pair-code and --pair-address are for the default code pairing"
+# Pairing is by QR code unless the six-digit code is asked for.  --pair-code and
+# --pair-address only mean something for that code, so they ask for it too.
+if [ "$want_qr" = 1 ]; then
+  [ "$want_code" = 0 ] || die "--qr and --code are different ways to pair; give only one"
+  { [ -z "$pair_code" ] && [ -z "$pair_address" ]; } ||
+    die "--qr pairs by scanning a QR code; --pair-code and --pair-address are for pairing with the six-digit code (--code)"
+fi
+if [ "$want_code" = 1 ] || [ -n "$pair_code" ] || [ -n "$pair_address" ]; then
+  pair_mode=code
 fi
 
 if [ -z "$apk" ]; then
@@ -564,16 +584,19 @@ EOF
   note "Paired with $paired_host."
 }
 
-# Pair by scanning a QR code.  Android stores this code in the Wi-Fi QR format
+# Pair by scanning a QR code ("Pair device with QR code" in Wireless
+# debugging, the default).  Android stores this code in the Wi-Fi QR format
 # (WIFI:T:ADB;...), even though it only carries a service name and password.
 # The service name is longer than the 32-byte Wi-Fi SSID limit, so a camera app
-# that reads the code as a network cannot join it; the wireless debugging
-# scanner passes the full name to mDNS, where 63 bytes are allowed.
+# that reads the code as a network cannot join it.  The wireless debugging
+# scanner is not bothered by that: Settings' AdbQrCode takes any non-empty name
+# and password, and the phone registers its _adb-tls-pairing mDNS service under
+# that name, where 63 bytes are allowed.  The scanner never joins a network.
 pair_with_qr() {
   read -r pair_name pair_password < <(
     python3 "$tool_dir/qr_terminal.py" --pairing "$pair_name_override"
   )
-  [ -n "$pair_name" ] && [ -n "$pair_password" ] || die "could not generate the pairing code"
+  [ -n "$pair_name" ] && [ -n "$pair_password" ] || die "could not generate the QR code's service name and password"
   qrtext="WIFI:T:ADB;S:$pair_name;P:$pair_password;;"
 
   cat <<EOF
@@ -584,6 +607,7 @@ On the phone:
 Scan it from that screen, not with the camera app: the code is in Android's
 Wi-Fi QR format, and a camera can read it as a network to join.  The phone and
 this computer must be on the same network.  Waiting up to $timeout seconds.
+To type the six-digit pairing code instead, run again with --code.
 EOF
 
   # A pairing server left over from a previous try is not ours; its password
@@ -649,7 +673,7 @@ EOF
   clear_status
   if [ -z "$paired" ]; then
     [ -z "$last_pair_error" ] || printf 'qr_install: last adb pair error: %s\n' "$last_pair_error" >&2
-    die "timed out waiting for the phone; check that wireless debugging is on and the network is the same"
+    die "timed out waiting for the phone; check that wireless debugging is on and the network is the same (or pair with the six-digit code: --code)"
   fi
 
   paired_host="${paired%:*}"
