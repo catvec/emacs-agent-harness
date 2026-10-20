@@ -647,9 +647,9 @@ third."
 ;;;###autoload
 (defun harness-restart ()
   "Restart the harness process with the current configuration.
-Sessions and tasks persist; running turns are interrupted, and the
-tasks among them carry on once the process is back (see
-`harness-tasks-resume-interrupted')."
+Sessions and tasks persist; running turns are interrupted, and carry
+on once the process is back (see `harness-tasks-resume-interrupted'
+and `harness-resilience-resume-interrupted')."
   (interactive)
   (unless (eq harness-ui-connection-address 'process)
     (user-error "The harness does not run in its own process (see `harness-process')"))

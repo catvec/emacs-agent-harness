@@ -1041,6 +1041,96 @@ whatever is waiting for output then: often a TRAMP call, in the buffer
 of the connection it waits on, which would die under it."
   (with-temp-buffer (funcall sentinel process event)))
 
+;;;;; Writing to a process without nesting
+
+(declare-function harness-log "harness-core" (level fmt &rest args))
+
+(defvar harness-process-send-slow 10
+  "Seconds a write to a process waits for room before it is logged.
+Internal, not an option: the log names the process that stopped
+reading, the first thing to know when the harness slows down.")
+
+(cl-defstruct (harness--send (:constructor harness--send-create) (:copier nil))
+  "A write under way to a process, and what waits to go out behind it."
+  (queue nil :documentation "Strings that wait, newest first.")
+  (start (float-time) :documentation "When the write began, a `float-time'.")
+  (eof nil :documentation "Non-nil when end-of-file goes out after the queue.")
+  (warned nil :documentation "Non-nil once the wait was logged."))
+
+(defun harness-process-sending-p (proc)
+  "Non-nil while a write to PROC is under way, further up some stack.
+What is written to PROC meanwhile waits in line behind it (see
+`harness-process-send')."
+  (and (process-get proc 'harness--send) t))
+
+(defun harness--process-send-wait (proc state string limit)
+  "Put STRING in line behind STATE, the write under way to PROC.
+Log once that the write is slow; past LIMIT seconds, give up on PROC."
+  (push string (harness--send-queue state))
+  (let ((waited (- (float-time) (harness--send-start state))))
+    (when (and (> waited harness-process-send-slow)
+               (not (harness--send-warned state)))
+      (setf (harness--send-warned state) t)
+      (when (fboundp 'harness-log)
+        (harness-log 'warn "process: a write to %s has waited %.0fs for room; what comes meanwhile waits behind it"
+                     (process-name proc) waited)))
+    (when (and limit (> waited limit) (process-live-p proc))
+      (when (fboundp 'harness-log)
+        (harness-log 'warn "process: %s has not read for %.0fs; closing it" (process-name proc) waited))
+      ;; The write under way then fails, and its caller drops PROC.
+      (delete-process proc))))
+
+(defun harness-process-send (proc string &optional limit)
+  "Write STRING to PROC after what waits to go out to it, without nesting.
+`process-send-string' to a process that reads more slowly than it is
+written to -- a client that stopped reading, a program busy elsewhere
+-- fills its input and then waits for room, running the timers due and
+process output meanwhile.  What those wrote to the same process would
+wait inside that write, each inside the one before, until Lisp nesting
+exceeded `max-lisp-eval-depth' and every timer, filter and sentinel
+failed; in the harness process, the error of a sentinel then killed it,
+as batch Emacs exits on one (see `harness-server--command-error').  So
+a write to a process already being written to waits in line instead,
+and the write under way sends what waits once it is done, in order.
+
+LIMIT, when non-nil, is how many seconds a write may wait for room:
+past that, the next write to PROC deletes it, since a peer that has not
+read for so long is gone (a phone asleep), and the write under way
+then fails.  A write that waits that long is logged either way, after
+`harness-process-send-slow' seconds.
+
+Return non-nil.  Signal the error of a failed write to its caller, the
+one under way; what waited behind it is dropped with it."
+  (let ((state (process-get proc 'harness--send)))
+    (if state
+        (harness--process-send-wait proc state string limit)
+      (setq state (harness--send-create))
+      (process-put proc 'harness--send state)
+      (unwind-protect
+          (let ((chunk string))
+            (while chunk
+              (process-send-string proc chunk)
+              ;; What came meanwhile, in one write.
+              (setq chunk (and (harness--send-queue state)
+                               (apply #'concat (nreverse (harness--send-queue state)))))
+              (setf (harness--send-queue state) nil))
+            (when (harness--send-eof state)
+              (process-send-eof proc)))
+        (process-put proc 'harness--send nil)
+        (let ((waited (- (float-time) (harness--send-start state))))
+          (when (and (> waited harness-process-send-slow) (fboundp 'harness-log))
+            (harness-log 'info "process: a write to %s waited %.0fs for room" (process-name proc) waited)))))
+    t))
+
+(defun harness-process-send-eof (proc)
+  "Send end-of-file to PROC once what waits to go out to it has gone.
+A write under way to PROC (see `harness-process-send') sends it after
+the strings that wait behind it; else it goes out now."
+  (let ((state (process-get proc 'harness--send)))
+    (if state
+        (setf (harness--send-eof state) t)
+      (process-send-eof proc))))
+
 (cl-defun harness-run-command (command &key cwd (timeout 120) stdin on-output name env
                                        merge-remote-stderr)
   "Run COMMAND (a list of strings) asynchronously and return a promise.
@@ -1118,8 +1208,8 @@ output is better off without all that."
                                        (run-at-time harness--process-kill-grace nil
                                                     (lambda ()
                                                       (harness-kill-process-tree tree 'kill)))))))
-      (when stdin (process-send-string proc stdin))
-      (when (process-live-p proc) (process-send-eof proc)))))
+      (when stdin (harness-process-send proc stdin))
+      (when (process-live-p proc) (harness-process-send-eof proc)))))
 
 (defun harness-grep-hit (line suffix)
   "Split LINE of `grep -H' output into (NAME . TEXT), or return nil.

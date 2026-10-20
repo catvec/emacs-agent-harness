@@ -644,11 +644,21 @@ For `harness-acp-authenticate-functions'.  The answer waits at most
 
 ;;;; Connections
 
+(defvar harness-acp-remote--write-limit 120
+  "Seconds a device may leave what is sent to it unread before it is dropped.
+Internal, not an option.  A phone put away stops reading without
+closing its connection; everything sent to it meanwhile would pile up
+behind the write that waits for it (see `harness-process-send').  A
+device dropped reconnects when it wakes, and reads the sessions again.")
+
 (defun harness-acp-remote--send (proc bytes)
-  "Write BYTES to the socket PROC, if it is still open."
+  "Write BYTES to the socket PROC, if it is still open.
+In line behind a write that waits for the device to read, never inside
+it: a device that stopped reading must not nest every write the harness
+makes meanwhile until Lisp nesting overflows."
   (when (process-live-p proc)
     (condition-case err
-        (process-send-string proc bytes)
+        (harness-process-send proc bytes harness-acp-remote--write-limit)
       (error (harness-log 'debug "acp-remote: writing to %s failed: %s"
                           (process-name proc) (harness-error-message err))))))
 
@@ -725,7 +735,7 @@ HEADERS is an alist of extra (NAME . VALUE) header fields to send."
                    'utf-8 t)
                   bytes))
     (when (process-live-p proc)
-      (ignore-errors (process-send-eof proc))
+      (ignore-errors (harness-process-send-eof proc))
       (run-at-time 5 nil (lambda () (when (process-live-p proc) (delete-process proc)))))))
 
 (defun harness-acp-remote--web-origin-p (origin)

@@ -1409,5 +1409,64 @@ process, fill their section when they arrive, or it says why not."
   (should (equal "abc" (plist-get (harness-await (harness-run-command '("cat") :stdin "abc")) :stdout)))
   (should (eq 'timeout (plist-get (harness-await (harness-run-command '("sleep" "5") :timeout 0.2)) :exit))))
 
+(ert-deftest harness-util-process-send-waits-in-line ()
+  "Writes to a process that does not read yet wait in line, never nested.
+`process-send-string' runs the timers due while it waits for room; each
+of them writing to the same process used to wait inside the one before,
+which is how the harness process overflowed `max-lisp-eval-depth' and
+died.  End-of-file asked for meanwhile goes out after what waits."
+  (let* ((file (make-temp-file "harness-send-"))
+         (proc (make-process :name "slow-reader" :noquery t :connection-type 'pipe
+                             :command (list "sh" "-c" (format "sleep 1; cat > %s"
+                                                              (shell-quote-argument file)))))
+         (big (make-string 300000 ?a))
+         (sending 0)
+         (deepest 0))
+    (unwind-protect
+        (progn
+          (dotimes (i 5)
+            (run-at-time 0 nil (lambda ()
+                                 (setq deepest (max deepest (cl-incf sending)))
+                                 (unwind-protect
+                                     (progn (harness-process-send proc (format "<%d>" i))
+                                            (when (= i 4) (harness-process-send-eof proc)))
+                                   (cl-decf sending)))))
+          ;; This write fills the pipe and waits; the timers run inside it.
+          (setq deepest (max deepest (cl-incf sending)))
+          (harness-process-send proc big)
+          (cl-decf sending)
+          (harness-test-wait (lambda () (not (process-live-p proc))) 10 "the reader to see end-of-file")
+          (should (= 2 deepest))
+          (should-not (harness-process-sending-p proc))
+          (should (equal (concat big "<0><1><2><3><4>")
+                         (with-temp-buffer (insert-file-contents file) (buffer-string)))))
+      (when (process-live-p proc) (delete-process proc))
+      (delete-file file))))
+
+(ert-deftest harness-util-process-send-gives-up-on-a-peer-that-stopped-reading ()
+  "Past its limit, a write that waits for room gives the process up.
+The write under way fails, so its caller drops the peer -- a phone put
+away -- rather than pile up everything sent to it behind it."
+  (let* ((proc (make-process :name "never-reads" :noquery t :connection-type 'pipe
+                             :command '("sleep" "30")))
+         (harness-process-send-slow 0.2)
+         (logged nil)
+         (log (lambda (level msg) (push (cons level msg) logged)))
+         failed)
+    (add-hook 'harness-log-hook log)
+    (unwind-protect
+        (progn
+          (run-at-time 0.7 nil (lambda () (harness-process-send proc "late" 0.5)))
+          (condition-case err
+              (harness-process-send proc (make-string 300000 ?a) 0.5)
+            (error (setq failed err)))
+          (should failed)
+          (should-not (process-live-p proc))
+          (should-not (harness-process-sending-p proc))
+          (should (cl-find-if (lambda (l) (string-match-p "a write to never-reads has waited" (cdr l))) logged))
+          (should (cl-find-if (lambda (l) (string-match-p "never-reads has not read for" (cdr l))) logged)))
+      (remove-hook 'harness-log-hook log)
+      (when (process-live-p proc) (delete-process proc)))))
+
 (provide 'harness-core-test)
 ;;; harness-core-test.el ends here

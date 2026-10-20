@@ -138,6 +138,24 @@ the transcript, where the model would read it as its own words twice."
       (should (eq 'end-turn (plist-get (harness-await (harness-call 'agent/prompt id "go")) :stop-reason)))
       (should (= 2 (length harness-retry-test-requests))))))
 
+(ert-deftest harness-retry-tries-again-when-the-provider-process-died ()
+  "A CLI provider's process killed mid-turn is started again by the next try.
+An exit the program chose, with a message, ends the turn as before."
+  (harness-retry-test-with
+    (harness-retry-test-define-provider
+     (lambda (step)
+       (if (= step 1)
+           '((:type done :stop-reason error :error "claude exited with status 9"))
+         '((:type text :delta "back") (:type done :stop-reason end-turn)))))
+    (let ((id (harness-retry-test-session)))
+      (should (eq 'end-turn (plist-get (harness-await (harness-call 'agent/prompt id "go")) :stop-reason)))
+      (should (= 2 (length harness-retry-test-requests)))
+      (should (cl-some (lambda (h) (string-match-p "\\`the provider's process died: claude exited with status 9; trying again" h))
+                       (harness-retry-test-hints id)))))
+  (should (eq 'process (harness-retry--kind '(:error "claude exited with status 137: Killed"))))
+  (should-not (harness-retry--kind '(:error "claude exited with status 1: Invalid API key")))
+  (should-not (harness-retry--kind '(:error "claude exited with status 90"))))
+
 (ert-deftest harness-retry-honours-retry-after ()
   "A rate limit that asked for a wait is waited for, its delay capped."
   (should (= 3 (let ((harness-retry-delay 0.5) (harness-retry-jitter 0))

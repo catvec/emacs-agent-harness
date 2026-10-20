@@ -310,7 +310,7 @@ to it, made the harness process exceed `max-lisp-eval-depth'."
       ;; One send waited for room; the timers run meanwhile queued theirs.
       (should (<= deepest 2))
       (should (memq client harness-acp--clients))
-      (should-not (process-get (harness-acp-client-process client) 'harness-acp-waiting)))))
+      (should-not (harness-process-sending-p (harness-acp-client-process client))))))
 
 (ert-deftest harness-acp-tcp-refuses-non-loopback-without-opt-in ()
   (harness-acp-tcp-test-with

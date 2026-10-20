@@ -2213,6 +2213,26 @@ Return the pending id.  The session becomes `blocked'."
   "Return the pending requests of session ID."
   (harness-session-pending (harness-session--get id)))
 
+(defvar harness-session--interrupted nil
+  "The sessions the start of this harness found cut short, newest first.
+Each is a plist (:id ID :status STATUS :pending PENDING :calls CALLS
+:text TEXT): STATUS the status the session was saved with, `running'
+or `blocked'; PENDING the requests it waited on; CALLS the tool calls
+left without a result, each (:tool NAME :call-id ID); TEXT the hint
+saying what it was doing.  See `session/interrupted'.")
+
+(harness-defmethod session/interrupted ()
+  "Return the sessions the start of this harness found cut short.
+They were saved running or blocked: the harness stopped -- it crashed,
+was killed, or its machine went down -- in the middle of their turns.
+Loading settled each one (see `harness-session--settle'): its tool
+calls got results saying they were interrupted, it was given a hint
+saying so, and it is inactive.  Each item is a plist (:id ID :status
+STATUS :pending PENDING :calls CALLS :text TEXT), oldest load first;
+see `harness-session--interrupted'.  A reload finds nothing new: it
+loads no session."
+  (reverse harness-session--interrupted))
+
 (defun harness-session--price-record (model record)
   "Return RECORD for MODEL with a missing `:cost' and `:list-cost' priced.
 The cost is what was billed and the list cost what the call costs at
@@ -3045,13 +3065,15 @@ a call the harness recorded in S's parent for S (`harness-outside-node-p'
 with S as its `:child-id'), which nothing else would answer: the parent
 need not have been running.  The requests themselves are gone: the turn
 that would read their answers ended with the process.  A message one
-held back goes back in the queue (`harness-session--requeue')."
+held back goes back in the queue (`harness-session--requeue').
+Return the tool calls of S answered so, each (:tool NAME :call-id ID)."
   (let* ((id (harness-session-id s))
          (parent (gethash (harness-session-parent-id s) harness-sessions))
          (interrupted (lambda (_call)
                         (list :output harness-session-interrupted-output :is-error t
-                              :meta (list :interrupted t)))))
-    (harness-session--answer id (harness-session--unanswered (harness-session--path s)) interrupted)
+                              :meta (list :interrupted t))))
+         (calls (harness-session--unanswered (harness-session--path s))))
+    (harness-session--answer id calls interrupted)
     ;; A call the harness recorded in the parent for S (the merge
     ;; queue's conflict resolver) waited on S, which stopped with it.
     (when parent
@@ -3064,11 +3086,15 @@ held back goes back in the queue (`harness-session--requeue')."
     (harness-session--requeue id pending)
     (harness-call 'session/hint id (harness-session--interrupted-text pending))
     ;; Saved inactive now, so the next start does not settle it again.
-    (harness-session--save id)))
+    (harness-session--save id)
+    (mapcar (lambda (call) (list :tool (plist-get call :tool) :call-id (plist-get call :call-id)))
+            calls)))
 
 (defun harness-session--load-all ()
   "Load every persisted session record (nodes stay on disk until needed).
-Sessions saved mid-turn are settled with `harness-session--settle'."
+Sessions saved mid-turn are settled with `harness-session--settle', and
+listed in `harness-session--interrupted' for whoever recovers them."
+  (setq harness-session--interrupted nil)
   (let (interrupted)
     (dolist (name (harness-call 'store/list "sessions" "\\.json\\'"))
       (let ((pl (harness-call 'store/load name)))
@@ -3076,12 +3102,16 @@ Sessions saved mid-turn are settled with `harness-session--settle'."
           (let ((s (harness-session--from-plist pl)))
             (puthash (plist-get pl :id) s harness-sessions)
             (when (member (plist-get pl :status) '("running" "blocked"))
-              (push (cons s (plist-get pl :pending)) interrupted))))))
+              (push (list s (plist-get pl :pending) (intern (plist-get pl :status))) interrupted))))))
     (dolist (entry interrupted)
-      (condition-case err
-          (harness-session--settle (car entry) (cdr entry))
-        (error (harness-log 'warn "session %s: could not settle its interrupted turn: %S"
-                            (harness-session-id (car entry)) err))))
+      (pcase-let ((`(,s ,pending ,status) entry))
+        (condition-case err
+            (let ((calls (harness-session--settle s pending)))
+              (push (list :id (harness-session-id s) :status status :pending pending :calls calls
+                          :text (harness-session--interrupted-text pending))
+                    harness-session--interrupted))
+          (error (harness-log 'warn "session %s: could not settle its interrupted turn: %S"
+                              (harness-session-id s) err)))))
     ;; A move waiting for a turn that the stop ended.
     (maphash (lambda (id s)
                (when (harness-session-move s)

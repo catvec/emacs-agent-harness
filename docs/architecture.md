@@ -92,6 +92,27 @@ default) the layers above are split across two Emacs processes:
   `harness-run-soon` of a request handler, the next step of a turn --
   would otherwise wait for an unrelated timer or process output, seconds
   later.
+- An error that escapes a process filter or sentinel goes to
+  `command-error-function`, whose batch default ends Emacs with status
+  255: every running turn stopped at once, and the parent restarted the
+  process ("Harness process exited (status 255); restarting").  The
+  child sets its own (`harness-server--guard`), which logs the error
+  and carries on.  One such error was `max-lisp-eval-depth`:
+  `process-send-string` to a peer that does not read waits for room in
+  20 ms slices, running timers and filters meanwhile, and one that
+  writes to the same peer waits inside it, and so on, a frame deeper
+  each time, until Lisp nesting overflows.  The handler throws such an
+  overflow back to the event loop (`harness-server--unwind`), so the
+  nested waits unwind rather than stop the process, and every write to
+  a peer goes through `harness-process-send` (lisp/harness-util.el): a
+  write that meets one in flight to the same process queues behind it,
+  and the one in flight sends it when it is done, in order, so the
+  waits never nest.  A write that waits longer than
+  `harness-process-send-slow` (10 s) is logged; given a limit (the
+  remote server's WebSocket, `harness-acp-remote--write-limit`, 120 s),
+  a write that comes in line behind one waiting longer than that closes
+  the peer, which has not read for so long, and the write in flight
+  fails rather than wait on.
 - The UI reads the child's socket when its event loop reports it
   readable, and handles what it read from a timer, a slice at a time
   (`harness-acp-receive-slice`; see acp).  The loop does not always get
@@ -1116,6 +1137,11 @@ gone.  A message one held back from a turn that had not started (its
 payload's `:waiting-message` `(:text :from)`: the cowboy module's
 question about a cold cache) goes back in the session's queue, with
 its sender, and the hint says so (`harness-session--requeue`).
+`session/interrupted` returns what the load settled, oldest first, one
+`(:id :status :pending :calls :text)` per session: the status it was
+saved with, the pending requests it waited on, the tool calls the load
+answered (`(:tool :call-id)`) and the hint's text.  The resilience
+module carries those sessions on (see resilience).
 
 The node log is only ever appended to, but for a redaction, which
 replaces it whole (`session/redact-text`, `session/reset-provider`; see
@@ -3844,6 +3870,86 @@ So a lost connection is repeated for the harness's own calls -- a
 task's title, a permission judge, a recap -- which no step layer covers
 (they are no agent step), as well as for a turn's.  The Claude Code CLI
 retries its own API calls.
+
+A CLI provider's process killed by a signal mid-turn (its failure text
+reads "exited with status N" for N in 6, 9, 11, 13, 15, 134, 137, 139,
+141 or 143: SIGABRT, SIGKILL, SIGSEGV, SIGPIPE, SIGTERM, by number or
+as a shell reports them, 128 + the signal) is the kind `process`
+(`harness-retry--process-death-patterns`), retried like a transport
+failure with the hint "the provider's process died: ...".  The next
+try starts the process again.  An exit the program chose (status 1 and
+a message, an invalid key) is not retried.
+
+### resilience
+
+Sessions and sub-agents never sit stalled unless the user stopped them
+on purpose.  In the core (`harness-core-modules`), after session, agent
+and tools.
+
+- After a start (not a reload: `harness-module-ready-p`), from
+  `harness-run-soon`, `harness-resilience--recover` goes over
+  `session/interrupted` (see session).  A session whose owner carries it
+  on is left to it: a task's (`task/for-session`, see
+  `harness-tasks-resume-interrupted`), an internal one, and a
+  sub-agent no `spawn_agent` call started (a supervisor's worker, the
+  merge queue's resolver, a seed: the module that started it).  Any
+  other is sent a message of the harness's (`agent/prompt`, `:from`
+  `(harness-sender-system "restart")`) naming the tool calls that did not
+  finish and the prompt it waited on, unless
+  `harness-resilience-resume-interrupted` is nil, its turn was
+  cancelled, or it was carried on `harness-resilience--resume-max` (3)
+  times in a row already; then it gets a hint saying why, and the user a
+  notification (kind `left-stopped`), but for a cancel.
+- Cancels: `agent/cancelling` sets the session's ext
+  `:resilience-cancelled`, which the next `agent/turn-started` drops, so
+  a turn cancelled on purpose -- `C-g`, a cancel action, another
+  session's `session_control` -- is never carried on, however the
+  process ended after.  An exit does not cancel turns (SIGTERM runs
+  `kill-emacs-hook`, which saves them as they are), so one restarted
+  with `M-x harness-restart` carries on.  The count of
+  carries in a row is the ext `:resilience-resumes`; a turn ending
+  `end-turn` drops it.  Both are in the record, so they outlive the
+  process.
+- Waits: at `agent/turn-ended` the ext `:resilience-awaiting` keeps
+  what `agent/outstanding` says the session still waits for (a
+  sub-agent, a `session_wait`, an event watch).  Those registrations
+  live in the process; after a start, a session that still has the
+  mark, waits on nothing of this process and was not carried on is
+  woken with a message saying so (`harness-resilience--wake-waiters`).
+- Sub-agents: tools-agent keeps the ext `:report-to` (parent, name,
+  worktree, branch) on each child it spawns, until the child reported.
+  At a start it takes those children back (`harness-tools-agent--adopt`).
+  Once this module has carried on what it carries on, it reports the
+  ones not running (`harness-tools-agent-settle-adopted`); without it,
+  tools-agent does `harness-tools-agent--settle-delay` (60 s) after the
+  start.  One that is carried on reports when its turn ends, as always;
+  one that is not is reported "stopped: the harness restarted during its
+  turn, which was not resumed" (or cancelled), so no parent waits
+  forever.
+- Prompts: every `harness-resilience--tick-seconds` (30) a repeating
+  timer looks at the blocked sub-agents.  A pending request older than
+  `harness-resilience-prompt-timeout` (600 s; nil never) is answered by
+  default: a permission denied for that call alone (`permission/answer`,
+  with a reason telling the agent not to wait for it), an ask_user
+  question answered "decide for yourself" (`question/answer`), a
+  question the harness asked dismissed (`question/cancel`).  The parent
+  is told by a message when the child is `spawn_agent`'s, by a hint
+  otherwise; the user by a notification (kind `prompt-timeout`); event
+  `resilience/prompt-timed-out ID ITEM`.  The user's own sessions and
+  tasks always wait for the user.
+- Watchdog: the same tick looks at the running turns.  Progress is any
+  of `agent/step-started`, `agent/stream`, `agent/tool-call`,
+  `agent/tool-result`, `agent/activity-changed`, `agent/steered`,
+  `tools/progress` and `session/pending-changed`; a session blocked on
+  the user is not stalled.  One quiet for `harness-resilience--stall-after`
+  (900 s; nil turns it off), or while tool calls run their longest
+  timeout and 60 s more when that is longer, gets a hint, event
+  `resilience/stalled ID SECONDS`, and the user a notification (kind
+  `stalled`), once until it moves again.  It is reported, not cancelled:
+  only the user knows whether a long silence is a hang.
+- Notifications go through `notification/send` when the notifications
+  module runs, else straight to the UI (`client/request`
+  `_harness/client/notify`), else to the log.
 
 ### compaction
 

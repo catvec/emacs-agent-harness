@@ -536,26 +536,15 @@ many chunks bring it."
 A client that reads more slowly than it is sent to, such as a UI busy
 for a while, fills its socket, and `process-send-string' then waits for
 room, running the timers due and process output meanwhile.  What those
-send to the same client waits in line for the write under way: writing
-it from each of them would make each wait inside the one before, until
-Lisp nesting exceeded `max-lisp-eval-depth' and every timer failed."
-  (let ((waiting (process-get proc 'harness-acp-waiting)))
-    (if waiting
-        (push line (car waiting))
-      (let ((queue (list nil)))         ; (LINES), newest first
-        (process-put proc 'harness-acp-waiting queue)
-        (condition-case err
-            (unwind-protect
-                (while line
-                  (process-send-string proc line)
-                  ;; What came meanwhile, in one write.
-                  (setq line (and (car queue)
-                                  (apply #'concat (nreverse (car queue)))))
-                  (setcar queue nil))
-              (process-put proc 'harness-acp-waiting nil))
-          (error
-           (harness-log 'warn "acp: send to %s failed: %s" (process-name proc) (harness-error-message err))
-           (harness-acp--drop-client client)))))))
+send to the same client waits in line for the write under way (see
+`harness-process-send'): writing it from each of them would make each
+wait inside the one before, until Lisp nesting exceeded
+`max-lisp-eval-depth' and every timer failed."
+  (condition-case err
+      (harness-process-send proc line)
+    (error
+     (harness-log 'warn "acp: send to %s failed: %s" (process-name proc) (harness-error-message err))
+     (harness-acp--drop-client client))))
 
 (defun harness-acp--client-notify (client method params)
   "Send notification METHOD with PARAMS to CLIENT."
@@ -1996,7 +1985,8 @@ Return what RESPOND does: non-nil when the answer went out."
         ((eq (process-status proc) 'connect)
          (setf (harness-acp-connection-outbox conn)
                (append (harness-acp-connection-outbox conn) (list line))))
-        (t (process-send-string proc line)))))))
+        ;; In line behind a write that waits for a busy server, not inside it.
+        (t (harness-process-send proc line)))))))
 
 (defun harness-acp--send-request (conn method params)
   "Send request METHOD with PARAMS over CONN; return (ID . PROMISE).
@@ -2409,7 +2399,7 @@ They are parsed as they are handled, a slice at a time."
         (let ((lines (harness-acp-connection-outbox conn)))
           (setf (harness-acp-connection-outbox conn) nil)
           (dolist (line lines)
-            (condition-case err (process-send-string proc line)
+            (condition-case err (harness-process-send proc line)
               (error (harness-log 'warn "acp: flush failed: %s" (harness-error-message err)))))))
        ((not (process-live-p proc))
         (harness-acp--conn-shutdown conn (string-trim event)))))))

@@ -8,7 +8,7 @@ The turn loop: prompt, stream, run tools, steer, queue.
 - **Source:** [lisp/modules/harness-agent.el](../../lisp/modules/harness-agent.el)
 - **Loaded:** by default
 - **Requires:** [session](session.md), [provider](provider.md), [tools](tools.md)
-- **Required by:** [compaction](compaction.md), [cowboy](cowboy.md), [handoff](handoff.md), [merge](merge.md), [naming](naming.md), [recap](recap.md), [retry](retry.md), [seed](seed.md), [supervisor](supervisor.md), [tasks](tasks.md), [tools-agent](tools-agent.md), [tools-events](tools-events.md), [tools-sessions](tools-sessions.md)
+- **Required by:** [compaction](compaction.md), [cowboy](cowboy.md), [handoff](handoff.md), [merge](merge.md), [naming](naming.md), [recap](recap.md), [resilience](resilience.md), [retry](retry.md), [seed](seed.md), [supervisor](supervisor.md), [tasks](tasks.md), [tools-agent](tools-agent.md), [tools-events](tools-events.md), [tools-sessions](tools-sessions.md)
 
 ## About
 

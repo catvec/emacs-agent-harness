@@ -545,10 +545,12 @@ resumes the CLI session in a new one."
       (when fn (funcall fn event)))))
 
 (defun harness-provider-claude--send (entry object)
-  "Write OBJECT as one JSON line to ENTRY's CLI process."
+  "Write OBJECT as one JSON line to ENTRY's CLI process.
+In line behind a write that waits for the CLI to read, never inside it
+\(see `harness-process-send')."
   (let ((proc (harness-provider-claude-session-process entry)))
     (if (process-live-p proc)
-        (process-send-string proc (concat (harness-json-encode object) "\n"))
+        (harness-process-send proc (concat (harness-json-encode object) "\n"))
       (harness-log 'warn "provider-claude: cannot write to dead process for %s"
                    (harness-provider-claude-session-id entry)))))
 
@@ -1961,7 +1963,7 @@ It is no longer the probe: whoever needs one next starts another."
     (setq harness-provider-claude--probe nil))
   (let ((proc (harness-provider-claude-session-process entry)))
     (when (process-live-p proc)
-      (if kill (delete-process proc) (process-send-eof proc)))))
+      (if kill (delete-process proc) (harness-process-send-eof proc)))))
 
 (defun harness-provider-claude--probe-sentinel (entry proc)
   "Clean up after the probe ENTRY once its process PROC has ended."
@@ -3083,7 +3085,7 @@ runs `harness-provider-claude--interrupt-timeout' seconds later."
     (remhash key harness-provider-claude--sessions)
     (let ((proc (harness-provider-claude-session-process entry)))
       (when (process-live-p proc)
-        (ignore-errors (process-send-eof proc))))
+        (ignore-errors (harness-process-send-eof proc))))
     (run-at-time harness-provider-claude--interrupt-timeout nil #'harness-provider-claude--kill entry)))
 
 (defun harness-provider-claude--complete-ephemeral (request)

@@ -133,13 +133,14 @@ after changing it run \\[harness-restart]."
 
 (defconst harness-core-modules
   '(acp agent compaction config naming perms priority project provider provider-claude
-    retry sandbox session store usage worktree
+    resilience retry sandbox session store usage worktree
     tools tools-agent tools-emacs tools-fs tools-plan tools-question tools-session-info
     tools-shell tools-todo
     ui ui-chat ui-compose ui-notify ui-pending ui-sessions)
   "The modules that load whatever `harness-enabled-modules' says.
 They make a harness to work with: sessions and the turn loop, Claude
-Code for the default model, compaction and retries, session names,
+Code for the default model, compaction and retries, carrying sessions
+on after a restart and reporting the ones that stall, session names,
 the file, shell and Emacs tools with the permissions and the sandbox
 that guard them, the tools that ask the user, plan, keep a todo list,
 describe the session and start sub-agents, worktrees, usage and

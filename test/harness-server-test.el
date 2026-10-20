@@ -156,6 +156,91 @@ check runs on, for each of 20 hops."
               (should (eq status 0)))))
       (delete-file script))))
 
+(defun harness-server-test--run-child (forms timeout)
+  "Run FORMS in a batch Emacs that has the harness on its load path.
+Return (STATUS . OUTPUT), OUTPUT being its stdout and stderr; kill it
+after TIMEOUT seconds."
+  (let ((script (make-temp-file "harness-child-" nil ".el"))
+        (lisp (expand-file-name "lisp" harness-test-root)))
+    (unwind-protect
+        (progn
+          (with-temp-file script
+            (insert ";; -*- lexical-binding: t -*-\n"
+                    (mapconcat #'prin1-to-string forms "\n")))
+          (with-temp-buffer
+            (let ((status (call-process "timeout" nil t nil (number-to-string timeout)
+                                        (expand-file-name invocation-name invocation-directory)
+                                        "-Q" "--batch" "-L" harness-test-root "-L" lisp "-l" script)))
+              (cons status (buffer-string)))))
+      (delete-file script))))
+
+(ert-deftest harness-server-an-error-in-a-sentinel-is-not-fatal ()
+  "The harness process logs an error that escapes a sentinel and carries on.
+Batch Emacs's own `command-error-function' exits with status 255 on one:
+that is how the harness process died, its every running turn cut
+short, when a sentinel ran past `max-lisp-eval-depth'."
+  (let ((child (lambda (guard)
+                 (harness-server-test--run-child
+                  `((require 'harness-server)
+                    (add-hook 'harness-log-hook #'harness-server--log-to-stderr)
+                    ,@(and guard '((harness-server--guard)))
+                    (make-process :name "p" :command '("true") :noquery t
+                                  :sentinel (lambda (_p _e) (error "Boom in a sentinel")))
+                    (run-at-time 1 nil (lambda ()
+                                         (princ "alive\n" #'external-debugging-output)
+                                         (kill-emacs 0)))
+                    (harness-server--event-loop))
+                  30))))
+    ;; What happened: Emacs's own handler kills the process.
+    (should (equal 255 (car (funcall child nil))))
+    (pcase-let ((`(,status . ,out) (funcall child t)))
+      (should (equal 0 status))
+      (should (string-match-p "ERROR server: error in process sentinel: Boom in a sentinel" out))
+      (should (string-match-p "^alive$" out)))))
+
+(ert-deftest harness-server-unwinds-nesting-that-overflowed ()
+  "Writes that wait inside writes overflow the stack; the process recovers.
+Each timer here writes to a process that never reads, with
+`process-send-string', so each waits inside the one before: a filter
+run at the bottom overflows `max-lisp-eval-depth', and the harness
+process unwinds to its event loop instead of failing every timer,
+filter and sentinel from then on."
+  (pcase-let ((`(,status . ,out)
+               (harness-server-test--run-child
+                '((require 'harness-server)
+                  (defvar unwound nil)
+                  (add-hook 'harness-log-hook
+                            (lambda (level msg)
+                              (when (string-match-p "unwound" msg) (setq unwound t))
+                              (princ (format "%s %s\n" level msg) #'external-debugging-output)))
+                  (harness-server--guard)
+                  (defvar sink (make-process :name "sink" :command '("sleep" "60")
+                                             :connection-type 'pipe :noquery t))
+                  (defvar chunk (make-string 70000 ?x))
+                  (defun write-tick ()
+                    (unless unwound
+                      (run-at-time 0.01 nil #'write-tick)
+                      (process-send-string sink chunk)))
+                  (run-at-time 0 nil #'write-tick)
+                  (defun deep (n) (if (> n 0) (1+ (deep (1- n))) 0))
+                  (make-process :name "talker" :noquery t
+                                :command '("sh" "-c" "while true; do echo x; sleep 0.05; done")
+                                :filter (lambda (_p _s) (deep 150)))
+                  (run-at-time 0.5 0.5
+                               (lambda ()
+                                 (when unwound
+                                   (princ (format "frames %d\n" (harness-server--frames))
+                                          #'external-debugging-output)
+                                   (kill-emacs 0))))
+                  (run-at-time 40 nil (lambda () (kill-emacs 5)))
+                  (harness-server--event-loop))
+                60)))
+    (should (equal 0 status))
+    (should (string-match-p "error server: error in process filter: Lisp nesting exceeds" out))
+    (should (string-match-p "warn server: Lisp nesting overflowed; unwound to the event loop" out))
+    (should (string-match "^frames \\([0-9]+\\)$" out))
+    (should (< (string-to-number (match-string 1 out)) 100))))
+
 (ert-deftest harness-server-emacs-tools-reach-the-emacs-the-ui-lends ()
   "The tools run in the harness process and reach the UI's Emacs, which
 lent itself when it connected: its buffers and windows, never an

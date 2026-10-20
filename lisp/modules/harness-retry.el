@@ -26,7 +26,9 @@
 ;; A provider that knows names its failure's kind in `:error-kind'
 ;; (`transport' or `rate-limit', see `harness-provider-openai'); a
 ;; transport failure that arrives as text alone (a CLI provider's, say)
-;; is read the same way by `harness-retry--kind'.
+;; is read the same way by `harness-retry--kind'.  So is a CLI
+;; provider's process killed mid-turn (out of memory, say): the next
+;; try starts it again.
 
 ;;; Code:
 
@@ -73,6 +75,14 @@ exactly."
   "rate[ _-]limit\\|too many requests\\|slow down\\|retry after"
   "Regexps that say a provider asked the caller to slow down.")
 
+(defconst harness-retry--process-death-patterns
+  "exited with status \\(?:6\\|9\\|11\\|13\\|15\\|134\\|137\\|139\\|141\\|143\\)\\(?:[^0-9]\\|\\'\\)"
+  "Regexps that say a provider's own process died of a signal mid-turn.
+A CLI provider (Claude Code) killed by the system -- out of memory, say
+-- or crashing ends its step with that exit status: the next try starts
+the process again, and the conversation goes on where it left off.  An
+exit the program chose, status 1 with a message, is no such failure.")
+
 (defvar harness-retry--attempts (make-hash-table :test 'equal)
   "Session id -> how many times its running turn tried a step again.
 Reset when a turn starts and when it ends.")
@@ -89,18 +99,21 @@ TEXT is read in lower case; a failure a provider named with
 (defun harness-retry--kind (failure)
   "Return the kind of FAILURE worth trying again, or nil.
 FAILURE is what `agent/step-error' passes.  A kind a provider named is
-used as it is: `transport' and `rate-limit' are this module's, anything
-else (a quota, a refused login) is another module's.  Without a kind,
-the error's text is read for a connection that failed or a limit that
-was hit."
+used as it is: `transport', `rate-limit' and `process' are this
+module's, anything else (a quota, a refused login) is another module's.
+Without a kind, the error's text is read for a connection that failed,
+a limit that was hit, or a provider process that died of a signal
+\(`harness-retry--process-death-patterns')."
   (let ((kind (let ((k (plist-get failure :error-kind)))
                 (and k (intern (format "%s" k)))))
         (text (plist-get failure :error)))
-    (cond ((memq kind '(transport rate-limit)) kind)
+    (cond ((memq kind '(transport rate-limit process)) kind)
           (kind nil)
           ((and (stringp text) (string-match-p harness-retry--rate-limit-patterns (downcase text)))
            'rate-limit)
-          ((harness-retry--transient-text-p text) 'transport))))
+          ((harness-retry--transient-text-p text) 'transport)
+          ((and (stringp text) (string-match-p harness-retry--process-death-patterns text))
+           'process))))
 
 (defun harness-retry--delay (attempt failure)
   "Seconds to wait before the ATTEMPT-th try of FAILURE's step.
@@ -122,7 +135,10 @@ otherwise the wait doubles per try, spread by `harness-retry-jitter'."
 (defun harness-retry--say (kind failure)
   "Return what a hint says about FAILURE of KIND."
   (format "%s: %s"
-          (if (eq kind 'rate-limit) "rate limited" "network error")
+          (pcase kind
+            ('rate-limit "rate limited")
+            ('process "the provider's process died")
+            (_ "network error"))
           (harness-error-short-message (or (plist-get failure :error) "unknown"))))
 
 (defun harness-retry--step-error (value next session failure)

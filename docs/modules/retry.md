@@ -35,7 +35,9 @@ keeping it busy.
 A provider that knows names its failure's kind in `:error-kind`
 (`transport` or `rate-limit`, see `harness-provider-openai`); a
 transport failure that arrives as text alone (a CLI provider's, say)
-is read the same way by `harness-retry--kind`.
+is read the same way by `harness-retry--kind`.  So is a CLI
+provider's process killed mid-turn (out of memory, say): the next
+try starts it again.
 
 ## Provides
 

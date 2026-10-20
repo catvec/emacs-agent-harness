@@ -106,12 +106,67 @@ knows of and, waking, sees the ones added meanwhile."
     ;; Zero would wait forever; a timer due now still needs one pass.
     (max 0.001 wait)))
 
+(defvar harness-server--in-loop nil
+  "Non-nil inside `harness-server--event-loop', which catches an unwind.")
+
 (defun harness-server--event-loop ()
-  "Run timers and process output until Emacs exits; never return."
-  (while t
-    (condition-case err
-        (accept-process-output nil (harness-server--wait-time))
-      (error (harness-log 'error "server: event loop: %s" (error-message-string err))))))
+  "Run timers and process output until Emacs exits; never return.
+Whatever escapes is logged and the loop goes on, a `quit' too: the
+harness process ends when it is told to (SIGTERM, `kill-emacs'), never
+because something it ran failed.  It is also where
+`harness-server--command-error' unwinds a stack that overflowed."
+  (let ((harness-server--in-loop t))
+    (while t
+      (when (catch 'harness-server--unwind
+              (condition-case err
+                  (progn (accept-process-output nil (harness-server--wait-time)) nil)
+                (t (ignore-errors
+                     (harness-log 'error "server: event loop: %s" (error-message-string err)))
+                   nil)))
+        (ignore-errors
+          (harness-log 'warn "server: Lisp nesting overflowed; unwound to the event loop"))))))
+
+(defun harness-server--frames ()
+  "Return how many frames deep the running Lisp is."
+  (let ((n 0))
+    (mapbacktrace (lambda (&rest _) (setq n (1+ n))))
+    n))
+
+(defun harness-server--overflow-p (data)
+  "Non-nil when DATA, an error, is Lisp nesting past `max-lisp-eval-depth'."
+  (or (eq (car-safe data) 'excessive-lisp-nesting)
+      (and (stringp (car-safe (cdr-safe data)))
+           (string-match-p "max-lisp-eval-depth" (cadr data)))))
+
+(defun harness-server--command-error (data context _signal)
+  "Log DATA, an error that escaped a process filter or sentinel, and go on.
+It is the harness process's `command-error-function'.  (A timer's error
+never gets here: `timer-event-handler' reports it.)  Batch Emacs's
+own, `command-error-default-function', prints the error and exits with
+status 255 when it is not interactive: one error in one process
+sentinel -- a sentinel run deep inside writes that waited for room,
+past `max-lisp-eval-depth' -- killed the harness process and cut every
+running turn short.  CONTEXT is the text Emacs puts before the error,
+such as \"error in process sentinel: \".  Nothing here may fail: it runs
+where Lisp has just failed, maybe with little room left.
+
+Nesting that overflowed while the stack is still deep -- whatever ran
+waits inside waits, which return when, if ever, the peers they wait for
+read -- would fail every timer, filter and sentinel from then on; so
+the stack is unwound to the event loop, which cuts the writes that
+waited short, rather than leave the harness unable to run anything."
+  (condition-case nil
+      (harness-log 'error "server: %s%s" (or context "") (error-message-string data))
+    (t (ignore-errors
+         (princ (format "ERROR server: %s%S\n" (or context "") data) #'external-debugging-output))))
+  (when (and harness-server--in-loop
+             (harness-server--overflow-p data)
+             (> (or (ignore-errors (harness-server--frames)) 0) (/ max-lisp-eval-depth 2)))
+    (throw 'harness-server--unwind t)))
+
+(defun harness-server--guard ()
+  "Make errors that escape process filters and sentinels non-fatal."
+  (setq command-error-function #'harness-server--command-error))
 
 (defun harness-server--reload ()
   "Reload the harness process in place, for its `harness/reload' method.
@@ -144,6 +199,8 @@ HARNESS_SERVER_TOKEN and HARNESS_SERVER_PARENT from the environment."
   (let ((config (getenv "HARNESS_SERVER_CONFIG"))
         (parent (let ((p (getenv "HARNESS_SERVER_PARENT"))) (and p (string-to-number p)))))
     (add-hook 'harness-log-hook #'harness-server--log-to-stderr)
+    ;; An error in a process filter or sentinel is logged, not fatal.
+    (harness-server--guard)
     (when (and config (file-readable-p config))
       (load config nil t t))
     (when (and harness-server-init-file (file-readable-p harness-server-init-file))

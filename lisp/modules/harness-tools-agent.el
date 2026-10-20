@@ -63,18 +63,97 @@ Keep the plan short and concrete; update the todo list (todo_write) as steps com
 (defvar harness-tools-agent--children (make-hash-table :test 'equal)
   "Child session id -> what a spawn_agent call knows of a running child.
 A plist (:parent PARENT-ID :name NAME :worktree PATH :branch BRANCH
-:result RESULT :unwatch STOP :stopped WHY).  A child's call has always
-returned, since it started; RESULT is what the child's first turn ended
-with, nil while it runs.  The entry stays until the child is done with
-everything it has going on, so a parent counts it as work it still runs
-\(`harness-tools-agent--outstanding') and a child that registered a wait
-is not reported as finished when its turn merely ended; STOP, when
-there is one, stops the note under the child's spawn_agent call
-\(`harness-tools-agent--watch-child').  WHY is there once the parent's
-outstanding work was stopped and took the child's with it
-\(`harness-tools-agent--stop-outstanding'): the reason, or t without
-one.  A child so stopped is reported as cancelled, whatever its last
-turn said.")
+:result RESULT :unwatch STOP :stopped WHY :adopted ADOPTED).  A child's
+call has always returned, since it started; RESULT is what the child's
+first turn ended with, nil while it runs.  The entry stays until the
+child is done with everything it has going on, so a parent counts it as
+work it still runs (`harness-tools-agent--outstanding') and a child
+that registered a wait is not reported as finished when its turn merely
+ended; STOP, when there is one, stops the note under the child's
+spawn_agent call (`harness-tools-agent--watch-child').  WHY is there
+once the parent's outstanding work was stopped and took the child's
+with it (`harness-tools-agent--stop-outstanding'): the reason, or t
+without one.  A child so stopped is reported as cancelled, whatever its
+last turn said.  ADOPTED is non-nil for a child this harness took back
+from one that stopped before reporting it (`harness-tools-agent--adopt'):
+whichever of its turns ends next reports it.
+
+Each entry is kept in the child's record too, as `:report-to' in its
+`ext' (`harness-tools-agent--remember'), so that it outlives the
+harness process.")
+
+(defun harness-tools-agent--remember (cid entry)
+  "Keep in the record of child CID whom it reports to, from ENTRY.
+That is `:report-to' in its `ext': (:parent ID :name NAME :worktree
+PATH :branch BRANCH :stopped WHY), the keys with a value.  Nothing
+fails for it: a child that cannot be remembered still runs."
+  (condition-case err
+      (when (harness-call 'session/exists-p cid)
+        (harness-call 'session/set-ext cid :report-to
+                      (cl-loop for key in '(:parent :name :worktree :branch :stopped)
+                               for value = (plist-get entry key)
+                               when (or (stringp value) (eq value t))
+                               append (list key value))))
+    (error (harness-log 'warn "tools-agent: remembering the parent of sub-agent %s failed: %s"
+                        cid (harness-error-message err)))))
+
+(defun harness-tools-agent--adopt ()
+  "Take back the sub-agents a stopped harness had not reported yet.
+Each spawn_agent child keeps whom it reports to in its record
+\(`harness-tools-agent--remember') until it is reported.  A harness
+that stops meanwhile forgets the children it ran, and their parents
+would wait for reports that never come; the next start takes them
+back, marked `:adopted': the next turn of each that ends reports it, as
+its first one would have (see `harness-tools-agent--on-turn-ended'),
+and one left with nothing to run is reported by
+`harness-tools-agent-settle-adopted'.  A child whose parent is gone
+is forgotten."
+  (dolist (s (harness-call 'session/list (list :kind 'subagent)))
+    (let* ((cid (plist-get s :id))
+           (link (plist-get (plist-get s :ext) :report-to))
+           (parent (and (consp link) (plist-get link :parent))))
+      (when (and link (not (gethash cid harness-tools-agent--children)))
+        (if (and (stringp parent) (harness-call 'session/exists-p parent))
+            (progn
+              (puthash cid (list :parent parent
+                                 :name (or (plist-get link :name) (plist-get s :name))
+                                 :worktree (plist-get link :worktree) :branch (plist-get link :branch)
+                                 :result nil :stopped (plist-get link :stopped) :unwatch nil :adopted t)
+                       harness-tools-agent--children)
+              (harness-log 'info "tools-agent: sub-agent %s reports to %s when it is done, after the restart"
+                           (harness-tools-agent--short-id cid) (harness-tools-agent--short-id parent)))
+          (harness-call 'session/set-ext cid :report-to nil))))))
+
+(defun harness-tools-agent-settle-adopted (&optional reasons)
+  "Report the sub-agents taken back after a restart that have nothing to run.
+A child taken back (`harness-tools-agent--adopt') reports when its next
+turn ends; one that has no turn to run -- nothing carried it on,
+nothing it waits on is left -- would leave its parent waiting for good.
+So each such child is reported now: as cancelled when it was being
+stopped, else with its reason in REASONS, an alist (ID . REASON) of the
+sessions whose turns did not end by themselves (`interrupted' for a
+turn the restart cut short, `cancelled' for one cancelled), else as
+finished.  The resilience module calls this once it has carried on
+what it carries on; without it, the tools-agent module calls it
+itself, a little after it starts.  Return the ids reported."
+  (let (reported)
+    (dolist (child (let (all)
+                     (maphash (lambda (cid entry) (when (plist-get entry :adopted) (push (cons cid entry) all)))
+                              harness-tools-agent--children)
+                     all))
+      (let ((cid (car child)))
+        (unless (or (harness-call 'agent/running cid)
+                    (harness-tools-agent--child-busy-p cid))
+          (condition-case err
+              (progn
+                (harness-tools-agent--settle-child
+                 cid (cond ((plist-get (cdr child) :stopped) 'cancelled)
+                           ((cdr (assoc cid reasons)))
+                           (t 'end-turn)))
+                (push cid reported))
+            (error (harness-log 'warn "tools-agent: reporting sub-agent %s after the restart failed: %s"
+                                cid (harness-error-message err)))))))
+    reported))
 
 (defun harness-tools-agent--short-id (id)
   "Return the first eight characters of session ID."
@@ -165,7 +244,8 @@ settled by its `agent/prompt' result (`harness-tools-agent--child-result'),
 which holds a failure's error too; this settles the turns that follow,
 such as the wake-up turn of a wait the child registered."
   (let ((entry (gethash session-id harness-tools-agent--children)))
-    (when (and entry (plist-get entry :result))
+    ;; A child taken back after a restart has no first turn to wait for.
+    (when (and entry (or (plist-get entry :result) (plist-get entry :adopted)))
       (harness-tools-agent--settle-child session-id reason))))
 
 (defun harness-tools-agent--watch-child (cid note)
@@ -176,11 +256,17 @@ watching, or nil when the call has no note function."
     (harness-tools-watch-session cid (lambda (text) (funcall note text)) (list :recap t))))
 
 (defun harness-tools-agent--forget-child (cid)
-  "Stop watching child CID and forget what its call knew of it."
+  "Stop watching child CID and forget what its call knew of it.
+Its record forgets whom it reports to too (`harness-tools-agent--remember')."
   (when-let* ((entry (gethash cid harness-tools-agent--children)))
     (when-let* ((stop (plist-get entry :unwatch)))
       (funcall stop))
-    (remhash cid harness-tools-agent--children)))
+    (remhash cid harness-tools-agent--children)
+    (condition-case err
+        (when (harness-call 'session/exists-p cid)
+          (harness-call 'session/set-ext cid :report-to nil))
+      (error (harness-log 'warn "tools-agent: forgetting the parent of sub-agent %s failed: %s"
+                          cid (harness-error-message err))))))
 
 (defun harness-tools-agent--child-summary (child-id)
   "Return the final text of CHILD-ID plus a footer with its tool calls and cost."
@@ -220,6 +306,7 @@ its turn ended."
                    ('cancelled "stopped: its turn was cancelled")
                    ('max-tokens "stopped: it hit its output limit")
                    ('blocked "stopped: its turn was blocked")
+                   ('interrupted "stopped: the harness restarted during its turn, which was not resumed")
                    ('error (format "stopped: it failed%s"
                                    (if (and (stringp error) (not (harness-string-blank-p error)))
                                        (format ": %s" error)
@@ -261,7 +348,8 @@ REASON is the text the report of CID says (`:stopped' in its entry),
 or t when there is none.  A child that has been reported meanwhile has no
 entry, and none is made."
   (when-let* ((entry (gethash cid harness-tools-agent--children)))
-    (puthash cid (plist-put entry :stopped reason) harness-tools-agent--children)))
+    (puthash cid (plist-put entry :stopped reason) harness-tools-agent--children)
+    (harness-tools-agent--remember cid entry)))
 
 (defun harness-tools-agent--stop-child (cid reason)
   "Stop sub-agent CID, as its parent's outstanding work is stopped for REASON.
@@ -574,6 +662,7 @@ own once its turn ends and nothing of it is outstanding any more."
                 (error (harness-log 'warn "tools-agent: naming the sub-agent %s on its call failed: %S"
                                     cid err)))
               (puthash cid entry harness-tools-agent--children)
+              (harness-tools-agent--remember cid entry)
               (harness-emit 'agent/spawned sid cid)
               ;; The parent hears of the child's end in a message of its
               ;; own; this call returns now, while the child runs.
@@ -628,12 +717,41 @@ own once its turn ends and nothing of it is outstanding any more."
 
 (harness-tools-agent--init)
 
+(defvar harness-tools-agent--settle-delay 60
+  "Seconds after a start before children taken back with nothing to run report.
+Internal.  The resilience module reports them as soon as it has resumed
+what it resumes (`harness-tools-agent-settle-adopted'); this is for a
+harness without it, and catches what it left.")
+
+(defun harness-tools-agent--settle-late ()
+  "Report the children taken back after a restart that still have nothing to run."
+  (when (and (harness-module-ready-p 'tools-agent)
+             (harness-method-exists-p 'agent/running))
+    (condition-case err
+        (harness-tools-agent-settle-adopted
+         (and (harness-method-exists-p 'session/interrupted)
+              (mapcar (lambda (it) (cons (plist-get it :id) 'interrupted))
+                      (harness-call 'session/interrupted))))
+      (error (harness-log 'warn "tools-agent: reporting the children taken back failed: %s"
+                          (harness-error-message err))))))
+
+(defun harness-tools-agent--start ()
+  "Start the module: its filters and subscribers, every time it starts.
+At a start, not at a reload, it also takes back the sub-agents a
+stopped harness had not reported (`harness-tools-agent--adopt')."
+  (harness-tools-agent--init)
+  (unless (harness-module-ready-p 'tools-agent)
+    (harness-tools-agent--adopt)
+    (when (cl-some (lambda (entry) (plist-get entry :adopted))
+                   (hash-table-values harness-tools-agent--children))
+      (run-at-time harness-tools-agent--settle-delay nil #'harness-tools-agent--settle-late))))
+
 (harness-declare-event 'agent/spawned "(PARENT-ID CHILD-ID) after spawn_agent created a child session.")
 
 (harness-define-module 'tools-agent
   :doc "The Sub-agent tool (spawn_agent), and the Planning section of the system prompt."
   :requires '(tools session agent)
-  :init #'harness-tools-agent--init)
+  :init #'harness-tools-agent--start)
 
 (provide 'harness-tools-agent)
 ;;; harness-tools-agent.el ends here

@@ -64,7 +64,10 @@ Nothing here waits: every long operation returns a promise.
 - `session/exists-p` ([session](session.md))
 - `session/get` ([session](session.md))
 - `session/hint` ([session](session.md))
+- `session/interrupted` ([session](session.md))
+- `session/list` ([session](session.md))
 - `session/nodes` ([session](session.md))
+- `session/set-ext` ([session](session.md))
 - `session/update-node` ([session](session.md))
 - `worktree/create` ([worktree](worktree.md)), when it is loaded
 

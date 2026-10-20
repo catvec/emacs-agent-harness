@@ -21,7 +21,12 @@ OpenAI-compatible APIs and AWS Bedrock.
   time; a rate limit waits the `Retry-After` it asked for. An answer cut
   in the middle is retried as a step, and the partial answer the failed
   step had streamed is dropped rather than sent to the model twice
-  (`harness-http-max-retries`, `harness-retry-max-attempts`).
+  (`harness-http-max-retries`, `harness-retry-max-attempts`). When the
+  harness process stops in the middle of a turn, the sessions it cut
+  short carry on once it is back, unless you had cancelled them; a
+  sub-agent's permission prompt nobody answers is denied after ten
+  minutes, its parent told; and a turn that stops making progress is
+  reported to you (see [Persistence](#persistence)).
 - **Built-in tools.** Tools for files (read, write, edit, search), the
   shell, commands on other hosts over ssh, the user's Emacs (buffers, windows, showing and editing a
   buffer, saving it, documentation, `*Messages*`, and debugging its
@@ -1969,6 +1974,13 @@ the parent's working directory through the merge queue, one at a time.
 offers (after any `model` override); without it the child thinks at this
 session's level. A level the model does not offer fails the call, naming
 the levels it does, so no child runs at a level its model cannot act on.
+A sub-agent that asks for permission, or asks you a question, waits for
+you `harness-resilience-prompt-timeout` seconds (600 by default); then
+the harness answers for you -- the permission denied, the question told
+to decide by itself -- and tells the parent, so one prompt left
+unanswered never holds up the whole tree. A sub-agent whose turn a
+harness restart cut short carries on and reports as before (see
+[Persistence](#persistence)).
 To wait for some other session without blocking, `session_wait`
 registers a wake-up and returns at once: a message of the harness's own
 arrives when the session is done, and the registration outlives the
@@ -4000,6 +4012,31 @@ of the harness process.
 - After a restart, sessions stay closed until you open one again
   (`C-c h s` or `C-c h l`), with its whole transcript. A turn that the
   restart interrupted is marked in the transcript.
+- A session whose turn the restart interrupted carries on by itself,
+  whether the process crashed, was killed or was restarted with `M-x
+  harness-restart`: the harness sends it a message (**System ·
+  restart**) naming the tool calls that did not finish, so the agent
+  checks what they did before it runs them again. A session you
+  cancelled (`C-g`, a cancel action) stays stopped, as does one carried
+  on three times in a row without a turn ending normally between; the
+  session then says why, and you are notified. A sub-agent spawned with
+  `spawn_agent` carries on the same way and still reports to its
+  parent; one that is not carried on is reported to its parent as
+  stopped, so the parent does not wait for it forever. A session whose
+  turn had ended on a wait (`session_wait`, `watch_events`) is woken to
+  check for itself, since the wait did not survive the restart. Set
+  `harness-resilience-resume-interrupted` to nil to leave every
+  interrupted session stopped instead.
+- A sub-agent's permission prompt or question that nobody answers
+  within `harness-resilience-prompt-timeout` seconds (600 by default) is
+  answered for you: the permission is denied, the question is told to
+  decide by itself. Its parent and you are told, so a whole tree of
+  sub-agents never waits on one prompt. Your own sessions and tasks
+  always wait for you; nil makes sub-agents wait too.
+- A running turn that makes no progress for 15 minutes -- no streaming,
+  no step, no tool call starting or ending -- is reported: the session
+  says so and you are notified. A tool call may run as long as its own
+  timeout allows without counting as a stall.
 - The task board comes back as it was. Tasks waiting for review still
   wait, and tasks that were working carry on by themselves. Set
   `harness-tasks-resume-interrupted` to nil to make them wait for you

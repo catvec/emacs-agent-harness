@@ -432,7 +432,8 @@ blocks without a Content-Length are dropped with anything before them."
   (let ((proc (harness-provider-copilot-session-process entry)))
     (if (process-live-p proc)
         (condition-case err
-            (progn (process-send-string proc (harness-provider-copilot-frame object)) t)
+            ;; In line behind a write that waits for room, never inside it.
+            (harness-process-send proc (harness-provider-copilot-frame object))
           (error (harness-log 'warn "provider-copilot: writing to %s failed: %s"
                               (harness-provider-copilot-session-id entry) (harness-error-message err))
                  nil))
@@ -1447,7 +1448,7 @@ starts a new probe."
                (process-live-p proc))
       (when (eq harness-provider-copilot--probe entry)
         (setq harness-provider-copilot--probe nil))
-      (process-send-eof proc)
+      (harness-process-send-eof proc)
       (run-at-time 5 nil (lambda () (when (process-live-p proc) (delete-process proc)))))))
 
 (defun harness-provider-copilot--probe-gone (entry)
