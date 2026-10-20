@@ -174,9 +174,28 @@ be combined with it; they cannot be combined with `--qr`.
 After pairing, the phone's debugging port can take a few seconds to appear, and
 adb's mDNS cache can hold an old port. The script only tries addresses on the
 phone it just paired with, retries every published port until one answers, and
-does not give up on the first refused connection. If the port never appears,
-open *Wireless debugging* on the phone, read the *IP address & port* shown
-there, and pass it with `--connect`.
+does not give up on the first refused connection. While nothing has connected
+it prints each refusal once (`adb connect: failed to connect to
+'192.168.1.7:46037': Connection refused`), so an old record for a closed port
+shows instead of the script seeming to hang; a refusal beside a service that did
+connect is not worth a line.
+
+The phone can publish two services under its name: an old record on a port that
+is closed now, and the live one, renamed `adb-SERIAL-xxxxxx (2)` because the
+name was still taken. adb lists services as `name<TAB>type<TAB>ip:port`, so that
+name, space and all, is one field, and the script reads the list by tabs (and
+`adb devices` too, whose serials can be such names). Reading it by spaces, as
+earlier versions did, dropped the live service and left only the old record: the
+script retried a closed port until it timed out, "stuck waiting for the phone's
+debugging port". adb's own connect after pairing only matches the exact name, so
+it never connects a renamed service itself.
+
+After 15 seconds of waiting the script says how to skip the wait. If the port
+never appears, open *Wireless debugging* on the phone, read the *IP address &
+port* shown there, and pass it with `--connect`. When the script gives up it
+says what it saw: the last connect error, a phone adb lists but that is not
+ready (`offline`), or that adb's mDNS list has no wireless debugging service
+for the phone at all (a firewall blocking mDNS, UDP port 5353, does that).
 
 A phone that adb already sees (connected by USB, or paired earlier) is used
 directly. Emulators are ignored unless named with `--device SERIAL`, and more

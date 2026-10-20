@@ -43,6 +43,9 @@ pair_code=""
 pair_address=""
 # Tests set this to a known mDNS pairing name; normally it is random.
 pair_name_override="${QR_INSTALL_PAIR_NAME:-}"
+# How long to wait for the phone's debugging port before saying how to skip the
+# wait (--connect).  Tests make it short.
+hint_after="${QR_INSTALL_HINT_AFTER:-15}"
 
 usage() {
   cat <<EOF
@@ -69,8 +72,9 @@ Options:
   --debug          use and build the debug APK instead of the release one
   --apk PATH       install PATH (implies --no-build)
   --device SERIAL  install on an already connected device (its adb serial)
-  --connect ADDR   connect to ADDR (IP:PORT, e.g. from Wireless debugging)
-                   instead of pairing
+  --connect ADDR   connect to ADDR (IP:PORT, the "IP address & port" shown by
+                   Wireless debugging) instead of pairing; also the way past a
+                   wait for the phone's debugging port that does not end
   --qr             pair by scanning the QR code shown here (the default)
   --code           pair with the six-digit code of "Pair device with pairing
                    code" instead of scanning a QR code
@@ -363,18 +367,31 @@ if [ -t 1 ] && [ -n "${TERM:-}" ] && [ "${TERM}" != dumb ]; then
   tty_ok=1
 fi
 
+# What adb prints is tab-separated -- "serial<TAB>state" for devices and
+# "name<TAB>type<TAB>ip:port" for mDNS services -- and the first field is free
+# text that can hold spaces.  Android renames a wireless debugging service whose
+# name is still taken to "adb-SERIAL-xxxxxx (2)", and adb lists a device it
+# found through mDNS under such a name too.  Splitting these lines at every
+# space (awk's default) turns that name into two fields and drops the row,
+# which is how the phone's live debugging port went unseen: only the old,
+# closed record under the plain name was left, and the installer retried it
+# until it timed out.  So split at tabs only, here and nowhere else.
 device_serials() {
-  "$adb" devices 2>/dev/null | awk 'NR > 1 && $2 == "device" { print $1 }'
+  "$adb" devices 2>/dev/null | awk -F '\t' '$2 == "device" { print $1 }'
 }
 
 device_rows() {
-  "$adb" devices 2>/dev/null | awk 'NR > 1 && NF >= 2 { print $1 "\t" $2 }'
+  "$adb" devices 2>/dev/null | awk -F '\t' 'NF >= 2 { print $1 "\t" $2 }'
 }
 
-# The mDNS services adb has seen: instance name, service type, address.
+# The wireless debugging services adb has seen: instance name, service type,
+# address.  The same tab-separated rows, so `read` with IFS=tab gets the name
+# whole.  A failing `adb mdns services` is an empty list, not the end of the
+# script (set -e): the callers wait and say what they could not find.
 mdns_rows() {
-  "$adb" mdns services 2>/dev/null |
-    awk 'NF >= 3 && $2 ~ /^_adb-tls-(pairing|connect)\._tcp\.?$/ {
+  { "$adb" mdns services 2>/dev/null || true; } |
+    awk -F '\t' 'NF >= 3 && $1 != "" && $3 ~ /.:[0-9]+$/ &&
+                 $2 ~ /^_adb-tls-(pairing|connect)\._tcp\.?$/ {
            print $1 "\t" $2 "\t" $3
          }'
 }
@@ -411,11 +428,20 @@ show_qr() {
   note ""
 }
 
-# A serial belongs to the phone just paired if it carries the phone's address
-# or its mDNS guid.  Never accept another device that happens to be connected.
+# The addresses adb said it connected to, one per line between newlines: adb
+# lists a phone connected that way under the address it was given.
+connected_addrs=$'\n'
+
+# A serial belongs to the phone just paired if it carries the phone's address,
+# is an address adb connected to at our request (the phone's service may be on
+# another address than its pairing one), or carries its mDNS guid.  Never
+# accept another device that happens to be connected.
 serial_matches() {
   case "$1" in
     "$paired_host":*) return 0 ;;
+  esac
+  case "$connected_addrs" in
+    *$'\n'"$1"$'\n'*) return 0 ;;
   esac
   [ -n "$guid" ] || return 1
   case "$1" in
@@ -680,81 +706,141 @@ EOF
   note "Paired with $paired_host."
 }
 
+# The connect services that belong to the phone just paired, as "IP:PORT" lines:
+# first the ones on its address, whatever they are named (the live one may be
+# a renamed "adb-SERIAL-xxxxxx (2)" beside an old record for the plain name),
+# then any other service named after the guid adb reported when it paired,
+# which is the same phone if it moved.  Services of other hosts are somebody
+# else's phone and are never connected to.
+phone_connect_addrs() {
+  local name type addr same="" moved=""
+  while IFS=$'\t' read -r name type addr; do
+    [ -n "$addr" ] || continue
+    case "$type" in _adb-tls-connect*) ;; *) continue ;; esac
+    if [ "${addr%:*}" = "$paired_host" ]; then
+      same+="$addr"$'\n'
+    elif [ -n "$guid" ]; then
+      case "$name" in "$guid"*) moved+="$addr"$'\n' ;; esac
+    fi
+  done < <(mdns_rows)
+  printf '%s%s' "$same" "$moved"
+}
+
+# Ask adb to connect to ADDR and say what came of it: a success is printed (once
+# per address), a failure is only collected, for report_failures to print.  Keeps
+# its state in the variables that wait_for_connection sets up.
+try_connect() {
+  local addr="$1" output
+  connect_tried=1
+  output="$("$adb" connect "$addr" 2>&1 || true)"
+  output="${output%%$'\n'*}"
+  [ -n "$output" ] || output="adb connect $addr printed nothing"
+  case "$output" in
+    *"connected to"*|*"already connected"*)
+      case "$connected_addrs" in *$'\n'"$addr"$'\n'*) ;; *) connected_addrs+="$addr"$'\n' ;; esac
+      pass_connected=1
+      if [ "$addr" != "$connect_ok" ]; then
+        clear_status
+        note "$output"
+        connect_ok="$addr"
+      fi
+      ;;
+    *)
+      last_connect_error="$output"
+      pass_failures+="$output"$'\n'
+      ;;
+  esac
+}
+
+# Print the failures of this pass over the phone's services, each message once
+# however often it comes back: the wait tries again every few seconds, and an
+# old record for the phone's name can stay in adb's list long after its port
+# closed.  Without this the wait is silent about what it is up against.
+report_failures() {
+  local line
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    case "$connect_failures" in
+      *$'\n'"$line"$'\n'*) ;;
+      *)
+        connect_failures+="$line"$'\n'
+        clear_status
+        note "adb connect: $line"
+        ;;
+    esac
+  done <<< "$pass_failures"
+  return 0
+}
+
 # Wireless debugging may publish its TLS port only after pairing.  The connect
-# record can also be stale for a few seconds, so try every record for this
-# phone, and only this phone, until one answers.  Sets serial.
+# record can also be stale for a few seconds, and adb keeps an old record for
+# the phone's name beside the live one for a long time, so try every record for
+# this phone, and only this phone, until one answers.  Sets serial.
 wait_for_connection() {
   note "Waiting for the phone's debugging port ..."
-  local connect_start deadline last_connect_try last_connect_error connect_ok
+  local connect_start deadline last_connect_try hinted addr cand state
+  local seen_serial="" seen_state=""
   connect_start=$SECONDS
   deadline=$((SECONDS + timeout))
   last_connect_try=-10
+  hinted=0
+  # What try_connect keeps.
   last_connect_error=""
   connect_ok=""
+  connect_tried=0
+  connect_failures=$'\n'
+  pass_connected=0
+  pass_failures=""
   while [ "$SECONDS" -lt "$deadline" ]; do
+    seen_serial=""
+    seen_state=""
     while IFS=$'\t' read -r cand state; do
-      [ "$state" = device ] || continue
-      if serial_matches "$cand"; then
+      serial_matches "$cand" || continue
+      if [ "$state" = device ]; then
         serial="$cand"
         break
       fi
+      # Ours, but not ready (offline while it connects, say): keep waiting,
+      # and remember what adb said on this look in case it stays that way.
+      seen_serial="$cand"
+      seen_state="$state"
     done < <(device_rows)
     [ -n "$serial" ] && break
 
     if [ $((SECONDS - last_connect_try)) -ge 3 ]; then
       last_connect_try=$SECONDS
-      services="$(mdns_rows)"
-      # First the service whose instance name carries the guid adb reported
-      # when it paired; then any other connect service on the same address.
-      if [ -n "$guid" ]; then
-        while IFS=$'\t' read -r name type addr; do
-          [ -n "$addr" ] || continue
-          case "$type" in _adb-tls-connect*) ;; *) continue ;; esac
-          case "$name" in "$guid"*) ;; *) continue ;; esac
-          # The guid comes from this pairing, so this is the same phone even
-          # if it moved to another address; only a foreign service without
-          # its guid is refused.
-          output="$("$adb" connect "$addr" 2>&1 || true)"
-          case "$output" in
-            *"connected to"*|*"already connected"*)
-              if [ "$addr" != "$connect_ok" ]; then
-                clear_status
-                note "$output"
-                connect_ok="$addr"
-              fi
-              ;;
-            *) last_connect_error="$output" ;;
-          esac
-        done <<< "$(printf '%s\n' "$services" | awk -F '\t' '$2 ~ /connect/')"
-      fi
-      while IFS=$'\t' read -r name type addr; do
+      pass_connected=0
+      pass_failures=""
+      while IFS= read -r addr; do
         [ -n "$addr" ] || continue
-        case "$type" in _adb-tls-connect*) ;; *) continue ;; esac
-        [ "${addr%:*}" = "$paired_host" ] || continue
-        if [ -n "$guid" ]; then
-          case "$name" in "$guid"*) continue ;; esac
-        fi
-        output="$("$adb" connect "$addr" 2>&1 || true)"
-        case "$output" in
-          *"connected to"*|*"already connected"*)
-            if [ "$addr" != "$connect_ok" ]; then
-              clear_status
-              note "$output"
-              connect_ok="$addr"
-            fi
-            ;;
-          *) last_connect_error="$output" ;;
-        esac
-      done <<< "$(printf '%s\n' "$services" | awk -F '\t' '$2 ~ /connect/')"
+        try_connect "$addr"
+      done < <(phone_connect_addrs)
+      # An old record's refusal is not news once another service connected.
+      [ "$pass_connected" = 1 ] || report_failures
+    fi
+
+    if [ "$hinted" = 0 ] && [ $((SECONDS - connect_start)) -ge "$hint_after" ]; then
+      hinted=1
+      clear_status
+      note "Still waiting.  The phone shows the address to use under Wireless debugging"
+      note "('IP address & port').  Interrupt this and run again with it to skip the wait:"
+      note "  tool/qr_install.sh --connect IP:PORT"
     fi
     status_line "Waiting for the phone's debugging port ... $((SECONDS - connect_start))s"
     sleep 1
   done
   clear_status
   if [ -z "$serial" ]; then
+    note "Paired with $paired_host, but its wireless debugging port did not open." >&2
+    # What adb said, so that the cause is not a guess.
+    if [ -n "$seen_serial" ]; then
+      note "adb lists $seen_serial as \"$seen_state\", not as a device that is ready." >&2
+    elif [ "$connect_tried" = 0 ]; then
+      note "adb's mDNS list has no wireless debugging service on $paired_host (a firewall" >&2
+      note "that blocks mDNS, UDP port 5353, would do that)." >&2
+    fi
     [ -z "$last_connect_error" ] ||
       printf 'qr_install: last adb connect error: %s\n' "$last_connect_error" >&2
-    note "Paired with $paired_host, but its wireless debugging port did not open." >&2
     note "Open Developer options > Wireless debugging on the phone, read the" >&2
     note "'IP address & port' shown there, then run:" >&2
     note "  tool/qr_install.sh --connect IP:PORT" >&2
@@ -783,7 +869,7 @@ case "$output" in
   *INSTALL_FAILED_UPDATE_INCOMPATIBLE*)
     printf '%s\n' "$output" >&2
     note "The installed app was signed with another key.  Remove it, then try again:"
-    note "  $adb -s $serial uninstall app.harness.client"
+    printf '  %q -s %q uninstall app.harness.client\n' "$adb" "$serial"
     exit 1
     ;;
   *)
@@ -804,4 +890,4 @@ fi
 note ""
 note "Harness is on the phone.  In the app, connect to the harness's ws:// address"
 note "(Emacs: C-c h P, [start serving]) and its token from acp-token."
-note "For hot reload while the phone is connected: tool/flutter run -d $serial"
+printf 'For hot reload while the phone is connected: tool/flutter run -d %q\n' "$serial"

@@ -36,6 +36,16 @@
   screen and a finished run; `qr-install-large.png` is the large image the
   viewer opens; `qr-install-serve.png` is the `--serve` download mode.  The QR
   decodes back to the exact pairing text in every capture.
+- `phone-debugging-port.txt` — the report "i paired w qr code but now it is
+  stuck waiting for phone's debugging port": the phone's real `adb mdns
+  services` listing (the live service renamed `NAME (2)` beside an old record
+  of the plain name on a closed port), why reading adb's tab-separated output
+  by spaces dropped the live service, and the original and the fixed
+  `tool/qr_install.sh` run on that listing (the original retries the closed
+  port until it times out, the fixed one connects to the live port), with the
+  new tests run against both scripts.  `phone-debugging-port.png` is the two
+  runs' terminal screens, one above the other (rendered from the captured pty
+  text).
 - `pub-cache-repair.txt` — the build that stops with `Error when reading
   '.../.pub-cache/.../shared_preferences-2.5.6/lib/shared_preferences.dart': No
   such file or directory` right after `pub get` said "Got dependencies!": how a

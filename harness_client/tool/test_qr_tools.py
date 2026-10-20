@@ -19,6 +19,7 @@ import io
 import json
 import os
 import re
+import shlex
 import shutil
 import struct
 import subprocess
@@ -341,33 +342,60 @@ def number(name, default=0):
 ip = os.environ.get("FAKE_PHONE_IP", "192.168.7.42")
 other = os.environ.get("FAKE_OTHER_IP", "192.168.1.117")
 pair_port = "37111"
-connect_port = "42345"
+connect_port = os.environ.get("FAKE_CONNECT_PORT", "42345")
+stale_port = "46037"
 pairing_name = os.environ.get("QR_INSTALL_PAIR_NAME", "ADB_WIFI_testpair-abcdef")
-guid = "adb-phone-abc"
-serial = ip + ":" + connect_port
+guid = os.environ.get("FAKE_GUID", "adb-phone-abc")
+connect_ip = os.environ.get("FAKE_CONNECT_IP", ip)
+serial = connect_ip + ":" + connect_port
+# How `adb devices` names the phone: by the address `adb connect` was given, or,
+# when adb found its service itself, by the mDNS name, which can have a space in
+# it ("adb-SERIAL-xxxxxx (2)._adb-tls-connect._tcp").
+listed = serial
+if flag("listed_by_name"):
+    listed = guid + " (2)._adb-tls-connect._tcp"
+state_word = "offline" if flag("offline") else "device"
 
 if args == ["devices"]:
     print("List of devices attached")
-    if flag("preconnected") or flag("connected"):
-        print(serial + "\tdevice")
+    if (flag("preconnected") or flag("connected")
+            or (flag("auto_connected") and flag("paired"))):
+        print(listed + "\t" + state_word)
 elif args[:2] == ["mdns", "services"]:
     count = number("mdns_count") + 1
     with open(os.path.join(state, "mdns_count"), "w") as f:
         f.write(str(count))
     print("List of discovered mdns services")
+    if count <= number("mdns_fail_first", 0):
+        # The adb server went away for a moment.
+        print("error: cannot connect to daemon", file=sys.stderr)
+        sys.exit(1)
     if flag("stale_pairing"):
         print("adb-other\t_adb-tls-pairing._tcp\t" + other + ":38291")
     if not flag("no_pairing") and count > number("pairing_after", 0):
-        print(pairing_name + "\t_adb-tls-pairing._tcp\t" + ip + ":" + pair_port)
+        shown = pairing_name + (" (2)" if flag("renamed_pairing") else "")
+        print(shown + "\t_adb-tls-pairing._tcp\t" + ip + ":" + pair_port)
+    if flag("renamed_connect"):
+        # What a real phone's listing looks like: wireless debugging publishes
+        # its connect service as soon as it is on, pairing or not.  The old
+        # record for the name lingers on its previous, now closed, port; the
+        # live one was renamed "NAME (2)" because the name was still taken.
+        # (Tab-separated, and the instance name has a space in it.)
+        rows = [guid + "\t_adb-tls-connect._tcp\t" + connect_ip + ":" + stale_port,
+                guid + " (2)\t_adb-tls-connect._tcp\t" + connect_ip + ":" + connect_port]
+        if flag("live_first"):
+            rows.reverse()
+        for row in rows:
+            print(row)
     if flag("paired"):
         if flag("stale_connect"):
             print("adb-other\t_adb-tls-connect._tcp\t" + other + ":46037")
         if flag("stale_same_host"):
             print("adb-stale\t_adb-tls-connect._tcp\t" + ip + ":46037")
-        if not flag("no_phone_connect"):
+        if not flag("no_phone_connect") and not flag("renamed_connect"):
             since = count - number("paired_mdns_count")
             if since > number("connect_after", 0):
-                print(guid + "\t_adb-tls-connect._tcp\t" + ip + ":" + connect_port)
+                print(guid + "\t_adb-tls-connect._tcp\t" + connect_ip + ":" + connect_port)
 elif args[0] == "pair":
     if args[1] != ip + ":" + pair_port:
         print("Failed: Wrong password or connection was dropped.")
@@ -383,7 +411,7 @@ elif args[0] == "pair":
     print("Successfully paired to " + args[1] + " [guid=" + guid + "]")
 elif args[0] == "connect":
     addr = args[1]
-    if addr == ip + ":" + connect_port:
+    if addr == connect_ip + ":" + connect_port:
         touch("connected")
         print("connected to " + addr)
     else:
@@ -396,6 +424,7 @@ elif args[0] == "-s" and len(args) >= 3 and args[2] == "get-state":
     else:
         sys.exit(1)
 elif args[0] == "-s" and len(args) >= 4 and args[2] == "install":
+    assert args[1] == listed, args
     assert os.path.isfile(args[4]), args
     if flag("install_fail"):
         print("Performing Streamed Install")
@@ -405,6 +434,7 @@ elif args[0] == "-s" and len(args) >= 4 and args[2] == "install":
     print("Performing Streamed Install")
     print("Success")
 elif args[0] == "-s" and len(args) >= 5 and args[2] == "shell":
+    assert args[1] == listed, args
     touch("launched")
     print("Starting: Intent")
 else:
@@ -633,6 +663,167 @@ class InstallScriptTest(unittest.TestCase):
         self.assertIn("connect 192.168.1.119:46037", calls)
         self.assertIn("connect 192.168.1.119:42345", calls)
         self.assertIn("Installed.", result.stdout)
+
+    def test_connects_to_a_service_whose_name_has_a_space(self):
+        # The report: "i paired w qr code but now it is stuck waiting for
+        # phone's debugging port".  The listing has the shape the phone really
+        # had (address and ports are its own, the serial is made up): an old
+        # record for its name on a port that is closed now, and the live
+        # service, which the phone renamed "NAME (2)" because the name was
+        # still taken.  adb prints
+        # "name<TAB>type<TAB>address", so the name is one field with a space in
+        # it; the installer split every line at its spaces, dropped the live
+        # service as "not a connect service", and retried the closed port until
+        # it timed out.  adb's own auto-connect after pairing cannot help: it
+        # needs the exact name.
+        self.flag("renamed_connect")
+        result = self.run_install("--qr", "--timeout", "10",
+                                  FAKE_PHONE_IP="192.168.1.119",
+                                  FAKE_GUID="adb-R58M1234567-LXX5ft",
+                                  FAKE_CONNECT_PORT="39131")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = self.calls()
+        self.assertIn("connect 192.168.1.119:46037", calls)   # tried, refused ...
+        self.assertIn("connect 192.168.1.119:39131", calls)   # ... and the live one
+        self.assertIn("Connected to 192.168.1.119:39131.", result.stdout)
+        self.assertIn("-s 192.168.1.119:39131 install -r " + self.apk, calls)
+        self.assertTrue(self.has_flag("installed"))
+        # The old record's refusal is not news once the live port connected.
+        self.assertNotIn("Connection refused", result.stdout + result.stderr)
+
+    def test_a_refusal_before_the_port_opens_is_still_reported(self):
+        # The phone's service only appears a few seconds after pairing: until
+        # then the old record is all there is, and what it says is shown.
+        self.flag("stale_same_host")
+        self.set_number("connect_after", 1)     # on the second pass, ~3 s in
+        result = self.run_install("--qr", "--timeout", "20")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.count(
+            "adb connect: failed to connect to '192.168.7.42:46037': "
+            "Connection refused"), 1, result.stdout)
+        self.assertIn("Connected to 192.168.7.42:42345.", result.stdout)
+
+    def test_the_live_port_is_found_whatever_order_adb_lists_it_in(self):
+        # Nothing may depend on the live service coming before the old record.
+        self.flag("renamed_connect")
+        self.flag("live_first")
+        result = self.run_install("--qr", "--timeout", "10")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Connected to 192.168.7.42:42345.", result.stdout)
+
+    def test_pairs_with_a_service_whose_name_has_a_space(self):
+        # The same split hid a pairing service the phone renamed.  The 8 second
+        # fallback (any new pairing server) is not what finds it here.
+        self.flag("renamed_pairing")
+        result = self.run_install("--qr", "--timeout", "5")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(any(call.startswith("pair 192.168.7.42:37111 ")
+                            for call in self.calls()), self.calls())
+        self.assertIn("Installed.", result.stdout)
+
+    def test_uses_a_device_adb_lists_under_a_name_with_a_space(self):
+        # adb names a device it found through mDNS by its service name, spaces
+        # and all, and `-s` must get that name as one argument.
+        name = "adb-phone-abc (2)._adb-tls-connect._tcp"
+        self.flag("preconnected")
+        self.flag("listed_by_name")
+        result = self.run_install("--timeout", "10")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Using the connected device " + name + ".", result.stdout)
+        self.assertIn("-s " + name + " install -r " + self.apk, self.calls())
+        # A command the script prints is one to paste: the name is quoted.
+        line = next(line for line in result.stdout.splitlines()
+                    if "tool/flutter run" in line)
+        self.assertEqual(shlex.split(line)[-2:], ["-d", name])
+
+    def test_the_uninstall_command_is_printed_quoted(self):
+        name = "adb-phone-abc (2)._adb-tls-connect._tcp"
+        self.flag("preconnected")
+        self.flag("listed_by_name")
+        self.flag("install_fail")
+        result = self.run_install("--timeout", "10")
+        self.assertNotEqual(result.returncode, 0)
+        line = next(line for line in result.stdout.splitlines()
+                    if "uninstall app.harness.client" in line)
+        self.assertEqual(shlex.split(line)[1:],
+                         ["-s", name, "uninstall", "app.harness.client"])
+
+    def test_waits_for_a_device_adb_connected_by_name(self):
+        # After pairing, adb connects to the service by itself when it can, and
+        # the phone is listed under the service name instead of its address.
+        name = "adb-phone-abc (2)._adb-tls-connect._tcp"
+        self.flag("auto_connected")
+        self.flag("listed_by_name")
+        self.flag("no_phone_connect")
+        result = self.run_install("--qr", "--timeout", "10")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Connected to " + name + ".", result.stdout)
+        self.assertIn("-s " + name + " install -r " + self.apk, self.calls())
+
+    def test_a_failing_mdns_listing_does_not_end_the_run(self):
+        # `adb mdns services` can fail for a moment (the adb server restarts).
+        # With set -e that used to end the script without a word, as soon as
+        # it had printed the QR code's instructions.
+        self.set_number("mdns_fail_first", 2)
+        result = self.run_install("--qr", "--timeout", "10")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Installed.", result.stdout)
+
+    def test_a_refused_port_is_reported_once_and_tried_again(self):
+        # An old record can stay in adb's list for a long time: it is retried
+        # (the port may only be slow to open) but not announced every time.
+        self.flag("stale_same_host")
+        self.flag("no_phone_connect")
+        result = self.run_install("--qr", "--timeout", "10")
+        self.assertNotEqual(result.returncode, 0)
+        refused = "failed to connect to '192.168.7.42:46037': Connection refused"
+        self.assertEqual(result.stdout.count(refused), 1, result.stdout)
+        self.assertGreaterEqual(
+            self.calls().count("connect 192.168.7.42:46037"), 2, self.calls())
+        self.assertIn(refused, result.stderr)   # and the last error is repeated
+
+    def test_finds_a_phone_that_connects_at_another_address_than_it_paired_at(self):
+        # Paired at one address, its connect service (named after the guid adb
+        # reported when it paired) is at another: the same phone, with a second
+        # address.  adb lists it by the address it was asked to connect to, and
+        # that is the phone, whatever address it is on.
+        result = self.run_install("--qr", "--timeout", "10",
+                                  FAKE_CONNECT_IP="192.168.7.99")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("connect 192.168.7.99:42345", self.calls())
+        self.assertIn("Connected to 192.168.7.99:42345.", result.stdout)
+        self.assertIn("-s 192.168.7.99:42345 install -r " + self.apk, self.calls())
+
+    def test_says_how_to_skip_a_long_wait(self):
+        self.flag("stale_same_host")
+        self.flag("no_phone_connect")
+        result = self.run_install("--qr", "--timeout", "8",
+                                  QR_INSTALL_HINT_AFTER="1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout.count("Still waiting"), 1, result.stdout)
+        self.assertIn("tool/qr_install.sh --connect IP:PORT", result.stdout)
+
+    def test_a_short_wait_gets_no_hint(self):
+        self.flag("stale_same_host")
+        self.flag("no_phone_connect")
+        result = self.run_install("--qr", "--timeout", "3")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("Still waiting", result.stdout)
+
+    def test_says_when_adb_found_no_service_for_the_phone(self):
+        self.flag("no_phone_connect")
+        result = self.run_install("--qr", "--timeout", "4")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("no wireless debugging service on 192.168.7.42",
+                      result.stderr)
+        self.assertFalse(any(call.startswith("connect ") for call in self.calls()))
+
+    def test_says_when_the_phone_is_listed_but_not_ready(self):
+        self.flag("offline")
+        result = self.run_install("--qr", "--timeout", "8")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('adb lists 192.168.7.42:42345 as "offline"', result.stderr)
+        self.assertFalse(self.has_flag("installed"))
 
     def test_explains_when_the_debugging_port_does_not_open(self):
         self.flag("stale_connect")

@@ -1,0 +1,168 @@
+Phone debugging port: "stuck waiting" after pairing
+====================================================
+
+The report: "i paired w qr code but now it is stuck waiting for phone's
+debugging port".  tool/qr_install.sh printed "Paired with 192.168.1.119." and
+then "Waiting for the phone's debugging port ..." counting up until --timeout,
+and gave up saying the port did not open.  (Earlier changes to this wait made it
+ignore a foreign host's service and retry a refused port, e8c4c3e; neither could
+help here, because the live service never reached the code that connects.)
+
+The phone's own listing
+-----------------------
+
+`adb mdns services` on the machine the script ran on (adb 37.0.0; a query of
+the running adb server's mDNS cache, nothing changed; the phone's serial is
+masked, <TAB> is a tab):
+
+    List of discovered mdns services
+    adb-SERIAL12345-LXX5ft<TAB>_adb-tls-connect._tcp<TAB>192.168.1.119:46037
+    adb-SERIAL12345-LXX5ft (2)<TAB>_adb-tls-connect._tcp<TAB>192.168.1.119:39131
+    
+
+adb prints each service as "%s\t%s\t%s:%u" (name, type, address:port; checked in
+adb's client/transport_mdns.cpp and client/mdnsresponder_client.cpp, and `adb
+devices` is "serial<TAB>state" the same way).  The name is free text.  When the
+phone registers a name that is still taken, Android renames it "NAME (2)": the
+live service here is "adb-SERIAL12345-LXX5ft (2)", beside the old record of the
+plain name.  What each of those ports does when connected to (a plain TCP
+connect from this machine; adb's state is not touched):
+
+    46037 refused (Connection refused)  <- the old record
+    39131 accepts the connection  <- the live debugging port
+
+The bug
+-------
+
+qr_install.sh read these lines with awk's default field splitting, which splits
+at every space, so "adb-SERIAL12345-LXX5ft (2)" became two fields, "(2)" landed
+where the service type should be, and the row was dropped as "not a connect
+service".  Only the old record, on the closed port, was left:
+
+  before (the script's mdns_rows):
+    adb-SERIAL12345-LXX5ft<TAB>_adb-tls-connect._tcp<TAB>192.168.1.119:46037
+  after (split at tabs only):
+    adb-SERIAL12345-LXX5ft<TAB>_adb-tls-connect._tcp<TAB>192.168.1.119:46037
+    adb-SERIAL12345-LXX5ft (2)<TAB>_adb-tls-connect._tcp<TAB>192.168.1.119:39131
+
+So the script retried the closed port until it timed out, while the live one was
+never tried.  adb's own connect right after `adb pair` cannot rescue it: it
+matches the instance name exactly (adb_secure_connect_by_service_name), and the
+auto-connect on discovery needs the instance name in adb's keystore, which the
+renamed one is not; `adb devices` stayed empty.
+
+The same split dropped a renamed pairing service (the QR flow), and a device
+adb lists under such a name ("adb-...(2)._adb-tls-connect._tcp<TAB>device").
+
+Replay on the real listing
+--------------------------
+
+The real tool/qr_install.sh, before (git HEAD) and after, run with a stub adb
+that forwards only `mdns services` to the real adb (the live listing above),
+answers `adb connect ADDR` with a plain TCP probe of ADDR, and fakes pair,
+devices and install; the real adb server and the phone are not changed.  Paired
+by `--code --pair-address` so that no pairing dialog is needed (the pairing-code
+instructions it prints first are the same in every run and are cut below):
+
+== before
+Pairing address: 192.168.1.119:37111
+Pairing with 192.168.1.119:37111 ...
+Paired with 192.168.1.119.
+Waiting for the phone's debugging port ...
+qr_install: last adb connect error: failed to connect to '192.168.1.119:46037': Connection refused
+Paired with 192.168.1.119, but its wireless debugging port did not open.
+Open Developer options > Wireless debugging on the phone, read the
+'IP address & port' shown there, then run:
+  tool/qr_install.sh --connect IP:PORT
+exit status: 1
+adb connect calls the script made:
+        7 connect 192.168.1.119:46037
+
+== after
+Pairing address: 192.168.1.119:37111
+Pairing with 192.168.1.119:37111 ...
+Paired with 192.168.1.119.
+Waiting for the phone's debugging port ...
+connected to 192.168.1.119:39131
+Connected to 192.168.1.119:39131.
+Installing app.apk on 192.168.1.119:39131 ...
+Installed.
+
+Harness is on the phone.  In the app, connect to the harness's ws:// address
+(Emacs: C-c h P, [start serving]) and its token from acp-token.
+For hot reload while the phone is connected: tool/flutter run -d 192.168.1.119:39131
+exit status: 0
+adb connect calls the script made:
+        1 connect 192.168.1.119:39131
+        1 connect 192.168.1.119:46037
+
+On a real terminal (a pty; the screen as it ends), where the status line is
+redrawn every second (the number of redraws is printed under each screen).
+Before, the user watched it count up with nothing said until it gave up; after,
+it connects at once:
+
+== before (pty)
+Pairing address: 192.168.1.119:37111
+Pairing with 192.168.1.119:37111 ...
+Paired with 192.168.1.119.
+Waiting for the phone's debugging port ...
+qr_install: last adb connect error: failed to connect to '192.168.1.119:46037': Connection refused
+Paired with 192.168.1.119, but its wireless debugging port did not open.
+Open Developer options > Wireless debugging on the phone, read the
+'IP address & port' shown there, then run:
+  tool/qr_install.sh --connect IP:PORT
+--- exit status: 1
+--- status line drawn 18 times (each a \r ... ESC[K)
+adb connect calls the script made:
+        7 connect 192.168.1.119:46037
+
+== after (pty)
+Pairing address: 192.168.1.119:37111
+Pairing with 192.168.1.119:37111 ...
+Paired with 192.168.1.119.
+Waiting for the phone's debugging port ...
+connected to 192.168.1.119:39131
+Connected to 192.168.1.119:39131.
+Installing app.apk on 192.168.1.119:39131 ...
+Installed.
+
+Harness is on the phone.  In the app, connect to the harness's ws:// address
+(Emacs: C-c h P, [start serving]) and its token from acp-token.
+For hot reload while the phone is connected: tool/flutter run -d 192.168.1.119:39131
+--- exit status: 0
+--- status line drawn 1 times (each a \r ... ESC[K)
+adb connect calls the script made:
+        1 connect 192.168.1.119:39131
+        1 connect 192.168.1.119:46037
+
+Tests
+-----
+
+The new tests (InstallScriptTest in tool/test_qr_tools.py; the fake adb now
+lists a renamed live service beside the old record, a renamed pairing service, a
+device listed by a name with a space, an offline device and a failing `mdns
+services`), run against the original qr_install.sh from git HEAD -- all but the
+one that guards against an early hint fail or error there:
+
+    test_a_failing_mdns_listing_does_not_end_the_run ... FAIL
+    test_a_refusal_before_the_port_opens_is_still_reported ... FAIL
+    test_a_refused_port_is_reported_once_and_tried_again ... FAIL
+    test_a_short_wait_gets_no_hint ... ok
+    test_connects_to_a_service_whose_name_has_a_space ... FAIL
+    test_finds_a_phone_that_connects_at_another_address_than_it_paired_at ... FAIL
+    test_pairs_with_a_service_whose_name_has_a_space ... FAIL
+    test_says_how_to_skip_a_long_wait ... FAIL
+    test_says_when_adb_found_no_service_for_the_phone ... FAIL
+    test_says_when_the_phone_is_listed_but_not_ready ... FAIL
+    test_the_live_port_is_found_whatever_order_adb_lists_it_in ... FAIL
+    test_the_uninstall_command_is_printed_quoted ... ERROR
+    test_uses_a_device_adb_lists_under_a_name_with_a_space ... FAIL
+    test_waits_for_a_device_adb_connected_by_name ... FAIL
+    Ran 14 tests in 107.823s
+    FAILED (failures=12, errors=1)
+
+and the whole of tool/test_qr_tools.py against the fixed script (the 73 tests
+that were there pass unchanged; 14 are new):
+
+    Ran 87 tests in 92.228s
+    OK
