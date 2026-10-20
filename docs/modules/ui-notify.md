@@ -28,7 +28,9 @@ are not counted (`harness-ui-user-sessions`).
 Other modules add segments of their own after its "harness"
 (`harness-ui-notify-segment-functions`), which show with no session
 active too: the version page's icon nags there while the harness is
-not the latest.
+not the latest, and the task board counts the tasks ready for your
+review, of every project, a click opening the board on them
+(`harness-tasks-review`).
 
 ## Provides
 

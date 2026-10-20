@@ -825,7 +825,8 @@ images with that result, each after its token.
 
 Permission requests and questions from the agent appear inline above
 the compose box. An indicator in the mode line, visible from any buffer,
-shows how many sessions need your attention, and nags with a small
+shows how many sessions need your attention, how many tasks are ready
+for your review (see [Task board](#task-board)), and nags with a small
 icon while the harness is not the latest (see
 [Running the latest version](#running-the-latest-version)). Clicking it opens the
 session list on just the sessions waiting for you, from every project
@@ -845,7 +846,8 @@ as switching project makes it but without asking for a file, and the
 session takes its window instead of opening beside Doom's dashboard
 (`harness-ui-switch-project-function`, nil to never switch). `b`, or
 the banner's `[Show all]`, shows every session again. With nobody
-waiting, the click opens the session list as usual.
+waiting, the click opens the session list as usual. A click on the
+count of tasks ready for review opens the task board on them instead.
 
 A permission request shows the call's input on one line, cut short to
 fit. When that line leaves something out, such as the rest of a long
@@ -2873,6 +2875,14 @@ with), `recap` writes the recaps on the cards,
   it as that session's, not as your feedback. The task deals with it
   and waits for review again, its report standing unless it hands in a
   new one; an agent sends work back only with `task_control` reject.
+- The mode line indicator counts the tasks ready for your review, of
+  every project, behind *Ready for review*'s flag (`harness ⚑2`), open
+  board or not, even while no session works. Hovering over it says how
+  many each project has. A click (`M-x harness-tasks-review`) opens the
+  board of the current project when it has tasks waiting for review,
+  else of the project whose task came to review last, with point on
+  the newest card; the board's project becomes current first, as for a
+  click on a task's notification.
 - `u` returns a task at work to *Pending*, one that only waits on its
   supervisor's workers too. Its turn stops and it keeps its session,
   branch and worktree. It goes to the front of its priority's queue and

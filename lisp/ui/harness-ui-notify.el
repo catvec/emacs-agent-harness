@@ -19,7 +19,9 @@
 ;; Other modules add segments of their own after its "harness"
 ;; (`harness-ui-notify-segment-functions'), which show with no session
 ;; active too: the version page's icon nags there while the harness is
-;; not the latest.
+;; not the latest, and the task board counts the tasks ready for your
+;; review, of every project, a click opening the board on them
+;; (`harness-tasks-review').
 
 ;;; Code:
 
@@ -65,7 +67,8 @@ notifier's \"harness\", before the session counts, in order, and keep
 the notifier showing while no session is active.  The text is worked
 out when sessions change, so a module calls `harness-ui-notify-refresh'
 when its segment changes.  Add to it with a symbol, so a reload
-redefines it.  The version page's nag icon shows this way.")
+redefines it.  The version page's nag icon shows this way, and so does
+the task board's count of tasks ready for review.")
 
 (defun harness-ui-notify--extra ()
   "Return the segments of `harness-ui-notify-segment-functions', joined."

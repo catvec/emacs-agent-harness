@@ -112,6 +112,14 @@
 ;; still wait there.  It is a harness option, so it holds for every
 ;; board and across restarts.
 ;;
+;; The mode line notifier (harness-ui-notify.el) counts the tasks ready
+;; for your review, of every project, beside the sessions it counts:
+;; Ready for review's flag and how many wait there, open board or not.
+;; Hovering says how many each project has.  A click
+;; (`harness-tasks-review') opens the board of the current project when
+;; it has some, else of the project whose task came to review last, with
+;; point on the card of the last to come.
+;;
 ;; How many of a project's tasks work at once ends the settings line
 ;; under New task: "3 at a time", or "all at once" without a limit, in
 ;; every mode -- a write-up or a plan takes no slot, but the work it
@@ -499,6 +507,11 @@ it is by default, until they say it is off."
   "When TASK was completed: verified, else finished, else 0."
   (or (plist-get task :verified-at) (plist-get task :finished) 0))
 
+(defun harness-ui-tasks--finished-later-p (a b)
+  "Non-nil when task A finished after task B.
+Ready for review lists its tasks so, the last to come to review first."
+  (> (or (plist-get a :finished) 0) (or (plist-get b :finished) 0)))
+
 (defun harness-ui-tasks--priority (task)
   "TASK's priority: \"low\", \"medium\" or \"high\"; medium when it has none.
 TASK is a view, whose `:priority' the harness computes from the task's
@@ -578,7 +591,7 @@ when there is one, archived or not."
       (setcdr g (sort (cdr g)
                       (pcase (car g)
                         ('active (lambda (a b) (> (harness-ui-tasks--started a) (harness-ui-tasks--started b))))
-                        ('review (lambda (a b) (> (or (plist-get a :finished) 0) (or (plist-get b :finished) 0))))
+                        ('review #'harness-ui-tasks--finished-later-p)
                         ('merging (lambda (a b) (< (harness-ui-tasks--merge-queued a)
                                                    (harness-ui-tasks--merge-queued b))))
                         ('done (lambda (a b) (> (harness-ui-tasks--completed a) (harness-ui-tasks--completed b))))
@@ -2597,36 +2610,43 @@ The board may still be loading: point goes to the card once it shows
         (harness-ui-tasks--focus-card)))
     board))
 
-(defun harness-ui-tasks--notification-root (notification)
-  "Return the main checkout of the project NOTIFICATION is about, or nil.
-The session a notification names, when the harness still has it, says
-the project for sure (`harness-ui-session-project'); otherwise its
-`:project' does, and that may be a task's worktree, which belongs to the
-main checkout around it (`harness-files-owning-checkout')."
-  (or (when-let* ((session-id (plist-get notification :session))
-                  ((stringp session-id))
+(defun harness-ui-tasks--task-root (session-id project)
+  "Return the main checkout of the project of a task, or nil.
+The task works in session SESSION-ID, and PROJECT is its `:project'.
+The session, when the harness still has it, says the project for sure
+\(`harness-ui-session-project'); otherwise PROJECT does, and that may be
+a task's worktree, which belongs to the main checkout around it
+\(`harness-files-owning-checkout')."
+  (or (when-let* (((stringp session-id))
                   (session (harness-ui-session session-id)))
         (harness-ui-session-project session))
-      (when-let* ((project (plist-get notification :project))
-                  ((stringp project))
-                  ((not (string-empty-p project))))
+      (when (and (stringp project) (not (string-empty-p project)))
         (harness-files-owning-checkout project))))
+
+(defun harness-ui-tasks-visit-task (id project &optional session-id)
+  "Show task ID on the board of PROJECT, in the task's project.
+The task's project becomes current first, as visiting a session makes
+it (`harness-ui-switch-to-project'): the project of its session
+SESSION-ID, else PROJECT's main checkout (`harness-ui-tasks--task-root').
+So the board opens in the project the task belongs to rather than the
+one that happened to be current.  The switch is a courtesy: whatever it
+does, the board opens, point going to the card once it shows
+\(`harness-ui-tasks-show-task').  Return the board."
+  (when harness-ui-switch-project-function
+    (harness-ignore-errors-logged "switching to the project of a task"
+      (harness-ui-switch-to-project (harness-ui-tasks--task-root session-id project))))
+  (harness-ui-tasks-show-task id project))
 
 (defun harness-ui-tasks--on-notification (notification)
   "Open the board on the task NOTIFICATION, a clicked notification, is about.
-The click switches to the task's project first, as visiting a session
-does (`harness-ui-switch-to-project'), so the board opens in the project
-the task belongs to rather than the one that happened to be current.  On
+The click switches to the task's project first
+\(`harness-ui-tasks-visit-task'), the project of the session the
+notification names when the harness still has it.  On
 `harness-ui-notification-functions': non-nil when it was a task's."
   (let ((id (plist-get notification :task))
         (project (plist-get notification :project)))
     (when (and (stringp id) (stringp project) (not (string-empty-p project)))
-      ;; Switching is a courtesy to the click: whatever it does, the
-      ;; board still opens below.
-      (when harness-ui-switch-project-function
-        (harness-ignore-errors-logged "switching to the project of a notification's task"
-          (harness-ui-switch-to-project (harness-ui-tasks--notification-root notification))))
-      (harness-ui-tasks-show-task id project)
+      (harness-ui-tasks-visit-task id project (plist-get notification :session))
       t)))
 
 (add-hook 'harness-ui-notification-functions #'harness-ui-tasks--on-notification)
@@ -5345,29 +5365,202 @@ banner's [Start now] starts it at once instead."
        (message "Queued"))
      (lambda (e) (message "Could not queue the task: %s" (harness-error-message e))))))
 
+;;;; Ready for review, in the mode line
+
+;; The mode line notifier (harness-ui-notify.el) counts the tasks ready
+;; for your review, of every project, as it counts the sessions that
+;; wait for you: the flag of the board's Ready for review and the count,
+;; in its colour (`harness-notify-review-face'), after the notifier's
+;; "harness" (`harness-ui-notify-segment-functions'), so it shows while
+;; no session works too -- a task in review has an idle session.  The UI
+;; asks for every project's tasks once it connects (`_harness/task/list'
+;; without a directory), and `task/changed' and `task/deleted' keep the
+;; count from then on, so it needs no board open.  Hovering says how
+;; many each project has, and a click opens the board on them
+;; (`harness-tasks-review').
+
+(defvar harness-notify-mode)
+(declare-function harness-ui-notify-refresh "harness-ui-notify")
+
+(defface harness-notify-review-face '((t :inherit harness-task-review-face))
+  "The count of tasks ready for your review, in the mode line notifier."
+  :group 'harness-ui-tasks)
+
+(defvar harness-ui-tasks--in-review (make-hash-table :test 'equal)
+  "Task id -> view of every task ready for your review, of every project.
+That is a task in Ready for review, but for an archived one, which no
+board shows.  The mode line notifier counts them
+\(`harness-ui-tasks--notify-segment').")
+
+(defun harness-ui-tasks--awaits-review-p (task)
+  "Non-nil when TASK, a view, waits in Ready for review and is not archived."
+  (and (eq (harness-ui-tasks--column task) 'review)
+       (not (harness-ui-tasks--archived-p task))))
+
+(defun harness-ui-tasks--note-review (task)
+  "Count TASK, a view, among the tasks in review while it waits there.
+A task that does not wait there is not counted.  Return non-nil when
+that changed the count."
+  (when-let* ((id (plist-get task :id)))
+    (let ((was (and (gethash id harness-ui-tasks--in-review) t)))
+      (if (harness-ui-tasks--awaits-review-p task)
+          (puthash id task harness-ui-tasks--in-review)
+        (remhash id harness-ui-tasks--in-review))
+      (not (eq was (and (gethash id harness-ui-tasks--in-review) t))))))
+
+(defun harness-ui-tasks--review-changed ()
+  "Draw the mode line notifier again, for another count of tasks in review."
+  (when (and (bound-and-true-p harness-notify-mode) (fboundp 'harness-ui-notify-refresh))
+    (harness-ui-notify-refresh)))
+
+(defun harness-ui-tasks--fetch-review ()
+  "Ask the harness for every project's tasks, and count those in review.
+A harness without tasks fails the request, and has none to count."
+  (cl-flet ((count (tasks)
+              (clrhash harness-ui-tasks--in-review)
+              (dolist (task tasks) (harness-ui-tasks--note-review task))
+              (harness-ui-tasks--review-changed)))
+    (harness-ui-call "_harness/task/list" nil
+                     (lambda (tasks) (count (and (listp tasks) tasks)))
+                     (lambda (_) (count nil)))))
+
+(defun harness-ui-tasks--on-review-event (event args)
+  "Keep the count of tasks in review: `task/changed' (TASK), `task/deleted' (ID).
+EVENT names a harness event and ARGS are its arguments, as
+`harness-ui-event-functions' hands them.  The notifier is drawn again
+only when the count changed."
+  (when (pcase event
+          ("task/changed" (harness-ui-tasks--note-review (car args)))
+          ("task/deleted" (let ((id (car args)))
+                            (when (and id (gethash id harness-ui-tasks--in-review))
+                              (remhash id harness-ui-tasks--in-review)
+                              t))))
+    (harness-ui-tasks--review-changed)))
+
+(defun harness-ui-tasks--review-projects ()
+  "Return the projects with tasks ready for your review, each (ROOT TASK...).
+ROOT is a project's root as the harness files its tasks under, and its
+tasks go in the order its board lists them, the last to come to review
+first; so do the projects, by the last of their tasks."
+  (let ((projects nil))
+    (maphash (lambda (_ task)
+               (let* ((root (plist-get task :project))
+                      (entry (assoc root projects)))
+                 (if entry
+                     (push task (cdr entry))
+                   (push (list root task) projects))))
+             harness-ui-tasks--in-review)
+    (dolist (entry projects)
+      (setcdr entry (sort (cdr entry) #'harness-ui-tasks--finished-later-p)))
+    (sort projects (lambda (a b) (harness-ui-tasks--finished-later-p (cadr a) (cadr b))))))
+
+(defun harness-ui-tasks--project-name (root)
+  "Return a short name of project ROOT: its directory's."
+  (if (and (stringp root) (not (string-empty-p root)))
+      (let ((name (file-name-nondirectory (directory-file-name root))))
+        (if (string-empty-p name) (abbreviate-file-name root) name))
+    "no project"))
+
+(defun harness-ui-tasks--review-help (projects)
+  "Return the tooltip of the notifier's count of tasks in review.
+PROJECTS is what `harness-ui-tasks--review-projects' returns."
+  (let ((n (apply #'+ (mapcar (lambda (entry) (length (cdr entry))) projects))))
+    (format "Tasks ready for your review: %s (mouse-1: open the task board on %s)"
+            (mapconcat (lambda (entry)
+                         (format "%d in %s" (length (cdr entry))
+                                 (harness-ui-tasks--project-name (car entry))))
+                       projects ", ")
+            (if (= n 1) "it" "them"))))
+
+(defun harness-ui-tasks--notify-segment ()
+  "Return the mode line notifier's count of tasks ready for your review, or nil.
+The board's flag and the count; hovering says how many each project
+has, and a click runs `harness-tasks-review'.  On
+`harness-ui-notify-segment-functions'."
+  (let ((n (hash-table-count harness-ui-tasks--in-review)))
+    (when (> n 0)
+      (propertize (format " %s%d" (harness-ui-icon 'harness-icon-task-review) n)
+                  'face 'harness-notify-review-face
+                  'help-echo (harness-ui-tasks--review-help (harness-ui-tasks--review-projects))
+                  'mouse-face 'mode-line-highlight
+                  'local-map (harness-ui-mouse-keymap #'harness-tasks-review)))))
+
+(defun harness-ui-tasks--same-root-p (a b)
+  "Non-nil when A and B name the same directory."
+  (and (stringp a) (stringp b)
+       (equal (file-name-as-directory (expand-file-name a))
+              (file-name-as-directory (expand-file-name b)))))
+
+(defun harness-ui-tasks--current-project ()
+  "Return the main checkout of the current buffer's project, or nil.
+On a board that is the project the board shows; elsewhere the project
+of the buffer's directory, a task's worktree belonging to its main
+checkout.  A remote directory is not looked at, and gives nil."
+  (if (harness-ui-tasks--board-p (current-buffer))
+      (or harness-ui-tasks--project harness-ui-tasks--dir)
+    (and (stringp default-directory)
+         (not (file-remote-p default-directory))
+         (ignore-errors (harness-files-main-root default-directory)))))
+
+;;;###autoload
+(defun harness-tasks-review ()
+  "Show the tasks ready for your review on their project's task board.
+The board is the current project's when that project has tasks waiting
+for review, else the board of the project whose task came to review
+last; point goes to the card of its task that came to review last, at
+the top of Ready for review.  The board's project becomes current
+first, as a click on a task's notification makes it
+\(`harness-ui-tasks-visit-task').  A click on the count of tasks in
+review, in the mode line notifier, runs this."
+  (interactive)
+  (let ((projects (harness-ui-tasks--review-projects)))
+    (unless projects
+      (user-error "No task is ready for your review"))
+    (let* ((here (harness-ui-tasks--current-project))
+           (entry (or (and here (cl-find-if (lambda (entry) (harness-ui-tasks--same-root-p (car entry) here))
+                                            projects))
+                      (car projects)))
+           (task (cadr entry)))
+      (harness-ui-tasks-visit-task (plist-get task :id) (car entry) (plist-get task :session)))))
+
 ;;;; Module
 
 (defun harness-ui-tasks--init ()
   "Keep the boards up to date and bind `harness-tasks' in `harness-ui-map'.
 They follow the harness's events, sessions, output rates, live token
 figures and quotas, and a timer redraws the visible ones so their
-elapsed times run."
+elapsed times run.  The mode line notifier counts the tasks ready for
+review, every project's, which the UI asks for as it connects and,
+started while connected, at once (`harness-ui-tasks--fetch-review');
+the count comes after the notifier's other segments, such as the
+version page's nag."
   (add-hook 'harness-ui-event-functions #'harness-ui-tasks--on-event)
   (add-hook 'harness-ui-event-functions #'harness-ui-tasks--on-session-task-event)
+  (add-hook 'harness-ui-event-functions #'harness-ui-tasks--on-review-event)
   (add-hook 'harness-chat-panel-functions #'harness-ui-tasks--backlog-panel)
   (add-hook 'harness-ui-sessions-changed-hook #'harness-ui-tasks--on-sessions-changed)
   (add-hook 'harness-ui-rate-functions #'harness-ui-tasks--on-rate)
   (add-hook 'harness-ui-live-functions #'harness-ui-tasks--on-live)
   (add-hook 'harness-ui-redraw-hook #'harness-ui-tasks--on-redraw)
   (add-hook 'harness-ui-quota-functions #'harness-ui-tasks--on-quota)
+  (add-hook 'harness-ui-connected-hook #'harness-ui-tasks--fetch-review)
+  (add-hook 'harness-ui-notify-segment-functions #'harness-ui-tasks--notify-segment 50)
   (when (timerp harness-ui-tasks--timer) (cancel-timer harness-ui-tasks--timer))
   (setq harness-ui-tasks--timer (run-with-timer harness-ui-tasks--tick-interval harness-ui-tasks--tick-interval #'harness-ui-tasks--tick))
-  (define-key harness-ui-map (kbd "a") #'harness-tasks))
+  (define-key harness-ui-map (kbd "a") #'harness-tasks)
+  (when (harness-ui-connected-p)
+    (harness-ui-tasks--fetch-review)))
 
 (defun harness-ui-tasks--shutdown ()
-  "Stop the timer that redraws the boards' elapsed times."
+  "Stop the timer that redraws the boards' elapsed times.
+The mode line notifier stops counting the tasks ready for review."
   (when (timerp harness-ui-tasks--timer) (cancel-timer harness-ui-tasks--timer))
-  (setq harness-ui-tasks--timer nil))
+  (setq harness-ui-tasks--timer nil)
+  (remove-hook 'harness-ui-event-functions #'harness-ui-tasks--on-review-event)
+  (remove-hook 'harness-ui-connected-hook #'harness-ui-tasks--fetch-review)
+  (remove-hook 'harness-ui-notify-segment-functions #'harness-ui-tasks--notify-segment)
+  (clrhash harness-ui-tasks--in-review)
+  (harness-ui-tasks--review-changed))
 
 (harness-define-module 'ui-tasks
   :doc "Task mode: a kanban of one-session tasks with a compose box."

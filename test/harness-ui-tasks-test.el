@@ -5606,5 +5606,270 @@ runs the task, not another write-up."
                                 (cl-remove-if-not (lambda (n) (eq (plist-get n :kind) 'user))
                                                   (harness-call 'session/nodes sid)))))))))
 
+;;;; Ready for review, in the mode line
+
+(defvar harness-ui-tasks--in-review)
+(defvar harness-ui-tasks--timer)
+(defvar harness-ui-notify-segment-functions)
+(defvar harness-ui-notify--string)
+(defvar harness-ui-notify--last-blocked)
+(defvar harness-notify-mode)
+(defvar harness-ui-event-functions)
+(defvar harness-ui-connected-hook)
+(defvar harness-ui-sessions-changed-hook)
+(defvar harness-ui-rate-functions)
+(defvar harness-ui-live-functions)
+(defvar harness-ui-redraw-hook)
+(defvar harness-ui-quota-functions)
+(defvar harness-chat-panel-functions)
+(defvar harness-ui-map)
+(declare-function harness-ui-notify-refresh "harness-ui-notify")
+(declare-function harness-ui-tasks--on-review-event "harness-ui-tasks")
+(declare-function harness-ui-tasks--notify-segment "harness-ui-tasks")
+(declare-function harness-ui-tasks--fetch-review "harness-ui-tasks")
+(declare-function harness-ui-tasks--init "harness-ui-tasks")
+(declare-function harness-ui-tasks--shutdown "harness-ui-tasks")
+(declare-function harness-tasks-review "harness-ui-tasks")
+
+(defmacro harness-ui-tasks-test-with-review-count (&rest body)
+  "Run BODY with no task counted in review and the mode line notifier on.
+The count is the notifier's only segment, so that nothing else, such as
+the version page's nag, shows beside it."
+  (declare (indent 0))
+  `(progn
+     (require 'harness-ui-notify)
+     (require 'harness-ui-tasks)
+     (let ((harness-ui-tasks--in-review (make-hash-table :test 'equal))
+           (harness-ui-notify-segment-functions (list #'harness-ui-tasks--notify-segment))
+           (harness-notify-mode t)
+           (harness-ui-notify--string "")
+           (harness-ui-notify--last-blocked 0))
+       ,@body)))
+
+(defun harness-ui-tasks-test--flag (n)
+  "The notifier's count of N tasks in review, as it reads in batch."
+  (concat (substring-no-properties (harness-ui-icon 'harness-icon-task-review)) (number-to-string n)))
+
+(defun harness-ui-tasks-test--review-event (&rest tasks)
+  "Hand the count every task of TASKS, views, as `task/changed' brings them."
+  (dolist (task tasks)
+    (harness-ui-tasks--on-review-event "task/changed" (list task))))
+
+(ert-deftest harness-ui-tasks-review-count-in-the-mode-line ()
+  "The notifier counts the tasks ready for review, of every project.
+An archived one is not counted, and nor is one at work.  It shows with
+no session at work, as a task in review has an idle one, and goes once
+the last task leaves review or is deleted.  The notifier is drawn again
+only when the count changes."
+  (harness-ui-tasks-test-with-review-count
+    (let ((harness-ui--sessions (make-hash-table :test 'equal))
+          (drawn 0))
+      (cl-letf* ((refresh (symbol-function 'harness-ui-notify-refresh))
+                 ((symbol-function 'harness-ui-notify-refresh) (lambda () (cl-incf drawn) (funcall refresh)))
+                 ((symbol-function 'force-mode-line-update) #'ignore))
+        (harness-ui-notify-refresh)
+        (should (equal "" harness-ui-notify--string))
+        (setq drawn 0)
+        ;; A task reaches review: the notifier shows, though no session works.
+        (harness-ui-tasks-test--review-event '(:id "t1" :project "/p/alpha/" :column "review" :finished 10))
+        (should (equal (concat " harness " (harness-ui-tasks-test--flag 1) " ")
+                       (substring-no-properties harness-ui-notify--string)))
+        (should (= 1 drawn))
+        ;; The same task again, a task at work and an archived one in review:
+        ;; the count stays, and the notifier is not drawn again.
+        (harness-ui-tasks-test--review-event '(:id "t1" :project "/p/alpha/" :column "review" :finished 10)
+                                             '(:id "t2" :project "/p/alpha/" :column "active")
+                                             '(:id "t3" :project "/p/beta/" :column "review" :archived t))
+        (should (= 1 drawn))
+        (should (= 1 (hash-table-count harness-ui-tasks--in-review)))
+        ;; Another project's task: both are counted.
+        (harness-ui-tasks-test--review-event '(:id "t4" :project "/p/beta/" :column "review" :finished 20))
+        (should (equal (concat " harness " (harness-ui-tasks-test--flag 2) " ")
+                       (substring-no-properties harness-ui-notify--string)))
+        (let ((segment (harness-ui-tasks--notify-segment))
+              (clicked 0))
+          (should (eq 'harness-notify-review-face (get-text-property 1 'face segment)))
+          (should (eq 'mode-line-highlight (get-text-property 1 'mouse-face segment)))
+          ;; Hovering says how many each project has, the last to have one
+          ;; come to review first.
+          (should (equal "Tasks ready for your review: 1 in beta, 1 in alpha (mouse-1: open the task board on them)"
+                         (get-text-property 1 'help-echo segment)))
+          ;; A click opens the board on them.
+          (cl-letf (((symbol-function 'harness-tasks-review) (lambda () (interactive) (cl-incf clicked))))
+            (dolist (key (list [mode-line mouse-1] [mode-line mouse-2] [mouse-1] (kbd "RET")))
+              (funcall (lookup-key (get-text-property 1 'local-map segment) key))))
+          (should (= 4 clicked)))
+        ;; With sessions at work, it comes before their counts.
+        (puthash "s1" '(:id "s1" :status "running") harness-ui--sessions)
+        (harness-ui-notify-refresh)
+        (should (string-match-p (concat "\\` harness " (regexp-quote (harness-ui-tasks-test--flag 2))
+                                        " " (regexp-quote (substring-no-properties (harness-ui-icon 'harness-icon-running)))
+                                        "1 \\'")
+                                (substring-no-properties harness-ui-notify--string)))
+        (clrhash harness-ui--sessions)
+        ;; One task goes on to merge, the other is deleted: the count goes.
+        (setq drawn 0)
+        (harness-ui-tasks-test--review-event '(:id "t1" :project "/p/alpha/" :column "merging" :finished 10))
+        (should (equal (concat " harness " (harness-ui-tasks-test--flag 1) " ")
+                       (substring-no-properties harness-ui-notify--string)))
+        (should (equal "Tasks ready for your review: 1 in beta (mouse-1: open the task board on it)"
+                       (get-text-property 1 'help-echo (harness-ui-tasks--notify-segment))))
+        (harness-ui-tasks--on-review-event "task/deleted" (list "t3"))
+        (should (= 1 drawn))
+        (harness-ui-tasks--on-review-event "task/deleted" (list "t4"))
+        (should (= 2 drawn))
+        (should-not (harness-ui-tasks--notify-segment))
+        (should (equal "" harness-ui-notify--string))))))
+
+(ert-deftest harness-ui-tasks-review-count-without-the-notifier ()
+  "With the notifier off, the count is kept and nothing is drawn."
+  (harness-ui-tasks-test-with-review-count
+    (let ((harness-notify-mode nil))
+      (cl-letf (((symbol-function 'harness-ui-notify-refresh) (lambda () (error "Drawn"))))
+        (harness-ui-tasks-test--review-event '(:id "t1" :project "/p/alpha/" :column "review"))
+        (should (= 1 (hash-table-count harness-ui-tasks--in-review)))))))
+
+(ert-deftest harness-ui-tasks-review-opens-the-right-board ()
+  "A click on the count opens the board of the current project when it has tasks in review.
+Otherwise the board of the project whose task came to review last.
+Point goes to the card of the project's last task to come to review,
+and its session names the project to switch to.  With none, it says so."
+  (harness-ui-tasks-test-with-review-count
+    (let* ((visited nil)
+           (project (lambda (prefix)
+                      ;; A git root of its own, wherever the temporary
+                      ;; directory is: below it is the same project.
+                      (let ((dir (file-name-as-directory (make-temp-file prefix t))))
+                        (make-directory (expand-file-name ".git" dir))
+                        (make-directory (expand-file-name "sub" dir))
+                        dir)))
+           (alpha (funcall project "harness-test-alpha-"))
+           (beta (funcall project "harness-test-beta-"))
+           (elsewhere (file-name-as-directory (make-temp-file "harness-test-elsewhere-" t))))
+      (unwind-protect
+          (cl-letf (((symbol-function 'harness-ui-tasks-visit-task)
+                     (lambda (id project &optional session-id) (push (list id project session-id) visited) nil))
+                    ((symbol-function 'harness-ui-notify-refresh) #'ignore))
+            (let ((default-directory elsewhere))
+              (should-error (harness-tasks-review) :type 'user-error))
+            (harness-ui-tasks-test--review-event
+             `(:id "a1" :project ,alpha :session "sa1" :column "review" :finished 10)
+             `(:id "a2" :project ,alpha :session "sa2" :column "review" :finished 30)
+             `(:id "b1" :project ,beta :session "sb1" :column "review" :finished 20))
+            (cl-flet ((click-in (dir)
+                        (let ((default-directory dir))
+                          (setq visited nil)
+                          (harness-tasks-review)
+                          (car visited))))
+              ;; Elsewhere: the project whose task came last, at that task.
+              (should (equal (list "a2" alpha "sa2") (click-in elsewhere)))
+              ;; In a project with tasks in review, from anywhere in it:
+              ;; its own board, at its last task to come.
+              (should (equal (list "b1" beta "sb1") (click-in beta)))
+              (should (equal (list "b1" beta "sb1") (click-in (expand-file-name "sub/" beta))))
+              ;; The last one gone, the project of the one before it.
+              (harness-ui-tasks-test--review-event `(:id "a2" :project ,alpha :column "done"))
+              (should (equal (list "b1" beta "sb1") (click-in elsewhere)))
+              (should (equal (list "a1" alpha "sa1") (click-in alpha)))))
+        (dolist (d (list alpha beta elsewhere)) (ignore-errors (delete-directory d t)))))))
+
+(ert-deftest harness-ui-tasks-review-count-wiring ()
+  "The module counts the tasks in review as it starts, and stops as it stops.
+Started while connected, it asks for every project's tasks at once; it
+asks again whenever the UI connects.  A harness without tasks, which
+fails the request, has none to count."
+  (harness-ui-tasks-test-with-review-count
+    (let ((requests nil)
+          (answer (lambda () (harness-resolved '((:id "t1" :project "/p/alpha/" :column "review")
+                                                  (:id "t2" :project "/p/alpha/" :column "active")
+                                                  (:id "t3" :project "/p/beta/" :column "review")))))
+          (harness-ui-notify-segment-functions nil)
+          (harness-ui--sessions (make-hash-table :test 'equal))
+          (harness-ui-event-functions nil)
+          (harness-ui-connected-hook nil)
+          (harness-ui-sessions-changed-hook nil)
+          (harness-ui-rate-functions nil)
+          (harness-ui-live-functions nil)
+          (harness-ui-redraw-hook nil)
+          (harness-ui-quota-functions nil)
+          (harness-chat-panel-functions nil)
+          (harness-ui-tasks--timer nil)
+          (harness-ui-map (make-sparse-keymap)))
+      (cl-letf (((symbol-function 'harness-ui-request)
+                 (lambda (method params) (push (list method params) requests) (funcall answer)))
+                ((symbol-function 'harness-ui-connected-p) (lambda () t))
+                ((symbol-function 'force-mode-line-update) #'ignore))
+        (unwind-protect
+            (progn
+              (harness-ui-tasks--init)
+              (should (equal '(("_harness/task/list" nil)) requests))
+              (should (memq #'harness-ui-tasks--notify-segment harness-ui-notify-segment-functions))
+              (should (memq #'harness-ui-tasks--on-review-event harness-ui-event-functions))
+              (should (memq #'harness-ui-tasks--fetch-review harness-ui-connected-hook))
+              (should (equal (concat " harness " (harness-ui-tasks-test--flag 2) " ")
+                             (substring-no-properties harness-ui-notify--string)))
+              ;; Initialised again, as a reload does: the hooks once each.
+              (harness-ui-tasks--init)
+              (should (= 1 (cl-count #'harness-ui-tasks--notify-segment harness-ui-notify-segment-functions)))
+              ;; Connecting to a harness without tasks: nothing to count.
+              (setq requests nil
+                    answer (lambda () (harness-rejected '(harness-error "Unknown method"))))
+              (run-hooks 'harness-ui-connected-hook)
+              (should (equal '(("_harness/task/list" nil)) requests))
+              (should (zerop (hash-table-count harness-ui-tasks--in-review)))
+              (should (equal "" harness-ui-notify--string))
+              ;; Back to a harness with tasks, then the module stops.
+              (setq answer (lambda () (harness-resolved '((:id "t1" :project "/p/alpha/" :column "review")))))
+              (run-hooks 'harness-ui-connected-hook)
+              (should (= 1 (hash-table-count harness-ui-tasks--in-review)))
+              (harness-ui-tasks--shutdown)
+              (should-not (memq #'harness-ui-tasks--notify-segment harness-ui-notify-segment-functions))
+              (should-not (memq #'harness-ui-tasks--on-review-event harness-ui-event-functions))
+              (should-not (memq #'harness-ui-tasks--fetch-review harness-ui-connected-hook))
+              (should (zerop (hash-table-count harness-ui-tasks--in-review)))
+              (should (equal "" harness-ui-notify--string)))
+          (when (timerp harness-ui-tasks--timer) (cancel-timer harness-ui-tasks--timer)))))))
+
+(ert-deftest harness-ui-tasks-review-count-follows-the-harness ()
+  "The count follows the harness's tasks, all the way through.
+A task submitted on the board finishes and waits for review: the
+notifier counts it, as it does after fetching every project's tasks
+again; a click from another directory opens the board on its card; and
+verifying it takes the count away."
+  (harness-ui-tasks-test-with
+    (harness-ui-tasks-test-with-review-count
+      (let ((harness-tasks-require-verification t)
+            (elsewhere (file-name-as-directory (make-temp-file "harness-test-elsewhere-" t))))
+        (unwind-protect
+            (cl-letf (((symbol-function 'force-mode-line-update) #'ignore))
+              (with-current-buffer board (harness-ui-tasks-refresh))
+              (harness-ui-tasks-test--type-and-submit board "Count me in review")
+              (harness-ui-tasks-test--wait-text board "Ready for review  1\\(.\\|\n\\)*Count me in review")
+              (harness-test-wait (lambda () (string-search (harness-ui-tasks-test--flag 1) harness-ui-notify--string))
+                                 5 "the notifier to count the task")
+              ;; Every project's tasks again, as when the UI connects: the same.
+              (clrhash harness-ui-tasks--in-review)
+              (harness-ui-tasks--fetch-review)
+              (harness-test-wait (lambda () (= 1 (hash-table-count harness-ui-tasks--in-review)))
+                                 5 "the tasks to be fetched")
+              (let ((id (plist-get (car (harness-call 'task/list dir)) :id)))
+                ;; A click from elsewhere opens the board, point on the card.
+                (with-current-buffer board (goto-char (point-max)))
+                (with-temp-buffer
+                  (setq default-directory elsewhere)
+                  (harness-tasks-review))
+                (harness-test-wait (lambda () (with-current-buffer board
+                                                (equal id (get-text-property (point) 'harness-task-id))))
+                                   5 "point on the card")
+                (should (eq board (window-buffer (selected-window)))))
+              ;; v accepts the work: the count goes, and the notifier with it.
+              (harness-ui-tasks-test--goto-card board "Count me in review")
+              (with-current-buffer board (call-interactively (key-binding (kbd "v"))))
+              (harness-ui-tasks-test--wait-text board "Completed  1\\(.\\|\n\\)*Count me in review")
+              (harness-test-wait (lambda () (zerop (hash-table-count harness-ui-tasks--in-review)))
+                                 5 "the count to go")
+              (should-not (string-search (harness-ui-tasks-test--flag 1) harness-ui-notify--string)))
+          (ignore-errors (delete-directory elsewhere t)))))))
+
 (provide 'harness-ui-tasks-test)
 ;;; harness-ui-tasks-test.el ends here

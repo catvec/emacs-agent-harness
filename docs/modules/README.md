@@ -364,13 +364,13 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `harness-reload-hook` | `harness.el`, `harness-revision.el` | `harness-revision.el` |
 | `harness-start-hook` | `harness.el`, `harness-revision.el` | `harness-revision.el` |
 | `harness-tasks-feedback-additions-functions` | [patch-review](patch-review.md), [tasks](tasks.md) | [patch-review](patch-review.md) |
-| `harness-ui-connected-hook` | [ui](ui.md) | [ui-chat](ui-chat.md), [ui-decisions](ui-decisions.md), [ui-pending](ui-pending.md), [ui-pet](ui-pet.md), [ui-version](ui-version.md) |
+| `harness-ui-connected-hook` | [ui](ui.md) | [ui-chat](ui-chat.md), [ui-decisions](ui-decisions.md), [ui-pending](ui-pending.md), [ui-pet](ui-pet.md), [ui-tasks](ui-tasks.md), [ui-version](ui-version.md) |
 | `harness-ui-decision-functions` | [ui-chat](ui-chat.md), [ui-decisions](ui-decisions.md) | [ui-chat](ui-chat.md) |
 | `harness-ui-event-functions` | [ui](ui.md), [ui-children](ui-children.md), [ui-priority](ui-priority.md) | [ui-acp-remote](ui-acp-remote.md), [ui-chat](ui-chat.md), [ui-children](ui-children.md), [ui-config](ui-config.md), [ui-decisions](ui-decisions.md), [ui-dirs](ui-dirs.md), [ui-merge](ui-merge.md), [ui-patch-review](ui-patch-review.md), [ui-pet](ui-pet.md), [ui-priority](ui-priority.md), [ui-report](ui-report.md), [ui-review](ui-review.md), [ui-secrets](ui-secrets.md), [ui-sessions](ui-sessions.md), [ui-slots](ui-slots.md), [ui-tasks](ui-tasks.md), [ui-tree](ui-tree.md), [ui-usage](ui-usage.md), [ui-version](ui-version.md), [ui-worktree](ui-worktree.md) |
 | `harness-ui-live-functions` | [ui](ui.md) | [ui-chat](ui-chat.md), [ui-sessions](ui-sessions.md), [ui-tasks](ui-tasks.md) |
 | `harness-ui-media-rerender-functions` | [ui-media](ui-media.md) | [ui-chat](ui-chat.md) |
 | `harness-ui-notification-functions` | [ui](ui.md) | [ui-tasks](ui-tasks.md) |
-| `harness-ui-notify-segment-functions` | [ui-notify](ui-notify.md) | [ui-version](ui-version.md) |
+| `harness-ui-notify-segment-functions` | [ui-notify](ui-notify.md) | [ui-tasks](ui-tasks.md), [ui-version](ui-version.md) |
 | `harness-ui-pending-changed-hook` | [ui-pending](ui-pending.md) | [ui-chat](ui-chat.md), [ui-pending](ui-pending.md), [ui-sessions](ui-sessions.md) |
 | `harness-ui-pending-drawn-predicates` |  | [ui-chat](ui-chat.md) |
 | `harness-ui-pending-panel-functions` | [ui-pending](ui-pending.md) | [ui-cowboy](ui-cowboy.md) |

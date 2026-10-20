@@ -91,6 +91,15 @@ or acts on tasks; the board then shows only the tasks it is about,
 and the sessions and commands it found above them
 (harness-ui-tasks-search.el, through `harness-ui-tasks-filter`).
 
+A backlog task's own session shows a banner above its compose box:
+that it waits in the Backlog, or is being written up, with the card's
+[Start now] and, while it waits, [Queue it].  A message typed in that
+session starts the task, whether it waits or its write-up still runs,
+which the message stops; feedback on the write-up is the board's
+[Refine].  [Start now] supersedes a write-up that runs the same way:
+it stops it and starts the task with the write-up it has when the
+turn has ended.
+
 Priority: a task is low, medium (the default) or high priority, and
 that priority is its session's -- every task has its session from
 submission, holding the level, so the board and the queues the
@@ -113,6 +122,14 @@ on the settings page): finished tasks then merge and complete by
 themselves, and Ready for review shows only while tasks from before
 still wait there.  It is a harness option, so it holds for every
 board and across restarts.
+
+The mode line notifier (harness-ui-notify.el) counts the tasks ready
+for your review, of every project, beside the sessions it counts:
+Ready for review's flag and how many wait there, open board or not.
+Hovering says how many each project has.  A click
+(`harness-tasks-review`) opens the board of the current project when
+it has some, else of the project whose task came to review last, with
+point on the card of the last to come.
 
 How many of a project's tasks work at once ends the settings line
 under New task: "3 at a time", or "all at once" without a limit, in
@@ -168,6 +185,8 @@ the chevron that folds a card's recap, which only draws the card again.
 
 ### Hooks
 
+- `harness-chat-panel-functions`
+- `harness-ui-tasks-action-functions` — Functions adding actions of their own to the menu of a task's card.
 - `harness-ui-tasks-corner-functions` — Functions drawing something at the right of the lines above the compose box.
 - `harness-ui-tasks-header-functions` — Functions returning a segment of a board's header line, or nil.
 - `harness-ui-tasks-tick-hook` — Hook run, with no arguments, each time the boards' clock ticks.
@@ -175,6 +194,7 @@ the chevron that folds a card's recap, which only draws the card again.
 ### Commands
 
 - `harness-tasks` — Show the task board of DIRECTORY's project (the current one by default).
+- `harness-tasks-review` — Show the tasks ready for your review on their project's task board.
 - `harness-ui-tasks-adopt` — Make an ongoing session of this project a task, chosen with completion.
 - `harness-ui-tasks-allow` — Answer the permission request the task at point waits on with Allow.
 - `harness-ui-tasks-archive` — Archive the task at point, completed or in review, or restore it when archived.
@@ -197,7 +217,6 @@ the chevron that folds a card's recap, which only draws the card again.
 - `harness-ui-tasks-mouse-open` — Open the task clicked in EVENT, or toggle the clicked section.
 - `harness-ui-tasks-next` — Move to the next task.
 - `harness-ui-tasks-open` — Open the session of the task at point in POSITION.
-- `harness-ui-tasks-open-harness` — Open an Emacs running the harness from the task's worktree.
 - `harness-ui-tasks-open-other` — Open the session of the task at point in a position read from the user.
 - `harness-ui-tasks-previous` — Move to the previous task.
 - `harness-ui-tasks-queue` — Put the backlog task at point back in the pending queue.
@@ -210,6 +229,8 @@ the chevron that folds a card's recap, which only draws the card again.
 - `harness-ui-tasks-retry` — Have the task at point, which stopped part way, work on it again.
 - `harness-ui-tasks-return-to-pending` — Stop the turn of the task at point and put it back in the pending queue.
 - `harness-ui-tasks-search` — Find tasks, sessions and commands from the board, or act on tasks, in words.
+- `harness-ui-tasks-session-queue` — Put this session's backlog task in the pending queue.
+- `harness-ui-tasks-session-start` — Start the backlog task of this session now, even with every slot busy.
 - `harness-ui-tasks-set-max-running` — Let N of each project's tasks work at once; N nil means no limit.
 - `harness-ui-tasks-show-all` — Show every task of the section at point, however tall it makes the board.
 - `harness-ui-tasks-show-fewer` — Let the section at point fit the window again.
@@ -234,7 +255,6 @@ the chevron that folds a card's recap, which only draws the card again.
 ### Methods it calls
 
 - `config/set` ([config](config.md))
-- `harness-dev/open` ([tools-dev](tools-dev.md))
 - `priority/set` ([priority](priority.md))
 - `project/root` ([project](project.md))
 - `task/adopt` ([tasks](tasks.md))
@@ -245,6 +265,7 @@ the chevron that folds a card's recap, which only draws the card again.
 - `task/cancel` ([tasks](tasks.md))
 - `task/complete` ([tasks](tasks.md))
 - `task/delete` ([tasks](tasks.md))
+- `task/for-session` ([tasks](tasks.md))
 - `task/list` ([tasks](tasks.md))
 - `task/merge` ([tasks](tasks.md))
 - `task/prompt` ([tasks](tasks.md))
@@ -265,15 +286,26 @@ the chevron that folds a card's recap, which only draws the card again.
 ### Events it hears over ACP
 
 - `session/ext-changed` → `harness-ui-tasks--on-event`
+- `task/changed` → `harness-ui-tasks--on-review-event`
+- `task/changed` → `harness-ui-tasks--on-session-task-event`
 - `task/changed` → `harness-ui-tasks--on-event`
+- `task/deleted` → `harness-ui-tasks--on-review-event`
+- `task/deleted` → `harness-ui-tasks--on-session-task-event`
 - `task/deleted` → `harness-ui-tasks--on-event`
+- `task/done` → `harness-ui-tasks--on-session-task-event`
+- `task/review` → `harness-ui-tasks--on-session-task-event`
 - `task/review` → `harness-ui-tasks--on-event`
 
 ### Hooks it adds to
 
+- `harness-chat-panel-functions` → `harness-ui-tasks--backlog-panel`
+- `harness-ui-connected-hook` → `harness-ui-tasks--fetch-review`
+- `harness-ui-event-functions` → `harness-ui-tasks--on-review-event`
+- `harness-ui-event-functions` → `harness-ui-tasks--on-session-task-event`
 - `harness-ui-event-functions` → `harness-ui-tasks--on-event`
 - `harness-ui-live-functions` → `harness-ui-tasks--on-live`
 - `harness-ui-notification-functions` → `harness-ui-tasks--on-notification`
+- `harness-ui-notify-segment-functions` → `harness-ui-tasks--notify-segment`
 - `harness-ui-quota-functions` → `harness-ui-tasks--on-quota`
 - `harness-ui-rate-functions` → `harness-ui-tasks--on-rate`
 - `harness-ui-redraw-hook` → `harness-ui-tasks--on-redraw`

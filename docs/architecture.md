@@ -10387,7 +10387,22 @@ for review, the report ends with the banner of its session, [Verify]
 and [Send back], and a box for the feedback.  Ready for review's
 heading counts the tasks to review, as each column's heading counts its
 own, and `task/review` says in the echo area that one is ready
-(`harness-ui-tasks--notify-review`).  The header line holds only what
+(`harness-ui-tasks--notify-review`).  The mode line notifier counts
+them too, every project's, whatever board is open: the module adds
+`harness-ui-tasks--notify-segment` to
+`harness-ui-notify-segment-functions` (after the version page's nag),
+the review flag and the count in `harness-notify-review-face`, from
+`harness-ui-tasks--in-review`, the views of the tasks whose column is
+review and that are not archived.  `_harness/task/list` without a cwd
+fills it as the UI connects (and as the module starts while connected),
+then `task/changed` and `task/deleted` keep it, the notifier drawn again
+only when the count changes.  Its tooltip says how many each project
+has; a click runs `harness-tasks-review`, which opens the board of the
+current project (`harness-ui-tasks--current-project`) when it has tasks
+in review, else of the project whose task finished last, point on that
+project's newest review card, after switching to the project as a
+notification's click does (`harness-ui-tasks-visit-task`, which both
+share).  The header line holds only what
 the board does not show: the project, and, as a chat's does for its
 session, what the board's tasks cost and who pays (see Cost display
 below), then the fullest budget that applies to the project, then the
@@ -11444,8 +11459,9 @@ notifier
 counts of the user's sessions (`harness-ui-user-sessions`, so no internal
 session), idle ones too with `harness-ui-notify-show-idle`, clickable;
 `harness-ui-notify-segment-functions` add segments of other modules
-after its "harness", such as the version page's nag icon, and keep it
-showing with no session active), BTW side window (`harness-ui-btw`: a
+after its "harness", such as the version page's nag icon and the task
+board's count of tasks ready for review, and keep it showing with no
+session active), BTW side window (`harness-ui-btw`: a
 new, empty
 session listed under the session it is opened over but sharing nothing
 with it or with other BTWs (`session/btw`), or, over a view that sets
