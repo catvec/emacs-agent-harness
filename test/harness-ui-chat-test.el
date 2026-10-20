@@ -31,6 +31,9 @@
 (declare-function harness-ui-decisions-store "harness-ui-decisions" (decision))
 (declare-function harness-ui-decisions--shutdown "harness-ui-decisions" ())
 (declare-function harness-ui-cache-session "harness-ui")
+(declare-function harness-ui-pending-popout "harness-ui-pending")
+(declare-function harness-ui-popout-buffer "harness-ui-popout")
+(declare-function harness-ui-popout-close "harness-ui-popout")
 
 (defvar harness-ui-chat-test-events nil "Recorded (EVENT . ARGS), newest first.")
 
@@ -137,6 +140,11 @@
       (goto-char (or from (point-min)))
       (let ((case-fold-search nil))
         (search-forward text nil t)))))
+
+(defun harness-ui-chat-test-radio (picked)
+  "Return, as text, the mark of a line of covers or patterns that is PICKED, or not."
+  (substring-no-properties
+   (harness-ui-icon (if picked 'harness-icon-radio-on 'harness-icon-radio-off))))
 
 (defun harness-ui-chat-test-link-keys (pos)
   "Return the keymap of the session link at POS, or nil.
@@ -4163,7 +4171,15 @@ undone, [redo].  Another hint has no buttons."
                                            :reason "Read file wants ~/notes/todo.org, which is outside the allowed directories")))))
       (should (harness-chat--on-permission (funcall params "d1") respond))
       (with-current-buffer buf
-        (should (harness-ui-chat-test-find buf "pattern: ~/notes/**  [Edit] e"))
+        ;; The patterns around the request's own are lines to pick from,
+        ;; its own picked and noted as the default; [Edit] types another.
+        (should (harness-ui-chat-test-find
+                 buf (concat "   Answers hold for:\n"
+                             "     " (harness-ui-chat-test-radio nil) " ~/notes/todo.org\n"
+                             "     " (harness-ui-chat-test-radio nil) " ~/notes/*.org\n"
+                             "     " (harness-ui-chat-test-radio t) " ~/notes/**  default\n"
+                             "     " (harness-ui-chat-test-radio nil) " ~/**\n"
+                             "   [Edit] e  [Narrower] <  [Wider] >\n")))
         ;; A directory prompt has the buttons of any request; their
         ;; tooltips speak of the pattern.
         (should (harness-ui-chat-test-find buf "[Allow] y  [Allow for session] s  [Always allow] a  [Deny] n  [Always deny] N"))
@@ -4181,7 +4197,9 @@ undone, [redo].  Another hint has no buttons."
             (set-window-buffer nil buf)
             (execute-kbd-macro "e")))
         (should (equal "" (harness-compose-text)))
-        (should (harness-ui-chat-test-find buf "pattern: ~/notes/*.org (edited)"))
+        ;; One of the lines, so it is picked, not noted as typed.
+        (should (harness-ui-chat-test-find buf (concat "     " (harness-ui-chat-test-radio t) " ~/notes/*.org\n")))
+        (should-not (harness-ui-chat-test-find buf (concat (harness-ui-chat-test-radio t) " ~/notes/**")))
         ;; Point stays on the panel, so its keys still answer it.
         (should (equal "d1" (get-text-property (point) 'harness-ui-pending)))
         (call-interactively (lookup-key harness-chat-panel-map (kbd "s")))
@@ -4192,10 +4210,12 @@ undone, [redo].  Another hint has no buttons."
         (harness-chat--on-permission (funcall params "d2") respond)
         (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "~/elsewhere/**")))
           (harness-chat-edit-permission-pattern))
-        (should (harness-ui-chat-test-find buf "pattern: ~/elsewhere/** (edited)"))
+        ;; Not one of the lines: a line of its own, noted as typed.
+        (should (harness-ui-chat-test-find buf (concat "     " (harness-ui-chat-test-radio t) " ~/elsewhere/**  edited\n")))
         (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "")))
           (harness-chat-edit-permission-pattern))
-        (should (harness-ui-chat-test-find buf "pattern: ~/notes/**  [Edit]"))
+        (should (harness-ui-chat-test-find buf (concat "     " (harness-ui-chat-test-radio t) " ~/notes/**  default\n")))
+        (should-not (harness-ui-chat-test-find buf "~/elsewhere/**"))
         (goto-char (harness-ui-chat-test-find buf "Permission"))
         (call-interactively (lookup-key harness-chat-panel-map (kbd "N")))
         (should (equal '(:outcome (:outcome "selected" :optionId "deny-always")) (car answers)))
@@ -4204,7 +4224,7 @@ undone, [redo].  Another hint has no buttons."
                                            :options harness-acp--permission-options
                                            :_harness '(:pendingId "p3" :tool "bash"))
                                      respond)
-        (should-not (harness-ui-chat-test-find buf "pattern:"))
+        (should-not (harness-ui-chat-test-find buf "Answers hold for"))
         (should-error (harness-chat-edit-permission-pattern) :type 'user-error)
         ;; So its `e' types instead, into the box, and the request still waits.
         (goto-char (harness-ui-chat-test-find buf "Permission"))
@@ -4255,15 +4275,23 @@ about a path outside, though the prompt about the call is newer."
         (harness-test-wait (lambda () (with-current-buffer buf (= 2 (length harness-chat--pending))))
                            5 "pending rendered")
         (with-current-buffer buf
-          (should (string-match-p "pattern: ~/notes/\\*\\*  \\[Edit\\] e\n" (funcall panel "d1")))
-          (should-not (string-match-p "pattern:\\|\\[Edit\\]\\|remember" (funcall panel "w1")))
+          (should (string-search (concat "Answers hold for:\n"
+                                         "     " (harness-ui-chat-test-radio nil) " ~/notes/todo.org\n")
+                                 (funcall panel "d1")))
+          (should (string-search (concat (harness-ui-chat-test-radio t) " ~/notes/**  default\n")
+                                 (funcall panel "d1")))
+          (should (string-search "[Edit] e  [Narrower] <  [Wider] >\n" (funcall panel "d1")))
+          ;; The write is about the call: no patterns, no covers it was sent none of.
+          (should-not (string-match-p "Answers hold for\\|Lasting answers\\|\\[Edit\\]\\|\\[Narrower\\]\\|remember"
+                                      (funcall panel "w1")))
           (should (string-match-p "\\[Allow\\] y  \\[Allow for session\\] s" (funcall panel "w1")))
           ;; C-c C-p from the compose box edits the directory prompt's.
           (goto-char harness-compose-end)
           (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "~/notes/*.org")))
             (call-interactively (lookup-key harness-chat-mode-map (kbd "C-c C-p"))))
-          (should (string-match-p "pattern: ~/notes/\\*\\.org (edited)" (funcall panel "d1")))
-          (should-not (string-match-p "pattern:" (funcall panel "w1")))
+          (should (string-search (concat "     " (harness-ui-chat-test-radio t) " ~/notes/*.org\n")
+                                 (funcall panel "d1")))
+          (should-not (string-search "Answers hold for" (funcall panel "w1")))
           ;; The write's answer is the plain option.
           (goto-char (1- (harness-ui-chat-test-find buf "[Always allow]" (funcall panel-start "w1"))))
           (should (equal "w1" (get-text-property (point) 'harness-ui-pending)))
@@ -4277,6 +4305,84 @@ about a path outside, though the prompt about the call is newer."
           (harness-chat-push))
         (harness-test-wait (lambda () (cdr recorded)) 5 "answered through the method")
         (should (equal (list sid "d1" '(:option "allow-always" :pattern "~/notes/*.org")) (car recorded)))))))
+
+(ert-deftest harness-ui-chat-permission-covers-are-picked-on-the-panel ()
+  "A call that comes with a ladder of covers lists them above the buttons.
+A click picks a line and `>' a wider one, point stays on the panel, the
+tooltips and the answer follow the pick, C-c . presses the keys from the
+box, and the popout of the same request draws the same block."
+  (harness-ui-chat-test-with
+    (harness-test-load-module 'ui-compose)
+    (harness-test-load-module 'ui-popout)
+    (let* ((sid (harness-ui-chat-test-session))
+           (recorded nil)
+           (block (lambda (buf)
+                    (with-current-buffer buf
+                      (let ((start (progn (goto-char (point-min)) (search-forward "   Lasting answers (")))
+                            (end (search-forward "   [Allow] y")))
+                        (buffer-substring-no-properties start end)))))
+           (line (lambda (picked label)
+                   (concat "     " (harness-ui-chat-test-radio picked) " " label "\n"))))
+      (harness-register-method 'permission/answer
+                               (lambda (session-id pending-id answer)
+                                 (push (list session-id pending-id answer) recorded)
+                                 (harness-call 'session/pending-resolve session-id pending-id answer)
+                                 answer))
+      (harness-call 'session/pending-add sid
+                    (list :id "l1" :kind 'permission
+                          :payload (list :tool "bash" :kind 'exec :title "Bash: make test"
+                                         :input '(:command "make test")
+                                         :commands '(("make")) :covers "make"
+                                         :ladder '((:id "exact" :label "every bash call with this exact command")
+                                                   (:id "programs" :label "every make call (any arguments)")
+                                                   (:id "tool" :label "every bash call (any command)"))
+                                         :cover "programs"
+                                         :options '(allow-once allow-session allow-always deny-once deny-always))))
+      (let ((buf (harness-ui-chat-test-open sid)))
+        (harness-test-wait (lambda () (with-current-buffer buf harness-chat--pending)) 5 "pending rendered")
+        (with-current-buffer buf
+          (should (harness-ui-chat-test-find
+                   buf (concat "   Lasting answers (s, a, N) cover:\n"
+                               (funcall line nil "every bash call with this exact command")
+                               (funcall line t "every make call (any arguments)")
+                               (funcall line nil "every bash call (any command)")
+                               "   [Narrower] <  [Wider] >\n")))
+          (should-not (harness-ui-chat-test-find buf "lasting answers: every make call"))
+          (should (equal "Always allow every make call (any arguments), in every session (a)"
+                         (get-text-property (1- (harness-ui-chat-test-find buf "[Always allow]")) 'help-echo)))
+          ;; A click on a line picks it; point is on the panel after the redraw.
+          (goto-char (1- (harness-ui-chat-test-find buf "every bash call with this exact command")))
+          (harness-chat-push)
+          (should (harness-ui-chat-test-find buf (funcall line t "every bash call with this exact command")))
+          (should (equal "l1" (get-text-property (point) 'harness-ui-pending)))
+          (should (equal "Always allow every bash call with this exact command, in every session (a)"
+                         (get-text-property (1- (harness-ui-chat-test-find buf "[Always allow]")) 'help-echo)))
+          ;; `>' on the panel is a wider one.
+          (call-interactively (key-binding (kbd ">")))
+          (should (harness-ui-chat-test-find buf (funcall line t "every make call (any arguments)")))
+          ;; The popout of the request draws the same block, the same pick.
+          (let ((chat-block (funcall block buf)))
+            ;; Showing the popout may select its window, and its buffer with it.
+            (save-window-excursion
+              (save-current-buffer
+                (harness-ui-pending-popout sid)
+                (should (equal chat-block (funcall block (harness-ui-popout-buffer (list 'pending sid)))))
+                (harness-ui-popout-close (list 'pending sid)))))
+          (set-buffer buf)
+          ;; From the box, C-c . and the key press it on the panel above.
+          (goto-char harness-compose-end)
+          (insert "draft")
+          (save-window-excursion
+            (set-window-buffer nil buf)
+            (execute-kbd-macro (kbd "C-c . >")))
+          (should (harness-ui-chat-test-find buf (funcall line t "every bash call (any command)")))
+          (should (equal "draft" (harness-compose-text)))
+          (should (= (point) harness-compose-end))
+          ;; The answer carries the pick.
+          (goto-char (1- (harness-ui-chat-test-find buf "[Always allow]")))
+          (harness-chat-push))
+        (harness-test-wait (lambda () recorded) 5 "answered through the method")
+        (should (equal (list sid "l1" '(:option "allow-always" :cover "tool")) (car recorded)))))))
 
 (ert-deftest harness-ui-chat-command-permission-says-where-it-runs ()
   "A shell command's prompt says where it runs and what it reaches.
@@ -4298,7 +4404,7 @@ Being about the call itself, it shows no pattern."
                #'ignore))
       (with-current-buffer buf
         (should (harness-ui-chat-test-find buf "kind: execute   runs in: ~/proj/\n   paths: ~/.claude/projects/x/\n"))
-        (should-not (harness-ui-chat-test-find buf "pattern:"))
+        (should-not (harness-ui-chat-test-find buf "Answers hold for"))
         (harness-chat-deny-newest))
       ;; It names none: it is about where it runs, said once.
       (should (harness-chat--on-permission
@@ -4307,7 +4413,7 @@ Being about the call itself, it shows no pattern."
       (with-current-buffer buf
         (should (harness-ui-chat-test-find buf "kind: execute   runs in: ~/proj/\n"))
         (should-not (harness-ui-chat-test-find buf "paths:"))
-        (should-not (harness-ui-chat-test-find buf "pattern:"))
+        (should-not (harness-ui-chat-test-find buf "Answers hold for"))
         (harness-chat-deny-newest))
       ;; Any other call's paths stay on the line of its kind.
       (should (harness-chat--on-permission

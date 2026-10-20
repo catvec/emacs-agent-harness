@@ -35,6 +35,15 @@
 ;; panel is a panel of the box (`harness-compose-panel'): its C-c . reads
 ;; a key and presses it on the nearest panel that has it
 ;; (`harness-compose-panel-key'), and every panel says so in a dim line.
+;;
+;; An answer that lasts (Allow for session, Always allow, Always deny)
+;; records a rule, and the panel says what the rule will cover before it
+;; is given (see "What the lasting answers cover"): a prompt about a call
+;; lists the covers the harness worked out for it, from the narrowest
+;; (this exact command) to the widest (every call of the tool), and one
+;; about a path outside the allowed directories lists the patterns around
+;; its own.  A click on a line, or < and >, picks the one the answers hold
+;; for; the least permissive stays one step away.
 
 ;;; Code:
 
@@ -49,6 +58,13 @@
 
 (defgroup harness-ui-pending nil
   "Requests a session waits on: permissions and questions." :group 'harness-ui)
+
+;; The mark of a line of covers or patterns that is picked, and of one
+;; that is not: a ring with a dot in it, and a ring.
+(harness-ui-define-icon harness-icon-radio-on "radio-on" "◉" "(*)"
+                        "A choice that is picked: a ring with a dot in it.")
+(harness-ui-define-icon harness-icon-radio-off "radio-off" "○" "( )"
+                        "A choice that is not picked: a ring.")
 
 (declare-function harness-ui-popout-show "harness-ui-popout")
 (declare-function harness-ui-popout-refresh "harness-ui-popout")
@@ -72,7 +88,10 @@ answer holds for, and `:edited-pattern' the one the user typed;
 `:commands' are the command patterns a shell call's lasting answers
 hold for, and `:covers' words them for the panel), `:question'
 `:options' `:diagrams' for a question.  A permission also has the
-`:call-id' of the tool call that waits on it.")
+`:call-id' of the tool call that waits on it, and, when the harness
+worked out what its lasting answers could cover, a `:ladder' of covers
+\(plists of `:id' and `:label', narrowest first), the id of the one they
+start on, `:cover', and the id the user picked instead, `:picked-cover'.")
 
 (defvar harness-ui-pending--diagrams (make-hash-table :test 'equal)
   "Session id -> (PID . INDEX) of the diagram its panel shows.
@@ -183,17 +202,29 @@ opening it."
              harness-ui-pending--images)
     (dolist (key gone) (remhash key harness-ui-pending--images))))
 
+(defun harness-ui-pending--keep-choices (old record)
+  "Return RECORD with what the user chose on OLD, the same request drawn before.
+That is the pattern they edited, and the cover they picked while
+RECORD's ladder still has it: a request that arrives again, from the
+session's pending list, must not undo what they chose on its panel."
+  (when-let* ((edited (plist-get old :edited-pattern)))
+    (setq record (plist-put (copy-sequence record) :edited-pattern edited)))
+  (when-let* ((picked (plist-get old :picked-cover))
+              ((harness-ui-pending--ladder-step record picked)))
+    (setq record (plist-put (copy-sequence record) :picked-cover picked)))
+  record)
+
 (defun harness-ui-pending-add (session-id record)
   "Add or replace RECORD among the requests SESSION-ID waits on.
 An answer already given here wins over news of the request still
 arriving: the record keeps its `:respond' and does not come back.  A
-pattern the user edited is kept too, for the same reason."
+pattern the user edited is kept too, for the same reason, and so is the
+cover they picked (see `harness-ui-pending--keep-choices')."
   (let* ((pid (plist-get record :id))
          (old (harness-ui-pending-record session-id pid))
-         (record (cond ((and old (plist-get old :respond) (not (plist-get record :respond))) old)
-                       ((plist-get old :edited-pattern)
-                        (plist-put (copy-sequence record) :edited-pattern (plist-get old :edited-pattern)))
-                       (t record)))
+         (record (if (and old (plist-get old :respond) (not (plist-get record :respond)))
+                     old
+                   (harness-ui-pending--keep-choices old record)))
          (rest (cl-remove pid (harness-ui-pending-items session-id)
                           :key (lambda (r) (plist-get r :id)) :test #'equal)))
     (harness-ui-pending--put session-id (append rest (list record)))))
@@ -235,6 +266,7 @@ ITEM is (:id :kind :payload) in the wire shape."
             :input (plist-get payload :input) :paths (plist-get payload :paths) :cwd (plist-get payload :cwd)
             :dir (plist-get payload :dir) :pattern (plist-get payload :pattern)
             :commands (plist-get payload :commands) :covers (plist-get payload :covers)
+            :ladder (plist-get payload :ladder) :cover (plist-get payload :cover)
             :reason (plist-get payload :reason)
             :options (plist-get payload :options)))))
 
@@ -279,7 +311,9 @@ non-nil when the store changed."
 ;; say so (`harness-ui-pending-answer-help'): Allow lets a call run, lets
 ;; one call reach the pattern of a request about a path outside, and
 ;; grants the directory an agent asked for until its turn ends -- the
-;; narrowest allow, which records nothing.
+;; narrowest allow, which records nothing.  The answers that last cover
+;; what the panel lists above them, and it is for the user to pick (see
+;; "What the lasting answers cover").
 
 (defconst harness-ui-pending-permission-keys
   '(("allow-once" . "y") ("allow-session" . "s") ("allow-always" . "a")
@@ -310,27 +344,33 @@ harness runs in a process of its own.")
   "Say what answering permission record R with OPTION does, in a few words.
 The answers are the same for every request, but not what they cover:
 the call itself, whose tool a lasting answer holds for, or whose
-commands when the call is a shell command the harness read; the
-pattern of a call reaching outside the allowed directories, which
-allow-once lets that call reach; or the directory an agent asked for,
-which allow-once grants until the session's turn ends."
+commands when the call is a shell command the harness read, or, when
+the harness listed the covers it could have (`:ladder'), the one picked
+\(see `harness-ui-pending--cover-label'); the pattern of a call reaching
+outside the allowed directories, which allow-once lets that call reach;
+or the directory an agent asked for, which allow-once grants until the
+session's turn ends."
   (let ((pattern (or (harness-ui-pending--permission-pattern r)
                      (and (plist-get r :dir) (abbreviate-file-name (format "%s" (plist-get r :dir))))))
         (tool (or (plist-get r :tool) "this tool"))
         (covers (plist-get r :covers))
+        (label (harness-ui-pending--cover-label r))
         (request (harness-ui-pending--dir-request-p r)))
     (pcase option
       ("allow-once" (cond ((and request pattern) (format "Allow %s until this turn ends" pattern))
                           (pattern (format "Let this call reach %s, this time" pattern))
                           (t "Allow this call, this time")))
       ("allow-session" (cond (pattern (format "Allow %s for this session" pattern))
+                             (label (format "Allow %s for this session" label))
                              (covers (format "Allow every %s call for this session" covers))
                              (t (format "Allow every %s call for this session" tool))))
       ("allow-always" (cond (pattern (format "Always allow %s, in every session" pattern))
+                            (label (format "Always allow %s, in every session" label))
                             (covers (format "Always allow every %s call, in every session" covers))
                             (t (format "Always allow every %s call, in every session" tool))))
       ("deny-once" (if request "Deny the request" "Deny this call"))
       ("deny-always" (cond (pattern (format "Always deny %s, to every tool" pattern))
+                           (label (format "Always deny %s" label))
                            (covers (format "Always deny every %s call" covers))
                            (t (format "Always deny every %s call" tool))))
       (_ (harness-ui-pending-answer-label option)))))
@@ -342,43 +382,66 @@ which allow-once grants until the session's turn ends."
 It says what the answer covered, as its button's tooltip did."
   (let ((shown (or (harness-ui-pending--permission-pattern r)
                    (and (plist-get r :dir) (abbreviate-file-name (format "%s" (plist-get r :dir))))))
-        (covers (plist-get r :covers)))
+        (covers (plist-get r :covers))
+        (label (harness-ui-pending--cover-label r)))
     (pcase option
       ("allow-once" (cond ((and shown (harness-ui-pending--dir-request-p r))
                            (format "Allowed %s until this turn ends" shown))
                           (shown (format "Allowed this call to reach %s" shown))
                           (t "Allowed this call")))
       ("allow-session" (cond (shown (format "Allowed %s for this session" shown))
+                             (label (format "Allowed %s for this session" label))
                              (covers (format "Allowed every %s call for this session" covers))
                              (t "Allowed for this session")))
       ("allow-always" (cond (shown (format "Always allowed %s" shown))
+                            (label (format "Always allowed %s" label))
                             (covers (format "Always allowed every %s call" covers))
                             (t "Always allowed")))
       ("deny-always" (cond (shown (format "Always denied %s" shown))
+                           (label (format "Always denied %s" label))
                            (covers (format "Always denied every %s call" covers))
                            (t "Always denied")))
       (_ "Denied"))))
 
+(defconst harness-ui-pending--lasting-options '("allow-session" "allow-always" "deny-always")
+  "The permission answers that last: each records a rule, or a grant.
+Allow and Deny hold for the one call and record nothing.")
+
+(defun harness-ui-pending--answer-extras (r option)
+  "Return what answering permission record R with OPTION carries beside it.
+That is `:cover' with the id of the cover picked from R's ladder, for an
+answer that lasts only (`harness-ui-pending--lasting-options'): the
+others record nothing, so there is nothing for a cover to say; then
+`:pattern' with the pattern the user edited.  Nil when it carries
+neither."
+  (append (and (member option harness-ui-pending--lasting-options)
+               (when-let* ((cover (harness-ui-pending--cover-id r)))
+                 (list :cover cover)))
+          (when-let* ((edited (plist-get r :edited-pattern)))
+            (list :pattern edited))))
+
 (defun harness-ui-pending-answer-permission (session-id pid option &optional on-error)
   "Answer permission request PID of SESSION-ID with OPTION.
 OPTION is an option id such as \"allow-once\".  A pattern the user
-edited goes with the answer (see `harness-ui-pending-edit-pattern').
-An ACP request is answered through the function that holds it; one only
-known from the session's pending list goes over
-`_harness/permission/answer', and ON-ERROR, when given, is called with
-the error should that fail (else the echo area says so).  An answer the
-request does not offer is refused: its key does nothing else instead."
+edited goes with the answer (see `harness-ui-pending-edit-pattern'), and
+for an answer that lasts the cover the user picked from the request's
+ladder (see `harness-ui-pending--answer-extras').  An ACP request is
+answered through the function that holds it; one only known from the
+session's pending list goes over `_harness/permission/answer', and
+ON-ERROR, when given, is called with the error should that fail (else
+the echo area says so).  An answer the request does not offer is
+refused: its key does nothing else instead."
   (when-let* ((r (harness-ui-pending-record session-id pid)))
-    (let ((edited (plist-get r :edited-pattern))
+    (let ((extras (harness-ui-pending--answer-extras r option))
           (offered (harness-ui-pending--offered-options r)))
       (when (and offered (not (member option offered)))
         (user-error "This request does not offer %s" (harness-ui-pending-answer-label option)))
       (unless (harness-ui-pending--respond
                r (append (list :outcome (list :outcome "selected" :optionId option))
-                         (and edited (list :_harness (list :pattern edited)))))
+                         (and extras (list :_harness extras))))
         (harness-ui-call "_harness/permission/answer"
                          (list :session-id session-id :pending-id pid
-                               :answer (if edited (list :option option :pattern edited) option))
+                               :answer (if extras (append (list :option option) extras) option))
                          #'ignore on-error))
       (harness-ui-pending-remove session-id pid)
       (message "%s" (harness-ui-pending--message-for r option)))))
@@ -478,8 +541,8 @@ narrowest first.  They are worked out from the names alone."
 (defun harness-ui-pending-set-pattern (session-id pid pattern)
   "Make PATTERN, or the request's own when nil, the one PID is answered for.
 PID is a request of SESSION-ID.  The hosts drawing the request are
-redrawn; point goes to the request's pattern line when this buffer
-shows it."
+redrawn; point goes to the picked line of the request's patterns when
+this buffer shows it."
   (harness-ui-pending--put
    session-id
    (mapcar (lambda (r)
@@ -487,13 +550,23 @@ shows it."
                  (plist-put (copy-sequence r) :edited-pattern pattern)
                r))
            (harness-ui-pending-items session-id)))
-  ;; Point on the panel's pattern line again, after the redraw; the text
-  ;; property is compared with `equal', so the loop walks the changes.
-  (let ((pos (point-min)))
-    (while (and pos (not (and (equal (get-text-property pos 'harness-ui-pending-pattern) pid)
-                              (equal (get-text-property pos 'harness-ui-pending) pid))))
-      (setq pos (next-single-property-change pos 'harness-ui-pending-pattern)))
-    (when pos (goto-char pos))))
+  (harness-ui-pending--goto-selected pid))
+
+(defun harness-ui-pending--goto-selected (pid)
+  "Put point on the picked line of the cover block of request PID, if drawn here.
+After a redraw point is where the host left it: this takes it back to
+the panel, so its keys go on working.  Failing the picked line, it goes
+to the first line of the block.  The text properties are compared with
+`equal', so the loop walks their changes."
+  (cl-flet ((find (property)
+              (let ((pos (point-min)) found)
+                (while (and pos (not found))
+                  (if (equal (get-text-property pos property) pid)
+                      (setq found pos)
+                    (setq pos (next-single-property-change pos property))))
+                found)))
+    (when-let* ((pos (and pid (or (find 'harness-ui-pending-selected) (find 'harness-ui-pending-cover)))))
+      (goto-char pos))))
 
 (defun harness-ui-pending-edit-pattern (&optional pid)
   "Edit the glob pattern the permission request PID is answered for.
@@ -527,6 +600,327 @@ the request's own; an empty answer goes back to it."
       (message "Answers now hold for %s"
                (harness-ui-pending--permission-pattern (harness-ui-pending-record session-id pid))))))
 
+;;;; What the lasting answers cover
+;;
+;; Allow for session, Always allow and Always deny last: each records a
+;; rule that decides later calls too, and the panel says what it will
+;; cover before the answer is given, not only in a tooltip.  The harness
+;; works the covers out from the call (see "Asking the user" in
+;; harness-perms.el) and sends them as the request's ladder: steps from
+;; the narrowest, this exact command or file, to the widest, every call
+;; of the tool, each a few words naming what it leaves open ("every
+;; gcloud call (any arguments)"), and the one the answers start on.  The
+;; panel lists them as radio lines.  A click on a line, or < and >, picks
+;; the one the lasting answers hold for, and the answer carries its id.
+;; A request about a path outside the allowed directories has no ladder
+;; from the harness: it is answered for a pattern, and its lines are the
+;; patterns around its own (`harness-ui-pending--pattern-suggestions'),
+;; picked the same way; `e' types any other.
+
+(defun harness-ui-pending--step-id (step)
+  "Return the id of ladder STEP, a plist, as a string."
+  (harness-ui-pending--str (plist-get step :id)))
+
+(defun harness-ui-pending--ladder (r)
+  "Return the cover ladder of permission record R: its steps, narrowest first.
+A step is a plist of `:id' and `:label'.  A step without either is left
+out, and so is a ladder that is no list: it comes as a list, or over the
+wire as a vector.  Nil when R has none."
+  (and (equal (plist-get r :kind) "permission")
+       (cl-remove-if-not (lambda (step)
+                           (and (consp step)
+                                (harness-ui-pending--step-id step)
+                                (stringp (plist-get step :label))))
+                         (and (sequencep (plist-get r :ladder))
+                              (not (stringp (plist-get r :ladder)))
+                              (append (plist-get r :ladder) nil)))))
+
+(defun harness-ui-pending--ladder-step (r id)
+  "Return the step of permission record R's ladder that has the id ID, or nil."
+  (when-let* ((id (harness-ui-pending--str id)))
+    (cl-find id (harness-ui-pending--ladder r)
+             :key #'harness-ui-pending--step-id :test #'equal)))
+
+(defun harness-ui-pending--cover-id (r)
+  "Return the id of the cover permission record R's lasting answers hold for.
+That is the step the user picked, else the one the harness started them
+on (`:cover'), while the ladder still has it; else the narrowest.  Nil
+when R has no ladder."
+  (when-let* ((ladder (harness-ui-pending--ladder r)))
+    (cond ((harness-ui-pending--ladder-step r (plist-get r :picked-cover))
+           (harness-ui-pending--str (plist-get r :picked-cover)))
+          ((harness-ui-pending--ladder-step r (plist-get r :cover))
+           (harness-ui-pending--str (plist-get r :cover)))
+          (t (harness-ui-pending--step-id (car ladder))))))
+
+(defun harness-ui-pending--cover-label (r)
+  "Return the words for what R's lasting answers cover, or nil without a ladder.
+They are the label of the picked step, a noun phrase: \"every gcloud
+call (any arguments)\"."
+  (when-let* ((id (harness-ui-pending--cover-id r)))
+    (plist-get (harness-ui-pending--ladder-step r id) :label)))
+
+(defun harness-ui-pending--pattern-choices (r)
+  "Return the patterns R's block lists, narrowest first, abbreviated.
+That is what `harness-ui-pending--pattern-suggestions' offers, and the
+pattern the user typed when it is none of them.  Nil when R is not
+answered for a pattern."
+  (when (stringp (plist-get r :pattern))
+    (let ((suggestions (harness-ui-pending--pattern-suggestions r))
+          (current (abbreviate-file-name (harness-ui-pending--permission-pattern r))))
+      (if (member current suggestions)
+          suggestions
+        (append suggestions (list current))))))
+
+(defun harness-ui-pending--cover-steps (r)
+  "Return the choices of permission record R's cover block as (ID LABEL).
+Those of its ladder, narrowest first; for a request answered for a
+pattern, the patterns, each its own id and label.  Nil when R has
+neither."
+  (cond ((harness-ui-pending--ladder r)
+         (mapcar (lambda (step) (list (harness-ui-pending--step-id step) (plist-get step :label)))
+                 (harness-ui-pending--ladder r)))
+        ((stringp (plist-get r :pattern))
+         (mapcar (lambda (pattern) (list pattern pattern)) (harness-ui-pending--pattern-choices r)))))
+
+(defun harness-ui-pending--cover-selected (r)
+  "Return the id of the choice of R's cover block that is picked now, or nil."
+  (if (harness-ui-pending--ladder r)
+      (harness-ui-pending--cover-id r)
+    (when (stringp (plist-get r :pattern))
+      (abbreviate-file-name (harness-ui-pending--permission-pattern r)))))
+
+(defun harness-ui-pending--lasting-names (r)
+  "Return the names of the lasting answers R offers, as a phrase, or nil.
+\"Allow for session, Always allow and Always deny\", say."
+  (let* ((offered (harness-ui-pending--offered-options r))
+         (names (delq nil (mapcar (lambda (option)
+                                    (and (or (null offered) (member option offered))
+                                         (harness-ui-pending-answer-label option)))
+                                  harness-ui-pending--lasting-options))))
+    (if (cdr names)
+        (concat (string-join (butlast names) ", ") " and " (car (last names)))
+      (car names))))
+
+(defun harness-ui-pending--lasting-keys (r)
+  "Return the keys of the lasting answers R offers, as \"s, a, N\", or nil."
+  (let* ((offered (harness-ui-pending--offered-options r))
+         (keys (delq nil (mapcar (lambda (option)
+                                   (and (or (null offered) (member option offered))
+                                        (harness-ui-pending-answer-key option)))
+                                 harness-ui-pending--lasting-options))))
+    (and keys (string-join keys ", "))))
+
+(defun harness-ui-pending-set-cover (session-id pid id)
+  "Make ID, a step of request PID's cover ladder, the one its answers hold for.
+PID is a request of SESSION-ID.  The hosts drawing the request are
+redrawn; point goes to the picked line when this buffer shows it."
+  (let ((r (harness-ui-pending-record session-id pid)))
+    (unless r (user-error "That request was answered already"))
+    (unless (harness-ui-pending--ladder-step r id)
+      (user-error "That request has no such cover"))
+    (let ((id (harness-ui-pending--str id)))
+      (unless (equal id (harness-ui-pending--cover-id r))
+        (harness-ui-pending--put
+         session-id
+         (mapcar (lambda (x)
+                   (if (equal (plist-get x :id) pid)
+                       (plist-put (copy-sequence x) :picked-cover id)
+                     x))
+                 (harness-ui-pending-items session-id))))
+      (harness-ui-pending--goto-selected pid))))
+
+(defun harness-ui-pending--choose (session-id r id)
+  "Make ID, a choice of permission record R's cover block, the picked one.
+R is a request of SESSION-ID.  A step of a ladder becomes the cover; a
+pattern the one R is answered for, and R's own pattern goes back to
+being what it is when nothing was edited."
+  (if (harness-ui-pending--ladder r)
+      (harness-ui-pending-set-cover session-id (plist-get r :id) id)
+    (harness-ui-pending-set-pattern session-id (plist-get r :id)
+                                    (unless (equal id (abbreviate-file-name (plist-get r :pattern))) id))))
+
+(defun harness-ui-pending--move-cover (n pid)
+  "Pick the choice N places on in the cover block of request PID.
+PID defaults to the request at point, or else the newest with choices
+to move between.  N is negative to go to a narrower cover, positive to
+go to a wider one; at either end of the list nothing moves, and the echo
+area says so."
+  (let* ((session-id (harness-ui-pending--session))
+         (named pid)
+         (pid (or pid (harness-ui-pending-at-point)))
+         (r (and pid (harness-ui-pending-record session-id pid))))
+    ;; A request named by a button is the one to move, answered already or
+    ;; not; for a key, a newer request with nothing to choose between must
+    ;; not hide an older one that has.
+    (unless (and r (cdr (harness-ui-pending--cover-steps r)))
+      (when named
+        (user-error (if r "That request has no covers to choose between" "That request was answered already")))
+      (setq r (cl-find-if (lambda (x) (cdr (harness-ui-pending--cover-steps x)))
+                          (reverse (harness-ui-pending-items session-id)))))
+    (unless r
+      (user-error "No permission request offers covers to choose between"))
+    (let* ((steps (harness-ui-pending--cover-steps r))
+           (i (or (cl-position (harness-ui-pending--cover-selected r) steps :key #'car :test #'equal) 0))
+           (j (+ i n))
+           (ladder (harness-ui-pending--ladder r)))
+      (cond
+       ((or (< j 0) (>= j (length steps)))
+        (message "Already the %s %s: %s" (if (< j 0) "narrowest" "widest") (if ladder "cover" "pattern")
+                 (cadr (nth i steps))))
+       (t
+        (harness-ui-pending--choose session-id r (car (nth j steps)))
+        (message (if ladder "Lasting answers now cover %s" "Answers now hold for %s")
+                 (cadr (nth j steps))))))))
+
+(defun harness-ui-pending-cover-narrower (&optional pid)
+  "Make the answers of permission request PID cover less: the next narrower line.
+PID defaults to the request at point.  A request about a call lists the
+covers its lasting answers can hold for, from the narrowest, this exact
+command, to the widest, every call of the tool; one about a path outside
+the allowed directories lists the patterns around its own.  At the
+narrowest nothing changes."
+  (interactive)
+  (harness-ui-pending--move-cover -1 pid))
+
+(defun harness-ui-pending-cover-wider (&optional pid)
+  "Make the answers of permission request PID cover more: the next wider line.
+PID defaults to the request at point; see
+`harness-ui-pending-cover-narrower'.  At the widest nothing changes."
+  (interactive)
+  (harness-ui-pending--move-cover 1 pid))
+
+(defun harness-ui-pending--steps-here-p ()
+  "Nil when point is on a panel with no covers to choose between.
+Its < and > have nothing to move there, so they type, into the compose
+box (`harness-compose-acts-p')."
+  (let* ((pid (get-text-property (point) 'harness-ui-pending))
+         (r (and pid (harness-ui-pending-record (harness-ui-pending--session) pid))))
+    (and r (cdr (harness-ui-pending--cover-steps r)) t)))
+
+(put 'harness-ui-pending-cover-narrower 'harness-compose-acts-p #'harness-ui-pending--steps-here-p)
+(put 'harness-ui-pending-cover-wider 'harness-compose-acts-p #'harness-ui-pending--steps-here-p)
+
+;;;;; Drawing the covers
+
+(defun harness-ui-pending--step-line (pid selected label action help &optional note)
+  "Return the line of one choice of the cover block of request PID.
+SELECTED non-nil marks it as the picked one: a ring with a dot, its
+label bold.  LABEL is what it covers, ACTION (a function of no
+arguments) what a click on it does, HELP its tooltip, and NOTE a dim word
+after the label.  The picked line carries the property that takes
+point back to it after a redraw (`harness-ui-pending--goto-selected')."
+  (let ((line (concat (propertize "     " 'wrap-prefix "       ")
+                      (propertize (harness-ui-action-button
+                                   (concat (harness-ui-icon (if selected 'harness-icon-radio-on 'harness-icon-radio-off))
+                                           " " label)
+                                   ;; Weight alone: the panel's background shows through.
+                                   action :face (if selected 'bold '(:weight normal)) :help help)
+                                  'wrap-prefix "       ")
+                      (if note (propertize (concat "  " note) 'face 'harness-dim-face) "")
+                      "\n")))
+    (if selected (propertize line 'harness-ui-pending-selected pid) line)))
+
+(defun harness-ui-pending--cover-buttons (r &optional edit)
+  "Return the buttons of the cover block of permission record R, on one line.
+[Narrower] and [Wider] move the pick up and down the lines, and are
+dim at the end they cannot go on to; EDIT adds [Edit], which types a
+pattern of one's own.  The buttons that move are left out for a block
+of one line."
+  (let* ((pid (plist-get r :id))
+         (steps (harness-ui-pending--cover-steps r))
+         (i (or (cl-position (harness-ui-pending--cover-selected r) steps :key #'car :test #'equal) 0))
+         (button (lambda (label key action help dim)
+                   (concat (harness-ui-action-button label action :help help
+                                                     :face (if dim 'harness-dim-face 'button))
+                           " " (harness-ui-kbd key)))))
+    (string-join
+     (delq nil
+           (list (and edit
+                      (funcall button "[Edit]" "e" (lambda () (harness-ui-pending-edit-pattern pid))
+                               "Edit the pattern, to make it more or less specific (e)" nil))
+                 (and (cdr steps)
+                      (funcall button "[Narrower]" "<" (lambda () (harness-ui-pending-cover-narrower pid))
+                               "Pick the next line up, which covers less (<)" (= i 0)))
+                 (and (cdr steps)
+                      (funcall button "[Wider]" ">" (lambda () (harness-ui-pending-cover-wider pid))
+                               "Pick the next line down, which covers more (>)" (= i (1- (length steps)))))))
+     "  ")))
+
+(defun harness-ui-pending--insert-ladder (r)
+  "Insert the cover block of permission record R, which has a ladder.
+A dim header says which answers the block is for, with their keys, then
+comes a line for each step, narrowest first, the picked one marked; a
+click on a line picks it.  A ladder of one step is that step on the
+header's line.  Nothing is drawn when R offers no answer that lasts."
+  (when-let* ((keys (harness-ui-pending--lasting-keys r)))
+    (let* ((session-id (harness-ui-pending--session))
+           (pid (plist-get r :id))
+           (names (harness-ui-pending--lasting-names r))
+           (ladder (harness-ui-pending--ladder r))
+           (selected (harness-ui-pending--cover-id r))
+           (header (propertize (format "   Lasting answers (%s) cover:" keys) 'face 'harness-dim-face))
+           (start (point)))
+      (if (null (cdr ladder))
+          (insert header " " (propertize (plist-get (car ladder) :label) 'wrap-prefix "     ") "\n")
+        (insert header "\n")
+        (dolist (step ladder)
+          (let ((id (harness-ui-pending--step-id step))
+                (label (plist-get step :label)))
+            (insert (harness-ui-pending--step-line
+                     pid (equal id selected) label
+                     (lambda () (harness-ui-pending-set-cover session-id pid id))
+                     (format "Make %s cover %s (click)" names label)))))
+        (insert "   " (harness-ui-pending--cover-buttons r) "\n"))
+      (put-text-property start (point) 'harness-ui-pending-cover pid))))
+
+(defun harness-ui-pending--pick-pattern (session-id pid pattern)
+  "Make PATTERN the one request PID of SESSION-ID is answered for.
+A click on a line of the block of patterns does this; the request may
+have been answered since it was drawn."
+  (let ((r (harness-ui-pending-record session-id pid)))
+    (unless r (user-error "That request was answered already"))
+    (harness-ui-pending--choose session-id r pattern)))
+
+(defun harness-ui-pending--insert-patterns (r)
+  "Insert the block of the patterns permission record R is answered for.
+R is a request about a path outside the allowed directories: every
+answer holds for a pattern.  The block lists the patterns around the
+request's own, narrowest first, the picked one marked; the request's own
+is noted as the default, and one the user typed that is none of the
+others as edited.  A click picks a line, [Edit] types another pattern."
+  (let* ((session-id (harness-ui-pending--session))
+         (pid (plist-get r :id))
+         (choices (harness-ui-pending--pattern-choices r))
+         (suggestions (harness-ui-pending--pattern-suggestions r))
+         (selected (harness-ui-pending--cover-selected r))
+         (own (abbreviate-file-name (plist-get r :pattern)))
+         (start (point)))
+    (if (null (cdr choices))
+        (insert (propertize "   Answers hold for: " 'face 'harness-dim-face)
+                (propertize (car choices) 'face 'harness-tool-subject-face)
+                "  " (harness-ui-pending--cover-buttons r t) "\n")
+      (insert (propertize "   Answers hold for:\n" 'face 'harness-dim-face))
+      (dolist (pattern choices)
+        (insert (harness-ui-pending--step-line
+                 pid (equal pattern selected) pattern
+                 (lambda () (harness-ui-pending--pick-pattern session-id pid pattern))
+                 (if (equal pattern own)
+                     (format "Make the answers hold for %s, the request's own pattern (click)" pattern)
+                   (format "Make the answers hold for %s (click)" pattern))
+                 (cond ((equal pattern own) "default")
+                       ((not (member pattern suggestions)) "edited")))))
+      (insert "   " (harness-ui-pending--cover-buttons r t) "\n"))
+    (put-text-property start (point) 'harness-ui-pending-cover pid)))
+
+(defun harness-ui-pending--insert-cover-block (r)
+  "Insert what permission record R's answers cover: its ladder, or its patterns.
+A request about a call has a ladder (`:ladder'); one about a path
+outside the allowed directories is answered for a pattern; any other
+has no block."
+  (cond ((harness-ui-pending--ladder r) (harness-ui-pending--insert-ladder r))
+        ((stringp (plist-get r :pattern)) (harness-ui-pending--insert-patterns r))))
+
 ;;;; Keys on the panels, and the commands behind them
 
 (defun harness-ui-pending-at-point ()
@@ -554,6 +948,9 @@ the request's own; an empty answer goes back to it."
 (pcase-dolist (`(,option . ,key) harness-ui-pending-permission-keys)
   (define-key harness-ui-pending-permission-map (kbd key) (harness-ui-pending--permission-command option)))
 (define-key harness-ui-pending-permission-map (kbd "e") #'harness-ui-pending-edit-pattern)
+;; Narrower and wider covers, where a panel lists some to choose between.
+(define-key harness-ui-pending-permission-map (kbd "<") #'harness-ui-pending-cover-narrower)
+(define-key harness-ui-pending-permission-map (kbd ">") #'harness-ui-pending-cover-wider)
 
 (defun harness-ui-pending--pattern-here-p ()
   "Nil when point is on the panel of a permission request with no pattern.
@@ -699,35 +1096,22 @@ answers, only those show."
     (or (and offered (cl-remove-if-not (lambda (o) (member (nth 2 o) offered)) all))
         all)))
 
-(defun harness-ui-pending--insert-pattern-line (r)
-  "Insert the line of the pattern permission record R is answered for.
-Only a request about a path outside the allowed directories has one."
-  (let ((pid (plist-get r :id))
-        (start (point)))
-    (insert (propertize "   pattern: " 'face 'harness-dim-face)
-            (propertize (harness-ui-pending--permission-pattern r) 'face 'harness-tool-subject-face)
-            (if (plist-get r :edited-pattern) (propertize " (edited)" 'face 'harness-dim-face) "")
-            "  "
-            (harness-ui-action-button "[Edit]" (lambda () (harness-ui-pending-edit-pattern pid))
-                                      :help "Edit the pattern, to make it more or less specific (e)")
-            " " (harness-ui-kbd "e")
-            "\n")
-    (put-text-property start (point) 'harness-ui-pending-pattern pid)))
-
 (defun harness-ui-pending--permission-facts (r)
   "Return the lines of facts the panel of permission record R states.
 The first says its kind and, for a shell command, where it runs (`runs
 in:').  The paths the call is about (`paths:') follow on that line, or
 for a shell command on a line of their own: there they are the paths
 the command names outside the session's directories, and they are left
-out when they are just where it runs."
+out when they are just where it runs.  What its lasting answers cover
+is a line of facts only when the harness sent no ladder of covers to
+draw (`harness-ui-pending--insert-cover-block')."
   (let* ((cwd (plist-get r :cwd))
          (paths (mapcar (lambda (p) (format "%s" p)) (append (plist-get r :paths) nil)))
          (only-cwd (and cwd paths (null (cdr paths))
                         (equal (file-name-as-directory (car paths)) (file-name-as-directory cwd))))
          (about (and paths (not only-cwd)
                      (format "paths: %s" (mapconcat #'abbreviate-file-name paths " "))))
-         (covers (plist-get r :covers))
+         (covers (and (not (harness-ui-pending--ladder r)) (plist-get r :covers)))
          (first (delq nil (list (and (plist-get r :tool-kind) (format "kind: %s" (plist-get r :tool-kind)))
                                 (and cwd (format "runs in: %s" (abbreviate-file-name cwd)))
                                 (and (not cwd) about)))))
@@ -758,8 +1142,8 @@ the panel's keys from there."
       (harness-ui-pending--insert-input r))
     (when-let* ((reason (plist-get r :reason)))
       (insert (propertize (format "   %s\n" reason) 'face 'harness-hint-face)))
-    (when (plist-get r :pattern)
-      (harness-ui-pending--insert-pattern-line r))
+    ;; What the lasting answers cover, and the lines to pick it from.
+    (harness-ui-pending--insert-cover-block r)
     (insert "   ")
     (dolist (o buttons)
       (let ((option (nth 2 o)))
@@ -1318,6 +1702,7 @@ clients, or the session's own pending list, answer it."
                :input (plist-get tc :rawInput) :paths (plist-get extra :paths) :cwd (plist-get extra :cwd)
                :dir (plist-get extra :dir) :pattern (plist-get extra :pattern)
                :commands (plist-get extra :commands) :covers (plist-get extra :covers)
+               :ladder (plist-get extra :ladder) :cover (plist-get extra :cover)
                :reason (plist-get extra :reason)
                :options (plist-get params :options))))
       t)))

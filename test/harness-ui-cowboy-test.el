@@ -112,7 +112,7 @@ its key, its button, its cost and what it does, the default marked."
                      "    q  Not now                            the message waits; nothing is sent yet")
                    (seq-subseq lines 4 11)))
     (should (equal "" (nth 11 lines)))
-    (should (equal "    B   S   T   F   C   I  the same, from now on without asking" (nth 12 lines)))
+    (should (equal "    B   S   T   F   C   I  the same, in every session from now on, without asking" (nth 12 lines)))
     (should (equal (concat "   Whichever you choose, the model can search and read the conversation it leaves out"
                            " (session_history).")
                    (nth 13 lines)))
@@ -133,7 +133,7 @@ its key, its button, its cost and what it does, the default marked."
       (should (string-match-p "\\`Brief summary (~\\$0\\.0040): a cheap model summarises the narrative, tool calls in brief\\." help))
       (should (string-match-p "Written by Demo cheap\\." help))
       (should (string-match-p "The conversation then holds ~900 tokens\\." help))
-      (should (string-match-p "Press b on this panel, or click; B makes it the default\\." help))
+      (should (string-match-p "Press b on this panel, or click; B makes it the default of every session, taken without asking\\." help))
       (should (string-match-p "The default, taken when nobody is asked\\." help)))))
 
 (ert-deftest harness-ui-cowboy-panel-heads-a-cache-held-for-another-model ()

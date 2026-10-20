@@ -115,12 +115,18 @@
 ;; and the answer grants or denies the pattern.  No other prompt has one: the
 ;; mode asking, or the judge objecting, is about the call itself, whose
 ;; paths the jail already let through, so its answers for the session
-;; or for always record a rule for the tool.  For a shell command they
-;; can record a narrower rule for the commands it runs instead, read
-;; from the command line's syntax tree (see "Commands a lasting answer
-;; allows"): "Always allow" on `gcloud compute instances list' covers
-;; gcloud, not every bash call, and on `gcloud ... && gsutil ...' both
-;; programs.  A command the reader cannot read keeps the tool-wide rule.
+;; or for always record a rule about the call, and which calls the rule
+;; holds is the user's to say (see "What a lasting answer covers"): the
+;; prompt lists a ladder of covers, from the very call asked about (the
+;; exact command line or arguments, one file) through the programs and
+;; subcommands a shell command runs, read from the command line's syntax
+;; tree (see "Commands a lasting answer allows"), and the directory or
+;; project a file lies in, to every call of the tool, each said by what
+;; it leaves free.  "Always allow" on `gcloud compute instances list'
+;; covers gcloud, not every bash call, unless the user steps to the
+;; tool-wide cover, or down to `gcloud compute instances' or that very
+;; line.  The prompt starts on what such an answer always held for, or,
+;; with `harness-perms-default-cover', on the narrowest step.
 ;; Roots and rules alike are directories or patterns (see
 ;; `harness-perms--within-p').
 ;;
@@ -293,16 +299,16 @@ the files below a directory, such as grep, may not.")
 (defcustom harness-perms-rules nil
   "Standing permission rules that apply to every session.
 Each rule is a plist (:tool NAME :kind KIND :path PATTERN :commands
-COMMANDS :behavior allow|deny).  NAME is a tool name or nil for any
-tool; KIND is a tool kind or nil for any kind.  PATTERN, when there is
-one, limits the rule to calls with paths: a glob (`*' within a name,
-`**' across directories) or a directory, which stands for everything
-in it, absolute or relative to the session's working directory.  An
-allow rule then needs every path of the call to match it, a deny rule
-any one.  A shell command's paths, for an allow rule, are the ones its
-command line names outside the session's directories, or where it runs
-when it names none there; a deny rule weighs every path it names and
-where it runs.
+COMMANDS :input ARGUMENTS :behavior allow|deny).  NAME is a tool name
+or nil for any tool; KIND is a tool kind or nil for any kind.  PATTERN,
+when there is one, limits the rule to calls with paths: a glob (`*'
+within a name, `**' across directories) or a directory, which stands
+for everything in it, absolute or relative to the session's working
+directory.  An allow rule then needs every path of the call to match
+it, a deny rule any one.  A shell command's paths, for an allow rule,
+are the ones its command line names outside the session's directories,
+or where it runs when it names none there; a deny rule weighs every
+path it names and where it runs.
 
 COMMANDS, when there is one, limits the rule to shell commands and to
 what they run, read from the command line's syntax tree: each pattern
@@ -313,18 +319,27 @@ command it cannot read matches neither.  A permission prompt about a
 shell command records such a rule for the commands it runs (see
 `harness-perms--command-rule-prefixes'), so \"Always allow\" on
 `gcloud compute instances list' covers gcloud rather than every bash
-call, and on `gcloud ... && gsutil ...' covers both programs.  A tool
-prompt about a tool that runs no command records the rule for the
-whole tool, as before; a rule that names no commands, such as one
-saved before command patterns existed, covers every call of its tool.
-The first matching rule wins.  Rules are added
-here when a permission request is answered with scope `always': a tool
-prompt's answer holds for its tool, or its commands, and \"Always
-deny\" for a path outside the allowed directories holds for the
-prompt's pattern, whatever the tool.  The note the session's transcript
-gets then can take such a rule back (`permission/undo') and, once
-taken back, record it again (`permission/redo'), from any session (see
-harness-decisions.el)."
+call, and on `gcloud ... && gsutil ...' covers both programs.  A rule
+that names no commands, such as one saved before command patterns
+existed, covers every call of its tool.
+
+ARGUMENTS, when there is one, is a plist of arguments such as
+\(:command \"make test\") that a call must pass, with those very values;
+its other arguments are free.  It limits the rule to calls like the one
+a prompt asked about.
+
+A permission prompt offers several covers for a lasting answer, from
+the narrowest to the whole tool (see `harness-perms--cover-ladder'):
+the exact command line or arguments, one file, directory or project,
+the commands of some programs and subcommands, or every call of the
+tool.  The answer records a rule of the cover chosen.  The first
+matching rule wins.  Rules are added here when a permission request is
+answered with scope `always': a tool prompt's answer holds for the
+cover chosen, and \"Always deny\" for a path outside the allowed
+directories holds for the prompt's pattern, whatever the tool.  The
+note the session's transcript gets then can take such a rule back
+\(`permission/undo') and, once taken back, record it again
+\(`permission/redo'), from any session (see harness-decisions.el)."
   :type '(repeat
           (plist
            :tag "Rule"
@@ -343,6 +358,8 @@ harness-decisions.el)."
             (:commands (repeat :tag "Command patterns"
                                :doc "Programs or words from them the call's commands must match, such as ((\"gcloud\" \"compute\") (\"gsutil\"))."
                                (sexp :tag "Pattern")))
+            (:input (sexp :tag "Arguments" :value (:command "make test")
+                          :doc "Arguments the call must pass, with these exact values, such as (:command \"make test\"); its other arguments are free."))
             (:behavior (choice :tag "Decision" :value deny
                                :doc "What the rule decides."
                                (const :tag "Allow" allow) (const :tag "Deny" deny)
@@ -2059,19 +2076,12 @@ most `harness-perms--command-rule-depth' words."
         (setq prefix (cl-subseq prefix 0 (1+ cut)))))
     (or prefix (list (car (car lists))))))
 
-(defun harness-perms--command-rule-prefixes (command)
-  "Return the command prefixes a lasting answer to COMMAND would cover.
-Each prefix is a list of words starting with a program, such as
-\(\"gcloud\" \"compute\") or (\"gsutil\").  Every command the shell line
-runs, in a substitution or a loop too, is read (see
-`harness-perms--shell-ast'); commands that run the same program are
-grouped, and the words they share are kept, up to
-`harness-perms--command-rule-depth' and no argument.  A single command
-of a program gives the program alone, so an answer to `gcloud compute
-instances list' covers every gcloud command; several commands of it
-narrow that to the words they have in common, and the rule covers every
-later command that starts with those words.  Nil when the command
-cannot be read or runs no program."
+(defun harness-perms--command-groups (command)
+  "Return the commands COMMAND's shell line runs, grouped by program.
+Every command the line runs, in a substitution or a loop too, is read
+\(see `harness-perms--shell-ast').  A group is (PROGRAM LIST...), one
+LIST for each command of that program: its words from the program on.
+Nil when the line cannot be read or runs no program."
   (condition-case err
       (let ((groups nil))
         (dolist (node (harness-perms--shell-ast-commands
@@ -2079,24 +2089,44 @@ cannot be read or runs no program."
           (let ((program (plist-get node :program))
                 (words (plist-get node :command-words)))
             (when (and program words)
-              (let ((entry (assoc program groups)))
+              (let ((entry (assoc program groups))
+                    (list (cons program (cdr words))))
                 (if entry
-                    (push words (cdr entry))
-                  (push (cons program (list words)) groups))))))
-        (let (prefixes)
-          (dolist (entry groups)
-            (let* ((program (car entry))
-                   (lists (mapcar (lambda (words)
-                                    (cons program (cdr words)))
-                                  (cdr entry)))
-                   (prefix (if (null (cdr lists))
-                               (list program)
-                             (harness-perms--command-common-prefix lists))))
-              (push prefix prefixes)))
-          (sort (delete-dups (nreverse prefixes))
-                (lambda (a b)
-                  (string< (mapconcat #'identity a " ")
-                           (mapconcat #'identity b " "))))))
+                    (push list (cdr entry))
+                  (push (cons program (list list)) groups))))))
+        groups)
+    (error (harness-log 'debug "perms: could not read the commands of a line: %S" err)
+           nil)))
+
+(defun harness-perms--sort-prefixes (prefixes)
+  "Return command PREFIXES without duplicates, in a fixed order."
+  (sort (delete-dups (copy-sequence prefixes))
+        (lambda (a b)
+          (string< (mapconcat #'identity a " ")
+                   (mapconcat #'identity b " ")))))
+
+(defun harness-perms--command-rule-prefixes (command)
+  "Return the command prefixes a lasting answer to COMMAND would cover.
+Each prefix is a list of words starting with a program, such as
+\(\"gcloud\" \"compute\") or (\"gsutil\").  Every command the shell line
+runs, in a substitution or a loop too, is read (see
+`harness-perms--command-groups'); commands that run the same program
+are grouped, and the words they share are kept, up to
+`harness-perms--command-rule-depth' and no argument.  A single command
+of a program gives the program alone, so an answer to `gcloud compute
+instances list' covers every gcloud command; several commands of it
+narrow that to the words they have in common, and the rule covers every
+later command that starts with those words.  Nil when the command
+cannot be read or runs no program.  These are the usual cover of a
+prompt about a shell command; it offers narrower and wider ones too
+\(see `harness-perms--cover-ladder')."
+  (condition-case err
+      (harness-perms--sort-prefixes
+       (mapcar (lambda (entry)
+                 (if (null (cddr entry))
+                     (list (car entry))
+                   (harness-perms--command-common-prefix (cdr entry))))
+               (harness-perms--command-groups command)))
     (error (harness-log 'debug "perms: could not make a command rule: %S" err)
            nil)))
 
@@ -2194,6 +2224,82 @@ matches: a rule is then not what decides it."
                                       (harness-perms--command-pattern-matches-p pattern words))
                                     patterns))))
                   commands))))
+
+;;;; Rules about a call's arguments
+;;
+;; A rule can hold the calls of a tool that pass certain arguments and
+;; no others: `:input' is a plist of arguments (:command "make test"),
+;; and the rule applies to a call whose input has each of them, with the
+;; very same value, whatever else the input holds.  It is how a lasting
+;; answer says "just this call" instead of "every call of the tool"
+;; (see "What a lasting answer covers"), for a tool with no paths or
+;; commands to narrow it by, such as web_fetch, and for a shell command
+;; line that must run exactly as written.
+
+(defun harness-perms--rule-input (rule)
+  "Return the arguments RULE's `:input' names as a plist, or nil.
+Nil when RULE has no `:input'.  A value that is no plist of keyword
+arguments is returned as the symbol `malformed': a rule that names
+arguments it cannot hold is not one that holds every call."
+  (let ((input (plist-get rule :input)))
+    (cond ((null input) nil)
+          ((and (proper-list-p input) (cl-evenp (length input))
+                (cl-loop for (k _v) on input by #'cddr always (keywordp k)))
+           input)
+          (t 'malformed))))
+
+(defun harness-perms--input-matches-p (rule request)
+  "Non-nil when every argument RULE's `:input' names is REQUEST's, equal.
+A rule with no `:input' holds every call; one whose `:input' is
+malformed holds none (`harness-perms--rule-input')."
+  (let ((want (harness-perms--rule-input rule))
+        (have (plist-get request :input)))
+    (cond ((null want) t)
+          ((eq want 'malformed) nil)
+          (t (and (proper-list-p have)
+                  (cl-loop for (k v) on want by #'cddr
+                           always (and (plist-member have k)
+                                       (equal (plist-get have k) v))))))))
+
+(defun harness-perms--input-sorted (input)
+  "Return plist INPUT as a list of (KEY . VALUE) in a fixed order.
+Two rules about the same arguments are the same rule whichever way
+round they list them (see `harness-perms--rule-key')."
+  (when (consp (harness-perms--rule-input (list :input input)))
+    (sort (cl-loop for (k v) on input by #'cddr collect (cons k v))
+          (lambda (a b) (string< (symbol-name (car a)) (symbol-name (car b)))))))
+
+(defun harness-perms--input-title (input)
+  "Return the clause that says which calls the arguments INPUT hold, or nil.
+INPUT is the plist of a rule's `:input'.  It reads `whose command is
+exactly \"make test\"' or `whose host is exactly \"dev\" and command is
+exactly \"ls\"': the name of each argument and its value, a text between
+quotes and cut to a line.  After a call, it is a few words that say
+the call is pinned to those arguments and no others."
+  (let ((pairs (and (consp (harness-perms--rule-input (list :input input)))
+                    (cl-loop for (k v) on input by #'cddr collect (cons k v)))))
+    (when pairs
+      (let ((words (mapcar (lambda (pair)
+                             (format "%s is exactly %s" (substring (symbol-name (car pair)) 1)
+                                     (harness-perms--input-value-text (cdr pair))))
+                           pairs)))
+        (concat "whose "
+                (if (cdr words)
+                    (concat (string-join (butlast words) ", ") " and " (car (last words)))
+                  (car words)))))))
+
+(defun harness-perms--input-value-text (value)
+  "Return argument VALUE for a few words about a rule.
+A text is between quotes, cut to its first line and to 50 characters,
+with an ellipsis when something of it is left out; any other value is
+printed as it is."
+  (if (not (stringp value))
+      (format "%s" value)
+    (let* ((text (string-trim value))
+           (line (harness-first-line text)))
+      (format "\"%s\"" (if (or (string-search "\n" text) (> (length line) 50))
+                           (concat (substring line 0 (min (length line) 49)) "…")
+                         line)))))
 
 ;;;; Patterns a prompt about a directory is answered for
 ;;
@@ -2695,7 +2801,11 @@ deny rule also stops it for a path it names inside them.
 A rule with `:commands' (see `harness-perms--rule-command-patterns')
 applies only to shell commands, and only as its patterns say: an
 allow rule needs every command of the call to match one of them, a
-deny rule any one.  A call the reader cannot read matches neither."
+deny rule any one.  A call the reader cannot read matches neither.
+
+A rule with `:input' (see `harness-perms--input-matches-p') applies
+only to a call that passes each of those arguments, with those very
+values, allow and deny alike."
   (let* ((tool (plist-get rule :tool))
          (kind (harness-perms--sym (plist-get rule :kind)))
          (commands (plist-get rule :commands))
@@ -2705,6 +2815,7 @@ deny rule any one.  A call the reader cannot read matches neither."
          (or (null kind) (eq kind (harness-perms--call-kind request)))
          (or (null commands)
              (harness-perms--command-rule-matches-p rule request deny))
+         (harness-perms--input-matches-p rule request)
          (or (null pattern)
              (let ((paths (if deny (harness-perms--every-path request) (harness-perms--subject-paths request))))
                (and paths
@@ -2740,16 +2851,22 @@ See `harness-perms--rules' for the order."
 (defun harness-perms--rule-subject (rule)
   "Return what RULE is for, in a few words: its tool, path, commands or a mix.
 For a rule about the commands of a shell call it says the tool and the
-programs, such as \"bash (gcloud and gsutil)\", so a decision's reason
-and the messages of undo name what it holds for."
+programs, such as \"bash (gcloud and gsutil)\", and for one about its
+arguments the arguments, such as \"bash whose command is exactly
+\\\"make test\\\"\", so a decision's reason and the messages of undo
+name what it holds for."
   (let* ((tool (plist-get rule :tool))
          (path (plist-get rule :path))
          (commands (harness-perms--rule-command-title rule))
+         (input (harness-perms--input-title (plist-get rule :input)))
          (path (and (stringp path) (not (harness-string-blank-p path))
                     (abbreviate-file-name path)))
          (subject (cond ((and tool commands) (format "%s (%s)" tool commands))
                         (commands (format "%s calls" commands))
-                        (tool tool))))
+                        (tool tool)))
+         (subject (cond ((and subject input) (format "%s %s" subject input))
+                        (input (format "calls %s" input))
+                        (t subject))))
     (cond ((and subject path) (format "%s in %s" subject path))
           (subject subject)
           (path path)
@@ -3692,6 +3809,218 @@ agent to carry on as it is."
              (harness-perms--non-interactive-p (harness-perms--session session-id)))
     (harness-perms--steer session-id request)))
 
+;;;; What a lasting answer covers
+;;
+;; An answer for the session or for always (Allow for session, Always
+;; allow, Always deny) decides later calls too, and which ones is the
+;; user's to say.  A prompt about a call therefore offers a ladder of
+;; covers, from the narrowest, the very call asked about, to the widest,
+;; every call of the tool, and the answer holds for the one chosen:
+;;
+;;   a shell command   every bash call whose command is exactly this line;
+;;                     every call of the programs and subcommands it
+;;                     runs (`gcloud compute instances'), any arguments;
+;;                     of its programs alone (`gcloud'); every bash call
+;;   a call of a tool on a file
+;;                     every call on that file; under its directory;
+;;                     under the session's project; of the tool
+;;   any other call    every call whose arguments are exactly these; of the
+;;                     tool
+;;
+;; Each step says what it leaves free in its label ("(any arguments)",
+;; "(any path)"), because that is what one reads a lasting answer for:
+;; whether it is all calls of a tool, or only some arguments of them.
+;; The steps are listed in the prompt (`:ladder', each with an `:id' and
+;; a `:label'), and `:cover' names the one the answers start on.  That is
+;; the usual cover, what a lasting answer always held for -- the programs
+;; of a shell command, the whole tool for any other call -- unless
+;; `harness-perms-default-cover' starts every ladder on its narrowest
+;; step.  The answer names its step as `:cover'; one the prompt did not
+;; offer, or none, is the step it started on, so a client that knows
+;; nothing of covers answers as before.
+;;
+;; A step records the keys of a rule (`harness-perms-rules'): `:input'
+;; for exact arguments, `:path' for a file, a directory or a project,
+;; `:commands' for programs and subcommands, and nothing for the tool.
+
+(defcustom harness-perms-default-cover 'usual
+  "Which cover the lasting answers of a permission prompt start on.
+A prompt offers a ladder of covers, from the call asked about to every
+call of the tool (see `harness-perms--cover-ladder'); the answers for
+the session and for always hold for the step chosen.  `usual', the
+default, starts on what such an answer always held for: the programs a
+shell command runs (an answer to `gcloud compute instances list' covers
+gcloud), the whole tool for any other call.  `narrowest' starts on the
+first step instead, the very call asked about, so that wider covers are
+chosen on purpose, one step at a time, when the narrow one does not get
+the work done."
+  :type '(choice (const :tag "The usual: the programs of a command, else the tool" usual)
+                 (const :tag "The narrowest: the call asked about" narrowest))
+  :safe (lambda (v) (memq v '(usual narrowest)))
+  :group 'harness)
+
+(defconst harness-perms--cover-input-chars 300
+  "Most characters of text a call's arguments may hold for an exact cover.
+A call with more has no step for exactly its arguments: a rule that
+long would match no call again, and the prompt would be unreadable.")
+
+(defun harness-perms--cover-step (id label &rest rule)
+  "Return a step of a cover ladder: ID, LABEL and the keys of the RULE it records."
+  (list :id id :label label :rule rule))
+
+(defun harness-perms--exact-arguments (request)
+  "Return the arguments of REQUEST's call that make it this very call, or nil.
+They are a plist, the keys of an `:input' rule.  For a shell command,
+the command line and the other texts it passes (a directory, a host),
+and not the numbers, such as a timeout, which do not say what it
+does; for any other call, all its arguments, when each is a text or a
+number and they are few: nil when one is a list, an object or a flag, or
+they are many, since a rule that left such an argument free would hold
+more calls than the one asked about."
+  (let ((input (plist-get request :input))
+        (shell (harness-perms--command request))
+        (size 0) (pairs nil) (ok t))
+    (when (and (proper-list-p input) (cl-evenp (length input)))
+      (cl-loop for (k v) on input by #'cddr
+               do (cond ((not (keywordp k)) (setq ok nil))
+                        ((null v))
+                        ((stringp v) (cl-incf size (length v)) (setq pairs (append pairs (list k v))))
+                        ((numberp v) (unless shell (setq pairs (append pairs (list k v)))))
+                        (t (setq ok nil))))
+      (and ok pairs (<= size harness-perms--cover-input-chars) pairs))))
+
+(defun harness-perms--paths-dir (paths)
+  "Return the directory that holds all of PATHS, as a directory name, or nil.
+PATHS are absolute.  Nil when they are on different hosts, or the
+directory would be the root of a file system."
+  (when (and paths (null (cdr (delete-dups (mapcar (lambda (p) (or (file-remote-p p) "")) paths)))))
+    (let* ((dirs (mapcar (lambda (p) (if (directory-name-p p) p (or (file-name-directory p) ""))) paths))
+           (common (car dirs)))
+      (dolist (d (cdr dirs))
+        (let ((n (compare-strings common nil nil d nil nil)))
+          (unless (eq n t) (setq common (substring common 0 (1- (abs n)))))))
+      (let ((slash (cl-position ?/ common :from-end t)))
+        (when slash
+          (let ((dir (substring common 0 (1+ slash))))
+            (unless (equal (cdr (harness-perms--split dir)) "/") dir)))))))
+
+(defun harness-perms--shell-covers (request tool)
+  "Return the cover steps for REQUEST, a shell call of TOOL, and the usual one.
+The result is (STEPS . USUAL), USUAL the id of the step a lasting
+answer always held for.  Narrowest first: the exact arguments, the
+programs with the subcommands the line shares, what it always covered,
+its programs alone, the tool.  Steps that would hold the same calls are
+one, named for the widest; a command line the reader cannot read has
+the exact arguments and the tool only."
+  (let* ((command (harness-perms--command request))
+         (groups (harness-perms--command-groups command))
+         (usual (harness-perms--command-rule-prefixes command))
+         (programs (harness-perms--sort-prefixes (mapcar (lambda (e) (list (car e))) groups)))
+         (subs (harness-perms--sort-prefixes
+                (mapcar (lambda (e) (harness-perms--command-common-prefix (cdr e))) groups)))
+         (exact (harness-perms--exact-arguments request))
+         (steps nil))
+    (cl-flet ((add (id label &rest rule)
+                (let ((step (apply #'harness-perms--cover-step id label rule)))
+                  ;; Two steps that hold the same calls are one: the wider name.
+                  (if (equal (plist-get (car steps) :rule) rule)
+                      (setcar steps step)
+                    (push step steps))))
+              (calls (prefixes)
+                (format "every %s call (any arguments)" (harness-perms--command-pattern-title prefixes))))
+      (when exact
+        (add "exact" (format "every %s call %s" tool (harness-perms--input-title exact))
+             :input exact))
+      (when groups
+        (add "subcommands" (calls subs) :commands subs)
+        (add "commands" (calls usual) :commands usual)
+        (add "programs" (calls programs) :commands programs))
+      (add "tool" (format "every %s call (any command)" tool)))
+    (setq steps (nreverse steps))
+    (cons steps
+          (or (plist-get (cl-find-if (lambda (s) (and groups (equal (plist-get s :rule) (list :commands usual))))
+                                     steps)
+                         :id)
+              "tool"))))
+
+(defun harness-perms--path-covers (request tool)
+  "Return the cover steps for REQUEST, a call of TOOL on files, or nil.
+Narrowest first: calls on that file, under its directory, under the
+session's project (its working directory or worktree, when the file
+lies in it), any path.  A call on several files has the directory that
+holds them all, not the file.  Nil unless the call reads or writes
+paths."
+  (let* ((session (plist-get request :session))
+         (paths (delete-dups (copy-sequence (plist-get request :paths))))
+         (dir (harness-perms--paths-dir paths))
+         (project (cl-some (lambda (root)
+                             (when (and (stringp root) (not (file-remote-p root)) dir
+                                        (harness-perms--within-p root dir))
+                               (file-name-as-directory (expand-file-name root))))
+                           (list (plist-get session :worktree) (plist-get session :cwd))))
+         (steps nil))
+    (when (and paths (memq (harness-perms--sym (harness-perms--call-kind request)) '(read write)))
+      (cl-flet ((add (id label &rest rule)
+                  (let ((step (apply #'harness-perms--cover-step id label rule)))
+                    (if (equal (plist-get (car steps) :rule) rule)
+                        (setcar steps step)
+                      (push step steps)))))
+        (when (null (cdr paths))
+          (add "path" (format "every %s call on %s" tool (abbreviate-file-name (car paths)))
+               :path (car paths)))
+        (when dir
+          (add "dir" (format "every %s call under %s (any file)" tool (abbreviate-file-name dir))
+               :path dir))
+        (when (and project dir (not (equal project dir)) (harness-perms--within-p project dir)
+                   (not (equal (cdr (harness-perms--split project)) "/")))
+          (add "project" (format "every %s call under %s (any file)" tool (abbreviate-file-name project))
+               :path project))
+        (add "tool" (format "every %s call (any path)" tool)))
+      (nreverse steps))))
+
+(defun harness-perms--cover-ladder (request)
+  "Return the covers a lasting answer to REQUEST's prompt can hold for.
+The result is (:steps STEPS :default ID).  STEPS are the possible
+covers from the narrowest to the widest, each (:id ID :label LABEL
+:rule RULE), RULE the keys it adds to the rule an answer records (see
+\"What a lasting answer covers\"); ID is the step the answers start on:
+the usual cover, or with `harness-perms-default-cover' `narrowest' the
+first.  Whatever goes wrong, the ladder is the whole tool alone, which a
+lasting answer always could be."
+  (let* ((tool (plist-get request :tool))
+         (whole (list (harness-perms--cover-step "tool" (format "every %s call (any arguments)" tool))))
+         (made
+          (condition-case err
+              (if (harness-perms--command request)
+                  (harness-perms--shell-covers request tool)
+                (let ((paths (harness-perms--path-covers request tool))
+                      (exact (harness-perms--exact-arguments request)))
+                  (cons (cond (paths paths)
+                              (exact (cons (harness-perms--cover-step
+                                            "exact"
+                                            (format "every %s call %s" tool (harness-perms--input-title exact))
+                                            :input exact)
+                                           whole))
+                              (t whole))
+                        "tool")))
+            (error (harness-log 'warn "perms: could not make the covers of a prompt: %S" err)
+                   (cons whole "tool"))))
+         (steps (car made)))
+    (list :steps steps
+          :default (if (eq harness-perms-default-cover 'narrowest)
+                       (plist-get (car steps) :id)
+                     (cdr made)))))
+
+(defun harness-perms--chosen-cover (steps default id)
+  "Return the step of STEPS that answer ID names, else the one DEFAULT names.
+ID is the `:cover' of an answer, a string or a symbol; one that names
+no step -- a client that knows nothing of covers sends none -- is
+the step the prompt started on.  Nil when STEPS is empty."
+  (let ((id (and id (format "%s" id))))
+    (or (cl-find id steps :key (lambda (s) (plist-get s :id)) :test #'equal)
+        (cl-find default steps :key (lambda (s) (plist-get s :id)) :test #'equal)
+        (car steps))))
+
 ;;;; Asking the user
 
 (defun harness-perms-describe-request (request)
@@ -3732,6 +4061,8 @@ where it runs."
                             (harness-perms--command-rule-prefixes
                              (harness-perms--command request))))
              (covers (harness-perms--command-pattern-title commands))
+             (ladder (harness-perms--cover-ladder request))
+             (steps (plist-get ladder :steps))
              (pending (list :kind 'permission
                             :payload (append (list :tool (plist-get request :tool)
                                                    :input (plist-get request :input)
@@ -3741,21 +4072,28 @@ where it runs."
                                              (and cwd (list :cwd cwd))
                                              (and commands (list :commands commands
                                                                  :covers covers))
+                                             ;; What a lasting answer can cover, narrowest first.
+                                             (list :ladder (mapcar (lambda (s) (list :id (plist-get s :id)
+                                                                                     :label (plist-get s :label)))
+                                                                   steps)
+                                                   :cover (plist-get ladder :default))
                                              (list :title (harness-perms-describe-request request)
                                                    :reason (harness-perms--judge-prompt-reason decision)
                                                    :options (harness-perms--tool-options)))))
              (pid (harness-call 'session/pending-add sid pending)))
         (puthash pid (list :session-id sid :request request :next next :paths paths :cwd cwd
-                           :rule-commands commands)
+                           :rule-commands commands :ladder steps :cover (plist-get ladder :default))
                  harness-perms--waiting)
         (harness-emit 'permission/requested sid (plist-put (copy-sequence pending) :id pid)))))))
 
 (defun harness-perms--parse-answer (answer)
-  "Normalise ANSWER into a plist of :behavior, :scope, :reason and :pattern.
+  "Normalise ANSWER into a plist of :behavior, :scope, :reason, :pattern, :cover.
 The result is (:behavior allow|deny :scope once|session|always :reason
-R :pattern P).  ANSWER is a plist, or an option id like
+R :pattern P :cover C).  ANSWER is a plist, or an option id like
 \"allow-session\" as a string or under `:option'.  P is the pattern
-the user answered for, when they edited the prompt's, else nil."
+the user answered for, when they edited the prompt's, else nil; C the
+id of the step of the prompt's ladder of covers the answer holds for
+\(see \"What a lasting answer covers\"), a string, when it names one."
   (let* ((option (cond ((stringp answer) answer)
                        ((symbolp answer) (symbol-name answer))
                        ((plist-get answer :option) (format "%s" (plist-get answer :option)))))
@@ -3766,11 +4104,13 @@ the user answered for, when they edited the prompt's, else nil."
          (scope (or (and (listp answer) (harness-perms--sym (plist-get answer :scope)))
                     (and (cadr parts) (intern (cadr parts)))
                     'once))
-         (pattern (and (listp answer) (plist-get answer :pattern))))
+         (pattern (and (listp answer) (plist-get answer :pattern)))
+         (cover (and (listp answer) (plist-get answer :cover))))
     (list :behavior (if (eq behavior 'allow) 'allow 'deny)
           :scope (if (memq scope '(once session always)) scope 'once)
           :reason (and (listp answer) (plist-get answer :reason))
-          :pattern (and (stringp pattern) (not (harness-string-blank-p pattern)) (string-trim pattern)))))
+          :pattern (and (stringp pattern) (not (harness-string-blank-p pattern)) (string-trim pattern))
+          :cover (and (or (stringp cover) (and cover (symbolp cover))) (format "%s" cover)))))
 
 (harness-defmethod permission/answer (session-id pending-id answer)
   "Answer the permission request PENDING-ID of SESSION-ID with ANSWER.
@@ -3815,16 +4155,25 @@ the final decision, or `continue' when a jail prompt hands the call on."
 Record session or standing rules, noted in the session's transcript
 where they can be undone (`harness-perms--note-recorded'), and let the
 tool call continue.  The prompt offered no pattern (see
-`harness-perms--ask'), so a rule holds for every call of the tool, or,
-when the call runs commands that could be read, for those commands:
-`:commands' are the prefixes the prompt worked out and showed, and a
-`:pattern' in ANSWER is ignored, as for a tool rule.  The jail still
-decides where each call may reach."
+`harness-perms--ask'), so a rule holds for the cover the answer names
+\(`:cover', a step of the ladder the prompt showed; see \"What a lasting
+answer covers\"), the usual one when it names none: the programs of a
+call that runs commands that could be read, as the prompt worked them
+out, else every call of the tool.  A `:pattern' in ANSWER is ignored,
+as for a tool rule.  The jail still decides where each call may reach."
   (let* ((answer (harness-perms--parse-answer answer))
          (request (plist-get waiting :request))
          (commands (plist-get waiting :rule-commands))
+         (ladder (plist-get waiting :ladder))
          (behavior (plist-get answer :behavior))
          (scope (plist-get answer :scope))
+         ;; What the rule holds for: the step chosen, or, for a prompt
+         ;; made without a ladder, the commands it worked out.
+         (cover (if ladder
+                    (plist-get (harness-perms--chosen-cover ladder (plist-get waiting :cover)
+                                                            (plist-get answer :cover))
+                               :rule)
+                  (and commands (list :commands commands))))
          (decision (list :behavior behavior :final t
                          :reason (or (plist-get answer :reason)
                                      (if (eq behavior 'allow) "allowed by the user"
@@ -3833,7 +4182,7 @@ decides where each call may reach."
       (harness-perms--add-rule-noted
        session-id
        (append (list :tool (plist-get request :tool))
-               (and commands (list :commands commands))
+               cover
                (list :behavior behavior))
        scope))
     (harness-perms--resolve session-id pending-id answer)
@@ -3865,13 +4214,17 @@ decides where each call may reach."
       (let* ((tool (plist-get rule :tool))
              (path (plist-get rule :path))
              (commands (harness-perms--rule-command-title rule))
-             (path (and (stringp path) (not (harness-string-blank-p path)) (abbreviate-file-name path))))
-        (cond ((and tool path) (format "%s calls in %s" tool path))
-              ((and tool commands) (format "every %s call to %s" tool commands))
-              (tool (format "every %s call" tool))
-              (commands (format "every %s call" commands))
-              (path (format "%s to every tool" path))
-              (t "every call"))))))
+             (input (harness-perms--input-title (plist-get rule :input)))
+             (path (and (stringp path) (not (harness-string-blank-p path)) (abbreviate-file-name path)))
+             (what (cond ((and tool path) (format "%s calls in %s" tool path))
+                         ((and tool commands) (format "every %s call to %s" tool commands))
+                         (tool (format "every %s call" tool))
+                         (commands (format "every %s call" commands))
+                         (path (format "%s to every tool" path))
+                         (t "every call"))))
+        ;; Only the calls that pass these arguments, said last: `every
+        ;; bash call whose command is exactly "make test"'.
+        (if input (format "%s %s" what input) what)))))
 
 (defun harness-perms--recorded-text (record)
   "Return the note that says what lasting answer RECORD does.
@@ -3947,7 +4300,16 @@ difference."
                 (lambda (a b)
                   (string< (mapconcat #'identity a " ")
                            (mapconcat #'identity b " "))))
-          (harness-perms--sym (plist-get rule :behavior)))))
+          (harness-perms--sym (plist-get rule :behavior))
+          ;; Last, so the positions above are the ones they always were.
+          (harness-perms--input-sorted (plist-get rule :input)))))
+
+(defun harness-perms--rule-subject-key (key)
+  "Return what a rule's KEY (see `harness-perms--rule-key') is about.
+That is its tool, path, commands and arguments, not what it decides:
+two rules about the same subject are the same rule, one of which may
+have been changed since the other was recorded."
+  (list (nth 0 key) (nth 2 key) (nth 3 key) (nth 5 key)))
 
 (defun harness-perms--rule-from-record (rule)
   "Return RULE as a note recorded it, its symbols symbols again.
@@ -3969,7 +4331,7 @@ and MESSAGE says why when it is not `undone'."
   (let* ((always (eq scope 'always))
          (rules (harness-perms--scope-rules session-id scope))
          (key (harness-perms--rule-key rule))
-         (subject (lambda (k) (list (nth 0 k) (nth 2 k) (nth 3 k))))
+         (subject #'harness-perms--rule-subject-key)
          (pos (or (cl-position rule rules :test #'equal)
                   (cl-position key rules :key #'harness-perms--rule-key :test #'equal))))
     (cond
@@ -4191,7 +4553,7 @@ OUTCOME is `done', `changed' or `gone', and MESSAGE says why when it is
 not `done'."
   (let* ((always (eq scope 'always))
          (key (harness-perms--rule-key rule))
-         (subject (lambda (k) (list (nth 0 k) (nth 2 k) (nth 3 k))))
+         (subject #'harness-perms--rule-subject-key)
          (there (cl-find (funcall subject key) (harness-perms--scope-rules session-id scope) :test #'equal
                          :key (lambda (r) (funcall subject (harness-perms--rule-key r))))))
     (cond

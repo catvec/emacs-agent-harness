@@ -5,6 +5,7 @@
 
 (defvar harness-providers)
 (defvar harness-allowed-directories)
+(defvar harness-perms-rules)
 
 (defvar harness-perms-test--session nil
   "Plist returned by the fake `session/get'.")
@@ -3461,7 +3462,7 @@ Unconfined, it sees what the user sees, and goes on as before."
   "The settings page offers each part of a standing rule by name."
   (require 'harness-test-helpers)
   (let ((type (cadr (get 'harness-perms-rules 'custom-type))))
-    (should (equal '(:tool :kind :path :commands :behavior) (harness-test-option-keys type)))
+    (should (equal '(:tool :kind :path :commands :input :behavior) (harness-test-option-keys type)))
     (harness-test-check-record-type type)
     (should (harness-test-fits-p type '(:tool "web_search" :behavior deny)))
     (should (harness-test-fits-p type '(:kind read :behavior allow)))
@@ -3870,6 +3871,397 @@ still asked about."
                    harness-perms-rules))
     (should (equal "Always denying every t_exec call to rm, in every session"
                    (plist-get (car (last (harness-perms-test--notes sid))) :content)))))
+
+;;;; What a lasting answer covers
+
+(ert-deftest harness-perms-rules-type-names-the-input-key ()
+  "The settings page offers a rule's arguments, and accepts them."
+  (require 'harness-test-helpers)
+  (let ((type (cadr (get 'harness-perms-rules 'custom-type))))
+    (should (memq :input (harness-test-option-keys type)))
+    (should (harness-test-fits-p type '(:tool "bash" :input (:command "make test") :behavior allow)))
+    (should (harness-test-fits-p type '(:tool "web_fetch" :input (:url "https://a.example/") :behavior deny)))))
+
+(ert-deftest harness-perms-input-rules-hold-only-the-calls-with-those-arguments ()
+  "A rule with `:input' holds a call that passes each of those arguments, equal.
+The call's other arguments are free.  A different value, an argument
+the call does not pass and an `:input' that is no plist of arguments
+hold nothing, for a deny rule as for an allow rule; and the order the
+rule lists them in makes no difference."
+  (let* ((s (harness-perms-test--setup :permission-mode 'ask))
+         (call (lambda (tool input)
+                 (list :session s :tool tool :kind 'net :input input :paths nil :call-id (harness-short-id))))
+         (matches (lambda (rule tool input)
+                    (and (harness-perms--rule-matches-p rule (funcall call tool input)) t))))
+    (let ((rule '(:tool "web_fetch" :input (:url "https://a.example/x") :behavior allow)))
+      (should (funcall matches rule "web_fetch" '(:url "https://a.example/x")))
+      (should (funcall matches rule "web_fetch" '(:url "https://a.example/x" :max_chars 10)))
+      (should-not (funcall matches rule "web_fetch" '(:url "https://a.example/y")))
+      (should-not (funcall matches rule "web_fetch" '(:max_chars 10)))
+      (should-not (funcall matches rule "web_fetch" nil))
+      (should-not (funcall matches rule "web_search" '(:url "https://a.example/x"))))
+    ;; Every argument the rule names must match, numbers included.
+    (let ((rule '(:tool "ssh" :input (:host "dev" :command "ls" :timeout 5) :behavior allow)))
+      (should (funcall matches rule "ssh" '(:command "ls" :timeout 5 :host "dev")))
+      (should-not (funcall matches rule "ssh" '(:command "ls" :timeout 6 :host "dev")))
+      (should-not (funcall matches rule "ssh" '(:command "ls" :host "prod" :timeout 5))))
+    ;; A deny rule holds the same calls, no more.
+    (let ((rule '(:tool "web_fetch" :input (:url "https://a.example/x") :behavior deny)))
+      (should (funcall matches rule "web_fetch" '(:url "https://a.example/x")))
+      (should-not (funcall matches rule "web_fetch" '(:url "https://a.example/y"))))
+    ;; Arguments that cannot be held hold no call, whatever the behavior.
+    (dolist (bad '("https://a.example/x" (:url) (url "https://a.example/x") (:url "a" :max_chars)))
+      (dolist (behavior '(allow deny))
+        (should-not (funcall matches (list :tool "web_fetch" :input bad :behavior behavior)
+                             "web_fetch" '(:url "https://a.example/x")))))
+    ;; Two rules about the same arguments are one, in whatever order.
+    (should (equal (harness-perms--rule-key '(:tool "ssh" :input (:host "dev" :command "ls") :behavior allow))
+                   (harness-perms--rule-key '(:tool "ssh" :input (:command "ls" :host "dev") :behavior allow))))
+    (should-not (equal (harness-perms--rule-key '(:tool "ssh" :input (:command "ls") :behavior allow))
+                       (harness-perms--rule-key '(:tool "ssh" :behavior allow))))
+    ;; Through the chain the rule allows that call and asks about no other.
+    (let ((harness-perms-rules '((:tool "web_fetch" :input (:url "https://a.example/x") :behavior allow))))
+      (let ((d (harness-perms-test--decide (funcall call "web_fetch" '(:url "https://a.example/x")))))
+        (should (eq 'allow (plist-get d :behavior)))
+        (should (equal "allowed by a standing rule for web_fetch whose url is exactly \"https://a.example/x\""
+                       (plist-get d :reason))))
+      (should (eq 'deny (plist-get (harness-perms-test--decide
+                                    (funcall call "web_fetch" '(:url "https://a.example/y")))
+                                   :behavior))))))
+
+(ert-deftest harness-perms-input-rules-are-worded ()
+  "What a rule about arguments is for is said in a few words, long texts cut."
+  (should (equal "whose command is exactly \"make test\""
+                 (harness-perms--input-title '(:command "make test"))))
+  (should (equal "whose host is exactly \"dev\" and command is exactly \"ls\""
+                 (harness-perms--input-title '(:host "dev" :command "ls"))))
+  (should (equal "whose url is exactly \"u\", max_chars is exactly 20 and host is exactly \"h\""
+                 (harness-perms--input-title '(:url "u" :max_chars 20 :host "h"))))
+  (should (equal "whose command is exactly \"echo one…\""
+                 (harness-perms--input-title '(:command "echo one\necho two"))))
+  (should (equal (format "whose command is exactly \"%s…\"" (make-string 49 ?x))
+                 (harness-perms--input-title (list :command (make-string 80 ?x)))))
+  (should-not (harness-perms--input-title nil))
+  (should-not (harness-perms--input-title '(:command)))
+  (should (equal "bash whose command is exactly \"make test\""
+                 (harness-perms--rule-subject '(:tool "bash" :input (:command "make test") :behavior allow))))
+  (should (equal "calls whose url is exactly \"u\"" (harness-perms--rule-subject '(:input (:url "u") :behavior deny))))
+  (should (equal "every bash call whose command is exactly \"make test\""
+                 (harness-perms--recorded-what
+                  (list :scope 'always :rule '(:tool "bash" :input (:command "make test") :behavior allow)))))
+  (should (equal "edit_file calls in ~/proj/lisp/"
+                 (harness-perms--recorded-what
+                  (list :scope 'always :rule (list :tool "edit_file" :path (abbreviate-file-name "~/proj/lisp/")
+                                                   :behavior 'allow))))))
+
+(defun harness-perms-test--steps (ladder &optional key)
+  "Return LADDER's step ids, or their KEY (`:label' or `:rule')."
+  (mapcar (lambda (s) (plist-get s (or key :id))) (plist-get ladder :steps)))
+
+(ert-deftest harness-perms-cover-ladder-of-a-shell-command ()
+  "A shell prompt's covers go from the exact command to the whole tool.
+They are the exact command line, the programs with the subcommands it
+shares, what a lasting answer always held for, the programs alone and
+the tool; steps that hold the same calls are one.  The step the answers
+start on is the one an answer always held for."
+  (let ((s (harness-perms-test--setup :permission-mode 'ask)))
+    (ignore s)
+    (let ((ladder (lambda (command) (harness-perms--cover-ladder (harness-perms-test--bash command)))))
+      ;; One command of a program: its subcommands, then the program.
+      (let ((l (funcall ladder "gcloud compute instances list --project p")))
+        (should (equal '("exact" "subcommands" "programs" "tool") (harness-perms-test--steps l)))
+        (should (equal '((:input (:command "gcloud compute instances list --project p"))
+                         (:commands (("gcloud" "compute" "instances")))
+                         (:commands (("gcloud")))
+                         nil)
+                       (harness-perms-test--steps l :rule)))
+        (should (equal '("every bash call whose command is exactly \"gcloud compute instances list --project p\""
+                         "every gcloud compute instances call (any arguments)"
+                         "every gcloud call (any arguments)"
+                         "every bash call (any command)")
+                       (harness-perms-test--steps l :label)))
+        ;; Starts where a lasting answer always held: the program.
+        (should (equal "programs" (plist-get l :default))))
+      ;; No subcommand to narrow by: the program is the narrowest command cover.
+      (let ((l (funcall ladder "ls -la")))
+        (should (equal '("exact" "programs" "tool") (harness-perms-test--steps l)))
+        (should (equal "programs" (plist-get l :default))))
+      ;; Several commands of one program keep the words they share, as before.
+      (let ((l (funcall ladder "gcloud compute instances list && gcloud compute instances describe x")))
+        (should (equal '("exact" "commands" "programs" "tool") (harness-perms-test--steps l)))
+        (should (equal "commands" (plist-get l :default)))
+        (should (equal '(:commands (("gcloud" "compute" "instances")))
+                       (plist-get (nth 1 (plist-get l :steps)) :rule))))
+      ;; Programs side by side: each keeps its own subcommands, or none.
+      (let ((l (funcall ladder "gcloud storage ls | grep running")))
+        (should (equal '("exact" "subcommands" "programs" "tool") (harness-perms-test--steps l)))
+        (should (equal '((:commands (("gcloud" "storage" "ls") ("grep" "running")))
+                         (:commands (("gcloud") ("grep"))))
+                       (list (plist-get (nth 1 (plist-get l :steps)) :rule)
+                             (plist-get (nth 2 (plist-get l :steps)) :rule))))
+        (should (equal "programs" (plist-get l :default))))
+      ;; Where a program runs several commands and another one, what
+      ;; an answer always held for lies between the two.
+      (let ((l (funcall ladder "gcloud compute instances list && gcloud compute instances describe x | grep running")))
+        (should (equal '("exact" "subcommands" "commands" "programs" "tool") (harness-perms-test--steps l)))
+        (should (equal '((:commands (("gcloud" "compute" "instances") ("grep" "running")))
+                         (:commands (("gcloud" "compute" "instances") ("grep")))
+                         (:commands (("gcloud") ("grep"))))
+                       (mapcar (lambda (i) (plist-get (nth i (plist-get l :steps)) :rule)) '(1 2 3))))
+        (should (equal "commands" (plist-get l :default))))
+      ;; A line the reader cannot read: the line itself, or the tool.
+      (let ((l (funcall ladder "FOO=1")))
+        (should (equal '("exact" "tool") (harness-perms-test--steps l)))
+        (should (equal "tool" (plist-get l :default))))
+      ;; Whatever the default, it is a step of the ladder, and the usual
+      ;; step is the rule an answer always recorded.
+      (dolist (command '("make" "git status && git log --oneline" "sudo -u me gcloud storage ls"
+                         "x=$(gcloud instances list); echo hi" "FOO=1"))
+        (let* ((l (funcall ladder command))
+               (usual (harness-perms--command-rule-prefixes command))
+               (step (cl-find (plist-get l :default) (plist-get l :steps)
+                              :key (lambda (s) (plist-get s :id)) :test #'equal)))
+          (should step)
+          (should (equal (and usual (list :commands usual)) (plist-get step :rule))))))))
+
+(ert-deftest harness-perms-cover-ladder-starts-on-the-narrowest-when-asked ()
+  "`harness-perms-default-cover' starts every ladder on its first step."
+  (harness-perms-test--setup :permission-mode 'ask)
+  (let ((harness-perms-default-cover 'narrowest))
+    (should (equal "exact" (plist-get (harness-perms--cover-ladder (harness-perms-test--bash "make test")) :default)))
+    (should (equal "path" (plist-get (harness-perms--cover-ladder
+                                      (harness-perms-test--request "edit_file" 'write "/home/u/proj/a.el"))
+                                     :default)))
+    ;; A ladder of one is on its only step.
+    (should (equal "tool" (plist-get (harness-perms--cover-ladder
+                                      (list :session harness-perms-test--session :tool "spawn_agent" :kind 'meta
+                                            :input (list :prompt (make-string 400 ?x))))
+                                     :default))))
+  (let ((harness-perms-default-cover 'usual))
+    (should (equal "programs" (plist-get (harness-perms--cover-ladder (harness-perms-test--bash "make test")) :default)))
+    (should (equal "tool" (plist-get (harness-perms--cover-ladder
+                                      (harness-perms-test--request "edit_file" 'write "/home/u/proj/a.el"))
+                                     :default)))))
+
+(ert-deftest harness-perms-cover-ladder-of-a-call-on-files ()
+  "A call that writes a file is covered by that file, its directory, the project or the tool.
+The project is the session's working directory, offered when the file
+lies below it; several files have the directory that holds them all."
+  (harness-perms-test--setup :permission-mode 'ask :cwd "/home/u/proj/")
+  (let ((ladder (lambda (tool kind &rest paths)
+                  (harness-perms--cover-ladder (apply #'harness-perms-test--request tool kind paths)))))
+    (let ((l (funcall ladder "edit_file" 'write "/home/u/proj/lisp/a.el")))
+      (should (equal '("path" "dir" "project" "tool") (harness-perms-test--steps l)))
+      (should (equal '((:path "/home/u/proj/lisp/a.el") (:path "/home/u/proj/lisp/") (:path "/home/u/proj/") nil)
+                     (harness-perms-test--steps l :rule)))
+      (should (equal '("every edit_file call on /home/u/proj/lisp/a.el"
+                       "every edit_file call under /home/u/proj/lisp/ (any file)"
+                       "every edit_file call under /home/u/proj/ (any file)"
+                       "every edit_file call (any path)")
+                     (harness-perms-test--steps l :label)))
+      ;; What an answer always held for: every call of the tool.
+      (should (equal "tool" (plist-get l :default))))
+    ;; In the project's own directory the directory is the project.
+    (should (equal '("path" "dir" "tool")
+                   (harness-perms-test--steps (funcall ladder "write_file" 'write "/home/u/proj/README.md"))))
+    ;; Outside the project (a granted directory): no project step.
+    (should (equal '("path" "dir" "tool")
+                   (harness-perms-test--steps (funcall ladder "write_file" 'write "/srv/notes/todo.org"))))
+    ;; Several files: the directory holding them all, which here is the project.
+    (let ((l (funcall ladder "write_file" 'write "/home/u/proj/lisp/a.el" "/home/u/proj/test/b.el")))
+      (should (equal '("dir" "tool") (harness-perms-test--steps l)))
+      (should (equal '(:path "/home/u/proj/") (plist-get (car (plist-get l :steps)) :rule))))
+    (let ((l (funcall ladder "write_file" 'write "/home/u/proj/lisp/a.el" "/home/u/proj/lisp/sub/b.el")))
+      (should (equal '("dir" "project" "tool") (harness-perms-test--steps l)))
+      (should (equal '(:path "/home/u/proj/lisp/") (plist-get (car (plist-get l :steps)) :rule))))
+    (should (equal '("path" "dir" "project" "tool")
+                   (harness-perms-test--steps
+                    (funcall ladder "write_file" 'write "/home/u/proj/lisp/a.el" "/home/u/proj/lisp/a.el"))))
+    ;; Never the root of a file system, which would be every file.
+    (should (equal '("path" "tool")
+                   (harness-perms-test--steps (funcall ladder "write_file" 'write "/etc"))))
+    ;; A directory is its own cover and holds everything below it.
+    (should (equal '("dir" "project" "tool")
+                   (harness-perms-test--steps (funcall ladder "list_dir" 'write "/home/u/proj/lisp/"))))
+    ;; A remote file keeps its host; another host's files share nothing.
+    (let ((l (funcall ladder "write_file" 'write "/ssh:u@box:/home/u/proj/a.el")))
+      (should (equal '(:path "/ssh:u@box:/home/u/proj/") (plist-get (nth 1 (plist-get l :steps)) :rule))))
+    (should (equal '("tool")
+                   (harness-perms-test--steps (funcall ladder "write_file" 'write
+                                                       "/ssh:u@box:/a/x" "/ssh:u@other:/a/y"))))
+    ;; A call that is neither a read nor a write is not covered by paths,
+    ;; but by its arguments.
+    (let ((l (funcall ladder "spawn_agent" 'meta "/home/u/proj/")))
+      (should (equal '("exact" "tool") (harness-perms-test--steps l)))
+      (should (equal '(:input (:path "/home/u/proj/")) (plist-get (car (plist-get l :steps)) :rule))))))
+
+(ert-deftest harness-perms-cover-ladder-of-any-other-call ()
+  "Any other call is covered by its exact arguments or by the tool.
+The exact arguments are all of them when each is a text or a number and
+they are few; a shell-like tool pins its texts, not a timeout."
+  (let ((s (harness-perms-test--setup :permission-mode 'ask))
+        (ladder (lambda (tool kind input)
+                  (harness-perms--cover-ladder
+                   (list :session harness-perms-test--session :tool tool :kind kind :input input)))))
+    (ignore s)
+    (let ((l (funcall ladder "web_fetch" 'net '(:url "https://a.example/x" :max_chars 100))))
+      (should (equal '("exact" "tool") (harness-perms-test--steps l)))
+      (should (equal '((:input (:url "https://a.example/x" :max_chars 100)) nil) (harness-perms-test--steps l :rule)))
+      (should (equal '("every web_fetch call whose url is exactly \"https://a.example/x\" and max_chars is exactly 100"
+                       "every web_fetch call (any arguments)")
+                     (harness-perms-test--steps l :label)))
+      (should (equal "tool" (plist-get l :default))))
+    ;; A shell-like call: its texts, not the timeout.
+    (let ((l (funcall ladder "ssh" 'exec '(:host "dev" :command "uptime" :timeout 30))))
+      (should (equal '("exact" "programs" "tool") (harness-perms-test--steps l)))
+      (should (equal '(:input (:host "dev" :command "uptime")) (plist-get (car (plist-get l :steps)) :rule))))
+    ;; No arguments, nothing to pin: the tool alone.
+    (should (equal '("tool") (harness-perms-test--steps (funcall ladder "emacs_trace" 'write nil))))
+    ;; Too long, or a list, an object or a flag among them: the tool alone.
+    (should (equal '("tool") (harness-perms-test--steps (funcall ladder "spawn_agent" 'meta (list :prompt (make-string 400 ?x))))))
+    (should (equal '("tool") (harness-perms-test--steps (funcall ladder "x" 'meta '(:names ("a" "b"))))))
+    (should (equal '("tool") (harness-perms-test--steps (funcall ladder "x" 'meta '(:opts (:a 1))))))
+    (should (equal '("tool") (harness-perms-test--steps (funcall ladder "x" 'meta '(:url "u" :fork t)))))
+    (should (equal "every spawn_agent call (any arguments)"
+                   (plist-get (car (plist-get (funcall ladder "spawn_agent" 'meta nil) :steps)) :label)))))
+
+(ert-deftest harness-perms-prompt-carries-its-ladder ()
+  "A prompt about a call lists its covers and says which one the answers start on.
+The waiting prompts list them too, so a client that did not see the
+request can still choose."
+  (harness-perms-test--setup :permission-mode 'ask)
+  (harness-perms-test--install-pending)
+  (let* ((p (harness-run-filter-async 'permission/decide (list :behavior 'ask)
+                                      (harness-perms-test--bash "gcloud compute instances list --project p")))
+         (payload (progn (harness-test-wait (lambda () harness-perms-test--pending) 2 "the prompt")
+                         (plist-get (car harness-perms-test--pending) :payload))))
+    (should (equal '("exact" "subcommands" "programs" "tool")
+                   (mapcar (lambda (s) (plist-get s :id)) (plist-get payload :ladder))))
+    (should (equal "every gcloud call (any arguments)"
+                   (plist-get (cl-find "programs" (plist-get payload :ladder)
+                                       :key (lambda (s) (plist-get s :id)) :test #'equal)
+                              :label)))
+    (should (equal "programs" (plist-get payload :cover)))
+    ;; The steps the UI is told of say nothing of the rules they record.
+    (should-not (cl-some (lambda (s) (plist-member s :rule)) (plist-get payload :ladder)))
+    ;; What it said before stays: the commands and the words for them.
+    (should (equal '(("gcloud")) (plist-get payload :commands)))
+    (should (equal "gcloud" (plist-get payload :covers)))
+    (harness-call 'permission/answer "s1" (plist-get (car harness-perms-test--pending) :id) "deny-once")
+    (should (eq 'deny (plist-get (harness-test-await p) :behavior)))))
+
+(ert-deftest harness-perms-answer-records-the-cover-it-names ()
+  "A lasting answer holds for the step of the ladder it names, and is noted so.
+Each step records its own rule; a step the prompt did not offer, or none,
+is the one the prompt started on; an answer for this call alone records
+nothing whatever it names.  Another call of the same kind then runs or
+asks as the rule says."
+  (harness-perms-test--with-notes
+    (harness-define-tool "t_write" :label "Write" :kind 'write
+                         :paths (lambda (in) (list (plist-get in :path)))
+                         :handler (lambda (_in _ctx) "wrote"))
+    (let* ((cwd (file-name-as-directory (file-truename (plist-get (harness-call 'session/get sid) :cwd))))
+           (file (lambda (name) (expand-file-name name cwd)))
+           (run (lambda (tool input answer)
+                  (plist-get (harness-perms-test--answered sid tool input answer) :content)))
+           (last-note (lambda () (plist-get (car (last (harness-perms-test--notes sid))) :content)))
+           (rules-now (lambda () harness-perms-rules)))
+      ;; The exact command line.
+      (should (equal "ran" (funcall run "t_exec" '(:command "make test") '(:option "allow-always" :cover "exact"))))
+      (should (equal '((:tool "t_exec" :input (:command "make test") :behavior allow)) (funcall rules-now)))
+      (should (equal "Always allowing every t_exec call whose command is exactly \"make test\", in every session"
+                     (funcall last-note)))
+      ;; It holds that command alone: the next run needs no answer, another asks.
+      (should (equal "ran" (plist-get (harness-test-await
+                                       (harness-call 'tools/execute sid (list :id "again" :name "t_exec"
+                                                                              :input '(:command "make test"))))
+                                      :content)))
+      (let ((d (harness-perms--find-rule (list :session (harness-call 'session/get sid) :tool "t_exec" :kind 'exec
+                                               :input '(:command "make test -j4")))))
+        (should-not d))
+      ;; Undone, it is gone; the note says what it was.
+      (should (equal '(undone . "Undone: no longer always allowing every t_exec call whose command is exactly \"make test\", in every session")
+                     (harness-perms-test--undo sid (car (last (harness-perms-test--notes sid))))))
+      (should-not (funcall rules-now))
+      ;; A step that names programs.
+      (funcall run "t_exec" '(:command "gcloud compute instances list") '(:option "allow-session" :cover "subcommands"))
+      (should (equal '((:tool "t_exec" :commands (("gcloud" "compute" "instances")) :behavior allow))
+                     (gethash sid harness-perms--session-rules)))
+      (should (equal "Allowing every t_exec call to gcloud compute instances for this session" (funcall last-note)))
+      (clrhash harness-perms--session-rules)
+      ;; The whole tool.
+      (funcall run "t_exec" '(:command "rm -rf build") '(:option "deny-always" :cover "tool"))
+      (should (equal '((:tool "t_exec" :behavior deny)) (funcall rules-now)))
+      (should (equal "Always denying every t_exec call, in every session" (funcall last-note)))
+      (setq harness-perms-rules nil)
+      ;; Not offered, or not named: the step the prompt started on.
+      (funcall run "t_exec" '(:command "gcloud ls") '(:option "allow-always" :cover "nonsense"))
+      (should (equal '((:tool "t_exec" :commands (("gcloud")) :behavior allow)) (funcall rules-now)))
+      (setq harness-perms-rules nil)
+      (funcall run "t_exec" '(:command "gcloud ls") "allow-always")
+      (should (equal '((:tool "t_exec" :commands (("gcloud")) :behavior allow)) (funcall rules-now)))
+      (setq harness-perms-rules nil)
+      ;; For this call alone, nothing is recorded, whatever it names.
+      (funcall run "t_exec" '(:command "make") '(:option "allow-once" :cover "tool"))
+      (should-not (funcall rules-now))
+      (should-not (gethash sid harness-perms--session-rules))
+      ;; A call on a file: that file, its directory, the project.
+      (should (equal "wrote" (funcall run "t_write" (list :path "lisp/a.el" :content "x")
+                                      '(:option "allow-always" :cover "path"))))
+      (should (equal (list (list :tool "t_write" :path (funcall file "lisp/a.el") :behavior 'allow)) (funcall rules-now)))
+      (should (equal (format "Always allowing t_write calls in %s, in every session"
+                             (abbreviate-file-name (funcall file "lisp/a.el")))
+                     (funcall last-note)))
+      (setq harness-perms-rules nil)
+      (funcall run "t_write" (list :path "lisp/a.el" :content "x") '(:option "allow-session" :cover "dir"))
+      (should (equal (list (list :tool "t_write" :path (funcall file "lisp/") :behavior 'allow))
+                     (gethash sid harness-perms--session-rules)))
+      ;; Any file of that directory runs now; one elsewhere asks.
+      (should (equal "wrote" (plist-get (harness-test-await
+                                         (harness-call 'tools/execute sid (list :id "w2" :name "t_write"
+                                                                                :input (list :path "lisp/sub/b.el" :content "y"))))
+                                        :content)))
+      (should-not (harness-perms--find-rule
+                   (list :session (harness-call 'session/get sid) :tool "t_write" :kind 'write
+                         :paths (list (funcall file "test/c.el")))))
+      (clrhash harness-perms--session-rules)
+      ;; The exact arguments of a call that has no paths to narrow it.
+      (funcall run "t_exec" '(:command "uptime") '(:option "allow-session" :cover "exact"))
+      (should (equal '((:tool "t_exec" :input (:command "uptime") :behavior allow))
+                     (gethash sid harness-perms--session-rules))))))
+
+(ert-deftest harness-perms-a-cover-answer-with-input-is-undone-and-redone ()
+  "A rule for exact arguments is a lasting decision like any other.
+Undo takes back that rule alone, redo records it again, and a rule for
+other arguments of the same tool is left as it is."
+  (harness-perms-test--with-decisions
+    (harness-perms-test--answered sid "t_exec" '(:command "make test") '(:option "allow-always" :cover "exact"))
+    (let ((first (car (last (harness-perms-test--notes sid)))))
+      (harness-perms-test--answered sid "t_exec" '(:command "make lint") '(:option "allow-always" :cover "exact"))
+      (should (= 2 (length harness-perms-rules)))
+      (should (eq 'undone (car (harness-perms-test--undo sid first))))
+      ;; Only make test's rule went.
+      (should (equal '((:tool "t_exec" :input (:command "make lint") :behavior allow)) harness-perms-rules))
+      (should (equal '(done . "Redone: always allowing every t_exec call whose command is exactly \"make test\", in every session")
+                     (harness-perms-test--redo sid first)))
+      (should (= 2 (length harness-perms-rules)))
+      (should (cl-find '(:command "make test") harness-perms-rules
+                       :key (lambda (r) (plist-get r :input)) :test #'equal)))))
+
+(ert-deftest harness-perms-answered-cover-rules-decide-later-calls ()
+  "The next call meets the rule the answer recorded, through the whole chain."
+  (harness-perms-test--with-notes
+    (harness-perms-test--answered sid "t_exec" '(:command "make test") '(:option "allow-always" :cover "exact"))
+    (let ((run (lambda (id command)
+                 (harness-call 'tools/execute sid (list :id id :name "t_exec" :input (list :command command))))))
+      ;; The very command runs without a question.
+      (should (equal "ran" (plist-get (harness-test-await (funcall run "n1" "make test")) :content)))
+      (should-not (harness-call 'session/pending sid))
+      ;; A longer one is another call: it asks.
+      (let ((p (funcall run "n2" "make test && rm -rf ~")))
+        (harness-test-wait (lambda () (harness-call 'session/pending sid)) 2 "the prompt")
+        (harness-call 'permission/answer sid (plist-get (car (harness-call 'session/pending sid)) :id) "deny-once")
+        (should (plist-get (harness-test-await p) :denied))))))
 
 ;;;; Notes of lasting answers, and their undo
 

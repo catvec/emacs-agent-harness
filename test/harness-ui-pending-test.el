@@ -1215,6 +1215,98 @@ the notes when it opens, and its [Undo] takes the rule back."
             (should (equal '((:tool "t_deploy" :commands (("deploy")) :behavior allow)) (gethash sid harness-perms--session-rules)))
             (should (funcall find buf "for this session  [Undo]"))))))))
 
+(ert-deftest harness-ui-pending-the-cover-picked-is-the-rule-recorded ()
+  "From the real prompt to the rule: what the panel has picked is what lasts.
+The harness works the covers out of the call, the panel lists them, `<'
+and `>' pick one, and a lasting answer given there records the rule of
+that cover: the exact command line, a directory, the whole tool.  What
+is recorded then decides the next call, and nothing wider than what was
+picked."
+  (harness-ui-pending-test-with
+    (harness-test-load-module 'perms)
+    (let ((harness-perms-rules nil))
+      (cl-letf (((symbol-function 'harness-save-user-option) (lambda (sym value) (set sym value))))
+        (let* ((sid (harness-ui-pending-test-session "Asker"))
+               (cwd (file-name-as-directory default-directory))
+               (popout (list 'pending sid))
+               (ask (lambda (tool input)
+                      (let ((call-id (harness-short-id)))
+                        (harness-call 'session/append sid (list :kind 'tool-call :tool tool :call-id call-id :input input))
+                        (prog1 (harness-call 'tools/execute sid (list :id call-id :name tool :input input))
+                          (harness-test-wait (lambda () (harness-call 'session/pending sid)) 5 "the prompt")
+                          ;; As `_harness/session' brings it: what it waits on, over the wire.
+                          (harness-ui-pending-test-cache
+                           sid (harness-json-parse (harness-json-encode (harness-call 'session/get sid))))))))
+               (text (lambda () (with-current-buffer (harness-ui-popout-buffer popout) (buffer-string))))
+               (press (lambda (key)
+                        (with-current-buffer (harness-ui-popout-buffer popout)
+                          (goto-char (point-min))
+                          (while (not (get-text-property (point) 'harness-ui-pending))
+                            (goto-char (or (next-single-property-change (point) 'harness-ui-pending)
+                                           (error "No panel in %S" (buffer-string)))))
+                          (call-interactively (key-binding (kbd key))))))
+               ;; What the rules say of a call: allow or deny, or `ask' when
+               ;; none holds it and the user would be asked.
+               (decide (lambda (tool input)
+                         (let ((rule (harness-perms--find-rule
+                                      (list :session (harness-call 'session/get sid) :tool tool
+                                            :kind (if (equal tool "t_write") 'write 'exec) :input input
+                                            :paths (if (plist-get input :path)
+                                                       (list (expand-file-name (plist-get input :path) cwd))
+                                                     (list cwd))))))
+                           (if rule (plist-get rule :behavior) 'ask)))))
+          (harness-call 'session/update sid :permission-mode 'ask)
+          (harness-define-tool "t_run" :label "Run" :kind 'exec :handler (lambda (_in _ctx) "ran"))
+          (harness-define-tool "t_write" :label "Write" :kind 'write
+                               :paths (lambda (in) (list (plist-get in :path)))
+                               :handler (lambda (_in _ctx) "wrote"))
+          ;; A command: the panel lists the ladder, starting on the program;
+          ;; two steps narrower is the very command line.
+          (let ((call (funcall ask "t_run" '(:command "gcloud compute instances list --project p"))))
+            (harness-ui-pending-popout sid)
+            (dolist (line '("Lasting answers (s, a, N) cover:"
+                            "every t_run call whose command is exactly \"gcloud compute instances list --project p\""
+                            "every gcloud compute instances call (any arguments)"
+                            "every gcloud call (any arguments)"
+                            "every t_run call (any command)"))
+              (should (string-search line (funcall text))))
+            (should (equal "programs" (harness-ui-pending--cover-id (car (harness-ui-pending-items sid)))))
+            (funcall press "<")
+            (funcall press "<")
+            (should (equal "exact" (harness-ui-pending--cover-id (car (harness-ui-pending-items sid)))))
+            (funcall press "a")
+            (should (equal "ran" (plist-get (harness-test-await call) :content))))
+          (should (equal '((:tool "t_run" :input (:command "gcloud compute instances list --project p") :behavior allow))
+                         harness-perms-rules))
+          ;; That command runs unasked now; another gcloud command asks.
+          (should (eq 'allow (funcall decide "t_run" '(:command "gcloud compute instances list --project p"))))
+          (should (eq 'ask (funcall decide "t_run" '(:command "gcloud compute instances list --project q"))))
+          ;; A file: the directory, for this session.
+          (let ((call (funcall ask "t_write" (list :path "lisp/a.el" :content "x"))))
+            (harness-ui-pending-popout sid)
+            (should (string-search (format "every t_write call under %s (any file)"
+                                           (abbreviate-file-name (expand-file-name "lisp/" cwd)))
+                                   (funcall text)))
+            (should (equal "tool" (harness-ui-pending--cover-id (car (harness-ui-pending-items sid)))))
+            (funcall press "<")
+            (funcall press "<")
+            (should (equal "dir" (harness-ui-pending--cover-id (car (harness-ui-pending-items sid)))))
+            (funcall press "s")
+            (should (equal "wrote" (plist-get (harness-test-await call) :content))))
+          (should (equal (list (list :tool "t_write" :path (expand-file-name "lisp/" cwd) :behavior 'allow))
+                         (gethash sid harness-perms--session-rules)))
+          (should (eq 'allow (funcall decide "t_write" (list :path "lisp/sub/b.el" :content "y"))))
+          (should (eq 'ask (funcall decide "t_write" (list :path "README" :content "y"))))
+          ;; The whole tool, picked on purpose, and denied for good.
+          (let ((call (funcall ask "t_run" '(:command "rm -rf build"))))
+            (harness-ui-pending-popout sid)
+            (funcall press ">")
+            (should (equal "tool" (harness-ui-pending--cover-id (car (harness-ui-pending-items sid)))))
+            (funcall press "N")
+            (should (plist-get (harness-test-await call) :denied)))
+          (should (equal '(:tool "t_run" :behavior deny) (car harness-perms-rules)))
+          (should (eq 'deny (funcall decide "t_run" '(:command "ls")))))))))
+
 ;;;; A panel's key, from the box
 
 ;; The digits of a question and the keys of a permission type in the
@@ -1356,6 +1448,559 @@ the request's id."
           (search-forward "from the box: ")
           (should (funcall face-p (- (point) 3) 'harness-dim-face))
           (should (funcall face-p (point) 'harness-ui-key-face)))))))
+
+;;;; What the lasting answers cover
+
+(defconst harness-ui-pending-test-options
+  '("allow-once" "allow-session" "allow-always" "deny-once" "deny-always")
+  "The answers a request offers when nothing narrows them.")
+
+(defun harness-ui-pending-test-ladder-item (&optional id options)
+  "Return a pending item for a shell call that comes with a ladder of covers.
+ID names it (\"ladder\" by default); OPTIONS are the answers it offers.
+The covers are those the harness works out for
+`gcloud compute instances list --project p': the last but one, every
+call of its program, is the one the lasting answers start on."
+  (list :id (or id "ladder") :kind "permission"
+        :payload (list :title "Bash: gcloud compute instances list --project p" :tool "bash" :kind "exec"
+                       :input '(:command "gcloud compute instances list --project p")
+                       :cwd "/home/u/proj/" :paths '("/home/u/proj/")
+                       :commands '(("gcloud")) :covers "gcloud"
+                       :ladder '((:id "exact" :label "every bash call with this exact command")
+                                 (:id "subcommands" :label "every gcloud compute instances call (any arguments)")
+                                 (:id "programs" :label "every gcloud call (any arguments)")
+                                 (:id "tool" :label "every bash call (any command)"))
+                       :cover "programs"
+                       :options (or options harness-ui-pending-test-options))))
+
+(defun harness-ui-pending-test-rendered (sid pid)
+  "Return the panel of request PID of SID as a chat draws it, without properties."
+  (with-temp-buffer
+    (let ((harness-ui-session-id sid))
+      (harness-ui-pending--insert-permission (harness-ui-pending-record sid pid)))
+    (buffer-substring-no-properties (point-min) (point-max))))
+
+(defun harness-ui-pending-test-step-line (selected label &optional note)
+  "Return the line of a cover block that shows LABEL, picked when SELECTED.
+NOTE is the dim word after it."
+  (concat "     "
+          (substring-no-properties
+           (harness-ui-icon (if selected 'harness-icon-radio-on 'harness-icon-radio-off)))
+          " " label (if note (concat "  " note) "")))
+
+(defun harness-ui-pending-test-face-p (pos face)
+  "Non-nil when the text at POS wears FACE, alone or among others."
+  (let ((faces (get-text-property pos 'face)))
+    (if (listp faces) (and (memq face faces) t) (eq face faces))))
+
+(defun harness-ui-pending-test-picked (sid pid)
+  "Return the label of the picked line of the block of request PID of SID, as drawn."
+  (let ((on (substring-no-properties (harness-ui-icon 'harness-icon-radio-on)))
+        (text (harness-ui-pending-test-rendered sid pid)))
+    (when (string-match (concat "^     " (regexp-quote on) " \\(.*?\\)\\(?:  default\\|  edited\\)?$") text)
+      (match-string 1 text))))
+
+(ert-deftest harness-ui-pending-ladder-panel-lists-the-covers ()
+  "A call with a ladder says what its lasting answers cover, on the panel.
+Every step is a line, narrowest first, the one they start on picked, with
+the keys of the answers the block is for and buttons that move the pick;
+the facts line of the commands it replaces is gone."
+  (harness-ui-pending-test-with
+    (let ((sid (harness-ui-pending-test-session)))
+      (harness-ui-pending-sync sid (list (harness-ui-pending-test-ladder-item)))
+      (let ((text (harness-ui-pending-test-rendered sid "ladder")))
+        (should (string-search
+                 (concat "   command: gcloud compute instances list --project p\n"
+                         "   Lasting answers (s, a, N) cover:\n"
+                         (harness-ui-pending-test-step-line nil "every bash call with this exact command") "\n"
+                         (harness-ui-pending-test-step-line nil "every gcloud compute instances call (any arguments)") "\n"
+                         (harness-ui-pending-test-step-line t "every gcloud call (any arguments)") "\n"
+                         (harness-ui-pending-test-step-line nil "every bash call (any command)") "\n"
+                         "   [Narrower] <  [Wider] >\n"
+                         "   [Allow] y  [Allow for session] s  [Always allow] a  [Deny] n  [Always deny] N")
+                 text))
+        (should-not (string-search "lasting answers:" text)))
+      (should (equal "programs" (harness-ui-pending--cover-id (harness-ui-pending-record sid "ladder"))))
+      (should (equal "every gcloud call (any arguments)" (harness-ui-pending-test-picked sid "ladder")))
+      ;; The lines are buttons with a tooltip that says what a click does.
+      (with-temp-buffer
+        (let ((harness-ui-session-id sid))
+          (harness-ui-pending--insert-permission (harness-ui-pending-record sid "ladder")))
+        (goto-char (point-min))
+        (search-forward "every bash call (any command)")
+        (should (equal "Make Allow for session, Always allow and Always deny cover every bash call (any command) (click)"
+                       (get-text-property (1- (point)) 'help-echo)))
+        (should (get-text-property (1- (point)) 'harness-ui-action))))))
+
+(ert-deftest harness-ui-pending-covers-are-all-the-panels ()
+  "The lines of covers and patterns belong to the panel, as every other line does.
+So the box's C-c . finds the panel's keys, and one request's panel ends
+where the next one's starts."
+  (harness-ui-pending-test-with
+    (let ((sid (harness-ui-pending-test-session)))
+      (harness-ui-pending-sync sid (list (harness-ui-pending-test-ladder-item "a")
+                                         (harness-ui-pending-test-item 'jail)
+                                         (harness-ui-pending-test-ladder-item "b")))
+      (with-temp-buffer
+        (let ((harness-ui-session-id sid))
+          (harness-ui-pending-insert-panels sid))
+        (should (string-search "Lasting answers (" (buffer-string)))
+        (should (string-search "Answers hold for:" (buffer-string)))
+        (should (cl-loop for i from (point-min) below (point-max)
+                         always (equal (get-text-property i 'harness-ui-pending)
+                                       (get-text-property i 'harness-compose-panel))))
+        ;; Each block is the panel of the request it is about.
+        (goto-char (point-min))
+        (dolist (pid '("a" "jail" "b"))
+          (re-search-forward (if (equal pid "jail") "Answers hold for:" "Lasting answers ("))
+          (should (equal pid (get-text-property (point) 'harness-ui-pending)))
+          (should (equal pid (get-text-property (point) 'harness-ui-pending-cover))))))))
+
+(ert-deftest harness-ui-pending-a-button-moves-the-cover-of-its-own-request ()
+  "[Narrower] and [Wider] belong to the request they are drawn in.
+Once it is answered they say so, rather than moving the cover of another
+request that waits: a stale click must not change what an answer to a
+different request will record."
+  (harness-ui-pending-test-with
+    (let* ((sid (harness-ui-pending-test-session))
+           (harness-ui-pending-session-id sid)
+           (cover (lambda (pid) (harness-ui-pending--cover-id (harness-ui-pending-record sid pid)))))
+      (harness-ui-pending-test-record-answers)
+      (harness-ui-pending-sync sid (list (harness-ui-pending-test-ladder-item "a")
+                                         (harness-ui-pending-test-ladder-item "b")
+                                         (harness-ui-pending-test-item 'tool)))
+      (harness-ui-pending-cover-wider "a")
+      (should (equal "tool" (funcall cover "a")))
+      (should (equal "programs" (funcall cover "b")))
+      ;; A request with nothing to choose between, named by its button.
+      (should (equal "That request has no covers to choose between"
+                     (cadr (should-error (harness-ui-pending-cover-wider "tool") :type 'user-error))))
+      ;; One answered already.
+      (harness-ui-pending-answer-permission sid "a" "allow-once")
+      (should (equal "That request was answered already"
+                     (cadr (should-error (harness-ui-pending-cover-narrower "a") :type 'user-error))))
+      (should (equal "programs" (funcall cover "b")))
+      ;; A key, which names no request, goes to the one that has covers.
+      (harness-ui-pending-cover-narrower)
+      (should (equal "subcommands" (funcall cover "b"))))))
+
+(ert-deftest harness-ui-pending-ladder-of-one-step-is-one-line ()
+  "A ladder of one step is that step on the header's line, without the buttons that move."
+  (harness-ui-pending-test-with
+    (let ((sid (harness-ui-pending-test-session)))
+      (harness-ui-pending-sync
+       sid (list (list :id "spawn" :kind "permission"
+                       :payload (list :title "Sub-agent: x" :tool "spawn_agent" :kind "meta"
+                                      :ladder '((:id "tool" :label "every spawn_agent call (any arguments)"))
+                                      :cover "tool" :options harness-ui-pending-test-options))))
+      (let ((text (harness-ui-pending-test-rendered sid "spawn")))
+        (should (string-search "   Lasting answers (s, a, N) cover: every spawn_agent call (any arguments)\n" text))
+        (should-not (string-search "[Narrower]" text))
+        (should-not (string-search "[Wider]" text)))
+      ;; Its tooltips and echo say it too; nothing to pick, so < and > type.
+      (let ((r (harness-ui-pending-record sid "spawn")))
+        (should (equal "Always allow every spawn_agent call (any arguments), in every session"
+                       (harness-ui-pending-answer-help r "allow-always")))
+        (should-not (cdr (harness-ui-pending--cover-steps r)))))))
+
+(ert-deftest harness-ui-pending-ladder-block-follows-the-answers-offered ()
+  "The block names the lasting answers a request offers, and only those.
+A policy can take Always allow and Always deny away: the keys of the
+header go with them, and a request with no lasting answer draws no block
+and no facts line either."
+  (harness-ui-pending-test-with
+    (let ((sid (harness-ui-pending-test-session)))
+      (harness-ui-pending-sync
+       sid (list (harness-ui-pending-test-ladder-item "some" '("allow-once" "allow-session" "deny-once"))
+                 (harness-ui-pending-test-ladder-item "none" '("allow-once" "deny-once"))))
+      (let ((some (harness-ui-pending-test-rendered sid "some")))
+        (should (string-search "   Lasting answers (s) cover:\n" some))
+        (should (string-search "[Allow] y  [Allow for session] s  [Deny] n  \n" some)))
+      (with-temp-buffer
+        (let ((harness-ui-session-id sid))
+          (harness-ui-pending--insert-permission (harness-ui-pending-record sid "some")))
+        (goto-char (point-min))
+        (search-forward "every bash call (any command)")
+        (should (equal "Make Allow for session cover every bash call (any command) (click)"
+                       (get-text-property (1- (point)) 'help-echo))))
+      (let ((none (harness-ui-pending-test-rendered sid "none")))
+        (should-not (string-search "Lasting answers" none))
+        (should-not (string-search "lasting answers" none))
+        (should-not (string-search "every gcloud" none))))))
+
+(ert-deftest harness-ui-pending-records-without-a-ladder-draw-as-before ()
+  "A request the harness sent no ladder for says what its answers cover as it always did.
+Its shell commands in a line of facts, its tool in the tooltips; it is
+no panel of covers, and < and > have nothing to move."
+  (harness-ui-pending-test-with
+    (let ((sid (harness-ui-pending-test-session)))
+      (harness-ui-pending-sync sid (list (harness-ui-pending-test-item 'tool)))
+      (let ((text (harness-ui-pending-test-rendered sid "tool"))
+            (r (harness-ui-pending-record sid "tool")))
+        (should (string-search "lasting answers: every ls call\n" text))
+        (should-not (string-search "Lasting answers (" text))
+        (should-not (string-search "[Narrower]" text))
+        (should-not (harness-ui-pending--ladder r))
+        (should-not (harness-ui-pending--cover-id r))
+        (should-not (harness-ui-pending--cover-label r))
+        (should-not (harness-ui-pending--cover-steps r))
+        (should (equal "Always allow every ls call, in every session"
+                       (harness-ui-pending-answer-help r "allow-always")))
+        (should-error (harness-ui-pending-set-cover sid "tool" "exact") :type 'user-error)
+        (let ((harness-ui-pending-session-id sid))
+          (should-error (harness-ui-pending-cover-wider "tool") :type 'user-error))))))
+
+(ert-deftest harness-ui-pending-picked-cover-is-what-the-answers-say ()
+  "Picking a step moves the mark, the tooltips and the echo area with it.
+The first lasting answer carries the id of the picked step; one that
+records nothing carries none."
+  (harness-ui-pending-test-with
+    (let* ((sid (harness-ui-pending-test-session))
+           (hooked 0)
+           (hook (lambda (_sid) (cl-incf hooked))))
+      (harness-ui-pending-sync sid (list (harness-ui-pending-test-ladder-item)))
+      (let ((r (lambda () (harness-ui-pending-record sid "ladder"))))
+        (add-hook 'harness-ui-pending-changed-hook hook)
+        (unwind-protect
+            (progn
+              ;; What the answers start on: the step the harness named.
+              (should (equal "Always allow every gcloud call (any arguments), in every session"
+                             (harness-ui-pending-answer-help (funcall r) "allow-always")))
+              (should (equal "Allow every gcloud call (any arguments) for this session"
+                             (harness-ui-pending-answer-help (funcall r) "allow-session")))
+              (should (equal "Always deny every gcloud call (any arguments)"
+                             (harness-ui-pending-answer-help (funcall r) "deny-always")))
+              ;; What records nothing says the same as ever.
+              (should (equal "Allow this call, this time" (harness-ui-pending-answer-help (funcall r) "allow-once")))
+              (should (equal "Deny this call" (harness-ui-pending-answer-help (funcall r) "deny-once")))
+              (harness-ui-pending-set-cover sid "ladder" "exact")
+              (should (= 1 hooked))
+              (should (equal "exact" (harness-ui-pending--cover-id (funcall r))))
+              (should (equal "every bash call with this exact command" (harness-ui-pending-test-picked sid "ladder")))
+              (should (equal "Always allow every bash call with this exact command, in every session"
+                             (harness-ui-pending-answer-help (funcall r) "allow-always")))
+              (should (equal "Allowed every bash call with this exact command for this session"
+                             (harness-ui-pending--message-for (funcall r) "allow-session")))
+              (should (equal "Always allowed every bash call with this exact command"
+                             (harness-ui-pending--message-for (funcall r) "allow-always")))
+              (should (equal "Always denied every bash call with this exact command"
+                             (harness-ui-pending--message-for (funcall r) "deny-always")))
+              (should (equal "Allowed this call" (harness-ui-pending--message-for (funcall r) "allow-once")))
+              ;; Picking the one already picked changes nothing, and redraws nothing.
+              (harness-ui-pending-set-cover sid "ladder" "exact")
+              (should (= 1 hooked))
+              ;; A step the ladder lacks, or a request that is gone, is refused.
+              (should-error (harness-ui-pending-set-cover sid "ladder" "nowhere") :type 'user-error)
+              (should-error (harness-ui-pending-set-cover sid "gone" "exact") :type 'user-error)
+              (should (equal "exact" (harness-ui-pending--cover-id (funcall r)))))
+          (remove-hook 'harness-ui-pending-changed-hook hook))))))
+
+(ert-deftest harness-ui-pending-pick-survives-the-request-arriving-again ()
+  "The session's pending list brings a request again: the cover picked stays.
+While the ladder still has it; a ladder that lost it goes back to where
+the answers start, and so does one that names no such step."
+  (harness-ui-pending-test-with
+    (let* ((sid (harness-ui-pending-test-session))
+           (item (harness-ui-pending-test-ladder-item))
+           (again (lambda (item)
+                    (harness-ui-pending-add sid (harness-ui-pending--record-of-item item))
+                    (harness-ui-pending-record sid "ladder"))))
+      (harness-ui-pending-sync sid (list item))
+      (harness-ui-pending-set-cover sid "ladder" "tool")
+      (should (equal "tool" (harness-ui-pending--cover-id (funcall again item))))
+      (should (equal "tool" (plist-get (harness-ui-pending-record sid "ladder") :picked-cover)))
+      ;; A ladder without the step picked: back to the harness's own.
+      (let ((narrower (copy-tree item)))
+        (setf (plist-get (plist-get narrower :payload) :ladder)
+              '((:id "exact" :label "every bash call with this exact command")
+                (:id "programs" :label "every gcloud call (any arguments)")))
+        (should (equal "programs" (harness-ui-pending--cover-id (funcall again narrower))))
+        (should-not (plist-get (harness-ui-pending-record sid "ladder") :picked-cover)))
+      ;; A cover the harness names that its ladder lacks: the narrowest.
+      (let ((odd (copy-tree item)))
+        (setf (plist-get (plist-get odd :payload) :cover) "nowhere")
+        (should (equal "exact" (harness-ui-pending--cover-id (funcall again odd))))))))
+
+(ert-deftest harness-ui-pending-ladder-comes-over-the-wire-as-a-vector ()
+  "A ladder an ACP client sends in `_harness' is a vector; it is read like a list.
+The request that arrives over ACP keeps its ladder and its cover, and
+its answer goes back through the function that holds it, the picked
+cover in its `_harness'; what records nothing carries none."
+  (harness-ui-pending-test-with
+    (let* ((answers nil)
+           (respond (lambda (r) (push r answers) t))
+           (drawn (list "drawn"))
+           (drawn-p (lambda (sid) (member sid drawn))))
+      (add-hook 'harness-ui-pending-drawn-predicates drawn-p)
+      (unwind-protect
+          (progn
+            (should (harness-ui-pending--on-permission
+                     (list :sessionId "drawn"
+                           :toolCall (list :toolCallId "c1" :title "Bash: ls -la" :kind "execute"
+                                           :rawInput '(:command "ls -la"))
+                           :options harness-acp--permission-options
+                           :_harness (list :pendingId "p9" :tool "bash" :commands '(("ls")) :covers "ls"
+                                           :ladder (vector (list :id "exact" :label "every bash call with this exact command")
+                                                           (list :id "programs" :label "every ls call (any arguments)")
+                                                           (list :id "tool" :label "every bash call (any command)"))
+                                           :cover "programs"))
+                     respond))
+            (let ((r (harness-ui-pending-record "drawn" "p9")))
+              (should (equal "programs" (plist-get r :cover)))
+              (should (= 3 (length (harness-ui-pending--ladder r))))
+              (should (equal "programs" (harness-ui-pending--cover-id r)))
+              (should (equal '(("exact" "every bash call with this exact command")
+                               ("programs" "every ls call (any arguments)")
+                               ("tool" "every bash call (any command)"))
+                             (harness-ui-pending--cover-steps r))))
+            (harness-ui-pending-set-cover "drawn" "p9" "exact")
+            (harness-ui-pending-answer-permission "drawn" "p9" "allow-always")
+            (should (equal '((:outcome (:outcome "selected" :optionId "allow-always")
+                                       :_harness (:cover "exact")))
+                           answers))
+            ;; An answer that records nothing carries no cover.
+            (should (harness-ui-pending--on-permission
+                     (list :sessionId "drawn"
+                           :toolCall (list :toolCallId "c2" :title "Bash: ls" :kind "execute")
+                           :options harness-acp--permission-options
+                           :_harness (list :pendingId "p10" :tool "bash"
+                                           :ladder (list (list :id "tool" :label "every bash call (any command)"))
+                                           :cover "tool"))
+                     respond))
+            (harness-ui-pending-answer-permission "drawn" "p10" "allow-once")
+            (should (equal '(:outcome (:outcome "selected" :optionId "allow-once")) (car answers))))
+        (remove-hook 'harness-ui-pending-drawn-predicates drawn-p)))))
+
+(ert-deftest harness-ui-pending-answers-over-the-method-carry-the-cover ()
+  "A request only the session's pending list knows is answered over `permission/answer'.
+A lasting answer carries the id of the picked cover next to its option,
+the three of them; Allow and Deny are the plain option, which records
+nothing for a cover to say."
+  (harness-ui-pending-test-with
+    (let ((sid (harness-ui-pending-test-session)))
+      (harness-ui-pending-test-record-answers)
+      (dolist (c '(("allow-session" . (:option "allow-session" :cover "exact"))
+                   ("allow-always" . (:option "allow-always" :cover "exact"))
+                   ("deny-always" . (:option "deny-always" :cover "exact"))
+                   ("allow-once" . "allow-once")
+                   ("deny-once" . "deny-once")))
+        (let ((pid (concat "ladder-" (car c))))
+          (harness-ui-pending-sync sid (list (harness-ui-pending-test-ladder-item pid)))
+          (harness-ui-pending-set-cover sid pid "exact")
+          (setq harness-ui-pending-test-answers nil)
+          (harness-ui-pending-answer-permission sid pid (car c))
+          (harness-test-wait (lambda () harness-ui-pending-test-answers) 5 (format "the %s answer" (car c)))
+          (should (equal (list 'permission sid pid (cdr c)) (car harness-ui-pending-test-answers))))))))
+
+(defun harness-ui-pending-test-popout-panel (sid)
+  "Open the popout of SID's requests and return its buffer, point on the panel."
+  (harness-ui-pending-popout sid)
+  (let ((buf (harness-ui-popout-buffer (list 'pending sid))))
+    (with-current-buffer buf
+      (goto-char (point-min))
+      (search-forward "Permission"))
+    buf))
+
+(ert-deftest harness-ui-pending-keys-move-the-cover-on-the-panel ()
+  "< picks the next narrower line, > the next wider one, with point on the panel.
+At either end nothing moves, and the echo area says which end it is.
+Point goes to the picked line again after the popout draws itself anew,
+so the keys go on working; the lasting answers hold for the new pick."
+  (harness-ui-pending-test-with
+    (let* ((sid (harness-ui-pending-test-session))
+           (buf (progn (harness-ui-pending-test-record-answers)
+                       (harness-ui-pending-sync sid (list (harness-ui-pending-test-ladder-item)))
+                       (harness-ui-pending-test-popout-panel sid)))
+           (shown nil)
+           (press (lambda (key)
+                    (setq shown nil)
+                    (cl-letf (((symbol-function 'message)
+                               (lambda (fmt &rest args) (when fmt (push (apply #'format fmt args) shown)))))
+                      (call-interactively (key-binding (kbd key))))
+                    (car shown))))
+      (with-current-buffer buf
+        (should (eq 'harness-ui-pending-cover-narrower (key-binding (kbd "<"))))
+        (should (eq 'harness-ui-pending-cover-wider (key-binding (kbd ">"))))
+        (should (equal "Lasting answers now cover every bash call (any command)" (funcall press ">")))
+        (should (equal "tool" (harness-ui-pending--cover-id (harness-ui-pending-record sid "ladder"))))
+        ;; Point went back to the picked line, which is on the panel.
+        (should (equal "ladder" (get-text-property (point) 'harness-ui-pending-selected)))
+        (should (equal "ladder" (get-text-property (point) 'harness-ui-pending)))
+        (should (equal "Already the widest cover: every bash call (any command)" (funcall press ">")))
+        (should (equal "tool" (harness-ui-pending--cover-id (harness-ui-pending-record sid "ladder"))))
+        (should (string-search (harness-ui-pending-test-step-line t "every bash call (any command)") (buffer-string)))
+        (should (equal "Lasting answers now cover every gcloud call (any arguments)" (funcall press "<")))
+        (should (equal "Lasting answers now cover every gcloud compute instances call (any arguments)"
+                       (funcall press "<")))
+        (should (equal "Lasting answers now cover every bash call with this exact command" (funcall press "<")))
+        (should (equal "Already the narrowest cover: every bash call with this exact command" (funcall press "<")))
+        (should (equal "exact" (harness-ui-pending--cover-id (harness-ui-pending-record sid "ladder"))))
+        ;; The end a pick cannot go on to has its button dim.
+        (goto-char (point-min))
+        (search-forward "[Narrower]")
+        (should (harness-ui-pending-test-face-p (- (point) 3) 'harness-dim-face))
+        (search-forward "[Wider]")
+        (should (harness-ui-pending-test-face-p (- (point) 3) 'button))
+        (should-not (harness-ui-pending-test-face-p (- (point) 3) 'harness-dim-face))
+        ;; The panel still answers: Always allow holds for what is picked.
+        (goto-char (point-min))
+        (search-forward "Permission")
+        (call-interactively (key-binding (kbd "a"))))
+      (harness-test-wait (lambda () harness-ui-pending-test-answers) 5 "the lasting answer")
+      (should (equal (list 'permission sid "ladder" '(:option "allow-always" :cover "exact"))
+                     (car harness-ui-pending-test-answers))))))
+
+(ert-deftest harness-ui-pending-clicking-a-line-picks-it ()
+  "A click on a line of the block, or RET on it, picks that cover.
+So does a click on [Narrower] and [Wider], which the keys do."
+  (harness-ui-pending-test-with
+    (let* ((sid (harness-ui-pending-test-session))
+           (buf (progn (harness-ui-pending-sync sid (list (harness-ui-pending-test-ladder-item)))
+                       (harness-ui-pending-test-popout-panel sid))))
+      (with-current-buffer buf
+        (goto-char (point-min))
+        (search-forward "every gcloud compute instances call")
+        (harness-ui-action-push)
+        (should (equal "subcommands" (harness-ui-pending--cover-id (harness-ui-pending-record sid "ladder"))))
+        (should (equal "every gcloud compute instances call (any arguments)" (harness-ui-pending-test-picked sid "ladder")))
+        (should (equal "ladder" (get-text-property (point) 'harness-ui-pending-selected)))
+        ;; The popout is drawn anew after each click: find the button again.
+        (let ((click (lambda (button)
+                       (goto-char (point-min))
+                       (search-forward button)
+                       (backward-char 2)
+                       (harness-ui-action-push))))
+          (funcall click "[Wider]")
+          (should (equal "programs" (harness-ui-pending--cover-id (harness-ui-pending-record sid "ladder"))))
+          (funcall click "[Narrower]")
+          (funcall click "[Narrower]")
+          (should (equal "exact" (harness-ui-pending--cover-id (harness-ui-pending-record sid "ladder")))))))))
+
+(ert-deftest harness-ui-pending-cover-keys-type-in-the-box-and-press-from-it ()
+  "In the compose box < and > type; C-c . then the key moves the cover.
+On a panel with nothing to pick between they type too, into the box."
+  (harness-ui-pending-test-with
+    (let* ((sid (harness-ui-pending-test-session))
+           ;; A popout has a box only when a question waits in it.
+           (buf (progn (harness-ui-pending-test-record-answers)
+                       (harness-ui-pending-sync
+                        sid (list (list :id "q1" :kind "question"
+                                        :payload (list :question "Which colour?" :options '("red" "green")))
+                                  (harness-ui-pending-test-ladder-item)))
+                       (harness-ui-pending-test-popout-panel sid))))
+      (with-current-buffer buf
+        (goto-char harness-compose-end)
+        (insert "x")
+        ;; Typed in the box, they are text.
+        (execute-kbd-macro (kbd "<"))
+        (should (equal "x<" (harness-compose-text)))
+        (should (equal "programs" (harness-ui-pending--cover-id (harness-ui-pending-record sid "ladder"))))
+        (goto-char (+ harness-compose-start 1))
+        ;; Pressed from the box, they move the pick; point and draft stay.
+        (execute-kbd-macro (kbd "C-c . >"))
+        (should (equal "tool" (harness-ui-pending--cover-id (harness-ui-pending-record sid "ladder"))))
+        (should (equal "x<" (harness-compose-text)))
+        (should (= (point) (+ harness-compose-start 1)))
+        (execute-kbd-macro (kbd "C-c . <"))
+        (should (equal "programs" (harness-ui-pending--cover-id (harness-ui-pending-record sid "ladder")))))
+      ;; Where the panel has no covers to pick between, the key types.
+      (harness-ui-pending-sync sid (list (harness-ui-pending-test-item 'tool)))
+      (harness-ui-pending-answer-permission sid "ladder" "allow-once")
+      (should-not (harness-ui-pending-record sid "ladder"))
+      (let ((buf (harness-ui-popout-buffer (list 'pending sid))))
+        (with-current-buffer buf
+          (goto-char (point-min))
+          (search-forward "Permission")
+          (should (eq 'harness-ui-pending-cover-wider (key-binding (kbd ">"))))
+          (should-not (harness-ui-pending--steps-here-p))
+          (execute-kbd-macro (kbd ">"))
+          (should (equal "x<>" (harness-compose-text))))))))
+
+;;;; The patterns a prompt about a path is answered for
+
+(ert-deftest harness-ui-pending-pattern-block-lists-the-patterns-around-its-own ()
+  "A request about a path outside lists its patterns as lines, narrowest first.
+The request's own is noted as the default and picked, and [Edit] types
+another; a pattern the user typed that is none of them is a line of its
+own, noted as edited, and the pattern the answers hold for."
+  (harness-ui-pending-test-with
+    (let ((sid (harness-ui-pending-test-session)))
+      (harness-ui-pending-sync sid (list (harness-ui-pending-test-item 'jail)))
+      (should (string-search
+               (concat "   Answers hold for:\n"
+                       (harness-ui-pending-test-step-line nil "/srv/notes/todo.org") "\n"
+                       (harness-ui-pending-test-step-line nil "/srv/notes/*.org") "\n"
+                       (harness-ui-pending-test-step-line t "/srv/notes/**" "default") "\n"
+                       (harness-ui-pending-test-step-line nil "/srv/**") "\n"
+                       "   [Edit] e  [Narrower] <  [Wider] >\n"
+                       "   [Allow] y")
+               (harness-ui-pending-test-rendered sid "jail")))
+      (should-not (string-search "pattern:" (harness-ui-pending-test-rendered sid "jail")))
+      (should (equal "/srv/notes/**" (harness-ui-pending--cover-selected (harness-ui-pending-record sid "jail"))))
+      ;; Typed, and none of the others.
+      (harness-ui-pending-set-pattern sid "jail" "/srv/notes/sub/*.org")
+      (should (string-search
+               (concat (harness-ui-pending-test-step-line nil "/srv/notes/**" "default") "\n"
+                       (harness-ui-pending-test-step-line nil "/srv/**") "\n"
+                       (harness-ui-pending-test-step-line t "/srv/notes/sub/*.org" "edited") "\n")
+               (harness-ui-pending-test-rendered sid "jail")))
+      ;; Typed, and one of them: picked, not edited text.
+      (harness-ui-pending-set-pattern sid "jail" "/srv/notes/*.org")
+      (should (equal "/srv/notes/*.org" (harness-ui-pending-test-picked sid "jail")))
+      (should-not (string-search "edited" (harness-ui-pending-test-rendered sid "jail")))
+      ;; The tooltips name the pattern, as they did.
+      (should (equal "Allow /srv/notes/*.org for this session"
+                     (harness-ui-pending-answer-help (harness-ui-pending-record sid "jail") "allow-session"))))))
+
+(ert-deftest harness-ui-pending-pattern-lines-pick-the-pattern ()
+  "A click on a line, or < and >, makes that the pattern the answers hold for.
+The request's own goes back to being no edit, as an empty answer to the
+minibuffer did, and the answer carries the pattern picked."
+  (harness-ui-pending-test-with
+    (let* ((sid (harness-ui-pending-test-session))
+           (buf (progn (harness-ui-pending-test-record-answers)
+                       (harness-ui-pending-sync sid (list (harness-ui-pending-test-item 'jail)))
+                       (harness-ui-pending-test-popout-panel sid)))
+           (r (lambda () (harness-ui-pending-record sid "jail"))))
+      (with-current-buffer buf
+        (goto-char (point-min))
+        (search-forward "/srv/notes/*.org")
+        (harness-ui-action-push)
+        (should (equal "/srv/notes/*.org" (plist-get (funcall r) :edited-pattern)))
+        (should (equal "jail" (get-text-property (point) 'harness-ui-pending-selected)))
+        (call-interactively (key-binding (kbd ">")))
+        (should (equal "/srv/notes/**" (harness-ui-pending--cover-selected (funcall r))))
+        (should-not (plist-get (funcall r) :edited-pattern))
+        (call-interactively (key-binding (kbd ">")))
+        (should (equal "/srv/**" (plist-get (funcall r) :edited-pattern)))
+        (let ((shown nil))
+          (cl-letf (((symbol-function 'message) (lambda (fmt &rest args) (setq shown (apply #'format fmt args)))))
+            (call-interactively (key-binding (kbd ">"))))
+          (should (equal "Already the widest pattern: /srv/**" shown)))
+        (call-interactively (key-binding (kbd "<")))
+        (call-interactively (key-binding (kbd "<")))
+        (call-interactively (key-binding (kbd "<")))
+        (should (equal "/srv/notes/todo.org" (plist-get (funcall r) :edited-pattern)))
+        (goto-char (point-min))
+        (search-forward "Permission")
+        (call-interactively (key-binding (kbd "s"))))
+      (harness-test-wait (lambda () harness-ui-pending-test-answers) 5 "the answer")
+      ;; The pattern, as the minibuffer's answer carried it, and no cover.
+      (should (equal (list 'permission sid "jail" '(:option "allow-session" :pattern "/srv/notes/todo.org"))
+                     (car harness-ui-pending-test-answers))))))
+
+(ert-deftest harness-ui-pending-pattern-block-of-one-line ()
+  "A request whose pattern has nothing around it is one line, with [Edit] alone."
+  (harness-ui-pending-test-with
+    (let ((sid (harness-ui-pending-test-session)))
+      (harness-ui-pending-sync
+       sid (list (list :id "root" :kind "permission"
+                       :payload (list :title "Access /" :tool "request_directory_access" :kind "meta"
+                                      :dir "/" :pattern "/**" :options harness-ui-pending-test-options))))
+      (let ((text (harness-ui-pending-test-rendered sid "root")))
+        (should (string-search "   Answers hold for: /**  [Edit] e\n" text))
+        (should-not (string-search "[Narrower]" text))
+        (should-not (cdr (harness-ui-pending--cover-steps (harness-ui-pending-record sid "root"))))))))
 
 (provide 'harness-ui-pending-test)
 ;;; harness-ui-pending-test.el ends here

@@ -240,7 +240,7 @@ price of carrying on is on its row below."
                 (format "\nThe conversation then holds ~%s tokens." (harness-format-tokens after))
               "")
             (format "\nPress %c on this panel, or click%s."
-                    key (if (equal choice "hold") "" (format "; %c makes it the default" (upcase key))))
+                    key (if (equal choice "hold") "" (format "; %c makes it the default of every session, taken without asking" (upcase key))))
             (if (equal choice (plist-get info :default)) "\nThe default, taken when nobody is asked." ""))))
 
 (defun harness-ui-cowboy--rows (session-id pid info)
@@ -278,7 +278,7 @@ price of carrying on is on its row below."
    (propertize "   " 'wrap-prefix "   ")
    (harness-ui-kbd " B ") " " (harness-ui-kbd " S ") " " (harness-ui-kbd " T ") " "
    (harness-ui-kbd " F ") " " (harness-ui-kbd " C ") " " (harness-ui-kbd " I ")
-   (propertize " the same, from now on without asking\n" 'face 'harness-dim-face)
+   (propertize " the same, in every session from now on, without asking\n" 'face 'harness-dim-face)
    (if (harness-json-true-p (plist-get info :history))
        (propertize "   Whichever you choose, the model can search and read the conversation it leaves out (session_history).\n"
                    'face 'harness-dim-face 'wrap-prefix "   ")

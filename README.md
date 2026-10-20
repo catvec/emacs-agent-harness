@@ -647,8 +647,10 @@ to the compose box, including `?`, so open the menu with `C-c h ?` or
 the `[menu]` button in the header line. A region selected in the
 transcript is dropped on the way, not deleted. On a request's panel the
 panel's own keys answer it instead: a question's digits, up to its
-number of options, and a permission's `y`, `s`, `a`, `n` and `N`, and
-`e` when it has a pattern to edit. In the compose box those keys type,
+number of options, and a permission's `y`, `s`, `a`, `n` and `N`,
+`<` and `>` when it lists what a lasting answer can cover (a narrower
+or a wider cover), and `e` when it has a pattern to edit. In the compose
+box those keys type,
 so `C-c .` is how you aim a key at a panel from there (see
 [Pressing a panel's key from the compose box](#pressing-a-panels-key-from-the-compose-box)).
 
@@ -943,44 +945,98 @@ as `~/.emacs.d/**`, rather than one directory of it after another. When
 there is no repository, or its root is or holds your home directory or
 the session's own working directory, it is the directory that holds
 the file, or the directory itself, such as `~/notes/**`; for the
-agent's own request, the directory it asked for. The panel shows the
-pattern on its own line. Press `e` on the panel, `C-c C-p`, or click
-`[Edit]` to change it in the minibuffer, either more specific
-(`~/notes/*.org`, a subdirectory, one file) or less (`~/**`). `*`
-matches within a name and `**` across directories, and `M-n` offers
-patterns around the request's own, from the file itself up to the
-directory above the pattern's. The answer grants or denies the
-pattern: once (for the one call, or until the turn ends for the agent's
-own request), for the session, or always (as an entry of
+agent's own request, the directory it asked for. The panel lists the
+patterns around it, narrowest first -- the file itself, the files of its
+kind in its directory, the directories up to the repository root, and
+the directory above that -- with the one the answers hold for marked, so
+you can start narrow and go wider only when the work needs it. Click
+another one, or press `<` for a narrower pattern and `>` for a wider
+one, on the panel. `[Edit]`, `e` on the panel or `C-c C-p` types any
+pattern in the minibuffer instead, more specific (`~/notes/*.org`, a
+subdirectory, one file) or less (`~/**`): `*` matches within a name and
+`**` across directories, and `M-n` offers the same patterns. A pattern
+you typed that is none of them joins the list. The answer grants or
+denies the pattern: once (for the one call, or until the turn ends for
+the agent's own request), for the session, or always (as an entry of
 `harness-allowed-directories`, or a rule in `harness-perms-rules` for
-*Always deny*). Any other request, such as the permission mode asking
-about a file edit or a command, or the auto-mode judge objecting to
-one, is about the call itself and shows no pattern: for a tool that
-runs no command, *Allow for session*, *Always allow* and *Always deny*
-hold for every call of that tool, and a call outside the session's
-directories still asks for the directory first.
+*Always deny*).
 
-For a shell command those answers are about what the command line
-runs, not about bash: the harness reads the line into a syntax tree of
-the commands it runs -- through pipes, `&&` and `;`, subshells,
-`$(...)` and backquotes, `if`, loops and `case`, and after a wrapper
-such as `sudo`, `env` or `xargs` -- and the panel says what a lasting
-answer would cover, on a line of its own and in the buttons' tooltips,
-such as `lasting answers: every gcloud and gsutil call`. A single
-command gives its program, so always allowing `gcloud compute instances
-list --project p` lets your other `gcloud` calls run without asking,
-while `rm`, `make` and unrelated commands still ask. A line with
+**What a lasting answer covers.** Any other request, such as the
+permission mode asking about a file edit or a command, or the auto-mode
+judge objecting to one, is about the call itself, and a call outside the
+session's directories still asks for the directory first. *Allow for
+session*, *Always allow* and *Always deny* decide later calls too, so
+the panel says which ones before you answer: it lists what they can
+cover, from the narrowest to the widest, each worded by what it leaves
+free (`(any arguments)`, `(any path)`), with the one they hold for
+marked.
+
+```
+ Permission  Bash: gcloud compute instances list --project p
+   kind: exec   runs in: ~/proj
+   command: gcloud compute instances list --project p
+   Lasting answers (s, a, N) cover:
+     ○ every bash call whose command is exactly "gcloud compute instances list --project p"
+     ○ every gcloud compute instances call (any arguments)
+     ● every gcloud call (any arguments)
+     ○ every bash call (any command)
+   [Narrower] <  [Wider] >
+   [Allow] y  [Allow for session] s  [Always allow] a  [Deny] n  [Always deny] N
+```
+
+Click a line, or press `<` for a narrower cover and `>` for a wider one
+(`C-c .` then the key, from the compose box). The tooltips of the three
+buttons, the echo area after the answer and the note it leaves in the
+chat (below) all name the cover chosen, such as `Always allow every
+gcloud compute instances call (any arguments), in every session`.
+*Allow* records nothing, whichever cover is marked. What the covers are
+depends on the call:
+
+| The call | Covers, narrowest first |
+|---|---|
+| A shell command | that exact command line; the programs it runs with the subcommands its commands share (`gcloud compute instances`), any arguments; its programs alone (`gcloud`); every call of the tool |
+| A call that reads or writes a file | that file; everything under its directory; everything under the project (the session's working directory or worktree); every call of the tool, any path |
+| Any other call | its exact arguments (a `web_fetch` of that `url`), when it has a few; every call of the tool, any arguments |
+
+Covers that would hold the same calls are one, so `ls -la` has the exact
+line, `ls` and `bash`; a command line too long to pin, or that passes a
+list or an object, has no exact cover; and files on different hosts
+have only the tool. The exact cover of a shell command pins the command
+line and the other texts it passes, a directory or a host, but not a
+timeout. A call about a file never reaches outside the project because
+of a cover: the directory jail still asks about the directory first.
+
+The panel starts on what an answer has always held for: the programs a
+shell command runs, the whole tool for any other call. To start from the
+narrowest instead and go wider only when the work needs it, for
+instance when the sandbox is in the way, set `harness-perms-default-cover`
+to `narrowest` (*Files and safety* on the settings page): every
+lasting answer then holds for the exact call or file unless you step
+wider. A policy can set it too (see [docs/policy.md](docs/policy.md)).
+
+For a shell command the covers are about what the command line runs,
+not about bash: the harness reads the line into a syntax tree of the
+commands it runs -- through pipes, `&&` and `;`, subshells, `$(...)`
+and backquotes, `if`, loops and `case`, and after a wrapper such as
+`sudo`, `env` or `xargs`. A single command gives its program as the
+usual cover, so always allowing `gcloud compute instances list
+--project p` lets your other `gcloud` calls run without asking, while
+`rm`, `make` and unrelated commands still ask; step down once for
+`gcloud compute instances`, or twice for that very line. A line with
 several commands of the same program keeps the words they share, up to
 three and never an argument, so two `gcloud compute instances` commands
 give `gcloud compute instances` rather than all of gcloud. A rule is a
 prefix: it matches a later command that starts with those words, such as
 `gcloud compute instances delete`, not the arguments the call happened
-to pass. A line that also runs something else needs that command covered
-too, so allowing
+to pass; only the exact cover pins them, as a rule of its own, `(:tool
+"bash" :input (:command "make test") :behavior allow)`, whose `:input`
+names arguments a call must pass with those very values. A line that
+also runs something else needs that command covered too, so allowing
 `gcloud ... && rm -rf build` does not let a later `gcloud ... && rm -rf
-~` run. A command the reader cannot read keeps the whole-tool answer,
-and the note says so. *Always deny* is scoped the same way: denying a
-`rm` call refuses later calls that run `rm`, not every command.
+~` run. A command the reader cannot read has the exact cover and the
+whole tool. *Always deny* is scoped the same way: denying a `rm` call
+refuses later calls that run `rm`, not every command, unless you choose
+the wider cover.
 
 An answer that lasts -- *Allow for session*, *Always allow*, *Always
 deny* -- leaves a note in the session's chat, under the call it

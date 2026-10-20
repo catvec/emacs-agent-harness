@@ -47,6 +47,15 @@ panel is a panel of the box (`harness-compose-panel`): its C-c . reads
 a key and presses it on the nearest panel that has it
 (`harness-compose-panel-key`), and every panel says so in a dim line.
 
+An answer that lasts (Allow for session, Always allow, Always deny)
+records a rule, and the panel says what the rule will cover before it
+is given (see "What the lasting answers cover"): a prompt about a call
+lists the covers the harness worked out for it, from the narrowest
+(this exact command) to the widest (every call of the tool), and one
+about a path outside the allowed directories lists the patterns around
+its own.  A click on a line, or < and >, picks the one the answers hold
+for; the least permissive stays one step away.
+
 ## Provides
 
 ### Hooks
@@ -57,6 +66,8 @@ a key and presses it on the nearest panel that has it
 ### Commands
 
 - `harness-ui-pending-allow-newest` — Answer the permission request at point, else the newest, with Allow.
+- `harness-ui-pending-cover-narrower` — Make the answers of permission request PID cover less: the next narrower line.
+- `harness-ui-pending-cover-wider` — Make the answers of permission request PID cover more: the next wider line.
 - `harness-ui-pending-deny-newest` — Answer the permission request at point, else the newest, with Deny.
 - `harness-ui-pending-edit-pattern` — Edit the glob pattern the permission request PID is answered for.
 - `harness-ui-pending-next-diagram` — Show the diagram of the next option of the question waiting with diagrams.

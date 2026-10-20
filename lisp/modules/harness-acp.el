@@ -1610,15 +1610,17 @@ That is `harness-acp--forwarded-events' and `harness-acp-extra-events'."
         (error (harness-log 'warn "acp: %s failed: %S" method err)))
     (harness-log 'warn "acp: no %s method to deliver the answer to" method)))
 
-(defun harness-acp--option-answer (option &optional pattern)
+(defun harness-acp--option-answer (option &optional pattern cover)
   "Turn a permission OPTION id like \"allow-session\" into an answer plist.
 PATTERN, a string, is the pattern the client answered for, when it
-edited the request's."
+edited the request's.  COVER, a string, is the id of the step of the
+request's `ladder' of covers its lasting answer holds for."
   (let* ((parts (split-string (format "%s" (or option "deny-once")) "-"))
          (behavior (if (equal (car parts) "allow") 'allow 'deny))
          (scope (intern (or (cadr parts) "once"))))
     (append (list :behavior behavior :scope (if (memq scope '(once session always)) scope 'once))
-            (and (stringp pattern) (not (string-blank-p pattern)) (list :pattern pattern)))))
+            (and (stringp pattern) (not (string-blank-p pattern)) (list :pattern pattern))
+            (and (stringp cover) (not (string-blank-p cover)) (list :cover cover)))))
 
 (defun harness-acp--offered-options (payload)
   "Return the ACP options for a permission request with PAYLOAD.
@@ -1639,7 +1641,14 @@ outcome.  A shell command's request carries where it runs in
 `_harness.cwd', in `_harness.paths' what it is about, and, when the
 harness read its command line, the commands its lasting answers would
 cover in `_harness.commands', with a few words for them in
-`_harness.covers' (see `harness-perms--command-rule-prefixes')."
+`_harness.covers' (see `harness-perms--command-rule-prefixes').
+
+A request about a call carries the covers its lasting answers can hold
+for in `_harness.ladder', narrowest first, each {id, label}, and the
+one they start on in `_harness.cover' (see `harness-perms--cover-ladder'):
+a client that lets the user choose answers with the id of the chosen
+step in `_harness.cover' of its result, next to the outcome; one that
+does not gets the step it starts on."
   (let* ((payload (or (plist-get pending :payload) pending))
          (pid (plist-get pending :id)))
     (harness-acp--request-clients
@@ -1658,13 +1667,17 @@ cover in `_harness.commands', with a few words for them in
                            :pattern (plist-get payload :pattern)
                            :commands (plist-get payload :commands)
                            :covers (plist-get payload :covers)
+                           :ladder (plist-get payload :ladder)
+                           :cover (plist-get payload :cover)
                            :reason (plist-get payload :reason)))
      (lambda (result)
        (let* ((outcome (plist-get result :outcome))
+              (extra (plist-get result :_harness))
               (selected (equal (format "%s" (plist-get outcome :outcome)) "selected"))
               (answer (if selected
                           (harness-acp--option-answer (plist-get outcome :optionId)
-                                                      (plist-get (plist-get result :_harness) :pattern))
+                                                      (plist-get extra :pattern)
+                                                      (plist-get extra :cover))
                         (list :behavior 'deny :scope 'once))))
          (harness-acp--call-safely 'permission/answer sid pid answer))))))
 

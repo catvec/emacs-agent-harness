@@ -4982,8 +4982,10 @@ The transcript is read-only; the compose box at the bottom is editable.
 Typing anywhere goes to the box, `?' included, so the harness menu is
 on \\[harness-menu] here, or the [menu] button in the header line.  On
 a request's panel its own keys answer it instead: a question's digits,
-up to its number of options, and a permission's y, s, a, n and N, and
-e when it has a pattern to edit.  In the box those keys type, so
+up to its number of options, and a permission's y, s, a, n and N, e
+when it has a pattern to edit, and < and > when it lists covers or
+patterns to choose between: a narrower or a wider one for the answers
+that last.  In the box those keys type, so
 \\[harness-compose-panel-key] and then a key presses it on the nearest panel above the box that
 has it, point coming back to the box (a numeric argument takes the Nth
 panel up): \\[harness-compose-panel-key] 1 picks a question's first option, \\[harness-compose-panel-key] y allows a

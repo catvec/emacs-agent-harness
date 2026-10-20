@@ -2709,8 +2709,14 @@ non-interactive session it stays a denial.
 - Session directory grants are stored on the session record
   (`:allowed-dirs`), so they survive restarts and forks inherit them.
 - Rules are plists `(:tool NAME-or-nil :kind KIND-or-nil :path PATTERN-or-nil
-  :commands COMMANDS-or-nil :behavior allow|deny)`; session rules live
-  in memory, always-rules in `harness-perms-rules`.  A rule with a
+  :commands COMMANDS-or-nil :input ARGUMENTS-or-nil :behavior allow|deny)`;
+  session rules live in memory, always-rules in `harness-perms-rules`.
+  A rule with `:input`, a plist of arguments such as `(:command "make
+  test")`, applies to a call that passes each of them with the very same
+  value (`equal`), its other arguments free, allow and deny alike
+  (`harness-perms--input-matches-p`); an `:input` that is no plist of
+  keyword arguments holds no call, so a rule that is broken is never one
+  that holds every call.  A rule with a
   `:path` (absolute, or relative to the session's cwd) applies to calls
   with paths only: an allow rule when the pattern holds every path of
   the call, a deny rule when it holds any.  For a shell command an allow
@@ -2732,34 +2738,69 @@ non-interactive session it stays a denial.
   (`harness-perms--read-only-cloud-p`) are read from the same tree, so
   one reading of a command line decides what a lasting answer covers,
   what a path rule sees and what needs no judge.
-  A lasting answer to a shell call records one of these rules
-  (`harness-perms--command-rule-prefixes`): one command gives its
-  program, and commands of the same program give the words they share,
-  up to three and never an argument, so `gcloud ... && gsutil ...`
-  records both programs and two `gcloud compute instances` commands
-  record `gcloud compute instances`.  A pattern is a prefix: it holds
-  every later command that starts with those words, `gcloud compute
-  instances delete` included, never the arguments the call happened to
-  pass.  A call whose command line cannot be read keeps the whole-tool
-  rule below.  The mode stage checks the
-  rules first, before the auto-allow list and the mode.  A tool prompt
-  (the mode asking, or the auto judge objecting) is about the call
-  itself, whose paths the jail already let through: it offers no
-  pattern, and its allow-session / allow-always / deny-always answers
-  record `(:tool NAME :behavior B)`, for every call of the tool, or
-  `(:tool NAME :commands COMMANDS :behavior B)` when the call is a shell
-  command whose commands were read, a `:pattern` in the answer
-  notwithstanding.
+  The mode stage checks the rules first, before the auto-allow list and
+  the mode.
+- What a lasting answer covers is the user's to say: a tool prompt (the
+  mode asking, or the auto judge objecting) is about the call itself,
+  whose paths the jail already let through, so it offers no pattern but a
+  **ladder of covers** (`harness-perms--cover-ladder`), from the narrowest
+  to the whole tool, and its allow-session / allow-always / deny-always
+  answers record `(:tool NAME COVER... :behavior B)` for the step the
+  answer names, a `:pattern` in the answer notwithstanding.  The steps,
+  narrowest first, with the ids and labels the prompt lists (a label says
+  what the step leaves free, so that "all calls of the tool" and "some
+  arguments of them" read differently):
+  - a shell call (a `:command` the reader can read):
+    `exact` `(:input (:command "gcloud compute instances list --project
+    p"))`, "every bash call whose command is exactly ..." (the command's texts and
+    not its numbers, so a timeout does not make it another call);
+    `subcommands` `(:commands (("gcloud" "compute" "instances")))`, the
+    programs with the words the line's commands share, up to three and
+    never an argument ("every gcloud compute instances call (any
+    arguments)"); `commands`, what an answer always held for when it
+    differs from the steps around it (a line with several commands of one
+    program and one command of another); `programs`
+    `(:commands (("gcloud")))`, "every gcloud call (any arguments)";
+    `tool`, "every bash call (any command)".  A pattern is a prefix: it
+    holds every later command that starts with those words, `gcloud
+    compute instances delete` included, never the arguments the call
+    happened to pass, which only `exact` pins.  Commands come from
+    `harness-perms--command-groups`; steps that hold the same calls are
+    one, named for the widest (`ls -la` has `exact`, `programs`,
+    `tool`).  A line the reader cannot read has `exact` and `tool`;
+  - a call that reads or writes files: `path` `(:path "/p/lisp/a.el")`,
+    `dir` `(:path "/p/lisp/")`, `project` `(:path "/p/")` (the session's
+    working directory or worktree, when the file lies below it) and
+    `tool` ("every edit_file call (any path)"); a call on several
+    files has the directory that holds them all, never the root of a
+    file system, and files on different hosts only the tool;
+  - any other call: `exact` `(:input ARGS)`, when its arguments are few
+    and each a text or a number ("every web_fetch call whose url is
+    exactly ..."), and `tool`.
+  The prompt starts on the step an answer always held for -- for a
+  shell call the one `harness-perms--command-rule-prefixes` gives
+  (`programs` for a single command, the words commands of one program
+  share when there are several), `tool` for any other call and for a
+  line the reader cannot read -- so nothing changes unless the user
+  chooses; with
+  `harness-perms-default-cover` set to `narrowest` (the setting for
+  least privilege first) every ladder starts on its first step instead.
+  `permission/answer`'s `:cover` names the step (a string); one that
+  names no step of the ladder, or none, is the step the prompt started
+  on, so a client that knows nothing of covers answers as before.
 - Events `permission/requested SID PENDING` (PENDING `(:id :kind permission
-  :payload (:tool :input :kind :paths :call-id :title :options))`, plus
-  `:dir`, `:pattern` and `:reason` for a directory prompt, and for a
-  shell command `:commands` and `:covers`, the command patterns a
-  lasting answer would record and a few words for them ("gcloud and
-  gsutil"); a tool prompt's `:paths` are its subject paths, and a shell
-  command's prompt has `:cwd`, where it runs; a confirmation has
-  `:confirm t` and its own `:reason`; UIs offer only the listed
-  `:options`, show a pattern only when there is one, and word a lasting
-  answer with `:covers` when there is one),
+  :payload (:tool :input :kind :paths :call-id :title :options :ladder
+  :cover))`, `:ladder` the covers a lasting answer can hold for, narrowest
+  first, each `(:id :label)`, and `:cover` the id of the step the answers
+  start on; plus `:dir`, `:pattern` and `:reason` for a directory prompt,
+  and for a shell command `:commands` and `:covers`, the command patterns
+  a lasting answer always held for and a few words for them ("gcloud and
+  gsutil"); a tool prompt's `:paths` are its subject
+  paths, and a shell command's prompt has `:cwd`, where it runs; a
+  confirmation has `:confirm t` and its own `:reason`; UIs offer only the
+  listed `:options`, show a pattern only when there is one, and word a
+  lasting answer with the step of `:ladder` it is for when there is one,
+  else with `:covers`),
   `permission/decided SID REQUEST DECISION`, `permission/dir-allowed SID DIR`,
   `permission/dir-revoked SID DIR` (a grant revoked, or one until the
   turn ends gone with its turn).
@@ -2775,14 +2816,17 @@ non-interactive session it stays a denial.
 - An answer that lasts is noted in the session's transcript, whoever
   gave it (the chat, a popout, a view, an ACP client): a rule recorded
   (an allow or a deny for the session or always on a tool prompt -- for
-  the whole tool, or for the commands a shell call runs -- a deny for
-  the session or always on a directory prompt) or a directory
+  the cover the answer named: the exact arguments, a file, directory or
+  project, the commands a shell call runs, or the whole tool -- a deny
+  for the session or always on a directory prompt) or a directory
   granted (allow-session or allow-always on the jail's prompt or
   `request_directory_access`) appends a hint
   (`harness-perms--note-recorded`, through `session/append` before the
   call goes on, so it sits under the call) saying what, such as
   "Always allowing every bash call to gcloud and gsutil, in every
-  session" (or "every bash call" for a whole-tool rule), with the record
+  session" (or "every bash call" for a whole-tool rule, "every bash call
+  whose command is exactly "make test"" for exact arguments, "edit_file calls in
+  ~/proj/lisp/" for a directory), with the record
   in its `:meta` `:permission` (see Node).  A rule or a grant that was
   there already gives a note with nothing to undo (no `:undo`, and the
   text says "already so").  allow-once records nothing and gives no
@@ -2801,12 +2845,14 @@ non-interactive session it stays a denial.
   and a note tried already returns what it got and changes nothing
   (`none` for one with nothing to undo).  A rule is looked up
   by value, the rule as recorded first, then one equal in substance
-  (`harness-perms--rule-key`: tool, kind, path, commands and behavior,
-  compared trimmed and with symbols as strings and command patterns in
-  a settled order, so a rule Settings saved back still counts);
+  (`harness-perms--rule-key`: tool, kind, path, commands, behavior and
+  arguments, compared trimmed and with symbols as strings and command
+  patterns and arguments in a settled order, so a rule Settings saved
+  back still counts);
   `undone` removes it from the session's rules or from
-  `harness-perms-rules`, saved.  A rule for the same tool, path and
-  commands that says something else since (edited in Settings, say) is
+  `harness-perms-rules`, saved.  A rule for the same tool, path,
+  commands and arguments that says something else since (edited in
+  Settings, say) is
   `changed` and stays, and with none left the outcome is `gone`;
   session rules live in memory and a fork starts without them, so that
   is what a session note gets after a restart, or in a fork, which
@@ -2821,7 +2867,9 @@ non-interactive session it stays a denial.
   (`permission/allow-dir`) while nothing took its place: no rule for the
   same tool and path, no entry that covers the directory, the session
   a session-wide answer was for still there, and the policy not setting
-  the list.  Otherwise the decision ends `changed` (or `gone`, its
+  the list.  (The same tool and path above also means the same
+  commands and arguments: two rules for one tool that differ in what
+  they cover are two rules.)  Otherwise the decision ends `changed` (or `gone`, its
   session gone) and the setting stays as it is.  The note is `offered`
   again once redone.
 - A call denied by a rule a decision recorded names it: the rule
@@ -8440,13 +8488,21 @@ someone other than the user sent, and a tool call or result the harness
 recorded (see Node), names its sender in `_harness.from`.
 Requests agent → client: `session/request_permission {sessionId, toolCall,
 options:[{optionId,name,kind}], _harness:{pendingId, tool, paths, cwd, dir,
-pattern, reason}}` (`options`: the same five for every request, named
-as the UI's buttons are, `harness-acp-permission-answers`; `cwd`: where
-a shell command runs; `paths`: what the call is about, see perms) →
+pattern, commands, covers, ladder, cover, reason}}` (`options`: the same five
+for every request, named as the UI's buttons are,
+`harness-acp-permission-answers`; `cwd`: where a shell command runs;
+`paths`: what the call is about, see perms; `ladder`: what the lasting
+answers (Allow for session, Always allow, Always deny) can cover,
+narrowest first, `[{id,label}]`, a label saying what the step leaves
+free, such as "every gcloud call (any arguments)" or "every edit_file
+call (any path)"; `cover`: the id of the step they start on) →
 `{outcome:{outcome:"selected",optionId}}`, plus
 `_harness:{pattern}` when the client answers a request about a path
 outside the allowed directories for another glob pattern than its
-`_harness.pattern` (only such a request has one, see perms),
+`_harness.pattern` (only such a request has one, see perms), and
+`_harness:{cover}` when it lets the user choose the cover of a lasting
+answer, the id of a step of `_harness.ladder` (any other, or none, is the
+step the request started on),
 and `_harness/ask_user {sessionId, requestId, question, options, diagrams, cowboy}` → `{answer}`,
 or `{answer, attachments}` when the user attached files to the answer:
 `attachments` are ACP content blocks, as a `session/prompt`'s `prompt`
@@ -8952,17 +9008,44 @@ popout brings the session's cached pending list into the store first
 (`harness-ui-pending-sync-session`), which is how a request a view
 already shows becomes answerable there when no chat has synced it.
 A permission prompt about a path outside the session's directories
-(one with a `:pattern`, see perms) shows the glob pattern its answers
-hold for on a line of its own (`pattern: ~/notes/**  [Edit] e`), with
-`[Edit]`/`e` (`harness-ui-pending-edit-pattern`, also `C-c C-p` in
-the chat) to change it in the minibuffer, more or less specific;
-`M-n` offers patterns around the request's own
+(one with a `:pattern`, see perms) lists the glob patterns its answers
+hold for, as radio lines under `Answers hold for:` -- the patterns
+around the request's own
 (`harness-ui-pending--pattern-suggestions`: the path itself, its
 directory's files of its extension, each directory from the path's up
-to the pattern's, the pattern, its parent), and the answer carries
-the edited pattern.  Any other prompt is about the call alone and
-shows no pattern; `C-c C-p`, or `e` on such a panel, edits the newest
-request that has one.  The facts under a panel's title
+to the pattern's, the pattern, its parent), narrowest first, the
+request's own noted `default`, the one picked marked and bold, and a
+pattern typed that is none of them its own line noted `edited`.  A click
+on a line, `<` (narrower) and `>` (wider) pick one
+(`harness-ui-pending-cover-narrower`, `-wider`), `[Edit]`/`e`
+(`harness-ui-pending-edit-pattern`, also `C-c C-p` in the chat) types any
+other in the minibuffer, and the answer carries the pattern picked.
+A prompt about a call -- a request with a `:ladder`, see perms --
+lists in the same way what its lasting answers (Allow for session,
+Always allow, Always deny) cover, under `Lasting answers (s, a, N)
+cover:` with the keys of the answers the request offers: a line for each
+step of the ladder, narrowest first, each worded by what it leaves free
+(`every gcloud call (any arguments)`), the one picked marked with a ring
+with a dot (`harness-icon-radio-on`; `harness-icon-radio-off` the
+others) and in bold, then `[Narrower] <  [Wider] >`, dim where the pick
+cannot go on.  A ladder of one step is that line alone, without the
+buttons.  The pick is the request's `:picked-cover` while the ladder
+still has it, else the `:cover` the harness started it on, else the
+narrowest step (`harness-ui-pending--cover-id`); a request that arrives
+again keeps it (`harness-ui-pending--keep-choices`).  The three
+lasting buttons' tooltips and the echo area after them say the step
+picked ("Always allow every gcloud call (any arguments), in every
+session"), and their answers carry its id as `:cover` (`harness-ui-pending--answer-extras`:
+`(:option "allow-always" :cover "programs")` over
+`_harness/permission/answer`, `:_harness (:cover ID)` next to the
+outcome of an ACP reply); Allow and Deny hold for the one call and
+carry none.  A request with neither a pattern nor a ladder, such as one
+from a harness that knows no covers, draws the line `lasting answers:
+every gcloud call` of its `:covers` (the facts below) and answers as it
+always did.  `<` and `>` act with point on a panel that lists some to
+choose between and type in the compose box, where `C-c . <` and `C-c .
+>` press them; `C-c C-p`, or `e` on a panel with no pattern, edits the
+newest request that has one.  The facts under a panel's title
 (`harness-ui-pending--permission-facts`) say what the call reaches:
 `kind: write   paths: ~/proj/lisp/a.el` on one line for most calls;
 for a shell command `kind: exec   runs in: ~/proj`, where it runs, and

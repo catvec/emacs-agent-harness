@@ -1039,6 +1039,55 @@ request for one alike; a payload listing fewer narrows them."
       (harness-test-wait (lambda () (= 2 (length recorded))))
       (should (equal (list sid "j2" '(:behavior deny :scope always)) (car recorded))))))
 
+(ert-deftest harness-acp-local-permission-cover-round-trip ()
+  "A request about a call carries the covers its lasting answers can hold for.
+They go in `_harness.ladder', narrowest first, with the step the answers
+start on in `_harness.cover'; a client that lets the user choose names
+the step in `_harness.cover' of its result, and the answer carries it.
+One that does not, answers as before."
+  (harness-acp-test-with
+    (let* ((conn (harness-acp-test-connect))
+           (sid (harness-acp-test-new-session conn))
+           (recorded nil)
+           (ladder '((:id "exact" :label "every bash call whose command is exactly \"ls -la\"")
+                     (:id "programs" :label "every ls call (any arguments)")
+                     (:id "tool" :label "every bash call (any command)")))
+           (request (lambda (pid)
+                      (harness-emit 'permission/requested sid
+                                    (list :id pid :kind 'permission
+                                          :payload (list :tool "bash" :kind 'exec :input '(:command "ls -la")
+                                                         :commands '(("ls")) :covers "ls"
+                                                         :ladder ladder :cover "programs")))
+                      (harness-test-wait
+                       (lambda () (cl-find-if (lambda (m) (equal pid (plist-get (plist-get (nth 1 m) :_harness) :pendingId)))
+                                              harness-acp-test-messages))))))
+      (harness-register-method 'permission/answer
+                               (lambda (s pid answer) (push (list s pid answer) recorded) answer))
+      (let* ((m (funcall request "c1"))
+             (extra (plist-get (nth 1 m) :_harness)))
+        (should (equal ladder (plist-get extra :ladder)))
+        (should (equal "programs" (plist-get extra :cover)))
+        ;; What it said before stays.
+        (should (equal "ls" (plist-get extra :covers)))
+        (funcall (nth 2 m) (list :outcome (list :outcome "selected" :optionId "allow-always")
+                                 :_harness (list :cover "exact"))))
+      (harness-test-wait (lambda () recorded))
+      (should (equal (list sid "c1" '(:behavior allow :scope always :cover "exact")) (car recorded)))
+      ;; A client that does not choose answers for the step the request started on.
+      (funcall (nth 2 (funcall request "c2")) (list :outcome (list :outcome "selected" :optionId "allow-session")))
+      (harness-test-wait (lambda () (= 2 (length recorded))))
+      (should (equal (list sid "c2" '(:behavior allow :scope session)) (car recorded)))
+      ;; A cover and a pattern together, and a blank cover, which names none.
+      (funcall (nth 2 (funcall request "c3"))
+               (list :outcome (list :outcome "selected" :optionId "deny-always")
+                     :_harness (list :cover "tool" :pattern "/srv/**")))
+      (harness-test-wait (lambda () (= 3 (length recorded))))
+      (should (equal (list sid "c3" '(:behavior deny :scope always :pattern "/srv/**" :cover "tool")) (car recorded)))
+      (funcall (nth 2 (funcall request "c4"))
+               (list :outcome (list :outcome "selected" :optionId "deny-always") :_harness (list :cover " ")))
+      (harness-test-wait (lambda () (= 4 (length recorded))))
+      (should (equal (list sid "c4" '(:behavior deny :scope always)) (car recorded))))))
+
 (ert-deftest harness-acp-local-ask-user-round-trip ()
   (harness-acp-test-with
     (let* ((conn (harness-acp-test-connect))

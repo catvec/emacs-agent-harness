@@ -211,10 +211,18 @@ not used, and the BTW keeps its session's model.
 - **Standing rules** (`harness-perms-rules`).  The policy's rules are
   weighed before a session's own (the answers given for the session),
   so no answer overrides them.  A rule may name the commands a shell
-  call runs (`:commands (("gcloud") ("gsutil"))`), as an answer's rule
-  does.  No answer records a standing rule: the prompts leave out
-  Always allow and Always deny, and one given anyway (an older client)
-  holds for the session.
+  call runs (`:commands (("gcloud") ("gsutil"))`), or the arguments it
+  passes (`:input (:command "make test")`), as an answer's rule does.
+  No answer records a standing rule: the prompts leave out Always allow
+  and Always deny, and one given anyway (an older client) holds for the
+  session.
+- **The cover a lasting answer starts on** (`harness-perms-default-cover`).
+  A prompt offers a ladder of covers for the answers that last, from the
+  call asked about to every call of the tool.  `usual` starts on what an
+  answer always held for, `narrowest` on the first step: a policy that
+  sets it to `narrowest` makes least privilege the starting point of
+  every prompt, and the person answering still chooses a wider step on
+  purpose.
 - **Allowed directories** (`harness-allowed-directories`).  The list is
   the policy's: no directory prompt offers Always allow, and the global
   entries cannot be revoked from the directory list.  A person in front

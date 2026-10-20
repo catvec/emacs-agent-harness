@@ -124,12 +124,18 @@ for.  The user may edit it, more or less specific, before answering,
 and the answer grants or denies the pattern.  No other prompt has one: the
 mode asking, or the judge objecting, is about the call itself, whose
 paths the jail already let through, so its answers for the session
-or for always record a rule for the tool.  For a shell command they
-can record a narrower rule for the commands it runs instead, read
-from the command line's syntax tree (see "Commands a lasting answer
-allows"): "Always allow" on `gcloud compute instances list` covers
-gcloud, not every bash call, and on `gcloud ... && gsutil ...` both
-programs.  A command the reader cannot read keeps the tool-wide rule.
+or for always record a rule about the call, and which calls the rule
+holds is the user's to say (see "What a lasting answer covers"): the
+prompt lists a ladder of covers, from the very call asked about (the
+exact command line or arguments, one file) through the programs and
+subcommands a shell command runs, read from the command line's syntax
+tree (see "Commands a lasting answer allows"), and the directory or
+project a file lies in, to every call of the tool, each said by what
+it leaves free.  "Always allow" on `gcloud compute instances list`
+covers gcloud, not every bash call, unless the user steps to the
+tool-wide cover, or down to `gcloud compute instances` or that very
+line.  The prompt starts on what such an answer always held for, or,
+with `harness-perms-default-cover`, on the narrowest step.
 Roots and rules alike are directories or patterns (see
 `harness-perms--within-p`).
 
@@ -239,6 +245,7 @@ needs from them are looked up with `harness-method-exists-p`.
 
 - `harness-perms-auto-model` — Model that judges tool calls, as PROVIDER:NAME, or `auto`.
 - `harness-perms-claude-auto-mode` — Whether the auto-mode judge follows the autoMode rules of Claude Code.
+- `harness-perms-default-cover` — Which cover the lasting answers of a permission prompt start on.
 - `harness-perms-rules` — Standing permission rules that apply to every session.
 
 ## Uses

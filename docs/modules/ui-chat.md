@@ -44,8 +44,8 @@ Markdown renderer only when it is finalised or at most every
 compaction summaries and runs of coalescable tools (with the thinking
 between their calls) collapse under overlays that isearch opens, so
 every word of the conversation stays searchable; a hand_in call that
-succeeds opens expanded once its result is in, its body the report the
-task handed in.  History loads lazily: the newest
+succeeds opens expanded once its result is in, its body the report
+the task handed in.  History loads lazily: the newest
 `harness-chat--history-limit` nodes at open, an older page whenever a
 window scrolls near the top, and blocks far above every window are
 dropped again so a long session never fills the buffer.
