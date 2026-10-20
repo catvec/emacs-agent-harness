@@ -105,6 +105,14 @@ recognition; a larger one is scaled down to fit."
 (defvar-local harness-ui-popout--render nil "The function drawing the content.")
 (defvar-local harness-ui-popout--compose nil "Function returning the box's SUBMIT, or nil for no box.")
 (defvar-local harness-ui-popout--submit nil "What the box sends with, as drawn last; nil without a box.")
+
+(defvar-local harness-ui-popout-empty-ok-function nil
+  "A function of no arguments that says an empty box may be sent, or nil.
+\<harness-ui-popout-mode-map>
+\[harness-ui-popout-submit] refuses an empty box.  When this function returns
+non-nil, it sends the empty message all the same, to the owner, who has
+something to send besides it: the report of a task in review has the
+drafts of the comments made in its review.")
 (defvar-local harness-ui-popout--placeholder nil "The empty box's hint: a string or a function.")
 (defvar-local harness-ui-popout--dir nil "The project directory of the box.")
 (defvar-local harness-ui-popout--on-close nil "Function called once the popout closes.")
@@ -619,7 +627,13 @@ With a region, completion or minibuffer to quit, quit that instead, as
   (interactive)
   (let ((submit harness-ui-popout--submit))
     (unless (and submit (harness-compose-live-p)) (user-error "This popout takes no message"))
-    (pcase-let ((`(,text . ,atts) (harness-compose-take)))
+    (pcase-let ((`(,text . ,atts)
+                 (if (and (functionp harness-ui-popout-empty-ok-function)
+                          (string-empty-p (string-trim (harness-compose-text)))
+                          (null harness-compose-attachments)
+                          (funcall harness-ui-popout-empty-ok-function))
+                     (cons "" nil)
+                   (harness-compose-take))))
       (harness-compose-clear)
       (funcall submit text atts))))
 

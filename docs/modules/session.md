@@ -8,7 +8,7 @@ Session records, conversation DAG, queue and pending requests.
 - **Source:** [lisp/modules/harness-session.el](../../lisp/modules/harness-session.el)
 - **Loaded:** by default
 - **Requires:** [store](store.md), [project](project.md)
-- **Required by:** [agent](agent.md), [compaction](compaction.md), [cowboy](cowboy.md), [fallback](fallback.md), [handoff](handoff.md), [merge](merge.md), [naming](naming.md), [readonly](readonly.md), [recap](recap.md), [redact](redact.md), [retry](retry.md), [seed](seed.md), [session-search](session-search.md), [supervisor](supervisor.md), [tasks](tasks.md), [tools-agent](tools-agent.md), [tools-events](tools-events.md), [tools-handin](tools-handin.md), [tools-plan](tools-plan.md), [tools-question](tools-question.md), [tools-session-info](tools-session-info.md), [tools-sessions](tools-sessions.md), [tools-todo](tools-todo.md), [usage](usage.md)
+- **Required by:** [agent](agent.md), [compaction](compaction.md), [cowboy](cowboy.md), [fallback](fallback.md), [handoff](handoff.md), [merge](merge.md), [naming](naming.md), [readonly](readonly.md), [recap](recap.md), [redact](redact.md), [retry](retry.md), [seed](seed.md), [session-search](session-search.md), [supervisor](supervisor.md), [tasks](tasks.md), [tools-agent](tools-agent.md), [tools-events](tools-events.md), [tools-handin](tools-handin.md), [tools-plan](tools-plan.md), [tools-question](tools-question.md), [tools-review](tools-review.md), [tools-session-info](tools-session-info.md), [tools-sessions](tools-sessions.md), [tools-todo](tools-todo.md), [usage](usage.md)
 
 ## About
 

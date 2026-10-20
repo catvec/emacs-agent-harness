@@ -542,7 +542,10 @@ A directory of `lisp/vendor`, `lisp/vendor/NAME/`, holds a library the
 harness ships without owning it: laid out as the repository of its own it
 can become (its source, tests, README and LICENSE), and written to work
 without the harness.  The first is `compose-quote`, which the compose
-box quotes with (see Compose box).  lisp/vendor/README.md is the
+box quotes with (see Compose box); the second is `change-review`, which
+the changes of a task are reviewed with, in threads of comments (see
+the review of a task's changes, under Presentation contracts), and
+which reviews emailed patches as well.  lisp/vendor/README.md is the
 guide; the contract is this:
 
 - A library needs nothing of the harness and never mentions it: no
@@ -566,7 +569,9 @@ guide; the contract is this:
   harness-ui-compose.el therefore looks for `compose-quote` beside
   itself when `locate-library` does not find it.
 - A library the harness needs at start is in `harness--library-files`
-  (compose-quote is, last): it loads compiled before any module, and
+  (compose-quote is, and the four files of change-review -- the model,
+  the diff, the mail and the UI -- after it, last): it loads compiled
+  before any module, and
   `harness-reload` checks it compiles and loads it again.  One that is
   only on `load-path` loads from its source on its first `require` and is
   not reloaded.  `harness-auto-reload-mode` watches the directories.
@@ -5128,6 +5133,23 @@ priority).
   false rather than nil), and a board's `V` turns it off and on with
   `config/set`, globally and saved, as the settings page does; tasks
   already in review wait on until verified.
+- Additions to the feedback: a message that sends a task back --
+  `task/reject`, or any message the user sends its session while it
+  waits for review (`harness-tasks--on-message`) -- first asks the
+  functions of `harness-tasks-feedback-additions-functions` what to add
+  (`harness-tasks--feedback-additions`).  Each is called with the task
+  and the words the message says (a string, empty for none) and returns
+  nil or `(TEXT . DONE)`: TEXT, a string or nil, goes after the words as
+  paragraphs of their own, in the round kept in `:feedback` and in the
+  prompt, and DONE, a function of no arguments, is called once the task
+  is sent back, or its feedback kept for a slot
+  (`harness-tasks--commit-additions`) -- never before, as the message
+  may turn out to be refused.  A function that signals adds nothing (it
+  is logged).  What they add counts as feedback: `task/reject` with an
+  empty message and an addition is a send-back, and with nothing at all
+  still an error.  The `patch-review` module uses it to send the drafts
+  of the user's review along (see its contract); the tasks module
+  knows nothing of reviews.
 - Pre-emption: work sent back from review keeps to
   `harness-tasks-max-running`, though its slot may have gone to another
   task while it waited for review.  `harness-tasks--make-room` finds it
@@ -6384,6 +6406,111 @@ TITLE is the session's name, else the prompt's first line without its
 leading `#`, at most 80 characters; PROJECT is `project/name` of the
 task's project.
 
+### patch-review, tools-review
+
+The threads of a task's review, kept where the user's Emacs and the
+task's agent both meet them.  `patch-review` is the harness's half of
+reviewing a task's changes with the library `change-review` (see
+Vendored libraries); its UI half is `ui-patch-review` (see Presentation
+contracts, the review of a task's changes), and `tools-review` gives the
+task's agent two tools.  The module needs `store`, `tasks` and
+`tools-review`.
+
+- The set.  A task is a change set of the library
+  (`harness-patch-review--set`, a `change-review-set` with the task's id
+  and its title): its versions and its threads.  It is made the first
+  time anything asks for it -- `patch-review/get`, an operation, a
+  version -- read from the store (`patch-review/TASK-ID.json`: the data
+  of `change-review-set-to-data` without the versions' files, which the
+  UI reads from the repository) and kept in memory; every change saves
+  it (`change-review-save`).  `task/deleted` forgets it.  The module is
+  the single writer of a task's threads, so the user's Emacs and the
+  agent never disagree: they send operations, the module performs
+  them.
+- Versions.  `task/review` -- the work was handed in -- records a
+  version of the set (`add-version`; one already recorded changes
+  nothing): its id and tip are the commit the task's branch ends at, its
+  base the merge base with the task's `:base`, read with git in the
+  task's project, else its worktree, when that is a directory of this
+  machine; a task with no branch, or no repository here, records none.
+  Its time, description and title are the report's, and its author the
+  agent with its session and the report's `:call-id`, the `hand_in`
+  call that handed the work in (`hand_in` puts the id in the report);
+  `:meta` holds the `:round` it is (the rounds of feedback before it)
+  and the `:branch`.  The id is the SOURCE REVISION every comment made
+  against the version records.
+- Authors.  The user is `user-full-name` and `user-mail-address` of the
+  harness's Emacs, the login name without the first.  An agent is the
+  model's name with its session id, and for a comment written with
+  `review_comment` the id of the tool call.
+- The earlier rounds.  A task sent back before threads existed kept its
+  feedback as text.  The first time its set is made, each comment the
+  reply format finds in a round of `:feedback`
+  (`change-review-mail-parse-reply`: the diff quoted with `> ` and the
+  comment under it) becomes a CLOSED thread: by the user, at the
+  round's time, against the commit the round names (`(at SHA)`), with
+  ids that follow from the task, the round and the comment's place in
+  it, so that reading the rounds again adds nothing.
+- `patch-review/get TASK-ID` → the set as plain data (versions without
+  files, threads), made if it was not; `patch-review/apply TASK-ID OP` →
+  `(:changed BOOL)`, performing OP, an operation of the library
+  (`:op` `add-comment`, `set-status`, `edit-comment`, `delete-comment` or
+  `add-version`, the ones a UI makes; any other signals), and nothing
+  happens the second time an operation is performed;
+  `patch-review/drafts TASK-ID` → the comments not sent yet, as data;
+  `patch-review/threads-text TASK-ID &optional STATUS` → the threads
+  (`open`, `closed` or all) as text for an agent: "N open, M closed" and
+  for each thread its id, status, where it is and its comments with
+  their ids and authors -- only the comments sent, since the drafts are
+  the user's until they send the task back; `patch-review/comment
+  TASK-ID BODY &rest OPTS` → `(:thread ID :status "open"|"closed"
+  :comment DATA)` adding the agent's comment.  OPTS: `:thread` (an id,
+  or the start of one that is unique, naming a thread to answer; else
+  the comment starts a thread), `:status` (`open` or `closed`, set after
+  the comment; with no BODY, only the status changes), `:session` and
+  `:call-id` (who wrote it: the author's session and tool call),
+  `:file`, `:line` and `:side` (where a new thread is), `:revision` (the
+  commit the agent was at; else the latest version).  A thread that does
+  not exist, a status that is neither, or neither a body nor a status,
+  signals an error that says what there is.  All are callable over ACP
+  as `_harness/patch-review/…`.
+- Event `patch-review/changed TASK-ID OP`: an operation changed the
+  threads of a task's review (`change-review-changed-functions`); OP is
+  the plist to perform on a copy.  ACP forwards it to every client,
+  and each UI performs OP on its own set: the user's own operations
+  come back too, and change nothing the second time.
+- The drafts go with the feedback.  The module adds
+  `harness-patch-review--additions` to
+  `harness-tasks-feedback-additions-functions` (see tasks).  Called as
+  the task is sent back, it returns the drafts of its set as text: a
+  line saying what the quotes are and how to answer
+  (`review_comment`, with the thread's id, and close the thread once
+  what it raises is done), then each comment quoted from the diff as a
+  reply on a mailing list quotes it, a reply in a thread after the
+  comments before it, each with its `[thread ID]`
+  (`change-review-mail-render-comments`).  Once the task is sent back it
+  marks them sent (`mark-sent`, `:round` in `:meta`), and keeps the
+  words the user sent it back with, if any, as a sent comment of a
+  thread on the change as a whole (`:meta` `:round` and `:words`), so
+  that the review has a record of what each round said.  With drafts and
+  no words the text is the feedback; with words and no drafts the words
+  are kept and nothing is added to them.
+- `tools-review` defines `review_threads` (input: `status` open or
+  closed, `task` a task id; lists a task's threads with
+  `patch-review/threads-text`) and `review_comment` (input: `thread`,
+  `body`, `status`, `file`, `line`, `side`, `task`; calls
+  `patch-review/comment` with the session, the call id and the commit
+  the session's directory is at).  Both are kind `meta` and offered to
+  the sessions of tasks only: a filter on `agent/tools` (50) drops them
+  from any other, and the catalogue keeps them; `task` names another
+  task's review.  They need no approval
+  (`harness-perms--auto-allow-tools`), and a supervising session is
+  offered them (`harness-supervisor--coordination-tools`): answering
+  the reviewer is coordination.
+- Tests: test/harness-patch-review-test.el (the module and the tools),
+  test/harness-ui-patch-review-test.el (the adapter), and the library's
+  own, in lisp/vendor/change-review.
+
 ### readonly
 
 Read-only sessions, which look and change nothing: a supervisor
@@ -6537,9 +6664,10 @@ and a message for the echo area.  Only the user calls it.
   `web_fetch web_search`, the coordination tools (`ask_user todo_write
   hand_in notify session_control session_send session_move
   set_non_interactive set_priority task_control task_submit
-  session_settings`), the tool that asks for a directory
-  (`harness-perms-dir-tool`) and `harness-supervisor-tools`
-  (`no_plan_needed submit_plan retry_step`), plus `bash` when
+  session_settings review_threads review_comment`), the tool that asks
+  for a directory (`harness-perms-dir-tool`) and
+  `harness-supervisor-tools` (`no_plan_needed submit_plan
+  retry_step`), plus `bash` when
   `sandbox/confined-p` says its directory is confined.  Any other
   session loses `harness-supervisor-tools`; the catalogue (no session)
   stays whole.  `permission/decide` stage 8 (before the jail, the mode
@@ -6921,7 +7049,7 @@ names its own working and temporary directories.
   session pickers).  The supervisor module forks the workers of its fork
   steps this way, when a plan has two or more on one model.
 
-### tools-fs, tools-shell, tools-ssh, tools-emacs, tools-emacs-eval, tools-web, tools-agent, tools-question, tools-plan, tools-todo, tools-session-info, tools-sessions, tools-events, tools-notify, tools-handin, tools-compact
+### tools-fs, tools-shell, tools-ssh, tools-emacs, tools-emacs-eval, tools-web, tools-agent, tools-question, tools-plan, tools-todo, tools-session-info, tools-sessions, tools-events, tools-notify, tools-handin, tools-compact, tools-review
 
 Tool names, labels and inputs (all paths relative to cwd or absolute;
 TRAMP prefixes come from the session host):
@@ -6976,6 +7104,8 @@ TRAMP prefixes come from the session host):
 | `task_control` | Control task | task_id, action (start/queue/message/cancel/return-to-pending/merge/verify/reject/complete/archive/restore/delete/priority, and on a project with no task_id: suspend-queue/resume-queue, auto-queue/manual-queue for its backlog mode), message (the feedback, for reject), priority (low/medium/high, for priority: given to the task's session, where a task's priority lives), cwd (the project of the four project actions; default: this session's) | meta |
 | `task_wait` | Wait for tasks | task_id / task_ids, until (settled/done/needs-input/active/review/merging/changed; settled counts review, and a written-up backlog task unless an auto-queued backlog hands it on to the queue), mode, timeout_seconds | read (needs no approval: `harness-perms--inspection-tools`) |
 | `hand_in` | Hand in the finished work | summary, evidence (image/video/file/code/note/tool_call, each with a caption), cannot_continue (cannot finish: to user input, nothing merges), no_merge (informational: verify completes without the merge queue) | meta (task sessions only; needs no approval: `harness-perms--auto-allow-tools`) |
+| `review_threads` | Review threads | status (open/closed), task (default: the session's own) | meta (tools-review; task sessions only; lists the threads of the task's review with the comments the user sent, by id; needs no approval: `harness-perms--auto-allow-tools`) |
+| `review_comment` | Review comment | thread (an id, or the start of one), body, status (open/closed), file, line, side (new/old), task (default: the session's own) | meta (tools-review; task sessions only; answers a thread, or starts one on the change or on a file and line, and may close or reopen the thread; the comment records the session, this call and the commit the session is at; needs no approval: `harness-perms--auto-allow-tools`) |
 | `compact` | Compact the conversation | kind (summary/brief/transcript/fresh/truncate, default summary), mode (queue/interrupt, default queue), reason | meta (tools-compact; offered to every session, so an agent compacts its own conversation) |
 | `open_harness` | Open harness in Emacs | path (default: the session's worktree, else its cwd), focus (for the user: stays until the task is done) | exec (tools-dev, the harness repository's own plugin: offered only to the sessions whose plugin list names it, as the repository's .dir-locals.el does once the user trusts it; the instance stops by itself once nothing needs it; needs no approval: the plugin adds it to `harness-perms-extra-auto-allow-tools`) |
 | `notify` | Notification | message, title, urgency (low/normal/critical), providers, url | meta (needs no approval: `harness-perms--auto-allow-tools`) |
@@ -6992,7 +7122,9 @@ credentials aside (see perms).  They may read the skills directories
 too, and bash reads them in the sandbox (see perms and sandbox).
 
 `hand_in` (tools-handin) is how a task's session finishes: the tool
-records the summary and evidence on the task (`task/hand-in'`) and asks
+records the summary and evidence on the task (`task/hand-in'`; the
+report keeps the call's id as `:call-id`, which the review names as the
+author of the version handed in) and asks
 the turn to end via the result's `:end-turn' -- `harness-agent--finish-turn'
 cancels the provider and ends the turn with `end-turn', as if the model
 had stopped itself -- so the review step puts the task in front of the
@@ -8306,7 +8438,7 @@ Extension methods: any bus method whose name starts with `session/`,
 `project/`, `task/`, `plugins/`, `search/`, `notification/`, `sandbox/status`, `harness/api`,
 `harness/modules`, `harness/version`, `harness/reload`, `harness/call`, `acp/remote-`,
 `pet/`, `version/`, `insights/`, `supervisor/`, `seed/`, `priority/`,
-`secrets/`, `commit-msg/` (`harness-acp-extension-prefixes`), or with one of
+`secrets/`, `commit-msg/`, `patch-review/` (`harness-acp-extension-prefixes`), or with one of
 `harness-acp-extra-method-prefixes`, which modules of the user's own
 and projects' plugins add to (see Modules of your own; the harness
 repository's plugin adds `harness-dev/`), is callable as `_harness/NAME` with a
@@ -8376,8 +8508,9 @@ with them); among them `session/ext-changed` (a setting a module keeps
 on a session changed, each change of a plan's step included),
 `supervisor/changed` (the user switched supervisor mode), and
 `session/redacted` and `secrets/redacted` (a secret was taken out of a
-session's stores, or out of the stores at all); see session,
-supervisor and redact.
+session's stores, or out of the stores at all) and `patch-review/changed`
+(an operation changed the threads of a task's review); see session,
+supervisor, redact and patch-review.
 
 Harness → UI requests for chores any client may do go through the bus
 method `client/request METHOD PARAMS` → promise of the first client's
@@ -11251,31 +11384,104 @@ box, which follows `task/changed` and closes once the review is decided
 `:feedback` -- wherever that was done; the report of a task decided
 before it opened stays).
 
-The review of a task's changes (`harness-ui-patch-review`, module
-`ui-patch-review`) keeps to itself, so that it could become a package of
-its own: nothing else names it
-(`harness-ui-patch-review-is-unknown-to-the-rest` checks), and its
-module's shutdown takes it out again.  It is a panel of the report: on
-`harness-ui-report-panel-functions` at depth -10, before the review
-banner, it returns the changes of a task in review that has a branch,
-and nothing for any other task.  A task that left review can still show
-its changes: `harness-ui-patch-review-open`, on C-c C-d in a task's
-session or on a board card (`harness-ui-patch-review-mode`), opens its
-report with a review whose `:show` is set, and the panel then draws for
-a task no longer in review.  The panel is drawn in the popout buffer,
-so it knows the report it is in; a report opened anew, a popout buffer
-it has not drawn in yet, reads the branch again.  Its rows carry a
-keymap of their own as a text property, which the popout puts before its
-own keys.  The comments go into the box the review module gives the
-report (`harness-ui-report-compose-functions`), written between the
-box's markers (`harness-compose-start` and `harness-compose-end`) with
-the buffer narrowed to them, and C-c C-c sends the box as the review's
-feedback, as it sends any: the module adds no sending of its own.  A
-hook on the popout's `after-change-functions` counts the comments in the
-box again once the typing stops, and draws the report again when the
-counts changed; while the report draws, the panel reads the box with
-`harness-compose-text`, which gives the text the popout captured before
-it erased the buffer.
+The review of a task's changes is three parts that know each other one
+way.  The library `change-review` (lisp/vendor/change-review, see
+Vendored libraries) is what a review is, how it looks and how it is
+kept: a change set with versions, threads of comments and the Emacs
+views that draw them, and nothing of the harness.  The module
+`patch-review` (see its contract) is the harness process's half: it
+keeps a task's threads, takes the operations the user and the agent
+make, and carries the drafts with the feedback.  The module
+`ui-patch-review` (`harness-ui-patch-review`) is the adapter that gives
+the library a task to review in this Emacs.  Nothing else names it or
+the backend (`harness-ui-patch-review-is-known-only-to-its-halves`
+checks; the review tools and the ACP lists of what a UI may call and
+hear are the exceptions), and the module's shutdown takes it out again.
+
+What the library holds (its README has the whole of it): a CHANGE SET --
+here a task -- with VERSIONS, each a proposal of the change, named by
+its source revision (for a task, the commit its branch ends at when the
+agent hands the work in; for an emailed series, the message id of its
+first mail), and THREADS, each open or closed.  Closed is the good
+ending, normally the point made or the change made.  A thread holds
+COMMENTS.  A comment records its thread and the comment it answers, its
+author, its time, the source revision it was written against, its place
+in the code if it has one (file, side, line, and the lines of the diff
+above it, as a reply on a mailing list quotes them) and whether it is
+still a draft.  The author is a user, with a name and an address; an
+agent, with its session and the tool call that wrote the comment, the
+link back to that point of the conversation; or a person of another
+kind, a mail's sender.  Everything that changes a set is an OPERATION,
+plain data performed by `change-review-apply`; an operation names what
+it adds, so performing it twice changes nothing, and that is what lets a
+UI keep its own copy of what the harness keeps.  What differs between
+hosts is a generic function that a subtype of the set answers
+(`change-review-dispatch`, `-save`, `-current-author`, `-own-author-p`,
+`-follow-author`, `-visit`, `-placement`, `-send`, `-file-text`); the
+adapter answers them for a task.
+
+THE ONE DRAWING.  A thread is drawn in one place,
+`change-review-ui-thread-string`, whichever view shows it: a header (a
+mark, open ● or closed ✓, the thread's short id, where it is, how many
+comments, open or closed -- and by whom and when) with buttons for what
+can be done with it ([Reply] [Close] or [Reopen] [Diff]), then each
+comment under a bar that runs the thread's length: its place in the
+thread (`2/3`), its author (marked "you" or "agent"), the time (exact,
+and relative), the revision it was written against, a "draft" mark, the
+comment it answers when that is not the one above (`↳ re 1/3`), a `▸
+where` button that shows where the comment was made, and for an agent's
+comment `↗ conversation`, then the text. `change-review-ui-thread-line`
+is the same thread as one row of a list.  The report's rows, the threads
+view (`change-review-open-threads`, which lists every thread by file,
+filtered by status with f and F) and the threads under the lines of
+Ediff's two versions and of the library's own diff view
+(`change-review-open-diff`) all call them, and the keys on a thread are
+the library's whichever view it is in: r replies, x closes it or opens
+it, s sets a status, e edits a draft, k deletes one, o follows an
+agent's comment to the point of its conversation, RET (TAB in the
+threads view) shows where its comment was made -- the file and line, the
+revision, the lines of the diff it was made on, the session and tool
+call of an agent -- and d shows the thread in the diff view
+(`change-review-visit`: the library's diff view; Ediff for a task).
+
+THE ADAPTER.  This module gives a task to the library as a change set of
+its own subtype (`harness-ui-patch-review--set`):
+
+- Its versions come from the harness (`patch-review/get`), which
+  recorded one each time the task came to review; the files of a version
+  are read here, from git, in the task's repository.
+- The threads are the harness's.  What the user does is performed on
+  the copy here at once and sent (`change-review-dispatch`, the method
+  `patch-review/apply` over ACP); what the harness does -- an agent's
+  comment, the drafts sent -- reaches this copy as the event
+  `patch-review/changed` and is performed on it.  An operation done
+  twice changes nothing, so the user's own come back harmlessly.
+- The author of every comment typed here is the user
+  (`change-review-own-author-p` is true of any user); an agent's author
+  follows to its conversation (`change-review-follow-author` opens the
+  session at the tool call).  A task's agent writes with the
+  `review_comment` tool.
+- Where a thread is now (`change-review-placement`) is worked out in
+  git (`harness-ui-patch-review--place-threads`): the thread's line in
+  the revision it was written against, carried through `git diff -U0` of
+  that revision's file against the branch's -- the same line, moved, or
+  changed.  A thread whose revision is no longer in the repository is
+  placed by the lines it quotes, and one on a file the branch deleted is
+  gone.  This needs nothing the review keeps, so it survives a restart.
+- `change-review-visit` compares the file in Ediff with the thread's line
+  in sight, and `change-review-send` goes to the feedback box.
+
+The panel is on `harness-ui-report-panel-functions` at depth -10, before
+the review banner, and returns the changes of a task in review that has
+a branch, and nothing for any other task.  A task that left review can
+still show its changes: `harness-ui-patch-review-open`, on C-c C-d in a
+task's session or on a board card (`harness-ui-patch-review-mode`),
+opens its report with a review whose `:show` is set, and the panel then
+draws for a task no longer in review.  The panel is drawn in the popout
+buffer, so it knows the report it is in; a report opened anew, a popout
+buffer it has not drawn in yet, reads the branch again.  Its rows carry
+a keymap of their own as a text property, which the popout puts before
+its own keys.
 
 The changes show for a task whose project, else its worktree, is a local
 directory, when the harness is not remote
@@ -11292,22 +11498,35 @@ The files show as a tree by default
 (`harness-ui-patch-review-file-tree`): a directory line with its files'
 count and the lines they add and delete, then the files under it by
 their names, the directories and files of a directory by name.  t on a
-row shows them flat instead, every path whole, in the diff's order.
-A file's mark says whether it was compared in Ediff, by its path and
-its blob on the branch, and whether it was approved -- by the same key,
-so a file the branch changed again is neither and is reviewed anew.  a
+row shows them flat instead, every path whole, in the diff's order.  A
+file's mark says whether it was compared in Ediff, by its path and its
+blob on the branch, and whether it was approved -- by the same key, so a
+file the branch changed again is neither and is reviewed anew.  a
 approves the file at point, A every file; the heading counts those
-viewed and those approved.  RET runs `ediff-buffers` on the two blobs,
-laid out by
+viewed and those approved, the threads ("3 open, 2 closed", with the
+key that lists them, T) and the drafts that wait for the feedback.  A
+file's row counts its threads and says whether it changed since the
+reviewer's last comment on it or stayed the same.  Under it are its open
+threads, a line each (`change-review-ui-thread-line`: `● 3f9a1c · line
+44 (was 42) · Claude: “Because the retry loop…” · 3 comments`), or all
+of them with `harness-ui-patch-review-closed-threads`.  RET or a click
+on a thread's row compares the file with that line in sight (the row's
+`harness-ui-patch-review-where` property); r, x and o act on the thread
+as in the threads view, and c comments on the change as a whole.
+Threads that no file row shows -- those on the change as a whole and on
+files the branch no longer changes -- stay in a block above the files,
+"Other threads".
+
+RET on a file runs `ediff-buffers` on the two blobs, laid out by
 `harness-ui-patch-review-ediff-window-setup`, once it saved the frame's
 window configuration and deleted every other window but the report's
-side window, which stays for its box (below); without a box beside
-Ediff (`harness-ui-patch-review-ediff-box-height` nil) the side window
-goes too (`ignore-window-parameters`).  q sets the
-configuration back.  The report, drawn again meanwhile, gets its window
-start and point anew, since its markers in the configuration went with
-the text they were in, and a window whose buffer was killed -- the
-report's, when the task was decided while Ediff showed -- goes
+side window, which stays for its box (below); without a box beside Ediff
+(`harness-ui-patch-review-ediff-box-height` nil) the side window goes
+too (`ignore-window-parameters`).  q sets the configuration back. The
+report, drawn again meanwhile, gets its window start and point anew,
+since its markers in the configuration went with the text they were in,
+and a window whose buffer was killed -- the report's, when the task was
+decided while Ediff showed -- goes
 (`window-restore-killed-buffer-windows`).  N and P read the next file's
 blobs, then end the Ediff under way quietly, within
 `save-window-excursion`, and start the next in its place, keeping the
@@ -11315,11 +11534,47 @@ configuration to give back.  n is Ediff's next difference, wrapped
 (`harness-ui-patch-review-next-difference`): at the last difference it
 says once that the next difference is the next file, and the same key
 again goes on to it in Ediff.  The control panel's map is a child of
-Ediff's with c, e, a, n, N, P and q (under evil, `evil-normalize-keymaps`
-puts it where evil-collection made Ediff's map overriding) and a brief
-help of its own (`ediff-brief-help-message-function`); quitting goes
-through `ediff-really-quit` with `ediff-keep-variants` bound, so it asks
+Ediff's with c, r, x, T, e, a, n, N, P and q (under evil,
+`evil-normalize-keymaps` puts it where evil-collection made Ediff's map
+overriding) and a brief help of its own
+(`ediff-brief-help-message-function`); quitting goes through
+`ediff-really-quit` with `ediff-keep-variants` bound, so it asks
 nothing, and the review kills the two versions itself.
+
+THE THREADS IN EDIFF.  The threads of the file show in both versions
+under their lines, as an overlay's `after-string` at the end of the
+line, drawn as the library draws them
+(`harness-ui-patch-review--decorate`): in the newest version of the
+file, at the place `change-review-placement` gives -- the merge base's
+version for a thread on a removed line, the top of the branch's for one
+on the file as a whole or whose line is gone.  A thread that moved says
+where it was ("line 44 (was 42)") or that its line changed since.  In
+either version (`harness-ui-patch-review-lines-mode`, whose map has the
+library's for its parent) c starts a thread, a draft, on the line at
+point -- on the branch's side it is a line of the branch, on the merge
+base's one of the merge base -- and r, x, o and RET act on the thread
+under point; e edits the draft there, or goes to the box.  In the
+control panel c comments on the last line of the current difference (at
+the merge base for a difference that only deletes), r replies to the
+thread there, x closes or opens it and T lists all the threads, d in
+that view coming back to Ediff at the thread's line.  A comment is read
+in a buffer of its own (`change-review-ui-read-function`; C-c C-c keeps
+it as a draft), and the excerpt it records is the change it ends and at
+most `change-review-diff-context-lines` lines before it, not from the
+middle of another change.
+
+THE DRAFTS.  A comment the user writes is a draft until the task is sent
+back; the report counts the drafts, and the views mark them.  The
+feedback box is the report's, and C-c C-c sends it as it sends any: the
+module adds no sending of its own.  What goes with the box is the
+drafts: the harness takes them along with whatever sends the task back
+-- the box, a message typed in the task's session, another client --
+quoted from the diff above each comment as a reply on a mailing list is,
+with the thread each belongs to and how to answer it (see
+`patch-review`).  A box left empty sends when drafts wait: the report
+sets the popout's `harness-ui-popout-empty-ok-function` from
+`harness-ui-review-pending-functions`.  The drafts become sent comments
+as the task goes back.
 
 The report stays in the frame while Ediff compares a file, for its
 feedback box (`harness-ui-patch-review-ediff-box-height`, a fraction of
@@ -11336,83 +11591,46 @@ window's bottom).  The window's point is the box's end, which the
 popout's own scrolling keeps in sight.  A window that is not selected
 loses its point when the popout is drawn again, so the review's own
 refresh keeps where such windows had point and puts it back
-(`harness-ui-patch-review--window-places`); the popout's panel hook
-also lets go of the limit when no Ediff is under way, so a limit left
-by an Ediff killed from outside does not stay.  A comment made meanwhile
-scrolls the window to the end of what it put in and highlights it
-(`pulse-momentary-highlight-region`); a report closed meanwhile comes
-back, as a side window, with the next comment.  e
-(`harness-ui-patch-review-edit-feedback`), in the control panel or
-either version, selects the window with point at the end of the comment
-under the quote of the current difference or, in a version, the line at
-point (`harness-ui-patch-review--box-target` reads the box as the
-comments do), else of the last comment on the file, else at the end of
-the box: the box is the popout's, so editing it is typing, and C-c C-c
-sends it.  `harness-ui-patch-review-open` on C-c C-d, which the review's
-minor mode now has in the report too, selects the control panel of the
-Ediff beside the report instead of opening it.  When the task's
-`:feedback` gets a round -- the feedback was sent -- the review ends the
-Ediff, the frame as it was.
+(`harness-ui-patch-review--window-places`); the popout's panel hook also
+lets go of the limit when no Ediff is under way, so a limit left by an
+Ediff killed from outside does not stay.  A report closed meanwhile
+comes back, as a side window, when the box is wanted.  e
+(`harness-ui-patch-review-edit-comment`), in the control panel or either
+version, edits your draft under point -- or, with none, selects the
+window with point at the end of the box: the box is the popout's, so
+editing it is typing, and C-c C-c sends it.
+`harness-ui-patch-review-open` on C-c C-d, which the review's minor mode
+now has in the report too, selects the control panel of the Ediff beside
+the report instead of opening it.  When the task's `:feedback` gets a
+round -- the feedback was sent -- the review ends the Ediff, the frame
+as it was.
 
-c puts a comment on the last line of the current difference on the
-branch (at the merge base for a difference that only deletes) in the
-box, filled to `harness-ui-patch-review-fill-column`.  In either
-version Ediff compares, each with a keymap of its own
-(`harness-ui-patch-review-lines-mode`), c comments on the line at
-point: on the branch's side it is a line of the branch, on the merge
-base's one of the merge base.  The box reads back as the quote it
-holds: a line starting with ">" quotes the diff, a `diff --git` line
-opens a file, a hunk's header sets the line numbers, which go on across
-the comments, and a paragraph of other lines is a comment.  A comment
-goes under the line it is about when the box quotes it already, after
-the comments there.  Else it quotes that line, the change it ends and
-at most `harness-ui-patch-review-context-lines` lines before it -- not
-from the middle of another change -- under a hunk header that counts
-just those lines, with git's heading; when the box quotes some of them
-already, the quote goes on after the last of those instead, with no
-header.  A line the diff does not have gets the nearest one, the
-comment saying which line it means, and a comment with no difference
-current is on the file as a whole, under its `diff --git` line.  The
-files keep the diff's order in the box, and a file's hunks the order of
-their lines; the first quote gets a line before it naming the branch,
-its tip, the base and the merge base.  A report closed meanwhile opens
-again out of sight for its box, its draft restored.
+THE ROUNDS BEFORE.  A task sent back before there were threads kept its
+feedback as text.  The harness reads those rounds once, when it first
+makes the task's set, and turns each comment the reply format finds in
+them into a closed thread with an id that follows from where it was
+(see `patch-review`), so what an earlier reviewer said shows in the same
+views as what they say now, closed.  The words typed with a later round
+are kept as a sent thread on the change as a whole.
 
-The task's rounds of feedback (`:feedback`) are read back as comments:
-their quote says the file and the line each was on and gives the lines
-quoted above it, a few at most, and a comment on a line the diff did not
-hold says that line itself ("On line 57: ").  Each is shown where it is
-in the newest version of its file: under the file's row in the report
-(`↳ Round 1 · line 44 (was 42): ...`; RET on it compares the file with
-that line in sight, by the row's `harness-ui-patch-review-where`
-property), and under the line in the versions Ediff compares, as an
-overlay's `after-string` at the end of the line -- in the merge base's
-version for a comment on a removed line, at the top of the branch's for
-one on the file as a whole.  What has no file row -- words on no file,
-files the branch no longer changes -- stays in a block above the files,
-with a line counting the comments and the rounds.  Where a comment is
-now (`harness-ui-patch-review--place`) comes from the first line of its
-round's feedback, which names the commit the branch was at (`(at SHA)`):
-`git diff -U0` of the file at that commit against its blob now gives
-hunks that `harness-ui-patch-review--map-line` carries the line through
--- the same, moved, or changed, the same place among the lines that
-replaced it.
-A round that does not name its commit, or a commit no longer in the
-repository, is placed by the lines it quotes
-(`harness-ui-patch-review--find-line`: the last quoted line, among those
-that say the same the one with most of the quoted lines above it just
-above it, then the nearest to the old number), and a line that cannot be
-placed -- not read, no quote -- shows where it was.  This needs nothing
-the review keeps, so it survives a restart.  The files are read once the
-branch is (`harness-ui-patch-review--place-previous`, a second drawing
-of the report), and Ediff takes the places from there, else works them
-out from the two texts it has.  When a task is
-sent back with a new round, the review keeps the blobs the branch had
-when the reviewer wrote (`:snapshots`, one round's files each); the
-next review says for each commented file whether it changed since the
-reviewer's last comment on it or stayed the same.  A review made after
-the feedback has no snapshot of that round: the comments show, without
-saying what changed since.  The module follows `task/changed`,
-`task/review` -- a task back for review has its branch read again --
-and `task/done` and `task/deleted`, which drop the review: at once when
-its Ediff does not show, else when q leaves it.
+OTHER SETS.  The library is not tied to a task.
+`change-review-open-threads` opens the threads view of any set,
+`change-review-open-diff` the diff view of any version, and
+`change-review-open-patches` reviews a file of patches: a mailbox with
+an emailed series, `git format-patch` files, a single patch or a plain
+diff.  The series becomes a set whose versions are its `[PATCH vN]`, and
+whose threads are kept in a file under `change-review-ui-directory`, so
+opening the same patches again finds them, a later version of the series
+being one more version of the same set.  `change-review-ui-import-reply`
+adds the comments of a reply (the region, or a mail saved in a file):
+each comment becomes a thread on the line it was under, or a reply in
+the thread it answers, authored by the mail's sender; and C-c C-c writes
+the drafts as replies to send, a mail for each patch with comments, in
+`message-mode`.  To the views, a handed-in task is one more set of
+versions, and an emailed patchset is the same thing.
+
+The module follows `task/changed`, `task/review` -- a task back for
+review has its branch read again, and the version the harness recorded
+-- `patch-review/changed`, and `task/done` and `task/deleted`, which
+drop the review: at once when its Ediff does not show, else when q
+leaves it.

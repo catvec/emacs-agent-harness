@@ -9,6 +9,7 @@ out](#splitting-a-library-out)).
 | Library | Upstream | Vendored commit |
 |---|---|---|
 | [compose-quote](compose-quote/README.md) | not split out yet: this directory is its source | -- |
+| [change-review](change-review/README.md) | not split out yet: this directory is its source | -- |
 
 ## The rule
 
@@ -38,7 +39,9 @@ the library's own directory on its load path.
   than this one, which loads the new `harness.el` before it compiles the
   new files and so can `require` a library they need.
 - **Loading.** A library the harness needs is listed in
-  `harness--library-files` (compose-quote is, last): it loads compiled,
+  `harness--library-files` (compose-quote is, and the four files of
+  change-review after it, in the order they require each other): it
+  loads compiled,
   before any module, when the harness starts, and `harness-reload`
   checks that it compiles and loads it again. One that is only on the
   load path is loaded from its source on its first `require`, and not
@@ -62,9 +65,11 @@ the library's own directory on its load path.
    with the usual header and `Package-Requires`, `NAME-test.el`, a
    `README.md`, a `LICENSE`. Keep to the rule above.
 2. If the harness needs it at start, add `"lisp/vendor/NAME/NAME.el"` to
-   `harness--library-files` in `harness.el`. Nothing else lists it: the
-   load path, the update check, `scripts/lint.sh` and `scripts/test.sh`
-   find a library by its directory.
+   `harness--library-files` in `harness.el`, and each other file of it
+   that the harness requires, after the files they require themselves
+   (change-review has four). Nothing else lists it: the load path, the
+   update check, `scripts/lint.sh` and `scripts/test.sh` find a library
+   by its directory.
 3. Add it to the table above.
 
 ## Splitting a library out

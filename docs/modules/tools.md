@@ -8,7 +8,7 @@ Tool registry, permission-gated execution and context-bomb guard.
 - **Source:** [lisp/modules/harness-tools.el](../../lisp/modules/harness-tools.el)
 - **Loaded:** by default
 - **Requires:** nothing
-- **Required by:** [agent](agent.md), [perms](perms.md), [readonly](readonly.md), [skills](skills.md), [supervisor](supervisor.md), [tool-slots](tool-slots.md), [tools-agent](tools-agent.md), [tools-compact](tools-compact.md), [tools-dev](tools-dev.md), [tools-emacs](tools-emacs.md), [tools-emacs-eval](tools-emacs-eval.md), [tools-events](tools-events.md), [tools-fs](tools-fs.md), [tools-handin](tools-handin.md), [tools-notify](tools-notify.md), [tools-plan](tools-plan.md), [tools-question](tools-question.md), [tools-session-info](tools-session-info.md), [tools-sessions](tools-sessions.md), [tools-shell](tools-shell.md), [tools-ssh](tools-ssh.md), [tools-todo](tools-todo.md), [tools-web](tools-web.md)
+- **Required by:** [agent](agent.md), [perms](perms.md), [readonly](readonly.md), [skills](skills.md), [supervisor](supervisor.md), [tool-slots](tool-slots.md), [tools-agent](tools-agent.md), [tools-compact](tools-compact.md), [tools-dev](tools-dev.md), [tools-emacs](tools-emacs.md), [tools-emacs-eval](tools-emacs-eval.md), [tools-events](tools-events.md), [tools-fs](tools-fs.md), [tools-handin](tools-handin.md), [tools-notify](tools-notify.md), [tools-plan](tools-plan.md), [tools-question](tools-question.md), [tools-review](tools-review.md), [tools-session-info](tools-session-info.md), [tools-sessions](tools-sessions.md), [tools-shell](tools-shell.md), [tools-ssh](tools-ssh.md), [tools-todo](tools-todo.md), [tools-web](tools-web.md)
 
 ## About
 

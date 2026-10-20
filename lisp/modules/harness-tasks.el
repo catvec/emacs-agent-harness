@@ -3224,6 +3224,66 @@ them, such as \"[image]\" or \"[file notes.txt]\"."
                  (cl-remove "text" blocks :key (lambda (b) (plist-get b :type)) :test #'equal)
                  " "))))
 
+(defvar harness-tasks-feedback-additions-functions nil
+  "Functions that add to the feedback that sends a task back from review.
+Each is called with the TASK, which waits for review, and the WORDS the
+user sends it back with, a string, empty when there are none; it returns
+nil or (TEXT . DONE).  TEXT, a string or nil, goes after the words of the
+feedback, as its own paragraphs -- the review module puts the user's
+draft comments there -- and DONE, a function of no arguments, is called
+once the task is sent back, or kept for a slot (`task/reject',
+`harness-tasks--on-message'): the review module marks the drafts sent
+and keeps the words.  A function must not change anything before DONE:
+its text may never be sent, when the message turns out to be refused.")
+
+(defun harness-tasks--feedback-additions (task &optional words)
+  "Return what the functions of `harness-tasks-feedback-additions-functions' add.
+\(TEXT . DONES) for TASK, which is sent back with WORDS: the texts they
+returned, trimmed and joined by a blank line, nil when there are none,
+and the functions to call once the task is sent back.  Nil when none
+added anything; a function that fails adds nothing."
+  (let (texts dones)
+    (dolist (fn (ensure-list harness-tasks-feedback-additions-functions))
+      (when-let* ((added (condition-case err
+                             (funcall fn task (or words ""))
+                           (error (harness-log 'warn "task feedback: %S failed: %s" fn
+                                               (harness-error-message err))
+                                  nil))))
+        (when (and (stringp (car added)) (not (harness-string-blank-p (car added))))
+          (push (string-trim (car added)) texts))
+        (when (functionp (cdr added)) (push (cdr added) dones))))
+    (and (or texts dones)
+         (cons (and texts (string-join (nreverse texts) "\n\n")) (nreverse dones)))))
+
+(defun harness-tasks--commit-additions (additions)
+  "Call the functions of ADDITIONS, from `harness-tasks--feedback-additions'."
+  (dolist (done (cdr additions))
+    (condition-case err
+        (funcall done)
+      (error (harness-log 'warn "task feedback: %S failed: %s" done (harness-error-message err))))))
+
+(defun harness-tasks--add-to-feedback (feedback additions)
+  "Return the text FEEDBACK with ADDITIONS after it.
+ADDITIONS are those `harness-tasks--feedback-additions' returned."
+  (if (car additions)
+      (string-join (delq nil (list (and (not (harness-string-blank-p feedback)) (string-trim feedback))
+                                   (car additions)))
+                   "\n\n")
+    feedback))
+
+(defun harness-tasks--add-to-blocks (blocks additions)
+  "Return the message BLOCKS with a text block of ADDITIONS after them."
+  (if (car additions)
+      (append blocks (list (list :type "text" :text (car additions))))
+    blocks))
+
+(defun harness-tasks--words (blocks)
+  "Return the words of the message BLOCKS: its text blocks, trimmed and joined."
+  (string-join (cl-loop for b in blocks
+                        when (harness-tasks--text-block-p b)
+                        collect (string-trim (plist-get b :text)))
+               "\n\n"))
+
 (defun harness-tasks--feedback-round (task feedback)
   "Return TASK's rounds of feedback with a new one, FEEDBACK, at the end."
   (append (plist-get task :feedback) (list (list :text feedback :at (float-time)))))
@@ -3354,8 +3414,10 @@ while a write-up ran.  Return the blocks to deliver."
       blocks)
      ((eq kind 'system) blocks)
      ((null kind)
-      (let ((steering (plist-get info :steering))
-            (feedback (harness-tasks--feedback-text blocks)))
+      (let* ((additions (harness-tasks--feedback-additions task (harness-tasks--words blocks)))
+             (blocks (harness-tasks--add-to-blocks blocks additions))
+             (steering (plist-get info :steering))
+             (feedback (harness-tasks--feedback-text blocks)))
         (cond
          ((or steering (harness-tasks--make-room task))
           (harness-log 'info "task %s: a message to its session sends it back from review" id)
@@ -3364,8 +3426,9 @@ while a write-up ran.  Return the blocks to deliver."
           (harness-tasks--send-back id feedback))
          (t
           (harness-log 'info "task %s: a message to its session sends it back from review; it waits for a slot" id)
-          (harness-tasks--hold-back id feedback))))
-      (harness-tasks--reject-blocks blocks))
+          (harness-tasks--hold-back id feedback)))
+        (harness-tasks--commit-additions additions)
+        (harness-tasks--reject-blocks blocks)))
      (t
       (harness-log 'info "task %s: a message from %s reaches it in review; not a review, it is not sent back"
                    id (harness-sender-description from))
@@ -5296,17 +5359,19 @@ front of its priority's queue instead, with the feedback kept, and its
 session gets it when it starts (`harness-tasks--hold-back'): when a
 slot frees, when it comes to outrank a task at work, at
 `task/resume-queue', or at an explicit `task/start'.  Return the task."
-  (let ((task (harness-tasks--get id)))
+  (let* ((task (harness-tasks--get id))
+         (additions (harness-tasks--feedback-additions task (string-trim (or feedback "")))))
     (unless (eq (plist-get task :state) 'review)
       (error "Task %s is not waiting for review" id))
-    (when (and (harness-string-blank-p feedback) (null attachments))
+    (when (and (harness-string-blank-p feedback) (null attachments) (null (car additions)))
       (error "Sending a task back needs feedback"))
     (unless (harness-tasks--session task) (error "Task %s has no session to send the feedback to" id))
     (when (plist-get task :worktree-removed)
       (error "Task %s was archived and its worktree removed; submit a new task" id))
-    (let ((sid (plist-get task :session))
-          (blocks (harness-tasks--blocks (list :prompt (string-trim (or feedback ""))
-                                               :attachments attachments))))
+    (let* ((sid (plist-get task :session))
+           (feedback (harness-tasks--add-to-feedback feedback additions))
+           (blocks (harness-tasks--blocks (list :prompt (string-trim (or feedback ""))
+                                                :attachments attachments))))
       (if (not (harness-tasks--make-room task))
           (progn
             (harness-log 'info "task %s: keeping the feedback until it gets a slot" id)
@@ -5322,6 +5387,7 @@ slot frees, when it comes to outrank a task at work, at
         (harness-tasks--send-back id (harness-tasks--feedback-text blocks))
         (harness-catch (harness-call-async 'agent/prompt sid (harness-tasks--reject-blocks blocks))
                        (lambda (e) (harness-tasks--fail id e))))
+      (harness-tasks--commit-additions additions)
       (harness-call 'task/get id))))
 
 (harness-defmethod task/for-session (session-id)

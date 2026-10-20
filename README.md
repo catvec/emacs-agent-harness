@@ -163,6 +163,11 @@ OpenAI-compatible APIs and AWS Bedrock.
 | ![A chat whose agent replied in three paragraphs, the reply quoted in the compose box with C-c > and answered inline: the middle of the long paragraph elided as [...], the quote split in two with an answer under each part](docs/media/quote-reply.png) | ![A chat whose agent answered a reply that quoted it: the agent's answer quoted in the compose box with the thread under it one level deeper, the user's answers and the agent's message they quoted, and an answer typed under the agent's line](docs/media/quote-thread.png) |
 | Answering a reply inline: `C-c >` quotes it, `C-c [` elides what you skip as `[...]`, `M-RET` splits the quote to answer a part | The thread kept: the message the reply answers, and what that answered, nested under the quote |
 
+| ![A task in review, its report at the changes: the files with their open and closed threads, and under each file its open threads, a line each; the drafts waiting to be sent](docs/media/review.png) | ![The threads of that review by file, filtered by status: each comment with who wrote it, when, its version and its place in the thread, one with where it was made and the lines of the diff, the agent's answer linking to its conversation](docs/media/review-threads.png) |
+| A task's changes, and the threads of comments on them | The threads by file: sender, when, content and place in the thread; where a comment was made |
+| ![Ediff on a file of that review: the two versions and the control panel, the threads drawn under their lines in the branch's version, the report with its box at the bottom](docs/media/review-ediff.png) | |
+| Ediff: the threads under their lines, drawn as the threads view draws them | |
+
 ## Requirements
 
 - GNU Emacs 29.1 or later
@@ -2499,7 +2504,10 @@ own, enabled beside it: `merge` gives each task a worktree (from the
 core's `worktree` module) and merges it back (without it tasks work in
 the main tree), `tools-handin` gives task sessions the `hand_in` tool
 they finish with, `ui-review` and `ui-patch-review` show the reports to
-verify or send back, `recap` writes the recaps on the cards,
+verify or send back (`ui-patch-review` brings `patch-review`, which
+keeps the threads of comments on a task's changes, and the
+`review_threads` and `review_comment` tools the agent answers them
+with), `recap` writes the recaps on the cards,
 `tasks-notify` notifies you, and `tasks-search` is the board's search:
 
 ```elisp
@@ -2892,40 +2900,70 @@ verify or send back, `recap` writes the recaps on the cards,
   the directories that hold them (`t` shows them flat), a row each,
   with its status, what changed (`+3 −1`), a check mark once you looked
   at it, a firmer one once you approved it (`a`; `A` approves them all:
-  a file the branch changes again is reviewed anew), and your comments
-  on it. `RET` on a file, or a click, compares it in Ediff, the merge
-  base against the branch, in the report's frame, the report itself
-  staying at the bottom of it, small, with its feedback box. There `c`
-  comments on the current difference -- in a buffer of its own, `C-c
-  C-c` comments -- or, in either version, on the line at point; `a`
-  approves the file, `n` goes to the next difference and, at the last
-  one, to the next file, `N` and `P` go on to the next or previous
-  file, and `q` comes back to the report as it was, point on the next
-  file. Each comment goes into the report's box for the feedback the way
-  a reply to a patch has it: the lines it is about quoted from the diff
-  with `> `, under their file's `diff --git` line, a few lines of
-  context first (`harness-ui-patch-review-context-lines`), your comment
-  under them. The box stays in sight while you compare
-  (`harness-ui-patch-review-ediff-box-height` is how much of the frame
-  the report keeps): `e` goes to it, point at the end of the comment on
-  the difference or the line you are on, to reword it or add something,
-  and `C-c C-d` there goes back to Ediff, which was not left. Edit the
-  box as you like and write around the comments; `C-c C-c` sends it all
-  back to the task as its feedback, in one go. A task sent back and in
-  review again shows your earlier comments where they are now: under
-  their file in the report, and in Ediff under their line in the newest
-  version, with the round and what became of the line (`line 44 (was
-  42)`, `changed since`); `RET` on one in the report opens Ediff with
-  that line in sight, and each commented file says whether it changed
-  since your comment. `C-c C-d` in a task's session or on its board card
-  opens the changes after the task left review too. Git runs in the
-  Emacs that shows the board, so the changes show where the task's
-  repository is on this machine. Ediff's own settings apply
-  (`ediff-split-window-function` puts the two versions side by side);
+  a file the branch changes again is reviewed anew), and how many
+  threads of comments it has, open and closed. Each open thread is a
+  line under its file. `RET` on a file, or a click, compares it in
+  Ediff, the merge base against the branch, in the report's frame, the
+  report itself staying at the bottom of it, small, with its feedback
+  box; `RET` on a thread's line compares the file with that line in
+  sight. In Ediff `n` goes to the next difference and, at the last one,
+  to the next file, `N` and `P` go on to the next or previous file, `a`
+  approves the file and `q` comes back to the report as it was, point
+  on the next file.
+
+  The comments are **threads**. `c` in Ediff comments on the current
+  difference -- or, in either version, on the line at point -- in a
+  buffer of its own (`C-c C-c` saves the comment), and it starts a
+  thread under that line, open, as a draft. Every thread of the file
+  shows under its line in both versions, each comment saying who wrote
+  it (you; or an agent, with `↗ conversation` to the point of its
+  session the comment came from), when, against which version of the
+  change, whether it is a draft, and its place in the thread (`2/3`, and
+  `↳ re 1/3` when it answers another than the one before). `r` replies
+  in the thread under the line, `x` closes it -- closed is the good
+  ending: the point made, the change made -- or opens it again, `RET`
+  shows where each comment was made, with the lines of the diff it was
+  made on, and `e` edits your draft or goes to the box. `T`, in the
+  report and in Ediff (or `[Threads]`), lists all the threads by file in
+  a view of their own: filtered by status (`f`: open, closed, all),
+  `n` and `p` between comments, `N` and `P` between threads, `r` to
+  reply to the comment at point, `x` to close or open its thread, `d` to
+  show it in Ediff, `o` to follow an agent's comment to its
+  conversation. The agent answers with its own tools, `review_threads`
+  and `review_comment`, which record its session and the call, and
+  closes a thread when what it raised is done; you close it once you
+  agree. A comment keeps the revision it was written against, and a thread
+  is shown where its line is now in the newest version -- `line 44 (was
+  42)`, `changed since` -- also across the rounds of a review, and
+  each commented file says whether it changed since your last comment.
+
+  Your comments are drafts until the task is sent back. Whatever sends
+  it back -- the report's box (`C-c C-c`, an empty box too when drafts
+  wait), a message typed in its session, another client -- takes the
+  drafts with it, quoted from the diff above each comment as a reply to
+  a patch has it, the thread named under each so that the agent can
+  answer it; they are marked sent, and the words you wrote around them
+  are kept as a thread on the change as a whole. The box stays in sight
+  while you compare (`harness-ui-patch-review-ediff-box-height` is how
+  much of the frame the report keeps): `e` goes to it and `C-c C-d`
+  there goes back to Ediff, which was not left. A task whose feedback
+  was written before there were threads shows those comments as closed
+  threads. `C-c C-d` in a task's session or on its board card opens the
+  changes after the task left review too. Git runs in the Emacs that
+  shows the board, so the changes show where the task's repository is on
+  this machine. Ediff's own settings apply (`ediff-split-window-function`
+  puts the two versions side by side);
   `harness-ui-patch-review-ediff-window-setup` keeps its control panel
-  in the frame. The module (`ui-patch-review`) is self-contained:
-  without it, left out of `harness-enable-modules` or added to
-  `harness-disabled-modules`, the changes leave the report.
+  in the frame.
+
+  The threads, their comments and the views are the
+  [change-review](lisp/vendor/change-review/README.md) library's, which
+  needs nothing of the harness and reviews emailed patches and any other
+  patch set the same way; the harness gives it a task to review and
+  keeps the threads (modules `ui-patch-review` and `patch-review`, which
+  come together; the tools come with them). Left out of
+  `harness-enable-modules` or added to `harness-disabled-modules`, the
+  changes leave the report.
 - `I` adds an ongoing session to the board as a task, and `b` opens a
   BTW conversation about the tasks.
 - `SPC` on a task that needs input pops out what it waits on -- the
@@ -4082,10 +4120,10 @@ with it.
 | Area | Core | Enabled by you |
 |---|---|---|
 | Sessions | `config` `project` `store` `session` `agent` `compaction` `retry` `priority` `usage` `naming` | `cowboy` `handoff` `fallback` `seed` `supervisor` `insights` `pet` `version` `decisions` `session-search` `cost-compare` `commit-msg` |
-| Tasks and git | `worktree` | `tasks` `tasks-notify` `tasks-search` `recap` `merge` |
+| Tasks and git | `worktree` | `tasks` `tasks-notify` `tasks-search` `recap` `merge` `patch-review` |
 | Safety | `perms` `sandbox` | `tool-slots` `tool-slots-load` `readonly` `secrets` `redact` `judge` |
 | Providers | `provider` `provider-claude` | `provider-copilot` `provider-openai` `provider-deepseek` `provider-bedrock` `provider-demo` |
-| Tools | `tools` `tools-fs` `tools-shell` `tools-emacs` `tools-question` `tools-plan` `tools-todo` `tools-session-info` `tools-agent` | `tools-ssh` `tools-web` `tools-sessions` `tools-notify` `tools-handin` `tools-emacs-eval` `tools-dev` `tools-events` `tools-compact` `skills` |
+| Tools | `tools` `tools-fs` `tools-shell` `tools-emacs` `tools-question` `tools-plan` `tools-todo` `tools-session-info` `tools-agent` | `tools-ssh` `tools-web` `tools-sessions` `tools-notify` `tools-handin` `tools-review` `tools-emacs-eval` `tools-dev` `tools-events` `tools-compact` `skills` |
 | Connections | `acp` | `acp-remote` `notifications` |
 | User interface | `ui` `ui-chat` `ui-compose` `ui-pending` `ui-sessions` `ui-notify` `ui-config` `ui-usage` `ui-priority` `ui-worktree` | `ui-btw` `ui-tree` `ui-compact` `ui-cache` `ui-review` `ui-report` `ui-patch-review` `ui-popout` `ui-media` `ui-dirs` `ui-qr` `ui-acp-remote` `ui-handoff` |
 
@@ -4097,8 +4135,9 @@ shows one in Emacs. [docs/module-audit.md](docs/module-audit.md) is an
 audit of the modules and their API made with them.
 Beside the modules, `lisp/vendor` holds libraries the harness ships that
 need nothing of it, and may be used without it: `compose-quote`, which
-the compose box quotes with, is the first. See
-[lisp/vendor/README.md](lisp/vendor/README.md).
+the compose box quotes with, and `change-review`, the threads of
+comments on a change, which the review of a task's changes is built on.
+See [lisp/vendor/README.md](lisp/vendor/README.md).
 
 ### Modules of your own
 
@@ -4336,6 +4375,7 @@ scripts/dev.sh start                         # start a clean development Emacs
 scripts/media.sh [NAME...]                   # take the screenshots in docs/media again
 scripts/module-docs.sh [--check]             # write the module pages in docs/modules again
 make -C lisp/vendor/compose-quote test       # a vendored library's own tests, on their own
+make -C lisp/vendor/change-review test
 ```
 
 A development Emacs (`scripts/dev.sh`) loads every module; set

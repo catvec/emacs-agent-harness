@@ -1567,7 +1567,10 @@ instead, by a merge that never ends."
       (harness-call 'task/verify pagination)
       (harness-media--wait-task pagination (lambda (task) (equal (harness-media--column task) "merging"))
                                 "to wait in the merge queue")
-      (harness-call 'task/reject slow "Say which unit the threshold is in.")
+      ;; The words of a round are kept in the review as written by the
+      ;; user, whose name the review shots below give their comments too.
+      (let ((user-full-name "Noah Huppert") (user-mail-address "noah@acme.example"))
+        (harness-call 'task/reject slow "Say which unit the threshold is in."))
       (harness-media--wait-task slow (lambda (task) (equal (harness-media--column task) "active")) "to go back to work")
       (harness-media--wait-task slow (lambda (task) (equal (harness-media--column task) "review")) "to come back for review")
       (harness-media--wait-task health (lambda (task) (equal (harness-media--column task) "needs-input")) "to ask its question")
@@ -3349,6 +3352,193 @@ afterwards."
     (harness-media--capture "version"))
   (harness-revision-note-loaded))
 
+;;;; Reviewing a task's changes with threads
+
+(defvar harness-ui-patch-review--reviews)
+(declare-function harness-ui-patch-review--r-files "harness-ui-patch-review")
+(declare-function harness-ui-patch-review--r-set "harness-ui-patch-review")
+(declare-function harness-ui-patch-review--r-tip "harness-ui-patch-review")
+(declare-function harness-ui-patch-review--r-popout "harness-ui-patch-review")
+(declare-function harness-ui-patch-review--r-ediff "harness-ui-patch-review")
+(declare-function harness-ui-patch-review--location "harness-ui-patch-review")
+(declare-function harness-ui-patch-review-ediff "harness-ui-patch-review")
+(declare-function change-review-user "change-review")
+(declare-function change-review-agent "change-review")
+(declare-function change-review-comment "change-review")
+(declare-function change-review-reply "change-review")
+(declare-function change-review-close "change-review")
+(declare-function change-review-set-threads "change-review")
+(declare-function change-review-open-threads "change-review-ui")
+
+(defvar harness-media--review nil
+  "The review the review pictures show, once its threads are made.")
+
+(defun harness-media--review-line (text file)
+  "Return the number of the first line of FILE, in the slow task's worktree, matching TEXT."
+  (let ((worktree (plist-get (harness-media--task (plist-get (plist-get harness-media--world :tasks) :slow))
+                             :worktree)))
+    (with-temp-buffer
+      (insert-file-contents (expand-file-name file worktree))
+      (goto-char (point-min))
+      (unless (re-search-forward text nil t) (error "No %s in %s" text file))
+      (line-number-at-pos (match-beginning 0)))))
+
+(defun harness-media--review-prepare ()
+  "Put a second file on the slow-request task's branch, for the review pictures.
+The agent wired the timing middleware in the app: acme/app.py changes
+beside acme/timing.py.  Done once."
+  (let* ((id (plist-get (plist-get harness-media--world :tasks) :slow))
+         (worktree (plist-get (harness-media--task id) :worktree))
+         (app (expand-file-name "acme/app.py" worktree)))
+    (unless (with-temp-buffer (insert-file-contents app) (search-forward "timed(" nil t))
+      (let ((text (with-temp-buffer (insert-file-contents app) (buffer-string))))
+        (with-temp-file app
+          (insert (replace-regexp-in-string
+                   "def application(environ, start_response):"
+                   "def _application(environ, start_response):"
+                   (replace-regexp-in-string
+                    "from acme.auth import authenticate\n"
+                    "from acme.auth import authenticate\nfrom acme.timing import timed\n"
+                    text t t)
+                   t t))
+          (insert "\n\napplication = timed(_application)\n")))
+      (harness-media--git-in worktree "add" "-A")
+      (harness-media--git-in worktree "commit" "-q" "-m" "Time the requests the application serves"))))
+
+(defun harness-media--review-layout ()
+  "Show the board the whole frame high, the slow-request task's report over it.
+Return the report's popout buffer, once it shows its changes."
+  (harness-media--review-prepare)
+  (harness-media--view (lambda () (harness-tasks harness-media-project 'full)))
+  (set-frame-size nil harness-media-columns harness-media-lines)
+  (harness-media--settle 0.5)
+  (let* ((id (plist-get (plist-get harness-media--world :tasks) :slow))
+         (task (with-current-buffer (window-buffer (selected-window)) (harness-ui-tasks--find id))))
+    (harness-ui-report-popout task)
+    (let ((review (harness-media--wait
+                   (lambda ()
+                     (let ((review (gethash id harness-ui-patch-review--reviews)))
+                       (and review (harness-ui-patch-review--r-tip review)
+                            (harness-ui-patch-review--r-files review) review)))
+                   30 "the review to read the branch")))
+      (harness-media--review-threads review id))
+    (harness-media--settle 1)
+    (harness-ui-popout-buffer (list 'report id))))
+
+(defun harness-media--review-threads (review id)
+  "Give REVIEW, that of task ID, the threads the pictures show, once."
+  (unless harness-media--review
+    (setq user-full-name "Noah Huppert" user-mail-address "noah@acme.example")
+    (let* ((set (harness-ui-patch-review--r-set review))
+           (worktree (plist-get (harness-media--task id) :worktree))
+           (sid (plist-get (harness-media--task id) :session))
+           ;; The commit the first round handed in: the first of the branch.
+           (first-tip (car (split-string (harness-media--git-in worktree "rev-list" "--reverse" "main..HEAD"))))
+           (call (cl-loop for node in (harness-call 'session/nodes sid)
+                          when (and (eq (plist-get node :kind) 'tool-call)
+                                    (equal (plist-get node :tool) "edit_file"))
+                          return (plist-get node :call-id)))
+           (agent (change-review-agent "Claude (Fable 5.1)" :session sid :tool-call call))
+           (you (change-review-user "Noah Huppert" "noah@acme.example"))
+           (file (lambda (path) (cl-find path (harness-ui-patch-review--r-files review)
+                                         :key #'change-review-file-path :test #'equal)))
+           (where (lambda (path text &optional side)
+                    (harness-ui-patch-review--location
+                     (funcall file path) (cons (or side :new) (harness-media--review-line text path)))))
+           (threshold (change-review-comment
+                       set "Is half a second the right threshold? The dashboards alert at 400 ms."
+                       :author you :time (harness-media--ago 95) :sent (harness-media--ago 94)
+                       :revision first-tip :location (funcall where "acme/timing.py" "SLOW_SECONDS = ")))
+           (resolution (change-review-comment
+                        set "Is whole-millisecond resolution enough for the log line?"
+                        :author you :time (harness-media--ago 93) :sent (harness-media--ago 92)
+                        :revision first-tip :location (funcall where "acme/timing.py" "elapsed \\* 1000"))))
+      (change-review-reply set threshold
+                           "Half a second is the objective in docs/slo.md, so I made it a named constant and said in a comment that it is in seconds."
+                           :author agent :time (harness-media--ago 50) :sent (harness-media--ago 50))
+      (change-review-reply set threshold "Fine, but please link the document in the comment."
+                           :author you :time (harness-media--ago 3))
+      (change-review-reply set resolution "At a 500 ms threshold whole milliseconds are enough."
+                           :author agent :time (harness-media--ago 50) :sent (harness-media--ago 50))
+      (change-review-close set (change-review-comment-thread resolution)
+                           :author you :time (harness-media--ago 40))
+      (let ((rename (change-review-comment
+                     set "Why rename application? The WSGI server imports it by that name."
+                     :author you :time (harness-media--ago 88) :sent (harness-media--ago 87)
+                     :revision first-tip :location (funcall where "acme/app.py" "def _application"))))
+        (change-review-reply set rename "It still exists: the last line of the module binds application to the timed one, so imports keep working."
+                             :author agent :time (harness-media--ago 50) :sent (harness-media--ago 50)))
+      (change-review-comment set "Should the health check be timed too? A slow probe would fill the log."
+                             :author you :time (harness-media--ago 2)
+                             :location (funcall where "acme/app.py" "application = timed"))
+      (harness-media--settle 1.5)
+      (setq harness-media--review review))))
+
+(defun harness-media-shot-review ()
+  "A task in review, its report at the changes: the files, and under each its open threads.
+The threads are the library's, kept by the harness: the user's comments,
+the agent's answers, a draft, and the round of feedback from before
+there were threads, closed."
+  (let ((popout (harness-media--review-layout)))
+    (with-selected-window (get-buffer-window popout)
+      (goto-char (point-min))
+      (re-search-forward "^Changes (")
+      (beginning-of-line)
+      (recenter 0))
+    (harness-media--fit-popout-shot 42)
+    (with-selected-window (get-buffer-window popout)
+      (goto-char (point-min))
+      (re-search-forward "^Changes (")
+      (beginning-of-line)
+      (recenter 0))
+    (harness-media--capture "review")))
+
+(defun harness-media-shot-review-threads ()
+  "The threads of that review by file: filtered by status, each message with who, when and its place.
+Where one comment was made shows under it, with the lines of the diff it was
+made on; the agent's answer links to the conversation it came from."
+  (let ((popout (harness-media--review-layout)))
+    (ignore popout)
+    (harness-media--reset-layout)
+    (let ((buffer (change-review-open-threads
+                   (harness-ui-patch-review--r-set harness-media--review) 'all)))
+      (delete-other-windows)
+      (with-current-buffer buffer
+        (goto-char (point-min))
+        (search-forward "Is half a second")
+        (call-interactively #'change-review-ui-show-origin)
+        (goto-char (point-min))
+        (search-forward "Half a second is the objective")
+        (forward-line -1)
+        (beginning-of-line))
+      (harness-media--settle 1)
+      (harness-media--fit (harness-media--text-lines (selected-window)) nil 60)
+      (set-window-start nil (point-min))
+      (harness-media--settle 0.5))
+    (harness-media--capture "review-threads")))
+
+(defun harness-media-shot-review-ediff ()
+  "Ediff on a file of that review, the threads under their lines and the box under it.
+The version on the branch shows the threads of acme/app.py at the line
+each is on now; the control panel offers to comment, reply and list them."
+  (let ((popout (harness-media--review-layout)))
+    (ignore popout)
+    (let* ((review harness-media--review)
+           (files (harness-ui-patch-review--r-files review))
+           (index (cl-position "acme/app.py" files :key #'change-review-file-path :test #'equal)))
+      (harness-ui-patch-review-ediff review index
+                                     (cons :new (harness-media--review-line "def _application" "acme/app.py")))
+      (harness-media--wait (lambda () (let ((state (harness-ui-patch-review--r-ediff review)))
+                                        (and (buffer-live-p (plist-get state :control))
+                                             (get-buffer-window (plist-get state :control)))))
+                           30 "Ediff to show")
+      (harness-media--settle 1.5)
+      (harness-media--capture "review-ediff")
+      ;; Back to the report, as q gives it.
+      (with-current-buffer (plist-get (harness-ui-patch-review--r-ediff review) :control)
+        (call-interactively #'harness-ui-patch-review-ediff-quit))
+      (harness-media--settle 0.5))))
+
 (defconst harness-media-shots
   '(("chat" . harness-media-shot-chat)
     ("chat-permission" . harness-media-shot-chat-permission)
@@ -3400,7 +3590,12 @@ afterwards."
     ("chat-denied-approved" . harness-media-shot-chat-denied-approved)
     ;; Likewise: they ask a session of their own, deleted after the picture.
     ("quote-reply" . harness-media-shot-quote-reply)
-    ("quote-thread" . harness-media-shot-quote-thread))
+    ("quote-thread" . harness-media-shot-quote-thread)
+    ;; Last: they add a commit to the slow-request task's branch and the
+    ;; threads of its review, which no other picture shows.
+    ("review" . harness-media-shot-review)
+    ("review-threads" . harness-media-shot-review-threads)
+    ("review-ediff" . harness-media-shot-review-ediff))
   "Every picture, as (NAME . FUNCTION), in the order they are taken.")
 
 ;;;; Entry point

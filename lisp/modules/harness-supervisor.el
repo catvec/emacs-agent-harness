@@ -437,13 +437,17 @@ none changes a file.  The reading tools every read-only session has are
 
 (defconst harness-supervisor--coordination-tools
   '("ask_user" "todo_write" "hand_in" "notify" "session_control" "session_send" "session_move"
-    "set_non_interactive" "set_priority" "task_control" "task_submit" "session_settings")
+    "set_non_interactive" "set_priority" "task_control" "task_submit" "session_settings"
+    "review_threads" "review_comment")
   "Tools a supervising session uses to coordinate with the user and other sessions.
 `session_settings' is one: giving a worker a larger context window or a
 stronger model is coordination, not hands-on work, and the permission
 chain decides each call.  It cannot widen a session's permissions
 anyway: the tool refuses the permission mode, non-interactive mode,
-allowed directories, the working directory and the host.")
+allowed directories, the working directory and the host.
+`review_threads' and `review_comment' are too: the reviewer's threads
+are answered, and closed once the plan's workers did what they raise,
+by the session that answers to the reviewer.")
 
 (defun harness-supervisor--allowed-tools ()
   "Return the names of the tools a supervising session may use besides bash.

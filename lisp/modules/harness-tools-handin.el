@@ -371,6 +371,9 @@ the session's branch is built on has to be in it first."
               (let ((report (append (list :summary summary :problem problem)
                                     (and reproduction (list :reproduction reproduction))
                                     (list :evidence items :at (float-time))
+                                    ;; The call that handed the work in: the review
+                                    ;; names it as the author of the version.
+                                    (and (plist-get ctx :call-id) (list :call-id (plist-get ctx :call-id)))
                                     (and cannot (list :cannot-continue t))
                                     (and no-merge (list :no-merge t)))))
                 (harness-call 'task/hand-in (plist-get task :id) report)

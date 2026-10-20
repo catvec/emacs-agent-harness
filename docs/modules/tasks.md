@@ -8,7 +8,7 @@ Task mode: one session per task, through review and the merge queue, with a limi
 - **Source:** [lisp/modules/harness-tasks.el](../../lisp/modules/harness-tasks.el)
 - **Loaded:** when enabled (see `harness-enable-modules`)
 - **Requires:** [store](store.md), [project](project.md), [session](session.md), [agent](agent.md)
-- **Required by:** [recap](recap.md), [tasks-notify](tasks-notify.md), [tasks-search](tasks-search.md)
+- **Required by:** [patch-review](patch-review.md), [recap](recap.md), [tasks-notify](tasks-notify.md), [tasks-search](tasks-search.md)
 - **Brings along:** [ui-tasks](ui-tasks.md) (its UI), [priority](priority.md) (its file requires it), [readonly](readonly.md) (its file requires it)
 
 ## About
@@ -342,6 +342,10 @@ here logs, emits or returns one.
 - `task/done` — (TASK HOW) when a task becomes done; HOW is merged, finished, verified or completed.
 - `task/queue` — (PROJECT SUSPENDED) when a project's pending queue is suspended or resumed.
 - `task/review` — (TASK) when a task's finished work starts waiting for the user's review.
+
+### Hooks
+
+- `harness-tasks-feedback-additions-functions` — Functions that add to the feedback that sends a task back from review.
 
 ### Options
 

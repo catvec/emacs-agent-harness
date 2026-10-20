@@ -57,6 +57,7 @@ moved it, and its keys with it.
 ### Hooks
 
 - `harness-chat-panel-functions`
+- `harness-ui-review-pending-functions` — Functions that say a review has something to send besides the box's words.
 
 ### Commands
 

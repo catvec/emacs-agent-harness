@@ -57,6 +57,7 @@
 (defvar harness-chat-placeholder)
 (defvar harness-chat-mode-map)
 (defvar harness-ui-session-id)
+(defvar harness-ui-popout-empty-ok-function)
 (defvar harness-compose-redraw-function)
 (declare-function harness-ui-report-popout "harness-ui-report" (task))
 (declare-function harness-ui-report-string "harness-ui-report" (task &optional window))
@@ -73,6 +74,18 @@
 
 (defconst harness-ui-review--feedback-hint "Feedback…  C-c C-c sends it back"
   "The empty box's hint while it takes the feedback that sends a task back.")
+
+(defvar harness-ui-review-pending-functions nil
+  "Functions that say a review has something to send besides the box's words.
+Each is called with the TASK, which waits for review, and returns non-nil
+when the review holds something that goes with the feedback that sends
+the task back -- the drafts of the comments the patch review module
+keeps -- so that sending it back with an empty box is feedback all the
+same.  The harness adds that to whatever sends the task back.")
+
+(defun harness-ui-review--pending-p (task)
+  "Return non-nil when the review of TASK has something to send with its feedback."
+  (and (run-hook-with-args-until-success 'harness-ui-review-pending-functions task) t))
 
 (defvar harness-ui-review--tasks (make-hash-table :test 'equal)
   "Session id -> the task record of that session, as last heard.")
@@ -171,7 +184,8 @@ session's own, the harness taking any message the user sends the
 task's session for the feedback that sends it back
 \(`harness-tasks--on-message')."
   (let ((task (harness-ui-review--current-task)))
-    (if (and (harness-string-blank-p text) (null attachments))
+    (if (and (harness-string-blank-p text) (null attachments)
+             (not (harness-ui-review--pending-p task)))
         (user-error "Sending it back needs feedback")
       (harness-ui-call "_harness/task/reject"
                        (list :id (plist-get task :id) :feedback text :attachments attachments)
@@ -388,6 +402,9 @@ less its [Review Changes] button.  While it shows, the review keys are on, and
 the box under it sends TASK back (`harness-ui-review--report-compose')."
   (let ((review (harness-ui-review--reviewing-p task)))
     (harness-ui-review--keys review)
+    ;; An empty box sends the task back when the review has drafts to send.
+    (setq-local harness-ui-popout-empty-ok-function
+                (and review (lambda () (harness-ui-review--pending-p (harness-ui-report-task)))))
     (and review (harness-ui-review--face (harness-ui-review--banner task nil t)))))
 
 (defun harness-ui-review--report-compose (task)

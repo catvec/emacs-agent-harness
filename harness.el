@@ -208,7 +208,11 @@ every file (see `harness--compiled-fresh-p').")
                                   "lisp/harness-notifications-desktop.el" "lisp/harness-server.el"
                                   "lisp/harness-revision.el" "lisp/harness-module-docs.el"
                                   "lisp/harness-slots.el"
-                                  "lisp/vendor/compose-quote/compose-quote.el")
+                                  "lisp/vendor/compose-quote/compose-quote.el"
+                                  "lisp/vendor/change-review/change-review.el"
+                                  "lisp/vendor/change-review/change-review-diff.el"
+                                  "lisp/vendor/change-review/change-review-mail.el"
+                                  "lisp/vendor/change-review/change-review-ui.el")
   "Libraries loaded after the core files and before any module, in order.
 Both sides of the process split use them: the UI requires them all,
 harness-module-docs among them (which reads the modules' pages from
@@ -227,10 +231,11 @@ every `harness-reload' loads them again, so a reloaded module never
 calls a library function as it was before the update; they define no
 macros, so a change to one does not recompile the modules.
 
-The last is vendored (lisp/vendor/README.md): compose-quote, which the
-compose box quotes with.  Listed here it loads compiled at start, and
-`harness-reload' checks it compiles and loads it again, as it does
-the others.")
+The last are vendored (lisp/vendor/README.md): compose-quote, which the
+compose box quotes with, and change-review, the threads of comments on a
+change, whose files are listed in the order they require each other.
+Listed here a library loads compiled at start, and `harness-reload'
+checks it compiles and loads it again, as it does the others.")
 
 (add-to-list 'load-path (expand-file-name "lisp" harness-directory))
 ;; The libraries vendored under lisp/vendor go on `load-path' as this file

@@ -204,6 +204,19 @@ project's rule about landing work first."
     (should (eq 'allow (harness-perms-test--behavior "hand_in" 'meta)))
     (should (null (funcall probe 'requests)))))
 
+(ert-deftest harness-perms-review-tools-need-no-approval ()
+  "A task's agent answers a thread of its review without asking first.
+review_threads and review_comment only read and write the threads the
+user reads; asking about each answer would keep an unattended agent
+from answering at all.  A standing rule still beats them."
+  (harness-perms-test--setup :permission-mode 'ask :non-interactive t)
+  (dolist (tool '("review_threads" "review_comment"))
+    (should (member tool harness-perms--auto-allow-tools))
+    (should (eq 'allow (harness-perms-test--behavior tool 'meta))))
+  (let ((harness-perms-rules '((:tool "review_comment" :behavior deny))))
+    (should (eq 'deny (harness-perms-test--behavior "review_comment" 'meta)))
+    (should (eq 'allow (harness-perms-test--behavior "review_threads" 'meta)))))
+
 (ert-deftest harness-perms-extra-auto-allow-tools-need-no-approval ()
   "A module outside the harness may say a tool of its own needs no approval.
 It adds the tool to `harness-perms-extra-auto-allow-tools', as this

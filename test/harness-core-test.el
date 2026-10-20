@@ -1208,7 +1208,44 @@ The compose box quotes with it, so it loads compiled at start and again
 at every reload, as the harness's other libraries do."
   (dolist (file harness--library-files)
     (should (file-regular-p (harness--path file))))
-  (should (member "lisp/vendor/compose-quote/compose-quote.el" harness--library-files)))
+  (should (member "lisp/vendor/compose-quote/compose-quote.el" harness--library-files))
+  ;; change-review, which a task's review is made with, in the order its
+  ;; files require each other.
+  (should (equal '("lisp/vendor/change-review/change-review.el"
+                   "lisp/vendor/change-review/change-review-diff.el"
+                   "lisp/vendor/change-review/change-review-mail.el"
+                   "lisp/vendor/change-review/change-review-ui.el")
+                 (cl-remove-if-not (lambda (file) (string-prefix-p "lisp/vendor/change-review/" file))
+                                   harness--library-files))))
+
+(ert-deftest harness-modules-find-their-libraries-with-an-old-load-path ()
+  "The modules that require change-review compile where its directory is not on `load-path'.
+A harness older than lisp/vendor, reloading after an update, first
+compiles every file of the new tree with the `load-path' it has, which
+lacks the library's directory: the modules look for it beside
+themselves, as the compose box does for compose-quote, or the reload
+is refused."
+  (let ((emacs (expand-file-name invocation-name invocation-directory))
+        (out (harness-test-temp-dir)))
+    (unwind-protect
+        (dolist (file '("lisp/modules/harness-patch-review.el" "lisp/ui/harness-ui-patch-review.el"))
+          (with-temp-buffer
+            (let* ((elc (expand-file-name "checked.elc" out))
+                   (status (call-process
+                            emacs nil t nil "-Q" "--batch"
+                            "-L" harness-test-root
+                            "-L" (expand-file-name "lisp" harness-test-root)
+                            "-L" (expand-file-name "lisp/modules" harness-test-root)
+                            "-L" (expand-file-name "lisp/ui" harness-test-root)
+                            "--eval"
+                            (format "(progn (setq byte-compile-warnings nil
+                                                  byte-compile-dest-file-function (lambda (_) %S))
+                                            (kill-emacs (if (eq t (byte-compile-file %S)) 0 1)))"
+                                    elc (expand-file-name file harness-test-root))))
+                   (output (buffer-string)))
+              (ert-info ((format "%s:\n%s" file output))
+                (should (eql 0 status))))))
+      (delete-directory out t))))
 
 (ert-deftest harness-auto-reload-watches-the-vendored-libraries ()
   "`harness-auto-reload-mode' watches each vendored library's directory.

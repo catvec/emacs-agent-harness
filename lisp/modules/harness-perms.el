@@ -212,7 +212,8 @@
 
 (defconst harness-perms--auto-allow-tools
   '("ask_user" "plan" "todo_write" "skill_search" "skill_load"
-    "web_search" "notify" "hand_in" "rerun_approved")
+    "web_search" "notify" "hand_in" "rerun_approved"
+    "review_threads" "review_comment")
   "Tools that never need approval, in every permission mode.
 `rerun_approved' is included because it can run only a call the user
 approved by hand (`permission/approve-denied'): asking again about the
@@ -226,7 +227,10 @@ whatever URL the agent names.  `notify' only reaches the user, through
 the notification providers they set up, so unattended sessions can
 tell them when they are needed.  `hand_in' only records a task's
 report and ends the turn: whether the work is ready is the user's
-call when they review it, never the judge's.  Modules outside the
+call when they review it, never the judge's.  `review_threads' and
+`review_comment' only read and answer the threads of a task's review,
+which the user reads: an agent that has to ask before it answers a
+reviewer's comment would not answer it.  Modules outside the
 harness add theirs to `harness-perms-extra-auto-allow-tools'.  The
 tools that inspect the harness are in
 `harness-perms--inspection-tools'.  Standing rules in

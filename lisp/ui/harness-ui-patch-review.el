@@ -1,13 +1,33 @@
-;;; harness-ui-patch-review.el --- A task's changes in its report: Ediff, and comments quoted in the feedback  -*- lexical-binding: t; -*-
+;;; harness-ui-patch-review.el --- A task's changes in its report: Ediff, and the threads of comments on them  -*- lexical-binding: t; -*-
 
 ;;; Commentary:
 
 ;; A task waiting for review is a patch waiting for its reviewer.  This
 ;; module puts the patch in the review, in the task's report (the popout
-;; [Review Changes] opens on the board and in the session), and reviews it the
-;; way a mailing list does: file by file in Ediff, with comments under
-;; the lines they are about, quoted from the diff, sent back to the task
-;; as its feedback in one go.
+;; [Review Changes] opens on the board and in the session), and reviews it
+;; file by file in Ediff, with the comments made on it kept as threads.
+;;
+;; THE LIBRARY AND THIS ADAPTER.  What a review is -- a change set with
+;; versions, threads of comments, each comment recording its thread, its
+;; place in the code, its author and the revision it was written against
+;; -- and how it looks, is the library change-review
+;; (lisp/vendor/change-review), which knows nothing of the harness: its
+;; threads view, its diff view, its one drawing of a thread.  This module
+;; is the adapter that gives that library a task to review, in this Emacs:
+;;
+;;   change set   the task; each time its agent hands the work in is a
+;;                version of it, named by the commit the branch ends at,
+;;                the revision the comments made against it record;
+;;   files        read from git here, in the task's repository, and the
+;;                files of the version;
+;;   threads      kept by the harness (harness-patch-review.el), which
+;;                this module sends the operations the user makes
+;;                (`patch-review/apply') and hears of those the agent
+;;                makes with its tools (`patch-review/changed'), so that
+;;                an agent's comment shows as it is made, with the session
+;;                and tool call it came from, a link to that point of its
+;;                conversation;
+;;   authors      the user, by name; the agent, by session and tool call.
 ;;
 ;; Under the evidence, above the review banner and its box, the report
 ;; shows what the task's branch changes against its merge base with the
@@ -16,14 +36,14 @@
 ;;
 ;;   a file      its status, its name, the lines it adds and deletes,
 ;;               a mark once it was looked at in Ediff and a firmer one
-;;               once it was approved, the comments on it in the box,
-;;               and whether it changed since the reviewer's last
-;;               comment on it.  RET or a click compares it in Ediff;
-;;               n and p move between rows; a approves it, A approves
-;;               every file, t shows the files flat instead.  An
-;;               approved file need not be looked at again unless the
-;;               branch changes it.  Under it, the comments the
-;;               reviewer made on it in earlier rounds (see below).
+;;               once it was approved, how many threads it has, open and
+;;               closed, and whether it changed since the reviewer's
+;;               last comment on it.  RET or a click compares it in
+;;               Ediff; n and p move between rows; a approves it, A
+;;               approves every file, t shows the files flat instead.
+;;               An approved file need not be looked at again unless the
+;;               branch changes it.  Under it, its open threads, a line
+;;               each, where they are now (see below).
 ;;   directories the files group under the directories that hold them,
 ;;               with how many files each holds and the lines they add
 ;;               and delete.
@@ -31,52 +51,55 @@
 ;;               branch, in the report's frame, the report itself small
 ;;               at the bottom of it with its box (see below).  The
 ;;               control panel keeps Ediff's keys and has more: c
-;;               comments on the current difference, e goes to the
+;;               comments on the current difference, r replies to the
+;;               thread there, T lists the threads, e goes to the
 ;;               report's box, a approves the file, N and P go on to the
 ;;               next or previous file, q comes back to the report as it
 ;;               was, point on the next file.  n is Ediff's next
 ;;               difference, and at the last one says the next
 ;;               difference is the next file: n again opens it.
-;;   comments    c reads a comment and puts it in the report's box as a
-;;               reply on a mailing list has it: the lines it is about
-;;               quoted from the diff with "> ", under their file's
-;;               `diff --git' line and a hunk header, a few lines of
-;;               context first, the comment after them.  In either
-;;               version Ediff compares, c comments on the line at point
-;;               instead.  The box is the feedback: edit it, write more,
-;;               and C-c C-c sends it all back to the task, as it sends
-;;               any feedback.
+;;   threads     c reads a comment and starts a thread with it, a draft,
+;;               under the line it is about: in the control panel on the
+;;               current difference, in either version Ediff compares on
+;;               the line at point.  Every thread of the file shows in
+;;               both versions under its line, drawn by the library as
+;;               its views draw it: who wrote each comment, when, which
+;;               revision it was against, its place in the thread, open
+;;               or closed; r replies in it, x closes it or opens it
+;;               again, RET shows where its comments were made, o
+;;               follows an agent's comment to its conversation.  T, in
+;;               the report and in Ediff, lists all the threads by file,
+;;               with a filter on their status; d there comes back to
+;;               Ediff, at the thread's line.
+;;
+;; The drafts go with the feedback.  Whatever sends the task back --
+;; the report's box, a message typed in its session, another client --
+;; takes the drafts with it, quoted from the diff above each comment as a
+;; reply on a mailing list has it; the harness does it
+;; (harness-patch-review.el), the drafts are marked sent, and the box
+;; holds the words that go with them.  Sending the feedback from the box
+;; beside Ediff ends Ediff and gives the frame back.
 ;;
 ;; The box stays in sight while Ediff compares the files: the report
 ;; keeps the bottom of the frame, 30% of it at most
-;; (`harness-ui-patch-review-ediff-box-height'), and ends in the box.  A
-;; comment made with c shows there as it is made, highlighted for a
-;; moment.  To edit the comments or to add to them, e in Ediff goes to the
-;; box, point at the end of the comment on the difference -- or, in a
-;; version, the line at point -- if there is one, else at the end of the
-;; last comment on the file, else at the end of the box; the box is a
-;; box, so editing is typing.  C-c C-d in the report goes back to Ediff,
+;; (`harness-ui-patch-review-ediff-box-height'), and ends in the box.  e
+;; in Ediff goes to the box; C-c C-d in the report goes back to Ediff,
 ;; which was never left: the comparison, and where in it the reviewer
-;; was, are as they were.  Sending the feedback from there ends Ediff
-;; and gives the frame back.
+;; was, are as they were.
 ;;
-;; A task sent back keeps its earlier rounds of feedback, and the review
-;; shows the comments in them where they are now, so the history is
-;; there to see: under the file in the report, and in Ediff under the
-;; line, in the newest version of the file (in the merge base's version
-;; for a comment on a removed line), with the round, when it was sent,
-;; and what became of the line since.  The feedback says the commit it
-;; was written at; the line a comment was on is carried through the
-;; diff from that commit to the branch as it is, so a line that moved
-;; shows at its new number ("line 44 (was 42)"), and one the task
-;; edited where the edit is ("line 44 (changed since)").  A round that
-;; does not say which commit it was written at is placed by the lines it
-;; quotes.  RET on such a comment in the report compares the file with
-;; that line in sight.  What has no file row -- words on the change as a
-;; whole, comments on files the branch no longer changes -- stays in a
-;; block above the files.  When it was sent back the review also kept
-;; the blobs of the branch it was reviewed at, so the next review says
-;; for each file whether it changed since the reviewer's last comment on
+;; A task sent back keeps its threads: the comments of its earlier
+;; rounds, and the agent's answers, show where their lines are now, in
+;; the newest version of the file (in the merge base's version for a
+;; comment on a removed line), with what became of the line since
+;; ("line 44 (was 42)", "line 44 (changed since)").  A comment records the
+;; revision it was written against; the line it was on is carried through
+;; the diff from that revision to the branch as it is, so a line that
+;; moved shows at its new number.  A comment whose revision is no longer
+;; in the repository is placed by the lines it quotes.  RET on such a
+;; thread's row in the report compares the file with that line in sight.
+;; What has no file row -- threads on the change as a whole, on files the
+;; branch no longer changes -- stays in a block above the files.  Each
+;; file also says whether it changed since the reviewer's last comment on
 ;; it or stayed the same -- an approved file that changed is approved no
 ;; more.
 ;;
@@ -88,11 +111,10 @@
 ;; repository: the changes show where that is a directory of this
 ;; machine, so not for a harness on another one.
 ;;
-;; The module is self-contained: nothing else knows of it.  It draws in
-;; the report through the hook the report has for panels
-;; (`harness-ui-report-panel-functions'), writes in the box between the
-;; box's own markers, and leaves sending to the review's box.  Disabled
-;; (`harness-disabled-modules'), it takes its part of the report out.
+;; The module draws in the report through the hook the report has for
+;; panels (`harness-ui-report-panel-functions'), and leaves sending to the
+;; review's box.  Disabled (`harness-disabled-modules'), it takes its
+;; part of the report out.
 
 ;;; Code:
 
@@ -107,7 +129,32 @@
 (require 'harness-ui-popout)
 (require 'harness-ui-report)
 
+;; change-review is in lisp/vendor/change-review, which the harness puts
+;; on `load-path' (`harness--setup-load-path').  A harness older than
+;; that directory, reloading after an update, first checks that this
+;; file compiles with the `load-path' it has, before it loads the
+;; harness.el that adds the directory.  So when the library is not found,
+;; look for it beside the file being compiled or loaded.
+(defvar byte-compile-current-file)
+(eval-and-compile
+  (unless (or (featurep 'change-review) (locate-library "change-review"))
+    (when-let* ((file (or (and (boundp 'byte-compile-current-file)
+                               (stringp byte-compile-current-file)
+                               byte-compile-current-file)
+                          load-file-name
+                          buffer-file-name))
+                (dir (expand-file-name "../vendor/change-review/" (file-name-directory file)))
+                ((file-directory-p dir)))
+      (add-to-list 'load-path dir))))
+(require 'change-review)
+(require 'change-review-ui)
+(require 'change-review-diff)
+
 (defvar harness-ui-patch-review--row-map)
+(defvar change-review-ui--set)
+(defvar change-review-ui--redraw-function)
+(defvar change-review-ui--details)
+(defvar harness-ui-review-pending-functions)
 (defvar harness-ui-popout--max-height)
 (defvar harness-ui-popout-window-parameters)
 (defvar harness-ui-popout-min-height)
@@ -136,6 +183,8 @@
 (declare-function ediff-multiframe-setup-p "ediff-init" ())
 (declare-function evil-normalize-keymaps "evil-core" (&optional state))
 (declare-function harness-ui-report-task "harness-ui-report" ())
+(declare-function harness-ui-report--call-position "harness-ui-report" (item))
+(declare-function harness-ui-display-session "harness-ui" (session-id))
 (declare-function harness-ui-review--task "harness-ui-review" (sid))
 (declare-function harness-ui-tasks--task "harness-ui-tasks" (&optional noerror))
 
@@ -151,17 +200,6 @@ graphical display gives the panel a frame of its own.  Whether the two
 versions are side by side is Ediff's `ediff-split-window-function'."
   :type '(choice (const :tag "Ediff's own setting" nil) function))
 
-(defcustom harness-ui-patch-review-fill-column 72
-  "Width the comments made in Ediff are filled to in the feedback."
-  :type 'natnum)
-
-(defcustom harness-ui-patch-review-context-lines 3
-  "How many lines before a change the quote above a comment on it starts.
-A comment made in Ediff goes into the feedback under the lines it is
-about, quoted from the diff: the change, up to the line it ends on,
-after this many lines at most."
-  :type 'natnum)
-
 (defcustom harness-ui-patch-review-ediff-box-height 0.3
   "How much of the frame's height the report takes beside an Ediff.
 While Ediff compares a file the report stays at the bottom of the frame,
@@ -172,6 +210,16 @@ edited, without leaving Ediff
 frame's height, at most; nil takes the report off the frame while Ediff
 shows, as the whole frame is Ediff's then."
   :type '(choice (const :tag "Out of sight" nil) number))
+
+(define-obsolete-variable-alias 'harness-ui-patch-review-context-lines
+  'change-review-diff-context-lines "2026-10-19")
+
+(defcustom harness-ui-patch-review-closed-threads nil
+  "Whether the report lists the closed threads under their files too.
+Open threads show as a line each under the file they are about; the
+closed ones, the good ending, only count in the file's row unless this
+is non-nil.  T lists them all, with a filter."
+  :type 'boolean)
 
 (defcustom harness-ui-patch-review-file-tree t
   "Whether a report shows the changed files as a tree.
@@ -191,21 +239,7 @@ switches it for the review at point."
   "The mark of a file approved for this review, in a report.")
 (defface harness-ui-patch-review-comments-face '((t :inherit bold))
   "The count of comments on a file, in a report.")
-(defface harness-ui-patch-review-earlier-face '((t :inherit (italic font-lock-comment-face)))
-  "What the reviewer said in an earlier round, under its line in Ediff.")
-
 ;;;; Data
-
-(cl-defstruct (harness-ui-patch-review--file
-               (:constructor harness-ui-patch-review--file-create)
-               (:conc-name harness-ui-patch-review--f-)
-               (:copier nil))
-  "A file the branch changes, as `git diff --raw' and its patch show it.
-STATUS is git's letter (A, D, M, R, T...), PATH where the file is on
-the branch, OLD-PATH where it was for a rename or a copy.  The modes are
-git's, the blobs nil for a side the file is not on.  PATCH is the
-file's part of the diff, from its `diff --git' line on."
-  status path old-path old-mode new-mode old-blob new-blob patch binary (added 0) (deleted 0))
 
 (cl-defstruct (harness-ui-patch-review--review
                (:constructor harness-ui-patch-review--review-create)
@@ -214,40 +248,37 @@ file's part of the diff, from its `diff --git' line on."
   "The review of a task's changes, which the task's report shows.
 ID and TASK are the task's, as last heard.  DIR is the repository the
 branch is read in, BRANCH and BASE the branches compared, MERGE-BASE and
-TIP the commits, FILES what the diff of the two holds.  SEEN holds the
-files seen in Ediff, APPROVED those the reviewer accepted, both by
-`harness-ui-patch-review--seen-key' -- a file the branch changes again
-is neither.  SNAPSHOTTED is how many rounds of the task's feedback
-`SNAPSHOTS' covers: a hash table of the round's number to its files'
-blobs on the branch when the review was sent back, which says what the
-branch changed since the reviewer's comments.  PREVIOUS keeps the
-comments of the task's earlier rounds of feedback as
-`harness-ui-patch-review--previous-comments' reads them, and PLACEMENTS
-where each is in the newest version of its file, by (ROUND . N): the
-line it is on there and whether the line moved, changed or stayed
-(`harness-ui-patch-review--place').  PLACING is the reading of the
-files that places them, while it runs.  TREE, non-nil while the
-files show as a tree.  SHOW, non-nil when the review is shown for a
-task no longer waiting for one, opened from its session's history.
-DIRTY is non-nil when the task's worktree has changes not committed.
-LOADING is non-nil while the branch is read, ERROR what the last
-reading failed with.  POPOUT is the report the changes show in, COUNTS
-the comments its box held when it was drawn last.  EDIFF is the
-comparison under way: a plist of :index, the buffers :a, :b and
-:control, the :windows to give back as it ends, the first line
-:start the report's window showed and the :box window of the report
-kept beside it.  GONE is non-nil once the task went, done or deleted,
-while its Ediff showed."
+TIP the commits, FILES what the diff of the two holds.  SET is the
+change set of the review (`harness-ui-patch-review--set'): its versions,
+the newest being the branch at TIP, with FILES, and the threads of
+comments, which the harness keeps; SYNCED is non-nil once they were
+fetched from it.  SEEN holds the files seen in Ediff, APPROVED those
+the reviewer accepted, both by `harness-ui-patch-review--seen-key' -- a
+file the branch changes again is neither.  PLACEMENTS says where each
+thread is now, in the newest version of its file, by the thread's id:
+the line it is on there and whether the line moved, changed or stayed
+\(`change-review-diff-place'); PLACING is the reading of the files that
+places them, while it runs.  SINCE says for each commented file, by its
+path, whether it `changed' or stayed the `same' since the reviewer's
+last comment on it.  TREE, non-nil while the files show as a tree.
+SHOW, non-nil when the review is shown for a task no longer waiting for
+one, opened from its session's history.  DIRTY is non-nil when the
+task's worktree has changes not committed.  LOADING is non-nil while the
+branch is read, ERROR what the last reading failed with.  POPOUT is the
+report the changes show in.  EDIFF is the comparison under way: a plist
+of :index, the buffers :a, :b and :control, the :windows to give back as
+it ends, the first line :start the report's window showed and the :box
+window of the report kept beside it.  GONE is non-nil once the task
+went, done or deleted, while its Ediff showed."
   id task dir branch base merge-base tip files
   (seen (make-hash-table :test 'equal))
   (approved (make-hash-table :test 'equal))
-  (snapshots (make-hash-table :test 'equal))
-  (snapshotted 0)
-  previous
+  set synced
   (placements (make-hash-table :test 'equal))
   placing
+  (since (make-hash-table :test 'equal))
   (tree harness-ui-patch-review-file-tree)
-  show dirty loading error popout counts ediff gone)
+  show dirty loading error popout ediff gone)
 
 (defvar harness-ui-patch-review--reviews (make-hash-table :test 'equal)
   "Task id -> the review of its changes.")
@@ -272,12 +303,6 @@ Nil while the report is not limited.")
 
 (defvar harness-ui-patch-review--drawing nil
   "Non-nil while a report draws the changes: nothing draws it again then.")
-
-(defconst harness-ui-patch-review--hunk-regexp
-  "\\`@@ -\\([0-9]+\\)\\(?:,\\([0-9]+\\)\\)? \\+\\([0-9]+\\)\\(?:,\\([0-9]+\\)\\)? @@\\(.*\\)"
-  "A hunk's header in a diff, with its line numbers and its heading.
-Its groups: where the hunk starts at the merge base and how many lines
-it has there, the same on the branch, and the heading git gives it.")
 
 (defun harness-ui-patch-review--short (sha)
   "Return commit or blob SHA shortened, or \"none\" for nil."
@@ -308,6 +333,171 @@ it has there, the same on the branch, and the heading git gives it.")
 (defun harness-ui-patch-review--plural (count word)
   "Return COUNT WORD, WORD in the plural unless COUNT is 1."
   (format "%d %s%s" count word (if (= count 1) "" "s")))
+
+;;;; The change set of a review
+
+(cl-defstruct (harness-ui-patch-review--set
+               (:include change-review-set)
+               (:constructor harness-ui-patch-review--make-set (&key id title))
+               (:copier nil))
+  "The change set of a task's review, in this Emacs.
+REVIEW is the review it belongs to.  The harness keeps the threads: what
+the user does in the set is performed here at once and sent there
+\(`change-review-dispatch'), and what happens there -- an agent's
+comment, the drafts sent -- is performed here too
+\(`patch-review/changed').  The files of its versions are read here,
+from the repository."
+  review)
+
+(cl-defmethod change-review-dispatch ((set harness-ui-patch-review--set) op)
+  (prog1 (change-review-apply set op)
+    (harness-ui-call "_harness/patch-review/apply"
+                     (list :task-id (change-review-set-id set) :op op)
+                     #'ignore
+                     (lambda (err)
+                       (message "Could not keep the review with the harness: %s"
+                                (harness-error-message err))))))
+
+(cl-defmethod change-review-save ((_set harness-ui-patch-review--set))
+  nil)
+
+;; Only the user reviews: the harness's own half of the review writes as
+;; the user too, under the name its Emacs guesses, which need not be the
+;; name this one has.
+(cl-defmethod change-review-own-author-p ((_set harness-ui-patch-review--set) author)
+  (and author (eq (change-review-author-kind author) 'user)))
+
+(cl-defmethod change-review-follow-author ((_set harness-ui-patch-review--set) author)
+  (harness-ui-patch-review--open-conversation (change-review-author-session author)
+                                              (change-review-author-tool-call author)))
+
+(cl-defmethod change-review-placement ((set harness-ui-patch-review--set) thread &optional version)
+  (or (and (null version)
+           (when-let* ((review (harness-ui-patch-review--set-review set)))
+             (gethash (change-review-thread-id thread) (harness-ui-patch-review--r-placements review))))
+      (cl-call-next-method)))
+
+(cl-defmethod change-review-visit ((set harness-ui-patch-review--set) target &optional _version)
+  (let* ((review (harness-ui-patch-review--set-review set))
+         (thread (cond ((change-review-thread-p target) target)
+                       ((change-review-comment-p target)
+                        (car (change-review-find-comment set (change-review-comment-id target))))))
+         (location (and thread (change-review-thread-location thread)))
+         (index (and location
+                     (cl-position-if (lambda (file) (harness-ui-patch-review--thread-file-p thread file))
+                                     (harness-ui-patch-review--r-files review))))
+         (placement (and thread (change-review-placement set thread))))
+    (cond
+     ((null thread) (user-error "No thread to show"))
+     ((null index)
+      (user-error "%s is not a file this version changes"
+                  (if location (change-review-location-label location) "The change as a whole")))
+     (t
+      (harness-ui-patch-review-ediff
+       review index
+       (when-let* ((line (or (plist-get placement :line)
+                             (change-review-location-line location))))
+         (cons (intern (concat ":" (symbol-name (or (plist-get placement :side)
+                                                    (change-review-location-side location)
+                                                    'new))))
+               line)))))))
+
+(cl-defmethod change-review-send ((set harness-ui-patch-review--set))
+  (let* ((review (harness-ui-patch-review--set-review set))
+         (popout (harness-ui-patch-review--feedback-box review))
+         (window (or (get-buffer-window popout t)
+                     (progn (pop-to-buffer popout) (get-buffer-window popout t)))))
+    (when (window-live-p window) (select-window window))
+    (goto-char (buffer-local-value 'harness-compose-end popout))
+    (message "%s go with the feedback: %s sends it"
+             (harness-ui-patch-review--plural (length (change-review-drafts set)) "draft")
+             (substitute-command-keys "\\<harness-ui-popout-mode-map>\\[harness-ui-popout-submit]"))))
+
+(defun harness-ui-patch-review--open-conversation (session-id call-id)
+  "Show the session SESSION-ID, at the tool call CALL-ID when it has one."
+  (unless (and (stringp session-id) (fboundp 'harness-ui-display-session))
+    (user-error "The session of this comment is not known here"))
+  (let ((buffer (harness-ui-display-session session-id)))
+    (when (and call-id (buffer-live-p buffer))
+      (with-current-buffer buffer
+        (if-let* ((pos (harness-ui-report--call-position (list :call-id call-id))))
+            (progn (goto-char pos)
+                   (when (eq (window-buffer) buffer) (recenter)))
+          (message "The call %s is not in this session's transcript" call-id))))))
+
+(defun harness-ui-patch-review--thread-file-p (thread file)
+  "Return non-nil when THREAD is about FILE: at its path, or the one it had."
+  (let ((path (and (change-review-thread-location thread)
+                   (change-review-location-file (change-review-thread-location thread)))))
+    (and path
+         (or (equal path (change-review-file-path file))
+             (and (change-review-file-old-path file)
+                  (equal path (change-review-file-old-path file)))))))
+
+(defun harness-ui-patch-review--file-threads (review file)
+  "Return the threads of REVIEW's set that are about FILE, by line."
+  (sort (cl-remove-if-not (lambda (thread) (harness-ui-patch-review--thread-file-p thread file))
+                          (change-review-set-threads (harness-ui-patch-review--r-set review)))
+        (lambda (a b) (< (or (change-review-thread-line a) 0) (or (change-review-thread-line b) 0)))))
+
+(defun harness-ui-patch-review--attach-files (review)
+  "Give the version REVIEW's branch ends at the files REVIEW read.
+That is the version the harness recorded when the task came to review;
+if it has none yet, the version is made here."
+  (when-let* ((tip (harness-ui-patch-review--r-tip review))
+              (set (harness-ui-patch-review--r-set review)))
+    (let ((files (harness-ui-patch-review--r-files review)))
+      (if-let* ((version (change-review-find-version set tip)))
+          (setf (change-review-version-files version) files)
+        (let ((task (harness-ui-patch-review--r-task review)))
+          (change-review-add-version
+           set (change-review-make-version
+                :id tip :tip tip :base (harness-ui-patch-review--r-merge-base review)
+                :time (or (plist-get task :report-at) (float-time))
+                :title (harness-ui-patch-review--title review)
+                :files files)))))))
+
+(defun harness-ui-patch-review--sync (review)
+  "Fetch REVIEW's threads and versions from the harness, and show them.
+The harness keeps them, and made the set of a task whose earlier rounds
+of feedback were text when it was first asked for it."
+  (let ((set (harness-ui-patch-review--r-set review))
+        (id (harness-ui-patch-review--r-id review)))
+    (harness-ui-call
+     "_harness/patch-review/get" (list :task-id id)
+     (lambda (data)
+       (when (eq review (gethash id harness-ui-patch-review--reviews))
+         (change-review-set-from-data data set)
+         (setf (change-review-set-title set) (harness-ui-patch-review--title review)
+               (harness-ui-patch-review--r-synced review) t)
+         (harness-ui-patch-review--attach-files review)
+         (change-review-ui-refresh set)
+         (harness-ui-patch-review--refresh review)
+         (when (harness-ui-patch-review--r-tip review)
+           (harness-ui-patch-review--place-threads review))))
+     (lambda (err)
+       (message "Could not read the threads of the review: %s" (harness-error-message err))))))
+
+(defun harness-ui-patch-review--set-changed (set _op)
+  "Draw the report of SET's review again, once an operation changed its threads.
+On `change-review-changed-functions'."
+  (when (harness-ui-patch-review--set-p set)
+    (when-let* ((review (harness-ui-patch-review--set-review set)))
+      (harness-debounce (list 'harness-ui-patch-review-threads (harness-ui-patch-review--r-id review))
+                        0.05 #'harness-ui-patch-review--refresh-if-current review))))
+
+(defun harness-ui-patch-review--refresh-if-current (review)
+  "Draw the report of REVIEW again, unless the review was dropped."
+  (when (eq review (gethash (harness-ui-patch-review--r-id review) harness-ui-patch-review--reviews))
+    (harness-ui-patch-review--refresh review)))
+
+(defun harness-ui-patch-review--pending-p (task)
+  "Return non-nil when the review of TASK has drafts to send with its feedback.
+On `harness-ui-review-pending-functions'."
+  (when-let* ((review (and (plist-get task :id)
+                           (gethash (plist-get task :id) harness-ui-patch-review--reviews)))
+              (set (harness-ui-patch-review--r-set review)))
+    (and (change-review-drafts set) t)))
 
 ;;;; Where the branch is
 
@@ -405,7 +595,7 @@ known, or no longer there, it is what DIR has checked out: NAME HEAD."
                  (two (member status '("R" "C")))
                  (first (pop fields))
                  (second (and two (pop fields))))
-            (push (harness-ui-patch-review--file-create
+            (push (change-review-make-file
                    :status status
                    :path (or second first)
                    :old-path (and two first)
@@ -428,16 +618,16 @@ Each part starts with its `diff --git' line; no line of a hunk can."
 (defun harness-ui-patch-review--count (file)
   "Count FILE's added and deleted lines in its patch, and see if it is binary."
   (let ((added 0) (deleted 0) (in-hunk nil) (binary nil))
-    (dolist (line (split-string (or (harness-ui-patch-review--f-patch file) "") "\n"))
+    (dolist (line (split-string (or (change-review-file-patch file) "") "\n"))
       (cond ((string-prefix-p "@@" line) (setq in-hunk t))
             ((not in-hunk)
              (when (or (string-prefix-p "Binary files " line) (string-prefix-p "GIT binary patch" line))
                (setq binary t)))
             ((string-prefix-p "+" line) (cl-incf added))
             ((string-prefix-p "-" line) (cl-incf deleted))))
-    (setf (harness-ui-patch-review--f-added file) added
-          (harness-ui-patch-review--f-deleted file) deleted
-          (harness-ui-patch-review--f-binary file) binary)))
+    (setf (change-review-file-added file) added
+          (change-review-file-deleted file) deleted
+          (change-review-file-binary file) binary)))
 
 (defun harness-ui-patch-review--pair (files parts)
   "Give each of FILES its part of the patch, from PARTS, and count it.
@@ -449,11 +639,11 @@ first line names it, if any."
       (let ((part (if in-order
                       (pop parts)
                     (let ((want (format "diff --git a/%s b/%s\n"
-                                        (or (harness-ui-patch-review--f-old-path file)
-                                            (harness-ui-patch-review--f-path file))
-                                        (harness-ui-patch-review--f-path file))))
+                                        (or (change-review-file-old-path file)
+                                            (change-review-file-path file))
+                                        (change-review-file-path file))))
                       (cl-find-if (lambda (p) (string-prefix-p want p)) parts)))))
-        (setf (harness-ui-patch-review--f-patch file) part)
+        (setf (change-review-file-patch file) part)
         (harness-ui-patch-review--count file)))
     files))
 
@@ -505,13 +695,12 @@ non-nil when WORKTREE, the branch's worktree, has changes not committed."
                      (puthash id (harness-ui-patch-review--review-create
                                   :id id :tree harness-ui-patch-review-file-tree)
                               harness-ui-patch-review--reviews))))
-    ;; A review made after the task was sent back has no snapshot of the
-    ;; branch its comments were made on: those rounds say only what was
-    ;; said, not what changed since.
-    (unless (harness-ui-patch-review--r-task review)
-      (setf (harness-ui-patch-review--r-snapshotted review)
-            (length (plist-get task :feedback))))
     (setf (harness-ui-patch-review--r-task review) task)
+    (if-let* ((set (harness-ui-patch-review--r-set review)))
+        (setf (change-review-set-title set) (harness-ui-patch-review--title review))
+      (let ((set (harness-ui-patch-review--make-set :id id :title (harness-ui-patch-review--title review))))
+        (setf (harness-ui-patch-review--set-review set) review
+              (harness-ui-patch-review--r-set review) set)))
     review))
 
 (defun harness-ui-patch-review--window-places (popout)
@@ -580,10 +769,11 @@ Return a promise of REVIEW."
                (harness-ui-patch-review--r-tip review) (plist-get result :tip)
                (harness-ui-patch-review--r-files review) (plist-get result :files)
                (harness-ui-patch-review--r-dirty review) (plist-get result :dirty))
+         (harness-ui-patch-review--attach-files review)
          (harness-ui-patch-review--refresh review)
-         ;; The report is there; where the earlier comments are now, in the
-         ;; files just read, comes a moment later.
-         (harness-ui-patch-review--place-previous review)))
+         ;; The report is there; where the threads are now, in the files
+         ;; just read, comes a moment later.
+         (harness-ui-patch-review--place-threads review)))
      (lambda (err)
        (when (eq (harness-ui-patch-review--r-loading review) token)
          (setf (harness-ui-patch-review--r-loading review) nil
@@ -594,7 +784,7 @@ Return a promise of REVIEW."
 (defun harness-ui-patch-review--seen-key (file)
   "Return what marks FILE seen: its path and its blob on the branch.
 A file the branch changed again since it was seen is not seen."
-  (cons (harness-ui-patch-review--f-path file) (harness-ui-patch-review--f-new-blob file)))
+  (cons (change-review-file-path file) (change-review-file-new-blob file)))
 
 (defun harness-ui-patch-review--seen-p (review file)
   "Non-nil when FILE of REVIEW was seen in Ediff."
@@ -633,7 +823,7 @@ it: the approval follows the file's path and blob, as being seen does."
       (harness-ui-patch-review--approve review file approved)
       (harness-ui-patch-review--refresh review)
       (message "%s %s" (if approved "Approved" "No longer approved")
-               (harness-ui-patch-review--f-path file)))))
+               (change-review-file-path file)))))
 
 (defun harness-ui-patch-review-approve-all ()
   "Approve every file of the review at point.
@@ -660,6 +850,7 @@ A file the branch changes again loses its approval with the change."
 (defun harness-ui-patch-review--forget (review)
   "Drop REVIEW: end its Ediff, give the windows back if it shows, kill its buffers."
   (remhash (harness-ui-patch-review--r-id review) harness-ui-patch-review--reviews)
+  (setq change-review-ui-sets (delq (harness-ui-patch-review--r-set review) change-review-ui-sets))
   (condition-case err
       (harness-ui-patch-review--end-ediff review (not (harness-ui-patch-review--ediff-shows-p review)))
     (error (harness-log 'warn "patch review: could not end Ediff: %S" err)))
@@ -668,964 +859,194 @@ A file the branch changes again loses its approval with the change."
   (harness-ui-patch-review--unlimit-box (harness-ui-patch-review--r-popout review))
   (setf (harness-ui-patch-review--r-ediff review) nil))
 
-;;;; The quote and the comments
-
-(defun harness-ui-patch-review--header (file)
-  "Return the first line of FILE's diff, which names it in the quote."
-  (let ((patch (harness-ui-patch-review--f-patch file)))
-    (if (and patch (string-match "\\`[^\n]+" patch))
-        (match-string 0 patch)
-      (format "diff --git a/%s b/%s"
-              (or (harness-ui-patch-review--f-old-path file) (harness-ui-patch-review--f-path file))
-              (harness-ui-patch-review--f-path file)))))
-
-(defun harness-ui-patch-review--parse ()
-  "Return the lines of this buffer's accessible portion, in order, as plists.
-:type is `quote', for a line of the quote (one that starts with \">\"),
-`comment' or `blank'; :start is where the line starts, :text what it
-holds.  Every line has the part of the quote it is in: :file, the first
-line of its file's diff (nil before the first), and :hunk, the index of
-the hunk in the file (nil in the file's header).  A quote line has
-:line -- `file' for that first line, `header' for the rest of the
-file's header, `hunk', `context', `added', `removed' or `other' -- and
-in a hunk :old and :new, its numbers at the merge base and on the
-branch, where it has them.  A hunk's header has :new-start, where it
-starts on the branch.  The quote of a hunk may stop for comments and go
-on after them: its numbers go on too."
-  (save-excursion
-    (goto-char (point-min))
-    (let (lines file hunk old new)
-      (while (not (eobp))
-        (let* ((start (point))
-               (text (buffer-substring-no-properties start (line-end-position)))
-               (props
-                (cond
-                 ((string-prefix-p ">" text)
-                  (let ((diff (substring text (if (string-prefix-p "> " text) 2 1))))
-                    (cond
-                     ((string-prefix-p "diff --git " diff)
-                      (setq file diff hunk nil)
-                      (list :type 'quote :line 'file))
-                     ((and file (string-match harness-ui-patch-review--hunk-regexp diff))
-                      (setq hunk (if hunk (1+ hunk) 0)
-                            old (string-to-number (match-string 1 diff))
-                            new (string-to-number (match-string 3 diff)))
-                      (list :type 'quote :line 'hunk :new-start new))
-                     ((null hunk) (list :type 'quote :line 'header))
-                     ((string-prefix-p "+" diff)
-                      (prog1 (list :type 'quote :line 'added :new new) (cl-incf new)))
-                     ((string-prefix-p "-" diff)
-                      (prog1 (list :type 'quote :line 'removed :old old) (cl-incf old)))
-                     ((string-prefix-p "\\" diff) (list :type 'quote :line 'other))
-                     (t (prog1 (list :type 'quote :line 'context :old old :new new)
-                          (cl-incf old) (cl-incf new))))))
-                 ((string-blank-p text) (list :type 'blank))
-                 (t (list :type 'comment)))))
-          (push (append (list :start start :text text :file file :hunk hunk) props) lines))
-        (forward-line 1))
-      (nreverse lines))))
-
-(defun harness-ui-patch-review--parse-text (text)
-  "Return the lines of TEXT, as `harness-ui-patch-review--parse' does."
-  (with-temp-buffer
-    (insert text)
-    (harness-ui-patch-review--parse)))
-
-(defun harness-ui-patch-review--comment-blocks (lines)
-  "Return the first line of each comment in LINES.
-A comment is a paragraph of the lines that do not quote: a blank line
-ends it, as a line of the quote does.  Two comments under one line of
-the quote, each made with c in Ediff, are two."
-  (let (blocks in-block)
-    (dolist (line lines)
-      (if (not (eq (plist-get line :type) 'comment))
-          (setq in-block nil)
-        (unless in-block (push line blocks))
-        (setq in-block t)))
-    (nreverse blocks)))
-
-(defun harness-ui-patch-review--counts (text)
-  "Return the comments TEXT has on files, an alist of (HEADER . COUNT).
-TEXT is what a feedback box holds; HEADER names a file as
-`harness-ui-patch-review--header' does.  What comes before any quote of
-a file -- the line that says what the quote is, words on the change as
-a whole -- is no comment on a file."
-  (let (counts)
-    (dolist (block (harness-ui-patch-review--comment-blocks (harness-ui-patch-review--parse-text text)))
-      (when-let* ((file (plist-get block :file)))
-        (let ((cell (assoc file counts)))
-          (if cell (cl-incf (cdr cell)) (push (cons file 1) counts)))))
-    (nreverse counts)))
-
-(defun harness-ui-patch-review--header-path (review header)
-  "Return the path HEADER names in REVIEW's files, or the path it reads as.
-HEADER is a `diff --git' line, as the feedback quotes it.  A file the
-diff no longer holds -- deleted, or renamed away -- has only its header
-to go by."
-  (or (when-let* ((file (cl-find header (harness-ui-patch-review--r-files review)
-                                 :key #'harness-ui-patch-review--header :test #'equal)))
-        (harness-ui-patch-review--f-path file))
-      (when (and (stringp header)
-                 (string-match "\\`diff --git a/\\(.+?\\) b/\\(.+\\)\\'" header))
-        (match-string 2 header))))
-
-(defun harness-ui-patch-review--comment-location (comment)
-  "Return (SIDE . LINE) for COMMENT, a line of the quote's comment.
-SIDE is :new for the branch's line, :old for the merge base's; nil when
-the comment is on the file as a whole, or on a line the quote does not
-number."
-  (pcase (plist-get comment :quoted-line)
-    ('added (and (plist-get comment :new) (cons :new (plist-get comment :new))))
-    ('removed (and (plist-get comment :old) (cons :old (plist-get comment :old))))
-    ('context (and (plist-get comment :new) (cons :new (plist-get comment :new))))
-    (_ nil)))
-
-(defconst harness-ui-patch-review--on-line-regexp
-  "\\`On line \\([0-9]+\\)\\( of the merge base\\)?: ?"
-  "What a comment on a line the diff does not hold starts with.
-`harness-ui-patch-review--put-comment' writes it: the comment goes under
-the nearest line the diff has, and this says which line it is about.")
-
-(defun harness-ui-patch-review--quote-content (text)
-  "Return the line the quote line TEXT, one of the box's, quotes.
-TEXT starts with \">\", then the diff's own line: its mark (a space, +
-or -) and the line."
-  (let ((diff (substring text (if (string-prefix-p "> " text) 2 1))))
-    (if (string-empty-p diff) "" (substring diff 1))))
-
-(defun harness-ui-patch-review--comments-in-text (review text)
-  "Return the comments TEXT, a round of feedback, holds.
-Each is a plist: :file, the header it quotes (nil for words on no file
-in particular), :path what `harness-ui-patch-review--header-path' makes
-of it, :text the comment, and :where (SIDE . LINE), or nil for the file
-as a whole.  :quote holds the lines of the diff quoted just above it, a
-few at most, as (KIND . LINE) -- KIND `context', `added' or `removed' --
-the last being the line it is on; :approx is non-nil when the comment
-says itself which line it is on (\"On line 57: \") and that line is not
-the quoted one."
-  (let ((lines (harness-ui-patch-review--parse-text text))
-        (previous nil) (recent nil) (block nil) (blocks nil))
-    (cl-flet ((finish ()
-                (when block
-                  (let ((comment (plist-put block :text
-                                            (string-trim
-                                             (mapconcat #'identity
-                                                        (nreverse (plist-get block :texts)) "\n")))))
-                    (setq comment (plist-put comment :where
-                                             (harness-ui-patch-review--comment-location comment)))
-                    (when (string-match harness-ui-patch-review--on-line-regexp
-                                        (plist-get comment :text))
-                      (setq comment (plist-put comment :where
-                                               (cons (if (match-string 2 (plist-get comment :text)) :old :new)
-                                                     (string-to-number (match-string 1 (plist-get comment :text))))))
-                      (setq comment (plist-put comment :approx t))
-                      (setq comment (plist-put comment :text
-                                               (substring (plist-get comment :text) (match-end 0)))))
-                    (setq comment (plist-put comment :path
-                                             (harness-ui-patch-review--header-path
-                                              review (plist-get comment :file))))
-                    (when (and (not (string-empty-p (plist-get comment :text)))
-                               ;; The line this module puts before the
-                               ;; first quote is no comment of the user's.
-                               (not (and (null (plist-get comment :file))
-                                         (string-match-p
-                                          "\\`My comments on the diff of your branch "
-                                          (plist-get comment :text)))))
-                      (push comment blocks)))
-                  (setq block nil))))
-      (dolist (line lines)
-        (pcase (plist-get line :type)
-          ('quote
-           (finish)
-           (setq previous line)
-           (pcase (plist-get line :line)
-             ;; A new file or hunk starts a new run of quoted lines.
-             ((or 'file 'hunk) (setq recent nil))
-             ((or 'context 'added 'removed)
-              (push (cons (plist-get line :line)
-                          (harness-ui-patch-review--quote-content (plist-get line :text)))
-                    recent)
-              (when (> (length recent) 8) (setq recent (seq-take recent 8))))))
-          ('comment
-           (unless block
-             (setq block (list :file (plist-get line :file)
-                               :new (plist-get previous :new)
-                               :old (plist-get previous :old)
-                               :quoted-line (plist-get previous :line)
-                               :quote (reverse recent)
-                               :texts nil)))
-           (push (plist-get line :text) (plist-get block :texts)))
-          (_ (finish))))
-      (finish))
-    (nreverse blocks)))
-
-(defun harness-ui-patch-review--previous-comments (review)
-  "Return the task's earlier rounds of feedback and the comments in them.
-A list, oldest first, of plists :round (0 for the first), :at when it
-was sent, and :comments as `harness-ui-patch-review--comments-in-text'
-gives them, each with its :round, its :at, its place in its round, :n,
-the :tip it says the branch was at (`harness-ui-patch-review--round-tip')
-and its :target, the file of the review's it is on, if any.
-A round whose words name no file is still there: it is a comment on the
-change as a whole.  The answer is kept for as long as the task's
-feedback and the files read stay the same."
-  (let* ((feedback (plist-get (harness-ui-patch-review--r-task review) :feedback))
-         (files (harness-ui-patch-review--r-files review))
-         (kept (harness-ui-patch-review--r-previous review)))
-    (if (and kept (eq (car (car kept)) feedback) (eq (cdr (car kept)) files))
-        (cdr kept)
-      (let* ((by-path (make-hash-table :test 'equal))
-             (by-old-path (make-hash-table :test 'equal))
-             (rounds
-              (progn
-                (dolist (file files)
-                  (puthash (harness-ui-patch-review--f-path file) file by-path)
-                  (when-let* ((old (harness-ui-patch-review--f-old-path file)))
-                    (unless (gethash old by-old-path) (puthash old file by-old-path))))
-                (cl-loop for round in feedback for index from 0
-                         for at = (plist-get round :at)
-                         for tip = (harness-ui-patch-review--round-tip (or (plist-get round :text) ""))
-                         for comments = (cl-loop for comment in (harness-ui-patch-review--comments-in-text
-                                                                 review (or (plist-get round :text) ""))
-                                                 for n from 0
-                                                 for path = (plist-get comment :path)
-                                                 collect (append comment
-                                                                 (list :round index :at at :n n :tip tip
-                                                                       :target (and path (or (gethash path by-path)
-                                                                                             (gethash path by-old-path))))))
-                         when comments
-                         collect (list :round index :at at :tip tip :comments comments)))))
-        (setf (harness-ui-patch-review--r-previous review) (cons (cons feedback files) rounds))
-        rounds))))
-
-(defun harness-ui-patch-review--comment-file (_review comment)
-  "Return the file of the review's changes that COMMENT, an earlier one, is on.
-Nil for a comment on no file, and for one on a file the branch no
-longer changes -- reverted, say -- or while the branch is not read.
-COMMENT is one of `harness-ui-patch-review--previous-comments'."
-  (plist-get comment :target))
-
-(defun harness-ui-patch-review--file-comments (review file)
-  "Return the earlier comments on FILE of REVIEW, oldest first."
-  (cl-loop for round in (harness-ui-patch-review--previous-comments review)
-           append (cl-loop for comment in (plist-get round :comments)
-                           when (eq file (harness-ui-patch-review--comment-file review comment))
-                           collect comment)))
-
-(defun harness-ui-patch-review--comment-key (comment)
-  "Return what names the earlier COMMENT among the task's feedback."
-  (cons (plist-get comment :round) (plist-get comment :n)))
-
-;;;;; Where an earlier comment is now
+;;;; Where the threads are now
 
 (defconst harness-ui-patch-review--place-limit 3000000
   "The longest file, in characters, whose lines earlier comments are looked for in.")
 
-(defun harness-ui-patch-review--lines-of (text)
-  "Return the lines of TEXT as a vector, without their newlines."
-  (if (string-empty-p text)
-      (vector)
-    (vconcat (split-string (if (string-suffix-p "\n" text) (substring text 0 -1) text) "\n"))))
-
-(defun harness-ui-patch-review--side-quote (comment side)
-  "Return the lines of the file on SIDE that COMMENT's quote shows, or nil.
-SIDE is :new for the branch's version, :old for the merge base's.  The
-last of the lines is the one the comment is on; nil when the quote does
-not end on a line of SIDE."
-  (let* ((kinds (if (eq side :old) '(context removed) '(context added)))
-         (quote (plist-get comment :quote)))
-    (and quote (memq (car (car (last quote))) kinds)
-         (cl-remove-if-not (lambda (entry) (memq (car entry) kinds)) quote))))
-
-(defun harness-ui-patch-review--find-line (lines quote hint)
-  "Return (LINE . SCORE) for where QUOTE is in LINES, or nil.
-LINES is a vector of the lines of a file, QUOTE the lines (KIND . TEXT)
-of it that were quoted, the last being the one that matters.  LINE is
-the number of the line, from 1, that is that last line; where several
-are, the one with most of the quoted lines above it just above it too
-\(SCORE of them), then the one nearest the line HINT, where it was.
-Blanks at the end of a line count for nothing."
-  (let* ((target (string-trim-right (cdr (car (last quote)))))
-         (before (mapcar (lambda (entry) (string-trim-right (cdr entry)))
-                         (reverse (butlast quote))))
-         best best-score best-distance)
-    (dotimes (i (length lines))
-      (when (equal target (string-trim-right (aref lines i)))
-        (let ((score 0))
-          (while (and (< score (length before)) (>= (- i score 1) 0)
-                      (equal (nth score before)
-                             (string-trim-right (aref lines (- i score 1)))))
-            (cl-incf score))
-          (let ((distance (abs (- (1+ i) hint))))
-            (when (or (null best) (> score best-score)
-                      (and (= score best-score) (< distance best-distance)))
-              (setq best (1+ i) best-score score best-distance distance))))))
-    (and best (cons best best-score))))
-
-(defconst harness-ui-patch-review--tip-regexp
-  "My comments on the diff of your branch .*? (at \\([0-9a-f]\\{7,40\\}\\)) against "
-  "The line `harness-ui-patch-review--attribution' writes, up to the commit.")
-
-(defun harness-ui-patch-review--round-tip (text)
-  "Return the commit the branch was at when the feedback TEXT was written, or nil.
-The feedback names it, in the line before its first quote
-\(`harness-ui-patch-review--attribution')."
-  (when (string-match harness-ui-patch-review--tip-regexp text)
-    (match-string 1 text)))
-
-(defun harness-ui-patch-review--diff-hunks (diff)
-  "Return the hunks of DIFF, as `git diff -U0' writes it, in order.
-Each is (OLD-START OLD-COUNT NEW-START NEW-COUNT)."
-  (let (hunks)
-    (dolist (line (split-string diff "\n"))
-      (when (string-match "\\`@@ -\\([0-9]+\\)\\(?:,\\([0-9]+\\)\\)? \\+\\([0-9]+\\)\\(?:,\\([0-9]+\\)\\)? @@" line)
-        (push (list (string-to-number (match-string 1 line))
-                    (if (match-string 2 line) (string-to-number (match-string 2 line)) 1)
-                    (string-to-number (match-string 3 line))
-                    (if (match-string 4 line) (string-to-number (match-string 4 line)) 1))
-              hunks)))
-    (nreverse hunks)))
-
-(defun harness-ui-patch-review--map-line (hunks line)
-  "Return (NEW . STATUS) for old LINE, once HUNKS have changed the file.
-HUNKS are as `harness-ui-patch-review--diff-hunks' gives them.  NEW is the
-line's number in the new file, STATUS `same' where nothing before it
-changed the numbering, `moved' where lines were added or deleted before
-it, and `changed' for a line in a hunk, whose NEW is the line in the same
-place among the lines that replaced it, the last of them at most."
-  (let ((offset 0) inside)
-    (cl-loop for (start count new-start new-count) in hunks
-             do (let ((first (if (zerop count) (1+ start) start))
-                      (last (if (zerop count) start (+ start count -1))))
-                  (cond
-                   ((< line first) (cl-return))
-                   ((and (> count 0) (<= line last))
-                    ;; The same place in what replaced the lines, the last
-                    ;; of them when there are fewer.
-                    (setq inside (if (> new-count 0)
-                                     (+ new-start (min (- line start) (1- new-count)))
-                                   (max 1 new-start)))
-                    (cl-return))
-                   ;; Past the hunk: its lines come to the new ones that follow.
-                   (t (setq offset (- (if (zerop new-count) (1+ new-start) (+ new-start new-count))
-                                      (if (zerop count) (1+ start) (+ start count))))))))
-    (cond (inside (cons inside 'changed))
-          ((zerop offset) (cons line 'same))
-          (t (cons (+ line offset) 'moved)))))
-
-(defun harness-ui-patch-review--read-hunks (review file tip path)
-  "Return a promise of how FILE of REVIEW changed since the commit TIP.
-PATH is the file's path at TIP.  The promise resolves to `same' when the
-file is as it was, else the hunks of the change
-\(`harness-ui-patch-review--diff-hunks'), or nil when that cannot be told:
-TIP is not in the repository, or not the file there."
-  (let ((dir (harness-ui-patch-review--r-dir review))
-        (new (harness-ui-patch-review--f-new-blob file)))
+(defun harness-ui-patch-review--blob-at (review revision path)
+  "Return a promise of the blob of PATH at REVISION in REVIEW's repository, or nil."
+  (if (not (and revision path))
+      (harness-resolved nil)
     (harness-catch
-     (harness-then
-      (harness-ui-patch-review--git dir "rev-parse" "--verify" "--quiet" (concat tip ":" path))
-      (lambda (out)
-        (let ((old (string-trim (harness-ui-patch-review--decode out))))
-          (cond
-           ;; The branch has no such file any more: no line to follow.
-           ((null new) nil)
-           ((equal old new) 'same)
-           (t (harness-then
-               (harness-ui-patch-review--git dir "diff" "-U0" "--no-color" "--no-ext-diff" "--no-textconv" old new)
-               (lambda (diff) (harness-ui-patch-review--diff-hunks (harness-ui-patch-review--decode diff)))))))))
+     (harness-then (harness-ui-patch-review--git (harness-ui-patch-review--r-dir review)
+                                                 "rev-parse" "--verify" "--quiet"
+                                                 (concat revision ":" path))
+                   (lambda (out) (let ((sha (string-trim (harness-ui-patch-review--decode out))))
+                                   (and (not (string-empty-p sha)) sha))))
      (lambda (_) nil))))
 
-(defun harness-ui-patch-review--place (comment old-lines new-lines unchanged &optional hunks)
-  "Return where COMMENT, an earlier comment with a line, is in the newest version.
-OLD-LINES and NEW-LINES are vectors of the lines of its file at the
-merge base and on the branch, nil for a side that was not read.
-UNCHANGED is non-nil when the branch's version is as it was when the
-comment was made.  HUNKS says how the branch's version changed since
-the commit the comment was made at: `same', or the hunks
-\(`harness-ui-patch-review--diff-hunks') of the change.  The answer is a
-plist: :side, :line where it is now (nil when the file has no such line
-any more) and :was where it was, and :status:
-  same     the line is where it was
-  moved    the line the comment is on is now at :line
-  changed  the line was edited, or is gone: :line is where the lines that
-           replaced it start, or where it was, as near as the file allows
-  unknown  there is no telling: the file was not read, or the comment
-           does not say which line it is on."
-  (pcase-let* ((`(,side . ,was) (plist-get comment :where))
-               (lines (if (eq side :old) old-lines new-lines))
-               ;; What the hunks make of the line, on the branch's side.
-               (mapped (and (eq side :new) (consp hunks)
-                            (harness-ui-patch-review--map-line hunks was)))
-               (clamped (lambda ()
-                          (if mapped
-                              (car mapped)
-                            (and (> (length lines) 0) (max 1 (min was (length lines))))))))
-    (cond
-     ((and (eq side :new) (or unchanged (eq hunks 'same)))
-      (list :side side :line was :was was :status 'same))
-     ((and mapped (memq (cdr mapped) '(same moved)))
-      (list :side side :line (car mapped) :was was :status (cdr mapped)))
-     ((null lines)
-      (list :side side :line (if mapped (car mapped) was) :was was :status (if mapped 'changed 'unknown)))
-     ((zerop (length lines)) (list :side side :line nil :was was :status 'changed))
-     (t
-      (let* ((quote (and (not (plist-get comment :approx))
-                         (harness-ui-patch-review--side-quote comment side)))
-             (found (and quote (harness-ui-patch-review--find-line lines quote (if mapped (car mapped) was)))))
-        (cond
-         ;; Edited, yet the same line is somewhere: moved there.
-         (found (list :side side :line (car found) :was was
-                      :status (if (= (car found) was) 'same 'moved)))
-         ((or quote mapped)
-          (list :side side :line (funcall clamped) :was was :status 'changed))
-         (t (list :side side :line (funcall clamped) :was was :status 'unknown))))))))
+(defun harness-ui-patch-review--ranges (review old new)
+  "Return a promise of how the file changed from blob OLD to blob NEW, or nil.
+The ranges are those of `change-review-diff-ranges', of a diff with no
+context.  Nil when it cannot be told."
+  (harness-catch
+   (harness-then (harness-ui-patch-review--git (harness-ui-patch-review--r-dir review)
+                                               "diff" "-U0" "--no-color" "--no-ext-diff" "--no-textconv" old new)
+                 (lambda (diff) (change-review-diff-ranges (harness-ui-patch-review--decode diff))))
+   (lambda (_) nil)))
 
-(defun harness-ui-patch-review--unchanged-since-p (review file comment)
-  "Non-nil when FILE of REVIEW is as it was on the branch at COMMENT's round.
-That is, the blob kept for the round (`harness-ui-patch-review--snapshot')
-is the blob it has now."
-  (let ((snapshot (gethash (plist-get comment :round) (harness-ui-patch-review--r-snapshots review))))
-    (and snapshot
-         (let ((kept (assoc (plist-get comment :path) snapshot)))
-           (and kept (equal (cdr kept) (harness-ui-patch-review--f-new-blob file)))))))
+(defun harness-ui-patch-review--read-text (review sha wanted file)
+  "Return a promise of the lines of blob SHA of FILE, nil when not WANTED.
+Not a binary file, nor one too large to search; nil for them too."
+  (if (and wanted sha (not (change-review-file-binary file)))
+      (harness-catch
+       (harness-then (harness-ui-patch-review--blob review sha)
+                     (lambda (text)
+                       (and (<= (length text) harness-ui-patch-review--place-limit)
+                            (change-review-diff-lines-of text))))
+       (lambda (_) nil))
+    (harness-resolved nil)))
 
-(defun harness-ui-patch-review--place-comments (review file old-text new-text &optional hunks)
-  "Place the earlier comments on FILE of REVIEW in its newest version.
-OLD-TEXT and NEW-TEXT are the file at the merge base and on the branch,
-nil for one not read.  HUNKS is an alist of a round's number to how the
-file changed since that round, as `harness-ui-patch-review--place' takes
-it.  Return an alist of (KEY . PLACEMENT) for the comments on a line,
-KEY as `harness-ui-patch-review--comment-key' gives it, PLACEMENT as
-`harness-ui-patch-review--place' does."
-  (let ((old-lines (and old-text (harness-ui-patch-review--lines-of old-text)))
-        (new-lines (and new-text (harness-ui-patch-review--lines-of new-text))))
-    (cl-loop for comment in (harness-ui-patch-review--file-comments review file)
-             when (plist-get comment :where)
-             collect (cons (harness-ui-patch-review--comment-key comment)
-                           (harness-ui-patch-review--place
-                            comment old-lines new-lines
-                            (harness-ui-patch-review--unchanged-since-p review file comment)
-                            (cdr (assq (plist-get comment :round) hunks)))))))
+(defun harness-ui-patch-review--user-revision (threads)
+  "Return the revision of the newest comment the user wrote in THREADS, or nil."
+  (let (best)
+    (dolist (thread threads)
+      (dolist (comment (change-review-thread-comments thread))
+        (when (and (eq (and (change-review-comment-author comment)
+                            (change-review-author-kind (change-review-comment-author comment)))
+                       'user)
+                   (change-review-comment-revision comment)
+                   (or (null best)
+                       (> (or (change-review-comment-time comment) 0) (or (car best) 0))))
+          (setq best (cons (change-review-comment-time comment)
+                           (change-review-comment-revision comment))))))
+    (cdr best)))
 
-(defun harness-ui-patch-review--placement (review comment)
-  "Return where REVIEW has COMMENT, an earlier one, in the newest version, or nil."
-  (gethash (harness-ui-patch-review--comment-key comment)
-           (harness-ui-patch-review--r-placements review)))
+(defun harness-ui-patch-review--place-file (review file threads)
+  "Return a promise of (PLACEMENTS . SINCE) for THREADS about FILE of REVIEW.
+PLACEMENTS is an alist of a thread's id to where the thread is now in
+the newest version of FILE (`change-review-diff-place'), read from the
+repository: the file at the revision each thread was made against, and
+how it changed since.  SINCE is `changed' or `same' for FILE since the
+user's last comment on it, nil when that is not told."
+  (let* ((tip (harness-ui-patch-review--r-tip review))
+         (new-blob (change-review-file-new-blob file))
+         (old-blob (change-review-file-old-blob file))
+         (located (cl-remove-if-not
+                   (lambda (th) (change-review-location-line (change-review-thread-location th)))
+                   threads))
+         (user-revision (harness-ui-patch-review--user-revision threads))
+         (paths nil))
+    ;; The revisions the threads were made against, with FILE's path then.
+    (dolist (thread threads)
+      (let ((revision (change-review-thread-revision thread)))
+        (when (and revision (not (equal revision tip)) (not (assoc revision paths)))
+          (push (cons revision (change-review-location-file (change-review-thread-location thread)))
+                paths))))
+    (when (and user-revision (not (equal user-revision tip)) (not (assoc user-revision paths)))
+      (push (cons user-revision (change-review-file-path file)) paths))
+    (harness-then
+     (harness-all (mapcar (lambda (entry)
+                            (harness-ui-patch-review--blob-at review (car entry) (cdr entry)))
+                          paths))
+     (lambda (blobs)
+       (let* ((blob-of (cl-mapcar (lambda (entry blob) (cons (car entry) blob)) paths blobs))
+              (on-side (lambda (thread side)
+                         (eq (change-review-location-side (change-review-thread-location thread)) side)))
+              (changed (cl-remove-if
+                        (lambda (th)
+                          (let ((revision (change-review-thread-revision th)))
+                            (or (null revision) (equal revision tip)
+                                (equal (cdr (assoc revision blob-of)) new-blob))))
+                        (cl-remove-if-not (lambda (th) (funcall on-side th 'new)) located)))
+              (want-old (cl-some (lambda (th) (funcall on-side th 'old)) located))
+              (since (when (and user-revision (not (equal user-revision tip)))
+                       (let ((then (cdr (assoc user-revision blob-of))))
+                         (and then new-blob (if (equal then new-blob) 'same 'changed))))))
+         (harness-then
+          (harness-all
+           (list (harness-ui-patch-review--read-text review old-blob want-old file)
+                 (harness-ui-patch-review--read-text review new-blob (and changed t) file)
+                 (harness-all
+                  (mapcar (lambda (revision)
+                            (let ((then (cdr (assoc revision blob-of))))
+                              (harness-then
+                               (if (and then new-blob (not (equal then new-blob))
+                                        (cl-some (lambda (th) (equal (change-review-thread-revision th) revision))
+                                                 changed))
+                                   (harness-ui-patch-review--ranges review then new-blob)
+                                 (harness-resolved nil))
+                               (lambda (ranges) (cons revision ranges)))))
+                          (delete-dups (delq nil (mapcar #'change-review-thread-revision changed)))))))
+          (lambda (read)
+            (let ((old-lines (nth 0 read)) (new-lines (nth 1 read)) (ranges (nth 2 read)))
+              (cons (cl-loop for thread in located
+                             for location = (change-review-thread-location thread)
+                             for revision = (change-review-thread-revision thread)
+                             collect (cons (change-review-thread-id thread)
+                                           (if (and (null new-blob)
+                                                    (eq (change-review-location-side location) 'new))
+                                               ;; The branch deleted the file: no line to be on.
+                                               (list :side 'new :line nil
+                                                     :was (change-review-location-line location)
+                                                     :status 'gone)
+                                             (change-review-diff-place
+                                              location old-lines new-lines
+                                              (or (null revision) (equal revision tip)
+                                                  (equal (cdr (assoc revision blob-of)) new-blob))
+                                              (cdr (assoc revision ranges))))))
+                    since)))))))))
 
-(defun harness-ui-patch-review--place-previous (review)
-  "Place REVIEW's earlier comments in the newest version of their files.
-Reads from the repository the files that have such comments, and how
-they changed since the commit each round of comments was made at, those
-not known to be as they were already; then draws the report again.
-Return a promise of REVIEW; it never rejects."
+(defun harness-ui-patch-review--place-threads (review)
+  "Place the threads of REVIEW in the newest version of their files.
+Reads from the repository the files that have threads, and how they
+changed since the revision each thread was made against; then draws the
+report and the views of the threads again.  Return a promise of REVIEW;
+it never rejects."
   (let ((token (list 'placing))
+        (set (harness-ui-patch-review--r-set review))
         jobs)
     (setf (harness-ui-patch-review--r-placing review) token)
     (dolist (file (harness-ui-patch-review--r-files review))
-      (let* ((comments (cl-remove-if-not (lambda (c) (plist-get c :where))
-                                         (harness-ui-patch-review--file-comments review file)))
-             (changed (cl-remove-if (lambda (c) (harness-ui-patch-review--unchanged-since-p review file c))
-                                    (cl-remove-if-not (lambda (c) (eq (car (plist-get c :where)) :new))
-                                                      comments)))
-             (old (cl-some (lambda (c) (eq (car (plist-get c :where)) :old)) comments))
-             ;; The rounds with a comment on the branch's side whose file may
-             ;; have changed: (ROUND TIP PATH) each, once.
-             (rounds (let (seen)
-                       (dolist (c changed)
-                         (when (and (plist-get c :tip) (not (assq (plist-get c :round) seen)))
-                           (push (list (plist-get c :round) (plist-get c :tip) (plist-get c :path)) seen)))
-                       (nreverse seen))))
-        (when (or changed old)
-          (push (list file old (and changed t) rounds) jobs))))
+      (when-let* ((threads (harness-ui-patch-review--file-threads review file)))
+        (push (cons file threads) jobs)))
     (setq jobs (nreverse jobs))
-    (let ((read (lambda (review sha wanted file)
-                  ;; Not a binary file, nor one too large to search.  No blob
-                  ;; is a file without that side: no lines.
-                  (if (and wanted (not (harness-ui-patch-review--f-binary file)))
-                      (harness-catch
-                       (harness-then (harness-ui-patch-review--blob review sha)
-                                     (lambda (text)
-                                       (and (<= (length text) harness-ui-patch-review--place-limit) text)))
-                       (lambda (_) nil))
-                    (harness-resolved nil)))))
-      (harness-then
-       (harness-all
-        (mapcar (lambda (job)
-                  (pcase-let ((`(,file ,old ,new ,rounds) job))
-                    (harness-all
-                     (list (funcall read review (harness-ui-patch-review--f-old-blob file) old file)
-                           (funcall read review (harness-ui-patch-review--f-new-blob file) new file)
-                           (harness-all
-                            (mapcar (lambda (round)
-                                      (harness-then
-                                       (harness-ui-patch-review--read-hunks
-                                        review file (nth 1 round) (nth 2 round))
-                                       (lambda (hunks) (cons (nth 0 round) hunks))))
-                                    rounds))))))
-                jobs))
-       (lambda (results)
-         (when (eq (harness-ui-patch-review--r-placing review) token)
-           (let ((table (make-hash-table :test 'equal)))
-             (cl-mapc (lambda (job result)
-                        (dolist (entry (harness-ui-patch-review--place-comments
-                                        review (car job) (nth 0 result) (nth 1 result) (nth 2 result)))
-                          (puthash (car entry) (cdr entry) table)))
-                      jobs results)
-             (setf (harness-ui-patch-review--r-placements review) table
-                   (harness-ui-patch-review--r-placing review) nil)
-             (harness-ui-patch-review--refresh review)))
-         review)
-       (lambda (err)
-         (harness-log 'warn "patch review: could not place the earlier comments: %s"
-                      (harness-error-message err))
-         review)))))
+    (harness-then
+     (harness-all (mapcar (lambda (job) (harness-ui-patch-review--place-file review (car job) (cdr job)))
+                          jobs))
+     (lambda (results)
+       (when (eq (harness-ui-patch-review--r-placing review) token)
+         (let ((placements (make-hash-table :test 'equal))
+               (since (make-hash-table :test 'equal)))
+           (cl-mapc (lambda (job result)
+                      (dolist (entry (car result)) (puthash (car entry) (cdr entry) placements))
+                      (when (cdr result)
+                        (puthash (change-review-file-path (car job)) (cdr result) since)))
+                    jobs results)
+           (setf (harness-ui-patch-review--r-placements review) placements
+                 (harness-ui-patch-review--r-since review) since
+                 (harness-ui-patch-review--r-placing review) nil)
+           (change-review-ui-refresh set)
+           (harness-ui-patch-review--refresh review)))
+       review)
+     (lambda (err)
+       (harness-log 'warn "patch review: could not place the threads: %s" (harness-error-message err))
+       review))))
 
-(defun harness-ui-patch-review--snapshot (review &optional task)
-  "Keep the branch's files' blobs for each round of feedback not kept yet.
-When REVIEW's task is sent back with feedback, its branch's files are
-as the reviewer saw them: the next review compares the branch with this
-to say which files changed since the comments and which stayed the
-same.  TASK is the record that has the new round, when REVIEW's own is
-the one before it."
-  (let ((feedback (plist-get (or task (harness-ui-patch-review--r-task review)) :feedback))
-        (files (harness-ui-patch-review--r-files review)))
-    (when (> (length feedback) (harness-ui-patch-review--r-snapshotted review))
-      (if (null files)
-          ;; Nothing was read: these rounds have no snapshot to be exact
-          ;; with, and later rounds must not be taken for them.
-          (setf (harness-ui-patch-review--r-snapshotted review) (length feedback))
-        (let ((blobs (mapcar (lambda (file)
-                               (cons (harness-ui-patch-review--f-path file)
-                                     (harness-ui-patch-review--f-new-blob file)))
-                             files)))
-          (cl-loop for index from (harness-ui-patch-review--r-snapshotted review)
-                   below (length feedback)
-                   do (puthash index blobs (harness-ui-patch-review--r-snapshots review)))
-          (setf (harness-ui-patch-review--r-snapshotted review) (length feedback)))))))
+(defun harness-ui-patch-review--place-from-texts (review file old new)
+  "Return where the threads about FILE of REVIEW are, from OLD and NEW, its texts.
+An alist of a thread's id to its place (`change-review-diff-place'),
+worked out from the lines the thread quotes: for the threads the
+repository has not been asked about yet."
+  (let ((tip (harness-ui-patch-review--r-tip review))
+        (old-lines (and old (change-review-diff-lines-of old)))
+        (new-lines (and new (change-review-diff-lines-of new))))
+    (cl-loop for thread in (harness-ui-patch-review--file-threads review file)
+             for location = (change-review-thread-location thread)
+             for revision = (change-review-thread-revision thread)
+             when (change-review-location-line location)
+             collect (cons (change-review-thread-id thread)
+                           (change-review-diff-place location old-lines new-lines
+                                                     (or (null revision) (equal revision tip)))))))
 
-(defun harness-ui-patch-review--latest-comment (review file)
-  "Return (ROUND . PATH) for the latest earlier comment on FILE of REVIEW.
-PATH is the path the comment named then: a file renamed meanwhile has
-its old path there.  Nil when no earlier comment was on it."
-  (let ((path (harness-ui-patch-review--f-path file))
-        (old (harness-ui-patch-review--f-old-path file))
-        found)
-    (dolist (round (harness-ui-patch-review--previous-comments review))
-      (dolist (comment (plist-get round :comments))
-        (when (and (plist-get comment :path)
-                   (or (equal (plist-get comment :path) path)
-                       (and old (equal (plist-get comment :path) old))))
-          (setq found (cons (plist-get round :round) (plist-get comment :path))))))
-    found))
-
-(defun harness-ui-patch-review--since-comment (review file)
-  "Return `changed', `same', or nil for FILE of REVIEW since its last comment.
-Nil when no earlier comment named it, or when the review kept no
-snapshot of the branch the comment was made on."
-  (when-let* ((found (harness-ui-patch-review--latest-comment review file)))
-    (let ((snapshot (gethash (car found) (harness-ui-patch-review--r-snapshots review))))
-      (when (and snapshot (assoc (cdr found) snapshot))
-        (if (equal (cdr (assoc (cdr found) snapshot))
-                   (harness-ui-patch-review--f-new-blob file))
-            'same
-          'changed)))))
-
-(defun harness-ui-patch-review--since-comment-text (review file)
-  "Return what to say of FILE of REVIEW since its last comment, or nil."
-  (pcase (harness-ui-patch-review--since-comment review file)
+(defun harness-ui-patch-review--since-text (review file)
+  "Return what to say of FILE of REVIEW since the user's last comment, or nil."
+  (pcase (gethash (change-review-file-path file) (harness-ui-patch-review--r-since review))
     ('same (propertize "same since your comment" 'face 'harness-dim-face))
     ('changed (propertize "changed since your comment" 'face 'warning))))
 
-(defun harness-ui-patch-review--round-time (comment)
-  "Return when the round of the earlier COMMENT was sent, as a string, or nil."
-  (when-let* ((at (plist-get comment :at)))
-    (format-time-string "%Y-%m-%d %H:%M" at)))
-
-(defun harness-ui-patch-review--where-text (review comment)
-  "Return where the earlier COMMENT is, as REVIEW's report says it, or nil.
-That is its line in the newest version of its file: \"line 44\", with
-\"(was 42)\" when it moved, \"(changed since)\" when the line it was on
-is not there as it was.  A comment on a file as a whole has no line.
-Until the files are read, the line the comment was made on."
-  (when-let* ((where (plist-get comment :where)))
-    (let* ((placement (harness-ui-patch-review--placement review comment))
-           (side (if placement (plist-get placement :side) (car where)))
-           (line (if placement (plist-get placement :line) (cdr where)))
-           (was (if placement (plist-get placement :was) (cdr where)))
-           (of (if (eq side :old) " of the merge base" "")))
-      (pcase (and placement (plist-get placement :status))
-        ('moved (format "line %d%s (was %d)" line of was))
-        ('changed (if line
-                      (format "line %d%s (changed since)" line of)
-                    "its line is gone"))
-        (_ (format "line %d%s" (or line was) of))))))
-
-(defun harness-ui-patch-review--previous-section (review)
-  "Return REVIEW's earlier comments that have no file row, or nil.
-The comments on a file the report shows are under its row
-\(`harness-ui-patch-review--comment-rows'); what stays here are the
-words on the change as a whole and the comments on files the branch no
-longer changes, round by round, with a line on how many comments there
-are.  Nil when there were no earlier rounds."
-  (let* ((rounds (harness-ui-patch-review--previous-comments review))
-         (total (apply #'+ (mapcar (lambda (round) (length (plist-get round :comments))) rounds)))
-         (loose (mapcar (lambda (round)
-                          (cons round (cl-remove-if (lambda (comment)
-                                                      (harness-ui-patch-review--comment-file review comment))
-                                                    (plist-get round :comments))))
-                        rounds))
-         (shown (- total (apply #'+ (mapcar (lambda (entry) (length (cdr entry))) loose)))))
-    (when rounds
-      (concat
-       (propertize "Previous comments" 'face 'harness-label-face)
-       "   "
-       (propertize (format "%s in %s%s"
-                           (harness-ui-patch-review--plural total "comment")
-                           (harness-ui-patch-review--plural (length rounds) "round")
-                           (if (> shown 0) (format ", %d under their files below" shown) ""))
-                   'face 'harness-dim-face)
-       "\n"
-       (mapconcat
-        (lambda (entry)
-          (let ((round (car entry)))
-            (if (null (cdr entry))
-                ""
-              (concat
-               "  " (propertize (format "Round %d%s" (1+ (plist-get round :round))
-                                        (if-let* ((at (plist-get round :at)))
-                                            (format " · %s" (format-time-string "%Y-%m-%d %H:%M" at))
-                                          ""))
-                                'face 'bold)
-               "\n"
-               (mapconcat
-                (lambda (comment)
-                  (let ((where (harness-ui-patch-review--where-text review comment)))
-                    (concat
-                     "    "
-                     (propertize (or (plist-get comment :path) "the change as a whole")
-                                 'face 'bold)
-                     (when where (concat ", " where))
-                     (when (and (plist-get comment :path)
-                                (harness-ui-patch-review--r-files review))
-                       (propertize " (not changed any more)" 'face 'harness-dim-face))
-                     ": "
-                     (harness-truncate-end (string-replace "\n" " " (plist-get comment :text)) 160)
-                     "\n")))
-                (cdr entry) "")))))
-        loose "")
-       "\n"))))
-
-(defun harness-ui-patch-review--comment-rows (review file index indent)
-  "Return the rows of the earlier comments on FILE of REVIEW.
-FILE is at INDEX of the review's files.  Each comment is a line of its
-own, INDENT then \"↳\", the round, where the comment is in the newest
-version of the file, and what it says; RET on it compares the file in
-Ediff with that line in sight.  Empty without earlier comments."
-  (mapconcat
-   (lambda (comment)
-     (let* ((where (harness-ui-patch-review--where-text review comment))
-            (placement (harness-ui-patch-review--placement review comment))
-            (row (concat indent
-                         (propertize "↳ " 'face 'harness-dim-face)
-                         (propertize (format "Round %d%s" (1+ (plist-get comment :round))
-                                             (if where (concat " · " where) ""))
-                                     'face 'harness-dim-face)
-                         ": "
-                         (harness-truncate-end (string-replace "\n" " " (plist-get comment :text)) 140))))
-       (add-text-properties
-        0 (length row)
-        (list 'harness-ui-patch-review-file index
-              'harness-ui-patch-review-task (harness-ui-patch-review--r-id review)
-              'harness-ui-patch-review-where
-              (and (plist-get comment :where)
-                   (cons (if placement (plist-get placement :side) (car (plist-get comment :where)))
-                         (or (and placement (plist-get placement :line))
-                             (cdr (plist-get comment :where)))))
-              'mouse-face 'highlight
-              'help-echo (format "Round %d%s\n%s\nRET or a click: compare %s in Ediff%s"
-                                 (1+ (plist-get comment :round))
-                                 (if-let* ((time (harness-ui-patch-review--round-time comment)))
-                                     (concat ", " time)
-                                   "")
-                                 (plist-get comment :text)
-                                 (harness-ui-patch-review--f-path file)
-                                 (if (plist-get comment :where) " at this line" ""))
-              'wrap-prefix (concat indent "  ")
-              'keymap harness-ui-patch-review--row-map)
-        row)
-       (concat row "\n")))
-   (harness-ui-patch-review--file-comments review file) ""))
-
-(defun harness-ui-patch-review--comment-text (text)
-  "Return TEXT made a comment of the feedback: trimmed and filled.
-No line of it starts with \">\", which would be taken for the quote."
-  (with-temp-buffer
-    (insert (string-trim text))
-    (let ((fill-column harness-ui-patch-review-fill-column)
-          (adaptive-fill-mode nil))
-      (fill-region (point-min) (point-max)))
-    (goto-char (point-min))
-    (while (re-search-forward "^>" nil t)
-      (replace-match " >" t t))
-    (string-trim-right (buffer-string))))
-
-(defun harness-ui-patch-review--attribution (review)
-  "Return the line before the first quote of REVIEW's diff in the feedback.
-It says what the quote is, for the task to read it."
-  (format "My comments on the diff of your branch %s (at %s) against %s (merge base %s), each under the lines it is about:"
-          (harness-ui-patch-review--r-branch review)
-          (harness-ui-patch-review--short (harness-ui-patch-review--r-tip review))
-          (harness-ui-patch-review--r-base review)
-          (harness-ui-patch-review--short (harness-ui-patch-review--r-merge-base review))))
-
-;;;;; The lines a comment is about
-
-(defun harness-ui-patch-review--hunks (file)
-  "Return the hunks of FILE's diff, in order, each a plist.
-:heading is what its header has after the line numbers, :lines its
-lines, each a list (KIND TEXT OLD NEW): KIND the character the line
-starts with, TEXT the rest, OLD and NEW its numbers at the merge base
-and on the branch -- on a side the line is not on, the number of the
-line that follows it there."
-  (let (hunks heading lines old new)
-    (cl-flet ((finish () (when heading (push (list :heading heading :lines (nreverse lines)) hunks))))
-      (dolist (text (split-string (or (harness-ui-patch-review--f-patch file) "") "\n"))
-        (cond
-         ((string-match harness-ui-patch-review--hunk-regexp text)
-          (finish)
-          ;; A side with no line counts from the line before: git's
-          ;; "-0,0" for a file that is new.
-          (setq old (+ (string-to-number (match-string 1 text))
-                       (if (equal (match-string 2 text) "0") 1 0))
-                new (+ (string-to-number (match-string 3 text))
-                       (if (equal (match-string 4 text) "0") 1 0))
-                heading (match-string 5 text)
-                lines nil))
-         ((or (null heading) (string-empty-p text)))
-         (t
-          (let ((kind (aref text 0)))
-            (push (list kind (substring text 1) old new) lines)
-            (pcase kind
-              (?\s (cl-incf old) (cl-incf new))
-              (?- (cl-incf old))
-              (?+ (cl-incf new)))))))
-      (finish))
-    (nreverse hunks)))
-
-(defun harness-ui-patch-review--own-number (line side)
-  "Return the number of LINE, a hunk's, on SIDE, :old or :new; nil when not there."
-  (pcase-let ((`(,kind ,_ ,old ,new) line))
-    (pcase kind
-      (?\s (if (eq side :old) old new))
-      (?- (and (eq side :old) old))
-      (?+ (and (eq side :new) new)))))
-
-(defun harness-ui-patch-review--locate (hunks side number)
-  "Return (HUNK INDEX EXACT) for line NUMBER of SIDE in HUNKS, or nil.
-INDEX is that of the line in HUNK's lines: the line NUMBER, EXACT
-non-nil, else the nearest the diff has on SIDE."
-  (let (best distance)
-    (cl-loop for hunk in hunks
-             until (and distance (zerop distance))
-             do (cl-loop for line in (plist-get hunk :lines) for index from 0
-                         for own = (harness-ui-patch-review--own-number line side)
-                         when (and own (or (null distance) (< (abs (- own number)) distance)))
-                         do (setq best (list hunk index (= own number))
-                                  distance (abs (- own number)))))
-    best))
-
-(defun harness-ui-patch-review--same-line-p (quoted line)
-  "Non-nil when QUOTED, a line of the box, quotes LINE, a hunk's."
-  (pcase-let ((`(,kind ,_ ,old ,new) line))
-    (pcase kind
-      (?\s (and (eq (plist-get quoted :line) 'context)
-                (eql (plist-get quoted :old) old) (eql (plist-get quoted :new) new)))
-      (?- (and (eq (plist-get quoted :line) 'removed) (eql (plist-get quoted :old) old)))
-      (?+ (and (eq (plist-get quoted :line) 'added) (eql (plist-get quoted :new) new))))))
-
-(defun harness-ui-patch-review--excerpt (file side number quoted)
-  "Return the part of FILE's diff that a comment on line NUMBER of SIDE quotes.
-SIDE is :new for a line of the branch, :old for one of the merge base.
-The part ends on that line, or on the nearest one the diff has, and
-starts where the change it ends starts, after at most
-`harness-ui-patch-review-context-lines' lines before it.  QUOTED are
-the lines of the box that quote FILE already: what they quote is not
-quoted again, the part going on after the last of them instead.
-
-Return nil when the diff has no hunk, else a plist: :text, the part,
-quoted, its hunk's header first unless it goes on; :new-start, where it
-starts on the branch; :exact, non-nil when it ends on line NUMBER;
-:after, the line of QUOTED it goes on after, if it does."
-  (when-let* ((found (harness-ui-patch-review--locate (harness-ui-patch-review--hunks file) side number)))
-    (pcase-let* ((`(,hunk ,index ,exact) found)
-                 (lines (plist-get hunk :lines))
-                 (change-p (lambda (i) (memq (car (nth i lines)) '(?+ ?- ?\\))))
-                 (end (if (eq (car (nth (1+ index) lines)) ?\\) (1+ index) index))
-                 (back (lambda (i)
-                         ;; To the start of the change I is in, if any.
-                         (when (funcall change-p i)
-                           (while (and (> i 0) (funcall change-p (1- i))) (cl-decf i)))
-                         i))
-                 ;; The context before the change, not cutting into one.
-                 (first (funcall back (max 0 (- (funcall back index) harness-ui-patch-review-context-lines))))
-                 (done (cl-loop for i from end downto first
-                                for line = (nth i lines)
-                                for match = (cl-find-if (lambda (q) (harness-ui-patch-review--same-line-p q line))
-                                                        quoted)
-                                when match return (cons i match)))
-                 (from (if done (1+ (car done)) first))
-                 (part (cl-subseq lines from (1+ end))))
-      (list :text (concat
-                   (unless done
-                     (pcase-let ((`(,_ ,_ ,old ,new) (nth from lines))
-                                 (old-count (cl-count-if (lambda (l) (memq (car l) '(?\s ?-))) part))
-                                 (new-count (cl-count-if (lambda (l) (memq (car l) '(?\s ?+))) part)))
-                       ;; A side with no line names the line before, as git does.
-                       (format "> @@ -%d,%d +%d,%d @@%s\n"
-                               (if (zerop old-count) (1- old) old) old-count
-                               (if (zerop new-count) (1- new) new) new-count
-                               (plist-get hunk :heading))))
-                   (mapconcat (lambda (l) (concat "> " (char-to-string (car l)) (nth 1 l) "\n")) part ""))
-            :new-start (nth 3 (nth from lines))
-            :exact exact
-            :after (cdr done)))))
-
-;;;;; Putting a comment in the box
-
-(defun harness-ui-patch-review--after-comments (pos)
-  "Return where the comments under the quote line at POS end.
-That is the start of the next quote line, or the end."
-  (save-excursion
-    (goto-char pos)
-    (forward-line 1)
-    (while (and (not (eobp)) (not (eq (char-after) ?>)))
-      (forward-line 1))
-    (point)))
-
-(defun harness-ui-patch-review--insert-comment (anchor text)
-  "Insert TEXT, a comment, under the quote line that starts at ANCHOR.
-It goes after the comments under that line already, a blank line
-before it and after it.  Return where it starts."
-  (save-excursion
-    (goto-char anchor)
-    (end-of-line)
-    (when (eobp) (insert "\n"))
-    (let ((limit (line-beginning-position 2))
-          (next (harness-ui-patch-review--after-comments anchor))
-          start)
-      (goto-char next)
-      ;; Back over the blank lines before the next quote line.
-      (while (and (> (point) limit)
-                  (save-excursion (forward-line -1) (looking-at-p "[ \t]*$")))
-        (forward-line -1))
-      (let ((blank-after (< (point) next)))
-        (insert "\n")
-        (setq start (point))
-        (insert text "\n")
-        (unless (or blank-after (eobp)) (insert "\n")))
-      start)))
-
-(defun harness-ui-patch-review--insert-block (pos block)
-  "Insert BLOCK, lines of the quote and a comment under them, at POS.
-POS starts a line.  A blank line parts BLOCK from a comment before it
-and from whatever follows it.  Return where BLOCK starts."
-  (goto-char pos)
-  (unless (bobp)
-    (let ((before (save-excursion (forward-line -1)
-                                  (buffer-substring-no-properties (point) (line-end-position)))))
-      (unless (or (string-blank-p before) (string-prefix-p ">" before))
-        (insert "\n"))))
-  (prog1 (point)
-    (insert block)
-    (unless (or (eobp) (looking-at-p "[ \t]*$"))
-      (insert "\n"))))
-
-(defun harness-ui-patch-review--section-end (lines header)
-  "Return where the quote of the file HEADER names ends among LINES.
-That is where the next file's quote starts, or the end."
-  (let ((in nil))
-    (or (cl-loop for line in lines
-                 for file-p = (eq (plist-get line :line) 'file)
-                 when (and file-p in) return (plist-get line :start)
-                 when (and file-p (equal (plist-get line :file) header)) do (setq in t))
-        (point-max))))
-
-(defun harness-ui-patch-review--block-position (review file lines quoted excerpt)
-  "Return where the quote EXCERPT of REVIEW's FILE goes among LINES, the box's.
-QUOTED are the lines quoting FILE already.  The files keep the order
-of the diff, the hunks of a file the order of its lines."
-  (if quoted
-      (let ((next (cl-find-if (lambda (line) (and (eq (plist-get line :line) 'hunk)
-                                                  (> (plist-get line :new-start)
-                                                     (plist-get excerpt :new-start))))
-                              quoted)))
-        (if next
-            (plist-get next :start)
-          (harness-ui-patch-review--section-end lines (harness-ui-patch-review--header file))))
-    (let* ((files (harness-ui-patch-review--r-files review))
-           (rank (lambda (header) (cl-position header files :key #'harness-ui-patch-review--header
-                                               :test #'equal)))
-           (mine (funcall rank (harness-ui-patch-review--header file)))
-           (next (and mine
-                      (cl-find-if (lambda (line)
-                                    (and (eq (plist-get line :line) 'file)
-                                         (let ((theirs (funcall rank (plist-get line :file))))
-                                           (and theirs (> theirs mine)))))
-                                  lines))))
-      (if next (plist-get next :start) (point-max)))))
-
-(defun harness-ui-patch-review--put-comment (review file where text)
-  "Put TEXT, a comment on FILE of REVIEW, in the box, under the lines it is about.
-The buffer is narrowed to the box.  WHERE is as for
-`harness-ui-patch-review--add-comment'.  Return (START . END), what was
-put in: the comment, and the lines of the quote it brought, if any."
-  ;; Whole lines: the box ends with a newline.
-  (goto-char (point-max))
-  (unless (or (bobp) (bolp)) (insert "\n"))
-  (let* ((lines (harness-ui-patch-review--parse))
-         (header (harness-ui-patch-review--header file))
-         (quoted (cl-remove-if-not (lambda (line) (and (eq (plist-get line :type) 'quote)
-                                                        (equal (plist-get line :file) header)))
-                                   lines))
-         (side (car where))
-         (number (cdr where))
-         (exact (and side (cl-find-if (lambda (line) (eql (plist-get line side) number)) quoted))))
-    (if exact
-        (let* ((comment (harness-ui-patch-review--comment-text text))
-               (start (harness-ui-patch-review--insert-comment (plist-get exact :start) comment)))
-          (cons start (+ start (length comment))))
-      (let* ((excerpt (and side (harness-ui-patch-review--excerpt file side number quoted)))
-             (comment (harness-ui-patch-review--comment-text
-                       (if (or (null side) (plist-get excerpt :exact))
-                           text
-                         (format "On line %d%s: %s" number (if (eq side :old) " of the merge base" "") text))))
-             (after (plist-get excerpt :after)))
-        (cl-flet ((comment-at (start) (cons start (+ start (length comment))))
-                  (block-at (start block) (cons start (+ start (length block)))))
-          (cond
-           ;; Nothing more to quote: under the line quoted last.
-           ((and after (string-empty-p (plist-get excerpt :text)))
-            (comment-at (harness-ui-patch-review--insert-comment (plist-get after :start) comment)))
-           ;; On from where the quote of the hunk stops.
-           (after
-            (let ((block (concat (plist-get excerpt :text) "\n" comment "\n")))
-              (block-at (harness-ui-patch-review--insert-block
-                         (harness-ui-patch-review--after-comments (plist-get after :start)) block)
-                        block)))
-           ;; On the file as a whole, or a file the diff has no line of:
-           ;; under its first line.
-           ((and (null excerpt) quoted)
-            (comment-at (harness-ui-patch-review--insert-comment (plist-get (car quoted) :start) comment)))
-           (t
-            (let ((block (concat (unless quoted
-                                   (concat (unless (cl-some (lambda (line) (plist-get line :file)) lines)
-                                             (concat (harness-ui-patch-review--attribution review) "\n\n"))
-                                           "> " header "\n"))
-                                 (plist-get excerpt :text)
-                                 "\n" comment "\n")))
-              (block-at (harness-ui-patch-review--insert-block
-                         (harness-ui-patch-review--block-position review file lines quoted excerpt) block)
-                        block)))))))))
+;;;; The box of the feedback
 
 (defun harness-ui-patch-review--feedback-box (review)
   "Return the report of REVIEW's task, whose box takes the feedback; or signal.
@@ -1640,31 +1061,6 @@ A report closed meanwhile opens again, out of sight, for its box."
       (unless (and (buffer-live-p popout) (with-current-buffer popout (harness-compose-live-p)))
         (user-error "The report of %s has no box for the feedback" (harness-ui-patch-review--title review)))
       popout)))
-
-(defun harness-ui-patch-review--add-comment (review file where text)
-  "Put TEXT in the feedback box of REVIEW's report as a comment on FILE.
-WHERE is (SIDE . LINE): the comment is on LINE of the branch's version
-for SIDE :new, of the merge base's for :old; nil for the file as a
-whole.  It goes under the line, quoted from the diff with the change it
-ends and a few lines before, its file's `diff --git' line first, and
-after the comments there already.  A line the diff does not have gets
-the comment under the nearest one, saying which line it is about.  The
-first quote in the box gets a line before it saying what it is."
-  (let ((popout (harness-ui-patch-review--feedback-box review))
-        offset)
-    (with-current-buffer popout
-      (let ((inhibit-read-only t)
-            (start (save-excursion
-                     (save-restriction
-                       (narrow-to-region harness-compose-start harness-compose-end)
-                       (harness-ui-patch-review--put-comment review file where text)))))
-        ;; Where in the box: the box moves when the report is drawn again.
-        (setq offset (and (consp start)
-                          (cons (- (car start) harness-compose-start)
-                                (- (cdr start) harness-compose-start)))))
-      (harness-compose-update-placeholder))
-    (harness-ui-patch-review--refresh review)
-    (harness-ui-patch-review--show-comment review offset)))
 
 ;;;; The changes in the report
 
@@ -1683,25 +1079,131 @@ first quote in the box gets a line before it saying what it is."
   (define-key map (kbd "p") #'harness-ui-patch-review-previous-file)
   (define-key map (kbd "a") #'harness-ui-patch-review-approve)
   (define-key map (kbd "A") #'harness-ui-patch-review-approve-all)
-  (define-key map (kbd "t") #'harness-ui-patch-review-toggle-file-tree))
+  (define-key map (kbd "t") #'harness-ui-patch-review-toggle-file-tree)
+  (define-key map (kbd "T") #'harness-ui-patch-review-threads)
+  (define-key map (kbd "r") #'change-review-ui-reply)
+  (define-key map (kbd "x") #'change-review-ui-toggle-status)
+  (define-key map (kbd "o") #'change-review-ui-follow-author)
+  (define-key map (kbd "c") #'change-review-ui-comment-on-change))
+
+;;;;; Threads in the rows
+
+(defun harness-ui-patch-review--counts (review)
+  "Return the threads of REVIEW per file of its changes.
+An alist of (PATH . (:open N :closed M :drafts K)), for the files that have
+threads."
+  (let (alist)
+    (dolist (file (harness-ui-patch-review--r-files review))
+      (let ((open 0) (closed 0) (drafts 0))
+        (dolist (thread (harness-ui-patch-review--file-threads review file))
+          (if (change-review-thread-open-p thread) (cl-incf open) (cl-incf closed))
+          (cl-incf drafts (length (change-review-thread-drafts thread))))
+        (when (> (+ open closed) 0)
+          (push (cons (change-review-file-path file) (list :open open :closed closed :drafts drafts))
+                alist))))
+    (nreverse alist)))
+
+(defun harness-ui-patch-review--thread-row (review thread index indent)
+  "Return the row of THREAD, about the file at INDEX of REVIEW, after INDENT.
+A line, by the library's drawing of a thread in a list; RET on it
+compares the file in Ediff with the thread's line in sight."
+  (let* ((set (harness-ui-patch-review--r-set review))
+         (placement (change-review-placement set thread))
+         (row (change-review-ui-thread-line set thread :placement placement :width 100
+                                            :indent (concat indent "↳ ")))
+         (line (or (plist-get placement :line)
+                   (change-review-location-line (change-review-thread-location thread))))
+         (side (or (plist-get placement :side)
+                   (change-review-location-side (change-review-thread-location thread))
+                   'new)))
+    (add-text-properties
+     0 (length row)
+     (list 'harness-ui-patch-review-file index
+           'harness-ui-patch-review-task (harness-ui-patch-review--r-id review)
+           'harness-ui-patch-review-where
+           (and line (cons (intern (concat ":" (symbol-name side))) line))
+           'mouse-face 'highlight
+           'help-echo "RET or a click: compare the file in Ediff at this line; r replies, x closes or opens the thread"
+           'wrap-prefix (concat indent "    ")
+           'keymap harness-ui-patch-review--row-map)
+     row)
+    row))
+
+(defun harness-ui-patch-review--thread-rows (review file index indent)
+  "Return the rows of the threads about FILE of REVIEW, at INDEX of its files.
+The open ones, unless `harness-ui-patch-review-closed-threads' wants
+the closed too; each after INDENT.  Empty without threads."
+  (mapconcat
+   (lambda (thread) (harness-ui-patch-review--thread-row review thread index indent))
+   (cl-remove-if-not (lambda (thread)
+                       (or harness-ui-patch-review-closed-threads (change-review-thread-open-p thread)))
+                     (harness-ui-patch-review--file-threads review file))
+   ""))
+
+(defvar harness-ui-patch-review--thread-map (make-sparse-keymap)
+  "Keys on the row of a thread no file shows: RET lists the threads.")
+
+(let ((map harness-ui-patch-review--thread-map))
+  (define-key map (kbd "RET") #'harness-ui-patch-review-threads)
+  (define-key map [mouse-1] #'harness-ui-patch-review-threads)
+  (define-key map (kbd "T") #'harness-ui-patch-review-threads)
+  (define-key map (kbd "r") #'change-review-ui-reply)
+  (define-key map (kbd "x") #'change-review-ui-toggle-status)
+  (define-key map (kbd "o") #'change-review-ui-follow-author)
+  (define-key map (kbd "c") #'change-review-ui-comment-on-change))
+
+(defun harness-ui-patch-review--other-threads (review)
+  "Return the rows of the threads of REVIEW that no file row shows, or nil.
+Those on the change as a whole and on files the branch no longer
+changes, under a heading; the open ones, unless
+`harness-ui-patch-review-closed-threads' says."
+  (let* ((files (harness-ui-patch-review--r-files review))
+         (set (harness-ui-patch-review--r-set review))
+         (others (cl-remove-if
+                  (lambda (thread)
+                    (or (cl-some (lambda (file) (harness-ui-patch-review--thread-file-p thread file)) files)
+                        (and (not harness-ui-patch-review-closed-threads)
+                             (not (change-review-thread-open-p thread)))))
+                  (change-review-set-threads set))))
+    (when others
+      (concat
+       (propertize "Other threads" 'face 'harness-label-face)
+       "   " (propertize (format "%s: on the change as a whole, or on files this version does not change"
+                                 (harness-ui-patch-review--plural (length others) "thread"))
+                         'face 'harness-dim-face)
+       "\n"
+       (mapconcat
+        (lambda (thread)
+          (let ((row (change-review-ui-thread-line set thread :width 100 :indent "  "
+                                                   :placement (change-review-placement set thread))))
+            (add-text-properties
+             0 (length row)
+             (list 'harness-ui-patch-review-task (harness-ui-patch-review--r-id review)
+                   'mouse-face 'highlight
+                   'help-echo "RET: list the threads; r replies, x closes or opens the thread"
+                   'keymap harness-ui-patch-review--thread-map)
+             row)
+            row))
+        others "")
+       "\n"))))
 
 (defun harness-ui-patch-review--path-label (file)
   "Return the path of FILE for its row, \"OLD → NEW\" for a rename."
-  (if (harness-ui-patch-review--f-old-path file)
-      (format "%s → %s" (harness-ui-patch-review--f-old-path file) (harness-ui-patch-review--f-path file))
-    (harness-ui-patch-review--f-path file)))
+  (if (change-review-file-old-path file)
+      (format "%s → %s" (change-review-file-old-path file) (change-review-file-path file))
+    (change-review-file-path file)))
 
 (defun harness-ui-patch-review--submodule-p (file)
   "Non-nil when FILE is a submodule on either side."
-  (or (equal (harness-ui-patch-review--f-old-mode file) "160000")
-      (equal (harness-ui-patch-review--f-new-mode file) "160000")))
+  (or (equal (change-review-file-old-mode file) "160000")
+      (equal (change-review-file-new-mode file) "160000")))
 
 (defun harness-ui-patch-review--change-label (file)
   "Return what changed in FILE, for its row: the lines added and deleted."
-  (let* ((added (harness-ui-patch-review--f-added file))
-         (deleted (harness-ui-patch-review--f-deleted file))
-         (old-mode (harness-ui-patch-review--f-old-mode file))
-         (new-mode (harness-ui-patch-review--f-new-mode file))
+  (let* ((added (change-review-file-added file))
+         (deleted (change-review-file-deleted file))
+         (old-mode (change-review-file-old-mode file))
+         (new-mode (change-review-file-new-mode file))
          (mode (and (not (member old-mode '("000000" nil))) (not (member new-mode '("000000" nil)))
                     (not (equal old-mode new-mode))
                     (format "mode %s → %s" old-mode new-mode)))
@@ -1710,29 +1212,32 @@ first quote in the box gets a line before it saying what it is."
                              " "
                              (propertize (format "−%d" deleted) 'face 'harness-ui-patch-review-minus-face)))))
     (cond ((harness-ui-patch-review--submodule-p file) (propertize "submodule" 'face 'harness-dim-face))
-          ((harness-ui-patch-review--f-binary file) (propertize "binary" 'face 'harness-dim-face))
+          ((change-review-file-binary file) (propertize "binary" 'face 'harness-dim-face))
           ((and lines mode) (concat lines "  " (propertize mode 'face 'harness-dim-face)))
           (lines)
           (mode (propertize mode 'face 'harness-dim-face))
-          ((harness-ui-patch-review--f-old-path file) (propertize "same content" 'face 'harness-dim-face))
+          ((change-review-file-old-path file) (propertize "same content" 'face 'harness-dim-face))
           (t ""))))
 
 (defun harness-ui-patch-review--status-face (file)
   "Return the face of FILE's status letter."
-  (pcase (harness-ui-patch-review--f-status file)
+  (pcase (change-review-file-status file)
     ("A" 'harness-ui-patch-review-plus-face)
     ("D" 'harness-ui-patch-review-minus-face)
     (_ 'bold)))
 
 (defun harness-ui-patch-review--row (review file index width counts &optional indent label)
   "Return the row of FILE of REVIEW, at INDEX of its files.
-The path is padded to WIDTH; COUNTS are the box's comments.  INDENT is
-what the row starts with, \"  \" by default; LABEL names the file, its
-path by default."
-  (let* ((comments (or (cdr (assoc (harness-ui-patch-review--header file) counts)) 0))
+The path is padded to WIDTH; COUNTS are the threads per file
+\(`harness-ui-patch-review--counts').  INDENT is what the row starts
+with, \"  \" by default; LABEL names the file, its path by default."
+  (let* ((threads (cdr (assoc (change-review-file-path file) counts)))
+         (open (or (plist-get threads :open) 0))
+         (closed (or (plist-get threads :closed) 0))
+         (drafts (or (plist-get threads :drafts) 0))
          (indent (or indent "  "))
          (label (or label (harness-ui-patch-review--path-label file)))
-         (since (harness-ui-patch-review--since-comment-text review file))
+         (since (harness-ui-patch-review--since-text review file))
          (row (concat indent
                       (cond ((harness-ui-patch-review--approved-p review file)
                              (propertize "✔" 'face 'harness-ui-patch-review-approved-face))
@@ -1740,15 +1245,22 @@ path by default."
                              (propertize "✓" 'face 'harness-ui-patch-review-seen-face))
                             (t " "))
                       " "
-                      (propertize (harness-ui-patch-review--f-status file)
+                      (propertize (change-review-file-status file)
                                   'face (harness-ui-patch-review--status-face file))
                       "  "
                       (string-pad (harness-truncate-middle label width) width)
                       "  "
                       (harness-ui-patch-review--change-label file)
-                      (if (> comments 0)
-                          (concat "   " (propertize (harness-ui-patch-review--plural comments "comment")
+                      (if (> open 0)
+                          (concat "   " (propertize (format "%d open" open)
                                                     'face 'harness-ui-patch-review-comments-face))
+                        "")
+                      (if (> closed 0)
+                          (concat "   " (propertize (format "%d closed" closed) 'face 'harness-dim-face))
+                        "")
+                      (if (> drafts 0)
+                          (concat "   " (propertize (harness-ui-patch-review--plural drafts "draft")
+                                                    'face 'change-review-ui-draft-face))
                         "")
                       (if since (concat "   " since) ""))))
     (add-text-properties 0 (length row)
@@ -1762,18 +1274,18 @@ path by default."
     row))
 
 (defun harness-ui-patch-review--file-block (review file index width counts &optional indent label)
-  "Return FILE of REVIEW as lines: its row, then its earlier comments.
+  "Return FILE of REVIEW as lines: its row, then its threads.
 The arguments are those of `harness-ui-patch-review--row'; each line ends
 in a newline."
   (let ((indent (or indent "  ")))
     (concat (harness-ui-patch-review--row review file index width counts indent label) "\n"
             ;; Under the label, past the mark and the status.
-            (harness-ui-patch-review--comment-rows review file index (concat indent "     ")))))
+            (harness-ui-patch-review--thread-rows review file index (concat indent "     ")))))
 
 (defun harness-ui-patch-review--tree-label (file)
   "Return FILE's name under its directory, \"OLD → NEW\" for a rename."
-  (let ((old (harness-ui-patch-review--f-old-path file))
-        (path (harness-ui-patch-review--f-path file)))
+  (let ((old (change-review-file-old-path file))
+        (path (change-review-file-path file)))
     (cond
      ((and old (not (equal (file-name-directory old) (file-name-directory path))))
       (format "%s → %s" old path))
@@ -1787,7 +1299,7 @@ in a newline."
 (defun harness-ui-patch-review--tree-add (node file &optional parts)
   "Put FILE in tree NODE, by the directories of its path.
 PARTS is what is left of the path; nil to start at its first directory."
-  (let* ((parts (or parts (split-string (harness-ui-patch-review--f-path file) "/" t)))
+  (let* ((parts (or parts (split-string (change-review-file-path file) "/" t)))
          (rest (cdr parts)))
     (if (null rest)
         (setf (plist-get node :files) (cons file (plist-get node :files)))
@@ -1810,8 +1322,8 @@ PARTS is what is left of the path; nil to start at its first directory."
         (added 0)
         (deleted 0))
     (dolist (file (plist-get node :files))
-      (cl-incf added (harness-ui-patch-review--f-added file))
-      (cl-incf deleted (harness-ui-patch-review--f-deleted file)))
+      (cl-incf added (change-review-file-added file))
+      (cl-incf deleted (change-review-file-deleted file)))
     (dolist (child (plist-get node :dirs))
       (pcase-let ((`(,child-count ,child-added ,child-deleted)
                    (harness-ui-patch-review--tree-stats (cdr child))))
@@ -1879,6 +1391,19 @@ each file to its place among REVIEW's files."
                                (harness-ui-report-task))))
           (gethash (plist-get task :id) harness-ui-patch-review--reviews)))))
 
+(defun harness-ui-patch-review-threads ()
+  "List the threads of the review at point by file, with a filter on their status.
+In the report of a task's changes, from a row or anywhere else in it;
+in Ediff, from the control panel or either version.  The list is the
+library's threads view (`change-review-open-threads'): n and p move
+between comments, r replies, x closes a thread or opens it again, d
+shows it in Ediff."
+  (interactive)
+  (let ((review (or (harness-ui-patch-review--review-here)
+                    harness-ui-patch-review--review
+                    (user-error "No review here"))))
+    (change-review-open-threads (harness-ui-patch-review--r-set review))))
+
 (defun harness-ui-patch-review-toggle-file-tree ()
   "Show the changed files flat, in the diff's order, or as a tree.
 In a report showing the changes, from a row or anywhere else in it."
@@ -1903,11 +1428,14 @@ N is how many files were compared in Ediff (`harness-ui-patch-review--seen-p')."
             (- (length files) seen)
             (if (> approved 0) (format ", %d approved" approved) ""))))
 
-(defun harness-ui-patch-review--heading (review comments)
+(defun harness-ui-patch-review--heading (review)
   "Return the first line of REVIEW's changes: what is compared, how much changed.
-COMMENTS is how many comments the box has on them."
-  (let ((files (harness-ui-patch-review--r-files review))
-        (tip (harness-ui-patch-review--r-tip review)))
+It also says how many threads the review has, open and closed."
+  (let* ((files (harness-ui-patch-review--r-files review))
+         (tip (harness-ui-patch-review--r-tip review))
+         (counts (change-review-thread-counts (harness-ui-patch-review--r-set review)))
+         (open (plist-get counts :open))
+         (closed (plist-get counts :closed)))
     (concat
      (propertize (if tip (format "Changes (%d)" (length files)) "Changes") 'face 'harness-label-face)
      ;; How far through the files the reviewer is, just after the count.
@@ -1927,14 +1455,23 @@ COMMENTS is how many comments the box has on them."
                                        (harness-ui-patch-review--r-base review)
                                        (harness-ui-patch-review--short (harness-ui-patch-review--r-merge-base review))))
         (if (null files) ""
-          (concat "   " (propertize (format "+%d" (apply #'+ (mapcar #'harness-ui-patch-review--f-added files)))
+          (concat "   " (propertize (format "+%d" (apply #'+ (mapcar #'change-review-file-added files)))
                                     'face 'harness-ui-patch-review-plus-face)
-                  " " (propertize (format "−%d" (apply #'+ (mapcar #'harness-ui-patch-review--f-deleted files)))
-                                  'face 'harness-ui-patch-review-minus-face)))
-        (if (> comments 0)
-            (concat "   " (propertize (harness-ui-patch-review--plural comments "comment")
-                                      'face 'harness-ui-patch-review-comments-face))
-          ""))))))
+                  " " (propertize (format "−%d" (apply #'+ (mapcar #'change-review-file-deleted files)))
+                                  'face 'harness-ui-patch-review-minus-face)))))
+     (if (> (+ open closed) 0)
+         (concat "   " (propertize (format "%d open, %d closed" open closed)
+                                   'face 'harness-ui-patch-review-comments-face
+                                   'help-echo "The threads of comments: T lists them by file")
+                 " " (harness-ui-patch-review--threads-button))
+       "")
+     "")))
+
+(defun harness-ui-patch-review--threads-button ()
+  "Return the [Threads] button of the report's heading."
+  (propertize (buttonize "[Threads]" (lambda (_) (harness-ui-patch-review-threads))
+                         nil "List the threads of comments by file, with a filter on their status")
+              'mouse-face 'highlight))
 
 (defun harness-ui-patch-review--notes (review)
   "Return the lines that tell what to know about REVIEW, above its files."
@@ -1951,6 +1488,12 @@ COMMENTS is how many comments the box has on them."
                                                (lambda (_) (harness-ui-patch-review--load review))
                                                nil "Read the branch again")
                                     'mouse-face 'highlight)))
+           (let ((drafts (length (and (harness-ui-patch-review--r-set review)
+                                      (change-review-drafts (harness-ui-patch-review--r-set review))))))
+             (and (> drafts 0)
+                  (propertize (format "%s to send: they go with the feedback that sends the task back, an empty box included."
+                                      (harness-ui-patch-review--plural drafts "draft"))
+                              'face 'change-review-ui-draft-face)))
            (and (harness-ui-patch-review--r-dirty review)
                 (propertize "Its worktree has changes not committed: they are not on the branch, so not here."
                             'face 'warning))
@@ -1959,11 +1502,12 @@ COMMENTS is how many comments the box has on them."
                             'face 'harness-dim-face))))))
 
 (defconst harness-ui-patch-review--hint
-  "RET or a click compares a file in Ediff, n and p move between them, a approves it, A approves all, t shows a tree or a flat list.  In Ediff c comments on a difference -- in either version, on the line at point -- quoting it in the box below, and e goes to the box to edit the comments (C-c C-d comes back to Ediff); n at the last difference offers the next file, N and P go on to the next or previous file, q comes back here."
+  "RET or a click compares a file in Ediff, n and p move between them, a approves it, A approves all, t shows a tree or a flat list, T lists the threads by file.  In Ediff c comments on a difference -- in either version, on the line at point -- as a thread of its own, r replies to a thread and x closes it or opens it again, and e goes to the box below (C-c C-d comes back to Ediff); n at the last difference offers the next file, N and P go on to the next or previous file, q comes back here."
   "What the report says under the changes.")
 
 (defun harness-ui-patch-review--section (review counts)
-  "Return REVIEW's changes as its report shows them; COUNTS are the box's comments."
+  "Return REVIEW's changes as its report shows them.
+COUNTS are its threads per file."
   (let* ((files (harness-ui-patch-review--r-files review))
          (indices (let ((table (make-hash-table :test 'eq)))
                     (cl-loop for file in files for index from 0
@@ -1976,10 +1520,10 @@ COMMENTS is how many comments the box has on them."
                                                  (string-width (harness-ui-patch-review--tree-label file)))
                                                files))))))
     (concat
-     (harness-ui-patch-review--heading review (apply #'+ (mapcar #'cdr counts))) "\n"
+     (harness-ui-patch-review--heading review) "\n"
      (mapconcat (lambda (note) (concat "  " note "\n")) (harness-ui-patch-review--notes review) "")
-     (when-let* ((previous (harness-ui-patch-review--previous-section review)))
-       (concat "\n" previous))
+     (when-let* ((others (harness-ui-patch-review--other-threads review)))
+       (concat "\n" others))
      (if (null files) ""
        (concat "\n"
                (if tree
@@ -2018,7 +1562,7 @@ says so (`harness-ui-patch-review--r-show')."
           (if (not (eq (harness-ui-patch-review--r-popout review) (current-buffer)))
               (progn
                 (setf (harness-ui-patch-review--r-popout review) (current-buffer))
-                (add-hook 'after-change-functions #'harness-ui-patch-review--box-changed nil t)
+                (harness-ui-patch-review--sync review)
                 (harness-ui-patch-review--load review))
             (unless (or (harness-ui-patch-review--r-tip review) (harness-ui-patch-review--r-loading review)
                         (harness-ui-patch-review--r-error review))
@@ -2032,28 +1576,9 @@ says so (`harness-ui-patch-review--r-show')."
               (harness-ui-patch-review--limit-box (current-buffer))
             (when harness-ui-patch-review--box-limit
               (harness-ui-patch-review--unlimit-box (current-buffer))))
-          (let ((counts (harness-ui-patch-review--counts (or (harness-compose-text) ""))))
-            (setf (harness-ui-patch-review--r-counts review) counts)
-            (harness-ui-patch-review--section review counts)))))))
-
-(defun harness-ui-patch-review--box-changed (beg end _length)
-  "Count the comments in this report's box again, once the typing stops.
-On `after-change-functions' of a report showing changes, for a change
-from BEG to END."
-  (when (and harness-ui-patch-review--active (harness-compose-in-p beg) (harness-compose-in-p end))
-    (harness-debounce (list 'harness-ui-patch-review (current-buffer)) 0.4
-                      #'harness-ui-patch-review--recount (current-buffer))))
-
-(defun harness-ui-patch-review--recount (buffer)
-  "Draw BUFFER, a report, again when the comments in its box changed."
-  (when (buffer-live-p buffer)
-    (with-current-buffer buffer
-      (when-let* ((task (harness-ui-report-task))
-                  (review (gethash (plist-get task :id) harness-ui-patch-review--reviews)))
-        (when (and (eq (harness-ui-patch-review--r-popout review) buffer)
-                   (not (equal (harness-ui-patch-review--counts (or (harness-compose-text) ""))
-                               (harness-ui-patch-review--r-counts review))))
-          (harness-ui-patch-review--refresh review))))))
+          ;; The commands on a thread's row find its set here.
+          (setq-local change-review-ui--set (harness-ui-patch-review--r-set review))
+          (harness-ui-patch-review--section review (harness-ui-patch-review--counts review)))))))
 
 (defun harness-ui-patch-review--row-start (id index)
   "Return where the row of the file at INDEX of task ID starts here, or nil."
@@ -2184,37 +1709,6 @@ or the option is nil."
           (harness-ui-patch-review--fit-box window)
           window)))))
 
-(defun harness-ui-patch-review--box-target (file where)
-  "Return where in this report's box point goes to edit the comments on FILE.
-WHERE is (SIDE . LINE), where the reviewer is in FILE.  That is the end
-of the comment under the quoted line it names, if the box has one; else
-the end of the last comment on FILE; else the end of the box, to write a
-new one."
-  (save-excursion
-    (save-restriction
-      (narrow-to-region harness-compose-start harness-compose-end)
-      (let* ((header (harness-ui-patch-review--header file))
-             (quoted (cl-remove-if-not (lambda (line) (and (eq (plist-get line :type) 'quote)
-                                                           (equal (plist-get line :file) header)))
-                                       (harness-ui-patch-review--parse)))
-             (side (car where))
-             (exact (and side (cl-find-if (lambda (line) (eql (plist-get line side) (cdr where)))
-                                          quoted)))
-             ;; The end of the comment under a line of the quote, nil when
-             ;; it has none.
-             (comment-end (lambda (line)
-                            (let ((limit (save-excursion (goto-char (plist-get line :start))
-                                                         (line-end-position)))
-                                  (end (save-excursion
-                                         (goto-char (harness-ui-patch-review--after-comments
-                                                     (plist-get line :start)))
-                                         (skip-chars-backward " \t\n")
-                                         (point))))
-                              (and (> end limit) end)))))
-        (or (and exact (funcall comment-end exact))
-            (cl-some comment-end (reverse quoted))
-            (point-max))))))
-
 (defun harness-ui-patch-review--ediff-where ()
   "Return (SIDE . LINE) for where the reviewer is in this Ediff.
 In the control panel that is the current difference
@@ -2226,60 +1720,99 @@ In the control panel that is the current difference
             (line-number-at-pos)))))
 
 (defun harness-ui-patch-review-edit-feedback ()
-  "Go to the report's feedback box, to edit what it holds or add to it.
+  "Go to the report's feedback box, to write the words that go with the comments.
 In an Ediff of a task's change, from the control panel or either
 version.  The box is at the bottom of the frame, under Ediff; point goes
-to the end of the comment on the difference at point -- the line, in a
-version -- if the box has one, so it can be reworded, else to the end of
-the last comment on this file, else to the end of the box.  Ediff stays as
-it is: \\<harness-ui-patch-review-mode-map>\\[harness-ui-patch-review-open] in the report goes back to it, and
-\\<harness-ui-popout-mode-map>\\[harness-ui-popout-submit] there sends the feedback."
+to its end.  Ediff stays as it is: \\<harness-ui-patch-review-mode-map>\\[harness-ui-patch-review-open] in the report goes back to it,
+and \\<harness-ui-popout-mode-map>\\[harness-ui-popout-submit] there sends the feedback, with the drafts of the threads."
   (interactive)
   (let* ((review (harness-ui-patch-review--current))
-         (index harness-ui-patch-review--index)
-         (file (or (and (integerp index) (nth index (harness-ui-patch-review--r-files review)))
-                   (user-error "No file here")))
-         (where (harness-ui-patch-review--ediff-where))
          (popout (harness-ui-patch-review--feedback-box review))
          (window (or (harness-ui-patch-review--keep-box review)
-                     (user-error "The box is not shown beside Ediff: see `harness-ui-patch-review-ediff-box-height'")))
-         (target (with-current-buffer popout (harness-ui-patch-review--box-target file where))))
+                     (user-error "The box is not shown beside Ediff: see `harness-ui-patch-review-ediff-box-height'"))))
     (select-window window)
-    (goto-char target)
-    (message "The feedback: %s goes back to Ediff, %s sends it"
+    (goto-char (buffer-local-value 'harness-compose-end popout))
+    (message "The feedback: %s goes back to Ediff, %s sends it with the %s"
              (substitute-command-keys "\\<harness-ui-patch-review-mode-map>\\[harness-ui-patch-review-open]")
-             (substitute-command-keys "\\<harness-ui-popout-mode-map>\\[harness-ui-popout-submit]"))))
+             (substitute-command-keys "\\<harness-ui-popout-mode-map>\\[harness-ui-popout-submit]")
+             (harness-ui-patch-review--plural
+              (length (change-review-drafts (harness-ui-patch-review--r-set review))) "draft"))))
 
-(defun harness-ui-patch-review--show-comment (review place)
-  "Show REVIEW's feedback box, with PLACE in sight, beside Ediff.
-PLACE is where a comment was put in the box, as offsets (START . END);
-the box is brought back if it was closed, and what was put in is
-highlighted for a moment.  Nothing happens without an Ediff."
-  (when (and place (harness-ui-patch-review--r-ediff review))
-    (when-let* ((window (harness-ui-patch-review--keep-box review)))
-      (harness-ui-patch-review--scroll-box window place)
-      (with-current-buffer (window-buffer window)
-        (ignore-errors
-          (pulse-momentary-highlight-region
-           (min harness-compose-end (+ harness-compose-start (car place)))
-           (min harness-compose-end (+ harness-compose-start (cdr place)))))))))
+(defun harness-ui-patch-review--ediff-threads (review file)
+  "Return the threads about FILE of REVIEW at the reviewer's place in Ediff.
+In the control panel that is the current difference, in a version the
+line at point; the threads placed on that line there."
+  (let* ((where (harness-ui-patch-review--ediff-where))
+         (set (harness-ui-patch-review--r-set review)))
+    (when where
+      (cl-remove-if-not
+       (lambda (thread)
+         (let ((placement (change-review-placement set thread)))
+           (and placement (eql (plist-get placement :line) (cdr where))
+                (eq (plist-get placement :side) (if (eq (car where) :old) 'old 'new)))))
+       (harness-ui-patch-review--file-threads review file)))))
+
+(defun harness-ui-patch-review--ediff-thread ()
+  "Return (REVIEW . THREAD) for the thread at the reviewer's place in Ediff.
+Signal when there is none."
+  (let* ((review (harness-ui-patch-review--current))
+         (file (or (and (integerp harness-ui-patch-review--index)
+                        (nth harness-ui-patch-review--index (harness-ui-patch-review--r-files review)))
+                   (user-error "No file here")))
+         (threads (harness-ui-patch-review--ediff-threads review file)))
+    (cons review (or (car threads)
+                     (user-error "No thread here; c starts one")))))
+
+(defun harness-ui-patch-review-reply ()
+  "Reply to the thread at the current difference, or at point, in Ediff.
+As a draft, in the thread: it goes with the feedback."
+  (interactive)
+  (pcase-let ((`(,review . ,thread) (harness-ui-patch-review--ediff-thread)))
+    (change-review-ui-reply-to-thread (harness-ui-patch-review--r-set review) thread)))
+
+(defun harness-ui-patch-review-toggle-thread ()
+  "Close the thread at the current difference, or at point, or open it again."
+  (interactive)
+  (pcase-let ((`(,review . ,thread) (harness-ui-patch-review--ediff-thread)))
+    (change-review-ui-toggle-thread (harness-ui-patch-review--r-set review) thread)))
+
+(defun harness-ui-patch-review-edit-comment ()
+  "Edit your draft in the thread at point in Ediff; else go to the feedback box.
+In a version, the draft in the thread under the line at point; in the
+control panel, in the thread at the current difference.  Without such a
+thread, \\[harness-ui-patch-review-edit-feedback]'s: the box."
+  (interactive)
+  (let* ((review (harness-ui-patch-review--current))
+         (file (and (integerp harness-ui-patch-review--index)
+                    (nth harness-ui-patch-review--index (harness-ui-patch-review--r-files review))))
+         (thread (and file (car (harness-ui-patch-review--ediff-threads review file))))
+         (draft (and thread (car (last (change-review-thread-drafts thread))))))
+    (if (null draft)
+        (harness-ui-patch-review-edit-feedback)
+      (let ((set (harness-ui-patch-review--r-set review)))
+        (change-review-ui-read
+         (format "Edit your comment in thread %s:" (change-review-ui-thread-short-id set thread))
+         (change-review-comment-body draft)
+         (lambda (text)
+           (unless (string-blank-p text)
+             (change-review-edit set draft (string-trim text)))))))))
 
 ;;;; Ediff
 
 (defun harness-ui-patch-review--incomparable (file)
   "Return why Ediff cannot compare FILE, or nil when it can."
-  (let ((path (harness-ui-patch-review--f-path file))
-        (old (harness-ui-patch-review--f-old-blob file))
-        (new (harness-ui-patch-review--f-new-blob file)))
+  (let ((path (change-review-file-path file))
+        (old (change-review-file-old-blob file))
+        (new (change-review-file-new-blob file)))
     (cond ((harness-ui-patch-review--submodule-p file)
            (format "%s is a submodule: its commit went from %s to %s"
                    path (harness-ui-patch-review--short old) (harness-ui-patch-review--short new)))
-          ((harness-ui-patch-review--f-binary file) (format "%s is binary: Ediff compares text" path))
+          ((change-review-file-binary file) (format "%s is binary: Ediff compares text" path))
           ((and old (equal old new))
-           (if (harness-ui-patch-review--f-old-path file)
-               (format "%s was renamed from %s, its content the same" path (harness-ui-patch-review--f-old-path file))
+           (if (change-review-file-old-path file)
+               (format "%s was renamed from %s, its content the same" path (change-review-file-old-path file))
              (format "%s only changed its mode, %s → %s" path
-                     (harness-ui-patch-review--f-old-mode file) (harness-ui-patch-review--f-new-mode file)))))))
+                     (change-review-file-old-mode file) (change-review-file-new-mode file)))))))
 
 (defun harness-ui-patch-review-ediff (&optional review index goto)
   "Compare the file of the row at point in Ediff, merge base and branch.
@@ -2314,90 +1847,79 @@ comment the version Ediff shows has that comment's line in sight; GOTO,
 GOTO, (SIDE . LINE), is a line to have in sight in the version of SIDE.
 Return a promise of the review."
   (let ((file (nth index (harness-ui-patch-review--r-files review))))
-    (message "Reading %s…" (harness-ui-patch-review--f-path file))
+    (message "Reading %s…" (change-review-file-path file))
     (harness-then
-     (harness-all (list (harness-ui-patch-review--blob review (harness-ui-patch-review--f-old-blob file))
-                        (harness-ui-patch-review--blob review (harness-ui-patch-review--f-new-blob file))))
+     (harness-all (list (harness-ui-patch-review--blob review (change-review-file-old-blob file))
+                        (harness-ui-patch-review--blob review (change-review-file-new-blob file))))
      (lambda (texts)
        (harness-ui-patch-review--start-ediff review index (nth 0 texts) (nth 1 texts) goto)
        review)
      (lambda (err)
-       (message "Could not read %s: %s" (harness-ui-patch-review--f-path file) (harness-error-message err))
+       (message "Could not read %s: %s" (change-review-file-path file) (harness-error-message err))
        nil))))
 
 (defvar harness-ui-patch-review-lines-mode-map
   (let ((map (make-sparse-keymap)))
+    (set-keymap-parent map change-review-ui-lines-mode-map)
     (define-key map (kbd "c") #'harness-ui-patch-review-comment-line)
     (define-key map (kbd "a") #'harness-ui-patch-review-approve-ediff)
-    (define-key map (kbd "e") #'harness-ui-patch-review-edit-feedback)
+    (define-key map (kbd "e") #'harness-ui-patch-review-edit-comment)
+    (define-key map (kbd "T") #'harness-ui-patch-review-threads)
     map)
-  "Keys in the two versions Ediff compares: c comments on the line at point.")
+  "Keys in the two versions Ediff compares: c comments on the line at point.
+Those of the library's threads under a line -- r, x, o, RET -- are its.")
 
 (define-minor-mode harness-ui-patch-review-lines-mode
   "Keys to review one of the two versions Ediff compares.
-\\<harness-ui-patch-review-lines-mode-map>\\[harness-ui-patch-review-comment-line] comments on the line at point, quoting it
-in the report's feedback box; \\[harness-ui-patch-review-approve-ediff] approves the file; \\[harness-ui-patch-review-edit-feedback] goes to the feedback
-box, to edit what it holds."
+\\<harness-ui-patch-review-lines-mode-map>
+\\[harness-ui-patch-review-comment-line] comments on the line at point, as a thread of its own.
+\\[change-review-ui-reply] replies to the thread under it.
+\\[change-review-ui-toggle-status] closes it or opens it again.
+\\[change-review-ui-return] shows where its comments were made.
+\\[harness-ui-patch-review-approve-ediff] approves the file.
+\\[harness-ui-patch-review-edit-comment] edits your draft there, or goes to the feedback box.
+\\[harness-ui-patch-review-threads] lists the threads."
   :lighter nil :keymap harness-ui-patch-review-lines-mode-map :group 'harness-ui-patch-review)
 
-;;;;; The earlier comments in the versions
-
-(defun harness-ui-patch-review--earlier-text (entries)
-  "Return the text that shows ENTRIES, earlier comments, under a line.
-Each entry is (COMMENT . PLACEMENT).  A comment is a block of lines
-behind a bar: the round, when it was sent and what became of the line
-since, then what the comment said.  The text starts with a newline and
-does not end in one: it goes at the end of the line it is under."
-  (mapconcat
-   (lambda (entry)
-     (let* ((comment (car entry))
-            (status (and (cdr entry) (plist-get (cdr entry) :status)))
-            (bar (propertize "▎ " 'face 'warning))
-            (head (format "Round %d%s%s" (1+ (plist-get comment :round))
-                          (if-let* ((time (harness-ui-patch-review--round-time comment)))
-                              (concat " · " time)
-                            "")
-                          (pcase status
-                            ('moved (format " · was line %d" (plist-get (cdr entry) :was)))
-                            ('changed " · the line changed since")
-                            (_ "")))))
-       (concat "\n" bar (propertize head 'face 'harness-dim-face)
-               (mapconcat (lambda (line)
-                            (concat "\n" bar (propertize line 'face 'harness-ui-patch-review-earlier-face)))
-                          (split-string (plist-get comment :text) "\n") ""))))
-   entries ""))
+;;;;; The threads in the versions
 
 (defun harness-ui-patch-review--decorate (review file buffer side placed)
-  "Show the earlier comments on FILE of REVIEW that are on SIDE in BUFFER.
-SIDE is :old or :new, the version BUFFER holds.  PLACED says where each
-comment is now (`harness-ui-patch-review--place-comments'); each shows
-under its line, as an overlay, and the comments on the file as a whole
-at the top of the branch's version."
-  (let ((by-line (make-hash-table)) top)
-    (dolist (comment (harness-ui-patch-review--file-comments review file))
-      (let ((placement (cdr (assoc (harness-ui-patch-review--comment-key comment) placed))))
-        (cond
-         ((null (plist-get comment :where))
-          (when (eq side :new) (push (cons comment nil) top)))
-         ((and placement (eq (plist-get placement :side) side) (plist-get placement :line))
-          (push (cons comment placement) (gethash (plist-get placement :line) by-line))))))
-    (with-current-buffer buffer
+  "Draw the threads about FILE of REVIEW in BUFFER, the version on SIDE.
+SIDE is `old' or `new'.  Each thread shows under its line, drawn as the
+library's views draw it, in the version it is placed in (the merge
+base's for a comment on a removed line); a thread on the file as a
+whole, or whose line is gone, at the top of the branch's version.
+PLACED says where each thread is, an alist of its id to its place
+\(`harness-ui-patch-review--place-from-texts'), for those the report has
+not placed yet."
+  (with-current-buffer buffer
+    (let ((inhibit-read-only t)
+          (set (harness-ui-patch-review--r-set review))
+          (width (change-review-ui-current-width)))
+      (change-review-ui-clear-overlays)
       (save-excursion
-        (maphash (lambda (line entries)
-                   (goto-char (point-min))
-                   (forward-line (1- line))
-                   (end-of-line)
-                   (let ((overlay (make-overlay (point) (point) nil t)))
-                     (overlay-put overlay 'harness-ui-patch-review-earlier t)
-                     (overlay-put overlay 'after-string
-                                  (harness-ui-patch-review--earlier-text (nreverse entries)))))
-                 by-line)
-        (when top
-          (let ((overlay (make-overlay (point-min) (point-min))))
-            (overlay-put overlay 'harness-ui-patch-review-earlier t)
-            (overlay-put overlay 'before-string
-                         (concat (substring (harness-ui-patch-review--earlier-text (nreverse top)) 1)
-                                 "\n"))))))))
+        (dolist (thread (harness-ui-patch-review--file-threads review file))
+          (let* ((location (change-review-thread-location thread))
+                 (placement (or (gethash (change-review-thread-id thread)
+                                         (harness-ui-patch-review--r-placements review))
+                                (cdr (assoc (change-review-thread-id thread) placed))
+                                (change-review-placement set thread)))
+                 (line (and (change-review-location-line location) (plist-get placement :line)))
+                 (on (or (plist-get placement :side) (change-review-location-side location) 'new))
+                 (args (list :view 'diff :placement placement :width width :indent "  "
+                             :details change-review-ui--details
+                             :collapsed (and (not (change-review-thread-open-p thread))
+                                             (not (cl-some (lambda (c)
+                                                             (member (change-review-comment-id c)
+                                                                     change-review-ui--details))
+                                                           (change-review-thread-comments thread)))))))
+            (cond
+             ((and line (eq on side))
+              (goto-char (point-min))
+              (forward-line (1- line))
+              (apply #'change-review-ui-add-thread-overlay set thread (line-end-position) args))
+             ((and (eq side 'new) (null line))
+              (apply #'change-review-ui-add-thread-overlay set thread (point-min) :before t args)))))))))
 
 (defun harness-ui-patch-review--show-line (review goto)
   "Put the Ediff of REVIEW at GOTO, (SIDE . LINE): that line in sight there."
@@ -2418,12 +1940,11 @@ REVIEW names it after the commit it is from.  It is in the major mode
 of FILE, without the mode's hooks: a language server, say, has no
 business there.  It is read-only, and its own keys comment on a line.
 It has REVIEW and its file's index, for the keys, and under the lines
-the reviewer commented on in earlier rounds, those comments (PLACED
-says where they are now, as `harness-ui-patch-review--place-comments'
-gives it)."
+the threads about the file are on, those threads (PLACED says where
+they are, as `harness-ui-patch-review--place-from-texts' gives it)."
   (let* ((old (eq side 'old))
-         (path (if old (or (harness-ui-patch-review--f-old-path file) (harness-ui-patch-review--f-path file))
-                 (harness-ui-patch-review--f-path file)))
+         (path (if old (or (change-review-file-old-path file) (change-review-file-path file))
+                 (change-review-file-path file)))
          (buffer (generate-new-buffer
                   (format "%s (%s)" path
                           (if old (format "merge base %s" (harness-ui-patch-review--short
@@ -2439,9 +1960,13 @@ gives it)."
       (ignore-errors (font-lock-mode 1))
       (setq-local harness-ui-patch-review--review review
                   harness-ui-patch-review--index
-                  (cl-position file (harness-ui-patch-review--r-files review) :test #'eq))
+                  (cl-position file (harness-ui-patch-review--r-files review) :test #'eq)
+                  change-review-ui--set (harness-ui-patch-review--r-set review)
+                  ;; The threads draw again when the set changes.
+                  change-review-ui--redraw-function
+                  (lambda () (harness-ui-patch-review--decorate review file buffer side nil)))
       (harness-ui-patch-review-lines-mode 1)
-      (harness-ui-patch-review--decorate review file buffer (if old :old :new) placed)
+      (harness-ui-patch-review--decorate review file buffer side placed)
       (set-buffer-modified-p nil)
       (setq buffer-read-only t)
       (goto-char (point-min)))
@@ -2466,12 +1991,12 @@ again once they are."
          (files (and review (harness-ui-patch-review--r-files review))))
     (if (or (null files) (not (integerp index)) (< index 0) (>= index (length files)))
         ""
-      (let ((earlier (length (harness-ui-patch-review--file-comments review (nth index files)))))
+      (let ((threads (length (harness-ui-patch-review--file-threads review (nth index files)))))
         (format "File %d of %d · %d viewed · %s"
                 (1+ index) (length files)
                 (cl-count-if (lambda (file) (harness-ui-patch-review--seen-p review file)) files)
-                (if (> earlier 0)
-                    (format "%d earlier %s · " earlier (if (= earlier 1) "comment" "comments"))
+                (if (> threads 0)
+                    (format "%s · " (harness-ui-patch-review--plural threads "thread"))
                   ""))))))
 
 (defun harness-ui-patch-review--ediff-redraw-help ()
@@ -2495,7 +2020,9 @@ It opens with where the reviewer is: which file of how many, and how
 many were compared already (`harness-ui-patch-review--ediff-progress')."
   (let* ((here (concat (harness-ui-patch-review--ediff-progress)
                        (harness-ui-patch-review--help-button "[Comment]" #'harness-ui-patch-review-comment "c")
-                       "   " (harness-ui-patch-review--help-button "[Edit feedback]" #'harness-ui-patch-review-edit-feedback "e")
+                       "   " (harness-ui-patch-review--help-button "[Reply]" #'harness-ui-patch-review-reply "r")
+                       "   " (harness-ui-patch-review--help-button "[Threads]" #'harness-ui-patch-review-threads "T")
+                       "   " (harness-ui-patch-review--help-button "[Feedback box]" #'harness-ui-patch-review-edit-comment "e")
                        "   " (harness-ui-patch-review--help-button "[Approve]" #'harness-ui-patch-review-approve-ediff "a")))
          (elsewhere (concat (harness-ui-patch-review--help-button "[Next file]" #'harness-ui-patch-review-ediff-next-file "N")
                             "   " (harness-ui-patch-review--help-button "[Previous file]" #'harness-ui-patch-review-ediff-previous-file "P")
@@ -2527,11 +2054,11 @@ window that is none of those, else the frame's first."
 From the report, Ediff takes its frame, whose windows are kept to give
 back when it ends.  From an Ediff of the review -- N and P -- it takes
 that one's place, with the same windows to give back.  The earlier
-comments on the file show in its versions, placed by these texts.  With
+threads about the file show in its versions, placed by these texts.  With
 GOTO, (SIDE . LINE), that line is in sight in the version of SIDE."
   (require 'ediff)
   (let* ((file (nth index (harness-ui-patch-review--r-files review)))
-         (placed (harness-ui-patch-review--place-comments review file old new))
+         (placed (harness-ui-patch-review--place-from-texts review file old new))
          (before (harness-ui-patch-review--r-ediff review))
          (going (buffer-live-p (plist-get before :control)))
          (windows (and going (plist-get before :windows)))
@@ -2559,12 +2086,8 @@ GOTO, (SIDE . LINE), that line is in sight in the version of SIDE."
                  (delete-other-windows main))))
       (set-window-dedicated-p main nil)
       ;; The versions show the places the report does, once it has read how
-      ;; the files changed; until then, those the texts at hand tell.
-      (setq placed (mapcar (lambda (entry)
-                             (cons (car entry)
-                                   (or (gethash (car entry) (harness-ui-patch-review--r-placements review))
-                                       (cdr entry))))
-                           placed))
+      ;; the files changed (`harness-ui-patch-review--decorate'); until
+      ;; then, those the texts at hand tell.
       (let ((a (harness-ui-patch-review--side-buffer review file 'old old placed))
             (b (harness-ui-patch-review--side-buffer review file 'new new placed)))
         (setf (harness-ui-patch-review--r-ediff review)
@@ -2581,7 +2104,7 @@ GOTO, (SIDE . LINE), that line is in sight in the version of SIDE."
           (error
            (harness-ui-patch-review--ediff-ended review index)
            (message "Ediff could not compare %s: %s"
-                    (harness-ui-patch-review--f-path file) (error-message-string err))))))))
+                    (change-review-file-path file) (error-message-string err))))))))
 
 (defun harness-ui-patch-review--ediff-startup (review index)
   "Make this Ediff control panel compare REVIEW's file at INDEX.
@@ -2592,7 +2115,10 @@ It gets the review's keys and help, and gives the report back as it ends."
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map ediff-mode-map)
     (define-key map "c" #'harness-ui-patch-review-comment)
-    (define-key map "e" #'harness-ui-patch-review-edit-feedback)
+    (define-key map "r" #'harness-ui-patch-review-reply)
+    (define-key map "x" #'harness-ui-patch-review-toggle-thread)
+    (define-key map "T" #'harness-ui-patch-review-threads)
+    (define-key map "e" #'harness-ui-patch-review-edit-comment)
     (define-key map "a" #'harness-ui-patch-review-approve-ediff)
     (define-key map "n" #'harness-ui-patch-review-next-difference)
     (define-key map "]" #'harness-ui-patch-review-next-difference)
@@ -2753,7 +2279,7 @@ the difference only deletes, then at the merge base, SIDE :old."
   (let* ((review (harness-ui-patch-review--current))
          (file (nth harness-ui-patch-review--index (harness-ui-patch-review--r-files review)))
          (where (harness-ui-patch-review--ediff-position)))
-    (format "Comment on %s%s: " (harness-ui-patch-review--f-path file)
+    (format "Comment on %s%s:" (change-review-file-path file)
             (pcase where
               ('nil " as a whole")
               (`(:new . ,line) (format ", line %d" line))
@@ -2763,34 +2289,27 @@ the difference only deletes, then at the merge base, SIDE :old."
   "Comment on the current difference with TEXT.
 In the Ediff of a task's change.  Called from the panel it reads the
 comment in a buffer of its own, so it may run to several lines: C-c C-c
-comments, C-c C-k gives up (`string-edit').  The comment goes in the
-feedback box of the task's report, under the difference's lines quoted
-from the diff -- the branch's lines, or the merge base's for a
-difference that only deletes -- after any comment there already.
-Without a current difference it is a comment on the file as a whole."
+comments, C-c C-k gives up (`string-edit').  The comment starts a
+thread, under the difference's last line -- the branch's, or the merge
+base's for a difference that only deletes -- a draft that goes with the
+feedback.  Without a current difference it is a comment on the file as
+a whole."
   (interactive)
   (let* ((review (harness-ui-patch-review--current))
          (file (nth harness-ui-patch-review--index (harness-ui-patch-review--r-files review)))
          (where (harness-ui-patch-review--ediff-position)))
     (if text
         (harness-ui-patch-review--comment-added review file where text)
-      (require 'string-edit)
-      (string-edit (concat (harness-ui-patch-review--comment-prompt)
-                           "  C-c C-c comments, C-c C-k cancels")
-                   ""
-                   (lambda (written)
-                     (harness-ui-patch-review--comment-added review file where written))
-                   :abort-callback #'ignore))))
+      (harness-ui-patch-review--read-comment
+       (harness-ui-patch-review--comment-prompt)
+       (lambda (written)
+         (harness-ui-patch-review--comment-added review file where written))))))
 
 (defun harness-ui-patch-review--read-comment (prompt callback)
   "Read a comment with PROMPT, then call CALLBACK with what was written.
 It is read in a buffer of its own, so it may run to several lines:
-C-c C-c comments, C-c C-k gives up (`string-edit')."
-  (require 'string-edit)
-  (string-edit (concat prompt "  C-c C-c comments, C-c C-k cancels")
-               ""
-               callback
-               :abort-callback #'ignore))
+C-c C-c saves it as a draft, C-c C-k gives up (`string-edit')."
+  (change-review-ui-read prompt "" callback))
 
 (defun harness-ui-patch-review-comment-line (&optional text)
   "Comment on the line at point in the version Ediff shows.
@@ -2812,7 +2331,7 @@ its own, which may run to several lines."
         (harness-ui-patch-review--comment-added review file where text)
       (harness-ui-patch-review--read-comment
        (format "Comment on %s, line %d%s: "
-               (harness-ui-patch-review--f-path file) line
+               (change-review-file-path file) line
                (if (eq side :old) " of the merge base" ""))
        (lambda (written)
          (harness-ui-patch-review--comment-added review file where written))))))
@@ -2830,20 +2349,30 @@ It need not be reviewed again unless the branch changes it."
     (harness-ui-patch-review--approve review file approved)
     (harness-ui-patch-review--refresh review)
     (message "%s %s" (if approved "Approved" "No longer approved")
-             (harness-ui-patch-review--f-path file))))
+             (change-review-file-path file))))
+
+(defun harness-ui-patch-review--location (file where)
+  "Return the location of a comment on WHERE of FILE.
+WHERE is (SIDE . LINE), SIDE `:new' for a line of the branch's version
+and `:old' for one of the merge base's; nil for the file as a whole.
+The location keeps the lines of the diff around it."
+  (if where
+      (change-review-diff-location file (car where) (cdr where))
+    (change-review-make-location :file (change-review-file-path file)
+                                 :old-file (change-review-file-old-path file)
+                                 :patch (change-review-file-patch-id file))))
 
 (defun harness-ui-patch-review--comment-added (review file where text)
-  "Put TEXT, a comment on WHERE of FILE of REVIEW, in the feedback box.
-Say in the echo area how many comments FILE now has.  A blank TEXT is
-no comment, and says so."
+  "Start a thread in REVIEW's set with TEXT, a comment on WHERE of FILE.
+It is a draft: it goes with the feedback that sends the task back.  Say
+so in the echo area.  A blank TEXT is no comment, and says so."
   (if (string-blank-p text)
       (message "No comment")
-    (harness-ui-patch-review--add-comment review file where text)
-    (message "In the report's box: %s on %s; C-c C-c there sends the feedback"
-             (harness-ui-patch-review--plural
-              (or (cdr (assoc (harness-ui-patch-review--header file) (harness-ui-patch-review--r-counts review))) 0)
-              "comment")
-             (harness-ui-patch-review--f-path file))))
+    (let ((location (harness-ui-patch-review--location file where)))
+      (change-review-comment (harness-ui-patch-review--r-set review) (string-trim text)
+                             :location location)
+      (message "Draft on %s: it goes with the feedback; T lists the threads, r replies"
+               (change-review-location-label location t)))))
 
 ;;;; Following the tasks
 
@@ -2863,29 +2392,33 @@ An Ediff of it on show stays until q gives the windows back."
        (let* ((before (harness-ui-patch-review--r-task review))
               (sent (and before (> (length (plist-get task :feedback))
                                    (length (plist-get before :feedback))))))
-         ;; Sent back, or with a round more of feedback: keep what the
-         ;; branch was when the reviewer wrote, to say what it changed
-         ;; since.  A new round taken while still in review is kept too.
-         (when (and before
-                    (or sent
-                        (and (equal (plist-get before :state) "review")
-                             (not (equal (plist-get task :state) "review")))))
-           (harness-ui-patch-review--snapshot review task))
          (setf (harness-ui-patch-review--r-task review) task)
+         (setf (change-review-set-title (harness-ui-patch-review--r-set review))
+               (harness-ui-patch-review--title review))
          ;; The feedback went -- from the box beside Ediff, say: the review
          ;; is over, and the frame is the reviewer's again.
          (when (and sent (harness-ui-patch-review--r-ediff review))
            (harness-ui-patch-review--end-ediff review)))
        ;; Back for review, maybe with more commits: the report open on it
-       ;; reads the branch again.
+       ;; reads the branch again, and the version the harness recorded.
        (when (and (equal event "task/review") (buffer-live-p (harness-ui-patch-review--r-popout review)))
+         (harness-ui-patch-review--sync review)
          (harness-ui-patch-review--load review))))
     ("task/done"
      (when-let* ((review (gethash (plist-get (car args) :id) harness-ui-patch-review--reviews)))
        (harness-ui-patch-review--ended review)))
     ("task/deleted"
      (when-let* ((review (gethash (car args) harness-ui-patch-review--reviews)))
-       (harness-ui-patch-review--ended review)))))
+       (harness-ui-patch-review--ended review)))
+    ;; What the harness did to the threads of a review: an agent's comment,
+    ;; the drafts sent, or the user's own operation come back.
+    ("patch-review/changed"
+     (when-let* ((review (gethash (car args) harness-ui-patch-review--reviews))
+                 (op (cadr args)))
+       (condition-case err
+           (change-review-apply (harness-ui-patch-review--r-set review) op)
+         (change-review-error
+          (harness-log 'warn "patch review: could not perform %S: %s" op (error-message-string err))))))))
 
 ;;;; Opening the review from a session
 
@@ -2984,6 +2517,9 @@ or has left it."
   ;; verified or sent back.
   (add-hook 'harness-ui-report-panel-functions #'harness-ui-patch-review--panel -10)
   (add-hook 'harness-ui-event-functions #'harness-ui-patch-review--on-event)
+  (add-hook 'change-review-changed-functions #'harness-ui-patch-review--set-changed)
+  (with-eval-after-load 'harness-ui-review
+    (add-hook 'harness-ui-review-pending-functions #'harness-ui-patch-review--pending-p))
   (with-eval-after-load 'harness-ui-chat
     (add-hook 'harness-chat-mode-hook #'harness-ui-patch-review--setup-chat))
   (when (fboundp 'harness-chat-mode)
@@ -2994,6 +2530,8 @@ or has left it."
   (setq harness-ui-patch-review--active nil)
   (remove-hook 'harness-ui-report-panel-functions #'harness-ui-patch-review--panel)
   (remove-hook 'harness-ui-event-functions #'harness-ui-patch-review--on-event)
+  (remove-hook 'change-review-changed-functions #'harness-ui-patch-review--set-changed)
+  (remove-hook 'harness-ui-review-pending-functions #'harness-ui-patch-review--pending-p)
   (remove-hook 'harness-chat-mode-hook #'harness-ui-patch-review--setup-chat)
   (dolist (buffer (buffer-list))
     (with-current-buffer buffer
@@ -3007,13 +2545,11 @@ or has left it."
              (copy-hash-table harness-ui-patch-review--reviews))
     (dolist (popout popouts)
       (when (buffer-live-p popout)
-        (with-current-buffer popout
-          (remove-hook 'after-change-functions #'harness-ui-patch-review--box-changed t))
         (harness-ui-popout-refresh (buffer-local-value 'harness-ui-popout-key popout))))))
 
 (harness-define-module 'ui-patch-review
-  :doc "A task's changes in its report: a file tree, Ediff file by file with the earlier comments in place and the feedback box beside it, approvals, comments quoted in the feedback."
-  :requires '(ui ui-report ui-review)
+  :doc "A task's changes in its report: a file tree, Ediff file by file with the threads of comments in place and the feedback box beside it, approvals; the UI of the review."
+  :requires '(ui ui-report ui-review patch-review)
   :init #'harness-ui-patch-review--init
   :shutdown #'harness-ui-patch-review--shutdown)
 

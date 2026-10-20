@@ -8,7 +8,7 @@ JSON, JSONL and SQLite persistence under the state directory.
 - **Source:** [lisp/modules/harness-store.el](../../lisp/modules/harness-store.el)
 - **Loaded:** by default
 - **Requires:** nothing
-- **Required by:** [decisions](decisions.md), [fallback](fallback.md), [insights](insights.md), [pet](pet.md), [redact](redact.md), [secrets](secrets.md), [session](session.md), [session-search](session-search.md), [tasks](tasks.md), [usage](usage.md)
+- **Required by:** [decisions](decisions.md), [fallback](fallback.md), [insights](insights.md), [patch-review](patch-review.md), [pet](pet.md), [redact](redact.md), [secrets](secrets.md), [session](session.md), [session-search](session-search.md), [tasks](tasks.md), [usage](usage.md)
 
 ## About
 
