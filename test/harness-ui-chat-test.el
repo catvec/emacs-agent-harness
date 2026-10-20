@@ -6889,9 +6889,9 @@ The redraw is debounced, once per buffer."
             (should (equal (list buf) args))))))))
 
 (ert-deftest harness-ui-chat-hand-in-renders-its-report ()
-  "An expanded hand_in call draws the report the review draws, not raw input.
-The report rides the tool result's `:meta' (`:report'), the chat shows it
-when the block is expanded, and the call starts collapsed as tool calls do."
+  "A hand_in call draws the report the review draws, not raw input.
+The report rides the tool result's `:meta' (`:report'), and the call
+opens expanded, so the report shows without a click."
   (harness-ui-chat-test-with
     (dolist (m '(ui-compose ui-popout ui-tasks ui-report))
       (harness-test-load-module m))
@@ -6915,12 +6915,10 @@ when the block is expanded, and the call starts collapsed as tool calls do."
         (let ((block (car (harness-ui-chat-test-blocks buf "tool-call"))))
           (should block)
           (should (harness-chat-block-result block))
-          (should (harness-chat-block-collapsed block))
+          (should-not (harness-chat-block-collapsed block))
           (let ((fold (harness-chat-block-fold block)))
             (should fold)
-            (should (overlay-get fold 'invisible)))
-          (harness-chat-toggle-block (harness-chat-block-id block))
-          (should-not (harness-chat-block-collapsed block))
+            (should-not (overlay-get fold 'invisible)))
           (let* ((fold (harness-chat-block-fold block))
                  (text (buffer-substring-no-properties (overlay-start fold) (overlay-end fold))))
             (should (string-search "Problem" text))
@@ -6930,6 +6928,41 @@ when the block is expanded, and the call starts collapsed as tool calls do."
             (should (string-search "A note" text))
             ;; The generic input listing is not shown.
             (should-not (string-search "  input" text))))))))
+
+(ert-deftest harness-ui-chat-cannot-continue-hand-in-expands ()
+  "A hand_in that cannot continue opens expanded too, showing its report.
+The report rides the result as any hand-in's does; the task then asks the
+user for a decision rather than waiting for review."
+  (harness-ui-chat-test-with
+    (dolist (m '(ui-compose ui-popout ui-tasks ui-report))
+      (harness-test-load-module m))
+    (harness-define-tool "hand_in" :label "Hand in the finished work" :description "hand in"
+      :kind 'meta
+      :handler (lambda (_input _ctx)
+                 (harness-tool-ok "Recorded: this task cannot continue." :end-turn t
+                                  :meta (list :report (list :summary "Need a decision on the schema."
+                                                            :problem "The migration needs a choice."
+                                                            :cannot-continue t
+                                                            :evidence (list (list :kind "note" :text "Both options pass the tests.")))
+                                              :task-id "t-chat"))))
+    (let* ((sid (harness-ui-chat-test-session "hand-in blocked"))
+           (buf (harness-ui-chat-test-open sid))
+           (harness-provider-demo-script-override
+            '((:type tool-call :id "h1" :name "hand_in"
+                     :input (:problem "The migration needs a choice."
+                             :summary "Need a decision on the schema."
+                             :evidence ("Both options pass the tests.")
+                             :cannot_continue t))
+              (:type done :stop-reason end-turn))))
+      (harness-ui-chat-test-prompt buf "hand it in")
+      (with-current-buffer buf
+        (let ((block (car (harness-ui-chat-test-blocks buf "tool-call"))))
+          (should block)
+          (should-not (harness-chat-block-collapsed block))
+          (let* ((fold (harness-chat-block-fold block))
+                 (text (buffer-substring-no-properties (overlay-start fold) (overlay-end fold))))
+            (should (string-search "The migration needs a choice." text))
+            (should (string-search "Need a decision on the schema." text))))))))
 
 (ert-deftest harness-ui-chat-hand-in-without-snapshot-falls-back ()
   "A hand_in call without the report snapshot still draws, from its input.
@@ -6952,7 +6985,7 @@ result meta; the chat rebuilds the report from what the call was given."
       (with-current-buffer buf
         (let ((block (car (harness-ui-chat-test-blocks buf "tool-call"))))
           (should block)
-          (harness-chat-toggle-block (harness-chat-block-id block))
+          (should-not (harness-chat-block-collapsed block))
           (let* ((fold (harness-chat-block-fold block))
                  (text (buffer-substring-no-properties (overlay-start fold) (overlay-end fold))))
             (should (string-search "Problem" text))

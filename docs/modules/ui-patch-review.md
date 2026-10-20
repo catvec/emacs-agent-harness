@@ -2,7 +2,7 @@
 
 # ui-patch-review
 
-A task's changes in its report: file by file in Ediff, comments quoted in the feedback.
+A task's changes in its report: a file tree, Ediff file by file with the earlier comments in place and the feedback box beside it, approvals, comments quoted in the feedback.
 
 - **Runs in:** the UI (your Emacs)
 - **Source:** [lisp/ui/harness-ui-patch-review.el](../../lisp/ui/harness-ui-patch-review.el)
@@ -22,25 +22,77 @@ as its feedback in one go.
 Under the evidence, above the review banner and its box, the report
 shows what the task's branch changes against its merge base with the
 branch it was made from -- what merging it brings in, not what that
-branch did since -- a row per file:
+branch did since -- a tree of the directories and their files:
 
-  a row       the file's status, its path, the lines it adds and
-              deletes, a check mark once it was looked at in Ediff,
-              and the comments on it in the box.  RET or a click
-              compares the file in Ediff; n and p move between rows.
+  a file      its status, its name, the lines it adds and deletes,
+              a mark once it was looked at in Ediff and a firmer one
+              once it was approved, the comments on it in the box,
+              and whether it changed since the reviewer's last
+              comment on it.  RET or a click compares it in Ediff;
+              n and p move between rows; a approves it, A approves
+              every file, t shows the files flat instead.  An
+              approved file need not be looked at again unless the
+              branch changes it.  Under it, the comments the
+              reviewer made on it in earlier rounds (see below).
+  directories the files group under the directories that hold them,
+              with how many files each holds and the lines they add
+              and delete.
   Ediff       the file at the merge base against the file on the
-              branch, in the report's frame.  The control panel keeps
-              Ediff's keys and has four more: c comments on the
-              current difference, N and P go on to the next or
-              previous file, q comes back to the report as it was,
-              point on the next file.
+              branch, in the report's frame, the report itself small
+              at the bottom of it with its box (see below).  The
+              control panel keeps Ediff's keys and has more: c
+              comments on the current difference, e goes to the
+              report's box, a approves the file, N and P go on to the
+              next or previous file, q comes back to the report as it
+              was, point on the next file.  n is Ediff's next
+              difference, and at the last one says the next
+              difference is the next file: n again opens it.
   comments    c reads a comment and puts it in the report's box as a
               reply on a mailing list has it: the lines it is about
               quoted from the diff with "> ", under their file's
               `diff --git` line and a hunk header, a few lines of
-              context first, the comment after them.  The box is the
-              feedback: edit it, write more, and C-c C-c sends it all
-              back to the task, as it sends any feedback.
+              context first, the comment after them.  In either
+              version Ediff compares, c comments on the line at point
+              instead.  The box is the feedback: edit it, write more,
+              and C-c C-c sends it all back to the task, as it sends
+              any feedback.
+
+The box stays in sight while Ediff compares the files: the report
+keeps the bottom of the frame, 30% of it at most
+(`harness-ui-patch-review-ediff-box-height`), and ends in the box.  A
+comment made with c shows there as it is made, highlighted for a
+moment.  To edit the comments or to add to them, e in Ediff goes to the
+box, point at the end of the comment on the difference -- or, in a
+version, the line at point -- if there is one, else at the end of the
+last comment on the file, else at the end of the box; the box is a
+box, so editing is typing.  C-c C-d in the report goes back to Ediff,
+which was never left: the comparison, and where in it the reviewer
+was, are as they were.  Sending the feedback from there ends Ediff
+and gives the frame back.
+
+A task sent back keeps its earlier rounds of feedback, and the review
+shows the comments in them where they are now, so the history is
+there to see: under the file in the report, and in Ediff under the
+line, in the newest version of the file (in the merge base's version
+for a comment on a removed line), with the round, when it was sent,
+and what became of the line since.  The feedback says the commit it
+was written at; the line a comment was on is carried through the
+diff from that commit to the branch as it is, so a line that moved
+shows at its new number ("line 44 (was 42)"), and one the task
+edited where the edit is ("line 44 (changed since)").  A round that
+does not say which commit it was written at is placed by the lines it
+quotes.  RET on such a comment in the report compares the file with
+that line in sight.  What has no file row -- words on the change as a
+whole, comments on files the branch no longer changes -- stays in a
+block above the files.  When it was sent back the review also kept
+the blobs of the branch it was reviewed at, so the next review says
+for each file whether it changed since the reviewer's last comment on
+it or stayed the same -- an approved file that changed is approved no
+more.
+
+From a task's session history -- or a board card -- C-c C-d opens the
+review, even after the task left review, when it shows the changes
+without the review banner (`harness-ui-patch-review-mode`).
 
 Git runs here, in the Emacs that shows the UI, in the task's
 repository: the changes show where that is a directory of this
@@ -56,22 +108,36 @@ box's own markers, and leaves sending to the review's box.  Disabled
 
 ### Commands
 
+- `harness-ui-patch-review-approve` — Approve the file of the row at point, or stop approving it.
+- `harness-ui-patch-review-approve-all` — Approve every file of the review at point.
+- `harness-ui-patch-review-approve-ediff` — Approve the file compared in this Ediff, or stop approving it.
 - `harness-ui-patch-review-comment` — Comment on the current difference with TEXT.
+- `harness-ui-patch-review-comment-line` — Comment on the line at point in the version Ediff shows.
 - `harness-ui-patch-review-ediff` — Compare the file of the row at point in Ediff, merge base and branch.
 - `harness-ui-patch-review-ediff-next-file` — On to the next file of the task's changes, in Ediff.
 - `harness-ui-patch-review-ediff-previous-file` — On to the previous file of the task's changes, in Ediff.
 - `harness-ui-patch-review-ediff-quit` — Back to the task's report, the windows as they were, without asking.
+- `harness-ui-patch-review-edit-feedback` — Go to the report's feedback box, to edit what it holds or add to it.
 - `harness-ui-patch-review-mouse-ediff` — Compare the file clicked on in EVENT in Ediff.
+- `harness-ui-patch-review-next-difference` — Move to the next difference in this Ediff, ARG times.
 - `harness-ui-patch-review-next-file` — Move to the next file of the changes, or the Nth next.
+- `harness-ui-patch-review-open` — Show the changes of the task this buffer shows, in a popout.
 - `harness-ui-patch-review-previous-file` — Move to the previous file of the changes, or the Nth previous.
+- `harness-ui-patch-review-toggle-file-tree` — Show the changed files flat, in the diff's order, or as a tree.
 
 ### Options
 
 - `harness-ui-patch-review-context-lines` — How many lines before a change the quote above a comment on it starts.
+- `harness-ui-patch-review-ediff-box-height` — How much of the frame's height the report takes beside an Ediff.
 - `harness-ui-patch-review-ediff-window-setup` — How Ediff lays out its windows while it compares a task's change.
+- `harness-ui-patch-review-file-tree` — Whether a report shows the changed files as a tree.
 - `harness-ui-patch-review-fill-column` — Width the comments made in Ediff are filled to in the feedback.
 
 ## Uses
+
+### Methods it calls
+
+- `task/for-session` ([tasks](tasks.md))
 
 ### Events it hears over ACP
 
@@ -84,6 +150,7 @@ box's own markers, and leaves sending to the review's box.  Disabled
 
 - `after-change-functions` → `harness-ui-patch-review--box-changed`
 - `ediff-after-quit-hook-internal` → `lambda`
+- `harness-chat-mode-hook` → `harness-ui-patch-review--setup-chat`
 - `harness-ui-event-functions` → `harness-ui-patch-review--on-event`
 - `harness-ui-report-panel-functions` → `harness-ui-patch-review--panel`
 

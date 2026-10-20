@@ -68,7 +68,7 @@ ui-tasks); `(setq harness-enabled-modules t)` loads every module.
  ;;compact            ; Compact a session's conversation by hand, choosing the kind at a known…
  ;;dirs               ; Directory access buffer of a session.
  ;;media              ; Audio playback and recording, video thumbnails, clipboard images.
- ;;patch-review       ; A task's changes in its report: file by file in Ediff, comments quoted…
+ ;;patch-review       ; A task's changes in its report: a file tree, Ediff file by file with…
  ;;popout             ; Popouts: one item of a session or task in a small window of its own.
  ;;qr                 ; QR codes: an encoder, drawn as an SVG image or with text characters.
  ;;quick-search       ; The quick search: find a session, a command or a… (with tasks-search)
@@ -173,7 +173,7 @@ ui-tasks); `(setq harness-enabled-modules t)` loads every module.
 | [ui-media](ui-media.md) |  | [ui](ui.md) | Audio playback and recording, video thumbnails, clipboard images. |
 | [ui-merge](ui-merge.md) |  | [ui](ui.md), [ui-chat](ui-chat.md) | A session's merge queue: which sub-agent branches are queued, merging, in conflict, merged or failed. |
 | [ui-notify](ui-notify.md) | by default | [ui](ui.md) | Mode line notifier with blocked/running/idle counts. |
-| [ui-patch-review](ui-patch-review.md) |  | [ui](ui.md), [ui-report](ui-report.md), [ui-review](ui-review.md) | A task's changes in its report: file by file in Ediff, comments quoted in the feedback. |
+| [ui-patch-review](ui-patch-review.md) |  | [ui](ui.md), [ui-report](ui-report.md), [ui-review](ui-review.md) | A task's changes in its report: a file tree, Ediff file by file with the earlier comments in place and the feedback box beside it, approvals, comments quoted in the feedback. |
 | [ui-pending](ui-pending.md) | by default | [ui](ui.md), [ui-compose](ui-compose.md) | Requests a session waits on: panels, answering and the popout. |
 | [ui-pet](ui-pet.md) |  | [ui](ui.md) | The companion pet: its buffer, and the creature and its words in chats, on the board and under the session list. |
 | [ui-popout](ui-popout.md) |  | [ui](ui.md), [ui-compose](ui-compose.md) | Popouts: one item of a session or task in a small window of its own. |
@@ -343,7 +343,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `harness-acp-received-hook` | [acp](acp.md) | [ui-chat](ui-chat.md) |
 | `harness-chat-header-end-functions` | [ui-chat](ui-chat.md) | [ui-version](ui-version.md) |
 | `harness-chat-header-functions` | [ui-btw](ui-btw.md), [ui-chat](ui-chat.md), [ui-priority](ui-priority.md), [ui-supervisor](ui-supervisor.md) | [ui-btw](ui-btw.md), [ui-priority](ui-priority.md), [ui-supervisor](ui-supervisor.md) |
-| `harness-chat-mode-hook` | [ui-cache](ui-cache.md), [ui-children](ui-children.md), [ui-handoff](ui-handoff.md), [ui-merge](ui-merge.md) | [ui-cache](ui-cache.md), [ui-children](ui-children.md), [ui-handoff](ui-handoff.md), [ui-merge](ui-merge.md), [ui-review](ui-review.md) |
+| `harness-chat-mode-hook` | [ui-cache](ui-cache.md), [ui-children](ui-children.md), [ui-handoff](ui-handoff.md), [ui-merge](ui-merge.md) | [ui-cache](ui-cache.md), [ui-children](ui-children.md), [ui-handoff](ui-handoff.md), [ui-merge](ui-merge.md), [ui-patch-review](ui-patch-review.md), [ui-review](ui-review.md) |
 | `harness-chat-panel-functions` | [ui-cache](ui-cache.md), [ui-chat](ui-chat.md), [ui-children](ui-children.md), [ui-handoff](ui-handoff.md), [ui-merge](ui-merge.md), [ui-review](ui-review.md) | [ui-cache](ui-cache.md), [ui-children](ui-children.md), [ui-handoff](ui-handoff.md), [ui-merge](ui-merge.md), [ui-review](ui-review.md) |
 | `harness-chat-send-functions` | [ui-btw](ui-btw.md), [ui-chat](ui-chat.md) | [ui-btw](ui-btw.md) |
 | `harness-chat-tool-body-functions` | [ui-chat](ui-chat.md) | [ui-report](ui-report.md) |

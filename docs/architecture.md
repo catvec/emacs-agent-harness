@@ -11258,11 +11258,15 @@ its own: nothing else names it
 module's shutdown takes it out again.  It is a panel of the report: on
 `harness-ui-report-panel-functions` at depth -10, before the review
 banner, it returns the changes of a task in review that has a branch,
-and nothing for any other task.  The panel is drawn in the popout
-buffer, so it knows the report it is in; a report opened anew, a popout
-buffer it has not drawn in yet, reads the branch again.  Its rows carry
-a keymap of their own as a text property, which the popout puts before
-its own keys.  The comments go into the box the review module gives the
+and nothing for any other task.  A task that left review can still show
+its changes: `harness-ui-patch-review-open`, on C-c C-d in a task's
+session or on a board card (`harness-ui-patch-review-mode`), opens its
+report with a review whose `:show` is set, and the panel then draws for
+a task no longer in review.  The panel is drawn in the popout buffer,
+so it knows the report it is in; a report opened anew, a popout buffer
+it has not drawn in yet, reads the branch again.  Its rows carry a
+keymap of their own as a text property, which the popout puts before its
+own keys.  The comments go into the box the review module gives the
 report (`harness-ui-report-compose-functions`), written between the
 box's markers (`harness-compose-start` and `harness-compose-end`) with
 the buffer narrowed to them, and C-c C-c sends the box as the review's
@@ -11282,13 +11286,24 @@ branch with the task's `:base` (HEAD when that is blank or gone) gives
 the commit compared with; `git diff --raw -z -M --no-abbrev` and the
 patch between the two give the files and their hunks, paired by path,
 and `git status` in the worktree tells the panel to say when it has
-changes not committed.  A file is seen by its path and its blob on the
-branch, so one the branch changed again is not.  RET runs
-`ediff-buffers` on the two blobs, laid out by
+changes not committed.
+
+The files show as a tree by default
+(`harness-ui-patch-review-file-tree`): a directory line with its files'
+count and the lines they add and delete, then the files under it by
+their names, the directories and files of a directory by name.  t on a
+row shows them flat instead, every path whole, in the diff's order.
+A file's mark says whether it was compared in Ediff, by its path and
+its blob on the branch, and whether it was approved -- by the same key,
+so a file the branch changed again is neither and is reviewed anew.  a
+approves the file at point, A every file; the heading counts those
+viewed and those approved.  RET runs `ediff-buffers` on the two blobs,
+laid out by
 `harness-ui-patch-review-ediff-window-setup`, once it saved the frame's
-window configuration and deleted every other window, the report's side
-window too (`ignore-window-parameters`): Ediff's own setup deletes the
-other windows, which it cannot do from a side window.  q sets the
+window configuration and deleted every other window but the report's
+side window, which stays for its box (below); without a box beside
+Ediff (`harness-ui-patch-review-ediff-box-height` nil) the side window
+goes too (`ignore-window-parameters`).  q sets the
 configuration back.  The report, drawn again meanwhile, gets its window
 start and point anew, since its markers in the configuration went with
 the text they were in, and a window whose buffer was killed -- the
@@ -11296,33 +11311,108 @@ report's, when the task was decided while Ediff showed -- goes
 (`window-restore-killed-buffer-windows`).  N and P read the next file's
 blobs, then end the Ediff under way quietly, within
 `save-window-excursion`, and start the next in its place, keeping the
-configuration to give back.  The control panel's map is a child of
-Ediff's with c, N, P and q (under evil, `evil-normalize-keymaps` puts it
-where evil-collection made Ediff's map overriding) and a brief help of
-its own (`ediff-brief-help-message-function`); quitting goes through
-`ediff-really-quit` with `ediff-keep-variants` bound, so it asks
+configuration to give back.  n is Ediff's next difference, wrapped
+(`harness-ui-patch-review-next-difference`): at the last difference it
+says once that the next difference is the next file, and the same key
+again goes on to it in Ediff.  The control panel's map is a child of
+Ediff's with c, e, a, n, N, P and q (under evil, `evil-normalize-keymaps`
+puts it where evil-collection made Ediff's map overriding) and a brief
+help of its own (`ediff-brief-help-message-function`); quitting goes
+through `ediff-really-quit` with `ediff-keep-variants` bound, so it asks
 nothing, and the review kills the two versions itself.
+
+The report stays in the frame while Ediff compares a file, for its
+feedback box (`harness-ui-patch-review-ediff-box-height`, a fraction of
+the frame's height).  Before Ediff lays the frame out,
+`harness-ui-patch-review--keep-box` gives the report's side window the
+`no-delete-other-windows` parameter, which `delete-other-windows` --
+Ediff's own call too -- honours, and limits the popout: its buffer-local
+height limit (`harness-ui-popout--max-height`) becomes a function
+returning that fraction, the old value kept for q, so that drawing the
+report again does not grow it back to its own share.  Ediff's plain
+setup puts the versions and the control panel in the main window above
+the side window (`display-buffer-in-direction` bottom is the main
+window's bottom).  The window's point is the box's end, which the
+popout's own scrolling keeps in sight.  A window that is not selected
+loses its point when the popout is drawn again, so the review's own
+refresh keeps where such windows had point and puts it back
+(`harness-ui-patch-review--window-places`); the popout's panel hook
+also lets go of the limit when no Ediff is under way, so a limit left
+by an Ediff killed from outside does not stay.  A comment made meanwhile
+scrolls the window to the end of what it put in and highlights it
+(`pulse-momentary-highlight-region`); a report closed meanwhile comes
+back, as a side window, with the next comment.  e
+(`harness-ui-patch-review-edit-feedback`), in the control panel or
+either version, selects the window with point at the end of the comment
+under the quote of the current difference or, in a version, the line at
+point (`harness-ui-patch-review--box-target` reads the box as the
+comments do), else of the last comment on the file, else at the end of
+the box: the box is the popout's, so editing it is typing, and C-c C-c
+sends it.  `harness-ui-patch-review-open` on C-c C-d, which the review's
+minor mode now has in the report too, selects the control panel of the
+Ediff beside the report instead of opening it.  When the task's
+`:feedback` gets a round -- the feedback was sent -- the review ends the
+Ediff, the frame as it was.
 
 c puts a comment on the last line of the current difference on the
 branch (at the merge base for a difference that only deletes) in the
-box, filled to `harness-ui-patch-review-fill-column`.  The box reads
-back as the quote it holds: a line starting with ">" quotes the diff, a
-`diff --git` line opens a file, a hunk's header sets the line numbers,
-which go on across the comments, and a paragraph of other lines is a
-comment.  A comment goes under the line it is about when the box quotes
-it already, after the comments there.  Else it quotes that line, the
-change it ends and at most `harness-ui-patch-review-context-lines` lines
-before it -- not from the middle of another change -- under a hunk
-header that counts just those lines, with git's heading; when the box
-quotes some of them already, the quote goes on after the last of those
-instead, with no header.  A line the diff does not have gets the nearest
-one, the comment saying which line it means, and a comment with no
-difference current is on the file as a whole, under its `diff --git`
-line.  The files keep the diff's order in the box, and a file's hunks
-the order of their lines; the first quote gets a line before it naming
-the branch, its tip, the base and the merge base.  A report closed
-meanwhile opens again out of sight for its box, its draft restored.  The
-module follows `task/changed`, `task/review` -- a task back for review
-has its branch read again -- and `task/done` and `task/deleted`, which
-drop the review: at once when its Ediff does not show, else when q
-leaves it.
+box, filled to `harness-ui-patch-review-fill-column`.  In either
+version Ediff compares, each with a keymap of its own
+(`harness-ui-patch-review-lines-mode`), c comments on the line at
+point: on the branch's side it is a line of the branch, on the merge
+base's one of the merge base.  The box reads back as the quote it
+holds: a line starting with ">" quotes the diff, a `diff --git` line
+opens a file, a hunk's header sets the line numbers, which go on across
+the comments, and a paragraph of other lines is a comment.  A comment
+goes under the line it is about when the box quotes it already, after
+the comments there.  Else it quotes that line, the change it ends and
+at most `harness-ui-patch-review-context-lines` lines before it -- not
+from the middle of another change -- under a hunk header that counts
+just those lines, with git's heading; when the box quotes some of them
+already, the quote goes on after the last of those instead, with no
+header.  A line the diff does not have gets the nearest one, the
+comment saying which line it means, and a comment with no difference
+current is on the file as a whole, under its `diff --git` line.  The
+files keep the diff's order in the box, and a file's hunks the order of
+their lines; the first quote gets a line before it naming the branch,
+its tip, the base and the merge base.  A report closed meanwhile opens
+again out of sight for its box, its draft restored.
+
+The task's rounds of feedback (`:feedback`) are read back as comments:
+their quote says the file and the line each was on and gives the lines
+quoted above it, a few at most, and a comment on a line the diff did not
+hold says that line itself ("On line 57: ").  Each is shown where it is
+in the newest version of its file: under the file's row in the report
+(`↳ Round 1 · line 44 (was 42): ...`; RET on it compares the file with
+that line in sight, by the row's `harness-ui-patch-review-where`
+property), and under the line in the versions Ediff compares, as an
+overlay's `after-string` at the end of the line -- in the merge base's
+version for a comment on a removed line, at the top of the branch's for
+one on the file as a whole.  What has no file row -- words on no file,
+files the branch no longer changes -- stays in a block above the files,
+with a line counting the comments and the rounds.  Where a comment is
+now (`harness-ui-patch-review--place`) comes from the first line of its
+round's feedback, which names the commit the branch was at (`(at SHA)`):
+`git diff -U0` of the file at that commit against its blob now gives
+hunks that `harness-ui-patch-review--map-line` carries the line through
+-- the same, moved, or changed, the same place among the lines that
+replaced it.
+A round that does not name its commit, or a commit no longer in the
+repository, is placed by the lines it quotes
+(`harness-ui-patch-review--find-line`: the last quoted line, among those
+that say the same the one with most of the quoted lines above it just
+above it, then the nearest to the old number), and a line that cannot be
+placed -- not read, no quote -- shows where it was.  This needs nothing
+the review keeps, so it survives a restart.  The files are read once the
+branch is (`harness-ui-patch-review--place-previous`, a second drawing
+of the report), and Ediff takes the places from there, else works them
+out from the two texts it has.  When a task is
+sent back with a new round, the review keeps the blobs the branch had
+when the reviewer wrote (`:snapshots`, one round's files each); the
+next review says for each commented file whether it changed since the
+reviewer's last comment on it or stayed the same.  A review made after
+the feedback has no snapshot of that round: the comments show, without
+saying what changed since.  The module follows `task/changed`,
+`task/review` -- a task back for review has its branch read again --
+and `task/done` and `task/deleted`, which drop the review: at once when
+its Ediff does not show, else when q leaves it.

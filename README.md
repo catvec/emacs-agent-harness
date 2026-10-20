@@ -2888,20 +2888,38 @@ verify or send back, `recap` writes the recaps on the cards,
 - While the task waits for review, its report also shows its changes,
   under the evidence and above the banner, to go through them the way a
   patch is reviewed on a mailing list: the files its branch changes
-  against its merge base with the branch it was made from, a row each,
+  against its merge base with the branch it was made from, as a tree of
+  the directories that hold them (`t` shows them flat), a row each,
   with its status, what changed (`+3 −1`), a check mark once you looked
-  at it, and your comments on it. `RET` on a file, or a click, compares
-  it in Ediff, the merge base against the branch, in the report's frame.
-  There `c` comments on the current difference (one line in the
-  minibuffer), `N` and `P` go on to the next or previous file, and `q`
-  comes back to the report as it was, point on the next file. Each
-  comment goes into the report's box for the feedback the way a reply to
-  a patch has it: the lines it is about quoted from the diff with `> `,
-  under their file's `diff --git` line, a few lines of context first
-  (`harness-ui-patch-review-context-lines`), your comment under them.
-  Edit the box as you like and write around the comments; `C-c C-c`
-  sends it all back to the task as its feedback, in one go. Git runs in
-  the Emacs that shows the board, so the changes show where the task's
+  at it, a firmer one once you approved it (`a`; `A` approves them all:
+  a file the branch changes again is reviewed anew), and your comments
+  on it. `RET` on a file, or a click, compares it in Ediff, the merge
+  base against the branch, in the report's frame, the report itself
+  staying at the bottom of it, small, with its feedback box. There `c`
+  comments on the current difference -- in a buffer of its own, `C-c
+  C-c` comments -- or, in either version, on the line at point; `a`
+  approves the file, `n` goes to the next difference and, at the last
+  one, to the next file, `N` and `P` go on to the next or previous
+  file, and `q` comes back to the report as it was, point on the next
+  file. Each comment goes into the report's box for the feedback the way
+  a reply to a patch has it: the lines it is about quoted from the diff
+  with `> `, under their file's `diff --git` line, a few lines of
+  context first (`harness-ui-patch-review-context-lines`), your comment
+  under them. The box stays in sight while you compare
+  (`harness-ui-patch-review-ediff-box-height` is how much of the frame
+  the report keeps): `e` goes to it, point at the end of the comment on
+  the difference or the line you are on, to reword it or add something,
+  and `C-c C-d` there goes back to Ediff, which was not left. Edit the
+  box as you like and write around the comments; `C-c C-c` sends it all
+  back to the task as its feedback, in one go. A task sent back and in
+  review again shows your earlier comments where they are now: under
+  their file in the report, and in Ediff under their line in the newest
+  version, with the round and what became of the line (`line 44 (was
+  42)`, `changed since`); `RET` on one in the report opens Ediff with
+  that line in sight, and each commented file says whether it changed
+  since your comment. `C-c C-d` in a task's session or on its board card
+  opens the changes after the task left review too. Git runs in the
+  Emacs that shows the board, so the changes show where the task's
   repository is on this machine. Ediff's own settings apply
   (`ediff-split-window-function` puts the two versions side by side);
   `harness-ui-patch-review-ediff-window-setup` keeps its control panel

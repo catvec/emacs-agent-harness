@@ -32,7 +32,9 @@
 ;; `harness-chat--render-interval' seconds.  Thinking, tool calls,
 ;; compaction summaries and runs of coalescable tools (with the thinking
 ;; between their calls) collapse under overlays that isearch opens, so
-;; every word of the conversation stays searchable.  History loads lazily: the newest
+;; every word of the conversation stays searchable; a hand_in call that
+;; succeeds opens expanded once its result is in, its body the report
+;; the task handed in.  History loads lazily: the newest
 ;; `harness-chat--history-limit' nodes at open, an older page whenever a
 ;; window scrolls near the top, and blocks far above every window are
 ;; dropped again so a long session never fills the buffer.
@@ -2363,10 +2365,23 @@ draws it, so carrying that over would keep drawing the old image."
     (harness-chat--make-fold block)
     (harness-chat--follow windows)))
 
+(defun harness-chat--hand-in-p (block)
+  "Non-nil when BLOCK is a hand_in call.
+Its result carries the report the task handed in, which is worth
+seeing whole: once the hand-in succeeds the call is not folded."
+  (and (harness-chat-block-p block)
+       (equal (harness-chat-block-kind block) "tool-call")
+       (equal (plist-get (harness-chat-block-node block) :tool) "hand_in")))
+
 (defun harness-chat--attach-result (call result)
   "Render RESULT, a tool-result node, in CALL, the block of its call.
-The result's id then finds the call's block, whose call has finished."
+The result's id then finds the call's block, whose call has finished.
+A successful hand_in call opens expanded: its body is the report,
+not raw output."
   (setf (harness-chat-block-result call) result)
+  (when (and (harness-chat--hand-in-p call)
+             (eq 'ok (harness-ui-tool-outcome result)))
+    (setf (harness-chat-block-collapsed call) nil))
   (setq harness-chat--unfinished (delete (harness-chat-block-id call) harness-chat--unfinished))
   (puthash (plist-get result :id) call harness-chat--blocks)
   (harness-chat--rerender call))
@@ -2712,6 +2727,9 @@ the thinking before its first call and after its last stays out."
      ;; An update of a result already merged into its call block.
      ((and block (not (equal (harness-chat-block-id block) id)))
       (setf (harness-chat-block-result block) node)
+      (when (and (harness-chat--hand-in-p block)
+                 (eq 'ok (harness-ui-tool-outcome node)))
+        (setf (harness-chat-block-collapsed block) nil))
       (harness-chat--rerender block)
       (harness-chat--maybe-coalesce (harness-chat-block-id block))
       (harness-chat--refresh-group-of block))
