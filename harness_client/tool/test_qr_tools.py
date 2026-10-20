@@ -609,5 +609,173 @@ class InstallScriptTest(unittest.TestCase):
         self.assertIn("positive number of seconds", result.stderr)
 
 
+class BuildFreshnessTest(unittest.TestCase):
+    """The default run must not install an APK built before the app changed."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="harness-qr-build-test-")
+        self.project = os.path.join(self.tmp, "harness_client")
+        self.tool = os.path.join(self.project, "tool")
+        os.makedirs(self.tool)
+        os.makedirs(os.path.join(self.project, "lib"))
+        for name in ("qr_install.sh", "qr_terminal.py", "serve_apk.py"):
+            shutil.copy2(os.path.join(TOOL_DIR, name),
+                         os.path.join(self.tool, name))
+        self.script = os.path.join(self.tool, "qr_install.sh")
+        self.apk = os.path.join(
+            self.project, "build", "app", "outputs", "flutter-apk",
+            "app-release.apk")
+        self.state = os.path.join(self.tmp, "state")
+        os.makedirs(self.state)
+        self.flag("preconnected")
+
+        with open(os.path.join(self.project, "lib", "app.dart"), "w") as f:
+            f.write("void main() {}\n")
+        for name in ("pubspec.yaml", "pubspec.lock", ".flutter-version"):
+            with open(os.path.join(self.project, name), "w") as f:
+                f.write("test\n")
+        android = os.path.join(self.project, "android", "app", "src", "main")
+        os.makedirs(android)
+        with open(os.path.join(android, "AndroidManifest.xml"), "w") as f:
+            f.write("<manifest/>\n")
+
+        self.adb = os.path.join(self.tmp, "adb")
+        with open(self.adb, "w") as f:
+            f.write(FAKE_ADB)
+        os.chmod(self.adb, 0o755)
+
+        self.flutter_log = os.path.join(self.tmp, "flutter.log")
+        self.flutter = os.path.join(self.tmp, "flutter")
+        with open(self.flutter, "w") as f:
+            f.write('''#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >> "$FAKE_FLUTTER_LOG"
+out=build/app/outputs/flutter-apk/app-release.apk
+case " $* " in *" --debug "*) out=build/app/outputs/flutter-apk/app-debug.apk ;; esac
+mkdir -p "$(dirname "$out")"
+printf 'fresh apk\\n' > "$out"
+''')
+        os.chmod(self.flutter, 0o755)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def flag(self, name):
+        open(os.path.join(self.state, name), "w").close()
+
+    def builds(self):
+        try:
+            with open(self.flutter_log) as f:
+                return f.read().splitlines()
+        except FileNotFoundError:
+            return []
+
+    def calls(self):
+        try:
+            with open(os.path.join(self.state, "log")) as f:
+                return f.read().splitlines()
+        except FileNotFoundError:
+            return []
+
+    def run_install(self, *args):
+        env = dict(os.environ)
+        env.update(ADB=self.adb, FAKE_ADB_STATE=self.state,
+                   FLUTTER=self.flutter, FAKE_FLUTTER_LOG=self.flutter_log)
+        return subprocess.run(
+            [self.script, "--timeout", "10", "--no-launch", *args],
+            capture_output=True, text=True, timeout=30, env=env,
+            stdin=subprocess.DEVNULL)
+
+    def set_age(self, path, offset):
+        stamp = time.time() + offset
+        os.utime(path, (stamp, stamp))
+
+    def test_missing_apk_builds_and_installs(self):
+        result = self.run_install()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Building the release APK", result.stdout)
+        self.assertIn("no APK at build/app/outputs/flutter-apk/app-release.apk",
+                      result.stdout)
+        self.assertEqual(self.builds(), ["build apk --release"])
+        self.assertTrue(any(" install -r " + self.apk in call
+                            for call in self.calls()), self.calls())
+
+    def test_source_newer_than_the_apk_rebuilds(self):
+        first = self.run_install()
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        self.assertEqual(len(self.builds()), 1)
+        # The APK is from before a change to the Dart app.
+        self.set_age(self.apk, -60)
+        self.set_age(os.path.join(self.project, "lib", "app.dart"), 0)
+        result = self.run_install()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("lib/app.dart is newer than app-release.apk",
+                      result.stdout)
+        self.assertEqual(len(self.builds()), 2)
+
+    def test_current_apk_is_not_rebuilt(self):
+        first = self.run_install()
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        self.set_age(self.apk, 120)
+        result = self.run_install()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("Building the", result.stdout)
+        self.assertEqual(len(self.builds()), 1)
+
+    def test_generated_android_files_do_not_trigger_a_build(self):
+        first = self.run_install()
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        self.set_age(self.apk, 100)
+        generated = os.path.join(self.project, "android", "app", "build",
+                                 "generated", "stamp.txt")
+        os.makedirs(os.path.dirname(generated))
+        with open(generated, "w") as f:
+            f.write("generated\n")
+        self.set_age(generated, 200)
+        local = os.path.join(self.project, "android", "local.properties")
+        with open(local, "w") as f:
+            f.write("sdk.dir=/tmp\n")
+        self.set_age(local, 200)
+        result = self.run_install()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("Building the", result.stdout)
+        self.assertEqual(len(self.builds()), 1)
+
+    def test_force_builds_an_up_to_date_apk(self):
+        first = self.run_install()
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        self.set_age(self.apk, 120)
+        result = self.run_install("--build")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("--build was given", result.stdout)
+        self.assertEqual(len(self.builds()), 2)
+
+    def test_no_build_warns_about_a_stale_apk(self):
+        os.makedirs(os.path.dirname(self.apk))
+        with open(self.apk, "w") as f:
+            f.write("old apk\n")
+        self.set_age(self.apk, -60)
+        result = self.run_install("--no-build")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("app-release.apk is older than", result.stdout)
+        self.assertIn("may not include the latest app", result.stdout)
+        self.assertEqual(self.builds(), [])
+        self.assertTrue(any(" install -r " + self.apk in call
+                            for call in self.calls()), self.calls())
+
+    def test_no_build_without_an_apk_is_an_error(self):
+        result = self.run_install("--no-build")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("APK not found", result.stderr)
+        self.assertEqual(self.builds(), [])
+
+    def test_help_describes_the_freshness_check(self):
+        result = subprocess.run([self.script, "--help"], capture_output=True,
+                                text=True, timeout=10)
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("up to date", result.stdout)
+        self.assertIn("newer than it", result.stdout)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

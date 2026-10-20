@@ -121,13 +121,18 @@ machine if the build reports a missing SDK package.
 ## Installing on a phone over Wi-Fi
 
 `tool/qr_install.sh` builds the Android APK when needed and installs it on a
-phone over the local network, with no USB cable. The phone pairs as a wireless
-debugging device, then adb installs the APK and opens the app:
+phone over the local network, with no USB cable. "Needed" includes an APK that
+is older than the app sources: a change under `lib/`, `assets/` or `android/`,
+or to `pubspec.yaml`, `pubspec.lock` or `.flutter-version`, triggers a build.
+That matters because an APK left over from an earlier run would otherwise keep
+the phone on old code even after the app was fixed. The phone pairs as a
+wireless debugging device, then adb installs the APK and opens the app:
 
 ```sh
-tool/qr_install.sh                 # build if needed, pair by code, install, open
-tool/qr_install.sh --build         # rebuild first
+tool/qr_install.sh                 # build if stale, pair by code, install, open
+tool/qr_install.sh --build         # rebuild even when the APK is current
 tool/qr_install.sh --debug         # build/install the debug APK
+tool/qr_install.sh --no-build      # install the existing APK, warn if it is stale
 tool/qr_install.sh --qr            # pair by scanning a QR code instead
 tool/qr_install.sh --no-launch     # install without opening the app
 tool/qr_install.sh --no-image      # with --qr, keep the QR text-only
@@ -272,10 +277,11 @@ e2e/                  Playwright mobile-emulated flows and screenshots
 
 ```sh
 flutter analyze                    # no issues
-flutter test                       # 21 tests: ACP, capabilities, reducer,
-                                   # connection parsing, 10 widget flows
+flutter test                       # 27 tests: ACP, capabilities, reducer,
+                                   # connection parsing, boot, widget flows
 python3 tool/test_qr_tools.py      # QR encoder against qrencode, the phone
-                                   # installer with a fake adb, the APK server
+                                   # installer (pairing, install, build
+                                   # freshness) with a fake adb, the APK server
 ```
 
 The widget tests drive the real `AcpClient` against an in-memory ACP server

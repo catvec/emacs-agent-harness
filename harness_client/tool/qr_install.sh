@@ -3,8 +3,9 @@
 # USB cable.  The phone pairs as a wireless debugging device with the six-digit
 # pairing code it shows; adb then installs the APK over the local network.
 #
-#   tool/qr_install.sh                 build a release APK if needed, pair, install, launch
-#   tool/qr_install.sh --build         build first even if the APK is there
+#   tool/qr_install.sh                 build a release APK if it is missing or
+#                                      older than the app sources, pair, install, launch
+#   tool/qr_install.sh --build         build first even if the APK is current
 #   tool/qr_install.sh --debug         use/build the debug APK
 #   tool/qr_install.sh --qr            pair by scanning a QR code instead of the
 #                                      six-digit code
@@ -24,6 +25,7 @@ cd "$project_dir"
 build=auto
 build_mode=release
 apk=""
+apk_explicit=0
 device=""
 launch=1
 serve=0
@@ -45,8 +47,12 @@ Build the Harness Android APK if needed and install it on a phone over Wi-Fi.
 The phone pairs with adb through Wireless debugging; this terminal asks for the
 six-digit pairing code the phone shows.
 
+A default run builds the APK when it is missing, or when a source file (under
+lib/, assets/ or android/, or pubspec.yaml, pubspec.lock or .flutter-version)
+is newer than it.  That keeps an install from silently carrying an old app.
+
 Options:
-  --build          build the APK even when it already exists
+  --build          build the APK even when it is up to date
   --no-build       never build; fail when the APK is missing
   --debug          use and build the debug APK instead of the release one
   --apk PATH       install PATH (implies --no-build)
@@ -111,6 +117,7 @@ while [ $# -gt 0 ]; do
     --apk)
       [ $# -ge 2 ] || die "--apk needs a path"
       apk="$2"
+      apk_explicit=1
       build=never
       shift
       ;;
@@ -181,17 +188,54 @@ else
   esac
 fi
 
-if [ "$build" != never ] && { [ "$build" = always ] || [ ! -f "$apk" ]; }; then
-  [ "$build" = always ] || note "No APK at ${apk#"$project_dir"/}; building one."
+# The app that goes into the APK.  A file here that is newer than the APK means
+# the APK was built before that change, so installing it would run old code.
+build_inputs=(lib assets android pubspec.yaml pubspec.lock .flutter-version)
+
+# Print the newest app source that is newer than the APK, when there is one.
+# Generated directories inside android/ and local.properties are not sources.
+stale_source() {
+  local newer
+  newer="$(find "${build_inputs[@]}" \
+    \( -path '*/build' -o -path '*/build/*' \
+       -o -path '*/.gradle' -o -path '*/.gradle/*' \) -prune -o \
+    -type f ! -name local.properties -newer "$apk" -print -quit 2>/dev/null || true)"
+  [ -z "$newer" ] || printf '%s\n' "$newer"
+  return 0
+}
+
+build_reason=""
+if [ "$build" != never ]; then
+  if [ ! -f "$apk" ]; then
+    build_reason="no APK at ${apk#"$project_dir"/}"
+  elif [ "$build" = always ]; then
+    build_reason="--build was given"
+  else
+    changed="$(stale_source)"
+    if [ -n "$changed" ]; then
+      build_reason="${changed#"$project_dir"/} is newer than ${apk##*/}"
+    fi
+  fi
+fi
+
+if [ -n "$build_reason" ]; then
+  note "Building the $build_mode APK ($build_reason)..."
   flutter="${FLUTTER:-$tool_dir/flutter}"
   if [ ! -x "$flutter" ]; then
     flutter="$(command -v flutter || true)"
   fi
   [ -n "$flutter" ] || die "Flutter not found; run tool/install_flutter.sh first or set FLUTTER"
-  note "Building the $build_mode APK (this can take a minute)..."
   "$flutter" build apk "--$build_mode"
 fi
 [ -f "$apk" ] || die "APK not found: $apk (run without --no-build to build it)"
+
+# An explicit --no-build is allowed to install an old APK, but say so: the
+# app would then still run whatever code was last built.
+if [ "$build" = never ] && [ "$apk_explicit" = 0 ]; then
+  changed="$(stale_source)"
+  [ -z "$changed" ] ||
+    note "Warning: ${apk##*/} is older than ${changed#"$project_dir"/}; it may not include the latest app."
+fi
 
 # Serve the APK over HTTP for phones without wireless debugging.
 if [ "$serve" = 1 ]; then
