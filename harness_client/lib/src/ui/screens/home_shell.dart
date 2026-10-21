@@ -8,6 +8,7 @@ import '../adaptive/platform_style.dart';
 import '../format.dart';
 import '../navigation.dart';
 import '../theme/harness_theme.dart';
+import '../widgets/connection_banner.dart';
 import 'session_screen.dart';
 import 'sessions_screen.dart';
 import 'settings_screen.dart';
@@ -150,7 +151,23 @@ class _HomeShellState extends State<HomeShell> {
               width: 1,
               color: Theme.of(context).colorScheme.outlineVariant,
             ),
-            Expanded(child: body),
+            Expanded(
+              child: Column(
+                children: [
+                  ConnectionBanner(app: app, safeTop: true),
+                  // The banner, when it shows, has kept clear of the status
+                  // bar: the page below it need not.  (Always wrapped, so
+                  // that the screens are not rebuilt when it comes and goes.)
+                  Expanded(
+                    child: MediaQuery.removePadding(
+                      context: context,
+                      removeTop: app.isReconnecting,
+                      child: body,
+                    ),
+                  ),
+                ],
+              ),
+            ),
           ],
         ),
       );
@@ -161,6 +178,7 @@ class _HomeShellState extends State<HomeShell> {
         child: Column(
           children: [
             Expanded(child: body),
+            ConnectionBanner(app: app),
             CupertinoTabBar(
               currentIndex: index < 0 ? 0 : index,
               onTap: (next) => _select(tabs[next].id),
@@ -188,22 +206,35 @@ class _HomeShellState extends State<HomeShell> {
 
     return Scaffold(
       body: body,
-      bottomNavigationBar: NavigationBar(
-        selectedIndex: index < 0 ? 0 : index,
-        onDestinationSelected: (next) => _select(tabs[next].id),
-        destinations: [
-          for (final tab in tabs)
-            NavigationDestination(
-              icon: _BadgedIcon(
-                icon: Icon(tab.materialIcon),
-                count: tab.id == 'tasks' ? (app.tasks?.needsAttention ?? 0) : 0,
-              ),
-              selectedIcon: _BadgedIcon(
-                icon: Icon(tab.materialIcon),
-                count: tab.id == 'tasks' ? (app.tasks?.needsAttention ?? 0) : 0,
-              ),
-              label: tab.label,
-            ),
+      // Above the navigation bar, in the layout: a banner that stays for as
+      // long as the harness cannot be reached must not cover the buttons of
+      // the screen above it.
+      bottomNavigationBar: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          ConnectionBanner(app: app),
+          NavigationBar(
+            selectedIndex: index < 0 ? 0 : index,
+            onDestinationSelected: (next) => _select(tabs[next].id),
+            destinations: [
+              for (final tab in tabs)
+                NavigationDestination(
+                  icon: _BadgedIcon(
+                    icon: Icon(tab.materialIcon),
+                    count: tab.id == 'tasks'
+                        ? (app.tasks?.needsAttention ?? 0)
+                        : 0,
+                  ),
+                  selectedIcon: _BadgedIcon(
+                    icon: Icon(tab.materialIcon),
+                    count: tab.id == 'tasks'
+                        ? (app.tasks?.needsAttention ?? 0)
+                        : 0,
+                  ),
+                  label: tab.label,
+                ),
+            ],
+          ),
         ],
       ),
     );
@@ -321,15 +352,19 @@ class _Sidebar extends StatelessWidget {
                     Container(
                       width: 7,
                       height: 7,
-                      decoration: const BoxDecoration(
-                        color: HarnessColors.moss,
+                      decoration: BoxDecoration(
+                        color: app.isReconnecting
+                            ? HarnessColors.amber
+                            : HarnessColors.moss,
                         shape: BoxShape.circle,
                       ),
                     ),
                     const SizedBox(width: 7),
                     Expanded(
                       child: Text(
-                        app.capability?.agentName ?? 'Connected',
+                        app.isReconnecting
+                            ? 'Reconnecting…'
+                            : app.capability?.agentName ?? 'Connected',
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: theme.textTheme.labelMedium?.copyWith(

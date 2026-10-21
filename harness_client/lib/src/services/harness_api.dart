@@ -21,18 +21,85 @@ class SessionPage {
 /// is remembered as unavailable and announced on [degraded], so the UI can
 /// hide that one feature instead of surfacing a scary error.
 class HarnessApi {
-  HarnessApi(this.client, this.capabilities);
+  HarnessApi(AcpClient client, this.capabilities) : _client = client {
+    _follow(client);
+  }
 
-  final AcpClient client;
+  AcpClient _client;
   HarnessCapabilities capabilities;
   final Set<String> _unavailable = <String>{};
   final _degraded = StreamController<String>.broadcast();
+  final _notifications = StreamController<AcpNotification>.broadcast();
+  StreamSubscription<AcpNotification>? _following;
+
+  /// The connection this talks over now.  It changes when the app connects
+  /// again after losing the connection ([rebind]), which is why what holds
+  /// on to an api (a session, the task board) must not hold on to this.
+  AcpClient get client => _client;
 
   Stream<String> get degraded => _degraded.stream;
+
+  /// What the agent sends, over this connection and the ones that follow
+  /// it: a listener stays subscribed when the connection is replaced.
+  Stream<AcpNotification> get notifications => _notifications.stream;
 
   void updateCapabilities(HarnessCapabilities next) {
     capabilities = next;
     _unavailable.clear();
+  }
+
+  /// Set while the app is getting a lost connection back.  A request made
+  /// then waits for the new connection, for up to [reconnectGrace], instead
+  /// of failing on the dead one: what a person asks for in that moment
+  /// happens a moment late, rather than not at all.
+  bool reconnecting = false;
+  Duration reconnectGrace = const Duration(seconds: 10);
+  Completer<void>? _back;
+
+  /// Talk over [client] from now on, a new connection to the same harness
+  /// after the old one was lost.  What the harness can do is read again
+  /// ([capabilities], from the new `initialize`): it may have been
+  /// restarted with other modules, and a method that was missing may be
+  /// there now.
+  void rebind(AcpClient client, HarnessCapabilities capabilities) {
+    _following?.cancel();
+    _client = client;
+    updateCapabilities(capabilities);
+    _follow(client);
+    reconnecting = false;
+    final waiting = _back;
+    _back = null;
+    if (waiting != null && !waiting.isCompleted) waiting.complete();
+  }
+
+  Future<Object?> _request(
+    String method, [
+    Map<String, Object?>? params,
+    Duration? timeout,
+  ]) async {
+    if (reconnecting && client.isClosed) {
+      final back = _back ??= Completer<void>();
+      await back.future.timeout(reconnectGrace, onTimeout: () {});
+    }
+    return client.request(method, params, timeout);
+  }
+
+  void _follow(AcpClient client) {
+    _following = client.notifications.listen((notification) {
+      if (!_notifications.isClosed) _notifications.add(notification);
+    });
+  }
+
+  /// Stop following the connection and end the streams.
+  void dispose() {
+    _following?.cancel();
+    _following = null;
+    reconnecting = false;
+    final waiting = _back;
+    _back = null;
+    if (waiting != null && !waiting.isCompleted) waiting.complete();
+    unawaited(_notifications.close());
+    unawaited(_degraded.close());
   }
 
   bool can(String method) =>
@@ -47,7 +114,7 @@ class HarnessApi {
       throw AcpException(-32601, '_harness/$method is unavailable.');
     }
     try {
-      final result = await client.request('_harness/$method', params, timeout);
+      final result = await _request('_harness/$method', params, timeout);
       return asMap(result);
     } on AcpException catch (error) {
       if (error.isMethodNotFound) {
@@ -67,7 +134,7 @@ class HarnessApi {
       throw AcpException(-32601, '_harness/$method is unavailable.');
     }
     try {
-      return await client.request('_harness/$method', params, timeout);
+      return await _request('_harness/$method', params, timeout);
     } on AcpException catch (error) {
       if (error.isMethodNotFound) {
         _unavailable.add(method);
@@ -81,7 +148,7 @@ class HarnessApi {
   Future<SessionPage> listSessions({String? cwd, String? cursor}) async {
     try {
       final result = asMap(
-        await client.request('session/list', {
+        await _request('session/list', {
           if (cwd != null && cwd.isNotEmpty) 'cwd': cwd,
           if (cursor != null && cursor.isNotEmpty) 'cursor': cursor,
         }),
@@ -111,7 +178,7 @@ class HarnessApi {
     String? name,
     String? model,
   }) async {
-    final result = await client.request('session/new', {
+    final result = await _request('session/new', {
       'cwd': cwd,
       'mcpServers': const <Object?>[],
       if (capabilities.isHarness)
@@ -124,7 +191,7 @@ class HarnessApi {
   }
 
   Future<JsonMap> loadSession(String sessionId, {String? cwd}) async {
-    final result = await client.request('session/load', {
+    final result = await _request('session/load', {
       'sessionId': sessionId,
       if (cwd != null && cwd.isNotEmpty) 'cwd': cwd,
       'mcpServers': const <Object?>[],
@@ -136,7 +203,7 @@ class HarnessApi {
     String sessionId,
     List<Map<String, Object?>> blocks,
   ) async {
-    final result = await client.request('session/prompt', {
+    final result = await _request('session/prompt', {
       'sessionId': sessionId,
       'prompt': blocks,
     }, Duration.zero);
@@ -146,15 +213,11 @@ class HarnessApi {
   Future<void> cancel(String sessionId) =>
       client.notify('session/cancel', {'sessionId': sessionId});
 
-  Future<void> setMode(String sessionId, String mode) => client.request(
-    'session/set_mode',
-    {'sessionId': sessionId, 'modeId': mode},
-  );
+  Future<void> setMode(String sessionId, String mode) =>
+      _request('session/set_mode', {'sessionId': sessionId, 'modeId': mode});
 
-  Future<void> setModel(String sessionId, String model) => client.request(
-    'session/set_model',
-    {'sessionId': sessionId, 'modelId': model},
-  );
+  Future<void> setModel(String sessionId, String model) =>
+      _request('session/set_model', {'sessionId': sessionId, 'modelId': model});
 
   Future<JsonMap> sessionGet(String sessionId) =>
       extension('session/get', {'id': sessionId});

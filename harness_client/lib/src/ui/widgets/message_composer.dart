@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 
+import '../../state/drafts.dart';
 import '../../state/session_controller.dart';
 import '../adaptive/adaptive_widgets.dart';
 import '../adaptive/platform_style.dart';
@@ -18,9 +19,15 @@ class MessageComposer extends StatefulWidget {
     required this.canAttach,
     this.enabled = true,
     this.awaitingAnswer = false,
+    this.offline = false,
+    this.drafts,
+    this.draftKey = '',
   });
 
-  final void Function(String text, List<PromptAttachment> attachments) onSend;
+  /// Takes the message to send.  Whether it was taken: where it was not
+  /// (there is no connection to send it over), what was typed stays in the
+  /// field, to be sent when it can be.
+  final bool Function(String text, List<PromptAttachment> attachments) onSend;
   final VoidCallback onStop;
   final bool running;
   final bool cancelling;
@@ -28,12 +35,25 @@ class MessageComposer extends StatefulWidget {
   final bool enabled;
   final bool awaitingAnswer;
 
+  /// There is no connection to the harness at the moment: what is typed is
+  /// kept, and sending waits for the connection.
+  final bool offline;
+
+  /// Where the text of the field is kept, under [draftKey], so that it
+  /// outlives this widget: the field starts from what was left there, keeps
+  /// it as it changes, and follows what is put there from outside (a message
+  /// that was not sent after all comes back).
+  final DraftStore? drafts;
+  final String draftKey;
+
   @override
   State<MessageComposer> createState() => _MessageComposerState();
 }
 
 class _MessageComposerState extends State<MessageComposer> {
-  final _text = TextEditingController();
+  late final TextEditingController _text = TextEditingController(
+    text: widget.drafts?.text(widget.draftKey) ?? '',
+  );
   final _focus = FocusNode();
   final _attachments = <PromptAttachment>[];
   String? _attachmentError;
@@ -45,22 +65,47 @@ class _MessageComposerState extends State<MessageComposer> {
       (_text.text.trim().isNotEmpty || _attachments.isNotEmpty);
 
   @override
+  void initState() {
+    super.initState();
+    _text.addListener(_rememberDraft);
+    widget.drafts?.addListener(_followDraft);
+  }
+
+  @override
   void dispose() {
+    widget.drafts?.removeListener(_followDraft);
+    _text.removeListener(_rememberDraft);
     _text.dispose();
     _focus.dispose();
     super.dispose();
+  }
+
+  /// What is typed is kept in the store.
+  void _rememberDraft() => widget.drafts?.setText(widget.draftKey, _text.text);
+
+  /// What was put in the store from outside is shown.  (What this field
+  /// keeps there itself is the text it holds already.)
+  void _followDraft() {
+    final stored = widget.drafts?.text(widget.draftKey) ?? '';
+    if (stored == _text.text) return;
+    _text.value = TextEditingValue(
+      text: stored,
+      selection: TextSelection.collapsed(offset: stored.length),
+    );
+    setState(() {});
   }
 
   Future<void> _send() async {
     if (!_canSend) return;
     final text = _text.text;
     final attachments = List<PromptAttachment>.of(_attachments);
+    // Only a message that was taken is cleared from the field.
+    if (!widget.onSend(text, attachments)) return;
     _text.clear();
     setState(() {
       _attachments.clear();
       _attachmentError = null;
     });
-    widget.onSend(text, attachments);
     _focus.requestFocus();
   }
 
@@ -266,7 +311,9 @@ class _MessageComposerState extends State<MessageComposer> {
                         key: const Key('composer-field'),
                         controller: _text,
                         focusNode: _focus,
-                        hint: widget.awaitingAnswer
+                        hint: widget.offline
+                            ? 'Reconnecting… what you type is kept'
+                            : widget.awaitingAnswer
                             ? 'Answer above to continue'
                             : widget.running
                             ? 'The agent is working…'

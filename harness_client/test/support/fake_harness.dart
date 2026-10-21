@@ -27,6 +27,11 @@ class FakeTransport implements AcpTransport {
   @override
   String get description => 'memory://fake-harness';
 
+  String? _closeReason;
+
+  @override
+  String? get closeReason => _closeReason;
+
   @override
   void send(String message) {
     if (!_open) throw StateError('closed');
@@ -35,6 +40,16 @@ class FakeTransport implements AcpTransport {
 
   void harnessSend(String message) {
     if (_open) _incoming.add(message);
+  }
+
+  /// The harness's end of the connection goes away: it closed it, or the
+  /// network did.  The client finds out, as it would from a socket.
+  Future<void> dropConnection([
+    String reason = 'The connection dropped.',
+  ]) async {
+    if (!_open) return;
+    _closeReason = reason;
+    await close();
   }
 
   @override
@@ -188,6 +203,23 @@ class FakeHarness {
   /// Make `session/list` fail, as a harness that goes wrong after it let the
   /// client in does.
   bool failSessionList = false;
+
+  /// How many of the next connections are refused, as a harness that is
+  /// down (or a network that is) refuses them.
+  int refuseConnects = 0;
+
+  /// How many connections were opened to this harness, the refused ones
+  /// not counted.
+  int connects = 0;
+
+  /// A harness that stopped answering without closing the connection, as
+  /// one on a network that died without a word does: what the client sends
+  /// goes nowhere.
+  bool silent = false;
+
+  /// How many of the next connections are silent from the start: the
+  /// harness takes the connection and never answers on it.
+  int silentConnects = 0;
   final methods = <String>{};
   final events = <String>{};
   bool authenticated = false;
@@ -208,6 +240,13 @@ class FakeHarness {
 
   Future<AcpTransport> Function(ConnectionTarget target, String token)
   get connector => (ConnectionTarget target, String token) async {
+    if (refuseConnects > 0) {
+      refuseConnects--;
+      throw Exception('Connection refused');
+    }
+    connects++;
+    silent = silentConnects > 0;
+    if (silentConnects > 0) silentConnects--;
     // A listener that lets a device sign in, as it opens: a secret it knows
     // signs the connection in, any other is as none.
     if (signIn) {
@@ -225,6 +264,15 @@ class FakeHarness {
     transport = fake;
     fake.onSend = _receive;
     return fake;
+  }
+
+  /// The connection goes away from the harness's side.
+  Future<void> dropConnection([String? reason]) async {
+    final fake = transport;
+    if (fake == null) return;
+    await (reason == null
+        ? fake.dropConnection()
+        : fake.dropConnection(reason));
   }
 
   /// For a server wrapper: hand a client's raw message to the harness.
@@ -631,6 +679,7 @@ class FakeHarness {
   }
 
   void _receive(String raw) {
+    if (silent) return;
     final message = asMap(jsonDecode(raw));
     final method = asString(message['method']);
     final id = message['id'];

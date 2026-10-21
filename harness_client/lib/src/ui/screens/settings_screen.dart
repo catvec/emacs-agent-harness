@@ -75,8 +75,13 @@ class SettingsScreen extends StatelessWidget {
                           ),
                         ),
                         HarnessStatusPill(
-                          label: 'Connected',
-                          color: HarnessColors.moss,
+                          key: const Key('connection-status'),
+                          label: app.isReconnecting
+                              ? 'Reconnecting'
+                              : 'Connected',
+                          color: app.isReconnecting
+                              ? HarnessColors.amber
+                              : HarnessColors.moss,
                         ),
                       ],
                     ),
@@ -95,17 +100,16 @@ class SettingsScreen extends StatelessWidget {
                     Row(
                       children: [
                         Expanded(
+                          // In place: the screens stay, and so does what was
+                          // typed on them.  (It used to disconnect first,
+                          // which threw them all away.)
                           child: HarnessSecondaryButton(
-                            label: 'Reconnect',
+                            key: const Key('settings-reconnect'),
+                            label: app.isReconnecting
+                                ? 'Retry now'
+                                : 'Reconnect',
                             icon: Icons.refresh_rounded,
-                            onPressed: () async {
-                              final address = app.address;
-                              final token = app.settings.token;
-                              await app.disconnect();
-                              if (address != null) {
-                                await app.connect(address, token: token);
-                              }
-                            },
+                            onPressed: app.reconnect,
                           ),
                         ),
                         const SizedBox(width: 8),

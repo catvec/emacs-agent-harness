@@ -2,16 +2,34 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:web_socket_channel/io.dart';
+import 'package:web_socket_channel/web_socket_channel.dart';
+
 import 'acp_transport.dart';
 import 'connection_target.dart';
 import 'websocket_transport.dart';
+
+/// `dart:io` can ping: a WebSocket that does keeps a connection open through
+/// a mobile network, a VPN or a NAT that forgets a quiet one, and closes it
+/// when the peer stops answering, so a connection that died without a word is
+/// found out in under a minute instead of when the next request times out.
+WebSocketChannel _openWithPings(Uri uri, List<String> protocols) =>
+    IOWebSocketChannel.connect(
+      uri,
+      protocols: protocols,
+      pingInterval: webSocketPingInterval,
+    );
 
 Future<AcpTransport> openAcpTransport(
   ConnectionTarget target,
   String token,
 ) async {
   if (!target.isTcp) {
-    return WebSocketAcpTransport.connect(target.webSocketUri!, token: token);
+    return WebSocketAcpTransport.connect(
+      target.webSocketUri!,
+      token: token,
+      opener: _openWithPings,
+    );
   }
   final socket = await Socket.connect(target.tcpHost!, target.tcpPort!);
   return TcpAcpTransport._(socket);
@@ -39,17 +57,25 @@ class TcpAcpTransport implements AcpTransport {
   final _done = Completer<void>();
   late final StreamSubscription<String> _sub;
   bool _open = true;
+  bool _closedHere = false;
+  String? _closeReason;
 
   void _onLine(String line) {
     if (line.trim().isNotEmpty) _messages.add(line);
   }
 
   void _onError(Object error, StackTrace stack) {
+    if (_open && !_closedHere) _closeReason = 'The connection failed: $error';
     if (!_messages.isClosed) _messages.addError(error, stack);
     _finish();
   }
 
-  void _onDone() => _finish();
+  void _onDone() {
+    if (_open && !_closedHere) {
+      _closeReason = 'The harness closed the connection.';
+    }
+    _finish();
+  }
 
   void _finish() {
     _open = false;
@@ -71,6 +97,9 @@ class TcpAcpTransport implements AcpTransport {
       'tcp://${_socket.remoteAddress.host}:${_socket.remotePort}';
 
   @override
+  String? get closeReason => _closeReason;
+
+  @override
   void send(String message) {
     if (!_open) throw StateError('TCP connection is closed');
     _socket.add(utf8.encode(message));
@@ -81,6 +110,7 @@ class TcpAcpTransport implements AcpTransport {
   Future<void> close([String? reason]) async {
     if (!_open) return;
     _open = false;
+    _closedHere = true;
     await _sub.cancel();
     try {
       await _socket.flush();

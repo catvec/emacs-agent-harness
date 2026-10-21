@@ -74,6 +74,30 @@ comparing the code.
 - **Keeps a conversation useful.** Local echo, auto-scroll with a "Latest"
   chip, a collapsible plan strip, a context-window meter, cost per session, and
   image attachments to prompts.
+- **Survives a lost connection.** A phone loses its connection all the time:
+  it sleeps, changes network, a VPN restarts, the harness reloads. The app
+  does not tell the person to go and reconnect. Over `ws://` and `wss://` it
+  pings the harness every 25 seconds, which keeps a quiet connection open
+  through a mobile network, a VPN or a NAT, and finds a dead one in under a
+  minute instead of when the next request times out. When the connection goes
+  (or is found dead, or the app returns to the foreground to find it gone) a
+  quiet **"Connection lost. Reconnecting…"** banner appears, with a *Retry
+  now* button, and the app connects again by itself with the session secret it
+  holds: at once, then after 1, 2, 4, 8 and every 15 seconds. The screens do
+  not go anywhere meanwhile: the tab, the open conversation, a sheet and
+  everything typed in them stay as they were; sending waits for the
+  connection and a message waits in its field; a request made in the gap
+  goes out over the new connection a moment late; and when it is back the
+  lists, the tasks and the open transcript are read again, and a permission
+  or question that was waiting is offered again. A message sent as the
+  connection died, which the harness never got (it echoes a message the
+  moment it takes it), goes back in the box instead of being lost. A phone
+  that is put away does not keep trying; it connects the moment it is picked
+  up. Only a harness that no longer accepts the device's session (it was
+  ended in Emacs) needs the person: the app falls back to the sign-in screen,
+  and whatever was typed is kept for when they are back (`DraftStore`; in
+  memory, for the life of the app). Settings → *Reconnect* does the same in
+  place; it used to disconnect first, which threw every screen away.
 
 ## Quick start
 
@@ -320,7 +344,17 @@ e2e/                  Playwright mobile-emulated flows and screenshots
 - `AppController` owns the connection and the capability switch. It routes
   `session/update` to the open `SessionController`, `_harness/event` to the
   task/usage controllers, and permission/question requests to the session that
-  must answer them.
+  must answer them. It watches the client it connected with: when that ends
+  (`AcpClient.closed`) the phase becomes `reconnecting`, which keeps the home
+  screens mounted, and it connects again in place (`HarnessApi.rebind` moves
+  the api, and the session, task and usage controllers built on it, to the new
+  `AcpClient`) with the backoff above, then reads everything again. It gives
+  up only when the harness refuses the device's session secret (`needsAuth`).
+  `DraftStore` keeps unsent text outside the widgets.
+- `WebSocketAcpTransport` pings (`webSocketPingInterval`, 25 s) where
+  `dart:io` can, closes a connection whose peer stops answering, and says why
+  a connection ended (`AcpClient.closeReason`) in words the banner can show.
+  The harness answers pings with pongs, as RFC 6455 asks.
 - `TranscriptState` turns both standard chunks and full harness nodes into one
   list, keeping a tool call and its result together, preferring a final node's
   content over streamed text, and grouping chunks by `_harness.nodeId`.
@@ -332,8 +366,9 @@ e2e/                  Playwright mobile-emulated flows and screenshots
 
 ```sh
 flutter analyze                    # no issues
-flutter test                       # 27 tests: ACP, capabilities, reducer,
-                                   # connection parsing, boot, widget flows
+flutter test                       # 90 tests: ACP, capabilities, reducer,
+                                   # connection parsing, boot, widget flows,
+                                   # reconnecting, WebSocket pings
 python3 tool/test_qr_tools.py      # QR encoder against qrencode, the phone
                                    # installer (pairing, install, build
                                    # freshness, pub cache repair) with a fake
@@ -353,6 +388,22 @@ The widget tests drive the real `AcpClient` against an in-memory ACP server
 - task review and verification, usage, server capability table
 - plain ACP fallback (three tabs, working chat, standard notice)
 - Cupertino rendering of the shell
+- a lost connection (`test/reconnect_test.dart`, `reconnect_widget_test.dart`):
+  a fake harness that drops the connection, refuses the next ones, goes silent
+  or no longer knows the device's secret. The app notices, connects again by
+  itself with backoff, keeps its screens (a typed message, a half-written
+  task, a search filter, the tab) and reads them again, answers nothing on the
+  dead connection, falls back to sign-in only when turned away and keeps what
+  was typed, waits while it is in the background, finds a connection that died
+  without a word by a probe, puts a message the harness never got back in the
+  box (and not one it did), and reconnects in place from Settings
+- real sockets (`test/websocket_transport_test.dart`): a peer that stops
+  answering pings is found out and named, an idle connection to one that
+  answers stays open, and what the peer said when it closed is reported
+- a real network (`test/reconnect_network_test.dart`): the app's own
+  transport through a TCP proxy that cuts every connection, refuses new ones
+  or swallows all traffic, as a network that died without a word does: the
+  connection is got back and the open conversation is read again
 
 ### End-to-end in a mobile emulator
 

@@ -66,11 +66,19 @@ class AcpClient {
   AcpRequestHandler? requestHandler;
   int _nextId = 1;
   bool _isClosed = false;
+  String? _closeReason;
 
   Stream<AcpNotification> get notifications => _notifications.stream;
+
+  /// Completes when the connection is gone, whoever ended it.
   Future<void> get closed => _closed.future;
   bool get isClosed => _isClosed;
   String get description => transport.description;
+
+  /// Why the connection ended when it was not this client that ended it
+  /// (the peer closed it, it stopped answering, the network failed), in
+  /// words for a person.  Null while it is open, and after [close].
+  String? get closeReason => _closeReason;
 
   void _log(String message) => logger?.call(message);
 
@@ -83,7 +91,9 @@ class AcpClient {
   /// `_harness.sessionRefresh` is also what asks a harness to hand over the
   /// session secret of a sign-in, in the answer to `authenticate`, so that
   /// the next connection needs no sign-in.  [clientTitle] is what the person
-  /// asked to approve this device sees it called.
+  /// asked to approve this device sees it called.  [timeout] is how long to
+  /// wait for the answer, where the default is too long (a connection that
+  /// was just opened to a harness that may not answer).
   Future<JsonMap> initialize({
     Map<String, Object?> clientCapabilities = const {
       'fs': {'readTextFile': false, 'writeTextFile': false},
@@ -93,6 +103,7 @@ class AcpClient {
     String clientName = 'Harness',
     String clientTitle = '',
     String clientVersion = '1.0.0',
+    Duration? timeout,
   }) async {
     final result = await request('initialize', <String, Object?>{
       'protocolVersion': 1,
@@ -102,15 +113,34 @@ class AcpClient {
         if (clientTitle.isNotEmpty) 'title': clientTitle,
         'version': clientVersion,
       },
-    });
+    }, timeout);
     return asMap(result);
+  }
+
+  /// Whether the peer is there and answers within [timeout].  It sends
+  /// `$/ping`, a request every JSON-RPC peer has to answer, if only with
+  /// "method not found": any answer will do, since it proves that the
+  /// connection works both ways.  A connection that died without a word
+  /// (a phone that was asleep, a network that changed) has no answer, which
+  /// a request for something real would only find out after minutes.
+  Future<bool> probe({Duration timeout = const Duration(seconds: 5)}) async {
+    if (_isClosed) return false;
+    try {
+      await request(r'$/ping', null, timeout);
+      return true;
+    } on AcpException catch (error) {
+      return !error.isTransport;
+    }
   }
 
   /// Sign in with [methodId], one of the `authMethods` `initialize` listed:
   /// ACP's way for an agent to sign its user in itself.  The answer comes
   /// when the agent did, which can take as long as the person it asks
   /// does.  [token] is the credential of the method named `token`.
-  Future<JsonMap> authenticate({required String methodId, String? token}) async {
+  Future<JsonMap> authenticate({
+    required String methodId,
+    String? token,
+  }) async {
     final result = await request('authenticate', <String, Object?>{
       'methodId': methodId,
       if (token != null) 'token': token,
@@ -265,11 +295,15 @@ class AcpClient {
 
   void _transportFailed(Object error, StackTrace stack) {
     _log('Transport error: $error');
+    _closeReason ??= transport.closeReason ?? 'The connection failed: $error';
     _failPending(-32003, 'The connection failed: $error');
     _close();
   }
 
   void _transportClosed() {
+    if (!_isClosed) {
+      _closeReason ??= transport.closeReason ?? 'The connection was closed.';
+    }
     _failPending(-32003, 'The connection was closed.');
     _close();
   }
@@ -284,8 +318,11 @@ class AcpClient {
     }
   }
 
+  /// The connection is over: whoever ended it, [closed] completes and the
+  /// notifications end.  (It used to return at once when [close] had marked
+  /// the client closed already, which left [closed] pending for good on a
+  /// client that was closed from this side.)
   void _close() {
-    if (_isClosed) return;
     _isClosed = true;
     if (!_notifications.isClosed) _notifications.close();
     if (!_closed.isCompleted) _closed.complete();
@@ -295,8 +332,11 @@ class AcpClient {
     if (_isClosed) return;
     _isClosed = true;
     _failPending(-32003, 'The connection was closed.');
-    await _subscription?.cancel();
-    await transport.close();
-    _close();
+    unawaited(_subscription?.cancel());
+    try {
+      await transport.close();
+    } finally {
+      _close();
+    }
   }
 }

@@ -5,10 +5,12 @@ import 'package:flutter/material.dart';
 
 import '../../models/task.dart';
 import '../../state/app_controller.dart';
+import '../../state/drafts.dart';
 import '../../state/task_controller.dart';
 import '../adaptive/adaptive_widgets.dart';
 import '../format.dart';
 import '../theme/harness_theme.dart';
+import '../widgets/connection_banner.dart';
 
 class TasksScreen extends StatefulWidget {
   const TasksScreen({
@@ -850,10 +852,8 @@ class _NewTaskSheet extends StatefulWidget {
 }
 
 class _NewTaskSheetState extends State<_NewTaskSheet> {
-  late final TextEditingController _prompt = TextEditingController();
-  late final TextEditingController _cwd = TextEditingController(
-    text: widget.app.selectedProject ?? '',
-  );
+  late final TextEditingController _prompt;
+  late final TextEditingController _cwd;
   String? _project;
   String _priority = 'medium';
   bool _refine = false;
@@ -862,14 +862,52 @@ class _NewTaskSheetState extends State<_NewTaskSheet> {
   bool _busy = false;
   String? _error;
 
+  /// What was written of the task, kept where it outlives this sheet: a
+  /// sheet that is closed by accident, or thrown away with the screens when
+  /// the connection is lost, must not take the description with it.
+  TaskDraft get _draft => widget.app.drafts.task;
+
   @override
   void initState() {
     super.initState();
-    _project = widget.app.selectedProject;
+    final draft = _draft;
+    final resumed = !draft.isEmpty;
+    _prompt = TextEditingController(text: draft.prompt);
+    _cwd = TextEditingController(
+      text: resumed ? draft.cwd : widget.app.selectedProject ?? '',
+    );
+    _project = resumed ? draft.project : widget.app.selectedProject;
+    if (resumed) {
+      _priority = draft.priority;
+      _refine = draft.refine;
+      _plan = draft.plan;
+      _mainTree = draft.mainTree;
+    }
+    _prompt.addListener(_keepDraft);
+    _cwd.addListener(_keepDraft);
+  }
+
+  void _keepDraft() {
+    _draft
+      ..prompt = _prompt.text
+      ..cwd = _cwd.text
+      ..project = _project
+      ..priority = _priority
+      ..refine = _refine
+      ..plan = _plan
+      ..mainTree = _mainTree;
+  }
+
+  /// Change a choice on the sheet, and keep it with the rest of the draft.
+  void _choose(VoidCallback change) {
+    setState(change);
+    _keepDraft();
   }
 
   @override
   void dispose() {
+    _prompt.removeListener(_keepDraft);
+    _cwd.removeListener(_keepDraft);
     _prompt.dispose();
     _cwd.dispose();
     super.dispose();
@@ -903,6 +941,8 @@ class _NewTaskSheetState extends State<_NewTaskSheet> {
       });
       return;
     }
+    // Sent: only now is the description no longer worth keeping.
+    _draft.clear();
     Navigator.of(context).pop(task);
   }
 
@@ -935,6 +975,9 @@ class _NewTaskSheetState extends State<_NewTaskSheet> {
                 color: theme.colorScheme.onSurfaceVariant,
               ),
             ),
+            // The sheet covers the banner of the screens under it. What is
+            // written here is kept, and goes when the connection is back.
+            ConnectionBanner(app: app, padding: const EdgeInsets.only(top: 12)),
             const SizedBox(height: 16),
             if (app.projects.isNotEmpty) ...[
               Text('PROJECT', style: _label(theme)),
@@ -948,7 +991,7 @@ class _NewTaskSheetState extends State<_NewTaskSheet> {
                       label: projectName(project),
                       icon: Icons.folder_outlined,
                       selected: _project == project,
-                      onTap: () => setState(() {
+                      onTap: () => _choose(() {
                         _project = project;
                         _cwd.text = project;
                       }),
@@ -962,7 +1005,7 @@ class _NewTaskSheetState extends State<_NewTaskSheet> {
               hint: '/absolute/path/to/project',
               prefix: const Icon(Icons.folder_open_rounded, size: 18),
               onChanged: (_) {
-                if (_project != null) setState(() => _project = null);
+                if (_project != null) _choose(() => _project = null);
               },
             ),
             const SizedBox(height: 14),
@@ -985,7 +1028,7 @@ class _NewTaskSheetState extends State<_NewTaskSheet> {
                 ('high', 'High'),
               ],
               value: _priority,
-              onChanged: (value) => setState(() => _priority = value),
+              onChanged: (value) => _choose(() => _priority = value),
             ),
             const SizedBox(height: 14),
             _ToggleRow(
@@ -994,14 +1037,14 @@ class _NewTaskSheetState extends State<_NewTaskSheet> {
               subtitle:
                   'Wait in the backlog; refines the prompt before it starts.',
               value: _refine,
-              onChanged: (value) => setState(() => _refine = value),
+              onChanged: (value) => _choose(() => _refine = value),
             ),
             _ToggleRow(
               icon: Icons.map_outlined,
               title: 'Plan first',
               subtitle: 'A strong model plans; a medium model carries it out.',
               value: _plan,
-              onChanged: (value) => setState(() => _plan = value),
+              onChanged: (value) => _choose(() => _plan = value),
             ),
             _ToggleRow(
               icon: Icons.account_tree_outlined,
@@ -1009,7 +1052,7 @@ class _NewTaskSheetState extends State<_NewTaskSheet> {
               subtitle:
                   'No worktree or branch; changes land in the checkout itself.',
               value: _mainTree,
-              onChanged: (value) => setState(() => _mainTree = value),
+              onChanged: (value) => _choose(() => _mainTree = value),
             ),
             if (_error != null) ...[
               const SizedBox(height: 10),

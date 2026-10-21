@@ -9,6 +9,7 @@ import '../models/activity.dart';
 import '../models/session.dart';
 import '../models/transcript.dart';
 import '../services/harness_api.dart';
+import 'drafts.dart';
 import 'interaction.dart';
 
 class PromptAttachment {
@@ -38,12 +39,20 @@ class SessionController extends ChangeNotifier {
     required this.api,
     required this.sessionId,
     this.summary,
+    this.drafts,
   }) {
-    _subscription = api.client.notifications.listen(_onNotification);
+    // The api's own stream, not the connection's: the connection is replaced
+    // when the app connects again, and this goes on listening.
+    _subscription = api.notifications.listen(_onNotification);
   }
 
   final HarnessApi api;
   final String sessionId;
+
+  /// Where the unsent text of this conversation's composer is kept, when
+  /// the app keeps it (see [DraftStore]): a message that turns out not to
+  /// have been sent goes back there.
+  final DraftStore? drafts;
   SessionSummary? summary;
   final TranscriptState transcript = TranscriptState();
   TurnActivity? activity;
@@ -57,6 +66,10 @@ class SessionController extends ChangeNotifier {
   bool _opened = false;
   bool _disposed = false;
 
+  /// Set when the connection was lost and replaced: the transcript may be
+  /// behind what the harness has, so the next [open] reads it again.
+  bool _stale = false;
+
   InteractionRequest? get currentInteraction =>
       interactions.isEmpty ? null : interactions.first;
 
@@ -65,8 +78,40 @@ class SessionController extends ChangeNotifier {
 
   bool get isRunning => promptInFlight || summary?.isRunning == true;
 
+  /// Whether a message can go out now: there is a connection to take it.
+  /// While there is none the composer keeps what was typed.
+  bool get canSend => !api.client.isClosed;
+
+  /// The connection this session talked over is gone.  What the agent asked
+  /// on it (a permission, a question) can no longer be answered there; the
+  /// harness still holds it as pending and offers it again to the next
+  /// connection ([open] finds it).  What was read of the session may be
+  /// behind by then, so the next [open] reads it again.
+  ///
+  /// Call this after the connection is closed: the answers that complete
+  /// the requests below are then dropped, and never reach the harness as a
+  /// refusal nobody gave.
+  void connectionLost() {
+    _stale = true;
+    final gone = [
+      for (final request in interactions)
+        if (!request.synthetic) request,
+    ];
+    if (gone.isEmpty) return;
+    for (final request in gone) {
+      interactions.remove(request);
+      if (request.isPermission) {
+        request.completer?.complete(request.cancelledPermissionResult());
+      } else if (request.isQuestion) {
+        request.completer?.complete(request.questionResult('', const []));
+      }
+    }
+    activity = null;
+    _notify();
+  }
+
   Future<void> open({bool force = false}) async {
-    if (_opened && !force) {
+    if (_opened && !force && !_stale) {
       await refreshInfo();
       return;
     }
@@ -77,6 +122,9 @@ class SessionController extends ChangeNotifier {
     try {
       // ACP's session/load resumes the session and replays the transcript.
       await api.loadSession(sessionId, cwd: summary?.cwd);
+      // Read again: what a lost connection may have left behind is made up
+      // for.  (One lost from here on marks it stale again.)
+      _stale = false;
       if (api.capabilities.richNodes) {
         try {
           final info = await api.sessionGet(sessionId);
@@ -162,10 +210,18 @@ class SessionController extends ChangeNotifier {
   }) async {
     final trimmed = text.trim();
     if ((trimmed.isEmpty && attachments.isEmpty) || promptInFlight) return;
+    if (!canSend) {
+      // The composer does not offer to send while there is no connection;
+      // this is for a caller that does not ask.  Nothing is echoed that
+      // never left.
+      error = 'Not connected to the harness: the message was not sent.';
+      _notify();
+      return;
+    }
     error = null;
     promptInFlight = true;
     cancelling = false;
-    transcript.addLocalUser(
+    final echo = transcript.addLocalUser(
       trimmed.isEmpty ? '(${attachments.length} images)' : trimmed,
     );
     _notify();
@@ -188,7 +244,11 @@ class SessionController extends ChangeNotifier {
         error = 'The turn ended: $reason';
       }
     } on AcpException catch (failure) {
-      error = _friendlyError(failure);
+      if (failure.isTransport) {
+        _interrupted(echo, trimmed, attachments.length);
+      } else {
+        error = _friendlyError(failure);
+      }
     } catch (failure) {
       error = '$failure';
     } finally {
@@ -199,6 +259,24 @@ class SessionController extends ChangeNotifier {
       unawaited(refreshInfo());
       unawaited(_refreshActivity());
     }
+  }
+
+  /// The connection went while a message was on its way.  The app connects
+  /// again by itself and reads the conversation again, which shows what the
+  /// harness has; what matters here is a message it does not have, which
+  /// must not be lost with the connection.  The harness echoes a message as
+  /// soon as it takes it, so one that was never echoed ([echo] still local)
+  /// never got there: it goes back to the composer.  One that was echoed is
+  /// the harness's, and its turn goes on there.
+  void _interrupted(TranscriptItem echo, String text, int images) {
+    if (!echo.localEcho) return;
+    transcript.removeLocalEcho(echo);
+    if (text.isNotEmpty) {
+      drafts?.putBack(DraftStore.composerKey(sessionId), text);
+    }
+    error = text.isNotEmpty
+        ? 'The connection was lost before this was sent. It is back in the box.'
+        : 'The connection was lost before the images were sent.';
   }
 
   Future<void> cancel() async {

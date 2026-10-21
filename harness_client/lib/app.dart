@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -20,14 +22,50 @@ class HarnessApp extends StatefulWidget {
   State<HarnessApp> createState() => _HarnessAppState();
 }
 
-class _HarnessAppState extends State<HarnessApp> {
+class _HarnessAppState extends State<HarnessApp> with WidgetsBindingObserver {
   late final AppController _app;
+  final _navigator = GlobalKey<NavigatorState>();
+  bool _inSession = false;
 
   @override
   void initState() {
     super.initState();
     _app = widget.appController ?? AppController(settings: widget.settings);
+    _inSession = _app.hasSession;
+    _app.addListener(_sessionChanged);
+    WidgetsBinding.instance.addObserver(this);
     _configure();
+  }
+
+  /// A conversation or a sheet is opened on top of the home screens, on the
+  /// navigator.  When the session ends (the harness turned the device away,
+  /// the person disconnected) the home screens give way to the connection
+  /// screen, and whatever was opened on them must go too, not stay up over
+  /// it.  What was typed in them is kept ([AppController.drafts]).
+  void _sessionChanged() {
+    final inSession = _app.hasSession;
+    if (_inSession && !inSession) {
+      _navigator.currentState?.popUntil((route) => route.isFirst);
+    }
+    _inSession = inSession;
+  }
+
+  /// A phone puts a connection to sleep without a word while the app is
+  /// away, and the person who comes back should not be the first to find
+  /// out: check it, and connect again if it died.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    switch (state) {
+      case AppLifecycleState.resumed:
+        unawaited(_app.resumed());
+      case AppLifecycleState.paused:
+      case AppLifecycleState.hidden:
+      case AppLifecycleState.detached:
+        _app.setForeground(false);
+      case AppLifecycleState.inactive:
+        // Only a moment: a permission dialog, the notification shade.
+        break;
+    }
   }
 
   /// Read local preferences in the background.  The client's first screen is
@@ -62,6 +100,8 @@ class _HarnessAppState extends State<HarnessApp> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _app.removeListener(_sessionChanged);
     _app.dispose();
     super.dispose();
   }
@@ -80,6 +120,7 @@ class _HarnessAppState extends State<HarnessApp> {
             app: _app,
             settings: widget.settings,
             child: MaterialApp(
+              navigatorKey: _navigator,
               title: 'Harness',
               debugShowCheckedModeBanner: false,
               theme: HarnessTheme.material(Brightness.light),
@@ -121,7 +162,9 @@ class _RootGate extends StatelessWidget {
       animation: app,
       builder: (context, _) {
         final Widget child;
-        if (app.phase == ConnectionPhase.connected) {
+        // Out of touch for a while is still the session: the screens stay
+        // up, with what was typed on them, while the app connects again.
+        if (app.hasSession) {
           child = HomeShell(key: const ValueKey('home'), app: app);
         } else {
           child = ConnectScreen(key: const ValueKey('connect'), app: app);

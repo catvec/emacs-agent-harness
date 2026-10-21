@@ -177,6 +177,12 @@ class TranscriptState {
     return item;
   }
 
+  /// Take back a message that was shown before the harness had it, and
+  /// never will.
+  void removeLocalEcho(TranscriptItem item) {
+    if (item.localEcho) items.remove(item);
+  }
+
   TranscriptItem? itemForNode(String? nodeId) {
     if (nodeId == null) return null;
     for (final item in items) {

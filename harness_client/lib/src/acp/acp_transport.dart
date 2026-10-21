@@ -16,6 +16,12 @@ abstract class AcpTransport {
 
   String get description;
 
+  /// Why the connection ended, in words for a person, once it has: the
+  /// close code a WebSocket peer sent, that it stopped answering pings, the
+  /// error the socket failed with.  Null while it is open, and for a
+  /// transport that was closed on purpose.
+  String? get closeReason;
+
   void send(String message);
 
   Future<void> close([String? reason]);

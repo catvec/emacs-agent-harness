@@ -9,6 +9,7 @@ import '../../models/task.dart';
 import '../../models/transcript.dart';
 import '../../models/usage.dart';
 import '../../state/app_controller.dart';
+import '../../state/drafts.dart';
 import '../../state/session_controller.dart';
 import '../adaptive/adaptive_widgets.dart';
 import '../adaptive/platform_style.dart';
@@ -16,6 +17,7 @@ import '../app_scope.dart';
 import '../format.dart';
 import '../navigation.dart';
 import '../theme/harness_theme.dart';
+import '../widgets/connection_banner.dart';
 import '../widgets/interaction_card.dart';
 import '../widgets/message_composer.dart';
 import '../widgets/transcript_view.dart';
@@ -369,6 +371,9 @@ class _SessionScreenState extends State<SessionScreen> {
     final plan = controller.transcript.plan;
     return Column(
       children: [
+        // A conversation opened as a page of its own covers the home
+        // screens, and with them their banner.
+        if (!widget.embedded) ConnectionBanner(app: _app),
         _MetaStrip(
           app: _app,
           controller: controller,
@@ -431,11 +436,19 @@ class _SessionScreenState extends State<SessionScreen> {
           cancelling: controller.cancelling,
           canAttach: _app.capability?.promptImages == true,
           awaitingAnswer: controller.currentInteraction != null,
-          enabled: controller.currentInteraction == null,
+          // Typing goes on while the connection is out; sending waits for it.
+          offline: !controller.canSend,
+          enabled: controller.currentInteraction == null && controller.canSend,
           onStop: controller.cancel,
+          // What is typed outlives this screen: see DraftStore.
+          drafts: _app.drafts,
+          draftKey: DraftStore.composerKey(widget.sessionId),
           onSend: (text, attachments) {
+            // No connection to take it: the composer keeps the message.
+            if (!controller.canSend) return false;
             setState(() => _scrollTick++);
             unawaited(controller.send(text, attachments: attachments));
+            return true;
           },
         ),
       ],

@@ -4325,7 +4325,13 @@ machine, gets nothing.
 
 **Staying signed in.** A client that says it can keep a session secret
 (the harness's own app) is handed one in the answer to `authenticate`
-and presents it as it connects next time: no question. Any other client
+and presents it as it connects next time: no question. The app also
+pings the listener every 25 seconds, which the listener answers as
+RFC 6455 asks, so a quiet connection stays open through a mobile
+network or a VPN and a dead one is found within a minute; when the
+connection is lost the app connects again by itself with that secret,
+and keeps its screens and what was typed on them (see
+[harness_client/README.md](harness_client/README.md)). Any other client
 signs in again each time it connects; to skip that, `t` on the page
 makes a token for it, shown once, to put in the client's settings (ACP
 UI: the address and a header `Authorization: Bearer TOKEN`; Agmente:
