@@ -15,8 +15,5 @@ Future<AcpTransport> openAcpTransport(
       'A browser cannot open a raw TCP socket. Use ws://HOST:PORT/acp.',
     );
   }
-  return WebSocketAcpTransport.connect(
-    target.uriWithToken(token)!,
-    token: token,
-  );
+  return WebSocketAcpTransport.connect(target.webSocketUri!, token: token);
 }

@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../acp/acp_client.dart';
 import '../acp/acp_message.dart';
@@ -10,6 +11,7 @@ import '../acp/connection_target.dart';
 import '../models/server_info.dart';
 import '../models/session.dart';
 import '../services/harness_api.dart';
+import '../services/device_name.dart';
 import '../state/session_controller.dart';
 import '../state/settings_controller.dart';
 import '../state/task_controller.dart';
@@ -29,18 +31,33 @@ typedef AcpConnector = Future<AcpTransport> Function(
   String token,
 );
 
+/// Opens [url] for the user, in their browser.  Whether it could be opened.
+typedef UrlOpener = Future<bool> Function(Uri url);
+
+Future<bool> _launchInBrowser(Uri url) =>
+    launchUrl(url, mode: LaunchMode.externalApplication);
+
 class AppController extends ChangeNotifier {
-  AppController({required this.settings, AcpConnector? connector})
-    : _connector = connector;
+  AppController({
+    required this.settings,
+    AcpConnector? connector,
+    UrlOpener? urlOpener,
+  }) : _connector = connector,
+       _openUrl = urlOpener ?? _launchInBrowser;
 
   final SettingsController settings;
   final AcpConnector? _connector;
+  final UrlOpener _openUrl;
   AcpClient? _client;
   HarnessApi? api;
   HarnessCapabilities? capabilities;
   ConnectionPhase phase = ConnectionPhase.disconnected;
   String? error;
   String? address;
+
+  /// The way to sign in the user chose, while the harness waits for them
+  /// to finish it (an approval in Emacs, a login in the browser).
+  AuthMethod? signingInWith;
   List<SessionSummary> sessions = const [];
   List<String> projects = const [];
   String? selectedProject;
@@ -85,6 +102,30 @@ class AppController extends ChangeNotifier {
   bool get hasTasks => capabilities?.tasks == true && tasks != null;
   bool get hasUsage => capabilities?.usage == true && usage != null;
 
+  /// The ways the harness lets this device sign in (ACP's `authMethods`),
+  /// but for the session secret, which has a field of its own.
+  List<AuthMethod> get signInMethods => [
+    for (final method in capabilities?.authMethods ?? const <AuthMethod>[])
+      if (!method.isToken) method,
+  ];
+
+  /// Whether a session secret can be given instead of choosing a method.
+  bool get canUseToken =>
+      (capabilities?.authMethods ?? const <AuthMethod>[]).any(
+        (method) => method.isToken,
+      );
+
+  /// Connect to [address]: a `ws://` or `wss://` address (an `https://` one
+  /// is its `wss://`), a `tcp://` address, or the connection link the
+  /// harness gives a device that is given a token (a `ws://` address with
+  /// a `?token=`).  [token] is a session secret typed beside the address,
+  /// and wins over one in it.
+  ///
+  /// A device that has no session yet, or whose secret was refused, stops
+  /// at [ConnectionPhase.needsAuth], where [signInMethods] are shown to
+  /// the user, who picks one for [signIn]: that is how ACP lets a client
+  /// sign in.  Once signed in, the secret the harness hands this device is
+  /// kept, and the next connection needs no sign-in at all.
   Future<void> connect(String address, {String token = ''}) async {
     final generation = ++_connectionGeneration;
     await _teardown(keepPhase: true);
@@ -92,12 +133,18 @@ class AppController extends ChangeNotifier {
     this.address = address;
     error = null;
     lastActionError = null;
+    signingInWith = null;
     _notify();
+    var secret = token.trim();
     try {
       final target = ConnectionTarget.parse(address, web: kIsWeb);
+      if (secret.isEmpty && target.token != null) secret = target.token!;
+      // What is shown and remembered never carries the secret in its URL.
+      final shown = target.isTcp ? address : target.webSocketUri.toString();
+      this.address = shown;
       final transport =
-          await (_connector?.call(target, token) ??
-              target.connect(token: token));
+          await (_connector?.call(target, secret) ??
+              target.connect(token: secret));
       if (generation != _connectionGeneration) {
         await transport.close();
         return;
@@ -108,35 +155,41 @@ class AppController extends ChangeNotifier {
       );
       _client = client;
       _subscription = client.notifications.listen(_onNotification);
-      final initialized = await client.initialize();
-      capabilities = HarnessCapabilities.fromInitialize(initialized);
-      api = HarnessApi(client, capabilities!);
-      _degradedSubscription = api!.degraded.listen(_onDegraded);
-      client.requestHandler = _onAgentRequest;
-      if (token.isNotEmpty) {
-        phase = ConnectionPhase.authenticating;
-        _notify();
-        try {
-          await client.authenticate(methodId: 'token', token: token);
-        } on AcpException catch (failure) {
-          if (failure.isAuthRequired) {
-            phase = ConnectionPhase.needsAuth;
-            error = 'That token was not accepted.';
-            _notify();
-            return;
+      final initialized = await client.initialize(clientTitle: deviceName());
+      _adopt(client, initialized);
+      // The secret the connection was opened with is the one to sign in
+      // with, even where the harness replaced it just now.
+      final presented = secret;
+      secret = _keepReplacement(shown, secret, _replacementSecret(initialized));
+      if (capabilities!.authMethods.isNotEmpty) {
+        // The harness wants this device to sign in.  A secret on a
+        // WebSocket was offered as the connection opened, and a harness
+        // that listed methods did not take it; over plain TCP it is the
+        // first thing to try.
+        if (target.isTcp && presented.isNotEmpty && canUseToken) {
+          try {
+            final answer = await client.authenticate(
+              methodId: 'token',
+              token: presented,
+            );
+            secret = await _signedIn(client, shown, secret, answer);
+          } on AcpException catch (failure) {
+            if (failure.isAuthRequired) {
+              phase = ConnectionPhase.needsAuth;
+              error = _notAccepted;
+              _notify();
+              return;
+            }
+            rethrow;
           }
-          // An agent with no token method can still be usable without auth.
-          if (!failure.isMethodNotFound) rethrow;
+        } else {
+          phase = ConnectionPhase.needsAuth;
+          error = presented.isNotEmpty ? _notAccepted : null;
+          _notify();
+          return;
         }
       }
-      await _loadInitial(throwOnAuth: true);
-      if (generation != _connectionGeneration) return;
-      phase = ConnectionPhase.connected;
-      _notify();
-      // Remembering is a convenience; a slow preference store must not stop
-      // the initial loads after a successful connection.
-      unawaited(settings.rememberConnectionDetails(address, token));
-      _scheduleInitialLoads();
+      await _enter(generation, shown, secret);
     } on AcpException catch (failure) {
       if (failure.isAuthRequired) {
         phase = ConnectionPhase.needsAuth;
@@ -149,59 +202,177 @@ class AppController extends ChangeNotifier {
       _notify();
     } catch (failure) {
       phase = ConnectionPhase.failed;
-      error = _cleanError(failure);
+      error = _cleanError(failure, hadSecret: secret.isNotEmpty);
       await _teardown(keepPhase: true);
       _notify();
     }
   }
 
-  Future<void> submitToken(String token) async {
+  /// Take [initialized], what `initialize` answered, as what the harness
+  /// can do, and wire the client to it.
+  void _adopt(AcpClient client, JsonMap initialized) {
+    capabilities = HarnessCapabilities.fromInitialize(initialized);
+    api = HarnessApi(client, capabilities!);
+    _degradedSubscription?.cancel();
+    _degradedSubscription = api!.degraded.listen(_onDegraded);
+    client.requestHandler = _onAgentRequest;
+  }
+
+  /// Start using the connection: the first loads, then the app opens.
+  Future<void> _enter(int generation, String shown, String secret) async {
+    await _loadInitial(throwOnAuth: true);
+    if (generation != _connectionGeneration) return;
+    signingInWith = null;
+    phase = ConnectionPhase.connected;
+    error = null;
+    _notify();
+    // Remembering is a convenience; a slow preference store must not stop
+    // the initial loads after a successful connection.
+    unawaited(settings.rememberConnectionDetails(shown, secret));
+    _scheduleInitialLoads();
+  }
+
+  /// What a harness that signed this device in handed back: the secret to
+  /// sign in with next time, in the `_meta` of the answer to `authenticate`.
+  String? _handedSecret(JsonMap answer) {
+    final token = asString(
+      asMap(asMap(asMap(answer['_meta'])['harness'])['session'])['token'],
+    );
+    return token == null || token.isEmpty ? null : token;
+  }
+
+  /// A harness that listed methods before it signed this device in answers
+  /// `initialize` again, now with everything it can do.  Returns the secret
+  /// to keep: the one it handed over, else the one the device had, and the
+  /// one that replaces either, when the full answer brings one.
+  Future<String> _signedIn(
+    AcpClient client,
+    String shown,
+    String secret,
+    JsonMap answer,
+  ) async {
+    var kept = _handedSecret(answer) ?? secret;
+    if (kept != secret) _keepReplacement(shown, secret, kept);
+    final full = await client.initialize(clientTitle: deviceName());
+    _adopt(client, full);
+    kept = _keepReplacement(shown, kept, _replacementSecret(full));
+    return kept;
+  }
+
+  /// Sign in with [method], one of [signInMethods]: ACP's `authenticate`,
+  /// which the harness answers once the user did what the method asks.
+  /// An approval waits for them in Emacs, a login for them in the browser,
+  /// which this opens.
+  Future<void> signIn(AuthMethod method) async {
     final client = _client;
-    if (client == null) return;
+    final shown = address;
+    if (client == null || shown == null || signingInWith != null) return;
+    final generation = _connectionGeneration;
+    signingInWith = method;
     phase = ConnectionPhase.authenticating;
     error = null;
     _notify();
     try {
-      await client.authenticate(methodId: 'token', token: token);
-      await _loadInitial(throwOnAuth: true);
-      phase = ConnectionPhase.connected;
-      _notify();
-      if (address != null) {
-        unawaited(settings.rememberConnectionDetails(address!, token));
+      final url = method.isOidc ? method.url : null;
+      if (url != null) {
+        final opened = await _openUrl(Uri.parse(url)).catchError((_) => false);
+        if (!opened) {
+          lastActionError =
+              'Open $url in a browser, sign in, and confirm the code '
+              '${method.code ?? ''}.';
+          _notify();
+        }
       }
-      _scheduleInitialLoads();
+      final answer = await client.authenticate(methodId: method.id);
+      if (generation != _connectionGeneration) return;
+      final secret = await _signedIn(client, shown, '', answer);
+      await _enter(generation, shown, secret);
     } on AcpException catch (failure) {
-      phase = failure.isAuthRequired
-          ? ConnectionPhase.needsAuth
-          : ConnectionPhase.failed;
-      error = failure.isAuthRequired
-          ? 'That token was not accepted.'
-          : failure.message;
+      if (generation != _connectionGeneration) return;
+      signingInWith = null;
+      phase = failure.isTransport
+          ? ConnectionPhase.failed
+          : ConnectionPhase.needsAuth;
+      error = failure.message;
+      _notify();
+    } catch (failure) {
+      if (generation != _connectionGeneration) return;
+      signingInWith = null;
+      phase = ConnectionPhase.failed;
+      error = _cleanError(failure);
       _notify();
     }
   }
 
-  /// The harness's QR pairing: this call waits until the code is scanned.
-  Future<void> pair() async {
+  /// Give up on the sign-in that waits: the connection closes, and with it
+  /// what the harness waits to approve.
+  Future<void> cancelSignIn() async {
+    if (signingInWith == null) return;
+    await disconnect();
+  }
+
+  /// The new session secret a harness put in an `initialize` answer, if any.
+  /// A harness replaces the secret of a device that said it can keep one
+  /// (see [AcpClient.initialize]) every so often, so a secret that leaks is
+  /// of no use for long.
+  String? _replacementSecret(JsonMap initialized) {
+    final token = asString(
+      asMap(asMap(initialized['_harness'])['session'])['token'],
+    );
+    return token == null || token.isEmpty ? null : token;
+  }
+
+  /// Keep [replacement] in place of [secret] at once: the old secret stops
+  /// working soon, so it must not wait for the rest of the connection to go
+  /// well.  Returns the secret to go on with.
+  String _keepReplacement(String address, String secret, String? replacement) {
+    if (replacement == null || replacement == secret) return secret;
+    unawaited(settings.rememberConnectionDetails(address, replacement));
+    return replacement;
+  }
+
+  /// Sign in with a session secret, or the harness's shared secret, typed
+  /// by the user.
+  Future<void> submitToken(String token) async {
     final client = _client;
-    if (client == null) return;
+    final shown = address;
+    if (client == null || shown == null) return;
+    final generation = _connectionGeneration;
     phase = ConnectionPhase.authenticating;
     error = null;
     _notify();
     try {
-      await client.authenticate(methodId: 'pair');
-      await _loadInitial(throwOnAuth: true);
-      phase = ConnectionPhase.connected;
-      _notify();
-      if (address != null) {
-        unawaited(settings.rememberConnectionDetails(address!, ''));
-      }
-      _scheduleInitialLoads();
+      final answer = await client.authenticate(methodId: 'token', token: token);
+      final secret = await _signedIn(client, shown, token, answer);
+      await _enter(generation, shown, secret);
     } on AcpException catch (failure) {
-      phase = ConnectionPhase.needsAuth;
-      error = failure.message;
+      phase = failure.isAuthRequired
+          ? ConnectionPhase.needsAuth
+          : ConnectionPhase.failed;
+      error = failure.isAuthRequired ? _notAccepted : failure.message;
       _notify();
     }
+  }
+
+  /// Whether the harness offers `logout`: ending this device's session.
+  bool get canSignOut {
+    final caps = asMap(asMap(capabilities?.raw['agentCapabilities'])['auth']);
+    return caps.containsKey('logout');
+  }
+
+  /// End this device's session on the harness (it must be paired again to
+  /// connect), forget the saved secret and disconnect.
+  Future<void> signOut() async {
+    final client = _client;
+    if (client != null && canSignOut) {
+      try {
+        await client.request('logout', <String, Object?>{});
+      } catch (_) {
+        // The session may be gone already; either way we leave.
+      }
+    }
+    await settings.clearConnection();
+    await disconnect();
   }
 
   Future<void> _loadInitial({bool throwOnAuth = false}) async {
@@ -590,6 +761,7 @@ class AppController extends ChangeNotifier {
     _client = null;
     api = null;
     capabilities = null;
+    signingInWith = null;
     for (final controller in _sessions.values) {
       controller.dispose();
     }
@@ -613,9 +785,32 @@ class AppController extends ChangeNotifier {
     }
   }
 
-  String _cleanError(Object failure) {
+  static const _notAccepted =
+      'The harness did not accept this device\'s session: it may have been '
+      'revoked, or have expired. Sign in again below.';
+
+  String _cleanError(Object failure, {bool hadSecret = false}) {
     if (failure is AcpException) return failure.message;
     final text = '$failure';
+    // dart:io reports a refused upgrade as "not upgraded to websocket"
+    // (some SDKs add the status).  A harness lets a connection in so that
+    // it can sign in; it refuses one only when its address has been refused
+    // too often (HTTP 429), or its listener has too many connections.
+    if (text.contains('status code: 429') ||
+        text.contains('was not upgraded to websocket')) {
+      return hadSecret
+          ? 'The harness refused this connection: too many devices are '
+                'signing in at once, or this address was refused too often '
+                'lately. Wait a minute and try again.'
+          : 'The harness refused this connection: too many devices are '
+                'signing in at once. Wait a minute and try again.';
+    }
+    // A browser reports no reason at all for a refused upgrade.
+    if (kIsWeb && text.contains('WebSocket connection failed')) {
+      return 'Could not open the connection. A browser cannot say why: the '
+          'harness may be unreachable, or its address may be refused for '
+          'now.';
+    }
     return text.replaceFirst(RegExp(r'^Exception: '), '');
   }
 

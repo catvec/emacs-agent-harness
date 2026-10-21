@@ -4,6 +4,7 @@ import fs from 'node:fs';
 const WEB = process.env.WEB_URL ?? 'http://127.0.0.1:8899';
 const ACP = process.env.ACP_URL ?? 'ws://127.0.0.1:4277/acp';
 const STANDARD = process.env.STANDARD_ACP_URL ?? 'ws://127.0.0.1:4278/acp';
+const SIGN_IN = process.env.SIGN_IN_ACP_URL ?? 'ws://127.0.0.1:4279/acp';
 const OUT = new URL('../screenshots/', import.meta.url);
 fs.mkdirSync(OUT, { recursive: true });
 
@@ -234,6 +235,31 @@ async function run() {
 
     await nav(page, 'Settings');
     await shot(page, 'android-settings');
+    await context.close();
+  }
+
+  // --- Android phone, signing in from inside the app: the harness lists how
+  // (ACP's authMethods), the user picks one, and the person at the harness's
+  // Emacs approves.  The mock approves a few seconds after it is asked.
+  {
+    const { page, context } = await pageFor('android');
+    await page.setViewportSize({ width: 412, height: 1250 });
+    await boot(page);
+    const field = page.locator('input[data-semantics-role="text-field"]:not([disabled])').nth(0);
+    await field.click();
+    await page.waitForTimeout(350);
+    await page.keyboard.insertText(SIGN_IN);
+    await page.waitForTimeout(450);
+    await page.getByRole('button', { name: 'Connect', exact: true }).click();
+    const approve = page.getByRole('button', { name: /Approve in Emacs/ });
+    await approve.waitFor({ timeout: 20000 });
+    await page.waitForTimeout(600);
+    await shot(page, 'android-signin');
+    await approve.click();
+    await page.getByText('Waiting for approval in Emacs', { exact: true }).waitFor({ timeout: 10000 });
+    await page.waitForTimeout(600);
+    await shot(page, 'android-signin-waiting');
+    await waitSessions(page);
     await context.close();
   }
 

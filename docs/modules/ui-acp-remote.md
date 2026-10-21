@@ -2,12 +2,12 @@
 
 # ui-acp-remote
 
-Remote control page: serve phones and other devices, pair them by QR code.
+Remote control page: serve phones and other devices, approve and see them.
 
 - **Runs in:** the UI (your Emacs)
 - **Source:** [lisp/ui/harness-ui-acp-remote.el](../../lisp/ui/harness-ui-acp-remote.el)
 - **Loaded:** when enabled (see `harness-enable-modules`)
-- **Requires:** [ui](ui.md), [ui-qr](ui-qr.md)
+- **Requires:** [ui](ui.md)
 - **Brings along:** [acp-remote](acp-remote.md) (the rest of it)
 
 ## About
@@ -15,46 +15,65 @@ Remote control page: serve phones and other devices, pair them by QR code.
 The UI half of the acp-remote module (harness-acp-remote.el), which
 loads with it.
 
+A device signs in from its own ACP client, which lists "Approve in
+Emacs" among its sign-in methods (and OpenID Connect, when a provider
+is set up).  Choosing it asks the person here: the harness tells the
+user at once (a message, a desktop notification and a count in the mode
+line notifier), and `harness-remote-approve` (C-c h y), or the buttons of
+the remote control page, say yes after comparing the code the page
+shows with the one the client shows.
+
 `harness-remote-control` (C-c h P) shows whether the harness serves
 phones and other devices on the network (the acp-remote module), the
-ACP address their clients connect to, and the paired devices.  The
-pairing QR code starts folded: it carries a one-time code that pairs
-whichever device scans it, so it shows only when asked for, and a
-fresh code is made each time it unfolds.  It folds again once a
-device pairs or the code expires, and hiding it drops the code.
+ACP address their clients connect to, whether what they send is
+encrypted, the devices that wait to be approved, and the devices
+signed in.  A client that cannot sign in from its own screen is given a
+token to keep instead (`harness-ui-acp-remote-create-token`): the
+address and secret to put in its settings, shown once.
 
-Keys: TAB folds or unfolds the QR code (elsewhere it moves between
-buttons), s starts or stops serving, a chooses the address in links,
-w copies the ACP address, n makes a new code, k unpairs the device at
-point, g refreshes.  Every key has a button.  Everything goes through
-ACP (`_harness/acp/remote-*`), so the page shows the harness the UI
-is connected to, here or elsewhere.
+Keys: s starts or stops serving, a chooses the address in links, w
+copies the ACP address, l the sign-in link of the provider, y approves
+the device that waits (the one at point), n refuses it, t makes a token,
+k revokes the device at point and K every device, g refreshes.  Every
+key has a button.  Everything goes through ACP
+(`_harness/acp/remote-*`), so the page shows the harness the UI is
+connected to, here or elsewhere.
 
 ## Provides
 
+### Hooks
+
+- `harness-ui-notify-segment-functions`
+
 ### Commands
 
-- `harness-remote-control` — Show the remote control page: serve phones and pair them by QR code.
+- `harness-remote-approve` — Approve a device that asks to sign in to the harness.
+- `harness-remote-control` — Show the remote control page: serve phones, approve them, see who is signed in.
+- `harness-ui-acp-remote-approve` — Approve the device that waits: the one at point, or the only one.
 - `harness-ui-acp-remote-copy-address` — Copy the address a phone's ACP client connects to.
-- `harness-ui-acp-remote-new-code` — Show a new pairing code; the one before stops working.
+- `harness-ui-acp-remote-copy-login-link` — Copy the link a browser opens to sign in at the OpenID Connect provider.
+- `harness-ui-acp-remote-create-token` — Make a token for a device called NAME, and show it once.
+- `harness-ui-acp-remote-deny` — Refuse the device that waits: the one at point, or the only one.
 - `harness-ui-acp-remote-refresh` — Fetch the status again.
-- `harness-ui-acp-remote-set-address` — Choose the address of this machine that pairing QR codes carry.
-- `harness-ui-acp-remote-tab` — Fold or unfold the QR code on its heading; elsewhere move to the next button.
-- `harness-ui-acp-remote-toggle-qr` — Show the pairing QR code with a fresh one-time code, or hide it.
-- `harness-ui-acp-remote-toggle-serving` — Start serving phones and other devices, or stop and forget every pairing.
-- `harness-ui-acp-remote-unpair` — Unpair the device at point.
+- `harness-ui-acp-remote-revoke` — Revoke the device at point: its session ends and its connections close.
+- `harness-ui-acp-remote-revoke-all` — Revoke every device: every session ends and every connection closes.
+- `harness-ui-acp-remote-set-address` — Choose the address of this machine that the ACP address and links carry.
+- `harness-ui-acp-remote-toggle-serving` — Start serving phones and other devices, or stop.
 
 ### Options
 
 - `harness-ui-acp-remote-buffer-name` — Name of the remote control buffer.
+- `harness-ui-acp-remote-token-buffer-name` — Name of the buffer that shows a token made for a device, once.
 
 ## Uses
 
 ### Methods it calls
 
-- `acp/remote-forget-code` ([acp-remote](acp-remote.md))
-- `acp/remote-pair` ([acp-remote](acp-remote.md))
+- `acp/remote-approve` ([acp-remote](acp-remote.md))
+- `acp/remote-create-token` ([acp-remote](acp-remote.md))
+- `acp/remote-deny` ([acp-remote](acp-remote.md))
 - `acp/remote-revoke` ([acp-remote](acp-remote.md))
+- `acp/remote-revoke-all` ([acp-remote](acp-remote.md))
 - `acp/remote-set-address` ([acp-remote](acp-remote.md))
 - `acp/remote-start` ([acp-remote](acp-remote.md))
 - `acp/remote-status` ([acp-remote](acp-remote.md))
@@ -67,6 +86,6 @@ is connected to, here or elsewhere.
 ### Hooks it adds to
 
 - `harness-ui-event-functions` → `harness-ui-acp-remote--on-event`
+- `harness-ui-notify-segment-functions` → `harness-ui-acp-remote--segment`
 - `harness-ui-redraw-hook` → `harness-ui-acp-remote--redraw-all`
-- `kill-buffer-hook` → `lambda`
 

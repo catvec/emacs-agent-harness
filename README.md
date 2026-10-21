@@ -126,7 +126,10 @@ OpenAI-compatible APIs and AWS Bedrock.
   the harness's own records, so it is the same for every provider.
 - **Remote control.** The harness speaks the Agent Client Protocol
   (ACP), so another Emacs or any ACP client can drive it, including one
-  on your phone, paired by scanning a QR code.
+  on your phone, which signs in from inside its own client with ACP's
+  `authenticate` (you press Approve in Emacs, or log in at your identity
+  provider) and then proves itself with a session secret
+  ([Remote control](#remote-control)).
 - **Modular and reloadable.** Every feature is a module. Out of the box
   only a small core loads, and you enable the rest in your init file,
   as Doom Emacs's `init.el` does ([Choosing modules](#choosing-modules)).
@@ -526,7 +529,8 @@ default), or nil for nowhere.
 | `C-c h z` | `harness-pet` | Show your companion pet, or the egg it hatches from |
 | `C-c h r` | `harness-record-audio` | Start or stop recording from the microphone |
 | `C-c h c` | `harness-connect-remote` | Connect the UI to a remote harness |
-| `C-c h P` | `harness-remote-control` | Pair phones and other devices, and serve them ACP |
+| `C-c h P` | `harness-remote-control` | Serve phones and other devices ACP, approve the ones that ask to sign in, see who is signed in |
+| `C-c h y` | `harness-remote-approve` | Approve a device that asks to sign in (after comparing its code) |
 | `C-c h v` | `harness-version` | Show whether the harness runs the latest commit, and update it |
 | `C-c h R` | `harness-reload` | Reload the harness in place |
 | `C-c h L` | `harness-show-log` | Show the harness log |
@@ -4110,8 +4114,8 @@ Turn it on in `config.el` (Doom) or your init file, before
 It turns off:
 
 - Remote control. The harness serves ACP on this machine only and
-  ignores `harness-acp-allow-remote`. Pairing phones and other devices
-  is refused, and the UI cannot connect to a harness elsewhere
+  ignores `harness-acp-allow-remote`. Signing phones and other devices
+  in is refused, and the UI cannot connect to a harness elsewhere
   (`harness-connect-remote`).
 - Network tools other than web search. Sessions do not get
   `web_fetch`, which reaches any URL. When a model calls it anyway, the
@@ -4258,43 +4262,100 @@ the token yourself.
 - `scripts/harness-acp-stdio` bridges ACP to standard input and output,
   for editors that start ACP agents as subprocesses.
 
-### Pairing a phone
+### Signing in a phone or another device
 
-Pairing is the `acp-remote` module, which brings its page,
+Signing devices in is the `acp-remote` module, which brings its page,
 `ui-acp-remote`: `(harness-enable-modules :features acp-remote)`.
 
-A phone (or any other device on the network) can drive the harness
-with an ACP client of its own, such as ACP UI, Agmente or Ferngeist.
-ACP defines no way to pair a device, so the harness pairs it with a web
-link, which works whatever client the phone uses:
+A phone (or any other device on the network) can drive the harness with
+an ACP client of its own, such as ACP UI or the harness's own app
+(`harness_client/`). ACP gives a remote client no field for a password,
+but it does say where signing in happens: the agent lists `authMethods`
+in its answer to `initialize`, the client shows them to its user, and
+the one chosen goes to `authenticate`, which the agent answers when it
+has signed the user in itself. ACP UI does this in a dialog of its own,
+so the user does not leave the app. That is the way in here. A QR code,
+a page in a browser and OpenID Connect are no part of ACP, and no
+generic client does them; the harness has no QR code, and OpenID Connect
+is one more method behind `authenticate`.
+[docs/remote-auth.md](docs/remote-auth.md) has the research behind this
+(what ACP defines, what the clients do), the design and the wire details.
 
 1. Press `C-c h P` to open the remote control page, then `[start
    serving]` (`s`). The harness listens on port 4276 of every network
    interface, for ACP over WebSocket and for ACP's own line framing
    (plain TCP clients such as VACP).
-2. Unfold the pairing QR code (`TAB` or a click on its heading). It
-   starts folded because the code it carries pairs whichever device
-   scans it.
-3. Scan the code with the phone's camera and open the link. The page
-   that opens says the phone is paired and gives the address to add in
-   its ACP client, `ws://ADDRESS:4276/acp`.
-4. Add a remote agent with that address in the phone's ACP client and
-   connect.
+2. In the phone's ACP client add a remote agent at the ACP address the
+   page shows, `ws://ADDRESS:4276/acp`, and open it. The client asks how
+   to sign in: choose **Approve in Emacs**.
+3. Emacs tells you (a count in the mode line, a desktop notification and
+   the page's "Waiting for approval", with the device's name and
+   address) and shows a code of four digits. If it is the code the
+   client shows, press **Approve** (`y`, or `C-c h y` anywhere); Deny
+   (`n`) refuses. You type and copy nothing, and the phone's client is
+   never left.
 
-A client that supports ACP authentication can also connect first: the
-harness offers it the method "Pair with a QR code", whose answer waits
-until the QR code is opened on that device.
+Until then the connection may only `initialize` and `authenticate`: it
+hears nothing of the harness, and every other request is ACP's
+`auth_required`. A device's network address is shown on the page and
+trusted with nothing, so another app on the same phone, or another
+machine, gets nothing.
 
-Each code works once and expires after ten minutes; unfolding the QR
-code again or pressing `n` makes a new one, and hiding it drops it. A
-pairing belongs to the device's network address. It lasts while the
-device uses it, ends once it goes unused for eight hours, ends when the
-harness stops serving, and is never saved. The page lists the paired
-devices, and `k` or `[unpair]` unpairs one at once. A WebSocket that a
-web page opens is never let in by a pairing, since any page the phone
-shows could open one. Clients can authenticate with
-`harness-acp-token` instead, as the subprotocol `bearer.TOKEN`, an
-`Authorization: Bearer TOKEN` header or `?token=TOKEN` in the address.
+**Staying signed in.** A client that says it can keep a session secret
+(the harness's own app) is handed one in the answer to `authenticate`
+and presents it as it connects next time: no question. Any other client
+signs in again each time it connects; to skip that, `t` on the page
+makes a token for it, shown once, to put in the client's settings (ACP
+UI: the address and a header `Authorization: Bearer TOKEN`; Agmente:
+"Bearer token"; or the address with `?token=`). Agmente has no dialog and
+reads only a configured token. A harness with `harness-acp-token` set
+takes that token in `authenticate` (method `token`) from a client that
+can send it, so a device can sign in without anyone at the Emacs; it gets
+a session secret of its own, and the token itself is no bearer
+credential. Five refused secrets make an address wait a minute; a
+device may ask to be approved six times a minute, and five may wait.
+
+**Sessions.** A session secret is 256 random bits, and only its hash is
+kept (in `acp-remote-sessions.eld` in the state directory, readable by you
+alone), so devices stay signed in when the harness restarts or stops
+serving. A client that was not handed a secret has a session of its
+connection alone, which ends with it. A kept session ends on revoking it
+(`k` or `[revoke]` on the page, `K` for every device; ACP's `logout`, which
+the harness announces to a client that has a session; `DELETE /session`),
+after 30 days unused and 90 days after its secret was issued, whatever it
+does; corporate mode suspends all of them. A client that can keep a secret
+is given a new one every seven days, the old one working for an hour or
+until the new one is first used, so it signs in once; a secret that was
+revoked leads its client to the dialog again. The page lists each device with how it
+signed in, when it was last seen and when its session ends. Approving,
+making tokens, revoking and moving the listener are for the Emacs on this
+machine: a signed-in device drives the harness and cannot hand out more
+access.
+
+**OpenID Connect (authentik).** ACP has none, so a login at an identity
+provider is one more method the agent offers: set
+`harness-acp-remote-oidc-issuer`, `harness-acp-remote-oidc-client-id` and
+`harness-acp-remote-oidc-allowed` (groups, users or e-mail addresses; `nil`,
+the default, lets nobody in), register `PUBLIC-URL/oidc/callback` with the
+provider, and the client lists "Sign in with …". Choosing it opens
+`PUBLIC-URL/login?c=CODE` in a browser (the harness's own app does it by
+itself): the page says which device that is and asks to continue, the
+provider logs the person in, and the waiting connection signs in. The flow
+is the authorization code with PKCE, a `state` bound to the browser and a
+`nonce`. A plain `PUBLIC-URL/login` (`l` copies it) signs a browser in and
+shows it a secret to put in a client's settings. docs/remote-auth.md walks
+through authentik, including that it reports e-mail addresses as unverified
+unless you set that up, and the harness goes by an address only when the
+provider calls it verified.
+
+**Encryption.** Nothing encrypts the listener: Emacs has no TLS server. Use
+a VPN such as Tailscale, whose addresses also stay fixed per device, or a
+TLS proxy in front (Caddy, nginx, Tailscale Serve): bind the listener to
+`127.0.0.1`, set `harness-acp-remote-public-url` to the proxy's `https://`
+address, and the ACP address and the OpenID redirect carry it
+(`wss://`). The page says in orange when neither applies. The page shows the
+address of this machine that clients connect to, chosen among its network
+interfaces (local network first); `a` picks another.
 
 Once it is let in, the phone's ACP client can list the harness's
 sessions with ACP's `session/list`: newest first, a page at a time, for
@@ -4308,19 +4369,20 @@ are under `_harness/` (`_harness/session/list` takes the harness's own
 filters), and a client that asks for one by its plain name is told where
 it is.
 
-The connection is not encrypted. Pair on a network you trust, or over a
-VPN such as Tailscale, whose addresses also stay fixed per device. The
-page shows the address of this machine that QR codes carry, chosen
-among its network interfaces (local network first); `a` picks another.
-
 | Option | Default | Meaning |
 |---|---|---|
 | `harness-acp-remote` | `nil` | Serve other devices; the page turns it on and off |
 | `harness-acp-remote-host` | `"0.0.0.0"` | Address the listener binds |
 | `harness-acp-remote-port` | `4276` | Port of the listener |
-| `harness-acp-remote-address` | `nil` (detect) | Address of this machine in pairing links |
-| `harness-acp-remote-code-lifetime` | `600` | Seconds a pairing code is valid |
-| `harness-acp-remote-idle-timeout` | `28800` | Seconds unused before a pairing ends |
+| `harness-acp-remote-address` | `nil` (detect) | Address of this machine in the ACP address and links |
+| `harness-acp-remote-public-url` | `nil` | `https://…` of a TLS proxy in front, carried by the ACP address and links |
+| `harness-acp-remote-approval` | `t` | Offer "Approve in Emacs"; turn it off on a harness nobody watches |
+| `harness-acp-remote-approval-timeout` | `50` | Seconds a request waits to be approved (ACP UI gives up at 60) |
+| `harness-acp-remote-idle-timeout` | `2592000` (30 days) | Seconds a session may go unused |
+| `harness-acp-remote-session-lifetime` | `7776000` (90 days) | Seconds after which a session secret ends whatever it does, counted from when it was issued |
+| `harness-acp-remote-rotate-after` | `604800` (7 days) | Seconds after which a client that can keep one is given a new secret; `nil` never |
+| `harness-acp-remote-rotation-grace` | `3600` | Seconds the secret being replaced still works |
+| `harness-acp-remote-oidc-issuer`, `-client-id`, `-client-secret`, `-scopes`, `-allowed` | `nil` | OpenID Connect sign-in (see above); `-allowed` names who may |
 
 Corporate mode turns all of this off.
 

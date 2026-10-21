@@ -22,12 +22,33 @@ Future<_Rig> _rig({
   String? token,
   bool connect = true,
   String connectionToken = '',
+  bool reducedBeforeAuth = false,
+  bool signIn = false,
+  String? oidcUrl,
+  String? issueSecret,
+  Set<String>? knownSecrets,
+  List<Uri>? opened,
 }) async {
   SharedPreferences.setMockInitialValues({});
   final settings = SettingsController();
   await settings.load();
-  final harness = FakeHarness(enhanced: enhanced, token: token);
-  final app = AppController(settings: settings, connector: harness.connector);
+  final harness = FakeHarness(
+    enhanced: enhanced,
+    token: token,
+    reducedBeforeAuth: reducedBeforeAuth,
+    signIn: signIn,
+    oidcUrl: oidcUrl,
+    issueSecret: issueSecret,
+    knownSecrets: knownSecrets,
+  );
+  final app = AppController(
+    settings: settings,
+    connector: harness.connector,
+    urlOpener: (url) async {
+      opened?.add(url);
+      return true;
+    },
+  );
   if (connect) {
     await app.connect('ws://memory/acp', token: connectionToken);
   }
@@ -81,15 +102,127 @@ void main() {
     await tester.enterText(find.byType(TextField).at(0), 'ws://memory/acp');
     await tester.tap(find.text('Connect'));
     await _settle(tester, 8);
-    expect(
-      find.text('This harness is protecting the connection'),
-      findsOneWidget,
-    );
+    expect(find.text('Sign in to this harness'), findsOneWidget);
     await tester.enterText(find.byType(TextField).at(1), 's3cret');
     await tester.ensureVisible(find.text('Unlock with the token above'));
     await tester.tap(find.text('Unlock with the token above'));
     await _settle(tester, 12);
     expect(find.text('Design the merge queue'), findsOneWidget);
+  });
+
+  testWidgets('the client signs in by an approval in Emacs, inside the app', (
+    tester,
+  ) async {
+    final rig = await _rig(
+      connect: false,
+      signIn: true,
+      issueSecret: 'hs1_session',
+    );
+    await _pump(tester, rig);
+    await tester.enterText(find.byType(TextField).at(0), 'ws://memory:4276/acp');
+    await tester.tap(find.text('Connect'));
+    await _settle(tester, 8);
+    // The harness listed how to sign in: the user chooses, nothing is typed.
+    expect(find.text('Sign in to this harness'), findsOneWidget);
+    expect(find.byKey(const Key('signin-emacs-approval')), findsOneWidget);
+    expect(find.text('Approve in Emacs'), findsOneWidget);
+    await tester.ensureVisible(find.byKey(const Key('signin-emacs-approval')));
+    await tester.tap(find.byKey(const Key('signin-emacs-approval')));
+    await _settle(tester, 6);
+    // It waits for the person at Emacs, and shows the code to compare.
+    expect(rig.harness.waitingForApproval, isTrue);
+    expect(find.text('Waiting for approval in Emacs'), findsOneWidget);
+    expect(find.byKey(const Key('signin-code')), findsOneWidget);
+    expect(find.text('4719'), findsOneWidget);
+    rig.harness.approve();
+    await _settle(tester, 14);
+    expect(find.text('Design the merge queue'), findsOneWidget);
+    // What the harness handed over is what is remembered, with the
+    // address: never anything the user had to type.
+    expect(rig.settings.address, 'ws://memory:4276/acp');
+    expect(rig.settings.token, 'hs1_session');
+  });
+
+  testWidgets('a refusal in Emacs is shown, and the user may choose again', (
+    tester,
+  ) async {
+    final rig = await _rig(connect: false, signIn: true);
+    await _pump(tester, rig);
+    await tester.enterText(find.byType(TextField).at(0), 'ws://memory:4276/acp');
+    await tester.tap(find.text('Connect'));
+    await _settle(tester, 8);
+    await tester.ensureVisible(find.byKey(const Key('signin-emacs-approval')));
+    await tester.tap(find.byKey(const Key('signin-emacs-approval')));
+    await _settle(tester, 4);
+    rig.harness.deny();
+    await _settle(tester, 8);
+    expect(
+      find.textContaining('refused this device', findRichText: true),
+      findsOneWidget,
+    );
+    expect(rig.app.phase, ConnectionPhase.needsAuth);
+    expect(find.byKey(const Key('signin-emacs-approval')), findsOneWidget);
+    expect(rig.settings.token, isEmpty);
+  });
+
+  testWidgets('a pasted connection link brings its own secret', (tester) async {
+    final rig = await _rig(connect: false, token: 'hs1_session');
+    await _pump(tester, rig);
+    await tester.enterText(
+      find.byType(TextField).at(0),
+      'ws://memory:4276/acp?token=hs1_session',
+    );
+    await tester.tap(find.text('Connect'));
+    await _settle(tester, 12);
+    expect(find.text('Design the merge queue'), findsOneWidget);
+    expect(rig.settings.address, 'ws://memory:4276/acp');
+    expect(rig.settings.token, 'hs1_session');
+  });
+
+  test('plain TCP asks for the full capabilities once it is let in', () async {
+    final rig = await _rig(
+      connect: false,
+      token: 'hs1_session',
+      reducedBeforeAuth: true,
+    );
+    await rig.app.connect('tcp://memory:4276', token: 'hs1_session');
+    expect(rig.app.phase, ConnectionPhase.connected);
+    expect(rig.app.capability!.has('task/list'), isTrue);
+    expect(rig.app.capability!.isHarness, isTrue);
+    expect(
+      rig.harness.requestsByClient.where((m) => m == 'initialize').length,
+      2,
+    );
+  });
+
+  test('a refused upgrade says why and to wait', () async {
+    SharedPreferences.setMockInitialValues({});
+    final settings = SettingsController();
+    await settings.load();
+    final app = AppController(
+      settings: settings,
+      connector: (target, token) async => throw Exception(
+        "WebSocketChannelException: WebSocketException: Connection to "
+        "'http://h:4276/acp#' was not upgraded to websocket",
+      ),
+    );
+    await app.connect('ws://h:4276/acp', token: 'hs1_old');
+    expect(app.phase, ConnectionPhase.failed);
+    expect(app.error, contains('too many devices'));
+    expect(app.error, contains('Wait a minute'));
+    await app.connect('ws://h:4276/acp');
+    expect(app.error, startsWith('The harness refused this connection'));
+  });
+
+  test('a wrong secret leaves the connection waiting for a session', () async {
+    final rig = await _rig(
+      connect: false,
+      token: 'hs1_session',
+      reducedBeforeAuth: true,
+    );
+    await rig.app.connect('tcp://memory:4276', token: 'hs1_wrong');
+    expect(rig.app.phase, ConnectionPhase.needsAuth);
+    expect(rig.app.error, contains('Sign in again'));
   });
 
   testWidgets('talk, stream, approve a permission, and answer a question', (

@@ -60,9 +60,11 @@ the session or agent modules are absent.
 
 ### Hooks
 
+- `harness-acp-agent-capabilities-functions` — Functions adding to the `agentCapabilities` `initialize` answers a client.
 - `harness-acp-auth-methods-functions` — Functions returning extra auth methods `initialize` advertises to a client.
 - `harness-acp-authenticate-functions` — Functions answering `authenticate` for the auth methods they advertise.
 - `harness-acp-authorize-functions` — Functions deciding that a client may call methods without authenticating.
+- `harness-acp-initialize-extras-functions` — Functions adding to the `_harness` object `initialize` answers a client.
 - `harness-acp-received-hook` — Hook run after each slice of received messages, before Emacs redisplays.
 
 ### Options

@@ -40,6 +40,7 @@ class HarnessCapabilities {
           id: asStringOr(method['id'], ''),
           name: asStringOr(method['name'], 'Authenticate'),
           description: asStringOr(method['description'], ''),
+          url: asString(asMap(asMap(method['_meta'])['harness'])['url']),
         ),
     ];
     return HarnessCapabilities(
@@ -174,19 +175,34 @@ class HarnessCapabilities {
   ];
 }
 
+/// A way to sign in that an agent lists in `initialize`.
 class AuthMethod {
   const AuthMethod({
     required this.id,
     required this.name,
     required this.description,
+    this.url,
   });
 
   final String id;
   final String name;
   final String description;
 
+  /// Where a browser goes for this method, when it has a page of its own
+  /// (the harness's login at an OpenID Connect provider).
+  final String? url;
+
   bool get isToken => id == 'token' || id == 'bearer';
-  bool get isPairing => id == 'pair';
+
+  /// The harness asks the person at its Emacs.
+  bool get isApproval => id == 'emacs-approval';
+
+  /// The user signs in at the harness's identity provider, in a browser.
+  bool get isOidc => id == 'oidc';
+
+  /// The code the description tells the user to compare with the one the
+  /// person who approves sees (four digits), when it holds one.
+  String? get code => RegExp(r'code (\d{4})').firstMatch(description)?.group(1);
 }
 
 class CapabilityFeature {

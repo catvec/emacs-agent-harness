@@ -9,6 +9,7 @@ class ConnectionTarget {
     this.tcpHost,
     this.tcpPort,
     required this.isTcp,
+    this.token,
   });
 
   final String raw;
@@ -16,6 +17,10 @@ class ConnectionTarget {
   final String? tcpHost;
   final int? tcpPort;
   final bool isTcp;
+
+  /// A session secret that came with the address (`?token=` in a pasted
+  /// connection link), already removed from [webSocketUri].
+  final String? token;
 
   /// The label shown beside a connection.
   String get label {
@@ -27,32 +32,21 @@ class ConnectionTarget {
   /// Parse what a person types into a connection target.
   ///
   /// Accepted forms:
-  ///   * `ws://host:4276/acp`, `wss://…` — WebSocket (phone/remote)
+  ///   * `ws://host:4276/acp`, `wss://…` — WebSocket (phone/remote).  A
+  ///     `?token=` in it, as the address of a device that is given a token
+  ///     has, is taken out into [token].  `http://` and `https://` name the
+  ///     same server: the public URL of a harness behind a TLS proxy.
   ///   * `tcp://host:1234` — ACP's line framing (desktop/local)
   ///   * `host:port` — TCP on desktop; WebSocket at `/acp` on the web,
   ///     where a browser cannot open a raw socket.
-  ///   * `http(s)://host:port/pair?code=…` — the pairing link the harness
-  ///     shows.  The caller is told where the ACP address is.
   static ConnectionTarget parse(String input, {bool web = false}) {
     var text = input.trim();
     if (text.isEmpty) throw const FormatException('Enter a server address.');
     if (!text.contains('://')) {
-      if (text.startsWith('//')) text = '//$text';
-      final looksLikePairing = text.contains('/pair');
-      if (looksLikePairing) {
-        throw const FormatException(
-          'That is a pairing link. Open it on this device first, then use '
-          'the ws:// address it shows (ws://HOST:4276/acp).',
-        );
-      }
+      if (text.startsWith('//')) text = text.substring(2);
       if (web) {
         final uri = Uri.parse('ws://$text');
-        final path = uri.path.isEmpty || uri.path == '/' ? '/acp' : uri.path;
-        return ConnectionTarget(
-          raw: input,
-          webSocketUri: uri.replace(path: path),
-          isTcp: false,
-        );
+        return _webSocket(input, uri);
       }
       final uri = Uri.parse('tcp://$text');
       if (uri.host.isEmpty || !uri.hasPort) {
@@ -74,12 +68,7 @@ class ConnectionTarget {
     switch (uri.scheme) {
       case 'ws':
       case 'wss':
-        final path = uri.path.isEmpty || uri.path == '/' ? '/acp' : uri.path;
-        return ConnectionTarget(
-          raw: input,
-          webSocketUri: uri.replace(path: path),
-          isTcp: false,
-        );
+        return _webSocket(input, uri);
       case 'tcp':
         if (web) {
           throw const FormatException(
@@ -97,27 +86,42 @@ class ConnectionTarget {
         );
       case 'http':
       case 'https':
-        throw const FormatException(
-          'That is the harness web page, not ACP. Open it, pair this device, '
-          'then connect to ws://HOST:4276/acp.',
+        // A harness behind a TLS proxy is told by its URL; ACP is at /acp.
+        return _webSocket(
+          input,
+          uri.replace(scheme: uri.scheme == 'https' ? 'wss' : 'ws'),
         );
       default:
         throw FormatException('Unsupported scheme "${uri.scheme}".');
     }
   }
 
-  /// The WebSocket address, with the token in the query when there is one.
-  /// The harness accepts the token there as well as in the subprotocol,
-  /// which is the only way a browser can offer it.
-  Uri? uriWithToken(String token) {
-    final uri = webSocketUri;
-    if (uri == null || token.isEmpty) return uri;
-    final params = Map<String, String>.from(uri.queryParametersAll)
-      ..putIfAbsent('token', () => token);
-    return uri.replace(queryParameters: params);
+  static ConnectionTarget _webSocket(String raw, Uri uri) {
+    final path = uri.path.isEmpty || uri.path == '/' ? '/acp' : uri.path;
+    final params = Map<String, List<String>>.from(uri.queryParametersAll);
+    final tokens = params.remove('token');
+    final token = tokens == null || tokens.isEmpty || tokens.first.isEmpty
+        ? null
+        : tokens.first;
+    final clean = Uri(
+      scheme: uri.scheme,
+      userInfo: uri.userInfo,
+      host: uri.host,
+      port: uri.hasPort ? uri.port : null,
+      path: path,
+      queryParameters: params.isEmpty ? null : params,
+    );
+    return ConnectionTarget(
+      raw: raw,
+      webSocketUri: clean,
+      isTcp: false,
+      token: token,
+    );
   }
 
-  /// Connect, picking the right transport for this platform.
+  /// Connect, picking the right transport for this platform.  [token] is
+  /// the session secret, sent in the `bearer.` WebSocket subprotocol: the
+  /// one place a browser can put it.
   Future<AcpTransport> connect({String token = ''}) =>
       openAcpTransport(this, token);
 }

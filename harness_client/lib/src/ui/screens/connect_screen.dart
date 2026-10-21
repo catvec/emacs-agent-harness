@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
+import '../../acp/capabilities.dart';
 import '../../acp/connection_target.dart';
 import '../../models/session.dart';
 import '../../state/app_controller.dart';
@@ -102,9 +103,10 @@ class _ConnectScreenState extends State<ConnectScreen> {
     if (mounted) setState(() {});
   }
 
-  Future<void> _pair() async {
+  Future<void> _signIn(AuthMethod method) async {
+    FocusScope.of(context).unfocus();
     setState(() => _localError = null);
-    await widget.app.pair();
+    await widget.app.signIn(method);
     if (mounted) setState(() {});
   }
 
@@ -114,16 +116,17 @@ class _ConnectScreenState extends State<ConnectScreen> {
         defaultTargetPlatform == TargetPlatform.iOS) {
       return 'ws://192.168.1.20:4276/acp';
     }
-    return 'tcp://127.0.0.1:4276';
+    return 'tcp://127.0.0.1:4276 or ws://…';
   }
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final app = widget.app;
+    final waiting = app.signingInWith != null;
     final busy =
         app.phase == ConnectionPhase.connecting ||
-        app.phase == ConnectionPhase.authenticating;
+        (app.phase == ConnectionPhase.authenticating && !waiting);
     final error = _localError ?? app.error;
     return Scaffold(
       backgroundColor: theme.colorScheme.surface,
@@ -201,14 +204,16 @@ class _ConnectScreenState extends State<ConnectScreen> {
                           },
                         ),
                       ],
-                      if (app.phase == ConnectionPhase.needsAuth) ...[
+                      if (app.phase == ConnectionPhase.needsAuth ||
+                          waiting) ...[
                         const SizedBox(height: 14),
                         _AuthCard(
                           app: app,
                           token: _token,
                           busy: busy,
                           onUnlock: busy ? null : _unlock,
-                          onPair: busy ? null : _pair,
+                          onSignIn: _signIn,
+                          onCancel: () => widget.app.cancelSignIn(),
                         ),
                       ],
                       if (app.capability != null &&
@@ -335,15 +340,15 @@ class _ConnectionCard extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 14),
-          _FieldLabel('TOKEN'),
+          _FieldLabel('SESSION SECRET'),
           const SizedBox(height: 7),
           Semantics(
             textField: true,
-            label: 'Token',
+            label: 'Session secret',
             child: HarnessTextField(
               key: const Key('connect-token'),
               controller: token,
-              hint: 'Paste the harness token',
+              hint: 'Only if you were given one',
               obscure: obscure,
               textInputAction: TextInputAction.go,
               onSubmitted: (_) => onConnect?.call(),
@@ -367,7 +372,7 @@ class _ConnectionCard extends StatelessWidget {
             children: [
               Expanded(
                 child: Text(
-                  'Kept on this device only. Leave empty if the harness has no token.',
+                  'Kept on this device only. Signing in below needs none.',
                   style: theme.textTheme.bodySmall?.copyWith(
                     color: theme.colorScheme.onSurfaceVariant,
                     height: 1.35,
@@ -401,9 +406,9 @@ class _ConnectionCard extends StatelessWidget {
               const SizedBox(width: 8),
               Expanded(
                 child: Text(
-                  'In Emacs, open the remote control page (C-c h P), start serving, '
-                  'and use the ws:// address it shows. On this computer, an ACP '
-                  'server\'s token is in acp-address and acp-token.',
+                  'In Emacs press C-c h P, start serving, and enter the ACP '
+                  'address it shows. This app then asks how to sign in: '
+                  'choose Approve in Emacs and press Approve there.',
                   style: theme.textTheme.bodySmall?.copyWith(
                     color: theme.colorScheme.onSurfaceVariant.withValues(
                       alpha: 0.78,
@@ -443,21 +448,23 @@ class _AuthCard extends StatelessWidget {
     required this.token,
     required this.busy,
     required this.onUnlock,
-    required this.onPair,
+    required this.onSignIn,
+    required this.onCancel,
   });
 
   final AppController app;
   final TextEditingController token;
   final bool busy;
   final VoidCallback? onUnlock;
-  final VoidCallback? onPair;
+  final ValueChanged<AuthMethod> onSignIn;
+  final VoidCallback onCancel;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final methods = app.capability?.authMethods ?? const [];
-    final canPair = methods.any((method) => method.isPairing);
-    final canToken = methods.any((method) => method.isToken) || methods.isEmpty;
+    final waitingFor = app.signingInWith;
+    final methods = app.signInMethods;
+    final canToken = app.canUseToken || (methods.isEmpty && !busy);
     return Container(
       padding: const EdgeInsets.all(18),
       decoration: BoxDecoration(
@@ -480,7 +487,7 @@ class _AuthCard extends StatelessWidget {
               const SizedBox(width: 9),
               Expanded(
                 child: Text(
-                  'This harness is protecting the connection',
+                  'Sign in to this harness',
                   style: theme.textTheme.titleSmall?.copyWith(
                     fontWeight: FontWeight.w700,
                   ),
@@ -489,53 +496,147 @@ class _AuthCard extends StatelessWidget {
             ],
           ),
           const SizedBox(height: 8),
-          Text(
-            canPair
-                ? 'Scan the harness\'s pairing QR code, or use its shared token.'
-                : 'Enter the shared token the harness was started with.',
-            style: theme.textTheme.bodySmall?.copyWith(
-              color: theme.colorScheme.onSurfaceVariant,
-              height: 1.4,
+          if (waitingFor != null)
+            _Waiting(method: waitingFor, onCancel: onCancel)
+          else ...[
+            Text(
+              methods.isEmpty
+                  ? 'This harness needs this device to sign in with a '
+                        'session secret: put it in the field above.'
+                  : 'Choose how this device signs in. The harness keeps a '
+                        'session for it, so the next connection needs none.',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+                height: 1.4,
+              ),
             ),
-          ),
-          if (busy) ...[
-            const SizedBox(height: 14),
-            Row(
-              children: [
-                HarnessActivity(radius: 8),
-                const SizedBox(width: 10),
+            if (busy) ...[
+              const SizedBox(height: 14),
+              Row(
+                children: [
+                  HarnessActivity(radius: 8),
+                  const SizedBox(width: 10),
+                  Text('Checking the session…', style: theme.textTheme.bodySmall),
+                ],
+              ),
+            ],
+            for (final method in methods) ...[
+              const SizedBox(height: 14),
+              if (method.isApproval)
+                HarnessPrimaryButton(
+                  key: Key('signin-${method.id}'),
+                  label: method.name,
+                  icon: Icons.verified_user_outlined,
+                  expand: true,
+                  onPressed: busy ? null : () => onSignIn(method),
+                )
+              else
+                HarnessSecondaryButton(
+                  key: Key('signin-${method.id}'),
+                  label: method.name,
+                  icon: method.isOidc ? Icons.open_in_new_rounded : null,
+                  expand: true,
+                  onPressed: busy ? null : () => onSignIn(method),
+                ),
+              if (method.description.isNotEmpty) ...[
+                const SizedBox(height: 6),
                 Text(
-                  canPair
-                      ? 'Waiting for the QR code to be scanned…'
-                      : 'Checking the token…',
-                  style: theme.textTheme.bodySmall,
+                  method.description,
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: theme.colorScheme.onSurfaceVariant,
+                    height: 1.35,
+                  ),
                 ),
               ],
-            ),
+            ],
+            if (canToken) ...[
+              const SizedBox(height: 14),
+              HarnessSecondaryButton(
+                label: 'Unlock with the token above',
+                icon: Icons.key_rounded,
+                expand: true,
+                onPressed: onUnlock,
+              ),
+            ],
           ],
-          const SizedBox(height: 14),
-          if (canPair)
-            HarnessPrimaryButton(
-              label: 'Pair with a QR code',
-              icon: Icons.qr_code_2_rounded,
-              expand: true,
-              onPressed: onPair,
-            ),
-          if (canPair && canToken) const SizedBox(height: 8),
-          if (canToken)
-            HarnessSecondaryButton(
-              label: 'Unlock with the token above',
-              icon: Icons.key_rounded,
-              expand: true,
-              onPressed: onUnlock,
-            ),
-          if (!canToken && !canPair)
-            Text(
-              'The harness offers ${methods.map((m) => m.name).join(', ')}.',
-              style: theme.textTheme.bodySmall,
-            ),
         ],
       ),
+    );
+  }
+}
+
+/// What shows while the harness waits for the user to do what a method asks.
+class _Waiting extends StatelessWidget {
+  const _Waiting({required this.method, required this.onCancel});
+
+  final AuthMethod method;
+  final VoidCallback onCancel;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final code = method.code;
+    final what = method.isOidc
+        ? 'Finish signing in in the browser. When it asks, confirm the code'
+        : 'Emacs asks to approve this device. Check that it shows the code';
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            HarnessActivity(radius: 8),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                method.isOidc
+                    ? 'Waiting for your sign-in'
+                    : 'Waiting for approval in Emacs',
+                style: theme.textTheme.bodyMedium?.copyWith(
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 10),
+        Text(
+          what,
+          style: theme.textTheme.bodySmall?.copyWith(
+            color: theme.colorScheme.onSurfaceVariant,
+            height: 1.4,
+          ),
+        ),
+        if (code != null) ...[
+          const SizedBox(height: 8),
+          Center(
+            child: Text(
+              code,
+              key: const Key('signin-code'),
+              style: theme.textTheme.displaySmall?.copyWith(
+                fontWeight: FontWeight.w700,
+                letterSpacing: 6,
+              ),
+            ),
+          ),
+        ],
+        const SizedBox(height: 10),
+        Text(
+          method.isOidc
+              ? 'Come back here once the page says you are signed in.'
+              : 'Then press Approve there (C-c h y). Nothing to type here.',
+          style: theme.textTheme.bodySmall?.copyWith(
+            color: theme.colorScheme.onSurfaceVariant,
+            height: 1.4,
+          ),
+        ),
+        const SizedBox(height: 12),
+        HarnessSecondaryButton(
+          key: const Key('signin-cancel'),
+          label: 'Cancel',
+          expand: true,
+          onPressed: onCancel,
+        ),
+      ],
     );
   }
 }

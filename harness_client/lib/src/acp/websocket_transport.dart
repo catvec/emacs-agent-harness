@@ -8,9 +8,12 @@ import 'acp_transport.dart';
 /// WebSocket transport, shared by mobile, desktop and web builds.
 ///
 /// It offers `acp.v1` (the protocol's subprotocol) and, when there is a
-/// token, `bearer.TOKEN`, which the harness's remote listener accepts.  The
-/// token is also put in the query string: the web build cannot set headers,
-/// and the harness reads either.
+/// session secret, `bearer.SECRET`, which the harness's remote listener
+/// accepts on every upgrade.  A subprotocol is the one place a browser can
+/// put a credential (it cannot set headers), and it keeps the secret out of
+/// the URL, which proxies log.  The harness answers with `acp.v1` and never
+/// echoes the secret.  A listener that refuses the secret answers the
+/// upgrade with HTTP 401.
 class WebSocketAcpTransport implements AcpTransport {
   WebSocketAcpTransport._(this._channel, this._uri) {
     _sub = _channel.stream.listen(

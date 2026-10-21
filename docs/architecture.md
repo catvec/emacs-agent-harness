@@ -8958,62 +8958,162 @@ re-entered.
 ### acp-remote
 
 ACP for phones and other devices on the network, off until
-`harness-acp-remote`.  One listener (`harness-acp-remote-host`
-0.0.0.0, `harness-acp-remote-port` 4276, binary sockets) reads the
-first bytes of each connection: `{` hands it to ACP's line framing
-(client kind `remote-tcp`), anything else is an HTTP request.  A
-WebSocket upgrade (RFC 6455, implemented in the module: handshake,
-streaming frame decoder over a unibyte buffer, ping/pong, close codes
-1002/1009) on any path, `/acp` documented, becomes a client of kind
-`websocket`; the subprotocol `acp.v1` is chosen when offered, and
-`Acp-Connection-Id` is sent, as ACP's draft transport asks.  A text
-message may carry several newline-separated JSON-RPC messages.
-`GET /pair?code=C` pairs, `GET /` explains; every answer is
-`Connection: close`, `Cache-Control: no-store`, `Referrer-Policy:
-no-referrer`.
+`harness-acp-remote`.  docs/remote-auth.md has the research and the wire
+details; this is the shape of the module.  One listener
+(`harness-acp-remote-host` 0.0.0.0, `harness-acp-remote-port` 4276,
+binary sockets) reads the first bytes of each connection: `{` hands it to
+ACP's line framing (client kind `remote-tcp`), anything else is an HTTP
+request, parsed by `harness-acp-remote-parse-request` (header block up
+to 16 KB, then `Content-Length` bytes of body up to 8 KB; chunked
+bodies are 411).  A WebSocket upgrade (RFC 6455, implemented in the
+module: handshake, streaming frame decoder over a unibyte buffer,
+ping/pong, close codes 1002/1009) on any path, `/acp` documented, becomes a
+client of kind `websocket`; the subprotocol `acp.v1` is chosen when
+offered (a `bearer.` one only when nothing else is, never preferred),
+and `Acp-Connection-Id` is sent, as ACP's draft transport asks.  A text
+message may carry several newline-separated JSON-RPC messages.  Every
+answer is `Connection: close`, `Cache-Control: no-store`, `Referrer-Policy:
+no-referrer`, with a Content-Security-Policy naming the pages' one script
+and style by hash.
 
-Pairing: `acp/remote-pair` → `(:url "http://ADDR:PORT/pair?code=C"
-:ws-url "ws://ADDR:PORT/acp" :address :port :expires :lifetime)` makes
-the one code in force (100 random bits, `harness-acp-remote-code-lifetime`).
-Opening the link from an address other than this machine's consumes
-it and pairs that address (devices `(:id :address :agent :paired
-:seen)`, in memory only, dropped after `harness-acp-remote-idle-timeout`
-without a connection), answers the waiting `authenticate` requests of
-that address and emits `acp/remote-changed`.  Every client the
-listener registers carries `:remote (:address A :transport T [:agent
-UA :origin O :web BOOL])`; `harness-acp-authorize-functions` lets in a
-paired address unless `:web` (an Origin naming a web page, not an
-app's own), `harness-acp-auth-methods-functions` offers `pair`, and
-`harness-acp-authenticate-functions` answers `authenticate pair` with a
-promise settled by the pairing or rejected (-32000) after the code
-lifetime.  A bearer token equal to `harness-acp-token` (subprotocol
-`bearer.T`, `Authorization: Bearer T`, `?token=T`) authenticates too.
+How a device signs in is ACP's own: the agent lists `authMethods` in
+`initialize` and the client calls `authenticate`.  A WebSocket (or plain TCP
+connection) that holds no live session secret is let in (`harness-acp-remote--upgrade`),
+a client whose `:remote` plist has no `:session-id`: it may call `initialize` and
+`authenticate` only (`harness-acp--invoke`: every other method is `-32000`, with
+the methods in `data.authMethods`), and `initialize` gives the standard
+`agentCapabilities`, `agentInfo.name` and the methods, no `_harness` and no
+version.  What the harness sends its clients and asks of them goes to
+`harness-acp--serving-clients` alone, the ones for which
+`harness-acp--auth-needed-p` is nil: `harness-acp--broadcast`,
+`harness-acp--request-clients` and `client/request` use it, so a connection with
+no session neither reads a session update nor answers a permission request.  Such
+connections are bounded (`harness-acp-remote--max-preauth` 16,
+`--max-preauth-per-address` 4: a further upgrade is 429; a message of at most 64 KB,
+`harness-acp-remote--pre-auth-max-line`), and `harness-acp-remote--close-idle`, run by
+the 30-second sweep, closes one that did nothing to sign in for
+`harness-acp-remote--preauth-timeout` (120 s, counted from its start or its last
+`authenticate`, `harness-acp-remote--watch`).
 
-What a device may call is what a client in this Emacs may.  Its
-connection goes through the same dispatch (`harness-acp--invoke`), with
-no table of methods of its own: `initialize` lists for it the same
-extension methods (`harness-acp--extension-methods`) and the same
-capabilities as for a local client, ACP's `session/list` among them
-while the bus has it, and a method the bus gains is on offer to it the
-next time it asks.  Until it is let in it may call `initialize` and
-`authenticate` and nothing else (-32000); `harness/call` is refused it
-once it is, however it was paired.
+The methods (`harness-acp-remote--auth-methods`, on
+`harness-acp-auth-methods-functions`; `--authenticate`, on
+`harness-acp-authenticate-functions`, which may answer with a plist for the
+core's `authenticate` handler to return, such as `(:_meta ...)`): `emacs-approval`
+(unless `harness-acp-remote-approval` is nil), `oidc` (when a provider is set up and
+someone allowed) and `token` (plain TCP, and a client that says it keeps secrets).
+A connection has a code of four digits (`harness-acp-remote--connection-code`,
+unique among those waiting, kept in its `:remote` plist) that the descriptions of
+the first two name.  `emacs-approval` is `harness-acp-remote--request-approval`: an
+approval `(:id :code :client :name :address :origin :method :expires :promise :timer)`
+in `harness-acp-remote--approvals`, announced by `acp/remote-changed :what
+"approval"` and by `notification/send` (source `acp-remote`, kind `approval`) when
+that method exists, and a promise the held `authenticate` returns.  It is limited
+(one per connection, `harness-acp-remote--max-waiting` devices at once, `--max-requests`
+per address per `--request-window`, refusals counting), and times out after
+`harness-acp-remote-approval-timeout`.  `acp/remote-approve ID` signs the device in
+(`harness-acp-remote--approve`: `--sign-in`, then resolves the promise), `acp/remote-deny ID`
+rejects it with `auth_required`; a connection that closes drops its approval
+(`--drop-approvals`, from the process sentinel).
+
+The credential a device holds is a session secret, `hs1_` and 256 random bits
+(`harness-acp-remote--new-secret`), held out as `Authorization: Bearer`,
+the subprotocol `bearer.SECRET` or `?token=` (`harness-acp-remote--request-secrets`).
+Sessions are `(:id :hash :name :agent :address :method :subject :ephemeral :created
+:seen :rotated :previous-hash :previous-until)` plists in
+`harness-acp-remote--sessions`: `:hash` is the SHA-256, compared with
+`harness-acp-remote--equal-p` against every session, whichever matches;
+the file `acp-remote-sessions.eld` in the state directory (mode 0600,
+written atomically at once on minting and revoking, within a minute on
+use) holds the hashes and never a secret, and is read by
+`harness-acp-remote--load-sessions`, which drops what ran out.
+`harness-acp-remote--sign-in` makes the session of a connection that signed in:
+for a client that says it can keep a secret (`clientCapabilities._harness.sessionRefresh`)
+it is kept and its secret goes back in `_meta.harness.session` of the
+`authenticate` answer; for any other it is `:ephemeral` (never saved, secret handed to
+nobody) and `harness-acp-remote--end-ephemeral` forgets it when its connection closes.
+A session ends after `harness-acp-remote-idle-timeout` unused with no connection open
+and `harness-acp-remote-session-lifetime` after its current secret was issued
+(`:rotated`, else `:created`: `harness-acp-remote--issued`), whatever it does
+(`harness-acp-remote--expire`, also run by the sweep, which drops the
+connections of sessions that ended).  The network address of a device is
+kept as `:address` for the page and trusted with nothing.  A connection that
+presents a secret as it opens (`harness-acp-remote--secret-match`) is signed in
+at once, one whose secret is no session's is a connection with no session (and
+counts against its address).
+
+For a client on another device `harness-acp--auth-needed-p` ignores both
+`harness-acp-token` and its own authenticated flag: only a function of
+`harness-acp-authorize-functions` lets it in, asked at every request,
+and `harness-acp-remote--authorize` answers by looking its session up again (and
+noting it in use, unless `harness-acp--fanout` says it only decides who a message
+is for), so revoking or expiring a session stops its device at the next message.
+`--authenticate-token` signs a client in with a session secret or trades
+`harness-acp-token` (at least 16 characters) for a session; a token that is neither
+counts against the address, five in a minute make it wait
+(`harness-acp-remote--throttled`).  A plain TCP connection's `initialize` gives
+the same answer as a WebSocket's.  The standard `logout`
+method (defined here, `-32601` for a client without a session) ends the
+session after answering, and `harness-acp-agent-capabilities-functions` tells
+a client that has one `agentCapabilities.auth.logout`.
+
+Only two HTTP routes answer without a session: `/login` and `/oidc/callback`
+(everything else, and an upgrade for what it refuses, is 401 naming nothing:
+`harness-acp-remote--unauthorized`), which need a sign-in at the provider to
+do anything.  `GET /session` and `DELETE /session` need a secret.  The OpenID
+Connect flow is the authorization code with PKCE S256, a state and a nonce, the
+state bound to the browser by a `harness_login` cookie that holds its hash, at most
+21 unfinished.  `/login?c=CODE` names the waiting connection: the browser is first
+shown which device that is (`harness-acp-remote--oidc-confirm`: a token in a form and
+in a `harness_confirm` cookie, `--oidc-confirmed` compares them), and the login record
+carries the `:client`; `/oidc/callback` (state spent once, cookie compared,
+`harness-http-request` to the provider's token endpoint, id token claims checked by
+`harness-acp-remote--oidc-claims-problem`, the userinfo endpoint asked when the id
+token lacks `groups` and an allow-list is set and its URL is one that may be spoken
+to, `harness-acp-remote--oidc-allowed-p` with a verified e-mail address only) then
+signs that connection in: `harness-acp-remote--login-waits` holds, per waiting
+connection, whom the provider vouched for and the `authenticate` that waits
+(`--await-login`, `--finish-login`), so the login may finish before or after
+the request.  A `/login` with no code mints a session and shows its secret once.  The
+provider's discovery document is read once an hour, and an issuer or endpoint that is
+not https (loopback excepted) is refused.
+
+A client that puts `_harness.sessionRefresh` in its `clientCapabilities` is
+given a new secret in `initialize` (`_harness.session.token`, added by
+`harness-acp-initialize-extras-functions`) when its session's secret is
+`harness-acp-remote-rotate-after` old, or when it came in with the secret a
+rotation replaced (it never got the new one); the old hash stays valid until
+the new secret is first presented or `harness-acp-remote-rotation-grace`
+passes.
+
+What a device may call is what a client in this Emacs may, except that
+`_harness/acp/remote-*` is refused it (`harness-acp-remote--local-caller-only`):
+serving other devices is managed from this machine, and `harness/call` is
+refused too.  Its connection goes through the same dispatch
+(`harness-acp--invoke`), with no table of methods of its own: `initialize`
+lists for it the same extension methods (`harness-acp--extension-methods`) and
+the same capabilities as for a local client, ACP's `session/list` among them
+while the bus has it, and a method the bus gains is on offer to it the next
+time it asks.
 
 Methods (callable as `_harness/acp/remote-*`): `acp/remote-status` →
 `(:running :enabled :corporate :host :port :address :address-set
-:addresses ((:address :interface :kind lan|vpn|other) ...) :ws-url
-:code-expires :devices (... :connected N) :clients)`,
-`acp/remote-start` and `acp/remote-stop` (save `harness-acp-remote`;
-stopping drops the clients, the code and every pairing; a policy that
-sets `harness-acp-remote` the other way refuses either before anything
-listens or stops),
-`acp/remote-pair`, `acp/remote-forget-code`, `acp/remote-revoke ID`,
-`acp/remote-set-address ADDRESS` (saves `harness-acp-remote-address`,
-"" detects; drops the code).  Event `acp/remote-changed (:what
-started|stopped|connected|disconnected|paired|revoked|address|corporate
-:address A)`, forwarded to UIs.  Corporate mode refuses start and pair,
-closes connections as they are accepted, and its change hook stops the
-listener.
+:addresses ((:address :interface :kind lan|vpn|other) ...) :ws-url :base-url
+:public-url-set :secure :approval :approvals ((:id :code :name :address :origin
+:expires) ...) :oidc (:configured :issuer :login-url :allowed)
+:devices ((:id :name :agent :address :method :subject :paired :seen :expires
+:ephemeral :connected N) ...) :clients)`, `acp/remote-start` and `acp/remote-stop` (save
+`harness-acp-remote`; stopping drops the clients, what waits to be approved and the
+sign-ins under way and keeps the kept sessions; a policy that sets `harness-acp-remote`
+the other way refuses either before anything listens or stops),
+`acp/remote-approve ID`, `acp/remote-deny ID`, `acp/remote-create-token [NAME]` (a
+kept session made here: `(:token :id :name :ws-url :url :expires)`, the only place
+its secret is shown), `acp/remote-revoke ID`, `acp/remote-revoke-all`,
+`acp/remote-set-address ADDRESS` (saves `harness-acp-remote-address`, "" detects).  Event
+`acp/remote-changed (:what
+started|stopped|connected|disconnected|signed-in|approval|revoked|expired|address|corporate
+:address A)`, forwarded to UIs.  Corporate mode refuses start, approve and
+create-token, closes connections as they are accepted, makes every session useless
+while it is on, and its change hook stops the listener.
 
 ### version
 
@@ -10416,16 +10516,23 @@ echo area what each provider did with it.
 Remote control page (`harness-ui-acp-remote`, `C-c h P`,
 `harness-remote-control`): whether the harness serves other devices
 (start or stop), the ACP address their clients connect to, the address
-of this machine that QR codes carry (chosen among the interfaces), the
-pairing QR code and the paired devices (unpair at point).  The QR code
-starts folded and unfolds with a fresh code (`acp/remote-pair`); it
-folds again once `acp/remote-changed` says a device paired, when its
-code expires, and when hidden, which drops the code
-(`acp/remote-forget-code`).  It is drawn by `harness-ui-qr`
-(`harness-qr-encode TEXT &optional LEVEL MASK` → `(:size :version
-:level :mask :modules)`, byte mode, versions 1–40; `harness-qr-image`
-one SVG path, black on white; `harness-qr-insert`, half blocks without
-images).  In corporate mode the page shows a notice only.
+of this machine in it (chosen among the interfaces), whether what devices
+send is encrypted (an https `harness-acp-remote-public-url`, or a VPN
+address; else a warning), the ways a device can sign in (approval in Emacs,
+and the OpenID Connect sign-in link when the provider is set up), the
+devices that wait to be approved, each with its name, address, the web page
+it comes from if it is one, the code to compare and `[approve]` / `[deny]`
+(`y` and `n`), and the signed-in devices, each with its name, address, how it
+signed in, when it was seen and when its session ends or that it lasts as long as
+its connection (`k` revokes the one at point, `K` all), and `t` (`[make a token]`)
+makes a token for a client that cannot sign in itself, shown once in a buffer of
+its own.  The UI follows `acp/remote-changed`: a new request is announced in
+the echo area, counted in the mode line notifier (a segment on
+`harness-ui-notify-segment-functions`, a click runs `harness-remote-approve`,
+also `C-c h y`, which asks which device when several wait and the user to
+confirm) and, through the harness, by a desktop notification.  In corporate mode
+the page shows a notice only.  The QR encoder `harness-ui-qr` is no longer used
+by it.
 
 Secrets and redactions (`harness-ui-secrets`, module `ui-secrets`, menu
 `x` and `E` after Log in the Tools column): `harness-redact-secret`

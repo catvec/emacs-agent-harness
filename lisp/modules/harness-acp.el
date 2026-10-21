@@ -219,7 +219,10 @@ it can answer for another one.")
 (defvar harness-acp-authorize-functions nil
   "Functions deciding that a client may call methods without authenticating.
 Each is called with the `harness-acp-client'; the first non-nil answer
-lets it in.  The remote access module lets paired devices in this way.")
+lets it in.  For a client from another device they are the only way in,
+asked at every request, so an answer that turns nil (a session that was
+revoked or ended) stops that client at once.  The remote access module
+lets the devices that hold a live session in this way.")
 
 (defvar harness-acp-auth-methods-functions nil
   "Functions returning extra auth methods `initialize' advertises to a client.
@@ -231,7 +234,21 @@ Each is called with the `harness-acp-client' and returns a list of ACP
 Each is called with the client, the method id and the request params,
 and returns nil when the method is not its own, else a value or a
 promise: once it resolves the client is authenticated; a rejection
-\(an `acp-error' list) is the answer the client gets.")
+\(an `acp-error' list) is the answer the client gets.  They are asked
+before `harness-acp-token' is compared, whatever the params hold.")
+
+(defvar harness-acp-initialize-extras-functions nil
+  "Functions adding to the `_harness' object `initialize' answers a client.
+Each is called with the `harness-acp-client' and returns a plist to add,
+or nil.  The remote access module hands a device that asked for it the
+new session secret that replaces its own.")
+
+(defvar harness-acp-agent-capabilities-functions nil
+  "Functions adding to the `agentCapabilities' `initialize' answers a client.
+Each is called with the `harness-acp-client' and returns a plist of
+capabilities to add, such as (:auth (:logout :empty)), or nil.  The
+remote access module announces `logout' to the devices that have a
+session to end.")
 
 ;;;; Structures
 
@@ -265,7 +282,8 @@ promise: once it resolves the client is authenticated; a rejection
   ;; Slots added later go last, so clients made before a reload keep working.
   writer                             ; (CLIENT JSON-TEXT) for other transports
   remote                             ; plist of a client on another device, else nil
-  active)                            ; `float-time' of its last request or notification
+  active                             ; `float-time' of its last request or notification
+  hello)                             ; the `clientInfo' (name, title, version) it gave `initialize'
 
 (cl-defstruct (harness-acp-error-value (:constructor harness-acp--make-error-value)
                                        (:copier nil))
@@ -291,6 +309,19 @@ since they were made."
   "Return the plist describing CLIENT's device when it is on another one, else nil.
 Transports serving other devices set it (see `harness-acp-add-client')."
   (harness-acp--client-get client 'remote))
+
+(defun harness-acp-client-info (client)
+  "Return the `clientInfo' CLIENT gave `initialize' (name, title, version), or nil.
+It is what the client says about itself: no proof of anything."
+  (harness-acp--client-get client 'hello))
+
+(defun harness-acp-client-set-remote-info (client info)
+  "Replace the plist describing CLIENT's device with INFO.
+A transport whose client proves who it is after it connected, with
+`authenticate' (a session secret sent over plain TCP, say), records what
+it learned with it.  CLIENT must be one from another device already."
+  (when (harness-acp-client-remote-info client)
+    (harness-acp--client-set client 'remote info)))
 
 ;;;; Wire shapes
 
@@ -556,9 +587,23 @@ wait inside the one before, until Lisp nesting exceeded
     (puthash id callback (harness-acp-client-pending client))
     (harness-acp--client-send client (list :jsonrpc "2.0" :id id :method method :params params))))
 
+(defvar harness-acp--fanout nil
+  "Non-nil while the clients a message is for are being chosen.
+A function of `harness-acp-authorize-functions' then says whether a
+client is let in and does not count it as in use.")
+
+(defun harness-acp--serving-clients ()
+  "Return the connected clients that may call methods.
+Those are the ones a message is for.  A client that connected and has not
+signed in yet (a device whose WebSocket was accepted so that it can
+authenticate) hears nothing of the harness and answers for nothing: no
+session update, no event, no permission request."
+  (let ((harness-acp--fanout t))
+    (cl-remove-if #'harness-acp--auth-needed-p harness-acp--clients)))
+
 (defun harness-acp--broadcast (method params)
-  "Send notification METHOD with PARAMS to every connected client."
-  (dolist (client harness-acp--clients)
+  "Send notification METHOD with PARAMS to every client that may call methods."
+  (dolist (client (harness-acp--serving-clients))
     (harness-acp--client-notify client method params)))
 
 (defun harness-acp--broadcast-update (sid update)
@@ -568,13 +613,14 @@ wait inside the one before, until Lisp nesting exceeded
 
 (defun harness-acp--request-clients (method params on-answer)
   "Send request METHOD PARAMS to all clients; ON-ANSWER gets the first result.
-Later answers and error responses are ignored.  Without a client the
-request is logged and stays pending on the session."
-  (if (null harness-acp--clients)
+Later answers and error responses are ignored.  Only clients that may
+call methods are asked.  Without one the request is logged and stays
+pending on the session."
+  (if (null (harness-acp--serving-clients))
       (harness-log 'warn "acp: %s (%s) but no client is connected; it stays pending"
                    method (plist-get params :sessionId))
     (let ((answered nil))
-      (dolist (client harness-acp--clients)
+      (dolist (client (harness-acp--serving-clients))
         (harness-acp--client-request
          client method params
          (lambda (result error)
@@ -594,7 +640,7 @@ chores any client may do, such as showing a desktop notification; a
 tool never asks a client to do its work (see `emacs/request').  Not
 callable over ACP."
   (harness-with-promise (resolve reject)
-    (let ((clients (copy-sequence harness-acp--clients)))
+    (let ((clients (harness-acp--serving-clients)))
       (if (null clients)
           (funcall reject (list 'harness-error (format "%s: no UI client is connected" method)))
         (let ((left (length clients)) (answered nil))
@@ -769,12 +815,16 @@ some mobile clients send to keep their connection open."
 
 (defun harness-acp--auth-needed-p (client)
   "Non-nil when CLIENT must authenticate before calling methods.
-A client from another device always must, unless a function of
-`harness-acp-authorize-functions' lets it in; one from this machine
-must when `harness-acp-token' is set."
-  (and (not (harness-acp-client-authenticated client))
-       (or harness-acp-token (harness-acp-client-remote-info client))
-       (not (run-hook-with-args-until-success 'harness-acp-authorize-functions client))))
+A client from another device is let in by a function of
+`harness-acp-authorize-functions' and by nothing else, asked at every
+request: neither `harness-acp-token', which is a secret of this machine's
+own, nor a flag set once could keep it in after its session ended.  One
+from this machine must authenticate when `harness-acp-token' is set."
+  (if (harness-acp-client-remote-info client)
+      (not (run-hook-with-args-until-success 'harness-acp-authorize-functions client))
+    (and (not (harness-acp-client-authenticated client))
+         harness-acp-token
+         (not (run-hook-with-args-until-success 'harness-acp-authorize-functions client)))))
 
 (defvar harness-acp--calling-client nil
   "The client whose message `harness-acp--invoke' is dispatching, or nil.
@@ -793,8 +843,11 @@ return, so a method that is not for every client can tell who asks:
                                "Corporate mode is on: this harness serves no other device" nil)))
      ((and (not (member method '("authenticate" "initialize")))
            (harness-acp--auth-needed-p client))
+      ;; A client shows `authMethods' to its user on this error, from
+      ;; `initialize'; some agents repeat them in its data.
       (signal 'acp-error (list harness-acp-error-unauthenticated
-                               "Authentication required: call authenticate first" nil)))
+                               "Authentication required: call authenticate first"
+                               (list :authMethods (harness-json-array (harness-acp--auth-methods client))))))
      (standard (funcall standard client params))
      ((string-prefix-p "_harness/" method)
       (harness-acp--call-extension (substring method (length "_harness/")) params))
@@ -1051,52 +1104,91 @@ a third-party ACP client shows them.")
             (list :sessionId (car pair) :cwd cwd :title (cdr pair)))
           harness-acp--virtual-sessions))
 
+(defun harness-acp--agent-capabilities (client)
+  "Return the `agentCapabilities' to tell CLIENT.
+The standard ones, then what the functions of
+`harness-acp-agent-capabilities-functions' add."
+  (append
+   (list :loadSession t
+         :promptCapabilities (list :image t :audio t :embeddedContext t))
+   ;; ACP's `session/list' (below) is there once the session module is:
+   ;; `{}' says it, as ACP's page on listing shows.  A client must not call
+   ;; it otherwise.
+   (and (harness-method-exists-p 'session/list)
+        (list :sessionCapabilities (list :list :empty)))
+   (cl-mapcan (lambda (fn)
+                (condition-case err (copy-sequence (funcall fn client))
+                  (error (harness-log 'warn "acp: capabilities from %s failed: %S" fn err) nil)))
+              harness-acp-agent-capabilities-functions)))
+
 (harness-acp--define-standard "initialize" (client params)
   (setf (harness-acp-client-initialized client) t
         (harness-acp-client-capabilities client) (plist-get params :clientCapabilities))
-  (when-let* ((emacs (harness-acp--emacs-info client)))
-    (harness-log 'info "acp: a %s client lends its Emacs (pid %s on %s)"
-                 (harness-acp-client-kind client) (plist-get emacs :pid) (plist-get emacs :host)))
-  (list :protocolVersion harness-acp-protocol-version
-        :agentCapabilities (append
-                            (list :loadSession t
-                                  :promptCapabilities (list :image t :audio t :embeddedContext t))
-                            ;; ACP's `session/list' (below) is there once the
-                            ;; session module is: `{}' says it, as ACP's page
-                            ;; on listing shows.  A client must not call it
-                            ;; otherwise.
-                            (and (harness-method-exists-p 'session/list)
-                                 (list :sessionCapabilities (list :list :empty))))
-        :agentInfo (list :name "emacs-agent-harness" :version (harness-acp--version))
-        :authMethods (harness-json-array (harness-acp--auth-methods client))
-        :_harness (list :methods (harness-acp--extension-methods)
-                        :events (mapcar (lambda (e) (symbol-name (car e))) (harness-events)))))
+  (harness-acp--client-set client 'hello (let ((info (plist-get params :clientInfo)))
+                                          (and (consp info) (keywordp (car info)) info)))
+  (if (and (harness-acp-client-remote-info client) (harness-acp--auth-needed-p client))
+      ;; A device that has not signed in learns that it must, and how, and
+      ;; what any ACP agent says of itself (a client decides on those, such
+      ;; as whether it may load a session, from this answer): not the
+      ;; harness's version, its methods or its events.  A client that wants
+      ;; those asks again once it signed in.
+      (list :protocolVersion harness-acp-protocol-version
+            :agentCapabilities (harness-acp--agent-capabilities client)
+            :agentInfo (list :name "emacs-agent-harness")
+            :authMethods (harness-json-array (harness-acp--auth-methods client)))
+    (when-let* ((emacs (harness-acp--emacs-info client)))
+      (harness-log 'info "acp: a %s client lends its Emacs (pid %s on %s)"
+                   (harness-acp-client-kind client) (plist-get emacs :pid) (plist-get emacs :host)))
+    (list :protocolVersion harness-acp-protocol-version
+          :agentCapabilities (harness-acp--agent-capabilities client)
+          :agentInfo (list :name "emacs-agent-harness" :version (harness-acp--version))
+          :authMethods (harness-json-array (harness-acp--auth-methods client))
+          :_harness (append
+                     (list :methods (harness-acp--extension-methods)
+                           :events (mapcar (lambda (e) (symbol-name (car e))) (harness-events)))
+                     (cl-mapcan (lambda (fn)
+                                  (condition-case err (copy-sequence (funcall fn client))
+                                    (error (harness-log 'warn "acp: initialize extras from %s failed: %S" fn err)
+                                           nil)))
+                                harness-acp-initialize-extras-functions)))))
 
 (defun harness-acp--auth-methods (client)
   "Return the ACP auth methods `initialize' advertises to CLIENT.
 Those of `harness-acp-auth-methods-functions' come first, then the
-shared secret when `harness-acp-token' is set."
+shared secret when `harness-acp-token' is set and CLIENT is on this
+machine: a device elsewhere may not use it (see
+`harness-acp--auth-needed-p')."
   (append (cl-mapcan (lambda (fn)
                        (condition-case err (copy-sequence (funcall fn client))
                          (error (harness-log 'warn "acp: auth methods from %s failed: %S" fn err) nil)))
                      harness-acp-auth-methods-functions)
           (and harness-acp-token
+               (not (harness-acp-client-remote-info client))
                (list (list :id "token" :name "Shared secret"
                            :description "Call authenticate with {\"token\": …}")))))
 
 (harness-acp--define-standard "authenticate" (client params)
-  (let ((token (plist-get params :token))
-        (method (plist-get params :methodId))
-        (accept (lambda (_) (setf (harness-acp-client-authenticated client) t) :empty)))
+  (let* ((token (plist-get params :token))
+         (method (plist-get params :methodId))
+         (remote (harness-acp-client-remote-info client))
+         ;; A device elsewhere is let in by what the authorizing functions
+         ;; say at every request, not by a flag this sets once.
+         ;; A function that handled the method may resolve to a plist to
+         ;; answer with (a `_meta' with what it hands the client), else {}.
+         (accept (lambda (extra)
+                   (unless remote (setf (harness-acp-client-authenticated client) t))
+                   (if (and (consp extra) (keywordp (car extra))) extra :empty))))
     (cond
      ;; Nothing to prove: a local client while no token is set, or one
      ;; a function of `harness-acp-authorize-functions' lets in.
      ((not (harness-acp--auth-needed-p client)) (funcall accept nil))
-     ((and (stringp token) harness-acp-token (string= token harness-acp-token)) (funcall accept nil))
-     ((stringp token) (signal 'acp-error (list harness-acp-error-unauthenticated "Invalid token" nil)))
+     ;; An auth method of a module's own, such as a session secret.
      ((let ((answer (run-hook-with-args-until-success 'harness-acp-authenticate-functions
                                                        client method params)))
         (and answer (harness-then (harness-as-promise answer) accept))))
+     ((and (not remote) (stringp token) harness-acp-token (string= token harness-acp-token))
+      (funcall accept nil))
+     ((stringp token) (signal 'acp-error (list harness-acp-error-unauthenticated "Invalid token" nil)))
      (t (signal 'acp-error (list harness-acp-error-unauthenticated
                                  (if (member method '(nil "token"))
                                      "Invalid token"
@@ -1795,9 +1887,9 @@ KIND names the transport (a symbol other than `local' and `tcp').
 WRITER is called with (CLIENT JSON-TEXT) for every message to the
 client.  PROCESS is its socket, deleted when the client is dropped.
 REMOTE, a plist such as (:address \"192.168.1.23\"), marks a client on
-another device: it must authenticate whatever `harness-acp-token' says,
-unless `harness-acp-authorize-functions' let it in, and corporate mode
-refuses it."
+another device: `harness-acp-token' does not apply to it, a function of
+`harness-acp-authorize-functions' must let it in, asked at every
+request, and corporate mode refuses it."
   (let ((client (harness-acp--make-client :kind kind :process process
                                           :writer writer :remote remote)))
     (push client harness-acp--clients)

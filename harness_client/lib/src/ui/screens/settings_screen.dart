@@ -130,6 +130,28 @@ class SettingsScreen extends StatelessWidget {
                         ),
                       ],
                     ),
+                    if (app.canSignOut) ...[
+                      const SizedBox(height: 8),
+                      HarnessSecondaryButton(
+                        label: 'Sign out of this harness',
+                        icon: Icons.key_off_rounded,
+                        destructive: true,
+                        expand: true,
+                        onPressed: () async {
+                          final confirmed = await showHarnessDialog<bool>(
+                            context: context,
+                            title: 'Sign out?',
+                            message:
+                                'This ends the session of this device on the '
+                                'harness and forgets its secret here. Sign '
+                                'in again to reconnect.',
+                            confirmLabel: 'Sign out',
+                            cancelLabel: 'Stay',
+                          );
+                          if (confirmed == true) await app.signOut();
+                        },
+                      ),
+                    ],
                   ],
                 ),
               ),

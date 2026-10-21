@@ -75,28 +75,47 @@ class AcpClient {
   void _log(String message) => logger?.call(message);
 
   /// Call `initialize` and return the agent's capabilities object.
+  ///
+  /// `_harness.sessionRefresh` says this client keeps the session secret it
+  /// is given when a harness replaces it: the new one comes back in the
+  /// answer as `_harness.session.token`.
+  ///
+  /// `_harness.sessionRefresh` is also what asks a harness to hand over the
+  /// session secret of a sign-in, in the answer to `authenticate`, so that
+  /// the next connection needs no sign-in.  [clientTitle] is what the person
+  /// asked to approve this device sees it called.
   Future<JsonMap> initialize({
     Map<String, Object?> clientCapabilities = const {
       'fs': {'readTextFile': false, 'writeTextFile': false},
       'terminal': false,
+      '_harness': {'sessionRefresh': true},
     },
     String clientName = 'Harness',
+    String clientTitle = '',
     String clientVersion = '1.0.0',
   }) async {
     final result = await request('initialize', <String, Object?>{
       'protocolVersion': 1,
       'clientCapabilities': clientCapabilities,
-      'clientInfo': {'name': clientName, 'version': clientVersion},
+      'clientInfo': {
+        'name': clientName,
+        if (clientTitle.isNotEmpty) 'title': clientTitle,
+        'version': clientVersion,
+      },
     });
     return asMap(result);
   }
 
-  /// Prove the shared secret, or join the harness's pairing flow.
-  Future<void> authenticate({required String methodId, String? token}) async {
-    await request('authenticate', <String, Object?>{
+  /// Sign in with [methodId], one of the `authMethods` `initialize` listed:
+  /// ACP's way for an agent to sign its user in itself.  The answer comes
+  /// when the agent did, which can take as long as the person it asks
+  /// does.  [token] is the credential of the method named `token`.
+  Future<JsonMap> authenticate({required String methodId, String? token}) async {
+    final result = await request('authenticate', <String, Object?>{
       'methodId': methodId,
       if (token != null) 'token': token,
     });
+    return asMap(result);
   }
 
   Future<Object?> request(

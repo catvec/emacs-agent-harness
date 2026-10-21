@@ -51,7 +51,17 @@ class FakeTransport implements AcpTransport {
 /// every client flow, and can pretend to be a plain ACP agent with
 /// [enhanced] false.
 class FakeHarness {
-  FakeHarness({this.enhanced = true, this.token, this.failAuthOnce = false}) {
+  FakeHarness({
+    this.enhanced = true,
+    this.token,
+    this.failAuthOnce = false,
+    this.reducedBeforeAuth = false,
+    this.rotateTo,
+    this.signIn = false,
+    this.oidcUrl,
+    this.issueSecret,
+    Set<String>? knownSecrets,
+  }) : knownSecrets = knownSecrets ?? <String>{} {
     if (enhanced) {
       methods.addAll({
         'session/list',
@@ -123,6 +133,61 @@ class FakeHarness {
   final bool enhanced;
   final String? token;
   final bool failAuthOnce;
+
+  /// Like a remote listener serving plain TCP: before `authenticate`,
+  /// `initialize` gives only the reduced result, with no `_harness` object.
+  final bool reducedBeforeAuth;
+
+  /// Like a harness whose session secret for this device is due to be
+  /// replaced: a client that says it can keep a new one (`_harness.
+  /// sessionRefresh` in its `initialize`) is given this one.
+  final String? rotateTo;
+
+  /// Whether a client said it can keep a replacement secret.
+  bool sessionRefreshAsked = false;
+
+  /// Like the harness's listener for other devices: a connection that
+  /// brought no session secret it knows may `initialize` and `authenticate`
+  /// and nothing else.  `initialize` lists "Approve in Emacs" (and, with
+  /// [oidcUrl], a login in the browser), and `authenticate` waits for the
+  /// test to [approve] or [deny] it.
+  final bool signIn;
+
+  /// Where the login at the identity provider is, for a harness that
+  /// offers one.
+  final String? oidcUrl;
+
+  /// The session secret a harness hands a client that said it can keep
+  /// one, in the answer to `authenticate`.
+  final String? issueSecret;
+
+  /// Session secrets this harness already knows: a connection that opens
+  /// with one is signed in.
+  final Set<String> knownSecrets;
+
+  /// The code the person at Emacs compares.
+  String signInCode = '4719';
+
+  /// What the last client said of itself in `initialize`.
+  Map<String, Object?> lastClientInfo = const {};
+
+  /// The methods `authenticate` was called with, in order.
+  final List<String> signInAttempts = [];
+
+  Completer<bool>? _waiting;
+
+  /// The person at Emacs approves the device that waits.
+  void approve() => _waiting?.complete(true);
+
+  /// The person at Emacs refuses it.
+  void deny() => _waiting?.complete(false);
+
+  /// Whether `authenticate` waits for somebody.
+  bool get waitingForApproval => _waiting != null && !_waiting!.isCompleted;
+
+  /// Make `session/list` fail, as a harness that goes wrong after it let the
+  /// client in does.
+  bool failSessionList = false;
   final methods = <String>{};
   final events = <String>{};
   bool authenticated = false;
@@ -143,6 +208,15 @@ class FakeHarness {
 
   Future<AcpTransport> Function(ConnectionTarget target, String token)
   get connector => (ConnectionTarget target, String token) async {
+    // A listener that lets a device sign in, as it opens: a secret it knows
+    // signs the connection in, any other is as none.
+    if (signIn) {
+      authenticated = token.isNotEmpty && knownSecrets.contains(token);
+    } else if (this.token != null && !target.isTcp) {
+      // A WebSocket that presented the secret as it opened was let in; plain
+      // TCP signs in with `authenticate`.
+      authenticated = token == this.token;
+    }
     return attach();
   };
 
@@ -591,7 +665,35 @@ class FakeHarness {
   Future<void> _request(String method, JsonMap params, Object? id) async {
     try {
       if (method == 'initialize') {
-        _respond(id, _initializeResult());
+        final reduced = reducedBeforeAuth && token != null && !authenticated;
+        final asked =
+            asMap(
+              asMap(params['clientCapabilities'])['_harness'],
+            )['sessionRefresh'] ==
+            true;
+        if (asked) sessionRefreshAsked = true;
+        lastClientInfo = asMap(params['clientInfo']);
+        _respond(
+          id,
+          signIn && !authenticated
+              ? _signInInitializeResult()
+              : reduced
+              ? _reducedInitializeResult()
+              : _initializeResult(rotate: asked && rotateTo != null),
+        );
+        return;
+      }
+      if (signIn && method == 'authenticate') {
+        await _signIn(id, params);
+        return;
+      }
+      if (signIn && !authenticated) {
+        _respondError(
+          id,
+          -32000,
+          'Authentication required: call authenticate first',
+          {'authMethods': _signInMethods()},
+        );
         return;
       }
       if (method == 'authenticate') {
@@ -612,6 +714,10 @@ class FakeHarness {
         return;
       }
       if (method == 'session/list') {
+        if (failSessionList) {
+          _respondError(id, -32603, 'The harness could not list sessions');
+          return;
+        }
         final cwd = asString(params['cwd']);
         final list = sessions.values
             .where(
@@ -705,6 +811,10 @@ class FakeHarness {
           _pushSession(sid);
         }
         _respond(id, const <String, Object?>{});
+        return;
+      }
+      if (method == '_harness/session/list' && failSessionList) {
+        _respondError(id, -32603, 'The harness could not list sessions');
         return;
       }
       if (method == '_harness/session/list') {
@@ -1126,7 +1236,7 @@ class FakeHarness {
     }
   }
 
-  Map<String, Object?> _initializeResult() => {
+  Map<String, Object?> _initializeResult({bool rotate = false}) => {
     'protocolVersion': 1,
     'agentInfo': {
       'name': enhanced ? 'emacs-agent-harness' : 'Plain ACP agent',
@@ -1145,14 +1255,112 @@ class FakeHarness {
       '_harness': {
         'methods': methods.toList()..sort(),
         'events': events.toList()..sort(),
+        if (rotate) 'session': {'token': rotateTo, 'deviceId': 'dev1'},
       },
     'authMethods': [
-      if (token != null)
+      if (token != null && !authenticated)
         {
           'id': 'token',
           'name': 'Shared secret',
           'description': 'Call authenticate with the token',
         },
+    ],
+  };
+
+  List<Map<String, Object?>> _signInMethods() => [
+    {
+      'id': 'emacs-approval',
+      'name': 'Approve in Emacs',
+      'description':
+          'Asks the person at this harness\'s Emacs to approve this device. '
+          'Check that Emacs shows the code $signInCode, and press Approve '
+          'there. It waits 50 seconds.',
+    },
+    if (oidcUrl != null)
+      {
+        'id': 'oidc',
+        'name': 'Sign in with auth.example.com',
+        'description':
+            'Open $oidcUrl in a browser, sign in, and confirm the code '
+            '$signInCode. This connection signs in once you have.',
+        '_meta': {
+          'harness': {'url': oidcUrl},
+        },
+      },
+    if (sessionRefreshAsked)
+      {
+        'id': 'token',
+        'name': 'Session secret',
+        'description': 'Call authenticate with a session secret.',
+      },
+  ];
+
+  /// What a listener for other devices answers a connection that has not
+  /// signed in: what any ACP agent says of itself, and how to sign in.
+  Map<String, Object?> _signInInitializeResult() => {
+    'protocolVersion': 1,
+    'agentInfo': {'name': 'emacs-agent-harness'},
+    'agentCapabilities': {
+      'loadSession': true,
+      'promptCapabilities': {
+        'image': true,
+        'audio': false,
+        'embeddedContext': true,
+      },
+    },
+    'authMethods': _signInMethods(),
+  };
+
+  Future<void> _signIn(Object? id, JsonMap params) async {
+    final methodId = asString(params['methodId']) ?? '';
+    signInAttempts.add(methodId);
+    if (methodId == 'token') {
+      final secret = asString(params['token']) ?? '';
+      if (knownSecrets.contains(secret)) {
+        authenticated = true;
+        _respond(id, const <String, Object?>{});
+      } else {
+        _respondError(id, -32000, 'Invalid session secret');
+      }
+      return;
+    }
+    if (methodId != 'emacs-approval' && methodId != 'oidc') {
+      _respondError(id, -32000, 'Unknown authentication method');
+      return;
+    }
+    final waiting = Completer<bool>();
+    _waiting = waiting;
+    final approved = await waiting.future;
+    _waiting = null;
+    if (!approved) {
+      _respondError(
+        id,
+        -32000,
+        'The person at the harness\'s Emacs refused this device',
+      );
+      return;
+    }
+    authenticated = true;
+    _respond(id, {
+      if (sessionRefreshAsked && issueSecret != null)
+        '_meta': {
+          'harness': {
+            'session': {'token': issueSecret, 'deviceId': 'dev1'},
+          },
+        },
+    });
+  }
+
+  Map<String, Object?> _reducedInitializeResult() => {
+    'protocolVersion': 1,
+    'agentInfo': {'name': 'emacs-agent-harness'},
+    'agentCapabilities': <String, Object?>{},
+    'authMethods': [
+      {
+        'id': 'token',
+        'name': 'Session secret',
+        'description': 'Call authenticate with the session secret',
+      },
     ],
   };
 
@@ -1535,12 +1743,16 @@ class FakeHarness {
     _write(jsonEncode({'jsonrpc': '2.0', 'id': id, 'result': result}));
   }
 
-  void _respondError(Object? id, int code, String message) {
+  void _respondError(Object? id, int code, String message, [Object? data]) {
     _write(
       jsonEncode({
         'jsonrpc': '2.0',
         'id': id,
-        'error': {'code': code, 'message': message},
+        'error': {
+          'code': code,
+          'message': message,
+          if (data != null) 'data': data,
+        },
       }),
     );
   }

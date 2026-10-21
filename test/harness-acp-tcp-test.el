@@ -215,6 +215,10 @@
               ;; ACP's auth_required, which clients answer by authenticating.
               (should (= -32000 (car (harness-acp-tcp-test-error conn "_harness/harness/version" nil))))
               (should (= -32000 (car (harness-acp-tcp-test-error conn "session/new" (list :cwd dir)))))
+              ;; It names the ways in, as some agents do, for a client that shows them to its user.
+              (should (equal '("token") (mapcar (lambda (m) (plist-get m :id))
+                                                (plist-get (nth 2 (harness-acp-tcp-test-error conn "session/new" (list :cwd dir)))
+                                                           :authMethods))))
               (should (= -32000 (car (condition-case err
                                          (progn (harness-test-await (harness-acp-authenticate conn "wrong")) nil)
                                        (acp-error (cdr err))))))
@@ -229,6 +233,48 @@
                                                         :version)))
               (harness-acp-close conn)))
         (setq harness-acp-token saved)))))
+
+(ert-deftest harness-acp-tcp-a-client-that-has-not-authenticated-hears-nothing ()
+  "What the harness sends its clients, and asks of them, is for those that may call methods."
+  (harness-acp-tcp-test-with
+    (let ((saved harness-acp-token))
+      (unwind-protect
+          (progn
+            (setq harness-acp-token nil)
+            (let ((conn (harness-acp-tcp-test-connect port)))
+              (setq harness-acp-token "s3cret")
+              (harness-test-await (harness-acp-initialize conn))
+              (should (null (harness-acp--serving-clients)))
+              (harness-acp--broadcast "_test/note" (list :n 1))
+              (harness-acp--request-clients "_test/ask" nil #'ignore)
+              (sleep-for 0.2)
+              (should (null (harness-acp-tcp-test-notes)))
+              (should (null (cl-find "_test/ask" harness-acp-tcp-test-messages :key #'car :test #'equal)))
+              ;; Once it authenticated, it is one of the clients a message is for.
+              (should (null (harness-test-await (harness-acp-authenticate conn "s3cret"))))
+              (should (= 1 (length (harness-acp--serving-clients))))
+              (harness-acp--broadcast "_test/note" (list :n 2))
+              (harness-test-wait (lambda () (equal '(2) (harness-acp-tcp-test-notes))) 5 "the note")
+              (harness-acp-close conn)))
+        (setq harness-acp-token saved)))))
+
+(ert-deftest harness-acp-authenticate-may-answer-with-more-than-nothing ()
+  "A function that signs a client in can hand it something in the answer's `_meta'."
+  (harness-acp-tcp-test-with
+    (let ((harness-acp-authenticate-functions
+           (list (lambda (_c method _params)
+                   (and (equal method "extra") (list :_meta (list :harness (list :session (list :token "hs1_x")))))))))
+      (let* ((saved harness-acp-token))
+        (unwind-protect
+            (progn
+              (setq harness-acp-token nil)
+              (let ((conn (harness-acp-tcp-test-connect port)))
+                (setq harness-acp-token "s3cret")
+                (harness-test-await (harness-acp-initialize conn))
+                (let ((result (harness-test-await (harness-acp-request conn "authenticate" '(:methodId "extra")))))
+                  (should (equal "hs1_x" (plist-get (plist-get (plist-get (plist-get result :_meta) :harness) :session) :token))))
+                (harness-acp-close conn)))
+          (setq harness-acp-token saved))))))
 
 (defun harness-acp-tcp-test-raw-client (port)
   "Return (PROC . LINES-CELL): a raw socket to PORT collecting response lines."
@@ -394,6 +440,64 @@ SENT-CELL's car collects the parsed messages the server writes, newest first."
                                        :code)))
           (harness-acp--on-corporate-mode)
           (should-not (memq client harness-acp--clients)))))))
+
+;; A client on another device is let in by the authorizing functions and
+;; by nothing else, asked at every request.
+
+(ert-deftest harness-acp-other-device-clients-answer-to-the-authorizers-alone ()
+  "Neither `harness-acp-token' nor a flag set on the client lets one in."
+  (harness-acp-tcp-test-with
+    (pcase-let ((`(,client . ,sent) (harness-acp-tcp-test-add-client "192.0.2.8"))
+                (harness-acp-authorize-functions nil)
+                (harness-acp-token "a-shared-secret-of-this-machine"))
+      (let ((code (lambda (id method &optional params)
+                    (plist-get (plist-get (harness-acp-tcp-test-answer sent client id method params) :error) :code))))
+        ;; The secret of this machine's own proves nothing from there.
+        (should (= -32000 (funcall code 1 "authenticate"
+                                   '(:methodId "token" :token "a-shared-secret-of-this-machine"))))
+        (should (= -32000 (funcall code 2 "_harness/harness/version")))
+        ;; Nor does a flag: only what the authorizers say now.
+        (setf (harness-acp-client-authenticated client) t)
+        (should (= -32000 (funcall code 3 "_harness/harness/version")))
+        (let* ((allowed t)
+               (harness-acp-authorize-functions (list (lambda (c) (and allowed (eq c client))))))
+          (should (null (funcall code 4 "_harness/harness/version")))
+          (setq allowed nil)
+          (should (= -32000 (funcall code 5 "_harness/harness/version"))))
+        ;; The shared secret is not offered to it as a way in, and until it is in
+        ;; it is told nothing about the harness.
+        (let ((init (plist-get (harness-acp-tcp-test-answer sent client 6 "initialize" '(:protocolVersion 1)) :result)))
+          (should (= 1 (plist-get init :protocolVersion)))
+          (should (null (plist-get init :authMethods)))
+          (should-not (plist-member init :_harness))
+          (should-not (plist-get (plist-get init :agentInfo) :version))
+          (should (equal "emacs-agent-harness" (plist-get (plist-get init :agentInfo) :name))))
+        ;; A client on this machine is offered it, and is told everything.
+        (let ((conn (harness-acp-connect nil)))
+          (unwind-protect
+              (let ((init (harness-test-await (harness-acp-initialize conn))))
+                (should (equal '("token") (mapcar (lambda (m) (plist-get m :id)) (plist-get init :authMethods))))
+                (should (plist-get init :_harness)))
+            (harness-acp-close conn)))))))
+
+(ert-deftest harness-acp-initialize-hooks-add-to-the-answer ()
+  "Functions of the two hooks add capabilities and `_harness' data; a broken one is skipped."
+  (harness-acp-tcp-test-with
+    (let ((harness-acp-agent-capabilities-functions
+           (list (lambda (_c) (list :auth (list :logout :empty)))
+                 (lambda (_c) (error "broken"))))
+          (harness-acp-initialize-extras-functions
+           (list (lambda (_c) (list :session (list :token "hs1_x")))
+                 (lambda (_c) (error "broken")))))
+      (let* ((conn (harness-acp-tcp-test-connect port))
+             (init (harness-test-await (harness-acp-initialize conn))))
+        (unwind-protect
+            (progn
+              (should (plist-member (plist-get (plist-get init :agentCapabilities) :auth) :logout))
+              (should (plist-get (plist-get init :agentCapabilities) :loadSession))
+              (should (equal "hs1_x" (plist-get (plist-get (plist-get init :_harness) :session) :token)))
+              (should (plist-get (plist-get init :_harness) :methods)))
+          (harness-acp-close conn))))))
 
 ;;;; Waiting for one answer, and calling with Lisp arguments
 

@@ -11,10 +11,7 @@ Future<AcpTransport> openAcpTransport(
   String token,
 ) async {
   if (!target.isTcp) {
-    return WebSocketAcpTransport.connect(
-      target.uriWithToken(token)!,
-      token: token,
-    );
+    return WebSocketAcpTransport.connect(target.webSocketUri!, token: token);
   }
   final socket = await Socket.connect(target.tcpHost!, target.tcpPort!);
   return TcpAcpTransport._(socket);

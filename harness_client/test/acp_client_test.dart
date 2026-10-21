@@ -144,22 +144,38 @@ void main() {
       );
     });
 
-    test('a pairing link explains the next step', () {
+    test('the public URL of a harness behind a TLS proxy is its ACP address', () {
       expect(
-        () => ConnectionTarget.parse('http://h:4276/pair?code=x'),
-        throwsA(isA<FormatException>()),
+        ConnectionTarget.parse('https://harness.example').webSocketUri.toString(),
+        'wss://harness.example/acp',
       );
       expect(
-        () => ConnectionTarget.parse(
-          'http://h:4276/pair?code=x'.replaceFirst('http', 'ws'),
-        ),
-        returnsNormally,
+        ConnectionTarget.parse('http://h:4276/').webSocketUri.toString(),
+        'ws://h:4276/acp',
+      );
+      // A proxy that serves the harness under a path keeps it.
+      expect(
+        ConnectionTarget.parse(
+          'https://example.com/harness/acp',
+        ).webSocketUri.toString(),
+        'wss://example.com/harness/acp',
+      );
+      expect(ConnectionTarget.parse('https://h/acp').isTcp, isFalse);
+      expect(
+        () => ConnectionTarget.parse('ftp://h:4276/'),
+        throwsA(isA<FormatException>()),
       );
     });
 
-    test('the token is added to the WebSocket query', () {
-      final target = ConnectionTarget.parse('ws://h/ap c'.replaceAll(' ', ''));
-      expect(target.uriWithToken('abc')!.queryParameters['token'], 'abc');
+    test('a connection link keeps its secret out of the address', () {
+      final target = ConnectionTarget.parse('ws://h:4276/acp?token=hs1_abc');
+      expect(target.token, 'hs1_abc');
+      expect(target.webSocketUri.toString(), 'ws://h:4276/acp');
+      final other = ConnectionTarget.parse('wss://h/acp?a=1&token=t&b=2');
+      expect(other.token, 't');
+      expect(other.webSocketUri!.queryParameters, {'a': '1', 'b': '2'});
+      expect(ConnectionTarget.parse('ws://h/acp').token, isNull);
+      expect(ConnectionTarget.parse('ws://h/acp?token=').token, isNull);
     });
   });
 

@@ -18,6 +18,14 @@ not offered.
 
 ![The macOS sidebar with the session list and transcript side by side](screenshots/macos-chat.png)
 
+Signing in happens inside the app, with ACP's own `authenticate`: the harness
+lists how, the user picks "Approve in Emacs", and presses Approve in Emacs after
+comparing the code.
+
+| Choosing how to sign in | Waiting for the approval |
+|---|---|
+| ![The harness lists how to sign in](screenshots/android-signin.png) | ![Waiting for approval in Emacs, the code to compare](screenshots/android-signin-waiting.png) |
+
 ## What it does
 
 - **Streams a real conversation.** Markdown answers, streamed thoughts, tool
@@ -45,10 +53,24 @@ not offered.
   Android; Cupertino navigation, tab bar, switches, sheets, typography and
   motion on iOS and macOS. Wide screens get a sidebar and a list/detail split.
   Theme and a System/Android/Apple preview are in Settings.
-- **Connects the way the harness is reached.** ACP over WebSocket (`ws://` and
-  `wss://`) or ACP's line-framed TCP (`tcp://`) on desktop, the shared token
-  from `acp-token`, and the harness's `pair` auth method when a QR code is
-  waiting to be scanned. The browser build uses WebSocket only.
+- **Connects the way the harness is reached.** ACP over WebSocket (`ws://`
+  and `wss://`, or the `https://` URL of a harness behind a TLS proxy) or
+  ACP's line-framed TCP (`tcp://`) on desktop; the browser build uses
+  WebSocket only. A remote harness lets a device in by ACP's own sign-in: it
+  lists its `authMethods` in `initialize`, the app shows them, and the user
+  taps one. **Approve in Emacs** asks the person at the harness's Emacs, who
+  compares the four-digit code the app shows with the one Emacs shows and
+  presses Approve: nothing to type or copy, and the app is not left. A harness
+  set up for OpenID Connect also lists a login at its identity provider, which
+  the app opens in the browser. The harness hands the app a **session secret**
+  (`hs1_…`) for the device, which the app keeps and presents on every
+  connection (the `bearer.SECRET` WebSocket subprotocol), so the next
+  connection needs no sign-in. A secret given by hand goes in the field below
+  the address, or in the address as `?token=`; it is taken out of the
+  address, so it is never remembered or shown inside a URL. The app says in
+  `initialize` that it can keep a session secret, and when the harness replaces
+  it (every seven days by default) it saves the new one at once, in place of
+  the old.
 - **Keeps a conversation useful.** Local echo, auto-scroll with a "Latest"
   chip, a collapsible plan strip, a context-window meter, cost per session, and
   image attachments to prompts.
@@ -87,8 +109,10 @@ flutter run -d chrome
 ```
 
 In Emacs, press `C-c h P` to open the remote control page, `[start serving]`,
-and use the `ws://ADDRESS:4276/acp` address it shows. Add the token if the
-harness has one. On a desktop build connected to a local ACP server, the
+and type the ACP address it shows (`ws://ADDRESS:4276/acp`) into the app.
+The app then asks how to sign in: choose **Approve in Emacs**, check that Emacs
+shows the code the app shows, and press Approve there (`C-c h y`). On a
+desktop build connected to a local ACP server, the
 address is `tcp://127.0.0.1:PORT`; the port and token are in `acp-address` and
 `acp-token` in the harness state directory.
 
@@ -104,8 +128,10 @@ python3 -m http.server 8080 --directory build/web
 The Android APK is built with the debug key so it installs directly; it needs
 Android 7 (API 24) or newer. `tool/qr_install.sh` builds and installs it over
 Wi-Fi from the terminal, with no cable (see *Installing on a phone over
-Wi-Fi*). This is a local-network test client: the token is kept in the app's
-shared preferences when *Remember* is on, not in a platform keychain, and
+Wi-Fi*). This is a local-network test client: the session secret is kept in
+the app's shared preferences when *Remember* is on, not in a platform
+keychain (*Sign out of this harness* in Settings ends the session on the
+harness and forgets it here), and
 `ws://` is cleartext. Use it on a trusted network, or a VPN such as Tailscale.
 Cleartext traffic is enabled for `ws://` on a local network, and the `INTERNET`
 permission is declared in the release manifest. iOS and macOS prompts for
@@ -242,7 +268,7 @@ what was detected, including `off` rows, and the raw `initialize` answer.
 The standard method set used here is:
 
 ```text
-initialize · authenticate · session/new · session/load · session/list
+initialize · authenticate · logout · session/new · session/load · session/list
 session/prompt · session/cancel · session/set_mode · session/set_model
 ```
 
@@ -317,7 +343,9 @@ python3 tool/test_qr_tools.py      # QR encoder against qrencode, the phone
 The widget tests drive the real `AcpClient` against an in-memory ACP server
 (`test/support/fake_harness.dart`), not mocks of the state layer. They cover:
 
-- connect and capability discovery, token auth and the auth-required panel
+- connect and capability discovery, session-secret auth and the auth-required
+  panel, pairing links (`POST /pair` against a fake HTTP client), connection
+  links with a token, refused codes, and plain TCP's second `initialize`
 - sessions, search and project filter
 - transcript replay, streaming, tool cards, thought blocks and plan
 - permission request and allow, question with a diagram and send

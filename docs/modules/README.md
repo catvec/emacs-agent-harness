@@ -19,7 +19,7 @@ ui-tasks); `(setq harness-enabled-modules t)` loads every module.
 ```elisp
 (harness-enable-modules
  :features
- ;;acp-remote         ; ACP for phones and other devices on the network: WebSocket, QR code…
+ ;;acp-remote         ; ACP for phones and other devices on the network: WebSocket, sign-in by…
  ;;commit-msg         ; A commit-msg hook stripping Claude attribution, in the repositories…
  ;;cost-compare       ; What the recorded usage would have cost at other models' prices.
  ;;cowboy             ; Ask what goes first when a message meets a session whose prompt cache…
@@ -86,7 +86,7 @@ ui-tasks); `(setq harness-enabled-modules t)` loads every module.
 |---|---|---|---|
 | [access](access.md) | by default | [perms](perms.md), [session](session.md), [tools](tools.md), [readonly](readonly.md) | What a session may reach, in one place: its access profile (network, writing, tools, read-only and given-up directories), request_escalation, which only the user answers, drop_access, which never asks, and the record of every permission judgement. |
 | [acp](acp.md) | by default |  | Agent Client Protocol: local and TCP transports, server and client. |
-| [acp-remote](acp-remote.md) |  | [acp](acp.md) | ACP for phones and other devices on the network: WebSocket, QR code pairing. |
+| [acp-remote](acp-remote.md) |  | [acp](acp.md) | ACP for phones and other devices on the network: WebSocket, sign-in by approval in Emacs or OpenID Connect, session secrets. |
 | [agent](agent.md) | by default | [session](session.md), [provider](provider.md), [tools](tools.md) | The turn loop: prompt, stream, run tools, steer, queue. |
 | [commit-msg](commit-msg.md) |  | [config](config.md), [worktree](worktree.md) | A commit-msg hook stripping Claude attribution, in the repositories that turn it on. |
 | [compaction](compaction.md) | by default | [session](session.md), [provider](provider.md), [agent](agent.md) | Summarise the transcript when it nears the context window; queue or interrupt one while a turn runs. |
@@ -160,7 +160,7 @@ ui-tasks); `(setq harness-enabled-modules t)` loads every module.
 |---|---|---|---|
 | [ui](ui.md) | by default | [acp](acp.md) | UI foundation: ACP connection, faces, positions, keymap and menu. |
 | [ui-access](ui-access.md) | by default | [ui](ui.md), [ui-chat](ui-chat.md), [ui-pending](ui-pending.md) | The access view of a session: its sandbox, mode, directories, tools and rules, the requests it waits on and the judgements of its calls, each drawn as the chat draws it. |
-| [ui-acp-remote](ui-acp-remote.md) |  | [ui](ui.md), [ui-qr](ui-qr.md) | Remote control page: serve phones and other devices, pair them by QR code. |
+| [ui-acp-remote](ui-acp-remote.md) |  | [ui](ui.md) | Remote control page: serve phones and other devices, approve and see them. |
 | [ui-btw](ui-btw.md) |  | [ui](ui.md) | BTW side conversations over the current session or view. |
 | [ui-cache](ui-cache.md) |  | [ui](ui.md), [ui-chat](ui-chat.md) | Warns above a session's compose box once its prompt cache has expired or been dropped, offering to compact. |
 | [ui-chat](ui-chat.md) | by default | [ui](ui.md) | The chat buffer: transcript, pending panel, queue, attachments and compose box. |
@@ -349,9 +349,11 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `dbus-event-error-functions` | `harness-notifications-desktop.el` | `harness-notifications-desktop.el` |
 | `ediff-after-quit-hook-internal` |  | [ui-patch-review](ui-patch-review.md) |
 | `emacs-startup-hook` |  | [ui](ui.md) |
+| `harness-acp-agent-capabilities-functions` | [acp](acp.md) | [acp-remote](acp-remote.md) |
 | `harness-acp-auth-methods-functions` | [acp](acp.md) | [acp-remote](acp-remote.md) |
 | `harness-acp-authenticate-functions` | [acp](acp.md) | [acp-remote](acp-remote.md) |
 | `harness-acp-authorize-functions` | [acp](acp.md) | [acp-remote](acp-remote.md) |
+| `harness-acp-initialize-extras-functions` | [acp](acp.md) | [acp-remote](acp-remote.md) |
 | `harness-acp-received-hook` | [acp](acp.md) | [ui-chat](ui-chat.md) |
 | `harness-chat-header-end-functions` | [ui-chat](ui-chat.md) | [ui-version](ui-version.md) |
 | `harness-chat-header-functions` | [ui-btw](ui-btw.md), [ui-chat](ui-chat.md), [ui-priority](ui-priority.md), [ui-supervisor](ui-supervisor.md) | [ui-btw](ui-btw.md), [ui-priority](ui-priority.md), [ui-supervisor](ui-supervisor.md) |
@@ -373,7 +375,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `harness-ui-live-functions` | [ui](ui.md) | [ui-chat](ui-chat.md), [ui-sessions](ui-sessions.md), [ui-tasks](ui-tasks.md) |
 | `harness-ui-media-rerender-functions` | [ui-media](ui-media.md) | [ui-chat](ui-chat.md) |
 | `harness-ui-notification-functions` | [ui](ui.md) | [ui-tasks](ui-tasks.md) |
-| `harness-ui-notify-segment-functions` | [ui-notify](ui-notify.md) | [ui-tasks](ui-tasks.md), [ui-version](ui-version.md) |
+| `harness-ui-notify-segment-functions` | [ui-acp-remote](ui-acp-remote.md), [ui-notify](ui-notify.md) | [ui-acp-remote](ui-acp-remote.md), [ui-tasks](ui-tasks.md), [ui-version](ui-version.md) |
 | `harness-ui-pending-changed-hook` | [ui-pending](ui-pending.md) | [ui-access](ui-access.md), [ui-chat](ui-chat.md), [ui-pending](ui-pending.md), [ui-sessions](ui-sessions.md) |
 | `harness-ui-pending-drawn-predicates` |  | [ui-chat](ui-chat.md) |
 | `harness-ui-pending-panel-functions` | [ui-pending](ui-pending.md) | [ui-cowboy](ui-cowboy.md) |
@@ -397,7 +399,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `harness-ui-update-functions` | [ui](ui.md), [ui-children](ui-children.md) | [ui-access](ui-access.md), [ui-cache](ui-cache.md), [ui-chat](ui-chat.md), [ui-children](ui-children.md), [ui-tree](ui-tree.md) |
 | `harness-update-hook` | [ui-version](ui-version.md), `harness.el` | [ui-version](ui-version.md) |
 | `harness-websearch-ready-functions` | [tools-web](tools-web.md) |  |
-| `kill-buffer-hook` |  | [ui-acp-remote](ui-acp-remote.md), [ui-cache](ui-cache.md), [ui-chat](ui-chat.md), [ui-compose](ui-compose.md), [ui-config](ui-config.md), [ui-pet](ui-pet.md), [ui-popout](ui-popout.md) |
+| `kill-buffer-hook` |  | [ui-cache](ui-cache.md), [ui-chat](ui-chat.md), [ui-compose](ui-compose.md), [ui-config](ui-config.md), [ui-pet](ui-pet.md), [ui-popout](ui-popout.md) |
 | `kill-emacs-hook` |  | [agent](agent.md), [pet](pet.md), [session](session.md), [tasks](tasks.md), [ui](ui.md) |
 | `message-sent-hook` | `change-review-mail.el` | `change-review-mail.el` |
 | `post-command-hook` |  | [ui-chat](ui-chat.md), [ui-compose](ui-compose.md), `compose-quote.el` |

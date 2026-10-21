@@ -3206,27 +3206,54 @@ lifted again afterwards, and the settings it fixed get their values back."
 (defvar harness-acp-remote-host)
 (defvar harness-acp-remote-port)
 (defvar harness-acp-remote-address)
-(declare-function harness-acp-remote--grant "harness-acp-remote")
-(declare-function harness-ui-acp-remote-toggle-qr "harness-ui-acp-remote")
+(declare-function harness-acp-remote--mint "harness-acp-remote")
+(declare-function harness-acp-remote--request-approval "harness-acp-remote")
+(declare-function harness-acp-remote--approval-over "harness-acp-remote")
+(defvar harness-acp-remote--approvals)
 
 (defun harness-media-shot-remote ()
-  "The remote control page: serving, a paired phone, the QR code unfolded."
+  "The remote control page: serving, a device that asks to sign in, devices signed in."
   ;; Loopback only, on the usual port when it is free; the page shows
   ;; a local network address, as on a laptop at home.
   (setq harness-acp-remote-host "127.0.0.1"
-        harness-acp-remote-address "192.168.1.150")
+        harness-acp-remote-address "192.168.1.150"
+        ;; An authentik provider set up for the harness, so the page
+        ;; shows the link a browser signs in with there.
+        harness-acp-remote-oidc-issuer "https://auth.example.com/application/o/harness/"
+        harness-acp-remote-oidc-client-id "harness"
+        harness-acp-remote-oidc-allowed '("harness-users"))
   (condition-case nil
       (let ((harness-acp-remote-port 4276)) (harness-call 'acp/remote-start))
     (error (let ((harness-acp-remote-port 0)) (harness-call 'acp/remote-start))))
-  (harness-acp-remote--grant
-   "192.168.1.23" "Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 Chrome/131.0 Mobile Safari/537.36")
-  (harness-media--view #'harness-remote-control
-                       (lambda ()
-                         (harness-media--settle 0.5)
-                         (harness-ui-acp-remote-toggle-qr)
-                         (harness-media--settle 1)
-                         (goto-char (point-min))))
-  (harness-media--capture "remote")
+  ;; Signed in: a phone's ACP client that was approved (its session is its
+  ;; connection's alone), a laptop that signed in with OpenID Connect, and
+  ;; a tablet that was given a token.
+  (harness-acp-remote--mint
+   "ACP UI 0.9.1 · Android · Chrome"
+   "Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 Chrome/131.0 Mobile Safari/537.36"
+   "192.168.1.23" "approval" nil t)
+  (harness-acp-remote--mint
+   "me@example.com · Mac · Safari" "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Safari/605.1.15"
+   "192.168.1.40" "oidc" "u-1")
+  (harness-acp-remote--mint "Tablet" nil "192.168.1.31" "token")
+  ;; And an iPhone that is asking now: a socket that carries nothing, and
+  ;; the request its `authenticate' makes.
+  (let* ((socket (make-pipe-process :name "media-remote-socket" :noquery t))
+         (client (harness-acp-add-client
+                  'websocket :process socket :writer #'ignore
+                  :remote (list :transport "websocket" :address "192.168.1.52"
+                                :agent "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Version/18.0 Mobile/15E148 Safari/604.1"))))
+    (harness-acp--client-set client 'hello '(:name "acp-ui" :title "ACP UI" :version "0.9.1"))
+    (harness-acp-remote--request-approval client)
+    (harness-media--view #'harness-remote-control
+                         (lambda ()
+                           (harness-media--settle 1)
+                           (goto-char (point-min))))
+    (harness-media--capture "remote")
+    (dolist (approval (copy-sequence harness-acp-remote--approvals))
+      (harness-acp-remote--approval-over approval "The shot is over"))
+    (harness-acp-drop-client client)
+    (when (process-live-p socket) (delete-process socket)))
   (harness-call 'acp/remote-stop))
 
 (defun harness-media--attachments-make-media ()

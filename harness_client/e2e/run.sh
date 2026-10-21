@@ -9,6 +9,7 @@ cd "$ROOT"
 PORT=${PORT:-8899}
 ACP_PORT=${ACP_PORT:-4277}
 STANDARD_PORT=${STANDARD_PORT:-4278}
+SIGN_IN_PORT=${SIGN_IN_PORT:-4279}
 PLAYWRIGHT_BROWSERS_PATH=${PLAYWRIGHT_BROWSERS_PATH:-$HOME/.cache/ms-playwright}
 export PLAYWRIGHT_BROWSERS_PATH
 
@@ -23,10 +24,14 @@ fi
 MOCK=$!
 "$DART" run tool/mock_harness_server.dart --port "$STANDARD_PORT" --standard > "$LOG_DIR/mock-standard.log" 2>&1 &
 MOCK_STANDARD=$!
+# One that lets a device in to sign in, as the harness's listener for other
+# devices does: it lists "Approve in Emacs" and approves six seconds later.
+"$DART" run tool/mock_harness_server.dart --port "$SIGN_IN_PORT" --token hs1_e2e --approve-after 6 > "$LOG_DIR/mock-sign-in.log" 2>&1 &
+MOCK_SIGN_IN=$!
 python3 -m http.server "$PORT" --directory build/web > "$LOG_DIR/web.log" 2>&1 &
 WEB=$!
 cleanup() {
-  kill "$MOCK" "$MOCK_STANDARD" "$WEB" 2>/dev/null || true
+  kill "$MOCK" "$MOCK_STANDARD" "$MOCK_SIGN_IN" "$WEB" 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -47,4 +52,5 @@ cd e2e
 WEB_URL="http://127.0.0.1:$PORT" \
 ACP_URL="ws://127.0.0.1:$ACP_PORT/acp" \
 STANDARD_ACP_URL="ws://127.0.0.1:$STANDARD_PORT/acp" \
+SIGN_IN_ACP_URL="ws://127.0.0.1:$SIGN_IN_PORT/acp" \
 node run_flows.mjs
