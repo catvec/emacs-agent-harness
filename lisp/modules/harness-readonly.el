@@ -69,6 +69,11 @@
 (defconst harness-readonly-sandbox-options '(:read-only t :network nil)
   "The sandbox options of a read-only session's commands: look, don't touch.")
 
+(defconst harness-readonly-always-tools '("drop_access")
+  "Tools every read-only session keeps, whatever its policy.
+They only take access away (the access module's drop_access gives up a
+directory, the network or a tool), which a session may always do.")
+
 ;;;; Policies
 
 (defvar harness-readonly--policies nil
@@ -135,11 +140,13 @@ session has no bash.  Anything that goes wrong counts as not confined."
 (defun harness-readonly-allowed-tools (policy)
   "Return the names of the tools a session under POLICY may use besides bash.
 They are the reading and web tools, then the policy's own `:tools',
-less the ones its `:except' names."
+less the ones its `:except' names, and `harness-readonly-always-tools',
+which no policy takes away."
   (let ((except (plist-get policy :except)))
-    (cl-remove-if (lambda (name) (member name except))
-                  (append harness-readonly-read-tools harness-readonly-net-tools
-                          (plist-get policy :tools)))))
+    (append (cl-remove-if (lambda (name) (member name except))
+                          (append harness-readonly-read-tools harness-readonly-net-tools
+                                  (plist-get policy :tools)))
+            harness-readonly-always-tools)))
 
 (defun harness-readonly-tool-allowed-p (tool dir allowed)
   "Non-nil when a read-only session may use TOOL, to run in DIR when it is bash.

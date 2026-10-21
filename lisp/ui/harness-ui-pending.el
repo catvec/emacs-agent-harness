@@ -126,6 +126,12 @@ The chat redraws its tail for it, an open popout its content.")
 The chat leaves it nil, so its `harness-ui-session-id' applies; a
 popout sets it to the session its item belongs to.")
 
+(defvar-local harness-ui-pending-box-hints t
+  "Non-nil when the panels drawn in this buffer say how to press a key from a box.
+A panel's keys type into the compose box of a chat or a popout, so the
+panel says how to press them from there.  A view without a compose box,
+such as the access view (harness-ui-access.el), sets this to nil.")
+
 (defun harness-ui-pending--str (value)
   "Return VALUE as a string (a symbol or string), or nil for nil."
   (when value (if (symbolp value) (symbol-name value) (format "%s" value))))
@@ -1153,7 +1159,7 @@ the panel's keys from there."
                 " " (harness-ui-kbd (nth 1 o)) "  ")))
     (insert "\n")
     ;; The keys above type in the compose box: this is how to press one there.
-    (when-let* ((key (nth 1 (car buttons))))
+    (when-let* ((key (and harness-ui-pending-box-hints (nth 1 (car buttons)))))
       (insert "   " (harness-compose-panel-hint key) "\n"))
     (harness-ui-pending--decorate start (point) pid (harness-ui-pending--permission-map r))))
 

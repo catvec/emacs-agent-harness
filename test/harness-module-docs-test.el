@@ -85,7 +85,8 @@ Then shrink it.\"
   (add-hook 'kill-emacs-hook #'harness-alpha--save)
   (when (harness-method-exists-p 'gamma/ping)
     (harness-call 'gamma/ping))
-  (harness-run-filter 'alpha/choose nil))
+  (harness-run-filter 'alpha/choose nil)
+  (harness-run-filter-async-traced 'alpha/decide nil (list 1)))
 
 (harness-define-module 'alpha
   :doc \"The alpha module, for `testing'.\"
@@ -187,7 +188,8 @@ to it in BODY."
                        (session/deleted harness-alpha--on-turn nil))))
       (should (equal (plist-get scan :filters-joined)
                      '((agent/system-prompt harness-alpha--prompt 60))))
-      (should (equal (plist-get scan :filters-run) '(alpha/choose)))
+      ;; Run plainly, and traced (as the permission chain is).
+      (should (equal (plist-get scan :filters-run) '(alpha/choose alpha/decide)))
       (should (equal (plist-get scan :calls) '(alpha/raw beta/fetch beta/list gamma/ping)))
       (should (equal (plist-get scan :checks) '(gamma/ping)))
       (should (equal (plist-get scan :hooks-defined)

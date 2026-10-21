@@ -8,7 +8,7 @@ Requests a session waits on: panels, answering and the popout.
 - **Source:** [lisp/ui/harness-ui-pending.el](../../lisp/ui/harness-ui-pending.el)
 - **Loaded:** by default
 - **Requires:** [ui](ui.md), [ui-compose](ui-compose.md)
-- **Required by:** [ui-cowboy](ui-cowboy.md)
+- **Required by:** [ui-access](ui-access.md), [ui-cowboy](ui-cowboy.md)
 - **Brings along:** [acp](acp.md) (its file requires it)
 
 ## About

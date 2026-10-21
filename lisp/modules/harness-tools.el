@@ -878,15 +878,52 @@ not refused here: the chain decides it, as any other call."
                     "corporate mode: network tools other than web search are off")
           :hint harness-tools-corporate-hint)))
 
+(defun harness-tools-decide-traced (request &optional from to)
+  "Return a promise of the decision the `permission/decide' chain makes on REQUEST.
+The chain runs from an undecided value (`:behavior ask'), only its
+stages between priorities FROM and TO when they are given.  The
+decision names, as `:stage', the stage function that made it -- the
+last one that handed on a value of its own (see
+`harness-run-filter-async-traced') -- unless it says who decided as
+`:by', or names its `:stage', already: a decision made again for a
+prompt that waited (see `harness-perms--decide-waiting') names the
+stage that made it then.  So whoever reads it can tell the jail from
+the judge.  A stage function says what it is with its
+`harness-permission-stage' property (see `harness-tools-decision-by')."
+  (let ((stage nil))
+    (harness-then
+     (harness-run-filter-async-traced 'permission/decide (list :behavior 'ask) (list request)
+                                      :from from :to to
+                                      :tracer (lambda (fn _old _new) (setq stage fn)))
+     (lambda (decision)
+       (if (and stage (symbolp stage) (listp decision)
+                (not (plist-get decision :by)) (not (plist-get decision :stage)))
+           (append decision (list :stage stage))
+         decision)))))
+
+(defun harness-tools-decision-by (decision)
+  "Return who made permission DECISION, a symbol, or nil when nothing says.
+DECISION's own `:by' says, else the `harness-permission-stage' property
+of its `:stage' (see `harness-tools-decide-traced'): `user' for the
+user's answer, `rule', `mode', `judge', `jail', `access', `away' (nobody
+could answer), `corporate', and `gate' for a stage that names nothing
+more precise, such as a module's own refusal."
+  (let ((by (plist-get decision :by))
+        (stage (plist-get decision :stage)))
+    (cond ((and by (symbolp by)) by)
+          ((stringp by) (intern by))
+          ((and stage (symbolp stage)) (or (get stage 'harness-permission-stage) 'gate)))))
+
 (defun harness-tools--decide (request)
   "Return a promise of the permission decision on REQUEST.
 A call corporate mode refuses (`harness-tools--corporate-refusal')
-never reaches the `permission/decide' chain; any other call does."
+never reaches the `permission/decide' chain; any other call does, and
+its decision names the stage that made it (`harness-tools-decide-traced')."
   (let ((refusal (harness-tools--corporate-refusal (plist-get request :tool)
                                                    (plist-get request :kind))))
     (if refusal
-        (harness-resolved refusal)
-      (harness-run-filter-async 'permission/decide (list :behavior 'ask) request))))
+        (harness-resolved (append refusal (list :by 'corporate)))
+      (harness-tools-decide-traced request))))
 
 ;;;; Tools a provider runs itself
 

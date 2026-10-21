@@ -40,18 +40,21 @@ Once it hatched, the pet shows in a few places besides, those
                 The whole creature in its rarity's colour, a few
                 lines tall, its name beside its eyes; or, in a speech
                 bubble on its left joined to it, what it last said
-                about that chat's session, until the session's next
-                turn starts (`harness-chat-top-functions`).
+                about that chat's session, and only that, until the
+                session's next turn starts or the saying grows old
+                (`harness-chat-top-functions`).
   board         the same at the bottom right of the task board, the
-                bubble saying what it said last about anything.  The
-                lines above the board's compose box -- its label and
-                settings -- narrow for the creature's bottom rows, so
-                it takes few lines of its own
+                bubble saying what it said last about itself, or its
+                recap of a session the board lists -- never what it
+                said about a session's work, which is for that chat.
+                The lines above the board's compose box -- its label
+                and settings -- narrow for the creature's bottom rows,
+                so it takes few lines of its own
                 (`harness-ui-tasks-corner-functions`).
   sessions      the same at the bottom right of the session list,
                 under its last row after a blank line, the bubble
-                saying what it said last about anything
-                (`harness-ui-sessions-footer-functions`).
+                saying what it would on the board, of the sessions
+                the list lists (`harness-ui-sessions-footer-functions`).
   chat header   its face, on one line, near the end of a chat's
                 header line, the first thing to go when the window is
                 narrow.  It blinks now and then while the session
@@ -76,11 +79,27 @@ even set then (`harness-ui-pet--wire`).  They draw from the pet as
 the harness last told this Emacs (`harness-ui-pet--current`), asked
 for when the UI connects and followed through `pet/changed`.
 
-The pet only speaks where it would be seen.  This Emacs tells the
-harness (`pet/watch`) whenever that changes, through
-`window-buffer-change-functions` while it matters: the pet's buffer,
-a task board or the session list with its figure on screen lets it
-speak about anything, a chat on screen about that chat's session.
+The pet only speaks where it would be seen, and each of its sayings
+shows where it belongs: the harness tags it with a scope
+(`harness-ui-pet--scope`).  What it says about a session's work shows
+in that session's chat only; what it says about itself -- a petting,
+its first words, a level it grew -- shows where it is itself, its
+buffer and its figure on a board or under the list; its recap of a
+session shows on an overview that lists the session, the board or the
+list.  This Emacs tells the harness (`pet/watch`) where that is
+whenever it changes, through `window-buffer-change-functions` while
+it matters, and as a board or list comes to list other sessions:
+the chats on screen, whether the pet itself is, and the sessions the
+overviews on screen list.  While no frame of this Emacs has focus,
+nobody is looking, and it says it shows nowhere
+(`harness-ui-pet--attended-p`), so the harness asks no model for a
+line nobody would read.
+
+A saying leaves its bubble after `harness-ui-pet-saying-lifetime`
+seconds, a minute by default: one timer, armed for the oldest saying
+shown, draws the figures again then (`harness-ui-pet--arm-fade`).
+Only the bubble forgets it: it stays in the pet's buffer, and in what
+the pet remembers it said.
 
 Nothing here runs while nothing happens.  Four short animations
 play when something does -- the egg wobbles and cracks as it hatches,
@@ -130,6 +149,7 @@ figure is on screen.
 - `harness-ui-pet-animations` — Whether the companion pet moves.
 - `harness-ui-pet-figure` — How the pet shows in chats, on the task board and under the session list.
 - `harness-ui-pet-places` — Where the companion pet shows besides its own buffer, once it hatched.
+- `harness-ui-pet-saying-lifetime` — Seconds what the pet says shows in its speech bubble, or nil for no limit.
 
 ## Uses
 

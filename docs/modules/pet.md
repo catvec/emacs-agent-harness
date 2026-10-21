@@ -24,6 +24,26 @@ and, quietly, in a few places besides: its face in the header line of
 a chat and of the task board, what it last said about a session above
 that session's compose box.
 
+Its voice is dry: a colleague at the next desk who notices things,
+never cutesy, affectionate or bodily.  It may start a line with a
+small deadpan gesture between asterisks, *squints at the diff*,
+unless `harness-pet-actions` is off; an action that nestles, nuzzles
+or purrs all the same is dropped from what it says.
+
+What the harness does to a session it tells as its own news: a new
+name (`session/updated`), and a compaction (`compaction/done`), where
+it reaches for the forgetting trope -- the neuralyzer of Men in Black
+and its kin.  Those it says whenever that session's chat is seen,
+cooldown or not, after the line it is saying if it is saying one.
+
+What it says about a session is that session's: it is said only while
+the session's chat is on screen, and shows there.  The pet itself on
+screen -- its buffer, or its figure on the task board or the session
+list -- hears what is about nothing in particular, a petting or its
+first words.  An overview, the board or the list, gets recaps of the
+sessions it lists instead: the recap module's recap of each, as the
+pet would put it (`recap/done`, `recap/session-done`).
+
 It can be turned off altogether: with `harness-pet-enabled` nil it
 reacts to nothing, grows no more, asks no model anything and refuses
 to be hatched, petted, renamed or released; `pet/get` still answers,
@@ -48,11 +68,14 @@ goes.  Set on the settings page, they show at once (`config/changed`
 announces the pet again).
 
 It is cheap.  Nothing here runs unless something happens: no timer
-but the one of a model call in flight and the one that saves the
-record a few seconds after it grew.  It only ever speaks where what
-it says would be seen: about a session while a UI shows it beside
-that session, or shows the pet itself (`pet/watch`); while it is not
-muted and while `harness-pet-reactions` is on; and then through the
+but the one of a model call in flight, the one that saves the record
+a few seconds after it grew, and the one that says a system message
+once the pet is free.  It only ever speaks where what it says would
+be seen, while the user is at the screen: about a session while a UI
+shows that session's chat, about nothing in particular while one
+shows the pet itself, a recap while one shows an overview listing the
+session (`pet/watch`); while it is not muted and while
+`harness-pet-reactions` is on; and then through the
 cheapest model of the provider in use, for a line of at most a
 couple of hundred tokens: unasked, at most once every
 `harness-pet-cooldown` seconds and only by chance
@@ -77,15 +100,16 @@ its experience; growing a level is something it may remark upon.
 - `pet/release` — Let the companion go: forget it for good.  Return the pet: an egg.
 - `pet/rename` (name) — Rename the companion NAME.  Return the pet (`pet/get`).
 - `pet/set-muted` (muted) — Mute the companion when MUTED is true, else let it speak again.
-- `pet/watch` (client on &optional sessions) — Say whether the UI CLIENT shows the pet now: ON true or false.
+- `pet/watch` (client on &optional sessions self overview) — Say where the UI CLIENT shows the pet now: ON true, or false for nowhere.
 
 ### Events
 
 - `pet/changed` — (PET) after the companion pet changed; PET as `pet/get` returns it.
-- `pet/said` — (SAYING) after the companion pet said something: (:text :ts :reason :session :session-name).
+- `pet/said` — (SAYING) after the companion pet said something: (:text :ts :reason :session :session-name :scope), SCOPE "pet", "session" or "overview" (`harness-pet--scope`).
 
 ### Options
 
+- `harness-pet-actions` — Whether the companion pet may start a line with an action, *like this*.
 - `harness-pet-chance` — Chance, from 0 to 1, that the pet comments on a message the user sends.
 - `harness-pet-cooldown` — Seconds the pet stays quiet after it said something unasked.
 - `harness-pet-enabled` — Whether there is a companion pet at all.
@@ -107,14 +131,20 @@ its experience; growing a level is something it may remark upon.
 - `store/delete` ([store](store.md))
 - `store/load` ([store](store.md))
 - `store/save` ([store](store.md))
+- `task/for-session` ([tasks](tasks.md)), when it is loaded
 - `usage/price` ([usage](usage.md)), when it is loaded
 - `usage/record` ([usage](usage.md)), when it is loaded
 
 ### Events it handles
 
+- `agent/turn-ended` → `harness-pet--on-turn-ended-overview` at 75
 - `agent/turn-ended` → `harness-pet--on-turn-ended` at 70
+- `compaction/done` → `harness-pet--on-compaction-done` at 70
 - `config/changed` → `harness-pet--on-config-changed` at 70
+- `recap/done` → `harness-pet--on-recap` at 70
+- `recap/session-done` → `harness-pet--on-recap` at 70
 - `session/node-added` → `harness-pet--on-node-added` at 70
+- `session/updated` → `harness-pet--on-session-updated` at 70
 - `task/done` → `harness-pet--on-task-done` at 70
 
 ### Events it emits

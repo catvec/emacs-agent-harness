@@ -771,8 +771,10 @@ On `harness-acp-received-hook'."
             (harness-chat--pin w)))))))
 
 (defun harness-chat--follow (windows)
-  "Scroll WINDOWS to the end of the buffer; the others learn about new content."
-  (unless harness-chat--batch
+  "Scroll WINDOWS to the end of the buffer; the others learn about new content.
+A buffer without a transcript, another view drawing tool calls
+\(`harness-chat-tool-view-setup'), has no end to follow."
+  (unless (or harness-chat--batch (null harness-chat--transcript-end))
     (dolist (w (harness-chat--windows))
       (if (memq w windows)
           (progn
@@ -1630,8 +1632,8 @@ went."
   "Move point to the block of tool call CALL-ID, when the buffer shows it.
 A run of calls the block was folded into opens, so the block is
 visible.  Return non-nil when point moved."
-  (let* ((node-id (gethash call-id harness-chat--calls))
-         (block (and node-id (gethash node-id harness-chat--blocks))))
+  (let* ((node-id (and harness-chat--calls (gethash call-id harness-chat--calls)))
+         (block (and node-id harness-chat--blocks (gethash node-id harness-chat--blocks))))
     (cond
      ((null block) (message "The call %s is not shown in this buffer" call-id) nil)
      (t (let ((gid (harness-chat-block-group block)))
@@ -1656,7 +1658,7 @@ denied call's block where the buffer still has it."
          (handle (and (equal tool-name harness-chat--rerun-tool)
                       (or (plist-get meta :rerun-of)
                           (plist-get (plist-get call :input) :handle))))
-         (denied (and (stringp handle)
+         (denied (and (stringp handle) harness-chat--calls harness-chat--blocks
                       (let* ((block (gethash (gethash handle harness-chat--calls) harness-chat--blocks)))
                         (plist-get (and block (harness-chat-block-node block)) :tool)))))
     (when (and (stringp handle) (not (string-empty-p handle)))
@@ -2333,6 +2335,63 @@ draws it, so carrying that over would keep drawing the old image."
       (unless (harness-chat-block-result block)
         (cl-pushnew (harness-chat-block-id block) harness-chat--unfinished :test #'equal)))
     block))
+
+;;;; Tool calls in another view
+;;
+;; Another view draws a session's tool calls as the chat does -- the
+;; title and status, the input and output under a fold, the decision
+;; that refused one, [Approve] for one refused that the agent may then
+;; rerun -- with the chat's own blocks, so a call reads the same
+;; wherever it shows.  The access view (harness-ui-access.el) lists a
+;; session's permission judgements so.  The view's buffer keeps its
+;; blocks as a chat does (`harness-chat-tool-view-setup'),
+;; `harness-chat-insert-tool-call' draws one at point, and
+;; `harness-chat-toggle-block' folds and unfolds the one at point.  Such
+;; a buffer has no transcript, so nothing scrolls to its end as a block
+;; changes.
+
+(defun harness-chat-tool-view-setup (session-id)
+  "Make the current buffer draw tool calls of SESSION-ID as the chat does.
+It gets fresh tables of blocks, so `harness-chat-insert-tool-call'
+draws in it and the blocks' buttons and folds work there.  Call it
+each time the buffer is drawn again from scratch, before drawing.  The
+buffer shows SESSION-ID without being its chat, so the modules that
+draw in a session's chat pass it by (`harness-ui-session-view')."
+  (setq-local harness-ui-session-id session-id)
+  (setq-local harness-ui-session-view t)
+  (setq harness-chat--blocks (make-hash-table :test 'equal)
+        harness-chat--calls (make-hash-table :test 'equal)
+        harness-chat--unfinished nil
+        harness-chat--transcript-end nil))
+
+(defun harness-chat-insert-tool-call (call result &optional expanded)
+  "Insert the block of CALL, a tool-call node, at point, as the chat draws it.
+RESULT is the call's tool-result node, or nil while it has none.  The
+block starts folded, as in the chat, unless EXPANDED.  Point ends after
+the block.  Return the block.  The buffer must have been set up with
+`harness-chat-tool-view-setup'."
+  (let ((block (harness-chat--new-block call)))
+    (when expanded (setf (harness-chat-block-collapsed block) nil))
+    (when result (setf (harness-chat-block-result block) result))
+    (harness-chat--insert-block block (point))
+    (when-let* ((rid (and result (plist-get result :id))))
+      (puthash rid block harness-chat--blocks))
+    (goto-char (harness-chat-block-end block))
+    block))
+
+(defun harness-chat-tool-view-expanded ()
+  "Return the call ids of the blocks this buffer shows unfolded.
+A view drawing tool calls (`harness-chat-tool-view-setup') reads them
+before it draws again, to keep them so."
+  (let (ids)
+    (when harness-chat--blocks
+      (maphash (lambda (_id block)
+                 (when-let* ((call (and (equal (harness-chat-block-kind block) "tool-call")
+                                        (not (harness-chat-block-collapsed block))
+                                        (plist-get (harness-chat-block-node block) :call-id))))
+                   (cl-pushnew call ids :test #'equal)))
+               harness-chat--blocks))
+    ids))
 
 (defun harness-chat--append-block (block)
   "Append BLOCK at the end of the transcript."

@@ -171,7 +171,9 @@ ENV is as for `harness-module-docs--names'."
       (`(harness-on ,event ,fn . ,rest)
        (dolist (e (harness-module-docs--names event env))
          (add :handles (list e (harness-module-docs--fn fn) (and (numberp (car rest)) (car rest))))))
-      (`(,(or 'harness-run-filter 'harness-run-filter-async 'harness-run-filter-async-between) ,name . ,_)
+      (`(,(or 'harness-run-filter 'harness-run-filter-async 'harness-run-filter-async-between
+              'harness-run-filter-async-traced)
+         ,name . ,_)
        (dolist (n (harness-module-docs--names name env)) (add :filters-run n)))
       (`(harness-add-filter ,name ,fn . ,rest)
        (dolist (n (harness-module-docs--names name env))

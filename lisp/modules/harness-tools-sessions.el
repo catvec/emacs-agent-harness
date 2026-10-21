@@ -861,9 +861,12 @@ INPUT is the tool call's input plist and CTX its context."
 ;;
 ;; It changes nothing else: the permission mode and non-interactive
 ;; state are shown by a read but refused, naming the tool that does
-;; change them (`set_non_interactive', `request_directory_access' or
-;; `session_move'), as are allowed directories, the working directory
-;; and the host.
+;; change them, as are allowed directories, the network, the tools, the
+;; working directory and the host.  What a session may reach is a
+;; sensitive attribute: it is raised only by the user's answer to an
+;; escalation (`request_escalation', or `request_directory_access' for a
+;; directory, see harness-access.el), lowered at once with
+;; `drop_access', and the session moved with `session_move'.
 
 (defconst harness-tools-sessions--settings-keys
   '("model" "thinking" "context_window_limit" "budget" "budget_hard")
@@ -872,10 +875,12 @@ INPUT is the tool call's input plist and CTX its context."
 hard (the session's next turn stops once it is spent) rather than soft.")
 
 (defconst harness-tools-sessions--settings-refused
-  '(("permission_mode" . "the permission mode is the user's; change it in the chat, not here")
-    ("non_interactive" . "use the set_non_interactive tool to change non-interactive mode")
-    ("allowed_dirs" . "use the request_directory_access tool to ask the user for a directory")
-    ("allowed_directories" . "use the request_directory_access tool to ask the user for a directory")
+  '(("permission_mode" . "the permission mode is the user's: ask them for a more permissive one with request_escalation (attribute permission_mode), or lower this session's with drop_access")
+    ("non_interactive" . "use the set_non_interactive tool to change non-interactive mode, or request_escalation (attribute non_interactive) to ask the user to turn it on for this session")
+    ("allowed_dirs" . "use request_directory_access or request_escalation (attribute directory, or read_directory to only read it) to ask the user for a directory, and drop_access to give one up")
+    ("allowed_directories" . "use request_directory_access or request_escalation (attribute directory, or read_directory to only read it) to ask the user for a directory, and drop_access to give one up")
+    ("network" . "use request_escalation to ask the user for the network, drop_access to give it up")
+    ("tools" . "use request_escalation to ask the user for a tool turned off, drop_access to turn one off")
     ("cwd" . "use the session_move tool to move the session to another working directory")
     ("directory" . "use the session_move tool to move the session to another working directory")
     ("working_directory" . "use the session_move tool to move the session to another working directory")
@@ -883,7 +888,9 @@ hard (the session's next turn stops once it is spent) rather than soft.")
   "Input keys `session_settings' refuses, each with the tool that changes it.
 The refusal names the right tool, so an agent asked to widen what a
 session may do is pointed at that tool and its confirmation rather
-than at this one.")
+than at this one: what a session may reach is raised only through the
+user's answer to an escalation (request_escalation, see the access
+module), and lowered with drop_access.")
 
 (defun harness-tools-sessions--settings-action (input)
   "Return the action of a `session_settings' call with INPUT, read or set."
@@ -997,7 +1004,7 @@ here."
            (or (harness-tools-sessions--settings-pinned :permission-mode s) "")
            (if (harness-json-true-p (plist-get s :non-interactive)) "on" "off")
            (or (harness-tools-sessions--settings-pinned :non-interactive s) ""))
-   "  The permission mode, non-interactive mode, allowed directories, the working directory and the host are not changed here: non-interactive has the set_non_interactive tool, a directory request_directory_access, and a move session_move.\n"))
+   "  The permission mode, non-interactive mode, allowed directories, the working directory and the host are not changed here: ask the user for more access with request_escalation (a directory, the permission mode, the network, a tool), give access up with drop_access, turn non-interactive mode on or off with set_non_interactive, and move with session_move.\n"))
 
 ;;;; session_settings: changing
 
@@ -1247,7 +1254,7 @@ INPUT is the tool call's input plist and CTX its context."
 
 (harness-define-tool "session_settings"
   :label "Session settings"
-  :description "Read or change a session's model, thinking level, context window limit and budget: this session's by default, or another one by id, unique id prefix or name. action=read shows the model, thinking, the context window and what set its limit, and the budget, plus the permission mode and non-interactive state, which this tool does not change. action=set changes model, thinking, context_window_limit (a token count, or model for the model's own window) and budget (a dollar amount; budget_hard makes it stop the session's next turn once spent). A set goes through the permission chain and every change is left in the affected session's transcript as a hint naming who made it and the old and new value. It refuses permission_mode, non_interactive, allowed_dirs, directory and host, naming the tool that changes them: set_non_interactive, request_directory_access or session_move."
+  :description "Read or change a session's model, thinking level, context window limit and budget: this session's by default, or another one by id, unique id prefix or name. action=read shows the model, thinking, the context window and what set its limit, and the budget, plus the permission mode and non-interactive state, which this tool does not change. action=set changes model, thinking, context_window_limit (a token count, or model for the model's own window) and budget (a dollar amount; budget_hard makes it stop the session's next turn once spent). A set goes through the permission chain and every change is left in the affected session's transcript as a hint naming who made it and the old and new value. It refuses permission_mode, non_interactive, allowed_dirs, directory and host, naming the tool that changes them: request_escalation asks the user for more access, drop_access gives access up, session_move moves the session."
   :schema '(:type "object"
             :properties (:action (:type "string" :enum ("read" "set")
                                   :description "read shows the settings; set changes them.")
@@ -1257,9 +1264,9 @@ INPUT is the tool call's input plist and CTX its context."
                          :context_window_limit (:type "string" :description "New context window limit in tokens, as a number (\"200000\" or \"200k\"), or model/none to remove the limit, for set.")
                          :budget (:type "string" :description "New budget in US dollars, as a number (\"5\" or \"5.00\"), or none to remove it, for set.")
                          :budget_hard (:type "boolean" :description "true for a hard budget (the session's next turn stops once it is spent), false for soft (it warns), for set.")
-                         :permission_mode (:type "string" :description "Refused: only the user changes the permission mode.")
+                         :permission_mode (:type "string" :description "Refused: ask the user with request_escalation, or lower it with drop_access.")
                          :non_interactive (:type "boolean" :description "Refused: use set_non_interactive.")
-                         :allowed_dirs (:type "array" :items (:type "string") :description "Refused: use request_directory_access.")
+                         :allowed_dirs (:type "array" :items (:type "string") :description "Refused: use request_escalation (or request_directory_access).")
                          :directory (:type "string" :description "Refused: use session_move.")
                          :host (:type "string" :description "Refused: use session_move."))
             :required ("action"))

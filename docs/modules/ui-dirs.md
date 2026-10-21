@@ -2,52 +2,22 @@
 
 # ui-dirs
 
-Directory access buffer of a session.
+Obsolete: the directories of a session are a section of its access view (ui-access), which this loads.
 
 - **Runs in:** the UI (your Emacs)
 - **Source:** [lisp/ui/harness-ui-dirs.el](../../lisp/ui/harness-ui-dirs.el)
 - **Loaded:** when enabled (see `harness-enable-modules`)
-- **Requires:** [ui](ui.md)
+- **Requires:** [ui-access](ui-access.md)
 
 ## About
 
-A `tabulated-list-mode` buffer of the directories a session may
-touch (see `permission/dirs`): its cwd and worktree, its own
-temporary directory, the configured `harness-allowed-directories`,
-the directories granted at runtime (to the session, or until its turn
-ends) and the tool output directory.  `a` grants another directory
-to the session (with a prefix argument: to every session), `k`
-revokes the grant at point, `m` moves the session to another working
-directory (`harness-move-session`), `g` refreshes.  The list follows
-grants made from permission prompts elsewhere, and moves.
+The list of the directories a session may touch was a buffer of its
+own here.  It is a section of the session's access view now
+(harness-ui-access.el), with the session's sandbox, mode, tools,
+rules and the judgements of its calls, and `harness-directories`
+(C-c h d) opens the view at its directories.  The access view loads
+with the access module, one of the core modules.
 
-## Provides
-
-### Commands
-
-- `harness-directories` — Show and manage the directories SESSION-ID may access.
-- `harness-ui-dirs-add` — Grant the session of this buffer access to DIR.
-- `harness-ui-dirs-move` — Move the session of this buffer to the working directory DIRECTORY.
-- `harness-ui-dirs-reload` — Fetch the directories again.
-- `harness-ui-dirs-revoke` — Revoke the directory grant at point.
-- `harness-ui-dirs-visit` — Open the directory at point in Dired.
-
-## Uses
-
-### Methods it calls
-
-- `permission/allow-dir` ([perms](perms.md))
-- `permission/dirs` ([perms](perms.md))
-- `permission/revoke-dir` ([perms](perms.md))
-
-### Events it hears over ACP
-
-- `config/changed` → `harness-ui-dirs--on-event`
-- `permission/dir-allowed` → `harness-ui-dirs--on-event`
-- `permission/dir-revoked` → `harness-ui-dirs--on-event`
-- `session/moved` → `harness-ui-dirs--on-event`
-
-### Hooks it adds to
-
-- `harness-ui-event-functions` → `harness-ui-dirs--on-event`
+This module stays so that a configuration naming ui-dirs in
+`harness-enabled-modules` still loads: it loads the access view.
 

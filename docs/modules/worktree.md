@@ -24,8 +24,9 @@ created with `:worktree PATH` that path as its cwd, and the merge
 module merges a worktree's branch back into its parent's cwd.
 Whatever else runs from a worktree lets go of it in the
 `worktree/before-remove` filter, which `worktree/remove` runs before
-git deletes the directory: the Emacs that `open_harness` started
-there, say (harness-tools-dev.el).
+git deletes the directory: the Emacs that this repository's plugin
+started there with `open_harness`, say
+(.harness/plugins/dev/harness-tools-dev.el).
 
 Locks.  Every worktree the harness creates is locked (`git worktree
 add --lock'), its lock reason starting with

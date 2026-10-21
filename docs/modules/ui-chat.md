@@ -8,7 +8,7 @@ The chat buffer: transcript, pending panel, queue, attachments and compose box.
 - **Source:** [lisp/ui/harness-ui-chat.el](../../lisp/ui/harness-ui-chat.el)
 - **Loaded:** by default
 - **Requires:** [ui](ui.md)
-- **Required by:** [ui-cache](ui-cache.md), [ui-children](ui-children.md), [ui-compact](ui-compact.md), [ui-handoff](ui-handoff.md), [ui-merge](ui-merge.md), [ui-priority](ui-priority.md), [ui-supervisor](ui-supervisor.md)
+- **Required by:** [ui-access](ui-access.md), [ui-cache](ui-cache.md), [ui-children](ui-children.md), [ui-compact](ui-compact.md), [ui-handoff](ui-handoff.md), [ui-merge](ui-merge.md), [ui-priority](ui-priority.md), [ui-supervisor](ui-supervisor.md)
 - **Brings along:** [acp](acp.md) (its file requires it), [ui-compose](ui-compose.md) (its file requires it), [ui-pending](ui-pending.md) (its file requires it)
 
 ## About

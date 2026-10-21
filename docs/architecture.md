@@ -223,7 +223,13 @@ NEXT to call later (merge holds, budget prompts) must return nil.
 `harness-run-filter-async-between NAME FROM TO VALUE &rest ARGS` runs
 only the handlers whose priority lies between FROM and TO, inclusive
 (the perms module re-decides a waiting prompt through the stages after
-the jail with it).
+the jail with it).  `harness-run-filter-async-traced NAME VALUE ARGS
+&key FROM TO TRACER` runs the chain the same way, between FROM and TO
+when they are given, and calls TRACER as (TRACER FN OLD NEW) each time
+a handler FN hands on a value NEW that is not `eq` to the value OLD it
+was given, so a caller can tell which handler changed it (the tools
+module names the permission stage that decided a call with it; see
+perms).
 
 An error signalled inside a `harness-then` handler rejects the derived
 promise *and* is logged (with a backtrace when `harness-log-level` is
@@ -2447,7 +2453,13 @@ which otherwise leaves the model with no answer to its call at all.
 Async filter `permission/decide`: value is a DECISION
 `(:behavior allow|deny|ask :reason "…" :input UPDATED :final BOOL)`,
 args are the REQUEST `(:session SESSION :tool NAME :input PLIST :kind KIND
-:paths (…))`.  Chain (priority): 5 dir-request, 6 away-request, 6
+:paths (…))`.  Chain (priority): 4 access gate (the access module: a
+tool turned off for the session, or one that would reach the network in
+a session that gave it up, is denied for good, `drop_access` is allowed
+for good, and a write to a `.dir-locals.el` asks the user; see access),
+5 dir-request, 5 escalation (the access module: `request_escalation`,
+decided only by the user, as `request_directory_access` is), 6
+away-request, 6
 session-move (the session tools: the user confirms every
 `session_move`), 7 sandbox-guard, 8 supervisor (the supervisor module,
 a plugin's stage: a session in supervisor mode is denied, for good, a
@@ -2461,6 +2473,18 @@ allowed otherwise, so the judge never rules on a plan; see supervisor),
 pending request and resolves when answered).  A judge denial reaches 90
 as an `ask` in an interactive session, so the user answers it; in a
 non-interactive session it stays a denial.
+
+Who decided a call is kept with the decision.  `harness-tools--decide`
+runs the chain traced (`harness-tools-decide-traced`, over
+`harness-run-filter-async-traced` in the core): the decision gets
+`:stage`, the label of the last stage that changed it, from that stage
+function's `harness-permission-stage` property (`jail`, `mode`, `judge`,
+`access`, ...).  A stage that knows better says so itself with `:by`:
+`user` for a decision the user's answer made, `rule` for a standing
+rule's, `mode` for the mode's, `away` for a denial because nobody can
+answer.  `harness-tools-decision-by DECISION` gives `:by`, else the
+stage's label, else `gate`; the access module's judgements and the
+`permission/decided` event carry it.
 
 - The away-request stage owns the decision of the `set_non_interactive`
   tool (tools-sessions), as the dir-request stage owns
@@ -2629,7 +2653,17 @@ non-interactive session it stays a denial.
   it exists whenever the jail lets a call into it), the configured
   `harness-allowed-directories`, its grants (to the session, and until
   its turn ends) and the tool output directory.  The temporary
-  directory needs no grant and cannot be revoked.
+  directory needs no grant and cannot be revoked.  They are entries
+  `(:dir :source)` (`harness-perms-dirs`), run through the sync filter
+  `permission/dir-entries` (value: the entries; argument: the session)
+  and then made unique: the access module takes out the ones a session
+  gave up and adds those it may only read, `(:dir D :source read
+  :read-only t)`.  `harness-perms-roots` are the entries that may be
+  written; `harness-perms-read-only-dirs` the `:read-only` ones, which a
+  call of kind `read` may reach (`harness-perms--read-only-reachable-p`)
+  and any other call is jailed out of as outside the roots, the jail
+  asking the user as it does there; `harness-perms-readable-roots` both.
+  The sandbox shows a `:read-only` entry to bash read-only.
 - Inspecting the harness itself is one of the things that make it
   powerful, so no mode, judge or jail stands in its way.  The harness
   is no root, but a call of kind `read` may read it, in every mode,
@@ -2698,8 +2732,8 @@ non-interactive session it stays a denial.
   grants every session, `turn` the session until its turn ends, as
   allow-once does for `request_directory_access`), `permission/revoke-dir SESSION-ID DIR`,
   `permission/dirs SESSION-ID` (`(:dir :source cwd|worktree|tmp|config|session|turn|outputs
-  :revocable)` plists, for the directory buffer), `permission/allowed-dirs SESSION-ID`
-  (the full effective root list), `permission/rules SESSION-ID`
+  :revocable :read-only)` plists, for the access view), `permission/allowed-dirs SESSION-ID`
+  (the full effective root list: the entries a call may write), `permission/rules SESSION-ID`
   (`(:mode :non-interactive :auto-allow :session :always :roots :inspect :skills)`:
   `:auto-allow` holds the inspection tools too, `:inspect` the
   directories of the harness itself and `:skills` the skills
@@ -3108,6 +3142,96 @@ non-interactive session it stays a denial.
   allow-always, `permission/allow-dir` with SCOPE `always` is refused,
   and the global entries are not `:revocable`; grants for the session
   or the turn, which a person answering makes, stay as they are.
+
+### access
+
+What a session may reach, gathered in one place and set up per session
+beyond its directories (harness-access.el, a core module, with its UI
+half `ui-access`, the access view).
+
+- The access profile is the session's ext `:access`, a plist of
+  `:network` (`:false`: no network), `:read-only` (t: no writing),
+  `:tools-off` (names), `:read-dirs` (directories it may only read) and
+  `:dropped` (directories it gave up: its cwd, worktree, temporary
+  directory or one of `harness-allowed-directories`, for this session
+  only).  No profile is the access a session always had.  Every change
+  goes through `session/set-ext` with a hint in the transcript ("Access:
+  … (given up by the agent | set by the user)") and emits
+  `access/changed SESSION-ID`.
+- It is held by the harness, not a prompt: the `permission/dir-entries`
+  filter (50) takes the dropped directories out and adds the read-only
+  ones (see perms); the `agent/tools` filter (85) takes off the tools
+  turned off and, without the network, those of kind net, `ssh` and
+  `emacs_eval`, and `bash` and `elisp` unless `sandbox/confined-p`
+  (the `tools/sandbox-options` filter, 80, then runs them with `:network
+  nil`); a read-only profile is a `harness-readonly-register` policy
+  (`access`), the reading tools and bash read-only and offline.  The
+  gate at 4 refuses for good a call to a tool the profile takes away,
+  whatever the tool list the model still has, and fails closed.
+  `drop_access` stays in every tool list, read-only sessions' included
+  (`harness-readonly-always-tools`).
+- `request_escalation` (`attribute` one of directory, read_directory,
+  writes, network, tool, permission_mode, non_interactive; `value`;
+  `reason`) asks the user for more.  Its stage at 5 makes every
+  decision final, so no mode, rule or judge sees it: a directory goes
+  through the prompt of `request_directory_access`
+  (`harness-perms-decide-dir-request`), the rest through
+  `harness-perms-confirm` (allow-once, deny-once, in every mode, yolo
+  included; a non-interactive session is refused at once).  Nothing to
+  grant -- the directory reachable already, a mode no higher than the
+  session's -- is allowed at once and says so; what a policy pins (the
+  mode, non-interactive mode) or a deny rule covers is refused.  The
+  handler grants what the user allowed.
+- `drop_access` (`attribute`, `value`, `keep_read` for a directory,
+  `reason`) gives access up and is allowed by the gate at 4, final, in
+  every mode and session.  A directory granted to the session or the
+  turn is revoked (and granted again read-only with `keep_read`); one
+  of the other sources is added to `:dropped` (and `:read-dirs`).  The
+  tool output directory cannot be given up, nor a directory inside
+  another entry (the result says which).  A permission mode is
+  dropped only to a less permissive one, and non-interactive mode only
+  turned off.
+- A write to `.dir-locals.el` or `.dir-locals-2.el`
+  (`harness-access-settings-files`), which sets the harness's own
+  settings for a project, asks the user at the gate through
+  `harness-perms-confirm`, in every mode: a file tool's target, or a
+  shell command that names one and looks like it writes it (a reading
+  of its text, not a boundary).
+- A session created with a `:parent-id` other than a BTW (a sub-agent,
+  a fork) takes its parent's network, writing, tools
+  off and dropped directories; a fork its read-only directories too.
+  Task sessions have no parent and keep their own access.
+- Judgements: every `permission/decided` is recorded per session in
+  memory (`harness-access--judged`, the newest 300) as `(:call-id :tool
+  :behavior :by :reason :hint :at)` and emitted as `access/judged
+  SESSION-ID RECORD`; a `tools/result` filter (95) writes `(:behavior
+  :by :reason)` into the result node's `:meta` `:judgement`, so the
+  transcript keeps it across a restart.
+- `access/describe SESSION-ID` → `(:session :sandbox (:backend
+  :available :policy :confined :remote :module) :mode :mode-pinned
+  :non-interactive :non-interactive-pinned :network :corporate
+  :read-only :read-only-profile :read-only-by :profile :dirs :inspect
+  :skills :tools (:on :off :builtin) :never-ask :rules (:session :always
+  :pinned))`.  `:dirs` are `permission/dirs` entries with `:read-only`,
+  `:given-up` on a read-only entry whose directory was given up, and
+  `(:dir :source dropped :dropped t)` for the rest given up; `:off`
+  entries are `(:name :why :profile :elsewhere)`, `:elsewhere` for a
+  tool of other kinds of session (a task's `hand_in`), which nobody
+  turned off.
+- `access/judgements SESSION-ID &rest FILTER` (`:behavior` allow, deny,
+  ask or asked -- the ones the user answered --, `:by`, `:tool`,
+  `:query` over the tool, reason, handle and title, `:limit`, default
+  200, at most 1000) → `(:items :total :counts (:allow :deny :ask)
+  :tools :by)`, newest first, each item `(:call-id :tool :subject :at
+  :behavior :by :reason :pending-id :approved :used :call NODE :result
+  NODE)`; a call waiting for the user is an `ask` item with its
+  `:pending-id`.
+- `access/set-network SESSION-ID ON`, `access/set-read-only SESSION-ID
+  ON`, `access/set-tool SESSION-ID TOOL ON`, `access/add-read-dir
+  SESSION-ID DIR`, `access/remove-read-dir SESSION-ID DIR`,
+  `access/drop-dir SESSION-ID DIR &optional KEEP-READ` and
+  `access/restore-dir SESSION-ID DIR` change the profile for the user,
+  asking nothing.
 
 ### decisions
 
@@ -7234,6 +7358,8 @@ TRAMP prefixes come from the session host):
 | `emacs_messages` | Emacs messages | count | read (needs no approval: `harness-perms--inspection-tools`) |
 | `ask_user` | Question | question, options (strings, or `{label, diagram}` / `{label, image}` objects: every option has a diagram or none does), allow_free_text | meta (answered with `question/answer SID PID ANSWER`, the files attached to the answer going to the model with it; event `question/asked`; the harness asks its own questions the same way, with no tool call, through `question/ask`) |
 | `request_directory_access` | Request access | path, reason | meta (perms module; decided only by the user's answer to a directory prompt, in every mode) |
+| `request_escalation` | Request escalation | attribute (directory, read_directory, writes, network, tool, permission_mode, non_interactive), value, reason | meta (access module; decided only by the user's answer, in every mode, yolo included; refused at once in a non-interactive session; see access) |
+| `drop_access` | Drop access | attribute (directory, writes, network, tool, permission_mode, non_interactive), value, keep_read (a directory: give up writing only), reason | meta (access module; always allowed, never asks, in every mode and session, read-only ones included) |
 | `rerun_approved` | Rerun approved call | handle | meta (perms module; runs the denied call the user approved by hand with `permission/approve-denied`, exactly as it was denied and with no permission check (`tools/execute-approved`); a handle the user has not approved, one this session does not know, and one already rerun are refused) |
 | `session_info` | Session info | — | read (needs no approval: `harness-perms--inspection-tools`) |
 | `plan` | Plan | plan | meta |
@@ -7246,7 +7372,7 @@ TRAMP prefixes come from the session host):
 | `session_history` | Session history | query, regexp, node_id, before, limit, max_chars, kinds, all | read (this session's own conversation from before its last compaction or handoff; needs no approval: `harness-perms--inspection-tools`) |
 | `session_send` | Message session | session_id, message, mode (send/queue), wait | meta |
 | `session_control` | Control session | session_id, action (cancel/resume/close/rename/answer), name, question_id, answer | meta (answer refuses the harness's cold-cache question, left to the user) |
-| `session_settings` | Session settings | action (read/set), session_id (default: this session), model, thinking (a level, or default for the model's own), context_window_limit (tokens: a number or "200k", or model/none for the model's own window), budget (USD, or none to remove it), budget_hard (a hard budget stops the next turn once spent) | meta (weighed per call, `harness-perms--call-kind`: a read is a read, a set asks in ask mode and is judged, as `session_send` is; the read shows the permission mode and non-interactive state, and the tool refuses them, allowed directories, the working directory and the host, naming `set_non_interactive`, `request_directory_access` or `session_move`) |
+| `session_settings` | Session settings | action (read/set), session_id (default: this session), model, thinking (a level, or default for the model's own), context_window_limit (tokens: a number or "200k", or model/none for the model's own window), budget (USD, or none to remove it), budget_hard (a hard budget stops the next turn once spent) | meta (weighed per call, `harness-perms--call-kind`: a read is a read, a set asks in ask mode and is judged, as `session_send` is; the read shows the permission mode and non-interactive state, and the tool refuses them, allowed directories, the working directory and the host, naming `set_non_interactive`, `request_escalation`, `request_directory_access`, `drop_access` or `session_move`) |
 | `session_move` | Move session | directory, session_id (default: this session), keep_old_directory, reason | meta (the user confirms every call, in every mode; see perms, Confirmations, and `session/move`) |
 | `set_non_interactive` | Non-interactive mode | enabled, session_id (default: this session) or all (every current session and task of every project), reason | meta (perms module's away-request stage: turning it on is decided only by the user's answer, in every mode, and denied at once in a non-interactive session; turning it off is allowed at once) |
 | `set_priority` | Set priority | priority (low/medium/high), session_id (default: this session) or all (every current session and task of every project) | meta (a priority is the session's, and every input here is a session id; a task's priority is set through its session) |
@@ -7884,8 +8010,9 @@ UI's `harness-ui-context-cap-name` gives), the budget, and the
 permission mode and non-interactive state, which it does not change: a
 call naming the permission mode, non-interactive mode, allowed
 directories, the working directory or the host is refused, and the
-refusal names `set_non_interactive`, `request_directory_access` or
-`session_move`.  A set is applied through `session/update` with
+refusal names `set_non_interactive`, `request_escalation` or
+`request_directory_access` (to ask the user for more), `drop_access`
+(to give some up) or `session_move`.  A set is applied through `session/update` with
 `:silent t` (its own hint would say less), and `harness-session-check-policy`
 runs first, so a setting the policy fixes is refused before anything
 changes.  Every change leaves one hint in the affected session's
@@ -9195,6 +9322,34 @@ going.  A chat buffer keeps them per call id (buffer-local
 `harness-chat--notes'), from the `:calls' of the turn's activity;
 `harness-chat--set-notes' redraws only the blocks whose note changed,
 and a call's note goes with its block when the call ends.
+Another view draws tool calls the chat's way through the same code:
+`harness-chat-tool-view-setup SESSION-ID` gives its buffer the chat's
+block tables and marks it a view of the session that is no chat
+(`harness-ui-session-view`): it sets `harness-ui-session-id`, so the
+commands that act on a buffer's session act on its own, while the
+modules that draw in a session's chat (sub-agents, merges, reviews,
+tasks) find it with `harness-ui-chat-of-p`, which passes such a view
+by.  `harness-chat-insert-tool-call CALL RESULT &optional
+EXPANDED` inserts a call node and its result node as the chat's block
+at point -- folded or not, `TAB` toggling it, a denied one with the
+`[Approve]` line that approves it -- and `harness-chat-tool-view-expanded`
+names the unfolded ones, to keep them so when the view draws again.  The
+access view (`harness-access`, harness-ui-access.el) draws each
+judgement's call so, under what was decided, by whom and its handle, and
+the requests the session waits on as the chat's own panels
+(`harness-ui-pending-insert-panel`, with `harness-ui-pending-box-hints`
+nil: it has no compose box to press their keys from).  It fetches
+`access/describe`, `access/judgements` and `session/pending` together,
+draws once all three are in, keeping point and each window's start on
+the section, directory, tool or call they were on, and fetches again
+(0.3 s after the last of a burst, or once a window shows it) on
+`access/changed`, `access/judged`, the session's moves, requests and
+ext changes, its node and tool call updates, every directory grant or
+revocation and `config/changed`.  A view whose session was deleted says
+so and fetches nothing more.  The buffers that look for a session's
+chat (the merge, children, tasks and review views) take only a buffer
+in `harness-chat-mode`, so the access view, which has a session id too,
+is never taken for one.
 The panel of a question whose options have diagrams shows one diagram
 at a time, in an area under the options; its tabs, `n` and `p` on the
 panel, `C-c C-f` and `C-c C-b`, and point moving onto an option switch

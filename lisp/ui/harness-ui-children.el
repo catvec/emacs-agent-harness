@@ -200,10 +200,10 @@ for (`harness-ui-children--flush') to compare with."
 ;;;; Redraw and events
 
 (defun harness-ui-children--chat-buffer (sid)
-  "Return the live chat buffer showing session SID, or nil."
-  (cl-find-if (lambda (buffer)
-                (equal (buffer-local-value 'harness-ui-session-id buffer) sid))
-              (buffer-list)))
+  "Return the live chat buffer showing session SID, or nil.
+Another view of the session, such as its access view, is no chat
+\(`harness-ui-chat-of-p')."
+  (cl-find-if (lambda (buffer) (harness-ui-chat-of-p buffer sid)) (buffer-list)))
 
 (defconst harness-ui-children--redraw-delay 1.0
   "Seconds a chat waits to draw its sub-agents panel after a child changed.

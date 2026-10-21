@@ -8,6 +8,7 @@ Directory jail, directory requests, sandbox guard, permission modes, auto judge,
 - **Source:** [lisp/modules/harness-perms.el](../../lisp/modules/harness-perms.el)
 - **Loaded:** by default
 - **Requires:** [config](config.md), [tools](tools.md)
+- **Required by:** [access](access.md)
 
 ## About
 
@@ -239,7 +240,7 @@ needs from them are looked up with `harness-method-exists-p`.
 
 ### Filter chains it runs
 
-- `permission/decide`
+- `permission/dir-entries`
 
 ### Options
 

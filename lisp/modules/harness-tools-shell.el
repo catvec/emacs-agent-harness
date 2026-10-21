@@ -163,9 +163,11 @@ They are those the permission layer lets every tool reach
 \(`permission/dirs'): its working directory and worktree, its own
 temporary directory, the configured ones and those granted to it are
 WRITABLE, the tool output directory, which only the harness writes,
-READABLE.  Both are nil without the permissions module or for a
-remote session, whose commands run on another host.  A glob pattern
-among the grants names no directory, and the sandbox leaves it out."
+and the directories the session may only read (`:read-only' entries,
+see the access module) READABLE.  Both are nil without the permissions
+module or for a remote session, whose commands run on another host.  A
+glob pattern among the grants names no directory, and the sandbox
+leaves it out."
   (let ((sid (plist-get ctx :session-id))
         (cwd (plist-get ctx :cwd)))
     (when (and sid (harness-method-exists-p 'permission/dirs)
@@ -176,7 +178,8 @@ among the grants names no directory, and the sandbox leaves it out."
             (dolist (e (harness-call 'permission/dirs sid))
               (let ((dir (plist-get e :dir)))
                 (when (and (stringp dir) (not (file-remote-p dir)))
-                  (if (eq (plist-get e :source) 'outputs)
+                  (if (or (eq (plist-get e :source) 'outputs)
+                          (harness-json-true-p (plist-get e :read-only)))
                       (push dir readable)
                     (push dir writable)))))
             (cons (nreverse writable) (nreverse readable)))

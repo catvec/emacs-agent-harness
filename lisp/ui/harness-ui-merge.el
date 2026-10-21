@@ -49,10 +49,10 @@ the ones finished recently, newest first.")
   "Session ids whose merge view was fetched once.")
 
 (defun harness-ui-merge--chat-buffer (sid)
-  "Return the live chat buffer showing session SID, or nil."
-  (cl-find-if (lambda (buffer)
-                (equal (buffer-local-value 'harness-ui-session-id buffer) sid))
-              (buffer-list)))
+  "Return the live chat buffer showing session SID, or nil.
+Another view of the session, such as its access view, is no chat
+\(`harness-ui-chat-of-p')."
+  (cl-find-if (lambda (buffer) (harness-ui-chat-of-p buffer sid)) (buffer-list)))
 
 (defun harness-ui-merge--redraw (sid)
   "Draw the tail of SID's chat buffer again, when it shows."

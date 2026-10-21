@@ -45,7 +45,14 @@ OpenAI-compatible APIs and AWS Bedrock.
 - **Permissions and sandboxing.** Four permission modes (Ask, Accept
   edits, Auto, YOLO), per-session directory access, and a kernel
   sandbox for tool processes (bubblewrap or `systemd-run` on GNU/Linux,
-  MXC's `mxc-exec-mac` on macOS).
+  MXC's `mxc-exec-mac` on macOS). One view per session (`C-c h j`)
+  shows its whole jail -- the sandbox backend, the mode, the network,
+  the directories it may write, only read or gave up, the tools it is
+  offered -- and changes it in place, beside a filterable list of how
+  each of its calls was judged, by whom, under which handle. An agent
+  asks you for more with `request_escalation`, which only you can
+  grant, and gives access up with `drop_access`, which never needs to
+  ask (see [A session's access](#a-sessions-access)).
 - **Polite with your machine.** The tools that start processes (`bash`,
   `elisp`, `ssh`, and those of plugins, such as the harness
   repository's `open_harness`) hold a slot per machine -- one per
@@ -141,6 +148,8 @@ OpenAI-compatible APIs and AWS Bedrock.
 | A permission request, answered in the chat | A question from the agent, answered with a digit |
 | ![A call the harness denied, with an [Approve] button under it and the handle the denial named](docs/media/chat-denied.png) | ![That call after the user approved it: marked user-approved, the agent's rerun under it with what the command printed](docs/media/chat-denied-approved.png) |
 | A denied call: the harness blocked it, [Approve] lets it run anyway | Approved: the agent reruns the call exactly as it was denied |
+| ![The access view of a session: its sandbox, bwrap, its mode and the network it gave up, the directories it may write, only read or gave up, the tools it is offered and those turned off, its rules and the request waiting on you](docs/media/access.png) | ![The judgements of that session's calls in its access view: each call drawn as the chat draws it, under what was decided, by whom and its handle, the two the access settings refused with [Approve]](docs/media/access-judgements.png) |
+| A session's access: its jail, directories, tools and rules, changed in place | How each of its calls was judged, by whom and under which handle, filterable |
 | ![The task board with tasks needing input, in review, merging, in progress, in the backlog and completed, each fact in its column](docs/media/tasks.png) | ![The conversation tree of a session, its fork and a BTW](docs/media/tree.png) |
 | The task board: each task has a session and a worktree | The conversation tree of a session, a fork and a BTW |
 | ![A task's report popped out of the board: its chart large, the test run it quotes, and the banner and box to verify it or send it back](docs/media/report.png) | ![The chart of that report shown larger, in a popout of its own](docs/media/report-image.png) |
@@ -305,7 +314,7 @@ modules](#choosing-modules)).
 
 When the menu is opened from a harness buffer (a chat, the task board,
 the session list, the conversation tree, the worktree list, the usage
-dashboard or the directory access list), it also lists that buffer's
+dashboard or a session's access view), it also lists that buffer's
 own commands under the keys they have there. Key chords such as
 `C-c C-c` appear as they are, and single-letter keys appear behind `.`:
 for example, `. s` runs what `s` does on the task board.
@@ -316,7 +325,8 @@ Every feature is a module, and out of the box only the core loads
 (`harness-core-modules`): sessions and the turn loop, Claude Code for
 the default model, compaction and retries, session names, the file,
 shell and Emacs tools with the permissions and the sandbox that guard
-them, the tools that ask you a question, plan, keep a todo list,
+them, the access view of what each session may reach and how its calls
+were judged, the tools that ask you a question, plan, keep a todo list,
 describe the session and start sub-agents, worktrees, usage and costs,
 the settings page, and the chat, the session list and the requests a
 session waits on. You enable the rest in your init file,
@@ -490,7 +500,8 @@ default), or nil for nowhere.
 | `C-c h I` | `harness-set-non-interactive-all` | Turn non-interactive mode on or off for every current session and task of every project |
 | `C-c h V` | `harness-toggle-supervisor` | Toggle supervisor mode: a session that supervises plans and leaves the changes to workers on cheaper models, a hands-on one may change files itself (see [Supervisor mode](#supervisor-mode)) |
 | menu `V` | `harness-set-supervisor-all` | In the `C-c h ?` menu, turn supervisor mode on or off for every current session and task of every project (see [Supervisor mode](#supervisor-mode)) |
-| `C-c h d` | `harness-directories` | Manage the directories a session may access |
+| `C-c h j` | `harness-access` | Show a session's access: its jail (sandbox, mode, network, writing), directories, tools and rules, changed in place, and how each of its calls was judged (see [A session's access](#a-sessions-access)) |
+| `C-c h d` | `harness-directories` | The same view, at the directories the session may access |
 | `C-c h W` | `harness-move-session` | Move a session to another working directory, and with it to that directory's project (see [Moving a session](#moving-a-session-to-another-directory)) |
 | `M` | `harness-ui-sessions-move` | In the session list, move the session at point to another directory |
 | `C-c h u` | `harness-usage` | Show the usage and cost dashboard |
@@ -902,7 +913,9 @@ scratch files, logs and screenshots there. Its shell commands can write
 there even in the sandbox, where the rest of `/tmp` is private to each
 command. The directory is made with the session, made again if it went
 missing, and deleted with the session. `C-c h d` lists all of these
-directories. Remote sessions have no temporary directory.
+directories, in the session's access view (see [A session's
+access](#a-sessions-access)). Remote sessions have no temporary
+directory.
 
 In the sandbox a shell command sees the system directories and, of
 yours, only these directories, each at its own path: a directory you
@@ -1329,6 +1342,92 @@ harness's own buffers and in every other.
 - `C-u C-c h >` asks which session gets it instead: one of the
   project's, newest first, or a new one.
 
+### A session's access
+
+`C-c h j` (`M-x harness-access`) shows everything a session may reach
+in one buffer, and is where you change it: to check what a session can
+use, or to set one up in a tighter jail than the defaults. `C-c h d`
+(`harness-directories`) opens the same view at its directories. From
+the top:
+
+- **Jail**: the sandbox backend its commands run in (bubblewrap,
+  `systemd-run` or MXC), the backends available and the sandbox policy,
+  whether its commands here run confined; its permission mode and
+  whether it is interactive, each with a button to change it; whether
+  it may reach the network, and whether it may write at all. Turning
+  the network off takes the web tools, `ssh` and `emacs_eval` (which
+  runs in your Emacs, outside any sandbox) from the session and runs
+  its `bash` and `elisp` offline; where no sandbox can confine them,
+  they go too. Read-only leaves the reading tools and a read-only,
+  offline `bash`.
+- **Directories**: each one the session may write (`rw`), only read
+  (`ro`) or gave up (`--`), with where it comes from -- the working
+  directory, the worktree, the temporary directory, every session's
+  `harness-allowed-directories`, a grant to this session or for this
+  turn, one it may only read -- and buttons to give one up, make it
+  read-only, revoke a grant, restore what was given up, or allow
+  another directory for writing (`a`) or only for reading (`r`). A
+  directory it may only read reaches the tools that only read, and
+  `bash` sees it read-only.
+- **Tools**: those it is offered, a click on one turning it off for
+  this session once you confirm, and those it is not, with why --
+  turned off, no network,
+  corporate mode, a read-only session -- and a button to turn each back
+  on. Tools that belong to other kinds of session, a task's `hand_in`
+  say, are named apart.
+- **Rules**: the session's own and every session's, and the tools that
+  never ask.
+- **Waiting for you**: the requests the session waits on, the same
+  panels as in its chat.
+- **Judgements**: every call of the session the permission chain
+  decided, newest first, each drawn as the chat draws it -- the same
+  block, folded, `TAB` unfolding it -- under what was decided, who
+  decided it (you, a rule, the mode, the auto-mode judge, the jail, the
+  access settings, a module's gate, or nobody to ask while you are
+  away), why, and the call's handle. A refused call offers the chat's
+  `[Approve]`, which reruns it exactly as it was refused, and a waiting
+  one `[Allow]` and `[Deny]`. Filter them by what was decided (`f`),
+  who decided (`b`), the tool (`t`) or text in the tool, the reason,
+  the handle or the call (`s`); `c` clears the filter. The judgement is
+  written into the call's result too, so the list survives a restart.
+
+![The access view of a session kept to a jail: its sandbox, bwrap, its mode and the network it gave up, the directories it may write, only read or gave up, the tools it is offered and those turned off, its rules and the request waiting on you](docs/media/access.png)
+
+What you change there takes effect at once, and the session's
+transcript says so. The view follows the session as it goes: a grant
+from a prompt, a directory given up, a call judged. `n` and `p` move
+between calls, `M-n` and `M-p` between sections, `g` fetches it again
+and `?` lists the keys.
+
+An agent changes its session's access with two tools. Giving access up
+is always allowed: `drop_access` gives up a directory (or only writing
+to it, `keep_read`), the network, writing, a tool, the permission mode
+for a less permissive one, or non-interactive mode, and nobody is asked,
+in any mode, in a read-only session too. Asking for more is the other
+way round: `request_escalation` asks for a directory to write or only
+to read, the network, writing, a tool turned off, a more permissive
+permission mode or non-interactive mode, and only you can grant it. You
+are asked in every mode, YOLO included, no rule or judge answers for
+you, and a non-interactive session, whose user is away, is refused at
+once. `request_directory_access` stays, the directory form of the same
+request. These are the only ways an agent changes its own access:
+`session_settings` refuses the permission mode, non-interactive mode
+and directories, and names the tool that has each.
+
+A session cannot get around what it gave up by starting another: a
+sub-agent or a fork takes its parent's restrictions with it (the
+network, writing, the tools turned off, the directories given up), and
+a fork its read-only directories too. Writing a `.dir-locals.el` (or
+`.dir-locals-2.el`) asks you too, in every mode, as an escalation does,
+since that file sets the harness's own settings for a project: the
+directories every session there may reach, the sandbox policy, the
+permission mode. For a file tool that holds; for a shell command it is a
+reading of the command's text, not a boundary. The tools that hand work
+to sessions that are not its children -- `session_send` to another
+session, `task_submit` for a task -- have that work done with those
+sessions' own access, so turn them off for a session that must stay
+inside its own.
+
 ### Moving a session to another directory
 
 A session works in the directory it was started in, and the session
@@ -1337,7 +1436,7 @@ one place turns out to work on another, move it there: `C-c h W`
 (`M-x harness-move-session`, also called `harness-session-move`) asks
 for the new directory, starting next to the session's own, and `M` does
 the same for the session at point in the session list, `m` for the
-session of the directory access list (`C-c h d`). The session then
+session of the access view (`C-c h j`, `C-c h d`). The session then
 works in the new directory and is listed under its project, also after
 a restart. It no longer reaches the old directory, unless you move it
 with a prefix argument (`C-u C-c h W`), which keeps the old directory
@@ -3897,8 +3996,10 @@ sub-agent cap (`harness-subagent-context-limit`), the task cap
 budget, and the permission mode and non-interactive state. It cannot
 change those last two, nor allowed directories, the working directory or
 the host: a call naming one of them is refused, and the refusal names
-the tool that has it (`set_non_interactive`, `request_directory_access`
-or `session_move`).
+the tool that has it (`set_non_interactive`, `request_escalation` or
+`request_directory_access` to ask you for more, `drop_access` to give
+access up, or `session_move`; see [A session's
+access](#a-sessions-access)).
 
 `action=set` changes the model, the thinking level (`default` for the
 model's own), the context window limit (a token count such as `200000`
@@ -4224,11 +4325,11 @@ with it.
 |---|---|---|
 | Sessions | `config` `project` `store` `session` `agent` `compaction` `retry` `priority` `usage` `naming` | `cowboy` `handoff` `fallback` `seed` `supervisor` `insights` `pet` `version` `decisions` `session-search` `cost-compare` `commit-msg` |
 | Tasks and git | `worktree` | `tasks` `tasks-notify` `tasks-search` `recap` `merge` `patch-review` |
-| Safety | `perms` `sandbox` | `tool-slots` `tool-slots-load` `readonly` `secrets` `redact` `judge` |
+| Safety | `perms` `sandbox` `access` `readonly` | `tool-slots` `tool-slots-load` `secrets` `redact` `judge` |
 | Providers | `provider` `provider-claude` | `provider-copilot` `provider-openai` `provider-deepseek` `provider-bedrock` `provider-demo` |
 | Tools | `tools` `tools-fs` `tools-shell` `tools-emacs` `tools-question` `tools-plan` `tools-todo` `tools-session-info` `tools-agent` | `tools-ssh` `tools-web` `tools-sessions` `tools-notify` `tools-handin` `tools-review` `tools-emacs-eval` `tools-dev` `tools-events` `tools-compact` `skills` |
 | Connections | `acp` | `acp-remote` `notifications` |
-| User interface | `ui` `ui-chat` `ui-compose` `ui-pending` `ui-sessions` `ui-notify` `ui-config` `ui-usage` `ui-priority` `ui-worktree` | `ui-btw` `ui-tree` `ui-compact` `ui-cache` `ui-review` `ui-report` `ui-patch-review` `ui-popout` `ui-media` `ui-dirs` `ui-qr` `ui-acp-remote` `ui-handoff` |
+| User interface | `ui` `ui-chat` `ui-compose` `ui-pending` `ui-sessions` `ui-notify` `ui-config` `ui-usage` `ui-priority` `ui-worktree` `ui-access` | `ui-btw` `ui-tree` `ui-compact` `ui-cache` `ui-review` `ui-report` `ui-patch-review` `ui-popout` `ui-media` `ui-qr` `ui-acp-remote` `ui-handoff` |
 
 [docs/modules](docs/modules/README.md) has a page for each module,
 generated from its source by `scripts/module-docs.sh`: what it is, what

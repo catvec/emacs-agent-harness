@@ -8,7 +8,7 @@ Tool registry, permission-gated execution and context-bomb guard.
 - **Source:** [lisp/modules/harness-tools.el](../../lisp/modules/harness-tools.el)
 - **Loaded:** by default
 - **Requires:** nothing
-- **Required by:** [agent](agent.md), [perms](perms.md), [readonly](readonly.md), [resilience](resilience.md), [skills](skills.md), [supervisor](supervisor.md), [tool-slots](tool-slots.md), [tools-agent](tools-agent.md), [tools-compact](tools-compact.md), [tools-dev](tools-dev.md), [tools-emacs](tools-emacs.md), [tools-emacs-eval](tools-emacs-eval.md), [tools-events](tools-events.md), [tools-fs](tools-fs.md), [tools-handin](tools-handin.md), [tools-notify](tools-notify.md), [tools-plan](tools-plan.md), [tools-question](tools-question.md), [tools-review](tools-review.md), [tools-session-info](tools-session-info.md), [tools-sessions](tools-sessions.md), [tools-shell](tools-shell.md), [tools-ssh](tools-ssh.md), [tools-todo](tools-todo.md), [tools-web](tools-web.md)
+- **Required by:** [access](access.md), [agent](agent.md), [perms](perms.md), [readonly](readonly.md), [resilience](resilience.md), [skills](skills.md), [supervisor](supervisor.md), [tool-slots](tool-slots.md), [tools-agent](tools-agent.md), [tools-compact](tools-compact.md), [tools-emacs](tools-emacs.md), [tools-emacs-eval](tools-emacs-eval.md), [tools-events](tools-events.md), [tools-fs](tools-fs.md), [tools-handin](tools-handin.md), [tools-notify](tools-notify.md), [tools-plan](tools-plan.md), [tools-question](tools-question.md), [tools-review](tools-review.md), [tools-session-info](tools-session-info.md), [tools-sessions](tools-sessions.md), [tools-shell](tools-shell.md), [tools-ssh](tools-ssh.md), [tools-todo](tools-todo.md), [tools-web](tools-web.md)
 
 ## About
 
@@ -61,6 +61,12 @@ in a session on that host.  A call that fails because TRAMP could not
 connect says why and how to set the host up, whichever tool made it
 (`harness-tools-remote-failure`).
 
+A tool a project's plugin defines (see harness-plugins.el) is for the
+sessions that name the plugin's module in `harness-plugin-modules`,
+as each froze the list when it started: no other session gets it,
+and a call from one is refused as a call of a tool that does not
+exist (`harness-tools--in-scope-p`).
+
 ## Provides
 
 ### Methods
@@ -101,6 +107,7 @@ connect says why and how to set the host up, whichever tool made it
 - `agent/activity` ([agent](agent.md)), when it is loaded
 - `emacs/request` ([acp](acp.md)), when it is loaded
 - `permission/denied-note` ([perms](perms.md)), when it is loaded
+- `plugins/of-session` ([plugins](plugins.md)), when it is loaded
 - `provider/capabilities` ([provider](provider.md)), when it is loaded
 - `session/exists-p` ([session](session.md)), when it is loaded
 - `session/get` ([session](session.md)), when it is loaded

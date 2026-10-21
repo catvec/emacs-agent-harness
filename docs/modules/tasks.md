@@ -92,9 +92,18 @@ pending tasks the scheduler starts -- as a backlog task
 (`:backlog`): the scheduler never starts it, only `task/start` does,
 so the backlog survives restarts until someone picks a task.  Its
 session is the one that refined it: starting moves that session into
-the task's worktree and tells it to do the work.  A message to a
-backlog task's session is feedback on the write-up, which the agent
-rewrites.  `task/queue` (the board's [Queue it]) puts a backlog task
+the task's worktree and tells it to do the work.  A message the user
+writes in that session while the task waits in the backlog starts
+it, as a message to a returned task does, and one written while its
+write-up runs stops the write-up and starts it all the same.
+Feedback on the write-up goes through `task/refine` or `task/prompt`
+(the board's [Refine] and its reply box) instead, and a message
+queued while a write-up ran stays feedback.  `task/start` (the
+board's [Start now]) also supersedes a write-up still running: it
+stops that turn and starts the task with the write-up it has when the
+turn has ended, so the stopped write-up never finishes the task or
+takes it to review.
+`task/queue` (the board's [Queue it]) puts a backlog task
 back in the pending queue, where the scheduler starts it like any
 queued task -- as soon as its project has a free slot -- the write-up
 kept for the start.

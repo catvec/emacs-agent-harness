@@ -1674,6 +1674,21 @@ on one line (see `harness-ui-one-line')."
 (defvar-local harness-ui-session-id nil
   "Id of the session this buffer shows, when any.")
 
+(defvar-local harness-ui-session-view nil
+  "Non-nil in a buffer that shows a session without being its chat.
+Such a view, the access view say, sets `harness-ui-session-id' to the
+session it shows, so the commands that act on a buffer's session act on
+that one; a module looking for the session's chat to draw in passes it
+by (`harness-ui-chat-of-p').")
+
+(defun harness-ui-chat-of-p (buffer sid)
+  "Non-nil when BUFFER is a live buffer showing the chat of session SID.
+That is a buffer whose `harness-ui-session-id' is SID and that is no
+other view of the session (`harness-ui-session-view')."
+  (and (buffer-live-p buffer)
+       (equal (buffer-local-value 'harness-ui-session-id buffer) sid)
+       (not (buffer-local-value 'harness-ui-session-view buffer))))
+
 (defun harness-ui-current-session-id (&optional noerror)
   "Return the session id of the current buffer, or prompt for one.
 Signal unless NOERROR when none can be found."
@@ -5215,6 +5230,7 @@ leaves the buffer's commands out, never the whole menu."
     ("H" "Thinking for all sessions" harness-set-thinking-all)
     ("p" "Permission mode" harness-set-permission-mode)
     ("e" "Context limit" harness-set-context-limit)
+    ("j" "Access & jail" harness-access :if (lambda () (harness-ui--command-available-p 'harness-access)))
     ("d" "Directory access" harness-directories :if (lambda () (harness-ui--command-available-p 'harness-directories)))
     ("i" (lambda () (harness-ui--non-interactive-menu-label)) harness-toggle-non-interactive)
     ("I" "Non-interactive for all sessions" harness-set-non-interactive-all)

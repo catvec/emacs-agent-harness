@@ -16,8 +16,10 @@ A few slots per machine for the tools that start processes.
 Some tools start whole process trees.  bash runs a shell command --
 a build, the test suite, or scripts/dev.sh, which starts another
 Emacs with the harness in it.  elisp starts a batch Emacs for every
-call, ssh runs a command on another host, and open_harness starts a
-checkout's development Emacs.  One such call is meant to use the
+call, and ssh runs a command on another host; a module outside the
+harness may have such a tool too, as this repository's plugin has
+open_harness, which starts a checkout's development Emacs.  One such
+call is meant to use the
 machine; several at once -- a task board running a handful of
 sessions, each with sub-agents of its own, a model that tries
 commands in parallel -- take it over, and whatever else the user

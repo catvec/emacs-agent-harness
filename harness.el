@@ -132,7 +132,7 @@ after changing it run \\[harness-restart]."
   :type '(repeat directory) :group 'harness)
 
 (defconst harness-core-modules
-  '(acp agent compaction config naming perms priority project provider provider-claude
+  '(access acp agent compaction config naming perms priority project provider provider-claude
     resilience retry sandbox session store usage worktree
     tools tools-agent tools-emacs tools-fs tools-plan tools-question tools-session-info
     tools-shell tools-todo
@@ -142,7 +142,8 @@ They make a harness to work with: sessions and the turn loop, Claude
 Code for the default model, compaction and retries, carrying sessions
 on after a restart and reporting the ones that stall, session names,
 the file, shell and Emacs tools with the permissions and the sandbox
-that guard them, the tools that ask the user, plan, keep a todo list,
+that guard them, the access view of what each session may reach and
+how its calls were judged, the tools that ask the user, plan, keep a todo list,
 describe the session and start sub-agents, worktrees, usage and
 costs, and the chat, the session list and the requests a session
 waits on.  What they require loads with them, and so does the UI half

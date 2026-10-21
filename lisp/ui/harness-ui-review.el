@@ -94,10 +94,10 @@ same.  The harness adds that to whatever sends the task back.")
   "Session ids whose task was looked up once.")
 
 (defun harness-ui-review--chat-buffer (sid)
-  "Return the live chat buffer showing session SID, or nil."
-  (cl-find-if (lambda (buffer)
-                (equal (buffer-local-value 'harness-ui-session-id buffer) sid))
-              (buffer-list)))
+  "Return the live chat buffer showing session SID, or nil.
+Another view of the session, such as its access view, is no chat
+\(`harness-ui-chat-of-p')."
+  (cl-find-if (lambda (buffer) (harness-ui-chat-of-p buffer sid)) (buffer-list)))
 
 (defun harness-ui-review--redraw (sid)
   "Draw the tail of SID's chat buffer again, when it shows."

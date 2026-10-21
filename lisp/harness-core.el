@@ -620,9 +620,28 @@ and those after TO are left out.  Return a promise of the final value."
                                               (gethash name harness--filters))
                             value args))
 
-(defun harness--run-async-chain (name chain value args)
+(cl-defun harness-run-filter-async-traced (name value args &key from to tracer)
+  "Run the asynchronous filter chain NAME from VALUE with ARGS, traced.
+It runs as `harness-run-filter-async' does, ARGS being the list of its
+arguments, and only the functions whose priority lies between FROM and
+TO when they are given, as `harness-run-filter-async-between' does.
+TRACER, a function, is called as (TRACER FN OLD NEW) each time a
+function of the chain hands on a value NEW that is not `eq' to the
+value OLD it was given: that function changed it, which is how a
+caller learns which stage of a chain decided.  Return a promise of the
+final value."
+  (harness--run-async-chain name
+                            (cl-remove-if-not (lambda (f) (and (or (null from) (<= from (car f)))
+                                                               (or (null to) (<= (car f) to))))
+                                              (gethash name harness--filters))
+                            value args tracer))
+
+(defun harness--run-async-chain (name chain value args &optional tracer)
   "Run CHAIN, entries (PRIORITY . FN) of filter NAME, from VALUE with ARGS.
-See `harness-run-filter-async'.  Return a promise of the final value."
+See `harness-run-filter-async'.  TRACER, when non-nil, is called as
+\(TRACER FN OLD NEW) when FN hands on a value NEW that is not OLD, the
+one it was given (see `harness-run-filter-async-traced').  Return a
+promise of the final value."
   (let ((promise (harness-make-promise)))
     (cl-labels ((step (value rest)
                   (if (or (null rest)
@@ -633,6 +652,10 @@ See `harness-run-filter-async'.  Return a promise of the final value."
                            (next (lambda (v)
                                    (unless called
                                      (setq called t)
+                                     (when (and tracer (not (eq v value)))
+                                       (condition-case err
+                                           (funcall tracer fn value v)
+                                         (error (harness-log 'error "tracer of %s failed: %S" name err))))
                                      (step v (cdr rest))))))
                       (condition-case err
                           (let ((ret (apply fn value next args)))

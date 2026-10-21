@@ -2,7 +2,7 @@
 
 # sandbox
 
-Kernel sandbox (bwrap / systemd-run) for spawned tool processes.
+Kernel sandbox (bwrap / systemd-run / MXC on macOS) for spawned tool processes.
 
 - **Runs in:** the harness process
 - **Source:** [lisp/modules/harness-sandbox.el](../../lisp/modules/harness-sandbox.el)
@@ -13,11 +13,13 @@ Kernel sandbox (bwrap / systemd-run) for spawned tool processes.
 
 Every process the harness spawns on behalf of a model can be routed
 through a kernel sandbox.  Isolation is enforced by the kernel
-(mount and PID namespaces), not by policy: the permission mode is a
-prompt-level hint, this is the boundary.
+(mount and PID namespaces on GNU/Linux, Seatbelt on macOS), not by
+policy: the permission mode is a prompt-level hint, this is the
+boundary.
 
 A backend is picked when the module initialises, in preference
-order: `bwrap` (bubblewrap), `systemd-run --user`, or none.  The
+order: `bwrap` (bubblewrap), `systemd-run --user`, or none; on macOS
+`mxc` (MXC's mxc-exec-mac, below) or none.  The
 `harness-sandbox-policy` setting from the config module decides what
 happens when no backend exists:
 
@@ -26,9 +28,9 @@ happens when no backend exists:
   preferred  the command runs unconfined, with a warning in the log;
   off        the command is always returned unchanged.
 
-What the sandbox sees: read-only /usr and /etc (plus the usual
-/lib, /lib64, /bin, /sbin as symlinks or read-only binds), a fresh
-/proc, /dev and /tmp, and the session's working directory
+What the sandbox sees on GNU/Linux: read-only /usr and /etc (plus
+the usual /lib, /lib64, /bin, /sbin as symlinks or read-only binds),
+a fresh /proc, /dev and /tmp, and the session's working directory
 read-write.  The home directory's contents are *not* mounted
 (credentials such as ~/.npmrc or ~/.aws stay out of reach).  With
 bwrap $HOME keeps its path, but an empty tmpfs covers it, so ~/x
@@ -49,6 +51,36 @@ inside as outside.  Network access stays on by default because
 hosted providers and most build tools need it; pass `:network nil`
 to cut it, which is only correct for local models.
 
+A confined command has HARNESS_SANDBOX set to the backend's name,
+`bwrap`, `systemd` or `mxc`, so a script can tell it runs confined:
+scripts/dev.sh warns that an Emacs it starts there ends with the
+command.
+
+On macOS the backend is MXC (Microsoft eXecution Container, see
+`harness-sandbox-mxc-program`): its executor, mxc-exec-mac, confines
+a command with Seatbelt, macOS's own sandbox, and needs macOS 15 or
+later.  It is the only backend looked for there, and is not looked
+for anywhere else.  Seatbelt allows what it is told and denies the
+rest, so what a command sees is a list of paths rather than mounts:
+MXC's baseline of system directories (/bin, /usr/bin, /usr/lib,
+/System, /Library...), the toolchain directories of
+`harness-sandbox--mxc-system-dirs` (Homebrew, MacPorts, Nix,
+/Applications) and `harness-sandbox-extra-read-only-dirs`, all
+read-only; the working directory read-write; the `:writable` and
+`:readable` directories as they are given; and a private $TMPDIR,
+made for the command and removed when it ends.  $HOME keeps its
+path, but nothing in it can be read except what is shown there.
+MXC passes on none of the harness's environment, so the command's
+is written out whole: `process-environment` as it is when the
+command is wrapped, with TMPDIR, PWD, HARNESS_SANDBOX=mxc and a
+worktree's commit identity set.  `:network nil` denies the network,
+loopback included; otherwise it is open both ways, as bwrap leaves
+it.  `:read-only` leaves nothing writable but that $TMPDIR.  Unlike
+bwrap, MXC gives the command no PID namespace of its own; /tmp
+cannot be written there (a command uses $TMPDIR); and MXC hands the
+command's output on only when it ends, so the note under a running
+bash call shows none until then.
+
 Remote working directories (TRAMP) are never wrapped: the sandbox
 binaries and the mounts would have to exist on the remote host, and
 the harness has no way to verify them there.  `sandbox/wrap`
@@ -58,10 +90,11 @@ A caller that needs a command to change nothing -- a supervisor's
 shell, which only looks -- passes `:read-only`: the working
 directory, the git directories and every `:writable` entry are then
 mounted read-only, and the command writes nothing but the sandbox's
-private /tmp.  It fails closed: where the command would run
-unconfined, with the `off` policy, in a remote directory or with no
-backend (whatever the policy), `sandbox/wrap` signals
-`harness-sandbox-unavailable` instead of returning it.
+private /tmp (its private $TMPDIR under MXC).  It fails closed:
+where the command would run unconfined, with the `off` policy, in a
+remote directory or with no backend (whatever the policy),
+`sandbox/wrap` signals `harness-sandbox-unavailable` instead of
+returning it.
 
 `:scratch` lists directories the caller made for the one command and
 deletes after it, which the command writes even when it is
@@ -94,6 +127,7 @@ Methods: `sandbox/wrap`, `sandbox/status`, `sandbox/confined-p`,
 
 - `harness-sandbox-backend` — Which sandbox backend to use.
 - `harness-sandbox-extra-read-only-dirs` — Additional directories bound read-only into every sandbox.
+- `harness-sandbox-mxc-program` — Name or absolute path of MXC's macOS executor, mxc-exec-mac.
 
 ## Uses
 

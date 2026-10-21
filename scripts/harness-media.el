@@ -88,6 +88,8 @@ layout: half the frame keeps the board's cards whole.")
 (defvar harness-supervisor-tasks)
 (defvar harness-recap--sessions)
 (defvar harness-merge--locks)
+(defvar harness-ui-access--describe)
+(defvar harness-ui-access--judgements)
 
 (declare-function harness-start "harness")
 (declare-function harness-call "harness-core")
@@ -103,6 +105,8 @@ layout: half the frame keeps the board's cards whole.")
 (declare-function harness-menu "harness-ui")
 (declare-function harness-chat-toggle-block "harness-ui-chat")
 (declare-function harness-chat-scroll-to-bottom "harness-ui-chat")
+(declare-function harness-access "harness-ui-access")
+(declare-function harness-ui-access--find-anchor "harness-ui-access")
 (declare-function harness-tools-session-note "harness-tools" (session-id &optional options))
 (declare-function harness-tools-session-activity "harness-tools" (session-id))
 (declare-function harness-chat-block-node "harness-ui-chat")
@@ -1243,6 +1247,7 @@ The handle is the one the approval message names."
     ;; The denied call and the user's approval of it.
     ("baseline" . harness-media--baseline-denied-script)
     ("The user approved the denied call" . harness-media--rerun-approved-script)
+    ("Audit how API keys" . harness-media--access-script)
     ("/health" . harness-media--task-health)
     ("gzip" . harness-media--task-compress))
   "Scripts as (REGEXP . FUNCTION), matched against the newest user message.")
@@ -2272,6 +2277,113 @@ The chat shows the call marked user-approved, the agent's
 handle linking the two."
   (harness-media--chat-denied t)
   (harness-media--capture "chat-denied-approved"))
+
+;;;; The access view
+
+(defconst harness-media--access-prompt
+  "Audit how API keys are checked, offline: read acme/auth.py and the key rotation notes in ~/src/acme-ops, then run the auth tests."
+  "What the access picture's session is asked.")
+
+(defconst harness-media--rotation-notes "# Rotating API keys
+
+1. Add the new key to `ACME_API_KEYS`, beside the old one.
+2. Deploy, and move the clients over.
+3. Drop the old key and deploy again.
+"
+  "The ops notes the access picture's session may read but not write.")
+
+(defun harness-media--access-ops ()
+  "Return the ops directory the access picture's session may only read."
+  (expand-file-name "~/src/acme-ops/"))
+
+(defun harness-media--access-script (_request)
+  "The turn of the access picture's session: an audit kept to its jail.
+It gives the network up itself (`drop_access'), reads the project and
+the ops notes it may only read, is refused the web it gave up and the
+sub-agents the user turned off, and waits for the user on the test run."
+  (list
+   (harness-media--think "An audit of the key checks needs nothing from the network, so I give it up first: what I read cannot leave this machine.")
+   (harness-media--tool "drop_access" :attribute "network" :reason "an audit of the key checks needs no network")
+   (harness-media--tool "read_file" :path "acme/auth.py")
+   ;; As a model writes it: no path of this machine's in the picture.
+   (harness-media--tool "read_file" :path "~/src/acme-ops/rotation.md")
+   (harness-media--tool "web_fetch" :url "https://docs.python.org/3/library/hmac.html")
+   (harness-media--say "The key check compares with `==`. A sub-agent could time it while I read on.")
+   (harness-media--tool "spawn_agent" :prompt "Time acme/auth.py's key check for keys that differ early and late."
+                        :name "time the key check")
+   (harness-media--say "Sub-agents are off for this session, so I run the auth tests myself.")
+   (harness-media--tool "bash" :command "python3 -m unittest tests.test_auth")))
+
+(defun harness-media--access-session ()
+  "Make the access picture's session, set up as a jail, and run its turn.
+The user lets it read the ops notes, not write them, and turns its
+sub-agents off, as the view's buttons do; the turn stops on the test
+run, waiting for the user.  Return the session's id."
+  (let ((id (harness-media--new-session :name "Audit the API key checks"
+                                        :model "claude:claude-sonnet-5"
+                                        :permission-mode 'ask))
+        (ops (harness-media--access-ops)))
+    (make-directory ops t)
+    (with-temp-file (expand-file-name "rotation.md" ops) (insert harness-media--rotation-notes))
+    (harness-call 'access/add-read-dir id ops)
+    (harness-call 'access/set-tool id "spawn_agent" :false)
+    ;; Idle too: where no sandbox confines bash, the network given up
+    ;; takes it away, and the turn ends refused instead of waiting.
+    (harness-media--prompt id harness-media--access-prompt '(blocked idle))
+    id))
+
+(defun harness-media--access-view (id)
+  "Show the access view of session ID in the whole frame; return its buffer."
+  (harness-media--view (lambda () (harness-access id))
+                       (lambda ()
+                         (let ((buffer (current-buffer)))
+                           (harness-media--wait
+                            (lambda () (with-current-buffer buffer
+                                         (and harness-ui-access--describe harness-ui-access--judgements
+                                              (harness-ui-access--find-anchor '(section . judgements)))))
+                            15 "the access view to load"))))
+  (window-buffer))
+
+(defun harness-media--access-shot (name judgements)
+  "Take picture NAME of the access view of a session kept to a jail.
+With JUDGEMENTS the view is scrolled to the judgements of its calls, the
+agent's own drop_access unfolded; else it shows from the top.  The
+session is made here and deleted after, so no other picture shows it.
+The view names the harness's own code, which every session may read: it
+is taken for straight's build of it in the scratch HOME and the clone
+that build links to, as in the version picture, so no path of this
+machine's shows.  Only those directories are taken for others:
+`harness-directory' stays, which the tools are read from."
+  (let ((id (harness-media--access-session)))
+    (cl-letf* (((symbol-function 'harness-perms--harness-code-dirs)
+                (lambda () (let ((paths (harness-media--harness-paths)))
+                             (list (plist-get paths :build) (plist-get paths :clone)))))
+               (buffer (harness-media--access-view id)))
+      (when judgements (harness-media--expand buffer "drop_access"))
+      (with-current-buffer buffer
+        (let ((pos (if judgements (harness-ui-access--find-anchor '(section . judgements)) (point-min))))
+          (goto-char pos)
+          (set-window-start (selected-window) pos)))
+      (harness-media--capture name)
+      (harness-call 'agent/cancel id)
+      (harness-media--wait (lambda () (not (harness-call 'agent/running id))) 15 "the turn to end")
+      (harness-call 'session/delete id)
+      ;; Gone with its session: the next picture's view takes its name.
+      (kill-buffer buffer))))
+
+(defun harness-media-shot-access ()
+  "The access view of a session kept to a jail, from the top.
+The sandbox and mode, the directories (the ops notes read-only), the
+tools (the web gone with the network the agent gave up, sub-agents
+turned off by the user), the rules and the request waiting on the user."
+  (harness-media--access-shot "access" nil))
+
+(defun harness-media-shot-access-judgements ()
+  "The judgements of that session's calls, in its access view.
+Each call drawn as the chat draws it, under what was decided, by whom and
+its handle; the refused ones offer [Approve], and the agent's own
+drop_access is unfolded."
+  (harness-media--access-shot "access-judgements" t))
 
 (defun harness-media--notes-child (parent)
   "Return the sub-agent session PARENT sent to run the checks, once it exists."
@@ -3591,6 +3703,8 @@ each is on now; the control panel offers to comment, reply and list them."
     ;; Likewise: they ask a session of their own, deleted after the picture.
     ("quote-reply" . harness-media-shot-quote-reply)
     ("quote-thread" . harness-media-shot-quote-thread)
+    ("access" . harness-media-shot-access)
+    ("access-judgements" . harness-media-shot-access-judgements)
     ;; Last: they add a commit to the slow-request task's branch and the
     ;; threads of its review, which no other picture shows.
     ("review" . harness-media-shot-review)

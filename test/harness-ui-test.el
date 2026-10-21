@@ -191,7 +191,7 @@ top, whole, and leaves them as they were."
 (require 'harness-ui-tree)
 (require 'harness-ui-worktree)
 (require 'harness-ui-usage)
-(require 'harness-ui-dirs)
+(require 'harness-ui-access)
 (require 'harness-ui-btw)
 (require 'harness-ui-media)
 (require 'harness-ui-review)
@@ -460,7 +460,7 @@ leave free.  None is left out by the menu."
                                  maps)))))))))
   ;; What every harness buffer offers is checked above; here, that each mode is there.
   (dolist (mode '(harness-chat-mode harness-ui-tasks-mode harness-ui-slots-mode harness-ui-sessions-mode
-                  harness-ui-tree-mode harness-ui-worktree-mode harness-ui-usage-mode harness-ui-dirs-mode
+                  harness-ui-tree-mode harness-ui-worktree-mode harness-ui-usage-mode harness-ui-access-mode
                   harness-ui-btw-minor-mode harness-ui-media-recording-mode harness-ui-review-minor-mode))
     (should (get mode 'harness-menu-group))))
 

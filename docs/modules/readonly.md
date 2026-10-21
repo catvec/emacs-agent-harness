@@ -6,9 +6,9 @@ Read-only sessions: the sessions a module's policy names (a supervisor, a task's
 
 - **Runs in:** the harness process
 - **Source:** [lisp/modules/harness-readonly.el](../../lisp/modules/harness-readonly.el)
-- **Loaded:** when enabled (see `harness-enable-modules`)
+- **Loaded:** by default
 - **Requires:** [session](session.md), [tools](tools.md)
-- **Required by:** [supervisor](supervisor.md)
+- **Required by:** [access](access.md), [supervisor](supervisor.md)
 
 ## About
 

@@ -156,6 +156,36 @@ and `:final' stops it as it stops the whole chain."
     (should (equal '(:last 10 :final t) (harness-await (harness-run-filter-async-between 'test/ab 6 40 nil 'w))))
     (should (equal '((10 w)) seen))))
 
+(ert-deftest harness-core-async-filter-traced-names-who-changed-the-value ()
+  "`harness-run-filter-async-traced' tells its tracer each function that
+handed on a value other than the one it got, between FROM and TO; a
+function that passes its value on as it is goes unnamed, and a tracer
+that fails is logged, not the chain's end."
+  (harness-test-reset-bus)
+  (let ((traced nil))
+    (harness-add-filter 'test/at (lambda (v next _x) (funcall next v)) 5)
+    (harness-add-filter 'test/at #'harness-core-test--decides 10)
+    (harness-add-filter 'test/at (lambda (v next _x) (funcall next v)) 20)
+    (should (equal '(:decided t)
+                   (harness-await (harness-run-filter-async-traced
+                                   'test/at nil '(x)
+                                   :tracer (lambda (fn old new) (push (list fn old new) traced))))))
+    (should (equal '((harness-core-test--decides nil (:decided t))) traced))
+    ;; Bounds leave the stage out.
+    (setq traced nil)
+    (should-not (harness-await (harness-run-filter-async-traced
+                                'test/at nil '(x) :from 11
+                                :tracer (lambda (fn _old _new) (push fn traced)))))
+    (should-not traced)
+    ;; A failing tracer does not stop the chain.
+    (should (equal '(:decided t)
+                   (harness-await (harness-run-filter-async-traced
+                                   'test/at nil '(x) :tracer (lambda (&rest _) (error "Oops"))))))))
+
+(defun harness-core-test--decides (_value next _x)
+  "A filter stage that decides: it hands on a value of its own to NEXT."
+  (funcall next (list :decided t)))
+
 (ert-deftest harness-core-promises ()
   (let ((p (harness-make-promise)))
     (should-not (harness-promise-settled-p p))
