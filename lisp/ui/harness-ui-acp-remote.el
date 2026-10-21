@@ -21,11 +21,17 @@
 ;; token to keep instead (`harness-ui-acp-remote-create-token'): the
 ;; address and secret to put in its settings, shown once.
 ;;
-;; Keys: s starts or stops serving, a chooses the address in links, w
-;; copies the ACP address, l the sign-in link of the provider, y approves
-;; the device that waits (the one at point), n refuses it, t makes a token,
-;; k revokes the device at point and K every device, g refreshes.  Every
-;; key has a button.  Everything goes through ACP
+;; Serving is kept across restarts of the harness: once it is on (s), the
+;; harness serves again every time it starts, and the devices signed in
+;; with a secret stay signed in.  When it is on but cannot serve (the port
+;; is held by another process, the address does not exist yet) the page
+;; says why while the harness tries again, and S turns it off.
+;;
+;; Keys: s starts or stops serving, S turns it off for good, a chooses the
+;; address in links, w copies the ACP address, l the sign-in link of the
+;; provider, y approves the device that waits (the one at point), n
+;; refuses it, t makes a token, k revokes the device at point and K every
+;; device, g refreshes.  Every key has a button.  Everything goes through ACP
 ;; (`_harness/acp/remote-*'), so the page shows the harness the UI is
 ;; connected to, here or elsewhere.
 
@@ -151,22 +157,55 @@ With SECONDS the clock shows them."
               ((harness-ui-acp-remote--true :running)
                (propertize (format " serving on port %s" (plist-get harness-ui-acp-remote--status :port))
                            'face 'harness-status-idle-face))
+              ((harness-ui-acp-remote--true :enabled)
+               (propertize " waiting to serve other devices" 'face 'harness-remote-warning-face))
               (t (propertize " not serving other devices" 'face 'harness-dim-face)))))
 
 (defun harness-ui-acp-remote--insert-serving ()
   "Insert whether the harness serves other devices, and where."
   (let* ((s harness-ui-acp-remote--status)
-         (running (harness-ui-acp-remote--true :running)))
+         (running (harness-ui-acp-remote--true :running))
+         (enabled (harness-ui-acp-remote--true :enabled))
+         (why (plist-get s :resume-error)))
+    ;; Serving is kept across restarts of the harness: it starts again by
+    ;; itself while it is on.  So a page that says it is not served, though
+    ;; it is on, says why and offers to stop trying.
     (harness-ui-acp-remote--row
      "Other devices"
-     (if running
-         (concat (harness-ui-status-icon 'idle) " "
-                 (propertize (format "served on port %s" (plist-get s :port)) 'face 'harness-status-idle-face))
-       (concat (harness-ui-status-icon 'inactive) " " (propertize "not served" 'face 'harness-dim-face)))
+     (cond
+      (running
+       (concat (harness-ui-status-icon 'idle) " "
+               (propertize (format "served on port %s" (plist-get s :port)) 'face 'harness-status-idle-face)))
+      (enabled
+       (concat (harness-ui-level-icon 'caution) " "
+               (propertize "not served yet" 'face 'harness-remote-warning-face)
+               (propertize (if (harness-ui-acp-remote--true :resuming) ", trying again" "")
+                           'face 'harness-dim-face)))
+      (t (concat (harness-ui-status-icon 'inactive) " " (propertize "not served" 'face 'harness-dim-face))))
      "   "
-     (lambda () (harness-ui-button (if running "[stop]" "[start serving]") #'harness-ui-acp-remote-toggle-serving
-                                   :help (if running "Stop serving other devices; those that keep a secret stay signed in (s)"
-                                           "Listen for phones and other devices on the network (s)"))))
+     (lambda ()
+       (harness-ui-button (cond (running "[stop]") (enabled "[try now]") (t "[start serving]"))
+                          #'harness-ui-acp-remote-toggle-serving
+                          :help (cond (running "Stop serving other devices, and do not start again with the harness; those that keep a secret stay signed in (s)")
+                                      (enabled "Start the listener now instead of at the next try (s)")
+                                      (t "Listen for phones and other devices on the network, now and whenever the harness starts (s)"))))
+     (lambda ()
+       (when (and enabled (not running))
+         (insert " ")
+         (harness-ui-button "[turn off]" #'harness-ui-acp-remote-turn-off
+                            :help "Stop trying, and do not serve other devices when the harness starts (S)"))))
+    ;; What it means, on a line of its own: the window may be narrow.
+    (cond
+     ((and running enabled)
+      (harness-ui-acp-remote--row
+       "" (propertize "starts again whenever the harness starts" 'face 'harness-dim-face)))
+     (running
+      (harness-ui-acp-remote--row
+       "" (propertize "not kept: serving ends when the harness stops" 'face 'harness-remote-warning-face)))
+     (enabled
+      (harness-ui-acp-remote--row
+       "" (propertize (if why (format "%s" why) "the listener did not start")
+                      'face 'harness-remote-warning-face))))
     (harness-ui-acp-remote--row
      "ACP address"
      (propertize (or (plist-get s :ws-url) "") 'face (if running 'default 'harness-dim-face))
@@ -367,6 +406,21 @@ The user is told of each new one."
                        (message (if running "Harness: no longer serving other devices"
                                   "Harness: serving other devices on port %s")
                                 (plist-get status :port))))))
+
+(defun harness-ui-acp-remote-turn-off ()
+  "Turn serving off: stop it, stop trying, and do not serve at the next start.
+It is what `s' does while the harness serves; this is for when it is on
+but does not serve (the port is taken, say) and `s' would only try again."
+  (interactive)
+  (harness-ui-acp-remote--check)
+  (let ((buf (current-buffer)))
+    (harness-ui-call "_harness/acp/remote-stop" nil
+                     (lambda (status)
+                       (when (buffer-live-p buf)
+                         (with-current-buffer buf
+                           (setq harness-ui-acp-remote--status status)
+                           (harness-ui-acp-remote--render)))
+                       (message "Harness: no longer serving other devices, and not at the next start")))))
 
 (defun harness-ui-acp-remote-set-address ()
   "Choose the address of this machine that the ACP address and links carry."
@@ -580,6 +634,7 @@ from its own screen: it presents the token as it connects."
     (define-key map (kbd "TAB") #'forward-button)
     (define-key map (kbd "<backtab>") #'backward-button)
     (define-key map (kbd "s") #'harness-ui-acp-remote-toggle-serving)
+    (define-key map (kbd "S") #'harness-ui-acp-remote-turn-off)
     (define-key map (kbd "a") #'harness-ui-acp-remote-set-address)
     (define-key map (kbd "w") #'harness-ui-acp-remote-copy-address)
     (define-key map (kbd "l") #'harness-ui-acp-remote-copy-login-link)
@@ -604,6 +659,7 @@ from its own screen: it presents the token as it connects."
      '("Remote control"
        ["Serving"
         (". s" "Start or stop serving" harness-ui-acp-remote-toggle-serving)
+        (". S" "Turn serving off, and stop trying" harness-ui-acp-remote-turn-off)
         (". a" "Address of this machine" harness-ui-acp-remote-set-address)
         (". w" "Copy the ACP address" harness-ui-acp-remote-copy-address)
         (". g" "Refresh" harness-ui-acp-remote-refresh)]
@@ -630,7 +686,7 @@ from its own screen: it presents the token as it connects."
 
 (defconst harness-ui-acp-remote--changes
   '("approval" "signed-in" "disconnected" "connected" "revoked" "expired" "started" "stopped"
-    "address" "corporate")
+    "waiting" "address" "corporate")
   "What `acp/remote-changed' says that the page, and what waits, follow.")
 
 (defun harness-ui-acp-remote--on-event (event args)

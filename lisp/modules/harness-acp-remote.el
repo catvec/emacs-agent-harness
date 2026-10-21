@@ -19,7 +19,10 @@
 ;;   speaks ACP over WebSocket (`ws://ADDRESS:PORT/acp'), the transport
 ;;   ACP's draft for remote agents asks of clients, and also ACP's own
 ;;   line framing for clients that use plain TCP.  It is off until the
-;;   user turns it on (`harness-acp-remote').
+;;   user turns it on (`harness-acp-remote'), and then stays on: the
+;;   harness serves again every time it starts, and a listener that cannot
+;;   start (the port is held, the address is not up yet) is tried again
+;;   until it can, with what it says on the remote control page.
 ;; - A connection that has no session may call `initialize' (answered
 ;;   with what any ACP agent says of itself and the methods below, and
 ;;   nothing of the harness) and `authenticate'.  Anything else is ACP's
@@ -438,18 +441,18 @@ cannot be waited for."
   :type 'integer :group 'harness)
 
 (defcustom harness-acp-remote-idle-timeout (* 30 24 3600)
-  "Seconds a device may leave its session unused before it must pair again.
+  "Seconds a device may leave its session unused before it must sign in again.
 A session in use, or with a connection open, does not run out."
   :type 'integer :group 'harness)
 (harness-renew-default 'harness-acp-remote-idle-timeout (* 8 3600))
 
 (defcustom harness-acp-remote-session-lifetime (* 90 24 3600)
   "Seconds after which a session secret ends however it is used.
-Counted from when the secret was issued: at pairing, or when it was last
+Counted from when the secret was issued: at sign-in, or when it was last
 replaced (see `harness-acp-remote-rotate-after').  A device that takes
-replacements is given a new secret long before, and pairs once; any other
-must pair again after this, so a secret that leaked long ago does not
-keep working for ever."
+replacements is given a new secret long before, and signs in once; any
+other must sign in again after this, so a secret that leaked long ago
+does not keep working for ever."
   :type 'integer :group 'harness)
 
 (defcustom harness-acp-remote-rotate-after (* 7 24 3600)
@@ -518,7 +521,7 @@ its last `authenticate', before it is closed.")
 Each is a plist (:id :hash :name :agent :address :method :subject
 :created :seen :rotated :previous-hash :previous-until): :hash is the
 SHA-256 of its session secret, which is kept nowhere else; :method says
-how it signed in (pairing, shared-secret or oidc), :subject who the
+how it signed in (approval, token, shared-secret or oidc), :subject who the
 OpenID provider said it was, :address where it connected from last
 \(shown, never trusted).  :created is when the device signed in and
 :rotated when the current secret was issued (the same, until it is
@@ -533,6 +536,19 @@ from; :previous-hash is the hash of the secret it replaced, good until
 
 (defvar harness-acp-remote--sweep-timer nil
   "Timer that drops the connections of sessions that ended, or nil.")
+
+(defvar harness-acp-remote--resume-timer nil
+  "Timer that tries again to start the listener, or nil.")
+
+(defvar harness-acp-remote--resume-error nil
+  "Why the listener could not start when it was last tried, as text, or nil.")
+
+(defvar harness-acp-remote--resume-attempts 0
+  "How many times in a row the listener could not start.")
+
+(defconst harness-acp-remote--resume-delays '(2 5 15 30 60)
+  "Seconds to wait before each next try to start the listener.
+The last one repeats, for as long as `harness-acp-remote' is on.")
 
 (defvar harness-acp-remote--failures (make-hash-table :test 'equal)
   "Address -> (COUNT . SINCE): secrets and codes refused from it lately.")
@@ -558,7 +574,8 @@ from; :previous-hash is the hash of the secret it replaced, good until
 
 (harness-declare-event 'acp/remote-changed
                        "(PLIST) when serving other devices changed: (:what WHAT :address A).
-WHAT is started, stopped, connected, disconnected, paired, revoked,
+WHAT is started, stopped, waiting (the listener could not start and is
+tried again), approval, signed-in, connected, disconnected, revoked,
 expired, address or corporate.")
 
 (defun harness-acp-remote--changed (what &optional address)
@@ -615,7 +632,8 @@ link-local and container or virtual machine interfaces are left out."
       (sort (nreverse out) (lambda (a b) (< (funcall rank a) (funcall rank b)))))))
 
 (defun harness-acp-remote--advertised-address ()
-  "Return the address pairing links carry: see `harness-acp-remote-address'."
+  "Return the address of this machine that the ACP address carries.
+See `harness-acp-remote-address'."
   (or (and (stringp harness-acp-remote-address)
            (not (string-blank-p harness-acp-remote-address))
            (string-trim harness-acp-remote-address))
@@ -1815,8 +1833,13 @@ bytes."
   "Clean up after the socket PROC once it closed."
   (unless (process-live-p proc)
     (if (eq proc harness-acp-remote--server)
+        ;; The listener ended on its own: not by `harness-acp-remote--stop',
+        ;; which forgets it first.  Serving is still wanted when the option is on.
         (progn (setq harness-acp-remote--server nil)
-               (harness-acp-remote--changed "stopped"))
+               (harness-acp-remote--changed "stopped")
+               (when (and harness-acp-remote (not (harness-corporate-p)))
+                 (harness-log 'warn "acp-remote: the listener ended; starting it again")
+                 (harness-acp-remote--resume-later)))
       (when-let* ((timer (process-get proc 'harness-acp-remote-timer)))
         (cancel-timer timer))
       (when-let* ((decoder (process-get proc 'harness-acp-remote-decoder)))
@@ -1916,7 +1939,77 @@ for the next time."
   (dolist (approval (copy-sequence harness-acp-remote--approvals))
     (harness-acp-remote--approval-over approval "The harness stopped serving other devices"))
   (when harness-acp-remote--save-timer (harness-acp-remote--save-sessions))
+  (harness-acp-remote--resume-cancel)
   (setq harness-acp-remote--logins nil))
+
+;; `harness-acp-remote' being on is what makes the harness serve other
+;; devices every time it starts, so that a device signs in once and finds
+;; the harness there on the next day.  Starting is not certain: another
+;; process may hold the port (the harness that this one replaces, still
+;; closing), or the address the listener binds may not exist yet (a VPN
+;; that connects after Emacs starts).  The harness then tries again, after
+;; a few seconds and then every minute, for as long as the option stays
+;; on, and the remote control page says why it does not serve yet.
+
+(defun harness-acp-remote--resume-cancel ()
+  "Stop trying to start the listener, and forget why it could not start."
+  (when harness-acp-remote--resume-timer
+    (cancel-timer harness-acp-remote--resume-timer))
+  (setq harness-acp-remote--resume-timer nil
+        harness-acp-remote--resume-error nil
+        harness-acp-remote--resume-attempts 0))
+
+(defun harness-acp-remote--resume-later ()
+  "Plan the next try to start the listener; return the seconds it waits.
+That is the delay `harness-acp-remote--resume-delays' gives for the
+tries that failed so far."
+  (let ((delay (nth (min harness-acp-remote--resume-attempts
+                         (1- (length harness-acp-remote--resume-delays)))
+                    harness-acp-remote--resume-delays)))
+    (when harness-acp-remote--resume-timer
+      (cancel-timer harness-acp-remote--resume-timer))
+    (setq harness-acp-remote--resume-timer
+          (run-at-time delay nil #'harness-acp-remote--resume))
+    delay))
+
+(defun harness-acp-remote--resume ()
+  "Serve other devices, as `harness-acp-remote' being on asks.
+If the listener cannot start, plan another try.  Return non-nil when the
+harness serves.  Nothing is planned, and what was is dropped, once the
+option is off, corporate mode is on or the listener runs."
+  (when harness-acp-remote--resume-timer
+    (cancel-timer harness-acp-remote--resume-timer)
+    (setq harness-acp-remote--resume-timer nil))
+  (cond
+   ((or (not harness-acp-remote) (harness-corporate-p))
+    (harness-acp-remote--resume-cancel)
+    nil)
+   ((harness-acp-remote--running-p)
+    (harness-acp-remote--resume-cancel)
+    t)
+   (t
+    (let ((tries harness-acp-remote--resume-attempts))
+      (condition-case err
+          (progn
+            (harness-acp-remote--listen)
+            (harness-acp-remote--resume-cancel)
+            (when (> tries 0)
+              (harness-log 'info "acp-remote: serving other devices at last, after %d failed %s"
+                           tries (if (= tries 1) "try" "tries"))
+              (harness-acp-remote--changed "started"))
+            t)
+        (error
+         (let* ((why (harness-error-message err))
+                ;; Chosen by the tries that failed before this one.
+                (delay (harness-acp-remote--resume-later)))
+           (setq harness-acp-remote--resume-error why
+                 harness-acp-remote--resume-attempts (1+ tries))
+           ;; Said once, as a warning; the tries that follow are for the log's debug level.
+           (harness-log (if (zerop tries) 'warn 'debug)
+                        "acp-remote: not serving other devices: %s; trying again in %d s"
+                        why delay)
+           (harness-acp-remote--changed "waiting")
+           nil)))))))
 
 ;;;; OpenID Connect
 
@@ -2348,7 +2441,7 @@ CLAIMS are those of the id token, describing who signed in."
     (harness-acp-remote--respond
      proc status
      (harness-acp-remote--page "Could not sign in" (harness-acp-remote--escape text)
-                               "Start again from the pairing page or the sign-in link."))))
+                               "Start again by choosing the sign-in method in the device's ACP client."))))
 
 (defun harness-acp-remote--oidc-callback (proc request)
   "Finish the sign-in of the browser on PROC.
@@ -2499,8 +2592,9 @@ when it has a client, else for the browser's own session."
 
 (harness-defmethod acp/remote-status ()
   "Describe serving other devices, for the remote control page.
-Return (:running :enabled :corporate :host :port :address :address-set
-:addresses ((:address :interface :kind) ...) :ws-url :base-url :secure
+Return (:running :enabled :resume-error :resuming :corporate :host :port
+:address :address-set :addresses ((:address :interface :kind) ...)
+:ws-url :base-url :secure
 :approval :approvals ((:id :code :name :address :origin :expires) ...)
 :oidc (:configured :issuer :login-url :allowed)
 :devices ((:id :name :agent :address :method :subject :paired :seen
@@ -2509,7 +2603,13 @@ Return (:running :enabled :corporate :host :port :address :address-set
   (harness-acp-remote--load-sessions)
   (harness-acp-remote--expire)
   (list :running (if (harness-acp-remote--running-p) t :false)
+        ;; :enabled is the saved option: serving starts again with the harness.
+        ;; When it is on and nothing serves, :resume-error says why (the port
+        ;; is taken, the address does not exist yet) and :resuming that the
+        ;; harness tries again.
         :enabled (if harness-acp-remote t :false)
+        :resume-error harness-acp-remote--resume-error
+        :resuming (if harness-acp-remote--resume-timer t :false)
         :corporate (if (harness-corporate-p) t :false)
         :host harness-acp-remote-host
         :port (harness-acp-remote--port)
@@ -2551,6 +2651,8 @@ policy that turns `harness-acp-remote' off.  Return the status."
     (harness-policy-refuse 'harness-acp-remote))
   (unless (harness-acp-remote--running-p)
     (harness-acp-remote--listen))
+  ;; It serves now: what was planned for a listener that could not start is moot.
+  (harness-acp-remote--resume-cancel)
   (unless harness-acp-remote
     (harness-save-user-option 'harness-acp-remote t))
   (harness-acp-remote--changed "started")
@@ -2645,13 +2747,13 @@ Saves `harness-acp-remote-address'.  Return the status."
   (add-hook 'harness-corporate-mode-change-hook #'harness-acp-remote--on-corporate-mode))
 
 (defun harness-acp-remote--init ()
-  "Join the hooks, and serve other devices when `harness-acp-remote' is on."
+  "Join the hooks, and serve other devices when `harness-acp-remote' is on.
+That is how serving, and the devices signed in, carry on across a
+restart of the harness; a listener that cannot start is tried again
+\(see `harness-acp-remote--resume')."
   (harness-acp-remote--hook)
   (harness-acp-remote--load-sessions)
-  (when (and harness-acp-remote (not (harness-corporate-p)) (not (harness-acp-remote--running-p)))
-    (condition-case err
-        (harness-acp-remote--listen)
-      (error (harness-log 'warn "acp-remote: not serving other devices: %s" (harness-error-message err))))))
+  (harness-acp-remote--resume))
 
 (defun harness-acp-remote--shutdown ()
   "Stop serving other devices and leave the hooks; the sessions are kept."

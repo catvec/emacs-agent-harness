@@ -39,10 +39,11 @@
 ;; - The detectors (`harness-secrets-builtin-detectors') find what
 ;;   looks like a secret: the token formats of DigitalOcean, AWS and
 ;;   Spaces keys, GitHub, Anthropic, OpenAI, Slack, Google and Stripe,
-;;   PEM private keys, and values assigned to names such as secret,
-;;   password or api_key.  They are labelled by their name.  Masking
-;;   never touches the inside of a placeholder, so masking text again
-;;   changes nothing.
+;;   the session secrets that the harness itself hands to a device that
+;;   signed in (harness-acp-remote.el), PEM private keys, and values
+;;   assigned to names such as secret, password or api_key.  They are
+;;   labelled by their name.  Masking never touches the inside of a
+;;   placeholder, so masking text again changes nothing.
 ;;
 ;; The hooks are the `tools/output' filter (the result of a call, ahead
 ;; of the size guard, so the file an oversized result is saved to is
@@ -225,6 +226,10 @@ never masked, whatever the detector (`harness-secrets-mask-text')."
      :regexp "[rs]k_live_[A-Za-z0-9]\\{16\\}[A-Za-z0-9]*"
      :group 0 :default t
      :doc "A live Stripe key: sk_live_ or rk_live_ and 16 or more characters.")
+    (acp-session-secret
+     :regexp "hs1_[A-Za-z0-9_-]\\{43\\}[A-Za-z0-9_-]*"
+     :group 0 :default t
+     :doc "A session secret of this harness's remote ACP (harness-acp-remote.el): hs1_ and 43 or more characters of base64url.")
     (private-key
      :regexp "-----BEGIN [A-Z0-9 ]*PRIVATE KEY\\(?: BLOCK\\)?-----"
      :end "-----END [A-Z0-9 ]*PRIVATE KEY\\(?: BLOCK\\)?-----"

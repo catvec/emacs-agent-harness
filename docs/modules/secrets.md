@@ -48,10 +48,11 @@ away.  Two things find secrets:
 - The detectors (`harness-secrets-builtin-detectors`) find what
   looks like a secret: the token formats of DigitalOcean, AWS and
   Spaces keys, GitHub, Anthropic, OpenAI, Slack, Google and Stripe,
-  PEM private keys, and values assigned to names such as secret,
-  password or api_key.  They are labelled by their name.  Masking
-  never touches the inside of a placeholder, so masking text again
-  changes nothing.
+  the session secrets that the harness itself hands to a device that
+  signed in (harness-acp-remote.el), PEM private keys, and values
+  assigned to names such as secret, password or api_key.  They are
+  labelled by their name.  Masking never touches the inside of a
+  placeholder, so masking text again changes nothing.
 
 The hooks are the `tools/output` filter (the result of a call, ahead
 of the size guard, so the file an oversized result is saved to is

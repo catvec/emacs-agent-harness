@@ -1596,6 +1596,148 @@ before the listener stops."
       (should (harness-acp-remote--running-p))
       (should (eq t (plist-get (harness-call 'acp/remote-start) :running))))))
 
+;;;; Serving carries on across restarts
+
+(defmacro harness-acp-remote-test-with-held-port (&rest body)
+  "Run BODY with the option on, the listener not running, and its port held.
+`squatter' is the process that holds it, `harness-acp-remote-port' its
+port, and the tries to start the listener come within a tenth of a second."
+  (declare (indent 0))
+  `(harness-acp-remote-test-with
+     (harness-acp-remote--stop)
+     (let* ((squatter (make-network-process :name "squatter" :server t :host "127.0.0.1"
+                                            :service t :noquery t))
+            (harness-acp-remote t)
+            (harness-acp-remote-port (process-contact squatter :service))
+            (harness-acp-remote--resume-delays '(0.05 0.1)))
+       (unwind-protect (progn ,@body)
+         (when (process-live-p squatter) (delete-process squatter))
+         (harness-acp-remote--resume-cancel)))))
+
+(ert-deftest harness-acp-remote-serves-again-when-the-harness-starts ()
+  "With the option on, a harness that starts serves again, and a device signed in before is still in."
+  (harness-acp-remote-test-with
+    (let ((secret (harness-acp-remote-test-secret "Kept")))
+      ;; The harness goes; another starts with the option saved on, and
+      ;; nothing of the devices in memory.
+      (harness-acp-remote--shutdown)
+      (should-not (harness-acp-remote--running-p))
+      (setq harness-acp-remote--sessions nil harness-acp-remote--sessions-loaded nil)
+      (let ((harness-acp-remote t))
+        (harness-acp-remote--init)
+        (should (harness-acp-remote--running-p))
+        (should (eq t (plist-get (harness-call 'acp/remote-status) :enabled))))
+      (setq harness-acp-remote-test-port (harness-acp-remote--port))
+      (should (harness-acp-remote-test-signed-in-p (harness-acp-remote-test-connect :secret secret)))
+      (should (equal "Kept" (plist-get (car (harness-acp-remote-test-devices)) :name))))
+    ;; With the option off, it does not.
+    (harness-acp-remote--shutdown)
+    (let ((harness-acp-remote nil))
+      (harness-acp-remote--init)
+      (should-not (harness-acp-remote--running-p))
+      (should-not harness-acp-remote--resume-timer))))
+
+(ert-deftest harness-acp-remote-tries-again-when-it-cannot-start ()
+  "A listener that cannot start is tried again while the option is on, and the status says why."
+  (harness-acp-remote-test-with-held-port
+    (let ((changes nil))
+      (harness-on 'acp/remote-changed (lambda (e) (push (plist-get e :what) changes)))
+      (harness-acp-remote--init)
+      (should-not (harness-acp-remote--running-p))
+      (let ((status (harness-call 'acp/remote-status)))
+        (should (eq :false (plist-get status :running)))
+        (should (eq t (plist-get status :enabled)))
+        (should (eq t (plist-get status :resuming)))
+        (should (string-match-p "in use" (plist-get status :resume-error))))
+      (should (member "waiting" changes))
+      ;; Still held: tried again, and again, and nothing else changes.
+      (harness-test-wait (lambda () (>= harness-acp-remote--resume-attempts 3)) 10 "three failed tries")
+      (should harness-acp-remote--resume-timer)
+      (should-not (harness-acp-remote--running-p))
+      ;; Let go of the port: the next try serves, and what was said is gone.
+      (delete-process squatter)
+      (harness-test-wait #'harness-acp-remote--running-p 10 "the listener to start")
+      (setq harness-acp-remote-test-port (harness-acp-remote--port))
+      (let ((status (harness-call 'acp/remote-status)))
+        (should (eq t (plist-get status :running)))
+        (should (eq :false (plist-get status :resuming)))
+        (should-not (plist-get status :resume-error)))
+      (should-not harness-acp-remote--resume-timer)
+      (should (= 0 harness-acp-remote--resume-attempts))
+      (should (member "started" changes))
+      (should (= 401 (car (harness-acp-remote-test-get "/")))))))
+
+(ert-deftest harness-acp-remote-waits-longer-between-tries ()
+  "The first try again comes after 2 seconds, the next after 5, and so on up to a minute."
+  (let ((waits nil)
+        (harness-acp-remote--resume-timer nil))
+    (cl-letf (((symbol-function 'run-at-time)
+               (lambda (time &rest _) (push time waits) nil)))
+      (dotimes (tries 8)
+        (let ((harness-acp-remote--resume-attempts tries))
+          (harness-acp-remote--resume-later))))
+    (should (equal '(2 5 15 30 60 60 60 60) (nreverse waits)))))
+
+(ert-deftest harness-acp-remote-stopping-ends-the-tries ()
+  "Turning serving off, from the page or by the policy of corporate mode, ends the tries."
+  (harness-acp-remote-test-with-held-port
+    (harness-acp-remote--init)
+    (should harness-acp-remote--resume-timer)
+    (let ((status (harness-call 'acp/remote-stop)))
+      (should (eq :false (plist-get status :resuming)))
+      (should (eq :false (plist-get status :enabled)))
+      (should-not (plist-get status :resume-error)))
+    (should-not harness-acp-remote--resume-timer)
+    (delete-process squatter)
+    (sleep-for 0.4)
+    (should-not (harness-acp-remote--running-p))
+    ;; Corporate mode: what was planned is dropped, nothing starts.
+    (setq harness-acp-remote t)
+    (setq squatter (make-network-process :name "squatter" :server t :host "127.0.0.1"
+                                         :service harness-acp-remote-port :noquery t))
+    (harness-acp-remote--init)
+    (should harness-acp-remote--resume-timer)
+    (let ((harness-corporate-mode t))
+      (should-not (harness-acp-remote--resume))
+      (should-not harness-acp-remote--resume-timer)
+      (should-not harness-acp-remote--resume-error))
+    ;; The same once the option is off, whoever turned it off.
+    (harness-acp-remote--resume)
+    (should harness-acp-remote--resume-timer)
+    (setq harness-acp-remote nil)
+    (should-not (harness-acp-remote--resume))
+    (should-not harness-acp-remote--resume-timer)))
+
+(ert-deftest harness-acp-remote-start-ends-the-tries-too ()
+  "Starting serving from the page, while it is tried again, serves at once and plans nothing."
+  (harness-acp-remote-test-with-held-port
+    (harness-acp-remote--init)
+    (should harness-acp-remote--resume-timer)
+    (delete-process squatter)
+    (let ((status (harness-call 'acp/remote-start)))
+      (should (eq t (plist-get status :running)))
+      (should (eq :false (plist-get status :resuming)))
+      (should-not (plist-get status :resume-error)))
+    (should-not harness-acp-remote--resume-timer)
+    (should (harness-acp-remote--running-p))))
+
+(ert-deftest harness-acp-remote-starts-a-listener-that-ended-on-its-own ()
+  "A listener that ends without being stopped is started again while the option is on."
+  (harness-acp-remote-test-with
+    (let ((harness-acp-remote t)
+          (harness-acp-remote--resume-delays '(0.05)))
+      (should (harness-acp-remote--running-p))
+      (delete-process harness-acp-remote--server)
+      (should-not (harness-acp-remote--running-p))
+      (harness-test-wait #'harness-acp-remote--running-p 10 "the listener to start again")
+      (setq harness-acp-remote-test-port (harness-acp-remote--port))
+      (should (= 401 (car (harness-acp-remote-test-get "/"))))
+      ;; Stopped on purpose, it stays stopped.
+      (harness-acp-remote--stop)
+      (sleep-for 0.3)
+      (should-not (harness-acp-remote--running-p))
+      (should-not harness-acp-remote--resume-timer))))
+
 (defun harness-acp-remote-test-idle-socket ()
   "Open a socket to the test listener that sends nothing; return (PROC . CLOSED-CELL)."
   (let* ((closed (list nil))

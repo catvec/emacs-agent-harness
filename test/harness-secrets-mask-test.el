@@ -348,6 +348,11 @@ The result says so in its meta, with the fingerprint and no value."
            (list 'google-api-key (concat "AIza" (make-string 35 ?a)))
            (list 'stripe-key (concat "sk_live_" (make-string 24 ?a)))
            (list 'stripe-key (concat "rk_live_" (make-string 16 ?a)))
+           ;; A session secret of the remote ACP: hs1_ and 32 random bytes as
+           ;; base64url, which has no padding and may hold - and _.
+           (list 'acp-session-secret (concat "hs1_" (make-string 43 ?a)))
+           (list 'acp-session-secret (concat "hs1_" "Ab-_" (make-string 39 ?9)))
+           (list 'acp-session-secret (concat "hs1_" (make-string 60 ?z)))
            (list 'private-key (concat "-----BEGIN RSA PRIVATE KEY-----\n" pem-body "\n-----END RSA PRIVATE KEY-----"))
            (list 'private-key (concat "-----BEGIN PRIVATE KEY-----\n" pem-body "\n-----END PRIVATE KEY-----"))
            (list 'private-key (concat "-----BEGIN OPENSSH PRIVATE KEY-----\n" pem-body "\n-----END OPENSSH PRIVATE KEY-----"))
@@ -396,6 +401,10 @@ The result says so in its meta, with the fingerprint and no value."
                           (concat "AIza" (make-string 34 ?a))
                           (concat "sk_test_" (make-string 24 ?a))
                           (concat "sk_live_" (make-string 15 ?a))
+                          (concat "hs1_" (make-string 42 ?a))         ; one short
+                          (concat "hs2_" (make-string 43 ?a))         ; another version
+                          (concat "hs1" (make-string 43 ?a))          ; no underscore
+                          (concat "hs1_" (make-string 21 ?a) "+" (make-string 21 ?a)) ; not base64url
                           ;; Only the header of a key: nothing of it to hide.
                           "-----BEGIN RSA PRIVATE KEY-----"
                           "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8A\n-----END PUBLIC KEY-----"
@@ -591,14 +600,15 @@ The result says so in its meta, with the fingerprint and no value."
            ;; touch it, so it is left out of what must never remain.)
            (secrets (append registered
                             (list (concat "dop_v1_" (make-string 64 ?a)) (concat "ghp_" (make-string 36 ?b))
-                                  (concat "sk-ant-" (make-string 30 ?c)))))
+                                  (concat "sk-ant-" (make-string 30 ?c))
+                                  (concat "hs1_" (make-string 43 ?d)))))
            (pieces (append
                     (list (concat "-----BEGIN RSA PRIVATE KEY-----\n" pem-line "\n-----END RSA PRIVATE KEY-----")
                           (concat "\"password\": \"Pw1" (make-string 20 ?p) "\"")
                           "[redacted: some-label sha256:0123abcd]" "[redacted: " (json-serialize (vector (car registered)))
                           (concat "AKIA" (make-string 16 ?A)) (concat "DO00" (make-string 16 ?D)))
                     secrets
-                    '("hello" " " "\n" "=" ":" "\"" "'" "token" "secret" "-----BEGIN " "DO" "AKIA" "ghp_" "sk-ant-"
+                    '("hello" " " "\n" "=" ":" "\"" "'" "token" "secret" "-----BEGIN " "DO" "AKIA" "ghp_" "sk-ant-" "hs1_"
                       "\\" "/" "+" "_" "-" "\t" "é")))
            (all (length pieces)))
       (dotimes (_ 400)

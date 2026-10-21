@@ -285,6 +285,16 @@ secret that leaked is thus useless soon, and a client whose own secret is
 refused knows that someone else used the session.  Do not paste one session's
 secret into two clients; give each its own.
 
+**Restarts.**  `[start serving]` saves `harness-acp-remote`, and the module starts
+the listener again whenever the harness starts, after reading the sessions it
+kept, so a device that holds a secret signs in with it on the next day with no
+question.  A listener that cannot start (another process holds the port, or the
+address it binds does not exist yet, as with a VPN that comes up after Emacs) is
+tried again after 2, 5, 15 and 30 seconds and then every minute for as long as the
+option stays on, and so is one that ends on its own; the remote control page says
+that it is on but not served yet, and why, and `S` turns it off.  Starting or
+stopping from the page, corporate mode and the option going off end the tries.
+
 **Managing access.**  Approving, refusing, making tokens, revoking, starting,
 stopping and moving the listener (`_harness/acp/remote-*`) are for the Emacs on
 this machine only: a device that is signed in drives the harness, it cannot hand

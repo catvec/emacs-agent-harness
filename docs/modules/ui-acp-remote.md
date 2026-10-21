@@ -31,11 +31,17 @@ signed in.  A client that cannot sign in from its own screen is given a
 token to keep instead (`harness-ui-acp-remote-create-token`): the
 address and secret to put in its settings, shown once.
 
-Keys: s starts or stops serving, a chooses the address in links, w
-copies the ACP address, l the sign-in link of the provider, y approves
-the device that waits (the one at point), n refuses it, t makes a token,
-k revokes the device at point and K every device, g refreshes.  Every
-key has a button.  Everything goes through ACP
+Serving is kept across restarts of the harness: once it is on (s), the
+harness serves again every time it starts, and the devices signed in
+with a secret stay signed in.  When it is on but cannot serve (the port
+is held by another process, the address does not exist yet) the page
+says why while the harness tries again, and S turns it off.
+
+Keys: s starts or stops serving, S turns it off for good, a chooses the
+address in links, w copies the ACP address, l the sign-in link of the
+provider, y approves the device that waits (the one at point), n
+refuses it, t makes a token, k revokes the device at point and K every
+device, g refreshes.  Every key has a button.  Everything goes through ACP
 (`_harness/acp/remote-*`), so the page shows the harness the UI is
 connected to, here or elsewhere.
 
@@ -59,6 +65,7 @@ connected to, here or elsewhere.
 - `harness-ui-acp-remote-revoke-all` — Revoke every device: every session ends and every connection closes.
 - `harness-ui-acp-remote-set-address` — Choose the address of this machine that the ACP address and links carry.
 - `harness-ui-acp-remote-toggle-serving` — Start serving phones and other devices, or stop.
+- `harness-ui-acp-remote-turn-off` — Turn serving off: stop it, stop trying, and do not serve at the next start.
 
 ### Options
 

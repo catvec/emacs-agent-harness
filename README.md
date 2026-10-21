@@ -1787,6 +1787,7 @@ Two things find secrets:
 | `slack-token` | A Slack token: `xoxa-`, `xoxb-`, `xoxp-`, `xoxo-`, `xoxs-` or `xoxr-` and 10 characters or more | on |
 | `google-api-key` | A Google API key, `AIza` and 35 characters | on |
 | `stripe-key` | A live Stripe key, `sk_live_` or `rk_live_` and 16 characters or more | on |
+| `acp-session-secret` | A session secret of the harness's own remote ACP (the one a phone that signed in keeps): `hs1_` and 43 characters or more of base64url | on |
 | `private-key` | A PEM private key, the whole block from its BEGIN line to its END line | on |
 | `secret-assignment` | The value of a name such as `secret`, `secret_key`, `client_secret`, `api_key`, `auth_token`, `access_token`, `private_key`, `password` or `token`, after `:` or `=`, quoted or not: 16 characters or more, with a letter and a digit | on |
 | `jwt` | A JSON Web Token: three dot-separated parts, the first two starting `eyJ` | off |
@@ -4317,6 +4318,13 @@ is one more method behind `authenticate`.
    (`n`) refuses. You type and copy nothing, and the phone's client is
    never left.
 
+**Serving stays on.** `[start serving]` saves `harness-acp-remote`, so the
+harness serves again every time it starts and the devices that keep a
+secret (below) find it there, signed in. If the listener cannot start (a
+program holds the port, or the address of a VPN is not up yet) the page says
+why, and the harness tries again after a few seconds and then every minute
+until it can. `[turn off]` (`S`) stops serving, and stops trying.
+
 Until then the connection may only `initialize` and `authenticate`: it
 hears nothing of the harness, and every other request is ACP's
 `auth_required`. A device's network address is shown on the page and
@@ -4399,7 +4407,7 @@ it is.
 
 | Option | Default | Meaning |
 |---|---|---|
-| `harness-acp-remote` | `nil` | Serve other devices; the page turns it on and off |
+| `harness-acp-remote` | `nil` | Serve other devices, now and whenever the harness starts; the page turns it on and off |
 | `harness-acp-remote-host` | `"0.0.0.0"` | Address the listener binds |
 | `harness-acp-remote-port` | `4276` | Port of the listener |
 | `harness-acp-remote-address` | `nil` (detect) | Address of this machine in the ACP address and links |

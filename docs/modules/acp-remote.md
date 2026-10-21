@@ -29,7 +29,10 @@ docs/remote-auth.md has the research and its sources.
   speaks ACP over WebSocket (`ws://ADDRESS:PORT/acp`), the transport
   ACP's draft for remote agents asks of clients, and also ACP's own
   line framing for clients that use plain TCP.  It is off until the
-  user turns it on (`harness-acp-remote`).
+  user turns it on (`harness-acp-remote`), and then stays on: the
+  harness serves again every time it starts, and a listener that cannot
+  start (the port is held, the address is not up yet) is tried again
+  until it can, with what it says on the remote control page.
 - A connection that has no session may call `initialize` (answered
   with what any ACP agent says of itself and the methods below, and
   nothing of the harness) and `authenticate`.  Anything else is ACP's
@@ -90,7 +93,7 @@ Emacs has no WebSocket server.
 - `harness-acp-remote-approval` — Non-nil lets a device ask to be signed in by an approval in Emacs.
 - `harness-acp-remote-approval-timeout` — Seconds a device's request to sign in waits to be approved in Emacs.
 - `harness-acp-remote-host` — Address the listener for other devices binds; "0.0.0.0" is every IPv4 interface.
-- `harness-acp-remote-idle-timeout` — Seconds a device may leave its session unused before it must pair again.
+- `harness-acp-remote-idle-timeout` — Seconds a device may leave its session unused before it must sign in again.
 - `harness-acp-remote-max-message` — Largest message, in bytes, a device may send.
 - `harness-acp-remote-oidc-allowed` — Who the provider may sign in.
 - `harness-acp-remote-oidc-client-id` — Client id the provider gave this harness, or nil.

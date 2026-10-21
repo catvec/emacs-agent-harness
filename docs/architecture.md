@@ -6154,8 +6154,10 @@ act on.
   a block, for a PEM key) and `:late` (tried after the others).  They
   are `digitalocean-token`, `aws-access-key-id`, `spaces-access-key-id`,
   `github-token`, `anthropic-key`, `openai-key`, `slack-token`,
-  `google-api-key`, `stripe-key`, `private-key` and `secret-assignment`,
-  which run by default, and `jwt`, which does not.
+  `google-api-key`, `stripe-key`, `acp-session-secret` (the `hs1_`
+  session secret that remote ACP gives a device that signed in), `private-key`
+  and `secret-assignment`, which run by default, and `jwt`, which does
+  not.
   `harness-secrets-detectors` is `default`, `t`, nil or a list of names,
   and `harness-secrets-extra-detectors` adds `(NAME REGEXP [GROUP])`.
   There is no detector of high-entropy strings: commit ids, hashes, ids
@@ -9153,6 +9155,21 @@ rotation replaced (it never got the new one); the old hash stays valid until
 the new secret is first presented or `harness-acp-remote-rotation-grace`
 passes.
 
+Serving carries on across restarts of the harness.  `harness-acp-remote` is the
+saved option that `acp/remote-start` and `acp/remote-stop` set, and the module's
+`:init` (`harness-acp-remote--init`) reads the saved sessions and calls
+`harness-acp-remote--resume` when it is on and corporate mode is off, so a device
+that holds a secret finds the harness listening and itself signed in.  A listener
+that cannot start (another process holds the port, the address does not exist yet,
+as with a VPN that comes up after Emacs) is not given up: `--resume` keeps why in
+`harness-acp-remote--resume-error` (a warning in the log, once) and plans another
+try after 2, 5, 15, 30 and then every 60 seconds (`harness-acp-remote--resume-delays`)
+for as long as the option stays on.  A listener that ends on its own (the sentinel
+sees the process die while `harness-acp-remote--server` still names it, which
+`--stop` clears first) is started again the same way.  `--stop` (so
+`acp/remote-stop`, the corporate-mode hook and the module's shutdown),
+`acp/remote-start`, corporate mode and the option going off end the tries.
+
 What a device may call is what a client in this Emacs may, except that
 `_harness/acp/remote-*` is refused it (`harness-acp-remote--local-caller-only`):
 serving other devices is managed from this machine, and `harness/call` is
@@ -9164,7 +9181,7 @@ while the bus has it, and a method the bus gains is on offer to it the next
 time it asks.
 
 Methods (callable as `_harness/acp/remote-*`): `acp/remote-status` →
-`(:running :enabled :corporate :host :port :address :address-set
+`(:running :enabled :resume-error :resuming :corporate :host :port :address :address-set
 :addresses ((:address :interface :kind lan|vpn|other) ...) :ws-url :base-url
 :public-url-set :secure :approval :approvals ((:id :code :name :address :origin
 :expires) ...) :oidc (:configured :issuer :login-url :allowed)
@@ -9176,10 +9193,12 @@ the other way refuses either before anything listens or stops),
 `acp/remote-approve ID`, `acp/remote-deny ID`, `acp/remote-create-token [NAME]` (a
 kept session made here: `(:token :id :name :ws-url :url :expires)`, the only place
 its secret is shown), `acp/remote-revoke ID`, `acp/remote-revoke-all`,
-`acp/remote-set-address ADDRESS` (saves `harness-acp-remote-address`, "" detects).  Event
-`acp/remote-changed (:what
-started|stopped|connected|disconnected|signed-in|approval|revoked|expired|address|corporate
-:address A)`, forwarded to UIs.  Corporate mode refuses start, approve and
+`acp/remote-set-address ADDRESS` (saves `harness-acp-remote-address`, "" detects).
+`:enabled` is the saved option, so serving starts again with the harness; with it on
+and nothing listening, `:resume-error` says why and `:resuming` that another try is
+planned.  Event `acp/remote-changed (:what
+started|stopped|waiting|connected|disconnected|signed-in|approval|revoked|expired|address|corporate
+:address A)`, forwarded to UIs (`waiting`: the listener could not start and will be tried again).  Corporate mode refuses start, approve and
 create-token, closes connections as they are accepted, makes every session useless
 while it is on, and its change hook stops the listener.
 

@@ -86,6 +86,8 @@ stands for its socket, and what `authenticate' waits for is the promise."
     (harness-test-wait (lambda () (harness-ui-acp-remote--true :running)) 15 "serving")
     (let ((text (harness-ui-acp-remote-test-text)))
       (should (string-search (format "served on port %s" (harness-acp-remote--port)) text))
+      ;; It is saved: the harness serves again whenever it starts.
+      (should (string-search "starts again whenever the harness starts" text))
       (should (string-search "a device that chooses \"Approve in Emacs\" in its ACP client shows here" text))
       (should (string-search "Sign in with" text))
       (should (string-search "Approve in Emacs" text))
@@ -324,6 +326,79 @@ stands for its socket, and what `authenticate' waits for is the promise."
     (harness-ui-acp-remote-test-open)
     (harness-ui-acp-remote-copy-address)
     (should (equal (format "ws://127.0.0.1:%s/acp" (harness-acp-remote--port)) (car kill-ring)))))
+
+(defmacro harness-ui-acp-remote-test-with-held-port (&rest body)
+  "Run BODY with serving on, its port held by `squatter', and no try within ten minutes."
+  (declare (indent 0))
+  `(harness-ui-acp-remote-test-with
+     (let* ((squatter (make-network-process :name "squatter" :server t :host "127.0.0.1"
+                                            :service t :noquery t))
+            (harness-acp-remote t)
+            (harness-acp-remote-port (process-contact squatter :service))
+            (harness-acp-remote--resume-delays '(600)))
+       (unwind-protect (progn ,@body)
+         (when (process-live-p squatter) (delete-process squatter))
+         (harness-acp-remote--resume-cancel)))))
+
+(defun harness-ui-acp-remote-test-header ()
+  "Return the page's header line as text."
+  (with-current-buffer harness-ui-acp-remote-buffer-name
+    (substring-no-properties (mapconcat (lambda (part) (format "%s" part)) header-line-format ""))))
+
+(ert-deftest harness-ui-acp-remote-says-why-serving-does-not-start ()
+  "With serving on but the listener unable to start, the page says why, and turns it off."
+  (harness-ui-acp-remote-test-with-held-port
+    (harness-acp-remote--resume)
+    (harness-ui-acp-remote-test-open)
+    (let ((text (harness-ui-acp-remote-test-text)))
+      (should (string-search "not served yet, trying again" text))
+      (should (string-search "Address already in use" text))
+      (should (string-search "[try now]" text))
+      (should (string-search "[turn off]" text))
+      (should-not (string-search "[start serving]" text))
+      (should-not (string-search "starts again whenever the harness starts" text)))
+    (should (string-search "waiting to serve other devices" (harness-ui-acp-remote-test-header)))
+    ;; The key does what the button does: serving is off, nothing is tried.
+    (should (eq #'harness-ui-acp-remote-turn-off (key-binding (kbd "S"))))
+    (harness-ui-acp-remote-turn-off)
+    (harness-test-wait (lambda () (string-search "[start serving]" (harness-ui-acp-remote-test-text)))
+                       15 "the page to say it is off")
+    (let ((text (harness-ui-acp-remote-test-text)))
+      (should (string-search "not served" text))
+      (should-not (string-search "not served yet" text))
+      (should-not (string-search "[turn off]" text))
+      (should-not (string-search "Address already in use" text)))
+    (should (string-search "not serving other devices" (harness-ui-acp-remote-test-header)))
+    (should-not harness-acp-remote)
+    (should-not harness-acp-remote--resume-timer)))
+
+(ert-deftest harness-ui-acp-remote-try-now-serves-once-the-port-is-free ()
+  "While the harness waits to serve, [try now] starts the listener and the page says it is kept."
+  (harness-ui-acp-remote-test-with-held-port
+    (harness-acp-remote--resume)
+    (harness-ui-acp-remote-test-open)
+    (should (string-search "[try now]" (harness-ui-acp-remote-test-text)))
+    (delete-process squatter)
+    (harness-ui-acp-remote-toggle-serving)
+    (harness-test-wait (lambda () (harness-ui-acp-remote--true :running)) 15 "serving")
+    (let ((text (harness-ui-acp-remote-test-text)))
+      (should (string-search (format "served on port %s" (harness-acp-remote--port)) text))
+      (should (string-search "[stop]" text))
+      (should (string-search "starts again whenever the harness starts" text))
+      (should-not (string-search "not served" text))
+      (should-not (string-search "[turn off]" text)))
+    (should (string-search "serving on port" (harness-ui-acp-remote-test-header)))
+    (should-not harness-acp-remote--resume-timer)))
+
+(ert-deftest harness-ui-acp-remote-says-when-serving-is-not-kept ()
+  "Serving that was not saved ends with the harness, and the page says so."
+  (harness-ui-acp-remote-test-with
+    (harness-acp-remote--listen)
+    (harness-ui-acp-remote-test-open)
+    (let ((text (harness-ui-acp-remote-test-text)))
+      (should (string-search "served on port" text))
+      (should (string-search "not kept: serving ends when the harness stops" text))
+      (should-not (string-search "starts again whenever" text)))))
 
 (ert-deftest harness-ui-acp-remote-corporate-mode ()
   (harness-ui-acp-remote-test-with
