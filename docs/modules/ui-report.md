@@ -18,9 +18,10 @@ notes, and references to earlier tool calls of the session.  It shows
 in a popout (`harness-ui-popout`), so it can be read without opening
 the session, from
 
-  the board  [Review Changes] on a card that has one; the board's item at
-             point (`SPC`, through the shared
-             `harness-ui-popout-at-point-functions`) too;
+  the board  [Review Changes] on a card waiting for review that has
+             one; the board's item at point (`SPC`, through the
+             shared `harness-ui-popout-at-point-functions`) on a
+             card of any column;
   the chat   the review banner's [Review Changes] button.
 
 The button reads [Review Changes], to look the changes and the work

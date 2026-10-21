@@ -140,6 +140,20 @@
 ;; usage dashboard.  Its buttons follow: [Search], [BTW], [Add session],
 ;; [Archived] and [Refresh].
 ;;
+;; What a card says: its title first.  The line states little besides --
+;; the arrow of a high or low priority, state worth a flag (archived,
+;; main tree, a borrowed slot, a merge in conflict), when (how long a task
+;; waited or has worked) and how many of its todos are done -- and the
+;; title is never cut to make room for any of it unless it is longer than
+;; the window.  A card short of room gives up the todo count first, then
+;; the time; failing that its facts and buttons go together to a second
+;; line under the title, in the same columns
+;; (`harness-ui-tasks--plan').  What its session has to say -- the
+;; context in use, the tokens written, how fast and what they cost --
+;; is in the tooltip of the title, made when you hover
+;; (`harness-ui-tasks--title-help'), so the board is not drawn again for
+;; figures that change with every model call.
+;;
 ;; Everything comes over ACP (`_harness/task/…', `_harness/config/set'
 ;; for turning review off and the limit, `_harness/usage/project-budgets' for the
 ;; header's budgets, plus the session cache), so the board works
@@ -933,17 +947,6 @@ then is the card's title, so the prompt shows here."
   "The branch TASK merges into."
   (or (plist-get task :base) "main"))
 
-(defun harness-ui-tasks--tokens (session)
-  "The token figures of a working task's SESSION: \"12.3k/200k · 3.4k out\".
-The size of its conversation against its context window, and its output
-tokens; both grow while it streams, \"~\" marking an estimate.  Nil
-while there is nothing to count yet."
-  (let ((tokens (harness-ui-session-tokens session)))
-    (when (> (+ (plist-get tokens :context) (plist-get tokens :output)) 0)
-      (let ((output (harness-ui-format-output session)))
-        (concat (harness-ui-format-context session)
-                (if output (concat " " harness-ui-tasks--dot " " output) ""))))))
-
 (defun harness-ui-tasks--queued-since (task)
   "When TASK joined the queue it waits in: a float time.
 That is when the harness last put it there (`:queued-at'), else when
@@ -952,7 +955,7 @@ a task kicked back into the queue waits from then, not from the day it
 was written."
   (or (plist-get task :queued-at) (plist-get task :returned) (plist-get task :created)))
 
-(defconst harness-ui-tasks--fact-kinds '(archived main-tree loan merge todos time tokens rate spend)
+(defconst harness-ui-tasks--fact-kinds '(archived main-tree loan merge todos time)
   "The kinds of fact a card states, in the order of the columns they make.
 `harness-ui-tasks--facts' makes a cell of each kind a task has a fact of,
 and the cards of a section lay their cells out in one column for each
@@ -973,17 +976,15 @@ kind TASK has no fact of has no cell.  The kinds:
   todos     how many of its todos are done: \"3/7\"
   time      what the column says of when: queued, added, refined, ready,
             done, or for work in progress how long it has run
-  tokens    what the conversation of a working task holds and has written,
-            which grow while it streams (`harness-ui-tasks--tokens')
-  rate      how fast the session writes, while it is open
-  spend     what the session cost, or the plan that pays for it
 
-Its priority is not among them: the arrow before the title says that
-\(`harness-ui-tasks--priority-mark').  A cell is dimmed (`harness-dim-face')
-and keeps its other properties: tooltips, and the context figure's button."
+That is all a row says: the title comes first.  What its session has to
+say -- the context in use, the tokens written, how fast and what they
+cost -- is in the tooltip of the title instead
+\(`harness-ui-tasks--figures').  Its priority is not among them: the
+arrow before the title says that (`harness-ui-tasks--priority-mark').
+A cell is dimmed (`harness-dim-face')."
   (let* ((todos (harness-ui-tasks--todos session))
          (started (plist-get task :started))
-         (usage (plist-get session :usage))
          (cells
           (list
            (cons 'archived (and (harness-ui-tasks--archived-p task) "archived"))
@@ -1022,17 +1023,64 @@ and keeps its other properties: tooltips, and the context figure's button."
                                     (format "queued %s" (harness-relative-time queued)))))
                    ('done (let ((completed (harness-ui-tasks--completed task)))
                             (and (> completed 0) (format "done %s" (harness-relative-time completed)))))
-                   (_ (and started (harness-ui-tasks--elapsed (- (float-time) started))))))
-           ;; Its tokens, which grow while it streams.
-           (cons 'tokens (and session (eq column 'active)
-                              (harness-ui-tasks--tokens session)))
-           (cons 'rate (and session (not (equal (plist-get session :status) "inactive"))
-                            (harness-ui-format-average-rate session)))
-           (cons 'spend (and session (> (harness-usage-list-cost usage) 0)
-                             (harness-ui-format-spend session))))))
+                   (_ (and started (harness-ui-tasks--elapsed (- (float-time) started)))))))))
     (cl-loop for (kind . text) in cells
              when (and text (not (string-empty-p text)))
              collect (cons kind (propertize text 'face 'harness-dim-face)))))
+
+(defun harness-ui-tasks--session-figures (session)
+  "What SESSION says of its work that no row of the board does, as strings.
+The size of its conversation against its context window, the tokens it
+wrote, how fast it wrote them on average, and what they cost -- \"cost
+$1.20\" when it is billed per token, else the plan that pays for it,
+\"Max plan\" (`harness-ui-format-spend').  A figure there is nothing to
+say of is left out."
+  (let ((tokens (harness-ui-session-tokens session)))
+    (mapcar #'substring-no-properties
+            (delq nil
+                  (list (and (> (+ (plist-get tokens :context) (plist-get tokens :output)) 0)
+                             (concat "context " (harness-ui-format-context session)))
+                        (harness-ui-format-output session)
+                        (harness-ui-format-average-rate session)
+                        (and (> (harness-usage-list-cost (plist-get session :usage)) 0)
+                             (let ((spend (substring-no-properties (harness-ui-format-spend session))))
+                               (if (string-match-p "\\`\\$[0-9.]*\\'" spend)
+                                   (concat "cost " spend)
+                                 (concat spend " plan")))))))))
+
+(defun harness-ui-tasks--figures (task)
+  "Everything TASK's card has to say, as short strings, in words.
+Its facts first (`harness-ui-tasks--facts'), whether or not its row has
+the room for them, then its session's figures
+\(`harness-ui-tasks--session-figures').  The facts are worded to read
+without a column to say what they are: \"3/7 todos done\", and \"started
+12m ago\" for the time a task has worked."
+  (let* ((column (harness-ui-tasks--column task))
+         (session (harness-ui-tasks--session task)))
+    (append
+     (cl-loop for (kind . text) in (harness-ui-tasks--facts task column session)
+              collect (substring-no-properties
+                       (pcase kind
+                         ('todos (format "%s todos done" text))
+                         ('time (if (memq column '(active needs-input)) (format "started %s ago" text) text))
+                         (_ text))))
+     (and session (harness-ui-tasks--session-figures session)))))
+
+(defun harness-ui-tasks--title-help (_window object pos)
+  "The tooltip of a card's title: what a click does, then its figures.
+It is made when it is asked for, a `help-echo' function of the board
+\(OBJECT) and the title's POS, so the session's figures, which change
+while it works, are never older than the hover and the board need not be
+drawn again for them (`harness-ui-tasks--board-key').  One line, as
+hover text is (`harness-ui-one-line')."
+  (let ((figures (and (bufferp object) (buffer-live-p object)
+                      (harness-ignore-errors-logged "making the tooltip of a card"
+                        (with-current-buffer object
+                          (when-let* ((id (get-text-property pos 'harness-task-id object))
+                                      (task (harness-ui-tasks--find id)))
+                            (harness-ui-tasks--figures task)))))))
+    (harness-ui-one-line
+     (string-join (cons "Open the session" figures) (concat " " harness-ui-tasks--dot " ")))))
 
 (defun harness-ui-tasks--shown-priority (task column)
   "TASK's priority as its card in COLUMN shows it: \"high\", \"low\" or nil.
@@ -1490,12 +1538,15 @@ offers for it, the session list too (`harness-ui-pending-view-actions'):
 
 (defun harness-ui-tasks--card-buttons (task)
   "Buttons for TASK's two most useful actions besides opening it.
-A task that handed a report in (`hand_in') gets a [Review Changes]
-button too: the changes, the final message and the evidence, in a
-popout.  One whose turn ended without it gets [No report] there
-instead, which pops out what the harness recorded for it: that nothing
-was handed in, and the session's last message
-\(`harness-tasks--missing-report').
+A task waiting for your review that handed a report in (`hand_in') gets
+a [Review Changes] button too: the changes, the final message and the
+evidence, in a popout.  One whose turn ended without it gets [No report]
+there instead, which pops out what the harness recorded for it: that
+nothing was handed in, and the session's last message
+\(`harness-tasks--missing-report').  The third button is for the work
+that waits to be reviewed: on a card in any other column it was the
+widest thing on the row, and the report is a SPC away
+\(`harness-ui-tasks-requests') or shows in the task's own session.
 
 A card has no button for opening its session: a click on its title
 does that.  Nor for an action of `harness-ui-tasks-action-functions',
@@ -1503,7 +1554,8 @@ which stays in the card's menu (`mouse-3')."
   (let ((missing (harness-json-true-p (plist-get (plist-get task :report) :missing))))
     (concat
      (harness-ui-tasks--action-buttons task)
-     (when (and (plist-get task :report) (fboundp 'harness-ui-report-popout))
+     (when (and (plist-get task :report) (eq (harness-ui-tasks--column task) 'review)
+                (fboundp 'harness-ui-report-popout))
        ;; [Review Changes] rather than [Report], which reads as
        ;; reporting the agent for something bad: the button opens the
        ;; changes and the work it handed in, to look them over.
@@ -1551,8 +1603,8 @@ at once: it is a disclosure triangle, not held down when pushed
 ;; held back in order until the box fits (`harness-ui-tasks--caps-that-fit').
 ;; The fitting is kept (`harness-ui-tasks--fitting') and drawn again as it is
 ;; while the board's shape -- tasks, folding, window -- is unchanged, so
-;; the figures that change while many tasks work cost a drawing of the
-;; cards the window shows, not of the whole board.
+;; what changes while many tasks work -- their todos, names, the clock --
+;; costs a drawing of the cards the window shows, not of the whole board.
 
 (defun harness-ui-tasks--window ()
   "Return the window the board should be drawn for.
@@ -1581,12 +1633,6 @@ on it: a box that grew a line or a new attachment changes what fits."
     (if (<= (string-width string) room)
         string
       (concat (truncate-string-to-width string (1- room)) "…"))))
-
-(defconst harness-ui-tasks--min-title-room 24
-  "Title columns a one-line card keeps before its facts are left out.
-On a narrow board the buttons stay and the facts wait for a wider
-window or for the card to be shown, so the title is not squeezed to
-nothing.")
 
 (defconst harness-ui-tasks--collapse-min-width 48
   "Board width below which cards keep their second line.
@@ -1887,18 +1933,18 @@ nothing shows, and while the board's shape is the one last checked."
   "The board's last fitting: (SHAPE . CAPS).
 SHAPE, from `harness-ui-tasks--fit-shape', is what the fitting depends
 on.  While it is unchanged, `harness-ui-tasks--fit-board' draws with
-CAPS again without measuring: the figures that change while a task
-works -- its tokens, rate and cost -- only change what the cards read,
-so a board that many tasks are updating draws its window's cards only.")
+CAPS again without measuring: what changes while a task works -- its
+todos, its name, the clock -- only changes what the cards read, so a
+board that many tasks are updating draws its window's cards only.")
 
 (defun harness-ui-tasks--fit-shape (window)
   "Return what fitting the board to WINDOW depends on.
 The tasks and their order, the folding and the subsections shown, the
 room the window has and the lines the board must leave for the compose
 box: everything that decides which cards show and how tall they are.
-Not the figures that only change what a card reads -- a session's
-tokens, rate or cost, the clock -- so the caps of a board many tasks
-are updating stay good while their cards' figures change."
+Not what only changes what a card reads -- a session's todos, status or
+name, the clock -- so the caps of a board many tasks are updating stay
+good while their cards change."
   (list window
         (window-body-width window t)
         (window-body-height window t)
@@ -1923,10 +1969,9 @@ would draw the whole board again for every trial.  Each capped section
 gets the line that says how many it holds and its [Show all].
 
 A fitting is kept for the next redraw of the same shape in the same
-window (`harness-ui-tasks--fitting'), so the figures that change while
-tasks work -- tokens, rates, costs, elapsed times -- cost one drawing
-of the cards the window shows, not a measurement and a drawing of every
-card.
+window (`harness-ui-tasks--fitting'), so what changes while tasks work
+-- todos, names, elapsed times -- costs one drawing of the cards the
+window shows, not a measurement and a drawing of every card.
 
 Nothing is capped without a window, when the window has no room to
 speak of, or when everything is folded away or expanded: the board then
@@ -1951,7 +1996,7 @@ asked when the shape changes, not on every redraw."
             nil)
            ;; The same shape, drawn the same way: the caps still fit it (the
            ;; check is for a card that grew where the shape said it would not),
-           ;; and drawing them covers the figures that changed.
+           ;; and drawing them covers what changed.
            ((and (equal shape (car-safe harness-ui-tasks--fitting))
                  (progn (harness-ui-tasks--draw-board (cdr harness-ui-tasks--fitting))
                         (harness-ui-tasks--fits-p window)))
@@ -1998,15 +2043,24 @@ asked when the shape changes, not on every redraw."
 ;; to its left, an icon or an arrow drawn wider or narrower than the
 ;; characters that stand for it, cannot move what follows.
 ;;
-;;   TITLE START                    FACTS (right-aligned)       BUTTONS
-;;   v ● ↑ Fix stuck model resp…   12m  9.2k/384k · 240 out  Max   [Steer] [Stop]
-;;   v ●   Write the OpenAPI sch…   4m                       Max   [Steer] [Stop]
+;;   TITLE START                          FACTS (right-aligned)   BUTTONS
+;;   v ● ↑ Fix stuck model response in the dispatcher   1/4  12m  [Steer] [Pause]
+;;   v ●   Write the OpenAPI schema for the endpoints        4m  [Steer] [Pause]
+;;
+;; The title comes first.  A row states little -- state flags, how far
+;; along a task is, when -- and says what is left to say about the
+;; session, its context, tokens, rate and cost, in the tooltip of the
+;; title.  What a row does state gives way to its title, a card at a
+;; time (`harness-ui-tasks--plan'): the todo count first, then the time.
+;; A title that still would not fit beside its buttons has the line to
+;; itself: the facts and the buttons, together, go to a second line under
+;; it, in the same columns.  A title is cut only when it is longer than
+;; the window.
 ;;
 ;; A card is taken apart first (`harness-ui-tasks--card-parts'), the
 ;; section's layout found from all its cards (`harness-ui-tasks--layout'),
 ;; and then each card is drawn in it (`harness-ui-tasks--insert-part').
-;; A card computes its facts once, whatever room there turns out to be:
-;; short of it, the section lets the columns go, never one card alone.
+;; A card computes its facts once, whatever room there turns out to be.
 
 (defun harness-ui-tasks--align (spec kind)
   "A space reaching SPEC, an `:align-to' column or expression, where KIND starts.
@@ -2050,6 +2104,7 @@ on a board too narrow for one-line cards
 `:left'     what comes before the title: the chevron that shows the
            recap, and the icon, padded to line up with the others
 `:mark'     the arrow of a high or low priority, with its space, else \"\"
+`:title'    the title, whole: the room it needs
 `:cells'    the facts, as `harness-ui-tasks--facts' makes them
 `:buttons'  its buttons, made with TASK's id in `harness-ui-tasks--card-id',
            which they are held down by
@@ -2085,21 +2140,25 @@ on a board too narrow for one-line cards
           ;; the card that says it, so it stays whatever else makes way
           ;; for the title.
           :mark (harness-ui-tasks--priority-mark task column)
+          :title (harness-ui-tasks--title task)
           :cells (harness-ui-tasks--facts task column session)
           :buttons buttons
           :shown shown)))
 
-(defun harness-ui-tasks--geometry (parts kinds title-col zone reserve width)
-  "The layout of the cards PARTS in WIDTH columns, with the facts of KINDS only.
-TITLE-COL, ZONE and RESERVE are as `harness-ui-tasks--layout' finds
-them.  The columns of the facts come right to left: the buttons zone
-first, when RESERVE says that some card has its buttons beside its facts
-\(it takes one column's room off the window's right edge, as a card has
-always left one), then each kind's column, two apart, wide as its widest
-cell.  `:ends' says how far from the window's right edge each ends."
+(defun harness-ui-tasks--geometry (cell-lists kinds title-col zone reserve width)
+  "The layout of the cards drawing CELL-LISTS in WIDTH columns.
+CELL-LISTS has one alist (KIND . TEXT) for each card, the facts it
+draws, and KINDS the kinds of fact there can be, in order.  TITLE-COL,
+ZONE and RESERVE are as `harness-ui-tasks--layout' finds them.  The
+columns of the facts come right to left: the buttons zone first, when
+RESERVE says that some card has its buttons beside its facts or under
+them (it takes one column's room off the window's right edge, as a card
+has always left one), then each kind's column, two apart, wide as its
+widest cell.  A kind no card draws has no column.  `:ends' says how
+far from the window's right edge each ends."
   (let* ((columns (cl-loop for kind in kinds
-                           for wide = (cl-loop for part in parts
-                                               maximize (if-let* ((cell (cdr (assq kind (plist-get part :cells)))))
+                           for wide = (cl-loop for cells in cell-lists
+                                               maximize (if-let* ((cell (cdr (assq kind cells))))
                                                             (string-width cell)
                                                           0))
                            when (> wide 0) collect (cons kind wide)))
@@ -2108,27 +2167,76 @@ cell.  `:ends' says how far from the window's right edge each ends."
     (dolist (column (reverse columns))
       (push (cons (car column) edge) ends)
       (setq edge (+ edge (cdr column) 2)))
-    (let ((layout (list :title-col title-col :zone zone :ends ends :width width
-                        ;; Under a title there is room for its recap up to the zone.
-                        :sub-room (- width zone 8))))
-      (plist-put layout :room (- width (cl-loop for part in parts
-                                                maximize (harness-ui-tasks--line-start part layout))
-                                 title-col 2)))))
+    (list :title-col title-col :zone zone :reserve reserve :ends ends :width width
+          ;; Under a title there is room for its recap up to the zone.
+          :sub-room (- width zone 8))))
 
-(defun harness-ui-tasks--line-start (part layout)
-  "How far left of the window's right edge the first line of card PART reaches.
-That is where the leftmost of what comes after its title starts in
-LAYOUT: one of its facts, or its buttons when they share the line.  A
+(defun harness-ui-tasks--line-start (cells beside layout)
+  "How far left of the window's right edge a card's first line reaches in LAYOUT.
+That is where the leftmost of what comes after its title starts: one of
+its facts, CELLS, or its buttons when BESIDE says they share the line.  A
 column of the layout it has no fact for takes none of its room, so a
 title may run on until its own facts."
   (let ((start 1)
         (ends (plist-get layout :ends)))
-    (dolist (cell (plist-get part :cells))
+    (dolist (cell cells)
       (when-let* ((end (cdr (assq (car cell) ends))))
         (setq start (max start (+ end (string-width (cdr cell)))))))
-    (when (and (not (plist-get part :shown)) (> (string-width (plist-get part :buttons)) 0))
+    (when beside
       (setq start (max start (1+ (plist-get layout :zone)))))
     start))
+
+(defun harness-ui-tasks--beside-p (part plan)
+  "Non-nil when the buttons of card PART are beside its title, as PLAN has it.
+They share the first line with the title and the facts.  A card with the
+recap line, or that PLAN stacked, has them under its title."
+  (and (> (string-width (plist-get part :buttons)) 0)
+       (not (plist-get part :shown))
+       (not (plist-get plan :stack))))
+
+(defconst harness-ui-tasks--fact-give-up '(nil (todos) (todos time))
+  "What a card leaves out of its facts, a little at a time, for its title.
+Each entry is a list of kinds (`harness-ui-tasks--fact-kinds') to leave
+out: none; the todo count; that and the time, which is all a row says of
+how a task is doing, so informational.  The rest is state -- archived,
+main tree, a borrowed slot, a merge in conflict -- which a card keeps
+until its title has no other way to fit (`harness-ui-tasks--plan').")
+
+(defun harness-ui-tasks--stackable-p (part)
+  "Non-nil when the buttons of card PART can go to a second line under its title.
+That is when it has buttons and no recap line, which has the second line."
+  (and (> (string-width (plist-get part :buttons)) 0)
+       (not (plist-get part :shown))))
+
+(defun harness-ui-tasks--plan (part step)
+  "What card PART draws when it has given up STEP times for its title: a plist.
+`:cells' are the facts it draws, `:stack' non-nil when the facts and the
+buttons go to a second line under the title, which then has the first to
+itself.  The title is the point of the card and comes first, so a card
+that has not the room for it gives up what it says a little at a time
+\(`harness-ui-tasks--layout'): step 0 is everything, beside its buttons;
+1 leaves out the todo count; 2 the time too, which are informational
+\(`harness-ui-tasks--fact-give-up'); and 3, the last, stacks the card,
+keeping all its facts -- nothing is left out for a title that has the
+line to itself.  A card that cannot stack (`harness-ui-tasks--stackable-p':
+it shows its recap, or has no buttons) leaves out its state too, last of
+all."
+  (let ((cells (plist-get part :cells)))
+    (cond ((< step 3)
+           (list :cells (cl-remove-if (lambda (cell) (memq (car cell) (nth step harness-ui-tasks--fact-give-up)))
+                                      cells)))
+          ((harness-ui-tasks--stackable-p part) (list :cells cells :stack t))
+          (t (list :cells nil)))))
+
+(defun harness-ui-tasks--room (part plan layout)
+  "The room the title of card PART has in LAYOUT, drawn as PLAN has it.
+That is what is left of its first line past where its title starts, less
+the column the window's edge keeps and the two a title leaves before
+what follows it."
+  (- (plist-get layout :width)
+     (harness-ui-tasks--line-start (unless (plist-get plan :stack) (plist-get plan :cells))
+                                   (harness-ui-tasks--beside-p part plan) layout)
+     (plist-get layout :title-col) 2))
 
 (defun harness-ui-tasks--layout (parts width)
   "How the cards PARTS of a section, taken apart, are laid out in WIDTH columns.
@@ -2139,15 +2247,21 @@ A plist, from `harness-ui-tasks--geometry':
               any card has one, whichever card has it
 `:zone'       how wide the buttons zone is, wide as the widest buttons;
               the buttons of every card start at its left edge
+`:reserve'    the room the facts leave the zone: its width while some
+              card has its buttons on a line with its facts or under
+              them, else none
 `:ends'       ((KIND . END)...) the columns of the facts, left to right
-`:room'       the room left for the longest title
 `:sub-room'   the room left for the recap line, up to the zone
+`:plans'      what each card draws, in the order of PARTS
+              (`harness-ui-tasks--plan')
 
-The facts take a column for each kind some card has a fact of.  When
-they would leave the titles under `harness-ui-tasks--min-title-room'
-columns, the section lets go of the token figures first, then of every
-fact, keeping the buttons: a decision for the section, never for one
-card, so the columns of the rest stay where they are."
+The title of a card is whole wherever a line has room for it.  Every
+card starts by drawing everything; the cards whose title has no room in
+the layout that makes give up one step more (`harness-ui-tasks--plan'),
+and the facts are laid out again, in the columns of what is drawn, so
+that a column no card draws takes no room.  That goes on until every
+title fits or its card has nothing left to give up.  The columns are the
+section's, and what a card gives up its own: the rest stay in line."
   (let* ((char (frame-char-width))
          (title-col (ceiling (+ (cl-loop for part in parts
                                          maximize (harness-ui-tasks--string-pixels (plist-get part :left)))
@@ -2155,59 +2269,79 @@ card, so the columns of the rest stay where they are."
                                          maximize (harness-ui-tasks--string-pixels (plist-get part :mark))))
                              char))
          (zone (cl-loop for part in parts maximize (string-width (plist-get part :buttons))))
-         ;; The facts stop short of the zone only when a card has its
-         ;; buttons beside them: the buttons of a two-line card are on
-         ;; its second line.
+         ;; The facts stop short of the zone unless every card has its
+         ;; recap line: the buttons of a card with it are on the second
+         ;; line, with nothing of the facts, which stay on the first.
          (reserve (if (cl-some (lambda (part) (not (plist-get part :shown))) parts) zone 0))
          (kinds (cl-remove-if-not (lambda (kind)
                                     (cl-some (lambda (part) (assq kind (plist-get part :cells))) parts))
                                   harness-ui-tasks--fact-kinds))
-         (tries (cond ((memq 'tokens kinds) (list kinds (remq 'tokens kinds) nil))
-                      (kinds (list kinds nil))
-                      (t (list nil))))
-         layout)
-    (catch 'fits
-      (dolist (try tries)
-        (setq layout (harness-ui-tasks--geometry parts try title-col zone reserve width))
-        (when (>= (plist-get layout :room) harness-ui-tasks--min-title-room)
-          (throw 'fits nil))))
-    layout))
+         (steps (make-list (length parts) 0))
+         layout plans changed)
+    (setq changed t)
+    (while changed
+      (setq plans (cl-mapcar #'harness-ui-tasks--plan parts steps)
+            layout (harness-ui-tasks--geometry (mapcar (lambda (plan) (plist-get plan :cells)) plans)
+                                               kinds title-col zone reserve width)
+            changed nil
+            steps (cl-mapcar (lambda (part plan step)
+                               (if (and (< step 3)
+                                        (< (harness-ui-tasks--room part plan layout)
+                                           (string-width (plist-get part :title))))
+                                   (progn (setq changed t) (1+ step))
+                                 step))
+                             parts plans steps)))
+    (plist-put layout :plans plans)))
 
-(defun harness-ui-tasks--insert-part (part layout)
-  "Insert the card PART in LAYOUT at point.
-PART is `harness-ui-tasks--card-parts', LAYOUT `harness-ui-tasks--layout'.
-The card is one line, two when its recap shows; its text has the task's
-id as its `harness-task-id' property.  The title gets what is left of
-its line, and the facts, right-aligned in their columns, come after it.
-The buttons start at the zone's left edge, on the first line or, with
-the recap, on the second."
+(defun harness-ui-tasks--insert-cells (cells ends)
+  "Insert CELLS, the facts of a card, in the columns ENDS says."
+  ;; A cell ends where its column does, and so starts further left the
+  ;; wider it is.
+  (dolist (cell cells)
+    (when-let* ((end (cdr (assq (car cell) ends))))
+      (insert (harness-ui-tasks--align-right (+ end (string-width (cdr cell))) (car cell))
+              (cdr cell)))))
+
+(defun harness-ui-tasks--insert-part (part layout plan)
+  "Insert the card PART in LAYOUT, as PLAN has it, at point.
+PART is `harness-ui-tasks--card-parts', LAYOUT `harness-ui-tasks--layout'
+and PLAN one of its `:plans' (`harness-ui-tasks--plan').
+The card is one line, two when its recap shows or PLAN stacked it; its
+text has the task's id as its `harness-task-id' property.  The title
+gets what is left of its line, and the facts, right-aligned in their
+columns, come after it, then the buttons, which start at the zone's left
+edge.  With the recap, the buttons are on the second line, after the
+recap and the facts stay on the first.  Stacked, the title is alone on
+the first and the second has the facts and the buttons."
   (let* ((task (plist-get part :task))
          (column (plist-get part :column))
          (buttons (plist-get part :buttons))
+         (cells (plist-get plan :cells))
+         (stack (plist-get plan :stack))
+         (beside (harness-ui-tasks--beside-p part plan))
          (zone-at (1+ (plist-get layout :zone)))
          (ends (plist-get layout :ends))
          (start (point))
-         (room (- (plist-get layout :width) (harness-ui-tasks--line-start part layout)
+         (room (- (plist-get layout :width)
+                  (harness-ui-tasks--line-start (unless stack cells) beside layout)
                   (plist-get layout :title-col) 2)))
     (insert (plist-get part :left) (plist-get part :mark)
             (harness-ui-tasks--align (plist-get layout :title-col) 'title)
-            (propertize (harness-ui-tasks--fit (harness-ui-tasks--title task) room)
+            (propertize (harness-ui-tasks--fit (plist-get part :title) room)
                         'face (if (eq column 'done) 'default 'harness-task-title-face)
                         'mouse-face 'highlight
-                        'help-echo "Open the session"))
-    ;; A cell ends where its column does, and so starts further left the
-    ;; wider it is.
-    (dolist (cell (plist-get part :cells))
-      (when-let* ((end (cdr (assq (car cell) ends))))
-        (insert (harness-ui-tasks--align-right (+ end (string-width (cdr cell))) (car cell))
-                (cdr cell))))
-    (when (and (not (plist-get part :shown)) (> (string-width buttons) 0))
+                        'help-echo #'harness-ui-tasks--title-help))
+    (unless stack
+      (harness-ui-tasks--insert-cells cells ends))
+    (when beside
       (insert (harness-ui-tasks--align-right zone-at 'zone) buttons))
     (insert "\n")
-    (when (plist-get part :shown)
-      (insert "      "
-              (harness-ui-tasks--subtitle task column (plist-get part :session) (plist-get part :position)
-                                          (plist-get layout :sub-room)))
+    (when (or (plist-get part :shown) stack)
+      (insert "      ")
+      (cond ((plist-get part :shown)
+             (insert (harness-ui-tasks--subtitle task column (plist-get part :session) (plist-get part :position)
+                                                 (plist-get layout :sub-room))))
+            (stack (harness-ui-tasks--insert-cells cells ends)))
       (when (> (string-width buttons) 0)
         (insert (harness-ui-tasks--align-right zone-at 'zone) buttons))
       (insert "\n"))
@@ -2224,8 +2358,8 @@ being TASK's place in line among queued tasks."
                             (harness-ui-tasks--card-parts (car entry) column (cdr entry) narrow))
                           entries))
            (layout (harness-ui-tasks--layout parts width)))
-      (dolist (part parts)
-        (harness-ui-tasks--insert-part part layout)))))
+      (cl-mapc (lambda (part plan) (harness-ui-tasks--insert-part part layout plan))
+               parts (plist-get layout :plans)))))
 
 (defun harness-ui-tasks--insert-card (task column position)
   "Insert the card of TASK in COLUMN at point, laid out as a section of one.
@@ -2438,11 +2572,17 @@ POS itself places what KEY no longer finds: a task gone."
               (cl-incf line))
             (list key line column button pos))))))))
 
+(defun harness-ui-tasks--key-end (start key)
+  "Where the text KEY names, which starts at START, ends."
+  (or (next-single-property-change start (car key) nil (point-max)) (point-max)))
+
 (defun harness-ui-tasks--anchor-position (anchor)
   "Return the position ANCHOR, from `harness-ui-tasks--anchor', is at now.
 On the line ANCHOR names, at its column, or on its button wherever that
-moved on the line; never on another button, where a key would do
-something else, but at the start of the line instead."
+moved on the line -- or, a card having stacked its buttons under its
+title or lifted them back, on another line of the card; never on another
+button, where a key would do something else, but at the start of the
+line instead."
   (let ((board-end (max (point-min) (1- harness-ui-tasks--list-end)))
         (box (harness-ui-tasks--box-start)))
     (pcase anchor
@@ -2478,7 +2618,10 @@ something else, but at the start of the line instead."
                     (at (pcase column
                           (`(end . ,n) (max bol (- eol n)))
                           (`(,_ . ,n) (min eol (+ bol n)))))
-                    (same (and button (harness-ui-tasks--find-button (car button) bol eol))))
+                    (same (and button
+                               (or (harness-ui-tasks--find-button (car button) bol eol)
+                                   (and key (harness-ui-tasks--find-button
+                                             (car button) start (harness-ui-tasks--key-end start key)))))))
                (cond
                 (same (min (+ (nth 1 same) (cdr button)) (1- (nth 2 same))))
                 ((harness-ui-tasks--button-at at) bol)
@@ -2541,11 +2684,12 @@ board, so what was skipped is only skipped while both are unchanged."
 
 (defun harness-ui-tasks--board-key ()
   "Return what the board region's drawing depends on.
-The tasks and their sessions (their status, todos, cost, output rate
-and token figures feed the cards: a running session's figures as the
-cards read them, which change less often than the figures do; the
-internal sessions, which no card reads and which change with every
-model call the harness makes on its own, are left out), the
+The tasks and their sessions (their name, status, todos and what they
+wait on feed the cards; a session's tokens, rate and cost, which change
+with every model call, do not: no row shows them, and the tooltip of a
+title reads them when it is asked for, `harness-ui-tasks--title-help';
+the internal sessions, which no card reads and which change with every
+model call the harness makes on its own, are left out too), the
 clock, the caps the window allows, and the state a card cannot show:
 which column is folded, which is expanded, which tasks are submitting,
 which cards you folded their recap on, whether finished work waits
@@ -2558,11 +2702,8 @@ as wide as it was."
   (harness-ui-tasks--release-stale)
   (list harness-ui-tasks--tasks
         (mapcar (lambda (session)
-                  (let ((id (plist-get session :id)))
-                    (list id (plist-get session :name) (plist-get session :status)
-                          (plist-get session :todos) (plist-get session :pending) (plist-get session :usage)
-                          (harness-ui-session-rate id)
-                          (and (harness-ui-session-live id) (harness-ui-tasks--tokens session)))))
+                  (list (plist-get session :id) (plist-get session :name) (plist-get session :status)
+                        (plist-get session :todos) (plist-get session :pending)))
                 (harness-ui-user-sessions))
         (truncate (float-time) 5)
         (harness-ui-tasks--window)
@@ -3951,44 +4092,6 @@ session (see `harness-ui-tasks--refresh-events') reload none."
   (dolist (b (harness-ui-tasks--buffers))
     (when (buffer-local-value 'harness-ui-tasks--tasks b)
       (harness-ui-tasks--schedule-render b))))
-
-(defun harness-ui-tasks--on-rate (id _rate)
-  "Redraw the boards with a card of session ID, which shows its output rate.
-ID nil, after every rate was fetched again, redraws every board."
-  (dolist (b (harness-ui-tasks--buffers))
-    (when (cl-some (lambda (task) (or (null id) (equal (plist-get task :session) id)))
-                   (buffer-local-value 'harness-ui-tasks--tasks b))
-      (harness-ui-tasks--schedule-render b))))
-
-(defconst harness-ui-tasks--live-interval 0.5
-  "Least seconds between two redraws of a board for growing token figures.")
-
-(defvar-local harness-ui-tasks--live-timer nil
-  "Timer of the redraw the board's growing token figures wait for, or nil.")
-
-(defun harness-ui-tasks--live-render (buffer)
-  "Redraw board BUFFER for the token figures that grew.
-The redraw is skipped while its cards read the same."
-  (when (buffer-live-p buffer)
-    (with-current-buffer buffer
-      (setq harness-ui-tasks--live-timer nil)
-      (when (harness-ui-tasks--board-p buffer)
-        (harness-ui-tasks--render)))))
-
-(defun harness-ui-tasks--on-live (id _live)
-  "Redraw soon the boards with a card of session ID, which shows its token figures.
-They grow a few times a second while it streams; a board redraws for
-them at most every `harness-ui-tasks--live-interval' seconds, and skips
-the redraw while its cards read the same (`harness-ui-tasks--board-key').
-ID nil, after every session's figures were fetched again, redraws every
-board."
-  (dolist (b (harness-ui-tasks--buffers))
-    (unless (timerp (buffer-local-value 'harness-ui-tasks--live-timer b))
-      (when (cl-some (lambda (task) (or (null id) (equal (plist-get task :session) id)))
-                     (buffer-local-value 'harness-ui-tasks--tasks b))
-        (with-current-buffer b
-          (setq harness-ui-tasks--live-timer
-                (run-at-time harness-ui-tasks--live-interval nil #'harness-ui-tasks--live-render b)))))))
 
 (defun harness-ui-tasks--on-redraw ()
   "Reload every board after a reload or reconnect."
@@ -5527,20 +5630,19 @@ review, in the mode line notifier, runs this."
 
 (defun harness-ui-tasks--init ()
   "Keep the boards up to date and bind `harness-tasks' in `harness-ui-map'.
-They follow the harness's events, sessions, output rates, live token
-figures and quotas, and a timer redraws the visible ones so their
-elapsed times run.  The mode line notifier counts the tasks ready for
-review, every project's, which the UI asks for as it connects and,
-started while connected, at once (`harness-ui-tasks--fetch-review');
-the count comes after the notifier's other segments, such as the
-version page's nag."
+They follow the harness's events, sessions and quotas, and a timer
+redraws the visible ones so their elapsed times run; the figures that
+change with every model call -- tokens, output rates, costs -- redraw
+none (`harness-ui-tasks--board-key').  The mode line notifier counts
+the tasks ready for review, every project's, which the UI asks for as
+it connects and, started while connected, at once
+\(`harness-ui-tasks--fetch-review'); the count comes after the
+notifier's other segments, such as the version page's nag."
   (add-hook 'harness-ui-event-functions #'harness-ui-tasks--on-event)
   (add-hook 'harness-ui-event-functions #'harness-ui-tasks--on-session-task-event)
   (add-hook 'harness-ui-event-functions #'harness-ui-tasks--on-review-event)
   (add-hook 'harness-chat-panel-functions #'harness-ui-tasks--backlog-panel)
   (add-hook 'harness-ui-sessions-changed-hook #'harness-ui-tasks--on-sessions-changed)
-  (add-hook 'harness-ui-rate-functions #'harness-ui-tasks--on-rate)
-  (add-hook 'harness-ui-live-functions #'harness-ui-tasks--on-live)
   (add-hook 'harness-ui-redraw-hook #'harness-ui-tasks--on-redraw)
   (add-hook 'harness-ui-quota-functions #'harness-ui-tasks--on-quota)
   (add-hook 'harness-ui-connected-hook #'harness-ui-tasks--fetch-review)

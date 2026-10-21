@@ -1233,7 +1233,7 @@ The handle is the one the approval message names."
     ("one time in ten" . harness-media--flaky-script)
     ("type hints to acme/db.py" . harness-media--queue-script)
     ("sqlite3.Row factory" . harness-media--queue-steered)
-    ("reviewed your work" . harness-media--task-slow-again)
+    ("Sent back from review" . harness-media--task-slow-again)
     ("hmac" . harness-media--task-constant-time)
     ("requires-python" . harness-media--task-python)
     ("limit/offset" . harness-media--task-pagination)

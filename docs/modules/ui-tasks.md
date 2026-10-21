@@ -151,6 +151,20 @@ fullest budget that applies to the project.  A click there opens the
 usage dashboard.  Its buttons follow: [Search], [BTW], [Add session],
 [Archived] and [Refresh].
 
+What a card says: its title first.  The line states little besides --
+the arrow of a high or low priority, state worth a flag (archived,
+main tree, a borrowed slot, a merge in conflict), when (how long a task
+waited or has worked) and how many of its todos are done -- and the
+title is never cut to make room for any of it unless it is longer than
+the window.  A card short of room gives up the todo count first, then
+the time; failing that its facts and buttons go together to a second
+line under the title, in the same columns
+(`harness-ui-tasks--plan`).  What its session has to say -- the
+context in use, the tokens written, how fast and what they cost --
+is in the tooltip of the title, made when you hover
+(`harness-ui-tasks--title-help`), so the board is not drawn again for
+figures that change with every model call.
+
 Everything comes over ACP (`_harness/task/…`, `_harness/config/set`
 for turning review off and the limit, `_harness/usage/project-budgets` for the
 header's budgets, plus the session cache), so the board works
@@ -303,11 +317,9 @@ the chevron that folds a card's recap, which only draws the card again.
 - `harness-ui-event-functions` → `harness-ui-tasks--on-review-event`
 - `harness-ui-event-functions` → `harness-ui-tasks--on-session-task-event`
 - `harness-ui-event-functions` → `harness-ui-tasks--on-event`
-- `harness-ui-live-functions` → `harness-ui-tasks--on-live`
 - `harness-ui-notification-functions` → `harness-ui-tasks--on-notification`
 - `harness-ui-notify-segment-functions` → `harness-ui-tasks--notify-segment`
 - `harness-ui-quota-functions` → `harness-ui-tasks--on-quota`
-- `harness-ui-rate-functions` → `harness-ui-tasks--on-rate`
 - `harness-ui-redraw-hook` → `harness-ui-tasks--on-redraw`
 - `harness-ui-sessions-changed-hook` → `harness-ui-tasks--on-sessions-changed`
 - `harness-ui-set-all-functions` → `harness-ui-tasks--set-all`

@@ -2863,14 +2863,25 @@ with), `recap` writes the recaps on the cards,
   elsewhere `TAB` on a card, or a click on its chevron, shows it. A card
   in *Merging* says on its one line when the merge is under way or in
   conflict.
+- A card puts its title first. The line says little besides it: the
+  arrow of a high or low priority, a flag for state that matters
+  (`main tree`, `archived`, a borrowed slot, a merge in conflict), how
+  long the task has worked or waited, and how many of its todos are
+  done. What its session has to say -- the context it holds, the tokens
+  it wrote, how fast, what they cost -- is in the tooltip of its title,
+  made when you hover, so a busy board is not redrawn for figures that
+  change with every model call. A pending card says how long its task
+  has waited since it joined the queue.
 - A section's cards line up: the titles start at one column, whatever
-  arrow or icon a card has before its title; the facts -- how long the
-  task has worked or waited, its tokens, its output rate, its cost --
-  stand in right-aligned columns that the section's cards share; and
-  the buttons start at one column. A section short of room lets a
-  column go on all its cards at once, the tokens first, never on one
-  card alone. A pending card says how long its task has waited since it
-  joined the queue.
+  arrow or icon a card has before its title; the facts stand in
+  right-aligned columns that the section's cards share; and the buttons
+  start at one column. A title is never cut to make room for any of
+  that, unless it is longer than the window: a card short of room gives
+  up its todo count first, then its time, and failing that its facts and
+  its buttons go together to a second line under the title, in the same
+  columns. [Review Changes] is on the cards waiting for your review, the
+  work it is for; on any other card it was the widest button of the row,
+  and the report is a `SPC` away.
 - A board taller than its window holds its least urgent cards back,
   behind `… N more  [Show all]`. A section opened with `[Show all]` keeps
   its `[Show fewer]` only while folding it would still hold cards back:

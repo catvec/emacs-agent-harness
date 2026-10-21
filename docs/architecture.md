@@ -3814,9 +3814,9 @@ see perms) and an "always" answer to the cold-cache question (kind
     rate above they outlast the window of recent calls, the model
     switches and a restart, so output over seconds is how fast the
     session wrote on average over its whole life.  The UI shows it as
-    the session list's Avg tok/s column and on a task's card
-    (`harness-ui-session-average-rate`), and the current rate stays in
-    the tooltip.
+    the session list's Avg tok/s column and in the tooltip of a task
+    card's title (`harness-ui-session-average-rate`), and the current
+    rate stays in the tooltip.
 - Live token count: a running session's token figures, its context in
   use and its output, grow while its model streams instead of only
   when its provider reports usage.  Counted here in the harness process,
@@ -9791,7 +9791,7 @@ line has the status: its icon and word, the spinner while a turn runs
 the turn runs, not while the session is blocked waiting on the user.
 The todo list is left to its panel above the compose
 box, what the turn does to the activity line, and the output tokens and
-rate to the session list and a running task's card.  The output
+rate to the session list and the tooltip of a task card's title.  The output
 rate ("48 tok/s", `harness-ui-format-rate`) is the session's rate as the
 usage module measured it. It is dimmed when the session is not running,
 because it is then the last rate measured. The session has no rate
@@ -9799,9 +9799,10 @@ until it has been measured.
 The UI keeps the rates in a cache (`harness-ui-session-rate`). It is
 filled with `_harness/usage/rates` on connect and kept current by
 `usage/rate-updated`. Every change runs `harness-ui-rate-functions`,
-which redraws the session list and the task board.
-The session list's Avg tok/s column and a task's card show the average
-over the whole session instead ("48 tok/s avg",
+which redraws the session list; a task board does not redraw for it, as
+no card shows a rate (a card's tooltip reads it when it is asked for).
+The session list's Avg tok/s column and the tooltip of a task card's
+title show the average over the whole session instead ("48 tok/s avg",
 `harness-ui-format-average-rate`; the column leaves out the unit):
 `harness-ui-session-average-rate` divides the `:stream-output` of the
 session's usage totals by their `:stream-seconds`, and gives nothing
@@ -9822,13 +9823,13 @@ before the session's new totals (sessions are pushed after a short
 debounce), so the last figures stand until the cache shows the session
 no longer running and never drop in between.  Every change runs
 `harness-ui-live-functions`: the chat headers redraw (a few times a
-second at most, as the events come), the session list and the task
-boards at most every half second, and only when a figure they show
-reads otherwise.
+second at most, as the events come) and the session list at most every
+half second, and only when a figure they show reads otherwise; the task
+boards do not, as no card shows a figure (a card's tooltip, made when
+it is asked for, reads the count as it stands).
 The context figure is a button (`harness-ui-context-limit-map`): in the
 chat header it is a segment as the settings beside it are, and in the
-session list and on a task card a click acts on the session the figure
-shows.  Mouse-1 on it, or `C-c h e` (`harness-set-context-limit`),
+session list a click acts on the session the figure shows.  Mouse-1 on it, or `C-c h e` (`harness-set-context-limit`),
 offers that session's context window limit: the current one, a few
 round sizes under the model's own window (read from its catalogue
 entry, never assumed), and no limit, which uses the whole of it; a
@@ -10699,10 +10700,10 @@ hooks again, as the module is not initialised again.
 
 Task board (`harness-ui-tasks`, `C-c h a`): the project's tasks in seven
 sections -- requires your input, ready for review, merging, in progress,
-pending, backlog, completed -- with each card's current todo, progress, elapsed
-time, token figures (a working task's context in use and output, growing
-as its model streams; a card short of room leaves them out first),
-average output rate (while its session is open), cost and merge state,
+pending, backlog, completed -- with each card's current todo, progress, how
+long it has worked or waited and merge state (what its session has to say
+-- context in use, tokens written, average output rate, cost -- is in the
+tooltip of its title, made when you hover),
 one-click answers to a blocked task's question or
 permission, and a compose box that submits a task, edits a pending one,
 messages a task's session, answers its question or takes the feedback
@@ -10931,12 +10932,26 @@ A section's cards are laid out together (`harness-ui-tasks--card-parts`
 takes each card apart, `harness-ui-tasks--layout` finds the section's
 columns): the titles start at one column, the facts stand in a
 right-aligned column per kind (`harness-ui-tasks--fact-kinds`: archived,
-main tree, merge, todos, time, tokens, rate, spend), as wide as the
-widest of the section's, and the buttons start at one column.  Each
-column starts with a space `:align-to` its place, so an icon or an
-arrow drawn wider or narrower than its character moves nothing after
-it; a section short of room lets a column go on all its cards, the
-tokens first, never on one card alone.  A board taller than its window
+main tree, borrowed slot, merge, todos, time), as wide as the widest of
+the section's, and the buttons start at one column.  Each column starts
+with a space `:align-to` its place, so an icon or an arrow drawn wider or
+narrower than its character moves nothing after it.  The title comes
+first: a row states little, and the session's context, tokens, rate and
+cost are in the tooltip of the title (`harness-ui-tasks--title-help`, a
+`help-echo` function: made when it is asked for, so the board is not
+drawn again for figures that change with every model call -- the board
+key holds a session's name, status, todos and requests only).  What a
+row does state gives way to the title, a card at a time
+(`harness-ui-tasks--plan`): the todo count first, then the time, both
+informational (`harness-ui-tasks--fact-give-up`); the state flags stay.
+A title that still would not fit beside the buttons has the line to
+itself: the card's facts and buttons go together to a second line, in the
+same columns (a card that shows its recap already has its buttons there,
+and leaves out its state too, last of all).  A column no card has room
+for is not laid out, and a title is cut only when it is longer than the
+window.  A card that waits for review is the one with a third button,
+[Review Changes] or [No report]; the report is `SPC` away on any other.
+A board taller than its window
 holds its least urgent cards back behind `… N more  [Show all]`; a
 section opened with [Show all] keeps its [Show fewer] only while folding
 it would hold cards back (`harness-ui-tasks--moot-expansions` forgets
