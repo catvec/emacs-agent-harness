@@ -2547,9 +2547,16 @@ or has left it."
       (when (buffer-live-p popout)
         (harness-ui-popout-refresh (buffer-local-value 'harness-ui-popout-key popout))))))
 
+;; Not `patch-review', the harness process's half, in `:requires': with
+;; `harness-process' on, the default, this Emacs loads the UI modules
+;; only, where `patch-review' is no module at all, and a module that
+;; requires one that is not there fails to start -- the changes then
+;; never show in the report.  The loader brings the half along with this
+;; one (`harness--module-other-half') and this module reaches it over
+;; ACP, so it needs no more.
 (harness-define-module 'ui-patch-review
   :doc "A task's changes in its report: a file tree, Ediff file by file with the threads of comments in place and the feedback box beside it, approvals; the UI of the review."
-  :requires '(ui ui-report ui-review patch-review)
+  :requires '(ui ui-report ui-review)
   :init #'harness-ui-patch-review--init
   :shutdown #'harness-ui-patch-review--shutdown)
 

@@ -7,7 +7,7 @@ A task's changes in its report: a file tree, Ediff file by file with the threads
 - **Runs in:** the UI (your Emacs)
 - **Source:** [lisp/ui/harness-ui-patch-review.el](../../lisp/ui/harness-ui-patch-review.el)
 - **Loaded:** when enabled (see `harness-enable-modules`)
-- **Requires:** [ui](ui.md), [ui-report](ui-report.md), [ui-review](ui-review.md), [patch-review](patch-review.md)
+- **Requires:** [ui](ui.md), [ui-report](ui-report.md), [ui-review](ui-review.md)
 - **Brings along:** [patch-review](patch-review.md) (the rest of it), [ui-compose](ui-compose.md) (its file requires it), [ui-popout](ui-popout.md) (its file requires it)
 
 ## About

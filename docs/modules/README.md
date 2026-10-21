@@ -178,7 +178,7 @@ ui-tasks); `(setq harness-enabled-modules t)` loads every module.
 | [ui-media](ui-media.md) |  | [ui](ui.md) | Audio playback and recording, video thumbnails, clipboard images. |
 | [ui-merge](ui-merge.md) |  | [ui](ui.md), [ui-chat](ui-chat.md) | A session's merge queue: which sub-agent branches are queued, merging, in conflict, merged or failed. |
 | [ui-notify](ui-notify.md) | by default | [ui](ui.md) | Mode line notifier with blocked/running/idle counts. |
-| [ui-patch-review](ui-patch-review.md) |  | [ui](ui.md), [ui-report](ui-report.md), [ui-review](ui-review.md), [patch-review](patch-review.md) | A task's changes in its report: a file tree, Ediff file by file with the threads of comments in place and the feedback box beside it, approvals; the UI of the review. |
+| [ui-patch-review](ui-patch-review.md) |  | [ui](ui.md), [ui-report](ui-report.md), [ui-review](ui-review.md) | A task's changes in its report: a file tree, Ediff file by file with the threads of comments in place and the feedback box beside it, approvals; the UI of the review. |
 | [ui-pending](ui-pending.md) | by default | [ui](ui.md), [ui-compose](ui-compose.md) | Requests a session waits on: panels, answering and the popout. |
 | [ui-pet](ui-pet.md) |  | [ui](ui.md) | The companion pet: its buffer, and the creature and its words in chats, on the board and under the session list. |
 | [ui-popout](ui-popout.md) |  | [ui](ui.md), [ui-compose](ui-compose.md) | Popouts: one item of a session or task in a small window of its own. |

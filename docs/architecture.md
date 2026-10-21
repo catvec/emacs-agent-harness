@@ -303,6 +303,16 @@ process split, from every module file of either side
 - Each side then loads the files of its own directories
   (`harness--module-files`), in directory then name order.
 
+A module requires only modules that load where it does.  The user's
+Emacs loads the UI modules and the ACP client, the harness process the
+others, and a module whose requirement loads on the other side never
+starts (`harness-module-start`): its feature is missing, and the start
+says `modules failed: NAME`.  So a UI module never requires its harness
+half -- the two halves of a feature talk over ACP and never require
+each other, and the loader brings the other half along by its name.
+`harness-loader-modules-require-only-what-loads-where-they-do` checks
+every module's requirements on both sides.
+
 The harness's guards, perms and sandbox, are core modules: they load
 whatever the user enables, and only `harness-disabled-modules` takes
 them out (see docs/policy.md).  A name `harness-enabled-modules` has

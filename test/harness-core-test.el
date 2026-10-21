@@ -1103,9 +1103,52 @@ devices and handoffs wait to be enabled, each with its UI half."
       (should (harness-module-default-p name)))
     (dolist (name '(tasks merge acp-remote ui-acp-remote handoff ui-handoff))
       (should-not (harness-module-default-p name)))
-    (pcase-dolist (`(,name . ,ui) '((acp-remote . ui-acp-remote) (handoff . ui-handoff)))
+    ;; The halves of a feature bring each other along by their names: a UI
+    ;; half requires none of the harness's modules (see the test below).
+    (pcase-dolist (`(,name . ,ui) '((acp-remote . ui-acp-remote) (handoff . ui-handoff)
+                                    (patch-review . ui-patch-review)))
       (should (memq ui (harness--module-closure sources (list name))))
       (should (memq name (harness--module-closure sources (list ui)))))))
+
+(ert-deftest harness-loader-modules-require-only-what-loads-where-they-do ()
+  "A module requires only modules that load in the Emacs it runs in.
+With `harness-process' on, the default, the user's Emacs loads the UI
+modules and the ACP client and the harness process loads the modules of
+lisp/modules, so a module whose requirement loads on the other side
+never starts (`harness-module-start'): `ui-patch-review' once required
+its harness half, `patch-review', and so failed in every Emacs that runs
+the harness as it is by default -- the changes of a task in review never
+showed in its report.  The two halves of a feature talk over ACP and
+never require each other, and the loader brings the other half along by
+its name (`harness--module-other-half').  A requirement is a module its
+`:requires' names or one whose file its file requires
+\(`harness--module-header'); a library of lisp/ is no module."
+  (let* ((harness-enabled-modules t)
+         (harness-disabled-modules nil)
+         (harness-extra-module-directories nil)
+         (sources (harness--module-sources))
+         (sides `((ui-emacs
+                   . ,(let ((harness-process t)
+                            (harness-module-directories '("lisp/modules" "lisp/ui")))
+                        (mapcar #'harness--file-module-name (harness--module-files))))
+                  (harness-process
+                   . ,(let ((harness-process nil)
+                            (harness-module-directories '("lisp/modules")))
+                        (mapcar #'harness--file-module-name (harness--module-files)))))))
+    ;; Each side loads its own and not the other's, or the loop below
+    ;; would check nothing.
+    (should (memq 'ui-patch-review (alist-get 'ui-emacs sides)))
+    (should (memq 'acp (alist-get 'ui-emacs sides)))
+    (should-not (memq 'patch-review (alist-get 'ui-emacs sides)))
+    (should (memq 'patch-review (alist-get 'harness-process sides)))
+    (should-not (memq 'ui-patch-review (alist-get 'harness-process sides)))
+    (pcase-dolist (`(,side . ,loaded) sides)
+      (dolist (name loaded)
+        (dolist (required (plist-get (harness--module-header (alist-get name sources)) :requires))
+          (when (assq required sources)
+            (ert-info ((format "%s, in the %s, requires %s, which loads only in the other"
+                               name side required))
+              (should (memq required loaded)))))))))
 
 (ert-deftest harness-enable-modules-reads-groups ()
   "`harness-enable-modules' names modules in groups, as Doom's init.el does."

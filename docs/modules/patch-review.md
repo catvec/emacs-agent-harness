@@ -8,7 +8,6 @@ The threads of a task's review: kept in the state directory, delivered with the 
 - **Source:** [lisp/modules/harness-patch-review.el](../../lisp/modules/harness-patch-review.el)
 - **Loaded:** when enabled (see `harness-enable-modules`)
 - **Requires:** [store](store.md), [tasks](tasks.md), [tools-review](tools-review.md)
-- **Required by:** [ui-patch-review](ui-patch-review.md)
 - **Brings along:** [ui-patch-review](ui-patch-review.md) (its UI)
 
 ## About
