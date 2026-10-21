@@ -8,8 +8,10 @@ import '../acp/acp_message.dart';
 import '../acp/capabilities.dart';
 import '../acp/acp_transport.dart';
 import '../acp/connection_target.dart';
+import '../models/project_roots.dart';
 import '../models/server_info.dart';
 import '../models/session.dart';
+import '../models/task.dart';
 import '../services/harness_api.dart';
 import '../services/device_name.dart';
 import '../state/drafts.dart';
@@ -134,6 +136,9 @@ class AppController extends ChangeNotifier {
   /// to finish it (an approval in Emacs, a login in the browser).
   AuthMethod? signingInWith;
   List<SessionSummary> sessions = const [];
+
+  /// The projects of the harness: main checkouts, which the git worktrees
+  /// of their tasks belong to rather than being projects themselves.
   List<String> projects = const [];
   String? selectedProject;
   TaskController? tasks;
@@ -148,6 +153,12 @@ class AppController extends ChangeNotifier {
   StreamSubscription<AcpNotification>? _subscription;
   StreamSubscription<String>? _degradedSubscription;
   Timer? _sessionRefresh;
+
+  /// How directories fold into projects, as far as this harness has said
+  /// (see [refreshProjects]).
+  ProjectRoots _roots = const ProjectRoots.empty();
+  final Map<String, String> _resolvedMains = <String, String>{};
+  final Set<String> _askedMains = <String>{};
   int _connectionGeneration = 0;
   bool _disposed = false;
 
@@ -477,7 +488,7 @@ class AppController extends ChangeNotifier {
       unawaited(tasks!.load(project: selectedProject, showSpinner: false));
     }
     if (capabilities?.usage == true) {
-      usage = UsageController(api!);
+      usage = UsageController(api!, roots: () => _roots);
       unawaited(usage!.load(project: selectedProject, showSpinner: false));
     }
     unawaited(refreshServer());
@@ -542,24 +553,66 @@ class AppController extends ChangeNotifier {
     return bt.compareTo(at);
   }
 
+  /// The project (main checkout) a session works for, null for none.
+  String? projectOfSession(SessionSummary session) =>
+      _roots.of(session.project ?? session.cwd);
+
+  /// The project (main checkout) a task belongs to, null for none.
+  String? projectOfTask(HarnessTask task) =>
+      _roots.of(task.project ?? task.cwd);
+
+  /// The directories the sessions and tasks work in.
+  Set<String> _workingDirectories() => {
+    for (final session in sessions)
+      if (projectDirectory(session.project ?? session.cwd).isNotEmpty)
+        projectDirectory(session.project ?? session.cwd),
+    for (final task in tasks?.tasks ?? const <HarnessTask>[])
+      if (projectDirectory(task.project ?? task.cwd).isNotEmpty)
+        projectDirectory(task.project ?? task.cwd),
+  };
+
+  /// Work out the projects: the main checkouts the harness lists and the
+  /// ones the work of its sessions and tasks is in.
+  ///
+  /// A session or a task names the directory it works in, which for a task,
+  /// and for the sub-agents and forks started in its worktree, is a git
+  /// worktree of the project.  That is no project of its own, so each
+  /// directory is folded into the checkout it belongs to: the harness says
+  /// which, once per directory, when it offers `project/mains`; else the
+  /// directory itself tells, in the layout the harness makes worktrees in
+  /// (see [ProjectRoots]).
   Future<void> refreshProjects() async {
     final service = api;
     if (service == null) return;
-    final found = <String>{};
+    var listed = const <String>[];
     if (service.can('insights/projects')) {
       try {
-        found.addAll(await service.projects());
+        listed = await service.projects();
       } catch (_) {}
     }
-    for (final session in sessions) {
-      final project = session.project ?? session.cwd;
-      if (project != null && project.isNotEmpty) found.add(project);
+    final listedMains = ProjectRoots(mains: listed).mains;
+    final unasked = [
+      for (final directory in _workingDirectories())
+        if (!_askedMains.contains(directory) &&
+            !listedMains.contains(directory))
+          directory,
+    ]..sort();
+    Map<String, String>? answers;
+    if (unasked.isNotEmpty && service.can('project/mains')) {
+      try {
+        answers = await service.mainProjects(unasked);
+      } catch (_) {
+        // Asked again with the next refresh; the paths say what they can.
+      }
     }
-    for (final task in tasks?.tasks ?? const []) {
-      final project = task.project ?? task.cwd;
-      if (project != null && project.isNotEmpty) found.add(project);
+    // The connection may have gone, or been replaced, meanwhile.
+    if (api != service) return;
+    if (answers != null) {
+      _resolvedMains.addAll(answers);
+      _askedMains.addAll(unasked);
     }
-    projects = found.toList()..sort();
+    _roots = ProjectRoots(mains: listed, resolved: _resolvedMains);
+    projects = _roots.projectsOf([...listedMains, ..._workingDirectories()]);
     if (selectedProject == null || !projects.contains(selectedProject)) {
       selectedProject = _defaultProject();
     }
@@ -567,18 +620,13 @@ class AppController extends ChangeNotifier {
   }
 
   String? _defaultProject() {
-    if (projects.isNotEmpty) {
-      for (final session in sessions) {
-        final project = session.project ?? session.cwd;
-        if (project != null && projects.contains(project)) return project;
-      }
-      return projects.first;
-    }
     for (final session in sessions) {
-      final project = session.project ?? session.cwd;
-      if (project != null && project.isNotEmpty) return project;
+      final project = projectOfSession(session);
+      if (project != null && (projects.isEmpty || projects.contains(project))) {
+        return project;
+      }
     }
-    return null;
+    return projects.isEmpty ? null : projects.first;
   }
 
   void selectProject(String? project) {
@@ -1248,6 +1296,9 @@ class AppController extends ChangeNotifier {
     sessions = const [];
     projects = const [];
     selectedProject = null;
+    _roots = const ProjectRoots.empty();
+    _resolvedMains.clear();
+    _askedMains.clear();
     tasks = null;
     usage = null;
     server = null;

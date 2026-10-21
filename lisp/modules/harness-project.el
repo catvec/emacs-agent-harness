@@ -25,6 +25,28 @@
   "Return a display name for the project at ROOT."
   (file-name-nondirectory (directory-file-name root)))
 
+(harness-defmethod project/mains (roots)
+  "Return the main checkout of each of ROOTS, as (:root ROOT :main MAIN) entries.
+ROOTS is a list of absolute directory names, such as the working
+directories of sessions.  A linked git worktree, such as a task's or a
+sub-agent's, belongs to the checkout it was made from, wherever it was
+made and also once it is gone from disk; any other directory is its own
+checkout (`harness-files-owning-checkout').  ROOT comes back as it was
+given.  It reads .git files and runs no process, so a client that lists
+projects, a phone say, asks for all the directories it knows at once to
+fold the worktrees of a project into it.  A name that is not an absolute
+directory name is left out."
+  (let ((roots (if (stringp roots) (list roots) (append roots nil))))
+    (delq nil
+          (mapcar (lambda (root)
+                    (and (stringp root)
+                         (file-name-absolute-p root)
+                         (not (string-prefix-p "~" root))
+                         (list :root root
+                               :main (or (ignore-errors (harness-files-owning-checkout root))
+                                         root))))
+                  roots))))
+
 (harness-defmethod project/files (root &optional query limit)
   "Return a promise of the files under project ROOT, relative to it.
 Fuzzy filtered by QUERY, at most LIMIT; nil when ROOT is not a project."

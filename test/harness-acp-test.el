@@ -1440,6 +1440,41 @@ project list and refreshing it rewrites its first message in place."
                                         (plist-get (plist-get refreshed :content) :text))))))
         (ignore-errors (delete-directory second t))))))
 
+(ert-deftest harness-acp-virtual-project-list-is-of-main-checkouts ()
+  "Without the insights module the project list is of checkouts, not worktrees.
+A session in a git worktree, a sub-agent's say, is filed under the
+worktree; the list names the checkout each worktree was made from, also
+for one made beside the repository."
+  (harness-acp-test-with
+    (let* ((base (harness-test-temp-dir))
+           (main (file-name-as-directory (expand-file-name "repo" base)))
+           (inside (file-name-as-directory (expand-file-name ".worktrees/task-a" main)))
+           (beside (file-name-as-directory (expand-file-name "repo-worktrees/task-b" base)))
+           (other (file-name-as-directory (expand-file-name "other" base))))
+      (unwind-protect
+          (progn
+            (should-not (harness-method-exists-p 'insights/projects))
+            (make-directory (expand-file-name ".git" main) t)
+            (make-directory other t)
+            ;; Worktrees as git leaves them: a .git file naming the gitdir
+            ;; the repository keeps for each.
+            (dolist (tree (list inside beside))
+              (make-directory tree t)
+              (with-temp-file (expand-file-name ".git" tree)
+                (insert (format "gitdir: %s\n"
+                                (expand-file-name
+                                 (concat ".git/worktrees/" (file-name-nondirectory (directory-file-name tree)))
+                                 main)))))
+            (dolist (dir (list main inside beside other))
+              (harness-call 'session/create :cwd dir :project dir))
+            (should (equal (list other main) (harness-acp--virtual-projects)))
+            (let ((text (harness-acp--projects-text)))
+              (should (string-match-p (regexp-quote main) text))
+              (should (string-match-p (regexp-quote other) text))
+              (should-not (string-match-p (regexp-quote inside) text))
+              (should-not (string-match-p (regexp-quote beside) text))))
+        (ignore-errors (delete-directory base t))))))
+
 (ert-deftest harness-acp-local-virtual-task-submit ()
   "Prompting the new-task virtual session submits a task for its project."
   (harness-acp-test-with

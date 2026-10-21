@@ -46,10 +46,8 @@ class _SessionsScreenState extends State<SessionsScreen> {
     final out = <SessionSummary>[];
     for (final session in app.sessions) {
       final live = app.summaryFor(session.id) ?? session;
-      if (_project != null) {
-        final project = live.project ?? live.cwd;
-        if (project != _project) continue;
-      }
+      // A session in a git worktree is in the project the worktree is of.
+      if (_project != null && app.projectOfSession(live) != _project) continue;
       switch (_filter) {
         case _SessionFilter.active:
           if (!live.isActive) continue;
@@ -616,7 +614,7 @@ class _SessionRow extends StatelessWidget {
   }
 
   String _subtitle(SessionSummary live) {
-    final project = projectName(live.project ?? live.cwd);
+    final project = projectName(app.projectOfSession(live));
     final model = modelName(live.model);
     return '$project · $model';
   }

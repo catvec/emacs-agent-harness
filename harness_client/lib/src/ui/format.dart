@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
+import '../models/project_roots.dart';
+
 String relativeTime(DateTime? time) {
   if (time == null) return '';
   final now = DateTime.now();
@@ -22,8 +24,11 @@ String shortAddress(String? uri) {
       .replaceFirst(RegExp(r'/acp/?$'), '');
 }
 
+/// The name of the project at [path].  A git worktree of the harness
+/// (`PROJECT/.worktrees/BRANCH`) is named for its project, not for itself.
 String projectName(String? path) {
   if (path == null || path.isEmpty) return 'No project';
+  path = worktreeOwner(path) ?? path;
   final parts = path.split('/').where((part) => part.isNotEmpty).toList();
   if (parts.isEmpty) return path;
   if (parts.length >= 2 && parts.last == '.git') return parts[parts.length - 2];

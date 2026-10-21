@@ -39,6 +39,7 @@
 (require 'subr-x)
 (require 'harness-core)
 (require 'harness-util)
+(require 'harness-files)
 
 (defvar harness-state-directory)
 
@@ -1006,14 +1007,19 @@ a third-party ACP client shows them.")
   (if (equal id "harness:projects") "virtual-projects" "virtual-new-task"))
 
 (defun harness-acp--virtual-projects ()
-  "Return the project directories the project-list page shows, sorted."
+  "Return the project directories the project-list page shows, sorted.
+They are main checkouts, as `insights/projects' lists them: a session in
+a git worktree, a task's or a sub-agent's, is of the project the worktree
+was made from (`harness-files-owning-checkout'), not a project of its own."
   (or (and (harness-method-exists-p 'insights/projects)
            (ignore-errors (harness-call 'insights/projects)))
       (and (harness-method-exists-p 'session/list)
            (let (roots)
              (dolist (s (harness-call 'session/list))
                (when-let* ((p (plist-get s :project)))
-                 (cl-pushnew (file-name-as-directory (expand-file-name p))
+                 (cl-pushnew (file-name-as-directory
+                              (expand-file-name
+                               (or (ignore-errors (harness-files-owning-checkout p)) p)))
                              roots :test #'equal)))
              (sort roots #'string<)))))
 

@@ -1,4 +1,5 @@
 import '../acp/acp_message.dart';
+import 'project_roots.dart';
 import 'session.dart';
 
 /// A task on the harness's task board.
@@ -163,8 +164,10 @@ class HarnessTask {
   bool get isDone => columnName == 'done';
   bool get isStopped => outcome != null && !isDone;
 
+  /// The name of the project the task is for: a git worktree of the harness
+  /// is named for its project.
   String get projectName {
-    final source = project ?? cwd;
+    final source = worktreeOwner(project ?? cwd) ?? project ?? cwd;
     if (source == null) return '';
     final parts = source.split('/').where((part) => part.isNotEmpty).toList();
     return parts.isEmpty ? source : parts.last;

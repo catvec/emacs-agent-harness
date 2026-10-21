@@ -75,6 +75,7 @@ class FakeHarness {
     this.signIn = false,
     this.oidcUrl,
     this.issueSecret,
+    this.projectMains = true,
     Set<String>? knownSecrets,
   }) : knownSecrets = knownSecrets ?? <String>{} {
     if (enhanced) {
@@ -117,6 +118,7 @@ class FakeHarness {
         'usage/rates',
         'usage/budgets',
         'insights/projects',
+        if (projectMains) 'project/mains',
         'provider/list',
         'provider/models',
         'harness/version',
@@ -148,6 +150,18 @@ class FakeHarness {
   final bool enhanced;
   final String? token;
   final bool failAuthOnce;
+
+  /// Whether the harness offers `project/mains`, which says what checkout a
+  /// directory is a git worktree of.  An older harness does not.
+  final bool projectMains;
+
+  /// Where git worktrees that are not in the `.worktrees` of their checkout
+  /// are, as a repository's `.git` says it: worktree -> checkout.  An older
+  /// harness made them beside the repository.
+  final Map<String, String> worktreeOf = {
+    '/Users/noah/Code/emacs-agent-harness-worktrees/task-old-layout/':
+        '/Users/noah/Code/emacs-agent-harness/',
+  };
 
   /// Like a remote listener serving plain TCP: before `authenticate`,
   /// `initialize` gives only the reduced result, with no `_harness` object.
@@ -232,6 +246,9 @@ class FakeHarness {
   final List<Map<String, Object?>> questionAnswers = [];
   final List<String> prompts = [];
   final List<String> requestsByClient = [];
+
+  /// Every request the client made, with its params, in order.
+  final List<(String, JsonMap)> requests = [];
   final Map<String, Completer<Map<String, Object?>>> _serverRequests = {};
   final Map<String, Map<String, Object?>> _serverRequestParams = {};
   void Function(String message)? writer;
@@ -650,6 +667,76 @@ class FakeHarness {
     };
   }
 
+  /// The checkout the git worktree at [directory] was made from, or
+  /// [directory] itself when it is no worktree: what its `.git` file says.
+  String mainCheckoutOf(String directory) {
+    final known = worktreeOf[directory];
+    if (known != null) return known;
+    final at = directory.indexOf('/.worktrees/');
+    return at > 0 ? directory.substring(0, at + 1) : directory;
+  }
+
+  /// Sessions as a harness that works in git worktrees has them.  A task's
+  /// own session is filed under the checkout (see `s2`), but a sub-agent, or
+  /// a session started to resolve a merge, that works in a worktree is
+  /// filed under the worktree, a directory of its own to the session.  One
+  /// worktree is in the `.worktrees` of its checkout, one beside the
+  /// repository, as an older harness made them.
+  void seedWorktreeSessions() {
+    final now = DateTime.now();
+    void add(String id, String name, String kind, String directory) {
+      sessions[id] = {
+        'id': id,
+        'name': name,
+        'kind': kind,
+        'project': directory,
+        'cwd': directory,
+        'model': 'claude:claude-fable-5-1',
+        'permissionMode': 'auto',
+        'status': 'idle',
+        'created':
+            now.subtract(const Duration(hours: 2)).millisecondsSinceEpoch /
+            1000,
+        'updated':
+            now.subtract(const Duration(minutes: 20)).millisecondsSinceEpoch /
+            1000,
+        'lastMessage':
+            now.subtract(const Duration(minutes: 20)).millisecondsSinceEpoch /
+            1000,
+        'contextWindow': 200000,
+        'todos': [],
+        'pending': [],
+        'queue': [],
+      };
+      nodes[id] = [];
+    }
+
+    add(
+      'w1',
+      'Review the title change',
+      'subagent',
+      '/Users/noah/Code/emacs-agent-harness/.worktrees/task-fix-titles/',
+    );
+    add(
+      'w2',
+      'Resolve the merge conflict',
+      'main',
+      '/Users/noah/Code/emacs-agent-harness/.worktrees/task-screens/',
+    );
+    add(
+      'w3',
+      'Port the old board',
+      'main',
+      '/Users/noah/Code/emacs-agent-harness-worktrees/task-old-layout/',
+    );
+    add(
+      'w4',
+      'Profile the model cache',
+      'subagent',
+      '/Users/noah/Code/other-project/.worktrees/task-cache/',
+    );
+  }
+
   Map<String, Object?> _node(
     String id,
     String kind,
@@ -688,6 +775,7 @@ class FakeHarness {
         _notification(method, asMap(message['params']));
       } else {
         requestsByClient.add(method);
+        requests.add((method, asMap(message['params'])));
         unawaited(_request(method, asMap(message['params']), id));
       }
       return;
@@ -1122,17 +1210,40 @@ class FakeHarness {
               'calls': 6,
             },
           ],
+          // Spend is recorded under the directory a session worked in: a
+          // task's work under its worktree, which says its checkout as `main`.
           'project' => [
             {
               'key': '/Users/noah/Code/emacs-agent-harness/',
               'main': '/Users/noah/Code/emacs-agent-harness/',
-              'input': 72800,
-              'output': 18400,
-              'cache-read': 40000,
-              'cache-write': 2100,
-              'cost': 1.09,
-              'list-cost': 1.33,
-              'calls': 24,
+              'input': 40000,
+              'output': 10000,
+              'cache-read': 20000,
+              'cache-write': 1200,
+              'cost': 0.49,
+              'list-cost': 0.6,
+              'calls': 12,
+            },
+            {
+              'key': '/Users/noah/Code/emacs-agent-harness/.worktrees/task-flutter/',
+              'main': '/Users/noah/Code/emacs-agent-harness/',
+              'input': 24000,
+              'output': 6300,
+              'cache-read': 14000,
+              'cache-write': 900,
+              'cost': 0.48,
+              'list-cost': 0.61,
+              'calls': 9,
+            },
+            {
+              'key': '/Users/noah/Code/emacs-agent-harness/.worktrees/task-fix-titles/',
+              'main': '/Users/noah/Code/emacs-agent-harness/',
+              'input': 8800,
+              'output': 2100,
+              'cache-read': 6000,
+              'cost': 0.12,
+              'list-cost': 0.12,
+              'calls': 3,
             },
             {
               'key': '/Users/noah/Code/other-project/',
@@ -1191,6 +1302,14 @@ class FakeHarness {
             'amount': 80,
             'hard': false,
           },
+        ]);
+        return;
+      }
+      if (method == '_harness/project/mains') {
+        _respond(id, [
+          for (final root in asList(params['roots']))
+            if (asString(root) case final directory?)
+              {'root': directory, 'main': mainCheckoutOf(directory)},
         ]);
         return;
       }
@@ -1773,6 +1892,11 @@ class FakeHarness {
       'update': {'sessionUpdate': '_harness/session', 'session': session},
     });
   }
+
+  /// The harness announces [event], as it does when something happens in
+  /// it: a client that listens refreshes what it shows.
+  void announce(String event, [List<Object?> args = const []]) =>
+      _event(event, args);
 
   void _event(String event, List<Object?> args) {
     if (!enhanced) return;

@@ -582,7 +582,7 @@ class TaskCard extends StatelessWidget {
                             Expanded(
                               child: Text(
                                 [
-                                      task.projectName,
+                                      projectName(app.projectOfTask(task)),
                                       if (task.branch != null) task.branch,
                                       if (session != null)
                                         statusLabel(session.status),
@@ -1225,7 +1225,7 @@ class _TaskDetail extends StatelessWidget {
                   runSpacing: 6,
                   children: [
                     HarnessStatusPill(
-                      label: projectName(task.project ?? task.cwd),
+                      label: projectName(app.projectOfTask(task)),
                       color: theme.colorScheme.onSurfaceVariant,
                       icon: Icons.folder_outlined,
                     ),

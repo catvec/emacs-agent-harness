@@ -1128,6 +1128,16 @@ See docs/configuration-audit.md for the rule and the audit behind it.
 
 - `project/root CWD` → root directory (project.el, falling back to CWD).
 - `project/name ROOT` → display name.
+- `project/mains ROOTS` → one `(:root ROOT :main MAIN)` for each absolute
+  directory name in ROOTS, in order (anything else is left out): the main
+  checkout ROOT belongs to.  A linked git worktree, such as a task's or a
+  sub-agent's, is of the checkout it was made from, wherever it is and
+  also once it is gone from disk; any other directory is its own
+  (`harness-files-owning-checkout`).  It reads `.git` files and runs no
+  process, so a client such as the phone app asks about every directory
+  its sessions and tasks work in at once, to fold the worktrees of a
+  project into it: a project is a main checkout, and a session started in
+  a worktree has that worktree as its `:project`.
 - `project/files ROOT &optional QUERY LIMIT` → promise of relative paths,
   fuzzy filtered; nil outside a project.  Never blocks: projectile's
   cache when it has the project, else an asynchronous listing
@@ -8762,7 +8772,10 @@ not offered, in `initialize` or otherwise, and is not found.
 Two sessions the harness advertises, on the first page of
 `session/list` (above), are not backed by real sessions, and the bus's
 `_harness/session/list` leaves them out:
-`harness:projects` (title "Projects") renders the project list, and
+`harness:projects` (title "Projects") renders the project list, which
+is of main checkouts: `insights/projects` when the bus has it, else the
+checkouts of the sessions' projects, a session in a git worktree being of
+the checkout the worktree was made from; and
 `harness:new-task` (title "New task") submits what its chat input sends
 as a task.  `session/load` renders a virtual session as a single
 `user_message_chunk` whose first message is the page; prompting

@@ -22,6 +22,7 @@ is; see there for why listing never blocks.
 
 - `project/files` (root &optional query limit) — Return a promise of the files under project ROOT, relative to it.
 - `project/invalidate` (root) — Forget projectile's cached file list for ROOT.
+- `project/mains` (roots) — Return the main checkout of each of ROOTS, as (:root ROOT :main MAIN) entries.
 - `project/name` (root) — Return a display name for the project at ROOT.
 - `project/root` (cwd) — Return the project root directory for CWD, or CWD itself.
 

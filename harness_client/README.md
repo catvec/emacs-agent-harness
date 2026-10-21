@@ -44,6 +44,15 @@ comparing the code.
   complete/archive), spend, tokens, live sessions, daily spend, per-model and
   per-project breakdowns, budgets, the model catalogue, harness modules and the
   full ACP capability report.
+- **Treats a project as a main checkout.** A task, and a sub-agent started in
+  its worktree, works in a git worktree, which the harness files under the
+  worktree itself. The app folds each worktree into the checkout it was made
+  from, so the project pickers and filters, the session and task rows, and the
+  Usage "Projects" list have one entry per project, and a project's usage adds
+  up the spend of its worktrees. The harness says which checkout a directory
+  belongs to (`project/mains`, which reads the repository's own `.git` files,
+  wherever the worktree was made); a harness without it is folded by the
+  `PROJECT/.worktrees/BRANCH` layout it makes worktrees in.
 - **Detects extensions per feature.** `initialize` is read for standard ACP
   capabilities and for the harness's `_harness.methods` and `_harness.events`.
   Each screen asks for the exact methods it needs. A missing method turns off
@@ -280,7 +289,7 @@ The client never assumes a method because the agent calls itself a harness.
 | Task board | `task/list` (actions need `task/start`, `task/verify`, …) |
 | Usage | `usage/totals` or `usage/summary` |
 | Question diagrams | `question/image` for images; ASCII comes with the request |
-| Project picker | `insights/projects` |
+| Project picker | `insights/projects` (and `project/mains`, to fold worktrees) |
 | Rename, fork, delete | `session/update`, `session/fork`, `session/delete` |
 | Priority | `priority/set` |
 | Model catalogue | `provider/list`, `provider/models` |
@@ -312,7 +321,7 @@ Everything beyond that is under `_harness/` and is optional.
 - Usage: `usage/totals`, `usage/summary`, `usage/live-all`, `usage/rates`,
   `usage/budgets`.
 - Server: `harness/version`, `harness/modules`, `insights/projects`,
-  `provider/list`, `provider/models`, `config/describe`.
+  `project/mains`, `provider/list`, `provider/models`, `config/describe`.
 - Questions: `_harness/ask_user` request, `question/pending`,
   `question/answer`, `question/cancel`, `question/image`; permission answers
   are the standard `{outcome: {outcome: "selected", optionId}}` reply, with an
@@ -381,11 +390,12 @@ The widget tests drive the real `AcpClient` against an in-memory ACP server
 - connect and capability discovery, session-secret auth and the auth-required
   panel, pairing links (`POST /pair` against a fake HTTP client), connection
   links with a token, refused codes, and plain TCP's second `initialize`
-- sessions, search and project filter
+- sessions, search and project filter (worktrees fold into their project)
 - transcript replay, streaming, tool cards, thought blocks and plan
 - permission request and allow, question with a diagram and send
 - creating a session and opening the new-task sheet / submitting a task
-- task review and verification, usage, server capability table
+- task review and verification, usage (a row per project, worktrees added),
+  server capability table and project list
 - plain ACP fallback (three tabs, working chat, standard notice)
 - Cupertino rendering of the shell
 - a lost connection (`test/reconnect_test.dart`, `reconnect_widget_test.dart`):

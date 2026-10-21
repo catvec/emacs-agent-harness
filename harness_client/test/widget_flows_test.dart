@@ -28,6 +28,7 @@ Future<_Rig> _rig({
   String? issueSecret,
   Set<String>? knownSecrets,
   List<Uri>? opened,
+  bool worktrees = false,
 }) async {
   SharedPreferences.setMockInitialValues({});
   final settings = SettingsController();
@@ -41,6 +42,7 @@ Future<_Rig> _rig({
     issueSecret: issueSecret,
     knownSecrets: knownSecrets,
   );
+  if (worktrees) harness.seedWorktreeSessions();
   final app = AppController(
     settings: settings,
     connector: harness.connector,
@@ -402,5 +404,110 @@ void main() {
     await _settle(tester, 4);
     expect(find.text('Investigate cache misses'), findsOneWidget);
     expect(find.text('Design the merge queue'), findsNothing);
+  });
+
+  testWidgets('the project filter lists checkouts, not worktrees', (
+    tester,
+  ) async {
+    final rig = await _rig(worktrees: true);
+    await _pump(tester, rig);
+    // A session working in a git worktree is shown for its project, not
+    // under the name of the worktree.
+    expect(find.textContaining('task-fix-titles'), findsNothing);
+    expect(find.textContaining('task-old-layout'), findsNothing);
+    await tester.tap(find.text('All projects'));
+    await _settle(tester, 4);
+    final sheet = find.byType(BottomSheet);
+    expect(sheet, findsOneWidget);
+    expect(
+      find.descendant(of: sheet, matching: find.text('emacs-agent-harness')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: sheet, matching: find.text('other-project')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: sheet, matching: find.textContaining('task-')),
+      findsNothing,
+    );
+    await tester.tap(
+      find.descendant(of: sheet, matching: find.text('emacs-agent-harness')),
+    );
+    await _settle(tester, 4);
+    // What was done for the project is in it, in a worktree or not.
+    for (final title in [
+      'Design the merge queue',
+      'Fix duplicate task titles',
+      'Review the title change',
+      'Resolve the merge conflict',
+      'Port the old board',
+    ]) {
+      expect(find.text(title), findsOneWidget, reason: title);
+    }
+    expect(find.text('Investigate cache misses'), findsNothing);
+    expect(find.text('Profile the model cache'), findsNothing);
+    expect(find.textContaining('task-'), findsNothing);
+  });
+
+  testWidgets('usage by project has a row for a project, not a worktree', (
+    tester,
+  ) async {
+    final rig = await _rig(worktrees: true);
+    await _pump(tester, rig);
+    await tester.tap(find.text('Usage'));
+    await _settle(tester, 6);
+    final usageList = find
+        .descendant(
+          of: find.byType(UsageScreen),
+          matching: find.byType(ListView),
+        )
+        .first;
+    Future<void> toTheEnd() async {
+      await tester.drag(usageList, const Offset(0, -1500));
+      await tester.pump(const Duration(milliseconds: 250));
+    }
+
+    // The project the app opens on: one row, which adds up what was spent
+    // in the checkout, in task-flutter's worktree and in task-fix-titles'.
+    await toTheEnd();
+    expect(find.text('PROJECTS'), findsOneWidget);
+    expect(find.text('emacs-agent-harness'), findsOneWidget);
+    expect(find.text(r'$1.33'), findsOneWidget);
+    expect(find.textContaining('task-'), findsNothing);
+
+    // Every project: a row each, still none for a worktree.
+    rig.app.selectProject(null);
+    await _settle(tester, 6);
+    await toTheEnd();
+    expect(find.text('emacs-agent-harness'), findsOneWidget);
+    expect(find.text('other-project'), findsOneWidget);
+    expect(find.text(r'$1.33'), findsOneWidget);
+    expect(find.textContaining('task-'), findsNothing);
+  });
+
+  testWidgets('the server view lists the projects, not their worktrees', (
+    tester,
+  ) async {
+    final rig = await _rig(worktrees: true);
+    await _pump(tester, rig);
+    await tester.tap(find.text('Server'));
+    await _settle(tester, 6);
+    final serverList = find.descendant(
+      of: find.byType(ListView),
+      matching: find.text('Projects'.toUpperCase()),
+    );
+    final list = find.byType(ListView).first;
+    await tester.scrollUntilVisible(
+      serverList,
+      300,
+      scrollable: find
+          .descendant(of: list, matching: find.byType(Scrollable))
+          .first,
+    );
+    expect(find.text('/Users/noah/Code/emacs-agent-harness/'), findsOneWidget);
+    expect(find.text('/Users/noah/Code/other-project/'), findsOneWidget);
+    expect(find.textContaining('.worktrees'), findsNothing);
+    expect(find.textContaining('task-old-layout'), findsNothing);
   });
 }

@@ -1,4 +1,5 @@
 import '../acp/acp_message.dart';
+import 'project_roots.dart';
 
 /// ACP's session/list entry, merged with the harness's fuller session plist
 /// when its extensions are present.
@@ -120,8 +121,10 @@ class SessionSummary {
     return 'Untitled session';
   }
 
+  /// The name of the project the session works for: a git worktree of the
+  /// harness is named for its project.
   String get projectName {
-    final source = project ?? cwd;
+    final source = worktreeOwner(project ?? cwd) ?? project ?? cwd;
     if (source == null) return '';
     final parts = source.split('/').where((part) => part.isNotEmpty).toList();
     return parts.isEmpty ? source : parts.last;

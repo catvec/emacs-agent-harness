@@ -324,6 +324,9 @@ class _SessionScreenState extends State<SessionScreen> {
                 _EmbeddedHeader(
                   title: title,
                   summary: summary,
+                  project: summary == null
+                      ? null
+                      : _app.projectOfSession(summary),
                   controller: _controller,
                   actions: _actions(context),
                   onClose: _app.closeSession,
@@ -460,6 +463,7 @@ class _EmbeddedHeader extends StatelessWidget {
   const _EmbeddedHeader({
     required this.title,
     required this.summary,
+    required this.project,
     required this.controller,
     required this.actions,
     required this.onClose,
@@ -467,6 +471,9 @@ class _EmbeddedHeader extends StatelessWidget {
 
   final String title;
   final SessionSummary? summary;
+
+  /// The project the session works for: the checkout of its worktree.
+  final String? project;
   final SessionController controller;
   final List<Widget> actions;
   final VoidCallback onClose;
@@ -502,7 +509,7 @@ class _EmbeddedHeader extends StatelessWidget {
                 const SizedBox(height: 2),
                 Text(
                   [
-                    projectName(summary?.project ?? summary?.cwd),
+                    projectName(project ?? summary?.project ?? summary?.cwd),
                     modelName(summary?.model),
                     statusLabel(summary?.status),
                   ].where((part) => part.isNotEmpty).join(' · '),
@@ -580,7 +587,9 @@ class _MetaStrip extends StatelessWidget {
           ),
           _MetaChip(
             icon: Icons.folder_outlined,
-            label: projectName(s?.project ?? s?.cwd),
+            label: projectName(
+              s == null ? null : app.projectOfSession(s) ?? s.project ?? s.cwd,
+            ),
             onTap: null,
           ),
           _MetaChip(

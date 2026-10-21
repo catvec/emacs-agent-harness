@@ -1,4 +1,5 @@
 import '../acp/acp_message.dart';
+import 'project_roots.dart';
 
 class UsageAggregate {
   const UsageAggregate({
@@ -43,6 +44,48 @@ class UsageAggregate {
     final parts = source.split('/').where((part) => part.isNotEmpty).toList();
     return parts.isEmpty ? key : parts.last;
   }
+
+  /// The project this row of usage by project is for: the main checkout the
+  /// harness says (`main`), else the one [roots] makes of the row's key.
+  /// Null for the row of usage that has no project.
+  String? projectIn(ProjectRoots roots) {
+    final said = main;
+    return roots.of(said != null && said.isNotEmpty ? said : key);
+  }
+}
+
+/// Usage rows by project with each project's worktrees added to it, richest
+/// first, as the usage dashboard in Emacs shows them: a worktree is where
+/// the work of a task ran, not a project of its own.  Each row is keyed by
+/// the project (and says it is its `main`); the row of usage with no project
+/// stays alone.
+List<UsageAggregate> foldProjectUsage(
+  Iterable<UsageAggregate> rows,
+  ProjectRoots roots,
+) {
+  final groups = <String, List<UsageAggregate>>{};
+  for (final row in rows) {
+    groups.putIfAbsent(row.projectIn(roots) ?? '', () => []).add(row);
+  }
+  final folded = [
+    for (final group in groups.entries)
+      UsageAggregate(
+        key: group.key,
+        main: group.key.isEmpty ? null : group.key,
+        input: group.value.fold(0, (sum, row) => sum + row.input),
+        output: group.value.fold(0, (sum, row) => sum + row.output),
+        cacheRead: group.value.fold(0, (sum, row) => sum + row.cacheRead),
+        cacheWrite: group.value.fold(0, (sum, row) => sum + row.cacheWrite),
+        cost: group.value.fold(0.0, (sum, row) => sum + row.cost),
+        listCost: group.value.fold(0.0, (sum, row) => sum + row.listCost),
+        calls: group.value.fold(0, (sum, row) => sum + row.calls),
+      ),
+  ];
+  folded.sort((a, b) {
+    final byList = b.listCost.compareTo(a.listCost);
+    return byList != 0 ? byList : b.cost.compareTo(a.cost);
+  });
+  return folded;
 }
 
 class UsageOverview {
