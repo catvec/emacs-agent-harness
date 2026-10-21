@@ -881,6 +881,22 @@ after taking a secret out of a session (see redact) is plain text in
 `:content`: the labels and fingerprints, where the secret was found, at
 whose request and why.
 
+A hint that has the same kind of thing to say again and again keeps the
+lot in one hint rather than a hint each (tool-slots-load does, for the
+tool slots a busy machine takes away and gives back).  Its `:meta`
+`:fold` is `(:key KEY :title TITLE :items ((:ts TIME :text TEXT) …))`:
+KEY names the module that writes it, which finds the hint again to add
+to it, TITLE is what the hint says while it is folded, and ITEMS are
+the lines under it, oldest first.  Read it with `harness-node-fold`
+(harness-util), which tolerates what travelled over JSON.  `:content`
+says the same in plain text, the title and then a line to an item, for
+a client that does not fold; with one item it is that item's text, so a
+hint of one line is the note it would have been.  The module adds a line
+with `session/update-node`, which announces the hint again
+(`session/node-updated`).  Hints are not sent to a model
+(`session/messages` leaves them out), so a hint changing where it
+stands changes nothing a model is sent.
+
 A session's transcript is the path root → `:head`.  A fork copies the
 ancestor chain (same node ids) into the new session and records
 `:parent-id` / `:fork-node`, so the tree view can merge families by id.
@@ -8487,15 +8503,52 @@ alone and no new one starts until the machine is under the limit again.
 A sample is taken once at startup and then every
 `harness-tool-slots-load-interval'.
 
-A change in the number in force, down or back up, is appended to every
-active session as a system message (`session/list` and `session/hint`;
-a closed or inactive session is left alone), so the user and the models
-see why calls are waiting: "Tool slots reduced from 18 to 5: system
-load 1.8x on this machine", and "Tool slots restored to 18: system load
-back to normal".  It is sent only when the number really changes, not
-on every sample.  The calls that had to wait still say so themselves
-("Waited 3.2s for a free slot on this machine"), as tool-slots has
-them.
+A change in the number in force, down or back up, is told to every
+active session as a system message (`session/list`; a closed or
+inactive session is left alone), so the user sees why calls are
+waiting: "Tool slots reduced from 18 to 5: system load 1.8x on this
+machine", and "Tool slots restored to 18: system load back to normal".
+It is sent only when the number really changes, not on every sample.
+The calls that had to wait still say so themselves ("Waited 3.2s for a
+free slot on this machine"), as tool-slots has them.
+
+A load that moves a lot changes the number again and again, and a hint
+to each change would fill the transcript (and cut every run of tool
+calls the chat folds in two), so the changes of one stretch share a
+hint per session, the session's note of slot changes, a folding hint
+(see Node: `harness-node-fold`, `:key` "tool-slots-load").  The first
+change is a hint of its own, with the line above.  A change that comes
+within ten minutes of the note's last (`harness-tool-slots-load--note-window`,
+counted from the last change, so changes that keep coming keep the note
+open) is added to the note with `session/update-node`, wherever the
+note stands in the transcript: the session's messages and tool calls
+since do not matter, and nothing is written where the session now is.
+The title then reads "Slots changed due to system load (3 changes)" and
+the chat draws it as that one line, closed, with a line to a change
+under it, each with its time (see ui-chat).  A change after a quieter
+spell starts a note of its own, so the transcript still shows where in
+the session's work the load moved; so does one that finds the note full
+(`harness-tool-slots-load--note-limit`, 20 changes, so a load that moves
+for hours does not write one ever longer note anew at each change), or
+off the branch the session's transcript is on now, or gone.  Only the
+module's own notes (by `:key`) are added to.  The window and the limit
+are internal variables, not options (see the configuration audit).
+
+The note is the history, and it stands where the first change of its
+stretch landed, far up a session that went on since.  How the slots
+stand now belongs to the machine, not to a session, so a UI gets it
+another way: `tool-slots/status` returns `(:limit N :baseline B
+:pressure P :text TEXT :at TIME)` -- N the slots in force and B the
+most there are, the machine being held back while N is the smaller, and
+of the change that took N the load per processor that decided it, what
+the sessions were told and when (nil before the first change) -- and the
+event `tool-slots/changed STATE` announces that state after every
+change, after the load watch is turned off while the slots were held
+back, and when the module stops while they were, so a UI never keeps a
+restriction that ended.  Both reach clients (the `tool-slots/` method
+prefix and the forwarded event of the ACP module).  The chat pins it
+above its compose box while N is under B (ui-tool-slots-load, see
+"Chat buffer").
 
 The watch is around advice on `harness-tool-slots--slots`, added by the
 module's `:init` and removed by its `:shutdown`, which gives the
@@ -8737,7 +8790,7 @@ Extension methods: any bus method whose name starts with `session/`,
 `project/`, `task/`, `plugins/`, `search/`, `notification/`, `sandbox/status`, `harness/api`,
 `harness/modules`, `harness/version`, `harness/reload`, `harness/call`, `acp/remote-`,
 `pet/`, `version/`, `insights/`, `supervisor/`, `seed/`, `priority/`,
-`secrets/`, `commit-msg/`, `patch-review/` (`harness-acp-extension-prefixes`), or with one of
+`secrets/`, `commit-msg/`, `patch-review/`, `tool-slots/` (`harness-acp-extension-prefixes`), or with one of
 `harness-acp-extra-method-prefixes`, which modules of the user's own
 and projects' plugins add to (see Modules of your own; the harness
 repository's plugin adds `harness-dev/`), is callable as `_harness/NAME` with a
@@ -8807,9 +8860,11 @@ with them); among them `session/ext-changed` (a setting a module keeps
 on a session changed, each change of a plan's step included),
 `supervisor/changed` (the user switched supervisor mode), and
 `session/redacted` and `secrets/redacted` (a secret was taken out of a
-session's stores, or out of the stores at all) and `patch-review/changed`
-(an operation changed the threads of a task's review); see session,
-supervisor, redact and patch-review.
+session's stores, or out of the stores at all), `patch-review/changed`
+(an operation changed the threads of a task's review) and
+`tool-slots/changed` (the slots this machine allows changed, or the load
+watch ended); see session, supervisor, redact, patch-review and
+tool-slots-load.
 
 Harness → UI requests for chores any client may do go through the bus
 method `client/request METHOD PARAMS` → promise of the first client's
@@ -9392,6 +9447,13 @@ rear-nonsticky, so an insertion inside it gets through).  Its double and
 triple clicks are bound to `ignore`: unbound, they ran as single clicks
 and opened the link again after the first click had.  Tool and thinking
 nodes collapse; runs of coalescable tools fold into a summary block.
+A hint that folds (`harness-node-fold`, see Node) with two lines or more
+is one line, its title, with the fold's button hanging in the indent
+before it, and the lines in the fold, each with the time it was said;
+the block starts folded, and a line added to the hint draws it again
+where it stands, as open or closed as the user left it
+(`harness-chat--render-folded-hint`).  With one line it is the plain
+note it would have been, which has nothing to fold.
 A run folds from its first call: a lone call is a run of one under its
 summary, which names the call as its header does ("1 tool call: Read
 file x.el"), and each later call of the run, with the thinking between,
@@ -11837,8 +11899,23 @@ per session, and the `agent/turn-started` and `agent/turn-ended`
 events, so nothing asks a child anything; a seed conversation is left
 out by its `:seed` marker, and a chat draws the panel at most once a
 second, one timer per chat taking the updates of all its children, and
-only when the panel's text differs from the one it drew last); the
-session's box sends
+only when the panel's text differs from the one it drew last); the tool
+slots held back by the machine's load (`harness-ui-tool-slots-load`,
+module `ui-tool-slots-load`, the UI half of tool-slots-load: beside the
+sub-agents above the compose box, one line on a background of its own,
+"Tool slots limited to 5 of 18: system load 1.8x on this machine", in
+every open chat for as long as the slots in force are under the
+baseline and in none while the machine has them all -- the notes in the
+transcript are the history, and stand wherever a stretch of changes
+began, this is how it stands now; the tooltip is what the sessions were
+told of the last change and when; the state is cached from
+`tool-slots/status`, which the UI asks for when it connects, which
+forgets what the last harness said, and after `harness/reloaded`, and
+is kept by `tool-slots/changed`, so nothing polls, and a state that
+reads like the one shown draws nothing; a change draws the tail of
+every open chat once, a chat still loading drawing it with the rest;
+the panel is decoration, so one that fails to draw leaves the tail as
+it was); the session's box sends
 as always and the harness takes any message the user sends the task's
 session for the feedback that sends it back (`harness-tasks--on-message'), so
 [Send back] only points at the box, while

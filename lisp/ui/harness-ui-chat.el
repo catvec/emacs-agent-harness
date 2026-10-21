@@ -1814,6 +1814,57 @@ and in the message that attached it."
 
 (defun harness-chat--render-hint (block)
   "Return the body of hint BLOCK.
+A hint that keeps several lines under a title (`harness-node-fold') is
+drawn as that title, with the fold's button, and the lines in the fold
+\(`harness-chat--render-folded-hint'); any other as the note it is
+\(`harness-chat--render-plain-hint').  A fold of one line is that line,
+as the note it would have been."
+  (let ((fold (harness-node-fold (harness-chat-block-node block))))
+    (if (cdr (plist-get fold :items))
+        (harness-chat--render-folded-hint block fold)
+      (harness-chat--render-plain-hint block))))
+
+(defun harness-chat--render-folded-hint (block fold)
+  "Return the body of hint BLOCK, whose several lines FOLD keeps under a title.
+The title is what the hint says folded, with the button that opens it
+hanging in the indent before it.  The lines are in the fold, one to
+the line, each with the time it was said, under the title's first
+letter; the block starts folded (`harness-chat--collapsible-p'), and
+stays as the user left it when the hint is drawn again with another
+line."
+  (let* ((id (harness-chat-block-id block))
+         ;; Where the lines start, and so the title: after the margin and
+         ;; four columns of indent, whatever width the button is drawn.
+         (indent "    ")
+         (header (propertize
+                  (concat " "
+                          (harness-chat--fold-button
+                           (harness-chat-block-collapsed block)
+                           (lambda () (interactive) (harness-chat-toggle-block id))
+                           "mouse-1, TAB: show or hide the lines")
+                          (propertize " " 'display `(space :align-to ,(1+ (length indent))))
+                          ;; The newest line is a hover away, without opening it.
+                          (propertize (plist-get fold :title) 'face 'harness-hint-face
+                                      'help-echo (format "Latest: %s"
+                                                         (plist-get (car (last (plist-get fold :items)))
+                                                                    :text)))
+                          "\n")
+                  'wrap-prefix indent))
+         (body (harness-chat--foldable
+                (mapconcat
+                 (lambda (item)
+                   (let* ((ts (plist-get item :ts))
+                          (time (if ts (format-time-string "%H:%M:%S  " ts) "")))
+                     (propertize (concat (propertize time 'face 'harness-summary-face)
+                                         (propertize (plist-get item :text) 'face 'harness-hint-face)
+                                         "\n")
+                                 'line-prefix indent
+                                 'wrap-prefix (concat indent (make-string (length time) ?\s)))))
+                 (plist-get fold :items) ""))))
+    (harness-chat--margin (concat header body))))
+
+(defun harness-chat--render-plain-hint (block)
+  "Return the body of hint BLOCK, drawn as a note.
 A note that tells of a lasting decision (`harness-node-decision') -- a
 permission answer for the session or always, the cold-cache question
 answered \"always\" -- ends in the decision's one button: [Undo] while
@@ -2310,8 +2361,12 @@ draws it, so carrying that over would keep drawing the old image."
 ;;;; Block insertion and update
 
 (defun harness-chat--collapsible-p (kind)
-  "Non-nil when blocks of KIND start collapsed."
-  (member kind '("thinking" "tool-call" "tool-result" "compaction")))
+  "Non-nil when blocks of KIND start collapsed.
+A hint folds only when it keeps several lines under a title
+\(`harness-node-fold'); one that does not has no fold for this to
+matter to, and one that grows to have one, as the hint of the slots
+changing does, starts folded."
+  (member kind '("thinking" "tool-call" "tool-result" "compaction" "hint")))
 
 (defun harness-chat--new-block (node)
   "Return an unrendered block for NODE."

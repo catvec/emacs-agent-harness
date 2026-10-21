@@ -124,8 +124,9 @@ calls a model or the network.
 Two modules are off, so that nothing outside the world reaches a
 picture: `recap`, whose lines are written by a model (the pictures get
 hand-written ones), and `tool-slots-load`, which on a busy machine tells
-every active chat "Tool slots reduced from 18 to 5: system load 1.8x".
-A run of the pictures does not depend on how loaded the machine is.
+every active chat "Tool slots reduced from 18 to 5: system load 1.8x" and
+pins "Tool slots limited to 5 of 18" above its compose box.  A run of
+the pictures does not depend on how loaded the machine is.
 
 **The world** (`harness-media--build-world`):
 

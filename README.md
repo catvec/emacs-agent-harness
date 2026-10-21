@@ -65,9 +65,11 @@ OpenAI-compatible APIs and AWS Bedrock.
   average too, so a load that lasts counts and a short burst does not:
   under load fewer slots are handed out, down to one, and the full limit
   comes back as the load falls (`harness-tool-slots-load-window`,
-  `harness-tool-slots-load-high`, `harness-tool-slots-load-floor`). The
-  test suites run at idle CPU and I/O priority, yielding to whatever you
-  are doing.
+  `harness-tool-slots-load-high`, `harness-tool-slots-load-floor`). While
+  they are held back every chat pins how many there are above its
+  compose box, and says when the number changes in one note that opens
+  to the changes, not a message for each. The test suites run at idle
+  CPU and I/O priority, yielding to whatever you are doing.
 - **Task board.** Run tasks in parallel, each in its own session and git
   worktree, review the results, and merge them back through a merge
   queue. A per-project limit on running tasks starts the waiting ones
@@ -909,6 +911,15 @@ its current todo item until its first activity arrives. It follows the
 children as they work, draws at most once a second, and disappears when
 none is running. A seed conversation (see **Cache seeds**) is left out,
 being no worker.
+
+While the machine's load holds the tool slots back, every chat says so in
+that place too: one line above the compose box, on a background of its
+own, "Tool slots limited to 5 of 18: system load 1.8x on this machine",
+with what the sessions were told of the last change in its tooltip. It
+is how the slots stand now, which the note in the transcript -- one to a
+stretch of changes, opening to each of them -- cannot say once it is far
+up the history. It follows the changes as the harness announces them,
+and disappears when the machine has all its slots again.
 
 A tool call that runs for a while says what it is doing under its own
 header, in dim lines that go when the call ends. `spawn_agent`, which

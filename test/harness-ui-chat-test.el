@@ -866,6 +866,166 @@ on a background and bar of its own; the user's own messages are as before."
                 (should (harness-chat-block-collapsed block))
                 (should (equal "harness-icon-collapsed.svg" (icon)))))))))))
 
+;;;; Hints that fold
+
+(defun harness-ui-chat-test--fold-items (&rest texts)
+  "Return the items of a fold saying TEXTS, a minute apart from 12:15:05.
+That is local time, so what the chat shows does not depend on the zone."
+  (let ((time (float-time (encode-time (list 5 15 12 12 6 2026 nil -1 nil)))))
+    (cl-loop for text in texts
+             for n from 0
+             collect (list :ts (+ time (* 60 n)) :text text))))
+
+(defun harness-ui-chat-test--fold-meta (&rest texts)
+  "Return the `:meta' of a hint that folds TEXTS under a title counting them."
+  (list :fold (list :key "chat-test"
+                    :title (format "Several things happened (%d)" (length texts))
+                    :items (apply #'harness-ui-chat-test--fold-items texts))))
+
+(defun harness-ui-chat-test--fold-icon (block)
+  "Return the position of the fold icon of BLOCK."
+  (text-property-any (harness-chat-block-start block) (harness-chat-block-end block)
+                     'harness-chat-fold-icon t))
+
+(ert-deftest harness-ui-chat-a-hint-that-folds-opens-to-its-lines ()
+  "A hint with several lines under a title is one line that opens to them.
+With one line it is the note it would be, and has no fold.  Another line
+added to the hint draws it again where it is, as open or closed as the
+user left it; a chat loaded afresh draws it closed."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid))
+           (hint (harness-call 'session/append sid
+                               (list :kind 'hint :content "alpha"
+                                     :meta (harness-ui-chat-test--fold-meta "alpha"))))
+           (id (plist-get hint :id)))
+      (cl-flet ((block () (with-current-buffer buf (gethash id harness-chat--blocks)))
+                (line-visible-p (text)
+                  (with-current-buffer buf
+                    (let ((pos (harness-ui-chat-test-find buf text)))
+                      (and pos (not (invisible-p (1- pos))))))))
+        (harness-test-wait (lambda () (harness-ui-chat-test-find buf "    alpha\n")) 5 "the hint")
+        (with-current-buffer buf
+          ;; One line: a note like any other, with nothing to fold.
+          (should-not (harness-chat-block-fold (block)))
+          (should-not (harness-ui-chat-test--fold-icon (block)))
+          (should-not (harness-ui-chat-test-find buf "Several things happened"))
+          (should-error (harness-chat-toggle-block id) :type 'user-error))
+        ;; A second line is added to the hint, which is drawn again in place.
+        (harness-call 'session/update-node sid id
+                      :content "Several things happened (2)\nalpha\nbeta"
+                      :meta (harness-ui-chat-test--fold-meta "alpha" "beta"))
+        (harness-test-wait (lambda () (harness-ui-chat-test-find buf "Several things happened (2)")) 5 "the title")
+        (with-current-buffer buf
+          (should (= 1 (length (harness-ui-chat-test-blocks buf "hint"))))
+          (should (eq (block) (gethash id harness-chat--blocks)))
+          ;; Folded: the title shows, with the button that opens it, and the
+          ;; lines do not.
+          (should (harness-chat-block-fold (block)))
+          (should (harness-chat-block-collapsed (block)))
+          (should (harness-ui-chat-test--fold-icon (block)))
+          (should (line-visible-p "Several things happened (2)"))
+          (should (harness-ui-chat-test-find buf "alpha"))
+          (should-not (line-visible-p "alpha"))
+          (should-not (line-visible-p "beta"))
+          ;; The button hangs in the indent before the title, which is
+          ;; aligned to the column the lines below it start at.
+          (save-excursion
+            (goto-char (harness-chat-block-start (block)))
+            (should (looking-at " [^ ] Several things happened (2)$"))
+            ;; After the margin and four columns of indent, as the lines are.
+            (should (equal '(space :align-to 5) (get-text-property (+ (point) 2) 'display)))
+            ;; Hovering the title says the newest line, which is a hover away.
+            (should (equal "Latest: beta" (get-text-property (+ (point) 4) 'help-echo)))
+            (should (equal "     " (get-text-property (1- (harness-ui-chat-test-find buf "alpha")) 'line-prefix))))
+          ;; TAB on the block opens it: a line to a change, each with the
+          ;; time it was said.
+          (goto-char (harness-ui-chat-test--fold-icon (block)))
+          (harness-chat-tab)
+          (should-not (harness-chat-block-collapsed (block)))
+          (should (line-visible-p "alpha"))
+          (should (line-visible-p "beta"))
+          (should (harness-ui-chat-test-find buf "12:15:05  alpha\n"))
+          (should (harness-ui-chat-test-find buf "12:16:05  beta\n")))
+        ;; A third line while it is open: still open, and drawn with it.
+        (harness-call 'session/update-node sid id
+                      :content "Several things happened (3)\nalpha\nbeta\ngamma"
+                      :meta (harness-ui-chat-test--fold-meta "alpha" "beta" "gamma"))
+        (harness-test-wait (lambda () (harness-ui-chat-test-find buf "Several things happened (3)")) 5 "the third")
+        (with-current-buffer buf
+          (should (= 1 (length (harness-ui-chat-test-blocks buf "hint"))))
+          (should-not (harness-chat-block-collapsed (block)))
+          (should (line-visible-p "gamma"))
+          (should (harness-ui-chat-test-find buf "12:17:05  gamma\n"))
+          ;; The button closes it again.
+          (call-interactively (lookup-key (get-text-property (harness-ui-chat-test--fold-icon (block)) 'keymap)
+                                          (kbd "RET")))
+          (should (harness-chat-block-collapsed (block)))
+          (should-not (line-visible-p "gamma"))
+          (should (line-visible-p "Several things happened (3)"))
+          ;; Open again, then drawn afresh: a chat loaded anew starts closed.
+          (harness-chat-toggle-block id))
+        (kill-buffer buf)
+        (setq buf (harness-ui-chat-test-open sid))
+        (with-current-buffer buf
+          (should (harness-chat-block-collapsed (block)))
+          (should (line-visible-p "Several things happened (3)"))
+          (should-not (line-visible-p "gamma")))))))
+
+(ert-deftest harness-ui-chat-a-hint-that-folds-opens-for-a-search ()
+  "Looking for a line the fold keeps opens the fold, as it does a folded block."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (hint (harness-call 'session/append sid
+                               (list :kind 'hint :content "Several things happened (2)\nalpha\nbeta"
+                                     :meta (harness-ui-chat-test--fold-meta "alpha" "beta"))))
+           (id (plist-get hint :id))
+           (buf (harness-ui-chat-test-open sid)))
+      (with-current-buffer buf
+        (let ((block (gethash id harness-chat--blocks)))
+          (should (harness-chat-block-collapsed block))
+          (harness-chat--show-node id "beta")
+          (should-not (harness-chat-block-collapsed block))
+          (should (not (invisible-p (1- (harness-ui-chat-test-find buf "beta"))))))))))
+
+(ert-deftest harness-ui-chat-the-slots-changing-make-one-hint-that-opens ()
+  "The load moving the tool slots about is one line in the chat, not a line each.
+The tool-slots-load module adds each change to one hint (see its tests);
+the chat draws that hint as \"Slots changed due to system load\", with the
+count, closed, and the changes a click away."
+  (harness-ui-chat-test-with
+    (dolist (m '(priority tool-slots tool-slots-load)) (harness-test-load-module m))
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid))
+           (texts '("Tool slots reduced from 18 to 5: system load 1.8x on this machine"
+                    "Tool slots restored to 18: system load back to normal"
+                    "Tool slots reduced from 18 to 9: system load 1.4x on this machine")))
+      (harness-call 'session/append sid '(:kind user :content "build it"))
+      ;; The first change reads as it always did.
+      (harness-tool-slots-load--announce (nth 0 texts))
+      (harness-test-wait (lambda () (harness-ui-chat-test-find buf (concat "    " (nth 0 texts) "\n")))
+                         5 "the first change")
+      (harness-call 'session/append sid '(:kind assistant :content "Building."))
+      (harness-tool-slots-load--announce (nth 1 texts))
+      (harness-call 'session/append sid '(:kind assistant :content "Still building."))
+      (harness-tool-slots-load--announce (nth 2 texts))
+      (harness-test-wait (lambda () (harness-ui-chat-test-find buf "Slots changed due to system load (3 changes)"))
+                         5 "the note")
+      (with-current-buffer buf
+        (should (= 1 (length (harness-ui-chat-test-blocks buf "hint"))))
+        (let ((block (car (harness-ui-chat-test-blocks buf "hint"))))
+          ;; The note is where the first change was, above the replies that
+          ;; came since: nothing new appeared where the chat now ends.
+          (should (< (harness-chat-block-start block) (harness-ui-chat-test-find buf "Building.")))
+          (should (harness-chat-block-collapsed block))
+          (dolist (text texts)
+            (should (harness-ui-chat-test-find buf text))
+            (should (invisible-p (1- (harness-ui-chat-test-find buf text)))))
+          (goto-char (harness-ui-chat-test--fold-icon block))
+          (harness-chat-tab)
+          (dolist (text texts)
+            (should-not (invisible-p (1- (harness-ui-chat-test-find buf text))))))))))
+
 (ert-deftest harness-ui-chat-header-shows-the-plan ()
   "A session a subscription pays for shows the plan and its quota, not a price."
   (harness-ui-chat-test-with

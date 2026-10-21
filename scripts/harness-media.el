@@ -3779,8 +3779,9 @@ each is on now; the control panel offers to comment, reply and list them."
         ;; instead (`harness-media--seed-recaps').  A busy machine --
         ;; this run's own, or whatever else it is doing -- would have
         ;; `tool-slots-load' note "Tool slots reduced from 18 to 5" in
-        ;; every active chat, and push the top of a picture off: the
-        ;; pictures do not depend on the machine's load.
+        ;; every active chat, and push the top of a picture off, and
+        ;; pin "Tool slots limited to 5 of 18" above every compose box:
+        ;; the pictures do not depend on the machine's load.
         harness-disabled-modules '(provider-claude provider-copilot provider-openai provider-bedrock provider-demo
                                                    recap tool-slots-load))
   (harness-media--harness-origins)

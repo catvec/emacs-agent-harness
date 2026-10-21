@@ -194,6 +194,7 @@ ui-tasks); `(setq harness-enabled-modules t)` loads every module.
 | [ui-supervisor](ui-supervisor.md) |  | [ui](ui.md), [ui-chat](ui-chat.md) | Supervisor mode: the chat header's segment and the V key that toggles it. |
 | [ui-tasks](ui-tasks.md) |  | [ui](ui.md) | Task mode: a kanban of one-session tasks with a compose box. |
 | [ui-tasks-search](ui-tasks-search.md) |  | [ui-tasks](ui-tasks.md), [ui-quick-search](ui-quick-search.md) | The task board's search: find tasks, sessions and commands or act on tasks in words, answered by a cheap model. |
+| [ui-tool-slots-load](ui-tool-slots-load.md) |  | [ui](ui.md), [ui-chat](ui-chat.md) | The tool slots held back by the machine's load, pinned above a chat's compose box while they are. |
 | [ui-tree](ui-tree.md) |  | [ui](ui.md) | Conversation tree: the fork family of a session as a git-like graph. |
 | [ui-usage](ui-usage.md) | by default | [ui](ui.md) | Usage and cost dashboard with charts, plan quota and budgets. |
 | [ui-version](ui-version.md) |  | [ui](ui.md) | Version page: whether the running harness is the latest, against its origins. |
@@ -231,7 +232,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `fallback/changed` | [fallback](fallback.md) | [fallback](fallback.md) | [ui-usage](ui-usage.md) | yes |
 | `fallback/switched` | [fallback](fallback.md) | [fallback](fallback.md) | [ui-usage](ui-usage.md) | yes |
 | `handoff/done` | [handoff](handoff.md) | [handoff](handoff.md) |  |  |
-| `harness/reloaded` | `harness.el` | `harness.el` | [session](session.md), [ui-decisions](ui-decisions.md), [ui-version](ui-version.md), [version](version.md), [worktree](worktree.md) | yes |
+| `harness/reloaded` | `harness.el` | `harness.el` | [session](session.md), [ui-decisions](ui-decisions.md), [ui-tool-slots-load](ui-tool-slots-load.md), [ui-version](ui-version.md), [version](version.md), [worktree](worktree.md) | yes |
 | `harness/started` | `harness.el` | `harness.el` | [worktree](worktree.md) |  |
 | `harness/stopping` | `harness.el` | `harness.el` |  |  |
 | `merge/conflict` | [merge](merge.md) | [merge](merge.md) | [tasks](tasks.md), [ui-merge](ui-merge.md), [ui-worktree](ui-worktree.md) | yes |
@@ -292,6 +293,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `task/done` | [tasks](tasks.md) | [tasks](tasks.md) | [pet](pet.md), [ui-patch-review](ui-patch-review.md), [ui-review](ui-review.md), [ui-tasks](ui-tasks.md) | yes |
 | `task/queue` | [tasks](tasks.md) | [tasks](tasks.md) |  | yes |
 | `task/review` | [tasks](tasks.md) | [tasks](tasks.md) | [patch-review](patch-review.md), [ui-patch-review](ui-patch-review.md), [ui-review](ui-review.md), [ui-tasks](ui-tasks.md) | yes |
+| `tool-slots/changed` | [tool-slots-load](tool-slots-load.md) | [tool-slots-load](tool-slots-load.md) | [ui-tool-slots-load](ui-tool-slots-load.md) | yes |
 | `tools/file-written` | [tools](tools.md) | [tools-fs](tools-fs.md) |  | yes |
 | `tools/finished` | [tools](tools.md) | [tools](tools.md) | [supervisor](supervisor.md) |  |
 | `tools/note` | [tools](tools.md) | [tools](tools.md) | [agent](agent.md) |  |
@@ -357,8 +359,8 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `harness-acp-received-hook` | [acp](acp.md) | [ui-chat](ui-chat.md) |
 | `harness-chat-header-end-functions` | [ui-chat](ui-chat.md) | [ui-version](ui-version.md) |
 | `harness-chat-header-functions` | [ui-btw](ui-btw.md), [ui-chat](ui-chat.md), [ui-priority](ui-priority.md), [ui-supervisor](ui-supervisor.md) | [ui-btw](ui-btw.md), [ui-priority](ui-priority.md), [ui-supervisor](ui-supervisor.md) |
-| `harness-chat-mode-hook` | [ui-cache](ui-cache.md), [ui-children](ui-children.md), [ui-handoff](ui-handoff.md), [ui-merge](ui-merge.md) | [ui-cache](ui-cache.md), [ui-children](ui-children.md), [ui-handoff](ui-handoff.md), [ui-merge](ui-merge.md), [ui-patch-review](ui-patch-review.md), [ui-review](ui-review.md) |
-| `harness-chat-panel-functions` | [ui-cache](ui-cache.md), [ui-chat](ui-chat.md), [ui-children](ui-children.md), [ui-handoff](ui-handoff.md), [ui-merge](ui-merge.md), [ui-review](ui-review.md), [ui-tasks](ui-tasks.md) | [ui-cache](ui-cache.md), [ui-children](ui-children.md), [ui-handoff](ui-handoff.md), [ui-merge](ui-merge.md), [ui-review](ui-review.md), [ui-tasks](ui-tasks.md) |
+| `harness-chat-mode-hook` | [ui-cache](ui-cache.md), [ui-children](ui-children.md), [ui-handoff](ui-handoff.md), [ui-merge](ui-merge.md), [ui-tool-slots-load](ui-tool-slots-load.md) | [ui-cache](ui-cache.md), [ui-children](ui-children.md), [ui-handoff](ui-handoff.md), [ui-merge](ui-merge.md), [ui-patch-review](ui-patch-review.md), [ui-review](ui-review.md), [ui-tool-slots-load](ui-tool-slots-load.md) |
+| `harness-chat-panel-functions` | [ui-cache](ui-cache.md), [ui-chat](ui-chat.md), [ui-children](ui-children.md), [ui-handoff](ui-handoff.md), [ui-merge](ui-merge.md), [ui-review](ui-review.md), [ui-tasks](ui-tasks.md), [ui-tool-slots-load](ui-tool-slots-load.md) | [ui-cache](ui-cache.md), [ui-children](ui-children.md), [ui-handoff](ui-handoff.md), [ui-merge](ui-merge.md), [ui-review](ui-review.md), [ui-tasks](ui-tasks.md), [ui-tool-slots-load](ui-tool-slots-load.md) |
 | `harness-chat-send-functions` | [ui-btw](ui-btw.md), [ui-chat](ui-chat.md) | [ui-btw](ui-btw.md) |
 | `harness-chat-tool-body-functions` | [ui-chat](ui-chat.md) | [ui-report](ui-report.md) |
 | `harness-chat-top-functions` | [ui-chat](ui-chat.md) |  |
@@ -369,9 +371,9 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `harness-reload-hook` | `harness.el`, `harness-revision.el` | `harness-revision.el` |
 | `harness-start-hook` | `harness.el`, `harness-revision.el` | `harness-revision.el` |
 | `harness-tasks-feedback-additions-functions` | [patch-review](patch-review.md), [tasks](tasks.md) | [patch-review](patch-review.md) |
-| `harness-ui-connected-hook` | [ui](ui.md) | [ui-chat](ui-chat.md), [ui-decisions](ui-decisions.md), [ui-pending](ui-pending.md), [ui-pet](ui-pet.md), [ui-tasks](ui-tasks.md), [ui-version](ui-version.md) |
+| `harness-ui-connected-hook` | [ui](ui.md) | [ui-chat](ui-chat.md), [ui-decisions](ui-decisions.md), [ui-pending](ui-pending.md), [ui-pet](ui-pet.md), [ui-tasks](ui-tasks.md), [ui-tool-slots-load](ui-tool-slots-load.md), [ui-version](ui-version.md) |
 | `harness-ui-decision-functions` | [ui-chat](ui-chat.md), [ui-decisions](ui-decisions.md) | [ui-chat](ui-chat.md) |
-| `harness-ui-event-functions` | [ui](ui.md), [ui-children](ui-children.md), [ui-priority](ui-priority.md) | [ui-access](ui-access.md), [ui-acp-remote](ui-acp-remote.md), [ui-chat](ui-chat.md), [ui-children](ui-children.md), [ui-config](ui-config.md), [ui-decisions](ui-decisions.md), [ui-merge](ui-merge.md), [ui-patch-review](ui-patch-review.md), [ui-pet](ui-pet.md), [ui-priority](ui-priority.md), [ui-report](ui-report.md), [ui-review](ui-review.md), [ui-secrets](ui-secrets.md), [ui-sessions](ui-sessions.md), [ui-slots](ui-slots.md), [ui-tasks](ui-tasks.md), [ui-tree](ui-tree.md), [ui-usage](ui-usage.md), [ui-version](ui-version.md), [ui-worktree](ui-worktree.md) |
+| `harness-ui-event-functions` | [ui](ui.md), [ui-children](ui-children.md), [ui-priority](ui-priority.md) | [ui-access](ui-access.md), [ui-acp-remote](ui-acp-remote.md), [ui-chat](ui-chat.md), [ui-children](ui-children.md), [ui-config](ui-config.md), [ui-decisions](ui-decisions.md), [ui-merge](ui-merge.md), [ui-patch-review](ui-patch-review.md), [ui-pet](ui-pet.md), [ui-priority](ui-priority.md), [ui-report](ui-report.md), [ui-review](ui-review.md), [ui-secrets](ui-secrets.md), [ui-sessions](ui-sessions.md), [ui-slots](ui-slots.md), [ui-tasks](ui-tasks.md), [ui-tool-slots-load](ui-tool-slots-load.md), [ui-tree](ui-tree.md), [ui-usage](ui-usage.md), [ui-version](ui-version.md), [ui-worktree](ui-worktree.md) |
 | `harness-ui-live-functions` | [ui](ui.md) | [ui-chat](ui-chat.md), [ui-sessions](ui-sessions.md), [ui-tasks](ui-tasks.md) |
 | `harness-ui-media-rerender-functions` | [ui-media](ui-media.md) | [ui-chat](ui-chat.md) |
 | `harness-ui-notification-functions` | [ui](ui.md) | [ui-tasks](ui-tasks.md) |

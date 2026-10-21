@@ -674,6 +674,43 @@ VALUE may have travelled over JSON, as a string."
                  ((and value (symbolp value) (not (memq value '(t :false :null)))) value))))
     (and (memq s '(done undone)) s)))
 
+;;;; Hints that fold
+
+;; Something the harness has to say again and again -- the machine's
+;; load moving the tool slots up and down (harness-tool-slots-load.el)
+;; -- would fill a transcript with hints.  The part of the harness that
+;; says it keeps what it said in one hint instead and adds to it as
+;; there is more to say.  That hint holds in its `:meta' `:fold' the
+;; title it shows folded and the lines under it, and the chat draws it
+;; as one line that opens to them (harness-ui-chat.el).  Its `:content'
+;; says the same in plain text, the title and then a line to an item,
+;; for whatever does not know the fold.
+
+(defun harness-node-fold (node)
+  "Return what the folding hint NODE holds, or nil for any other node.
+That is the `:meta' `:fold' of NODE:
+
+  (:key KEY      ; the part of the harness that writes it, which finds
+                 ; the hint again to add to it
+   :title TITLE  ; what the hint says while it is folded
+   :items ITEMS) ; the lines under it, oldest first, each (:ts TIME :text TEXT)
+
+An item with no text is left out, and a hint with no title or no item
+is no fold.  Strings and numbers may have travelled over JSON."
+  (let ((fold (plist-get (plist-get node :meta) :fold)))
+    (when (and (consp fold) (keywordp (car fold)))
+      (let ((title (plist-get fold :title))
+            (items (delq nil
+                         (mapcar (lambda (item)
+                                   (let ((text (and (consp item) (plist-get item :text)))
+                                         (ts (and (consp item) (plist-get item :ts))))
+                                     (and (stringp text) (not (string-empty-p text))
+                                          (list :ts (and (numberp ts) ts) :text text))))
+                                 (let ((items (plist-get fold :items)))
+                                   (and (sequencep items) (append items nil)))))))
+        (when (and (stringp title) (not (string-empty-p title)) items)
+          (list :key (plist-get fold :key) :title title :items items))))))
+
 ;;;; Messages
 ;;
 ;; A message is content blocks: text, images, files, and the text of an

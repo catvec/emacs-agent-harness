@@ -95,6 +95,8 @@ Functional requirements:
 - The chat interface must be aware of how it opens in Emacs and what position it takes up, presets to open in several convenient places like on the right hand side vertically split
 - Only one session must be visible in each position, if a session is already open in a position and a different session must be opened with the same position preset--then that different session should replace the existing session, so that you can switch between sessions
 - System hint messages can be shown from the harness to tell the user when harness configuration (like session info: name, model, permission mode, ect) change, the text should be muted like thinking but distinct
+- System hint messages about something that changes again and again (like the tool slots following the machine's load) must not fill the chat: the changes of one stretch are kept in one hint, shown as a single collapsed line ("Slots changed due to system load (3 changes)") that can be expanded to show each change
+- How such a thing stands now (how many tool slots there are while the machine's load holds them back) is shown pinned above the compose box, like the todo list and the running sub-agents, and only while it is held back, because the hint that told of it stands wherever the first change landed
 - Messages from the agent, the user, and thinking / tool messages should all have their contents be searchable
 
 ### Image Video Audio Support 

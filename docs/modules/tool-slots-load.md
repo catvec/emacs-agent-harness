@@ -8,6 +8,7 @@ Fewer tool slots while this machine is loaded.
 - **Source:** [lisp/modules/harness-tool-slots-load.el](../../lisp/modules/harness-tool-slots-load.el)
 - **Loaded:** when enabled (see `harness-enable-modules`)
 - **Requires:** [tool-slots](tool-slots.md)
+- **Brings along:** [ui-tool-slots-load](ui-tool-slots-load.md) (its UI)
 
 ## About
 
@@ -49,9 +50,26 @@ or through the ssh tool -- runs on a machine whose load this harness
 cannot read, and keeps that host's baseline slots.
 
 Whenever the effective number changes, down or back up, every active
-session is told as a system message, so the user and the models see
-why calls are waiting: "Tool slots reduced from 18 to 5: system load
-1.8x on this machine".
+session is told as a system message, so the user sees why calls are
+waiting: "Tool slots reduced from 18 to 5: system load 1.8x on this
+machine".  A load that moves a lot would fill every transcript with
+them, so the changes of one stretch share one message per session.
+The first is a hint as above; a change that follows within ten
+minutes of the last is added to that hint instead of a new one,
+whatever else the session has done meanwhile, and the chat draws it
+as one line, "Slots changed due to system load (3 changes)", that
+opens to the changes with the time of each.  After a quieter spell
+the next change starts a hint of its own, so the transcript still
+shows where in the session's work the load moved.  The hint is a
+folding one (`harness-node-fold`).  A session's model is never sent
+hints, so none of this changes what it reads.
+
+That note is the history, and it stands where the first change of its
+stretch landed.  How the slots stand now is the machine's, not a
+session's: the `tool-slots/status` method gives it, and the event
+`tool-slots/changed` announces every change -- the watch ending too --
+so that a UI can show it, as the chat does while the slots are held
+back, pinned above its compose box (ui-tool-slots-load).
 
 The limit is modulated by around advice on
 `harness-tool-slots--slots`, which is where the tool-slots plugin
@@ -62,6 +80,14 @@ machine that function now takes.  Disable the module
 the limit is the baseline again, as plain tool-slots leaves it.
 
 ## Provides
+
+### Methods
+
+- `tool-slots/status` — Return this machine's tool slots: (:limit :baseline :pressure :text :at).
+
+### Events
+
+- `tool-slots/changed` — (STATE) once the slots this machine allows changed, or the watch ended: STATE as `tool-slots/status` gives it.
 
 ### Options
 
@@ -78,6 +104,12 @@ the limit is the baseline again, as plain tool-slots leaves it.
 
 ### Methods it calls
 
-- `session/hint` ([session](session.md)), when it is loaded
+- `session/append` ([session](session.md)), when it is loaded
 - `session/list` ([session](session.md)), when it is loaded
+- `session/nodes` ([session](session.md)), when it is loaded
+- `session/update-node` ([session](session.md)), when it is loaded
+
+### Events it emits
+
+- `tool-slots/changed`
 

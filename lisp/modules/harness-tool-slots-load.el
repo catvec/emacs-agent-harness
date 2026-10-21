@@ -40,9 +40,26 @@
 ;; cannot read, and keeps that host's baseline slots.
 ;;
 ;; Whenever the effective number changes, down or back up, every active
-;; session is told as a system message, so the user and the models see
-;; why calls are waiting: "Tool slots reduced from 18 to 5: system load
-;; 1.8x on this machine".
+;; session is told as a system message, so the user sees why calls are
+;; waiting: "Tool slots reduced from 18 to 5: system load 1.8x on this
+;; machine".  A load that moves a lot would fill every transcript with
+;; them, so the changes of one stretch share one message per session.
+;; The first is a hint as above; a change that follows within ten
+;; minutes of the last is added to that hint instead of a new one,
+;; whatever else the session has done meanwhile, and the chat draws it
+;; as one line, "Slots changed due to system load (3 changes)", that
+;; opens to the changes with the time of each.  After a quieter spell
+;; the next change starts a hint of its own, so the transcript still
+;; shows where in the session's work the load moved.  The hint is a
+;; folding one (`harness-node-fold').  A session's model is never sent
+;; hints, so none of this changes what it reads.
+;;
+;; That note is the history, and it stands where the first change of its
+;; stretch landed.  How the slots stand now is the machine's, not a
+;; session's: the `tool-slots/status' method gives it, and the event
+;; `tool-slots/changed' announces every change -- the watch ending too --
+;; so that a UI can show it, as the chat does while the slots are held
+;; back, pinned above its compose box (ui-tool-slots-load).
 ;;
 ;; The limit is modulated by around advice on
 ;; `harness-tool-slots--slots', which is where the tool-slots plugin
@@ -182,6 +199,11 @@ what the load allows, never above the baseline.")
 (defvar harness-tool-slots-load--changed-pressure nil
   "Load per processor when the limit last changed, or nil.")
 
+(defvar harness-tool-slots-load--changed-text nil
+  "What the sessions were told when the limit last changed, or nil.
+The same line the sessions' note holds (`harness-tool-slots-load--notice'),
+for a UI that shows the slots as they are now.")
+
 (defvar harness-tool-slots-load--timer nil
   "The repeating timer that samples the load, or nil when it is off.")
 
@@ -282,30 +304,187 @@ watch was turned off."
         (t (format "Tool slots raised from %d to %d: system load %.1fx on this machine"
                    old new pressure))))
 
+;;;; One note per stretch of changes
+;;
+;; A session is told of a change in a hint, and a load that moves a lot
+;; moves the slots a lot: a hint to each change would fill the
+;; transcript, and split the runs of tool calls the chat folds into one
+;; summary.  So the changes of one stretch share a hint, the session's
+;; note of slot changes: a folding hint (`harness-node-fold') holding a
+;; line to a change, which the chat draws as one line that opens to
+;; them.  A change is added to the note the session has when that
+;; note's last change is recent, wherever in the transcript the note
+;; is -- tool calls and messages may have come since -- and a change
+;; that comes later than that starts a note of its own.
+
+(defconst harness-tool-slots-load--note-key "tool-slots-load"
+  "The `:key' of the fold of a session's note of slot changes.
+It tells this module's notes from other hints that fold.")
+
+(defconst harness-tool-slots-load--note-title "Slots changed due to system load"
+  "What a note of slot changes says while it is folded, before the count.")
+
+(defvar harness-tool-slots-load--note-window 600.0
+  "Seconds a note of slot changes stays open to the next change.
+A change that comes this soon after the note's last is added to the
+note; a later one starts another.  A load that moves back and forth
+within minutes therefore makes one note, and a build an hour on, with
+the machine quiet between, a note of its own.")
+
+(defvar harness-tool-slots-load--note-limit 20
+  "Most changes one note of slot changes holds.
+A note this full is closed, and the next change starts another: a load
+that moves for hours would otherwise write one ever longer note anew
+at every change.  With the default options the load of a build, from
+idle to full and back, changes the slots fewer times than that, each
+`harness-tool-slots-load-deadband' of load being one change at most,
+so a build is one note.")
+
+(defun harness-tool-slots-load--note-count-title (items)
+  "Return the title of a note holding ITEMS: the title, and how many changes.
+A note of one change is that change's own line in the chat, so its
+title is only the title."
+  (if (cdr items)
+      (format "%s (%d changes)" harness-tool-slots-load--note-title (length items))
+    harness-tool-slots-load--note-title))
+
+(defun harness-tool-slots-load--note-text (items)
+  "Return the plain text of a note holding ITEMS, for what does not fold.
+One change reads as its own line, as the hint of a single change always
+did; several read as the title and a line to a change, with its time."
+  (if (null (cdr items))
+      (plist-get (car items) :text)
+    (concat (harness-tool-slots-load--note-count-title items) "\n"
+            (mapconcat (lambda (item)
+                         (let ((ts (plist-get item :ts)))
+                           (concat (if ts (format-time-string "%H:%M:%S  " ts) "")
+                                   (plist-get item :text))))
+                       items "\n"))))
+
+(defun harness-tool-slots-load--note-meta (meta items)
+  "Return META, a node's `:meta', with the fold of a note holding ITEMS."
+  (plist-put (copy-sequence meta) :fold
+             (list :key harness-tool-slots-load--note-key
+                   :title (harness-tool-slots-load--note-count-title items)
+                   :items items)))
+
+(defun harness-tool-slots-load--open-note (id now)
+  "Return session ID's note that a change at NOW is added to, or nil.
+That is the session's newest note of slot changes on the branch its
+transcript is on, when its last change is less than
+`harness-tool-slots-load--note-window' old and it holds fewer than
+`harness-tool-slots-load--note-limit' changes.  A newer note that is
+closed is the last word: an older one is older still."
+  (cl-loop for node in (reverse (harness-call 'session/nodes id))
+           for fold = (and (eq (plist-get node :kind) 'hint) (harness-node-fold node))
+           when (and fold (equal (plist-get fold :key) harness-tool-slots-load--note-key))
+           return (let* ((items (plist-get fold :items))
+                         (last (plist-get (car (last items)) :ts)))
+                    (and (< (length items) harness-tool-slots-load--note-limit)
+                         (numberp last)
+                         (< (- now last) harness-tool-slots-load--note-window)
+                         node))))
+
+(defun harness-tool-slots-load--note-add (id node text now)
+  "Add the change TEXT, at NOW, to NODE, the note of session ID."
+  (let ((items (append (plist-get (harness-node-fold node) :items)
+                       (list (list :ts now :text text)))))
+    (harness-call 'session/update-node id (plist-get node :id)
+                  :content (harness-tool-slots-load--note-text items)
+                  :meta (harness-tool-slots-load--note-meta (plist-get node :meta) items))))
+
+(defun harness-tool-slots-load--note-start (id text now)
+  "Start a note of slot changes in session ID, with the change TEXT at NOW."
+  (let ((items (list (list :ts now :text text))))
+    (harness-call 'session/append id
+                  (list :kind 'hint
+                        :content (harness-tool-slots-load--note-text items)
+                        :meta (harness-tool-slots-load--note-meta nil items)))))
+
+(defun harness-tool-slots-load--note (id text now)
+  "Tell session ID of the change TEXT, at NOW, in its note of slot changes.
+The change joins the session's open note (see
+`harness-tool-slots-load--open-note'), or starts a note when there is
+none.  A note that cannot be added to -- it went while this was on its
+way -- is no reason to leave the session untold: the change starts a
+new one."
+  (let ((open (harness-tool-slots-load--open-note id now)))
+    (or (and open
+             (condition-case err
+                 (progn (harness-tool-slots-load--note-add id open text now) t)
+               (error (harness-log 'debug "tool-slots-load: no adding to the note of %s: %s"
+                                   id (harness-error-message err))
+                      nil)))
+        (harness-tool-slots-load--note-start id text now))))
+
 (defun harness-tool-slots-load--announce (text)
-  "Append TEXT to every active session, as a system hint.
+  "Tell every active session of the change TEXT, in its note of slot changes.
 A session that is closed, or inactive, is left alone; a session that
 goes while the message is on its way is skipped."
   (when (and (harness-method-exists-p 'session/list)
-             (harness-method-exists-p 'session/hint))
-    (dolist (session (harness-call 'session/list (list :active t)))
-      (let ((id (plist-get session :id)))
-        (when (and (stringp id) (not (eq (plist-get session :status) 'inactive)))
-          (ignore-errors (harness-call 'session/hint id text)))))))
+             (harness-method-exists-p 'session/nodes)
+             (harness-method-exists-p 'session/append)
+             (harness-method-exists-p 'session/update-node))
+    (let ((now (float-time)))
+      (dolist (session (harness-call 'session/list (list :active t)))
+        (let ((id (plist-get session :id)))
+          (when (and (stringp id) (not (eq (plist-get session :status) 'inactive)))
+            (condition-case err
+                (harness-tool-slots-load--note id text now)
+              (error (harness-log 'debug "tool-slots-load: %s not told: %s"
+                                  id (harness-error-message err))))))))))
+
+;;;; The slots as they are now
+
+;; The notes in the sessions' transcripts are the history of the slots
+;; changing.  What a person watching a chat wants to know is how many
+;; there are now, so a UI shows that pinned above the compose box while
+;; they are held back (harness-ui-tool-slots-load.el).  It gets the
+;; state from `tool-slots/status' when it connects and hears of every
+;; change as `tool-slots/changed'.
+
+(defun harness-tool-slots-load--state ()
+  "Return this machine's tool slots as a UI shows them.
+That is (:limit N :baseline B :pressure P :text TEXT :at TIME): N the
+slots in force, B the most there are -- the machine is held back while N
+is under B -- and, of the change that took N, P the load per processor
+that decided it, TEXT what the sessions were told and TIME when.  The
+last three are nil before the first change, and P when the watch was
+turned off."
+  (let ((baseline (harness-tool-slots--baseline)))
+    (list :limit (min baseline (or harness-tool-slots-load--limit baseline))
+          :baseline baseline
+          :pressure harness-tool-slots-load--changed-pressure
+          :text harness-tool-slots-load--changed-text
+          :at harness-tool-slots-load--changed-at)))
+
+(harness-defmethod tool-slots/status ()
+  "Return this machine's tool slots: (:limit :baseline :pressure :text :at).
+:limit is how many calls of the governed tools may run at once on this
+machine now and :baseline how many would without the load watch, so the
+machine is held back while :limit is the smaller.  :pressure is the load
+per processor that took the limit, :text what the sessions were told of
+it and :at when, as `tool-slots/changed' announces them."
+  (harness-tool-slots-load--state))
+
+(harness-declare-event 'tool-slots/changed
+  "(STATE) once the slots this machine allows changed, or the watch ended: STATE as `tool-slots/status' gives it.")
 
 (defun harness-tool-slots-load--set (slots pressure)
   "Make SLOTS this machine's limit, nil for the baseline, and say so.
 PRESSURE is the load per processor that decided it, nil when the load
-watch was turned off.  The calls waiting start when the limit rose, and
-every active session hears the new number."
+watch was turned off.  Every UI hears the new state, the calls waiting
+start when the limit rose, and every active session hears the new number."
   (let* ((baseline (harness-tool-slots--baseline))
          (old (min baseline (or harness-tool-slots-load--limit baseline)))
          (new (or slots baseline))
          (text (harness-tool-slots-load--notice old new pressure)))
     (setq harness-tool-slots-load--limit slots
           harness-tool-slots-load--changed-at (float-time)
-          harness-tool-slots-load--changed-pressure pressure)
+          harness-tool-slots-load--changed-pressure pressure
+          harness-tool-slots-load--changed-text text)
     (harness-log 'info "tool-slots-load: %s" text)
+    (harness-emit 'tool-slots/changed (harness-tool-slots-load--state))
     (harness-tool-slots-load--admit)
     (harness-tool-slots-load--announce text)))
 
@@ -343,7 +522,8 @@ cannot report leaves the limit as it is."
     (advice-add 'harness-tool-slots--slots :around
                 #'harness-tool-slots-load--slots-advice))
   (setq harness-tool-slots-load--changed-at nil
-        harness-tool-slots-load--changed-pressure nil)
+        harness-tool-slots-load--changed-pressure nil
+        harness-tool-slots-load--changed-text nil)
   ;; The machine may already be busy: take the first reading now.
   (harness-tool-slots-load--tick)
   (when (timerp harness-tool-slots-load--timer)
@@ -355,17 +535,22 @@ cannot report leaves the limit as it is."
 (defun harness-tool-slots-load--shutdown ()
   "Stop watching the load and give this machine its baseline slots back.
 The sessions are not told: the watch going away is not the machine's
-load changing, and a harness shutting down has no business saying so."
+load changing, and a harness shutting down has no business saying so.
+A UI is, if the slots were held back, so that what it shows of them
+goes with the limit."
   (when (timerp harness-tool-slots-load--timer)
     (cancel-timer harness-tool-slots-load--timer))
   (setq harness-tool-slots-load--timer nil)
   (advice-remove 'harness-tool-slots--slots
                  #'harness-tool-slots-load--slots-advice)
-  (when harness-tool-slots-load--limit
-    (setq harness-tool-slots-load--limit nil)
-    (harness-tool-slots-load--admit))
-  (setq harness-tool-slots-load--changed-at nil
-        harness-tool-slots-load--changed-pressure nil))
+  (let ((held (and harness-tool-slots-load--limit t)))
+    (setq harness-tool-slots-load--limit nil
+          harness-tool-slots-load--changed-at nil
+          harness-tool-slots-load--changed-pressure nil
+          harness-tool-slots-load--changed-text nil)
+    (when held
+      (harness-tool-slots-load--admit)
+      (harness-emit 'tool-slots/changed (harness-tool-slots-load--state)))))
 
 (harness-define-module 'tool-slots-load
   :doc "Fewer tool slots while this machine is loaded."

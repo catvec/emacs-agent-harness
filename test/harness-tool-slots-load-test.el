@@ -147,6 +147,39 @@ and put back when a test took it off."
   "Return the newest system hint session ID holds, or nil."
   (car (last (harness-tool-slots-load-test--hints id))))
 
+(defun harness-tool-slots-load-test--notes (id)
+  "Return the notes of slot changes session ID holds, oldest first.
+They are the hints that fold (`harness-node-fold'), as nodes."
+  (cl-remove-if-not (lambda (node) (and (eq (plist-get node :kind) 'hint)
+                                       (harness-node-fold node)))
+                    (harness-call 'session/nodes id)))
+
+(defun harness-tool-slots-load-test--lines (note)
+  "Return the changes NOTE holds, oldest first, as the texts they say."
+  (mapcar (lambda (item) (plist-get item :text))
+          (plist-get (harness-node-fold note) :items)))
+
+(defun harness-tool-slots-load-test--move (per-processor)
+  "Move the machine's load to PER-PROCESSOR and take a reading.
+The reading is let through the cooldown and the deadband, so it changes
+the slots whenever the load asks for another number."
+  (setq harness-tool-slots-load-function (harness-tool-slots-load-test--load per-processor)
+        harness-tool-slots-load--changed-at nil
+        harness-tool-slots-load--changed-pressure nil)
+  (harness-tool-slots-load-test--tick))
+
+(defconst harness-tool-slots-load-test--reduced
+  "Tool slots reduced from 8 to 4: system load 1.5x on this machine"
+  "What a machine of eight slots going to load 1.5 per processor tells.")
+
+(defconst harness-tool-slots-load-test--restored
+  "Tool slots restored to 8: system load back to normal"
+  "What a machine of eight slots getting its slots back tells.")
+
+(defconst harness-tool-slots-load-test--floor
+  "Tool slots reduced from 8 to 1: system load 2.0x on this machine"
+  "What a machine of eight slots going to load 2.0 per processor tells.")
+
 ;;;; The limit the load allows
 
 (ert-deftest harness-tool-slots-load-a-quiet-machine-keeps-the-baseline ()
@@ -507,7 +540,9 @@ and put back when a test took it off."
 ;;;; Telling the sessions
 
 (ert-deftest harness-tool-slots-load-a-change-tells-every-active-session ()
-  "Both directions of a change reach every active session, once."
+  "Both directions of a change reach every active session, once.
+A first change is a hint saying what changed, as ever; the way back up
+joins it (see the tests of the note below)."
   (harness-tool-slots-load-test-with-sessions
     (let* ((cwd (harness-test-temp-dir))
            (first (plist-get (harness-call 'session/create :cwd cwd) :id))
@@ -531,14 +566,408 @@ and put back when a test took it off."
           (harness-tool-slots-load-test--tick)
           (should (equal told (list (harness-tool-slots-load-test--hints first)
                                     (harness-tool-slots-load-test--hints second)))))
-        ;; The way back up is told too.
-        (setq harness-tool-slots-load-function (harness-tool-slots-load-test--load 0.2)
-              harness-tool-slots-load--changed-at nil)
-        (harness-tool-slots-load-test--tick)
+        ;; The way back up is told too, in the note the first change began
+        ;; rather than in another hint: one note holds the two changes.
+        (harness-tool-slots-load-test--move 0.2)
         (should (= 8 (harness-tool-slots--slots "local:test-machine")))
-        (should (equal "Tool slots restored to 8: system load back to normal"
-                       (harness-tool-slots-load-test--hint first)))
-        (should (equal 2 (length (harness-tool-slots-load-test--hints first))))))))
+        (dolist (id (list first second))
+          (should (= 1 (length (harness-tool-slots-load-test--hints id))))
+          (should (equal (list harness-tool-slots-load-test--reduced
+                               harness-tool-slots-load-test--restored)
+                         (harness-tool-slots-load-test--lines
+                          (car (harness-tool-slots-load-test--notes id))))))
+        (should-not (harness-tool-slots-load-test--notes closed))))))
+
+;;;; One note per stretch of changes
+
+(ert-deftest harness-tool-slots-load-the-first-change-reads-as-it-always-did ()
+  "A change on its own is a hint with the one line, whatever else it holds.
+Its fold, which the chat does not draw for one change, is there for the
+next change to add to."
+  (harness-tool-slots-load-test-with-sessions
+    (let ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id))
+          (harness-tool-slots-count 8)
+          (harness-tool-slots-burst 0))
+      (harness-tool-slots-load-test--move 1.5)
+      (let* ((note (car (harness-tool-slots-load-test--notes id)))
+             (fold (harness-node-fold note)))
+        (should (equal harness-tool-slots-load-test--reduced (plist-get note :content)))
+        (should (equal "tool-slots-load" (plist-get fold :key)))
+        (should (equal "Slots changed due to system load" (plist-get fold :title)))
+        (should (equal (list harness-tool-slots-load-test--reduced)
+                       (harness-tool-slots-load-test--lines note)))
+        (should (numberp (plist-get (car (plist-get fold :items)) :ts)))
+        (should (= 1 (length (harness-call 'session/nodes id))))))))
+
+(ert-deftest harness-tool-slots-load-the-changes-of-a-stretch-share-one-note ()
+  "A change within the window joins the session's note, in place.
+Whatever the session did since the note was written -- messages, tool
+calls -- the note stays where it is and gains a line, and no hint is
+added where the session now is."
+  (harness-tool-slots-load-test-with-sessions
+    (let ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id))
+          (harness-tool-slots-count 8)
+          (harness-tool-slots-burst 0))
+      (harness-call 'session/append id '(:kind user :content "go"))
+      (harness-tool-slots-load-test--move 1.5)
+      (let ((note-id (plist-get (car (harness-tool-slots-load-test--notes id)) :id)))
+        (harness-call 'session/append id '(:kind assistant :content "on it"))
+        (harness-call 'session/append id '(:kind tool-call :tool "bash" :call-id "c1" :input (:command "ls")))
+        (harness-call 'session/append id '(:kind tool-result :call-id "c1" :output "a b"))
+        (harness-tool-slots-load-test--move 0.2)
+        (harness-call 'session/append id '(:kind assistant :content "still on it"))
+        (harness-tool-slots-load-test--move 2.0)
+        ;; One hint, the one the first change wrote, and it is not the
+        ;; session's newest node: it was updated where it stands.
+        (should (= 1 (length (harness-tool-slots-load-test--hints id))))
+        (should (= 1 (length (harness-tool-slots-load-test--notes id))))
+        (let ((note (car (harness-tool-slots-load-test--notes id))))
+          (should (equal note-id (plist-get note :id)))
+          (should-not (equal note-id (plist-get (harness-call 'session/get id) :head)))
+          (should (equal (list harness-tool-slots-load-test--reduced
+                               harness-tool-slots-load-test--restored
+                               harness-tool-slots-load-test--floor)
+                         (harness-tool-slots-load-test--lines note)))
+          (should (equal "Slots changed due to system load (3 changes)"
+                         (plist-get (harness-node-fold note) :title)))
+          ;; Its plain text, for what does not fold: the title, then a line
+          ;; to a change, each with the time it came.
+          (let ((lines (split-string (plist-get note :content) "\n")))
+            (should (equal "Slots changed due to system load (3 changes)" (car lines)))
+            (should (= 4 (length lines)))
+            (cl-loop for line in (cdr lines)
+                     for text in (harness-tool-slots-load-test--lines note)
+                     do (should (string-match (concat "\\`[0-9][0-9]:[0-9][0-9]:[0-9][0-9]  "
+                                                      (regexp-quote text) "\\'")
+                                              line))))
+          ;; The changes came one after another.
+          (let ((times (mapcar (lambda (item) (plist-get item :ts))
+                               (plist-get (harness-node-fold note) :items))))
+            (should (equal times (sort (copy-sequence times) #'<)))))))))
+
+(ert-deftest harness-tool-slots-load-each-session-keeps-a-note-of-its-own ()
+  "A session that was told later joins no one else's note, and has its own."
+  (harness-tool-slots-load-test-with-sessions
+    (let* ((cwd (harness-test-temp-dir))
+           (first (plist-get (harness-call 'session/create :cwd cwd) :id))
+           (harness-tool-slots-count 8)
+           (harness-tool-slots-burst 0))
+      (harness-tool-slots-load-test--move 1.5)
+      (let ((second (plist-get (harness-call 'session/create :cwd cwd) :id)))
+        (harness-tool-slots-load-test--move 0.2)
+        (should (equal (list harness-tool-slots-load-test--reduced
+                             harness-tool-slots-load-test--restored)
+                       (harness-tool-slots-load-test--lines
+                        (car (harness-tool-slots-load-test--notes first)))))
+        ;; The second session heard only of the change it was there for.
+        (should (equal (list harness-tool-slots-load-test--restored)
+                       (harness-tool-slots-load-test--lines
+                        (car (harness-tool-slots-load-test--notes second)))))
+        (should (equal harness-tool-slots-load-test--restored
+                       (plist-get (car (harness-tool-slots-load-test--notes second)) :content)))))))
+
+(ert-deftest harness-tool-slots-load-a-change-after-a-quiet-spell-starts-a-note ()
+  "A change later than the window after the note's last starts a note of its own.
+The transcript then shows where in the session's work the load moved."
+  (harness-tool-slots-load-test-with-sessions
+    (let ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id))
+          (harness-tool-slots-count 8)
+          (harness-tool-slots-burst 0))
+      (should (> harness-tool-slots-load--note-window 0))
+      (harness-tool-slots-load-test--move 1.5)
+      (let ((harness-tool-slots-load--note-window 0.0))
+        (harness-call 'session/append id '(:kind assistant :content "much later"))
+        (harness-tool-slots-load-test--move 0.2))
+      (let ((notes (harness-tool-slots-load-test--notes id)))
+        (should (= 2 (length notes)))
+        (should (equal harness-tool-slots-load-test--reduced (plist-get (car notes) :content)))
+        (should (equal harness-tool-slots-load-test--restored (plist-get (cadr notes) :content)))
+        (should (equal (list harness-tool-slots-load-test--restored)
+                       (harness-tool-slots-load-test--lines (cadr notes)))))
+      ;; The newest note is the one the next change joins, not the first.
+      (harness-tool-slots-load-test--move 2.0)
+      (let ((notes (harness-tool-slots-load-test--notes id)))
+        (should (= 2 (length notes)))
+        (should (= 1 (length (harness-tool-slots-load-test--lines (car notes)))))
+        (should (equal (list harness-tool-slots-load-test--restored
+                             harness-tool-slots-load-test--floor)
+                       (harness-tool-slots-load-test--lines (cadr notes))))))))
+
+(ert-deftest harness-tool-slots-load-the-window-is-counted-from-the-last-change ()
+  "A note stays open while the changes keep coming, however long it has been.
+Its window is that of its last change, not of its first."
+  (harness-tool-slots-load-test-with-sessions
+    (let ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id))
+          (harness-tool-slots-count 8)
+          (harness-tool-slots-burst 0)
+          (harness-tool-slots-load-test--clock 1000.0))
+      (cl-letf (((symbol-function 'float-time)
+                 (lambda (&optional _) harness-tool-slots-load-test--clock)))
+        ;; Four changes, 400 seconds apart: 1200 seconds from the first
+        ;; to the last, which is twice the window of 600.
+        (dolist (load '(1.5 0.2 1.5 0.2))
+          (harness-tool-slots-load-test--move load)
+          (cl-incf harness-tool-slots-load-test--clock 400.0))
+        (should (= 1 (length (harness-tool-slots-load-test--notes id))))
+        (should (= 4 (length (harness-tool-slots-load-test--lines
+                              (car (harness-tool-slots-load-test--notes id))))))
+        ;; The clock is 400 seconds past the last change: inside the window.
+        ;; At 700 it is outside.
+        (cl-incf harness-tool-slots-load-test--clock 300.0)
+        (harness-tool-slots-load-test--move 1.5)
+        (should (= 2 (length (harness-tool-slots-load-test--notes id))))
+        (should (equal (list harness-tool-slots-load-test--reduced)
+                       (harness-tool-slots-load-test--lines
+                        (cadr (harness-tool-slots-load-test--notes id)))))))))
+
+(ert-deftest harness-tool-slots-load-a-full-note-is-closed ()
+  "A note that holds as many changes as it may is closed, and the next starts another."
+  (harness-tool-slots-load-test-with-sessions
+    (let ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id))
+          (harness-tool-slots-count 8)
+          (harness-tool-slots-burst 0)
+          (harness-tool-slots-load--note-limit 2))
+      (harness-tool-slots-load-test--move 1.5)
+      (harness-tool-slots-load-test--move 0.2)
+      (should (= 1 (length (harness-tool-slots-load-test--notes id))))
+      (harness-tool-slots-load-test--move 2.0)
+      (let ((notes (harness-tool-slots-load-test--notes id)))
+        (should (= 2 (length notes)))
+        (should (= 2 (length (harness-tool-slots-load-test--lines (car notes)))))
+        (should (equal (list harness-tool-slots-load-test--floor)
+                       (harness-tool-slots-load-test--lines (cadr notes))))))))
+
+(ert-deftest harness-tool-slots-load-a-note-off-the-branch-is-left-alone ()
+  "A session that went back before its note does not add to the note.
+The note is on a branch the session left; the change is told where the
+session is, in a note of its own."
+  (harness-tool-slots-load-test-with-sessions
+    (let* ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id))
+           (start (plist-get (harness-call 'session/append id '(:kind user :content "go")) :id))
+           (harness-tool-slots-count 8)
+           (harness-tool-slots-burst 0))
+      (harness-tool-slots-load-test--move 1.5)
+      (let ((old (car (harness-tool-slots-load-test--notes id))))
+        (harness-call 'session/set-head id start)
+        (should-not (harness-tool-slots-load-test--notes id))
+        (harness-tool-slots-load-test--move 0.2)
+        (let ((now (car (harness-tool-slots-load-test--notes id))))
+          (should-not (equal (plist-get old :id) (plist-get now :id)))
+          (should (equal (list harness-tool-slots-load-test--restored)
+                         (harness-tool-slots-load-test--lines now))))
+        ;; The note on the branch left is as it was.
+        (should (equal (list harness-tool-slots-load-test--reduced)
+                       (harness-tool-slots-load-test--lines
+                        (harness-call 'session/node id (plist-get old :id)))))))))
+
+(ert-deftest harness-tool-slots-load-another-modules-fold-is-not-ours ()
+  "A hint that folds for another module is left as it is."
+  (harness-tool-slots-load-test-with-sessions
+    (let ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id))
+          (harness-tool-slots-count 8)
+          (harness-tool-slots-burst 0))
+      (let ((other (harness-call 'session/append id
+                                 (list :kind 'hint :content "Other things\nthing"
+                                       :meta (list :fold (list :key "other" :title "Other things"
+                                                               :items (list (list :ts (float-time) :text "thing"))))))))
+        (harness-tool-slots-load-test--move 1.5)
+        (should (equal '("thing") (harness-tool-slots-load-test--lines
+                                   (harness-call 'session/node id (plist-get other :id)))))
+        (should (= 2 (length (harness-tool-slots-load-test--notes id))))
+        (should (equal (list harness-tool-slots-load-test--reduced)
+                       (harness-tool-slots-load-test--lines
+                        (cadr (harness-tool-slots-load-test--notes id)))))))))
+
+(ert-deftest harness-tool-slots-load-a-note-that-cannot-be-added-to-is-replaced ()
+  "A session is told even when its note went while the change was on its way."
+  (harness-tool-slots-load-test-with-sessions
+    (let ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id))
+          (harness-tool-slots-count 8)
+          (harness-tool-slots-burst 0))
+      (harness-tool-slots-load-test--move 1.5)
+      (cl-letf (((symbol-function 'harness-tool-slots-load--note-add)
+                 (lambda (&rest _) (error "The note is gone"))))
+        (harness-tool-slots-load-test--move 0.2))
+      (let ((notes (harness-tool-slots-load-test--notes id)))
+        (should (= 2 (length notes)))
+        (should (equal (list harness-tool-slots-load-test--restored)
+                       (harness-tool-slots-load-test--lines (cadr notes))))))))
+
+(ert-deftest harness-tool-slots-load-a-session-that-cannot-be-told-leaves-the-others-told ()
+  "A session that goes while the message is on its way is skipped."
+  (harness-tool-slots-load-test-with-sessions
+    (let* ((cwd (harness-test-temp-dir))
+           (gone (plist-get (harness-call 'session/create :cwd cwd) :id))
+           (kept (plist-get (harness-call 'session/create :cwd cwd) :id))
+           (note (symbol-function 'harness-tool-slots-load--note))
+           (harness-tool-slots-count 8)
+           (harness-tool-slots-burst 0))
+      (cl-letf (((symbol-function 'harness-tool-slots-load--note)
+                 (lambda (id &rest args)
+                   (if (equal id gone) (error "No session %s" id) (apply note id args)))))
+        (harness-tool-slots-load-test--move 1.5))
+      (should (= 4 (harness-tool-slots--slots "local:test-machine")))
+      (should-not (harness-tool-slots-load-test--notes gone))
+      (should (equal (list harness-tool-slots-load-test--reduced)
+                     (harness-tool-slots-load-test--lines
+                      (car (harness-tool-slots-load-test--notes kept))))))))
+
+(ert-deftest harness-tool-slots-load-the-note-outlives-a-restart ()
+  "A note read back from the node log is the one the next change joins."
+  (harness-tool-slots-load-test-with-sessions
+    (let ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id))
+          (harness-tool-slots-count 8)
+          (harness-tool-slots-burst 0))
+      (harness-tool-slots-load-test--move 1.5)
+      (harness-tool-slots-load-test--move 0.2)
+      (let ((before (car (harness-tool-slots-load-test--notes id))))
+        (harness-session-flush)
+        (clrhash harness-sessions)
+        (harness-session--load-all)
+        (harness-call 'session/resume id)
+        (let ((after (car (harness-tool-slots-load-test--notes id))))
+          (should (equal (plist-get before :id) (plist-get after :id)))
+          (should (equal (plist-get before :content) (plist-get after :content)))
+          (should (equal (harness-node-fold before) (harness-node-fold after))))
+        (harness-tool-slots-load-test--move 2.0)
+        (should (= 1 (length (harness-tool-slots-load-test--notes id))))
+        (should (equal (list harness-tool-slots-load-test--reduced
+                             harness-tool-slots-load-test--restored
+                             harness-tool-slots-load-test--floor)
+                       (harness-tool-slots-load-test--lines
+                        (car (harness-tool-slots-load-test--notes id)))))
+        ;; And the update was written too: the next restart reads it.
+        (harness-session-flush)
+        (clrhash harness-sessions)
+        (harness-session--load-all)
+        (should (= 3 (length (harness-tool-slots-load-test--lines
+                              (car (harness-tool-slots-load-test--notes id))))))))))
+
+;;;; The slots as they stand
+;;
+;; The notes are the history; a UI shows how the slots stand now, from
+;; `tool-slots/status' and each `tool-slots/changed'.
+
+(defvar harness-tool-slots-load-test--changes nil
+  "The states `tool-slots/changed' announced, newest first.")
+
+(defun harness-tool-slots-load-test--listen ()
+  "Collect what `tool-slots/changed' announces in `harness-tool-slots-load-test--changes'."
+  (setq harness-tool-slots-load-test--changes nil)
+  (harness-on 'tool-slots/changed
+              (lambda (state) (push state harness-tool-slots-load-test--changes))))
+
+(ert-deftest harness-tool-slots-load-the-state-says-how-the-slots-stand ()
+  "The state is the limit in force, the most there are, and what took it.
+A machine with all its slots has the limit and the baseline alike and
+nothing to say of a change; one held back has the load that took the
+limit, what the sessions were told and when; `tool-slots/status' gives
+the same."
+  (harness-tool-slots-load-test-with-sessions
+    (let ((harness-tool-slots-count 8)
+          (harness-tool-slots-burst 0))
+      (let ((state (harness-tool-slots-load--state)))
+        (should (= 8 (plist-get state :limit)))
+        (should (= 8 (plist-get state :baseline)))
+        (should-not (plist-get state :pressure))
+        (should-not (plist-get state :text))
+        (should-not (plist-get state :at)))
+      (harness-tool-slots-load-test--move 1.5)
+      (let ((state (harness-tool-slots-load--state)))
+        (should (= 4 (plist-get state :limit)))
+        (should (= 8 (plist-get state :baseline)))
+        (should (= 1.5 (plist-get state :pressure)))
+        (should (equal harness-tool-slots-load-test--reduced (plist-get state :text)))
+        (should (numberp (plist-get state :at)))
+        ;; Clients ask for it by name.
+        (should (equal state (harness-call 'tool-slots/status))))
+      ;; The way back up: all the slots, and what said so.
+      (harness-tool-slots-load-test--move 0.2)
+      (let ((state (harness-call 'tool-slots/status)))
+        (should (= 8 (plist-get state :limit)))
+        (should (= 8 (plist-get state :baseline)))
+        (should (equal harness-tool-slots-load-test--restored (plist-get state :text)))))))
+
+(ert-deftest harness-tool-slots-load-every-change-is-announced-to-the-uis ()
+  "Each change of the limit is announced once, with the state it leaves.
+The number staying where it was announces nothing; the watch turned off
+while the slots are held back does, as the baseline comes back."
+  (harness-tool-slots-load-test-with-sessions
+    (let ((harness-tool-slots-count 8)
+          (harness-tool-slots-burst 0))
+      (harness-tool-slots-load-test--listen)
+      (harness-tool-slots-load-test--move 1.5)
+      (should (= 1 (length harness-tool-slots-load-test--changes)))
+      (let ((state (car harness-tool-slots-load-test--changes)))
+        (should (= 4 (plist-get state :limit)))
+        (should (= 8 (plist-get state :baseline)))
+        (should (= 1.5 (plist-get state :pressure)))
+        (should (equal harness-tool-slots-load-test--reduced (plist-get state :text))))
+      ;; The same number again: no news.
+      (harness-tool-slots-load-test--tick)
+      (should (= 1 (length harness-tool-slots-load-test--changes)))
+      ;; Further down, and back up.
+      (harness-tool-slots-load-test--move 2.0)
+      (should (= 1 (plist-get (car harness-tool-slots-load-test--changes) :limit)))
+      (harness-tool-slots-load-test--move 0.2)
+      (should (= 8 (plist-get (car harness-tool-slots-load-test--changes) :limit)))
+      (should (= 3 (length harness-tool-slots-load-test--changes)))
+      ;; Held back again, then the watch is turned off.
+      (harness-tool-slots-load-test--move 1.5)
+      (let ((harness-tool-slots-load-enabled nil))
+        (harness-tool-slots-load-test--tick))
+      (let ((state (car harness-tool-slots-load-test--changes)))
+        (should (= 5 (length harness-tool-slots-load-test--changes)))
+        (should (= 8 (plist-get state :limit)))
+        (should (equal "Tool slots restored to 8: the load watch is off" (plist-get state :text)))
+        (should-not (plist-get state :pressure))))))
+
+(ert-deftest harness-tool-slots-load-shutting-down-tells-the-uis-the-slots-are-back ()
+  "A UI showing the slots held back is told they are not once the module stops.
+The sessions are not told, nor is a UI of slots that were not held back."
+  (harness-tool-slots-load-test-with-sessions
+    (let ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id))
+          (harness-tool-slots-count 8)
+          (harness-tool-slots-burst 0))
+      ;; Nothing held back: nothing to take away.
+      (harness-tool-slots-load-test--listen)
+      (harness-tool-slots-load--shutdown)
+      (should-not harness-tool-slots-load-test--changes)
+      (harness-tool-slots-load--init)
+      (harness-tool-slots-load-test--move 1.5)
+      (should (= 1 (length harness-tool-slots-load-test--changes)))
+      (harness-tool-slots-load--shutdown)
+      (should (= 2 (length harness-tool-slots-load-test--changes)))
+      (let ((state (car harness-tool-slots-load-test--changes)))
+        (should (= 8 (plist-get state :limit)))
+        (should (= 8 (plist-get state :baseline)))
+        (should-not (plist-get state :text))
+        (should-not (plist-get state :at)))
+      ;; The session heard of the one change, not of this.
+      (should (equal (list harness-tool-slots-load-test--reduced)
+                     (harness-tool-slots-load-test--lines
+                      (car (harness-tool-slots-load-test--notes id))))))))
+
+(ert-deftest harness-tool-slots-load-the-slots-reach-clients ()
+  "Clients ask how the slots stand and hear when they change."
+  (harness-test-load-module 'acp)
+  (should (harness-acp--extension-allowed-p "tool-slots/status"))
+  (should (memq 'tool-slots/changed harness-acp--forwarded-events)))
+
+(ert-deftest harness-tool-slots-load-the-load-watch-going-off-is-told-in-the-note ()
+  "Turning the watch off tells the sessions the baseline is back, in the note."
+  (harness-tool-slots-load-test-with-sessions
+    (let ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id))
+          (harness-tool-slots-count 8)
+          (harness-tool-slots-burst 0))
+      (harness-tool-slots-load-test--move 1.5)
+      (let ((harness-tool-slots-load-enabled nil))
+        (harness-tool-slots-load-test--tick))
+      (should (= 1 (length (harness-tool-slots-load-test--notes id))))
+      (should (equal (list harness-tool-slots-load-test--reduced
+                           "Tool slots restored to 8: the load watch is off")
+                     (harness-tool-slots-load-test--lines
+                      (car (harness-tool-slots-load-test--notes id))))))))
 
 (provide 'harness-tool-slots-load-test)
 ;;; harness-tool-slots-load-test.el ends here

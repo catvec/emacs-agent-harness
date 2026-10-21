@@ -514,6 +514,40 @@ have none."
     (should (equal "session s2" (harness-sender-description '(:kind "session" :id "s2"))))
     (should (equal "the user" (harness-sender-description nil)))))
 
+(ert-deftest harness-util-node-fold ()
+  "A hint that folds several lines under a title reads the same after JSON.
+Items without text, and a fold with no title or no item, are no fold."
+  (let* ((fold (list :key "k" :title "Several things"
+                     :items (list (list :ts 1760000000.5 :text "one")
+                                  (list :ts 1760000100.25 :text "two"))))
+         (node (list :kind 'hint :content "Several things\none\ntwo" :meta (list :fold fold)))
+         (parsed (list :kind "hint" :meta (harness-json-parse
+                                           (harness-json-encode (list :fold fold))))))
+    (should (equal fold (harness-node-fold node)))
+    ;; What travelled over JSON reads as what did not.
+    (should (equal fold (harness-node-fold parsed)))
+    ;; Another key of the meta, and another kind of hint, are no fold.
+    (should-not (harness-node-fold '(:kind hint :content "plain")))
+    (should-not (harness-node-fold '(:kind hint :meta (:permission (:scope session)))))
+    ;; An item with no text is left out, one with no time keeps its text,
+    ;; and a time that is no number is none.
+    (should (equal '(:key nil :title "T" :items ((:ts nil :text "kept") (:ts nil :text "x")))
+                   (harness-node-fold
+                    '(:meta (:fold (:title "T"
+                                    :items ((:text "kept") (:ts 1) (:text "") "stray" nil
+                                            (:ts "late" :text "x"))))))))
+    ;; No title, an empty one, or no item left: no fold.
+    (should-not (harness-node-fold '(:meta (:fold (:items ((:text "a")))))))
+    (should-not (harness-node-fold '(:meta (:fold (:title "" :items ((:text "a")))))))
+    (should-not (harness-node-fold '(:meta (:fold (:title "T" :items ((:ts 1)))))))
+    (should-not (harness-node-fold '(:meta (:fold (:title "T")))))
+    (should-not (harness-node-fold '(:meta (:fold (:title "T" :items "text")))))
+    (should-not (harness-node-fold '(:meta (:fold "T"))))
+    ;; A client may send the items as a vector.
+    (should (equal '((:ts nil :text "a"))
+                   (plist-get (harness-node-fold '(:meta (:fold (:title "T" :items [(:text "a")]))))
+                              :items)))))
+
 (ert-deftest harness-thinking-level-fit-fits-a-level-to-a-model ()
   "A thinking level is fitted to the levels a model offers, by their order.
 The level itself when the model has it; else the strongest it has below
