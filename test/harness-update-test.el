@@ -71,6 +71,67 @@ Both are directory names; `base' is the directory holding them."
            ,@body)
        (ignore-errors (delete-directory base t)))))
 
+;; straight.el names a package by the name its recipe gives it, and
+;; keeps its clone in the directory of the recipe's :local-repo: the
+;; recipe (package! harness :recipe (:repo "~me/emacs-agent-harness"))
+;; makes package `harness' in the clone emacs-agent-harness/.  Its pull,
+;; `straight-pull-package', takes the package's name, looks the recipe up
+;; in `straight--recipe-cache' and, finding none, does nothing: it
+;; fetches nothing, changes nothing and complains of nothing.  It
+;; returns nil then, and nil when it pulls too, so its value says
+;; nothing.  The tests below stand in a straight.el that behaves so,
+;; with its clones laid out as straight.el lays them out:
+;; straight/repos/LOCAL-REPO/.
+(defvar straight--recipe-cache)
+(defvar straight--repo-cache)
+
+(defmacro harness-update-test-with-straight (local-repo recipes &rest body)
+  "Run BODY with `upstream', and `clone' a clone of it as straight.el keeps one.
+The clone is depth 1, one branch and no tags, as Doom's straight.el
+makes it, in the directory LOCAL-REPO of a straight repos directory,
+and `base' holds both; `harness-directory' is the clone, as the
+harness runs from it.  RECIPES is a list of (PACKAGE . LOCAL-REPO), the
+recipes the fake straight.el has registered; `pulled' collects the
+package names its pull was asked for.  The pull does what
+`straight-pull-package' does: it fetches and merges the clone of the
+recipe of the package it is given, and does nothing, silently, for a
+name that has none."
+  (declare (indent 2))
+  `(let* ((base (harness-test-temp-dir))
+          (upstream (file-name-as-directory (expand-file-name "upstream" base)))
+          (repos (file-name-as-directory (expand-file-name "straight/repos" base)))
+          (clone (file-name-as-directory (expand-file-name ,local-repo repos)))
+          ;; The harness runs from the clone, as it does from straight.el's.
+          (harness-directory clone)
+          (straight--recipe-cache (make-hash-table :test #'equal))
+          (straight--repo-cache (make-hash-table :test #'equal))
+          (pulled nil))
+     (ignore base upstream clone pulled)
+     (dolist (recipe ,recipes)
+       (let ((plist (list :package (car recipe) :local-repo (cdr recipe) :type 'git)))
+         (puthash (car recipe) plist straight--recipe-cache)
+         (puthash (cdr recipe) plist straight--repo-cache)))
+     (unwind-protect
+         (progn
+           (make-directory upstream t)
+           (make-directory repos t)
+           (harness-update-test--git upstream "init" "-q" "-b" "main")
+           (harness-update-test--configure upstream)
+           (harness-update-test--commit upstream "harness.el" ";; one\n" "First")
+           (harness-update-test--git base "clone" "-q" "--depth" "1" "--single-branch" "--no-tags"
+                                     (concat "file://" (directory-file-name upstream)) clone)
+           (harness-update-test--configure clone)
+           (cl-letf (((symbol-function 'straight-pull-package)
+                      (lambda (package &optional _from-upstream)
+                        (push package pulled)
+                        (when-let* ((recipe (gethash package straight--recipe-cache)))
+                          (let ((dir (expand-file-name (plist-get recipe :local-repo) repos)))
+                            (harness-update-test--git dir "fetch" "-q" "origin")
+                            (harness-update-test--git dir "merge" "-q" "--ff-only" "origin/main")))
+                        nil)))
+             ,@body))
+       (ignore-errors (delete-directory base t)))))
+
 ;;;; Where the harness runs from
 
 (ert-deftest harness-update-source-directory-follows-links ()
@@ -229,7 +290,7 @@ The build is straight's kind, links into a clone; the clone moved on."
   (harness-update-test-with-clone
     (let ((before (harness-update-test--git clone "rev-parse" "HEAD"))
           (pulled nil))
-      (cl-letf (((symbol-function 'harness--straight-package) (lambda () "harness"))
+      (cl-letf (((symbol-function 'harness--straight-package) (lambda (&optional _dir) "harness"))
                 ((symbol-function 'straight-pull-package)
                  (lambda (package)
                    (setq pulled package)
@@ -244,7 +305,7 @@ The build is straight's kind, links into a clone; the clone moved on."
   "straight's pull that lands on a commit that does not compile is put back."
   (harness-update-test-with-clone
     (let ((head (harness-update-test--git clone "rev-parse" "HEAD")))
-      (cl-letf (((symbol-function 'harness--straight-package) (lambda () "harness"))
+      (cl-letf (((symbol-function 'harness--straight-package) (lambda (&optional _dir) "harness"))
                 ((symbol-function 'straight-pull-package)
                  (lambda (_package)
                    (harness-update-test--commit clone "lisp/ui/harness-ui-broken.el"
@@ -255,6 +316,172 @@ The build is straight's kind, links into a clone; the clone moved on."
                                 (harness-update-test--failure (harness--update-package clone))))
         (should (equal head (harness-update-test--git clone "rev-parse" "HEAD")))
         (should-not (file-exists-p (expand-file-name "lisp/ui/harness-ui-broken.el" clone)))))))
+
+;;;; The package straight.el knows the checkout by
+
+(ert-deftest harness-update-straight-package-is-the-one-registered ()
+  "The package of a straight.el clone is its recipe's name, not its directory's.
+The recipe (package! harness ...) keeps package `harness' in the
+directory emacs-agent-harness/: `straight-pull-package' is given the
+package, and a directory's name is none."
+  (harness-update-test-with-straight "emacs-agent-harness" '(("harness" . "emacs-agent-harness"))
+    (should (equal "harness" (harness--straight-package clone)))
+    ;; Another package's directory, or a directory that holds no package.
+    (should-not (harness--straight-package (expand-file-name "other-package" repos)))
+    (should-not (harness--straight-package (expand-file-name "emacs-agent-harness" base)))
+    ;; Its build directory is named for the package.
+    (should (equal "harness" (harness--straight-package (expand-file-name "straight/build-31.1/harness/" base))))
+    (should-not (harness--straight-package (expand-file-name "straight/build-31.1/emacs-agent-harness/" base)))))
+
+(ert-deftest harness-update-straight-package-named-as-its-repository ()
+  "A package named as its repository is the directory's name: that is the usual one."
+  (harness-update-test-with-straight "harness" '(("harness" . "harness"))
+    (should (equal "harness" (harness--straight-package clone)))
+    (should (equal "harness" (harness--straight-package (expand-file-name "straight/build/harness/" base))))))
+
+(ert-deftest harness-update-straight-package-of-a-shared-clone ()
+  "Packages that share one clone: the one straight.el keeps the clone's recipe under."
+  (harness-update-test-with-straight "emacs-agent-harness"
+      '(("harness" . "emacs-agent-harness") ("harness-extras" . "emacs-agent-harness"))
+    (should (equal "harness-extras" (harness--straight-package clone)))
+    (puthash "emacs-agent-harness" (gethash "harness" straight--recipe-cache) straight--repo-cache)
+    (should (equal "harness" (harness--straight-package clone)))
+    ;; Without a record of the clone, the first by name.
+    (clrhash straight--repo-cache)
+    (should (equal "harness" (harness--straight-package clone)))))
+
+(ert-deftest harness-update-straight-package-without-a-recipe ()
+  "straight.el loaded, with no recipe for the checkout: it manages none here."
+  (harness-update-test-with-straight "emacs-agent-harness" '(("magit" . "magit"))
+    (should-not (harness--straight-package clone))
+    (should-not (harness--straight-package (expand-file-name "straight/build/harness/" base)))))
+
+(ert-deftest harness-update-straight-package-guessed-without-straight ()
+  "An Emacs without straight.el cannot look, and answers with the directory's name.
+Only the text on the version page makes use of it: such an Emacs does not pull."
+  (let* ((base (harness-test-temp-dir))
+         (repos (expand-file-name "straight/repos/emacs-agent-harness/" base)))
+    (unwind-protect
+        (progn
+          (should-not (boundp 'straight--recipe-cache))
+          (should (equal "emacs-agent-harness" (harness--straight-package repos)))
+          (should (equal "harness" (harness--straight-package (expand-file-name "straight/build/harness/" base))))
+          ;; Not under a straight directory: a checkout of one's own.
+          (should-not (harness--straight-package (expand-file-name "src/emacs-agent-harness/" base)))
+          (should-not (harness--straight-package (expand-file-name "straight/other/harness/" base)))
+          (should-not (harness--straight-package (expand-file-name "repos/harness/" base))))
+      (ignore-errors (delete-directory base t)))))
+
+(ert-deftest harness-update-straight-package-in-a-linked-repos-directory ()
+  "straight.el's repos directory reached through a link still holds the clone.
+`harness-directory' has its links followed, straight.el's own name for
+its directory has not, and the directory need not be called straight."
+  (harness-update-test-with-straight "emacs-agent-harness" '(("harness" . "emacs-agent-harness"))
+    (let* ((real (file-name-as-directory (expand-file-name "elsewhere" base)))
+           (linked (expand-file-name "linked" base))
+           (checkout (file-name-as-directory
+                      (file-truename (expand-file-name "repos/emacs-agent-harness" real)))))
+      (make-directory (expand-file-name "repos/emacs-agent-harness" real) t)
+      (make-symbolic-link (directory-file-name real) linked)
+      ;; Nothing about its path says straight.el keeps packages there.
+      (should-not (harness--straight-package checkout))
+      (cl-letf (((symbol-function 'straight--repos-dir)
+                 (lambda (&rest _) (file-name-as-directory (expand-file-name "repos" linked)))))
+        (should (equal "harness" (harness--straight-package checkout)))
+        ;; The repos directory itself, and a directory beside it, hold none.
+        (should-not (harness--straight-package (expand-file-name "repos" real)))
+        (should-not (harness--straight-package (expand-file-name "other/emacs-agent-harness" real)))))))
+
+(ert-deftest harness-update-straight-package-defaults-to-the-harness-directory ()
+  "Without a directory, the one the harness runs from."
+  (harness-update-test-with-straight "emacs-agent-harness" '(("harness" . "emacs-agent-harness"))
+    (let ((harness-directory clone))
+      (should (equal "harness" (harness--straight-package))))
+    (let ((harness-directory nil))
+      (should-not (harness--straight-package)))))
+
+;;;; Updating a straight.el clone
+
+(ert-deftest harness-update-straight-pulls-the-package-registered ()
+  "A clone kept under another name than its package's is pulled as its package.
+This is the install that updated nothing and said it was up to date: the
+clone emacs-agent-harness/ of package `harness' was pulled as
+\"emacs-agent-harness\", a name straight.el has no recipe for, so its
+pull did nothing."
+  (harness-update-test-with-straight "emacs-agent-harness" '(("harness" . "emacs-agent-harness"))
+    (harness-update-test--commit upstream "harness.el" ";; two\n" "Second")
+    (harness-update-test--commit upstream "lisp/modules/harness-new.el" ";; new\n" "Add a module")
+    (let ((result (harness-test-await (harness--update-package clone) 60)))
+      (should (equal '("Add a module" "Second")
+                     (mapcar (lambda (c) (plist-get c :subject)) (plist-get result :commits))))
+      (should (= 2 (plist-get result :count)))
+      (should (equal (harness-update-test--git upstream "rev-parse" "HEAD")
+                     (harness-update-test--git clone "rev-parse" "HEAD")))
+      (should (file-exists-p (expand-file-name "lisp/modules/harness-new.el" clone)))
+      ;; By the package's name, the one straight.el has a recipe for.
+      (should (equal '("harness") pulled)))))
+
+(ert-deftest harness-update-straight-pull-that-moves-nothing-asks-the-remote ()
+  "A pull that did nothing does not make the clone up to date: the remote is asked.
+straight.el's pull returns nil whether it pulled or did nothing, and
+says nothing either way, so an unmoved clone is no proof of anything."
+  (harness-update-test-with-straight "emacs-agent-harness" '(("harness" . "emacs-agent-harness"))
+    (harness-update-test--commit upstream "harness.el" ";; two\n" "Second")
+    (cl-letf (((symbol-function 'straight-pull-package)
+               (lambda (package &optional _from-upstream) (push package pulled) nil)))
+      (let ((result (harness-test-await (harness--update-package clone) 60)))
+        (should (equal '("harness") pulled))
+        (should (equal '("Second") (mapcar (lambda (c) (plist-get c :subject)) (plist-get result :commits))))
+        (should (equal (harness-update-test--git upstream "rev-parse" "HEAD")
+                       (harness-update-test--git clone "rev-parse" "HEAD")))))))
+
+(ert-deftest harness-update-straight-pull-that-moves-nothing-with-nothing-new ()
+  "Up to date is said after the remote was asked, which is seen in the clone's fetch."
+  (harness-update-test-with-straight "emacs-agent-harness" '(("harness" . "emacs-agent-harness"))
+    (cl-letf (((symbol-function 'straight-pull-package)
+               (lambda (package &optional _from-upstream) (push package pulled) nil)))
+      (should-not (file-exists-p (expand-file-name ".git/FETCH_HEAD" clone)))
+      (let ((head (harness-update-test--git clone "rev-parse" "--short" "HEAD"))
+            (result (harness-test-await (harness--update-package clone) 60)))
+        (should (equal '("harness") pulled))
+        (should (= 0 (plist-get result :count)))
+        (should-not (plist-get result :commits))
+        (should (equal head (plist-get result :from)))
+        (should (equal head (plist-get result :to)))
+        (should (file-exists-p (expand-file-name ".git/FETCH_HEAD" clone)))))))
+
+(ert-deftest harness-update-straight-pull-checks-what-the-remote-gave-too ()
+  "What the remote gives after a pull that moved nothing is checked like any update."
+  (harness-update-test-with-straight "emacs-agent-harness" '(("harness" . "emacs-agent-harness"))
+    (let ((head (harness-update-test--git clone "rev-parse" "HEAD")))
+      (harness-update-test--commit upstream "lisp/ui/harness-ui-broken.el"
+                                   ";;; -*- lexical-binding: t -*-\n(defun harness-ui-broken ()\n  (list 1\n"
+                                   "Break the build")
+      (cl-letf (((symbol-function 'straight-pull-package) (lambda (&rest _) nil)))
+        (should (string-match-p "is broken, so it was not installed"
+                                (harness-update-test--failure (harness--update-package clone)))))
+      (should (equal head (harness-update-test--git clone "rev-parse" "HEAD"))))))
+
+(ert-deftest harness-update-clone-straight-has-no-recipe-for-is-fetched ()
+  "A clone straight.el has no recipe for is updated from its remote branch, not pulled."
+  (harness-update-test-with-straight "emacs-agent-harness" '(("magit" . "magit"))
+    (harness-update-test--commit upstream "harness.el" ";; two\n" "Second")
+    (let ((result (harness-test-await (harness--update-package clone) 60)))
+      (should-not pulled)
+      (should (equal '("Second") (mapcar (lambda (c) (plist-get c :subject)) (plist-get result :commits))))
+      (should (equal (harness-update-test--git upstream "rev-parse" "HEAD")
+                     (harness-update-test--git clone "rev-parse" "HEAD"))))))
+
+(ert-deftest harness-update-straight-pull-that-fails-is-reported ()
+  "An error of straight.el's pull is the update's failure, and the clone stays."
+  (harness-update-test-with-straight "emacs-agent-harness" '(("harness" . "emacs-agent-harness"))
+    (harness-update-test--commit upstream "harness.el" ";; two\n" "Second")
+    (let ((head (harness-update-test--git clone "rev-parse" "HEAD")))
+      (cl-letf (((symbol-function 'straight-pull-package)
+                 (lambda (&rest _) (error "Failed to run git fetch origin, see buffer *straight-process*"))))
+        (should (string-match-p "straight-pull-package failed: Failed to run git fetch origin"
+                                (harness-update-test--failure (harness--update-package clone)))))
+      (should (equal head (harness-update-test--git clone "rev-parse" "HEAD"))))))
 
 (ert-deftest harness-update-refuses-a-version-that-does-not-compile ()
   "An upstream commit with a file that does not compile is never installed.
@@ -409,6 +636,95 @@ It is checked out of the clone and compiled elsewhere, then thrown away."
         (harness-update)
         (harness-test-wait (lambda () (string-prefix-p "Harness is up to date" (car shown))) 30 "the check")
         (should (= 1 reloads))))))
+
+(defun harness-update-test--loaded (dir)
+  "Return the settled promise of DIR's revision, as the harness notes it on loading."
+  (harness-resolved (list :directory dir :loaded (float-time) :version "3.0.0"
+                          :commit (harness-update-test--git dir "rev-parse" "HEAD")
+                          :branch "main" :dirty nil)))
+
+(ert-deftest harness-update-reloads-a-checkout-that-moved-on-by-itself ()
+  "With nothing new from the remote, the harness is not up to date if it runs older code.
+A package manager, or a pull by hand, moved the checkout on while the
+harness ran the commit it was loaded from.  \"Up to date\" would be false,
+and the version page beside the message says it is not the latest."
+  (harness-update-test-with-clone
+    (let ((harness-directory clone)
+          (harness-started t)
+          (harness--updating nil)
+          (harness-revision--loaded (harness-update-test--loaded clone))
+          (reloads 0)
+          (shown nil))
+      (harness-update-test--commit upstream "harness.el" ";; two\n" "Second")
+      (harness-update-test--git clone "pull" "-q" "--ff-only")
+      (cl-letf (((symbol-function 'harness--reload)
+                 (lambda ()
+                   (cl-incf reloads)
+                   ;; A reload notes the commit it loaded.
+                   (setq harness-revision--loaded (harness-update-test--loaded clone))
+                   (list :files 3 :errors nil)))
+                ((symbol-function 'message)
+                 (lambda (fmt &rest args) (push (apply #'format-message fmt args) shown))))
+        (harness-update)
+        (harness-test-wait (lambda () (cl-find-if (lambda (m) (string-match-p "which its checkout already had" m)) shown))
+                           30 "the update")
+        (should (= 1 reloads))
+        (should (string-match-p "\\`Harness reloaded from [0-9a-f]+ to [0-9a-f]+, which its checkout already had\\'"
+                                (car shown)))
+        (should (equal "updated" (plist-get harness--last-update :state)))
+        (should (= 0 (plist-get harness--last-update :count)))
+        (should-not (plist-get harness--last-update :commits))
+        ;; Reloaded, the harness runs the checkout's commit: that is up to date.
+        (harness-update)
+        (harness-test-wait (lambda () (string-prefix-p "Harness is up to date" (car shown))) 30 "the check")
+        (should (= 1 reloads))))))
+
+(ert-deftest harness-update-reload-of-a-checkout-that-moved-on-refused ()
+  "A reload that is refused says what still runs, and has no update to go back from."
+  (harness-update-test-with-clone
+    (let ((harness-started t)
+          (harness-revision--loaded (harness-update-test--loaded clone))
+          (running (harness-update-test--git clone "rev-parse" "--short" "HEAD"))
+          (shown nil))
+      (harness-update-test--commit upstream "harness.el" ";; two\n" "Second")
+      (harness-update-test--git clone "pull" "-q" "--ff-only")
+      (cl-letf (((symbol-function 'harness--reload)
+                 (lambda () (list :refused '("harness-ui.el: oops"))))
+                ((symbol-function 'message)
+                 (lambda (fmt &rest args) (push (apply #'format-message fmt args) shown))))
+        (harness--updated clone (harness-test-await (harness--update-checkout clone) 30))
+        (should (string-match-p "reload to [0-9a-f]+ was refused: harness-ui.el: oops" (car shown)))
+        (should (string-match-p (format "still runs %s: restart Emacs to load it" running) (car shown)))
+        (should-not (string-match-p "reset --keep" (car shown)))))))
+
+(ert-deftest harness-update-nothing-new-and-nothing-known-of-what-runs-is-up-to-date ()
+  "Without a commit the harness is known to run, or one of another checkout, nothing is reloaded."
+  (harness-update-test-with-clone
+    (let ((harness-started t)
+          (reloads 0)
+          result)
+      ;; The checkout is ahead of the commit that was noted, and has nothing new to fetch.
+      (harness-update-test--commit upstream "harness.el" ";; two\n" "Second")
+      (harness-update-test--git clone "pull" "-q" "--ff-only")
+      (setq result (harness-test-await (harness--update-checkout clone) 30))
+      (should (= 0 (plist-get result :count)))
+      (cl-letf (((symbol-function 'harness--reload) (lambda () (cl-incf reloads) (list :files 1)))
+                ((symbol-function 'message) #'ignore))
+        (dolist (loaded (list
+                         ;; Not noted yet, or not settled.
+                         nil (harness-make-promise)
+                         ;; Not from a git checkout.
+                         (harness-resolved (list :directory clone :error "no git"))
+                         ;; From another checkout.
+                         (harness-resolved (list :directory (expand-file-name "elsewhere/" clone)
+                                                 :commit (make-string 40 ?a)))))
+          (let ((harness-revision--loaded loaded))
+            (should (string-prefix-p "Harness is up to date" (harness--updated clone result)))))
+        ;; A harness not started loads what the checkout holds when it does.
+        (let ((harness-started nil)
+              (harness-revision--loaded (harness-resolved (list :directory clone :commit (make-string 40 ?a)))))
+          (should (string-prefix-p "Harness is up to date" (harness--updated clone result))))
+        (should (= 0 reloads))))))
 
 (ert-deftest harness-update-command-reports-a-refused-reload ()
   "When the update does not compile here, the message says how to go back."

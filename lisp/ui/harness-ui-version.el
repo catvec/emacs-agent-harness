@@ -17,7 +17,12 @@
 ;; installed (straight.el's own pull for a straight.el install), checks
 ;; the commit and reloads -- or push first.  What an update brought is
 ;; shown the same way, from `harness--last-update', which
-;; `harness-update-hook' reports as it settles.
+;; `harness-update-hook' reports as it settles, with how long ago that
+;; was: an "up to date" from hours ago, above a check that found the
+;; harness behind, is the answer of its moment.  A harness that runs
+;; elsewhere is told to pull with the package straight.el registered
+;; the checkout under (`harness--straight-package'), which is not always
+;; the name of its directory.
 ;;
 ;; The checks run in the background, in the harness process.  The page
 ;; shows the last report at once and asks for a fresh one only when it
@@ -508,16 +513,22 @@ the harness menu's `U' runs the same update."
     (harness-ui-version--insert-update-result result width)))
 
 (defun harness-ui-version--insert-update-result (result width)
-  "Insert the outcome RESULT of the last update, filled to WIDTH."
+  "Insert the outcome RESULT of the last update, filled to WIDTH.
+It says how long ago the update settled: its \"up to date\" is the
+answer of that moment, and a check since may have found commits the
+harness lacks, which the page says too."
   (let ((state (plist-get result :state))
-        (text (or (plist-get result :message) "")))
+        (text (or (plist-get result :message) ""))
+        (ago (harness-ui-version--ago (plist-get result :at))))
     (unless (string-empty-p text)
       (let ((start (point))
             (face (pcase state
                     ("updated" 'harness-success-face)
                     ("failed" 'harness-failure-face)
                     (_ 'harness-dim-face))))
-        (insert " " (propertize text 'face face) "\n")
+        (insert " " (propertize text 'face face)
+                (if (string-empty-p ago) "" (propertize (concat " · " ago) 'face 'harness-dim-face))
+                "\n")
         (let ((fill-column width) (fill-prefix " "))
           (fill-region start (point)))))
     (when (equal state "updated")

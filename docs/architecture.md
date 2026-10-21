@@ -9025,7 +9025,9 @@ sessions' projects belong to (`session/list`,
 read with `git ls-remote`).  The repository the loaded checkout pulls
 from (`:upstream t`) comes first of its kind, as
 `harness-revision-remote` resolves it -- the same function
-`harness-update` fetches by, so the two always agree: the remote its
+`harness-update` fetches by (an update that finds nothing new has always
+asked it, a straight.el pull that moved nothing included), so the page
+and the update ask the same remote: the remote its
 branch tracks and the branch it tracks there (`for-each-ref
 %(upstream:remotename)`, the remote's URL from `git config`), else
 `origin`, else its only remote; without a tracked upstream the version
@@ -10463,19 +10465,36 @@ harness lacks (an origin at the same commit with the same status as one
 listed above says so instead of listing them again; an ahead one has
 none to list), and the update: an `[Update harness]` button (`u`) when
 this Emacs can reload the harness it shows, the last update's outcome
-(`harness--last-update`) and, for one that brought commits, its
-changelog.  A commit is shown as its message, subject and body, never
-its diff or file statistics.  The button runs `harness-update': a
-checkout straight.el installed is pulled with `straight-pull-package',
-the way its package manager updates it, and put back with `git reset
---keep' when the commit it lands on fails the check; any other checkout
-is fetched by the remote and branch `harness-revision-remote' resolves
-and fast-forwarded to the commit it names, checked first by another
-Emacs; a detached HEAD, or a checkout with no remote, is refused with a
-message that says so.  What to do without updating is said too: reload
-when the loaded checkout moved on, push when only a local checkout has
-them.  The page follows `harness-update-hook', which `harness-update'
-runs with the outcome as it settles, and redraws.
+(`harness--last-update`), with how long ago it settled, and, for one
+that brought commits, its changelog.  A commit is shown as its message,
+subject and body, never its diff or file statistics.  The button runs
+`harness-update': a checkout straight.el has a recipe for is pulled with
+`straight-pull-package', the way its package manager updates it, and put
+back with `git reset --keep' when the commit it lands on fails the
+check.  The package is the name its recipe gave it, which
+`harness--straight-package` reads from straight.el's own records
+(`straight--repo-cache` and `straight--recipe-cache`, by the recipe's
+`:local-repo`, the clone's directory) and is not always the directory's
+name -- `(package! harness ...)` is the package `harness` in the clone
+`emacs-agent-harness/` -- because `straight-pull-package` given a name
+it has no recipe for does nothing, silently, and returns nil as it does
+when it pulls.  So an unmoved clone proves nothing, and one that
+straight.el has no recipe for is not pulled by it at all: both are
+fetched by the remote and branch `harness-revision-remote' resolves,
+like any other checkout, and fast-forwarded to the commit it names,
+checked first by another Emacs.  "Up to date" is therefore said only
+once that remote was asked, and only when the harness runs what the
+checkout holds: a checkout can move on by itself (a package manager's
+pull, or one by hand) while the harness runs the commit it was loaded
+from, and with nothing new from the remote `harness--updated` then
+reloads, as it does for commits that came in, when the commit this Emacs
+noted on loading (`harness-revision--loaded`, of the same checkout) is
+not the checkout's -- the outcome is "updated", with a count of none.
+A detached HEAD, or a checkout with no remote, is refused with a message
+that says so.  What to do without updating is said too: reload when the
+loaded checkout moved on, push when only a local checkout has them.  The
+page follows `harness-update-hook', which `harness-update' runs with the
+outcome as it settles, and redraws.
 Opening it shows the last report at once and asks `version/check` with
 a max-age of a minute; `g` asks with 0; `version/checked` redraws it,
 and the menu's Version entry says "not the latest" after a report that

@@ -264,12 +264,24 @@ checkout the harness runs from: the clone of a manual installation, or
 the clone that straight.el keeps for a Doom Emacs or straight.el
 installation. A checkout straight.el installed is updated with
 straight's own pull (`straight-pull-package`), the way its package
-manager updates it, in an Emacs that loaded straight.el. Any other
-checkout is fast-forwarded to the branch it tracks, or else to the
-same-named branch of `origin` (or of its only remote); a detached
-HEAD, or a checkout with no remote, is refused with a message that
-says so. A checkout with local changes is refused either way, and a
-fast-forward changes nothing when the branch has commits of its own.
+manager updates it, in an Emacs that loaded straight.el and has a
+recipe for the checkout. The harness finds the package from the
+checkout's directory, since straight.el names a package by its recipe
+and keeps its clone under the recipe's `:local-repo`: `(package!
+harness ...)` is the package `harness` in the clone
+`emacs-agent-harness/`. Any other checkout, including one straight.el
+has no recipe for, is fast-forwarded to the branch it tracks, or else
+to the same-named branch of `origin` (or of its only remote); a
+detached HEAD, or a checkout with no remote, is refused with a message
+that says so. A straight.el pull that moved nothing is not taken for
+"up to date" (straight.el says nothing when it does nothing): the
+branch the checkout tracks is fetched all the same, so "Harness is up
+to date" always means the remote was asked and had nothing new. Nor is
+the harness up to date while it runs older code than its checkout, which
+a pull of its own (a package manager's, or yours by hand) moves on: with
+nothing new from the remote, the update reloads what the checkout
+already holds. A checkout with local changes is refused either way, and
+a fast-forward changes nothing when the branch has commits of its own.
 
 When the update brings commits, the newest is checked in a separate
 Emacs, outside the checkout: `harness.el` must load, and every file

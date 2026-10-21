@@ -530,6 +530,9 @@ its source: what loads is a compiled copy elsewhere."
 (declare-function harness-policy-load "harness-policy")
 (declare-function harness-policy-apply "harness-policy" (&optional final))
 (declare-function straight-pull-package "straight" (package &optional from-upstream))
+(declare-function straight--repos-dir "straight" (&rest segments))
+(defvar straight--recipe-cache)
+(defvar straight--repo-cache)
 
 ;;;###autoload
 (defun harness-start ()
@@ -1245,37 +1248,95 @@ the remote lacks, or the remote's commit fails the check."
                                                 dir ours (if (= ours 1) "" "s"))
                                (harness--update-result dir from target)))))))))))
 
-(defun harness--straight-package ()
-  "Return the name of the straight.el package this harness runs from, or nil.
-That is the harness's directory under straight's repos, or the build
-directory of links into it, when it is one: straight.el installs a
-package by cloning its repository there.  Nil for a checkout of one's
-own, and in an Emacs that never loaded straight.el."
-  (when (stringp harness-directory)
-    (let* ((dir (file-name-as-directory (expand-file-name harness-directory)))
-           (name (file-name-nondirectory (directory-file-name dir)))
-           (parent (file-name-directory (directory-file-name dir)))
-           (grand (and parent (file-name-directory (directory-file-name parent)))))
-      (or (when (fboundp 'straight--repos-dir)
-            (let ((repos (file-name-as-directory (expand-file-name (straight--repos-dir)))))
-              (when (and (not (equal repos dir))
-                         (equal (file-name-directory (directory-file-name dir)) repos))
-                name)))
-          (when (and grand parent
-                     (equal (file-name-nondirectory (directory-file-name grand)) "straight")
-                     (let ((kind (file-name-nondirectory (directory-file-name parent))))
-                       (or (equal kind "repos") (string-prefix-p "build" kind))))
-            name)))))
+(defun harness--straight-layout (&optional dir)
+  "Return (KIND . NAME) when DIR is where straight.el keeps a package, else nil.
+DIR is the harness's directory, `harness-directory' by default.
+straight.el installs a package by cloning its repository under its repos
+directory, in a directory named for the recipe's :local-repo, and builds
+the package into a directory of links into that clone, named for the
+package.  KIND is `repos' for such a clone, NAME being the name of its
+directory; and `build' for such a build, NAME being the package's."
+  (let ((dir (or dir harness-directory)))
+    (when (stringp dir)
+      (let* ((dir (file-name-as-directory (expand-file-name dir)))
+             (name (file-name-nondirectory (directory-file-name dir)))
+             (parent (file-name-directory (directory-file-name dir)))
+             (grand (and parent (file-name-directory (directory-file-name parent))))
+             (kind (and grand parent
+                        (equal (file-name-nondirectory (directory-file-name grand)) "straight")
+                        (file-name-nondirectory (directory-file-name parent)))))
+        (cond
+         ;; Directly under straight's repos directory, which may itself be
+         ;; reached through a link, as `harness-directory' has them followed.
+         ((and (fboundp 'straight--repos-dir)
+               (let ((repos (file-name-as-directory (expand-file-name (straight--repos-dir)))))
+                 (and (not (equal repos dir))
+                      (or (equal parent repos)
+                          (equal (and parent (file-name-as-directory (file-truename parent)))
+                                 (file-name-as-directory (file-truename repos)))))))
+          (cons 'repos name))
+         ((equal kind "repos") (cons 'repos name))
+         ((and kind (string-prefix-p "build" kind)) (cons 'build name)))))))
+
+(defun harness--straight-registry-p ()
+  "Non-nil when this Emacs has loaded straight.el, so knows its packages' recipes."
+  (and (boundp 'straight--recipe-cache) (hash-table-p straight--recipe-cache)))
+
+(defun harness--straight-repo-package (local-repo)
+  "Return the package straight.el registered for the clone LOCAL-REPO, or nil.
+LOCAL-REPO is the name of a directory under straight's repos, the
+recipe's :local-repo.  Several packages can share a clone; then the one
+straight keeps the clone's recipe under (`straight--repo-cache') counts,
+else the first by name."
+  (let ((matches nil))
+    (maphash (lambda (package recipe)
+               (when (equal (plist-get recipe :local-repo) local-repo)
+                 (push package matches)))
+             straight--recipe-cache)
+    (let ((named (and (boundp 'straight--repo-cache) (hash-table-p straight--repo-cache)
+                      (plist-get (gethash local-repo straight--repo-cache) :package)))
+          (matches (sort matches #'string<)))
+      (if (member named matches) named (car matches)))))
+
+(defun harness--straight-package (&optional dir)
+  "Return the name of the straight.el package whose checkout is DIR, or nil.
+DIR is the harness's directory, `harness-directory' by default; it counts
+when it is where straight.el keeps a package (`harness--straight-layout').
+
+The name is the one straight.el registered the package under, which is
+what `straight-pull-package' takes and is not always the directory's:
+the recipe (package! harness :recipe (:repo \"~me/emacs-agent-harness\"
+...)) makes the package `harness' in the clone emacs-agent-harness/.
+`straight-pull-package' given a name it has no recipe for does not
+complain: it does nothing at all.  So in an Emacs that has loaded
+straight.el the answer is the registered name, and nil when straight.el
+has no recipe for the checkout -- it does not manage that here, wherever
+the checkout lies.  An Emacs without straight.el cannot look: it answers
+with the directory's name, right for a package named as its repository,
+which only text (the version page's hint) makes use of, as it cannot pull
+with straight.el either.  Nil for a checkout of one's own."
+  (pcase (harness--straight-layout dir)
+    (`(,kind . ,name)
+     (cond ((not (harness--straight-registry-p)) name)
+           ((eq kind 'repos) (harness--straight-repo-package name))
+           ((gethash name straight--recipe-cache) name)))))
 
 (defun harness--straight-pull (dir package)
   "Pull PACKAGE, the straight.el package whose checkout is DIR, and report it.
 straight's own pull (`straight-pull-package') fetches and merges the
 repository and branch its recipe names, which need not be the ones DIR's
 branch tracks; that is what an install from straight.el is updated
-with.  With nothing new it does not move DIR.  The commit it lands on is
-checked like any other (`harness--verify-commit'), and DIR is put back to
-the commit it held when the check fails, so a broken version is not left
-installed.  Return the promise of the same plist
+with.  The commit it lands on is checked like any other
+\(`harness--verify-commit'), and DIR is put back to the commit it held
+when the check fails, so a broken version is not left installed.
+
+When the pull moves nothing, that does not make DIR up to date: the pull
+may have had nothing to fetch, or have done nothing (straight.el's
+returns nil either way, and says nothing, for a package it has no recipe
+for or whose recipe names no repository).  Only the remote can tell, so
+it is asked: DIR is updated from the remote branch it tracks as any
+other checkout is (`harness--update-checkout'), and is up to date only
+when that finds nothing new.  Return the promise of the same plist
 `harness--update-checkout' makes."
   (let ((dir (file-name-as-directory (expand-file-name dir)))
         from target)
@@ -1293,27 +1354,36 @@ installed.  Return the promise of the same plist
                                               (error-message-string err))))))
       (harness-then (lambda (_) (harness--git dir "rev-parse" "HEAD")))
       (harness-then (lambda (head)
-                      (if (equal head from)
-                          (list :from (substring from 0 7) :to (substring from 0 7)
-                                :commits nil :count 0)
+                      (cond
+                       ((equal head from)
+                        ;; Nothing moved: nothing new, or nothing done.  Ask the remote.
+                        (harness-log 'info "update: the pull of straight package %s moved nothing; asking the remote of %s"
+                                     package dir)
+                        (harness--update-checkout dir))
+                       (t
                         (setq target head)
                         (harness-catch
                          (harness--update-result dir from target)
                          (lambda (err)
                            (harness-then (harness--git dir "reset" "--keep" from)
                                          (lambda (_) (harness-rejected err))
-                                         (lambda (_) (harness-rejected err)))))))))))
+                                         (lambda (_) (harness-rejected err))))))))))))
 
 (defun harness--update-package (dir)
   "Update DIR, the checkout the harness runs from, the way it was installed.
 A checkout straight.el manages is pulled with its own
 `straight-pull-package', the way its package manager updates it, when
-this Emacs has straight.el loaded; any other checkout is fast-forwarded
-to its remote branch (`harness--update-checkout')."
-  (let ((package (and (fboundp 'straight-pull-package) (harness--straight-package))))
-    (if package
-        (harness--straight-pull dir package)
-      (harness--update-checkout dir))))
+this Emacs has straight.el loaded and a recipe for the checkout
+\(`harness--straight-package'); any other checkout is fast-forwarded to
+its remote branch (`harness--update-checkout')."
+  (let ((package (and (fboundp 'straight-pull-package) (harness--straight-package dir))))
+    (cond
+     (package
+      (harness-log 'info "update: pulling %s as straight package %s" dir package)
+      (harness--straight-pull dir package))
+     (t
+      (harness-log 'info "update: fetching the remote branch of %s" dir)
+      (harness--update-checkout dir)))))
 
 (defvar harness--last-update nil
   "The last update's outcome, a plist; see `harness-update-hook'.")
@@ -1322,31 +1392,61 @@ to its remote branch (`harness--update-checkout')."
   "Hook run after `harness-update' settles, with the outcome as its argument.
 The outcome is a plist: :state \"updated\", \"up-to-date\" or \"failed\";
 :from and :to the abbreviated commits; :commits the newest commits that
-came in, each (:commit :date :subject :body); :count how many came in;
-:reload the `harness--reload' result or nil; :message the line shown;
-:at when it settled; and :error why it failed.")
+came in, each (:commit :date :subject :body); :count how many came in
+\(none for an update that only reloaded a checkout that had moved on by
+itself); :reload the `harness--reload' result or nil; :message the line
+shown; :at when it settled; and :error why it failed.")
+
+(defun harness--loaded-commit (dir)
+  "Return the commit this Emacs loaded the harness from, when that was DIR.
+Nil when it is not known (yet), when the harness was not loaded from a
+git checkout, and when the checkout it was loaded from is another."
+  (when-let* ((promise (bound-and-true-p harness-revision--loaded))
+              ((harness-promise-settled-p promise))
+              (revision (harness-promise-value promise))
+              ((listp revision))
+              (commit (plist-get revision :commit))
+              (directory (plist-get revision :directory))
+              ((harness-revision--same-directory-p directory dir)))
+    commit))
 
 (defun harness--updated (dir result)
   "Report RESULT of `harness--update-checkout' on DIR, reloading what came in.
 Return the message shown, and record the outcome in `harness--last-update'
-and on `harness-update-hook' for the version page."
+and on `harness-update-hook' for the version page.
+
+An update that brought nothing is \"up to date\" only when the harness
+runs what the checkout holds.  A checkout can move on by itself, pulled
+by a package manager or by hand, while the harness runs the commit it
+was loaded from; then \"up to date\" would be false.  The update does what
+it does for commits that came in, and reloads."
   (let* ((from (plist-get result :from))
          (to (plist-get result :to))
          (commits (plist-get result :commits))
          (count (or (plist-get result :count) (length commits)))
-         (summary (format "Harness updated from %s to %s (%d commit%s)"
-                          from to count (if (= count 1) "" "s")))
+         ;; The commit the harness runs, when it is not the checkout's.
+         (running (and (zerop count) harness-started
+                       (let ((commit (harness--loaded-commit dir)))
+                         (and commit (not (string-prefix-p to commit))
+                              (substring commit 0 (min 7 (length commit)))))))
+         (summary (if running
+                      (format "Harness reloaded from %s to %s, which its checkout already had" running to)
+                    (format "Harness updated from %s to %s (%d commit%s)"
+                            from to count (if (= count 1) "" "s"))))
          state reload text)
-    (if (zerop count)
+    (if (and (zerop count) (not running))
         (setq state "up-to-date"
               text (format "Harness is up to date (%s)" to))
       (setq state "updated")
-      (harness-log 'info "update: %s..%s brought:\n  %s" from to
-                   (string-join (mapcar (lambda (c)
-                                          (format "%s %s" (substring (plist-get c :commit) 0 7)
-                                                  (plist-get c :subject)))
-                                        commits)
-                                "\n  "))
+      (if running
+          (harness-log 'info "update: nothing new, but the checkout holds %s and the harness runs %s: reloading"
+                       to running)
+        (harness-log 'info "update: %s..%s brought:\n  %s" from to
+                     (string-join (mapcar (lambda (c)
+                                            (format "%s %s" (substring (plist-get c :commit) 0 7)
+                                                    (plist-get c :subject)))
+                                          commits)
+                                  "\n  ")))
       (cond
        ((not harness-started)
         (setq text (format "%s; `harness-start' loads it" summary)))
@@ -1354,13 +1454,18 @@ and on `harness-update-hook' for the version page."
         (setq reload (harness--reload))
         (setq text
               (cond
+               ((and running (plist-get reload :refused))
+                (format "Harness reload to %s was refused: %s.  The harness still runs %s: restart Emacs to load it"
+                        to (string-join (plist-get reload :refused) "; ") running))
                ((plist-get reload :refused)
                 (format "%s, but the reload was refused: %s.  The harness still runs %s: restart Emacs to load the update, or go back with git -C %s reset --keep %s"
                         summary (string-join (plist-get reload :refused) "; ") from
                         (shell-quote-argument (directory-file-name dir)) from))
                ((plist-get reload :errors)
-                (format "%s and reloaded, but these failed to load: %s"
-                        summary (string-join (plist-get reload :errors) "; ")))
+                (format "%s%s, but these failed to load: %s"
+                        summary (if running "" " and reloaded")
+                        (string-join (plist-get reload :errors) "; ")))
+               (running summary)
                (t (format "%s and reloaded" summary)))))))
     (message "%s" text)
     (setq harness--last-update (list :state state :from from :to to :commits commits
@@ -1377,15 +1482,20 @@ and on `harness-update-hook' for the version page."
   "Update the harness from its checkout, then reload it in place.
 The harness runs from a git checkout of its own.  The remote branch to
 fetch is the one its branch tracks, or else the same-named branch of
-origin, or of its only remote; a checkout straight.el manages is pulled
-with `straight-pull-package', the way its package manager updates it.
+origin, or of its only remote; a checkout straight.el has a recipe for is
+pulled with `straight-pull-package', the way its package manager updates
+it, and fetched from that remote branch all the same when the pull moved
+nothing, so that \"up to date\" always means the remote was asked.
 A detached HEAD and a checkout without a remote are refused with a
 message that says so.  When the remote has new commits, the newest is
 checked by another Emacs, out of the checkout: its harness.el must load,
 and every source file compile with no merge conflict marker in its
 code.  Only then is the checkout fast-forwarded to it and
 `harness-reload' run, which loads it in this Emacs and in the harness
-process, keeping running sessions.  Nothing changes when the update
+process, keeping running sessions.  So is a checkout that moved on by
+itself, pulled by a package manager or by hand, while the harness ran
+the commit it was loaded from: the harness is not up to date then,
+whatever the remote has.  Nothing changes when the update
 fails the check, or the checkout has local changes or commits of its
 own.  Git and the checking Emacs run in the background: this Emacs stays
 responsive.  The harness log and the version page list the commits that

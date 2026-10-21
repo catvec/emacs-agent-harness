@@ -27,7 +27,12 @@ runs `harness-update`, which updates the checkout the way it was
 installed (straight.el's own pull for a straight.el install), checks
 the commit and reloads -- or push first.  What an update brought is
 shown the same way, from `harness--last-update`, which
-`harness-update-hook` reports as it settles.
+`harness-update-hook` reports as it settles, with how long ago that
+was: an "up to date" from hours ago, above a check that found the
+harness behind, is the answer of its moment.  A harness that runs
+elsewhere is told to pull with the package straight.el registered
+the checkout under (`harness--straight-package`), which is not always
+the name of its directory.
 
 The checks run in the background, in the harness process.  The page
 shows the last report at once and asks for a fresh one only when it

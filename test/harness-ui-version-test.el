@@ -203,6 +203,37 @@ directory is a tree of links into it), counts as much as its build."
                                 (harness-ui-version-test--prose)))
         (should-not (member "[Update harness]" (harness-ui-version-test--buttons)))))))
 
+(defvar straight--recipe-cache)
+(defvar straight--repo-cache)
+
+(ert-deftest harness-ui-version-names-the-package-straight-registered ()
+  "The hint's package is the one straight.el registered, not the clone's directory.
+The clone emacs-agent-harness/ keeps package `harness': M-x
+straight-pull-package RET emacs-agent-harness would find no package."
+  (let ((harness-directory "/srv/straight/repos/emacs-agent-harness/")
+        (straight--recipe-cache (make-hash-table :test #'equal))
+        (straight--repo-cache (make-hash-table :test #'equal)))
+    (let ((recipe (list :package "harness" :local-repo "emacs-agent-harness" :type 'git)))
+      (puthash "harness" recipe straight--recipe-cache)
+      (puthash "emacs-agent-harness" recipe straight--repo-cache))
+    (should (equal "harness" (harness-ui-version--straight-package)))
+    (harness-ui-version-test-with-page (harness-ui-version-test--behind)
+      (let ((harness-ui-connection-address "box:7000"))
+        (harness-ui-version--render)
+        (should (string-match-p (concat "pull them into "
+                                        (regexp-quote harness-ui-version-test--clone)
+                                        " (M-x straight-pull-package RET harness), then reload\\.")
+                                (harness-ui-version-test--prose)))))
+    ;; straight.el has no recipe for this clone: no command to name.
+    (clrhash straight--recipe-cache)
+    (clrhash straight--repo-cache)
+    (should-not (harness-ui-version--straight-package))
+    (harness-ui-version-test-with-page (harness-ui-version-test--behind)
+      (let ((harness-ui-connection-address "box:7000"))
+        (harness-ui-version--render)
+        (should (string-match-p "pull them into [^ ]+, then reload\\." (harness-ui-version-test--prose)))
+        (should-not (string-match-p "straight-pull-package" (harness-ui-version-test--prose)))))))
+
 (ert-deftest harness-ui-version-shows-commits-not-fetched-yet ()
   ;; The repository the clone pulls from, GitHub here, has a commit no
   ;; local repository holds: the harness lacks it, uncounted.
@@ -382,6 +413,30 @@ directory is a tree of links into it), counts as much as its build."
     (setq harness--last-update (list :state "failed" :message "Harness update failed: it has local changes"))
     (harness-ui-version--render)
     (should (eq 'harness-failure-face (harness-ui-version-test--face-of "Harness update failed")))))
+
+(ert-deftest harness-ui-version-dates-the-last-update ()
+  "The outcome of the last update says when it was made.
+An \"up to date\" from hours ago, under a verdict that the harness is
+not the latest, is the answer of its moment and not a contradiction."
+  (dolist (case `(("up-to-date" "Harness is up to date (bbbbbbb)" 7200 " · 2h ago")
+                  ("up-to-date" "Harness is up to date (bbbbbbb)" 1 " · just now")
+                  ("updated" "Harness updated to bbbbbbb and reloaded" 180 " · 3m ago")
+                  ("failed" "Harness update failed: it has local changes" 90000 " · 1d ago")))
+    (pcase-let ((`(,state ,message ,age ,suffix) case))
+      (harness-ui-version-test-with-page (harness-ui-version-test--behind)
+        (setq harness--last-update (list :state state :message message :count 0
+                                         :at (- (float-time) age)))
+        (harness-ui-version--render)
+        (should (string-match-p (concat (regexp-quote message) (regexp-quote suffix) "$")
+                                (harness-ui-version-test--text)))
+        ;; The age is dim, whatever the outcome's face.
+        (should (eq 'harness-dim-face (harness-ui-version-test--face-of suffix)))
+        (should (string-match-p "Not the latest" (harness-ui-version-test--text))))))
+  ;; An outcome without a time (from before it was kept) shows none.
+  (harness-ui-version-test-with-page (harness-ui-version-test--behind)
+    (setq harness--last-update (list :state "up-to-date" :message "Harness is up to date (bbbbbbb)" :count 0))
+    (harness-ui-version--render)
+    (should (string-match-p "Harness is up to date (bbbbbbb)$" (harness-ui-version-test--text)))))
 
 (ert-deftest harness-ui-version-compares-this-emacs-with-the-harness-process ()
   (let ((harness-revision--loaded (harness-resolved (list :directory harness-ui-version-test--clone
