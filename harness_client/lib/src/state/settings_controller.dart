@@ -33,6 +33,11 @@ class SettingsController extends ChangeNotifier {
   bool _detailsChanged = false;
   bool _flagChanged = false;
 
+  /// The writes the platform store did not take, by key, with why in words
+  /// for a person.  A key leaves when it is written well after all, so one
+  /// write that works does not hide another that did not.
+  final Map<String, String> _writeProblems = <String, String>{};
+
   /// Completes once [load] is over, whether or not the store answered.
   final Completer<void> _ready = Completer<void>();
 
@@ -77,6 +82,33 @@ class SettingsController extends ChangeNotifier {
   /// platform store failed.
   Object? get loadError => _loadError;
 
+  /// Why this device cannot keep what it is asked to remember, in words for a
+  /// person; null while it can (and until [load] has said).
+  ///
+  /// The app goes on without a store that does not open or refuses a write,
+  /// but then it forgets the harness's address and the device's session
+  /// secret each time it closes, and the person is asked for them again
+  /// whatever "Remember" says.  That must not happen unannounced: an Android
+  /// release build whose preference plugin was stripped by R8 did exactly
+  /// that for days, and nothing on screen said why.
+  String? get persistenceProblem {
+    if (!_loaded) return null;
+    if (_prefs == null) {
+      final error = _loadError;
+      return 'The settings store of this device did not open'
+          '${error == null ? '' : ': ${describeStoreError(error)}'}.';
+    }
+    return _writeProblems.values.firstOrNull;
+  }
+
+  /// What went wrong with the platform store, on one line: the exceptions
+  /// plugins raise can run to a page.
+  static String describeStoreError(Object error) {
+    final line = '$error'.trim().split('\n').first.trim();
+    if (line.isEmpty) return error.runtimeType.toString();
+    return line.length <= 140 ? line : '${line.substring(0, 139)}…';
+  }
+
   bool get useCupertino => switch (_previewPlatform) {
     PreviewPlatform.cupertino => true,
     PreviewPlatform.material => false,
@@ -99,32 +131,53 @@ class SettingsController extends ChangeNotifier {
     }
     final prefs = _prefs;
     if (prefs != null) {
-      try {
+      // Each value is read on its own, and what the device holds of its
+      // harness first: a value that is corrupt keeps its default, but must not
+      // make the device forget the others, the address of its harness least
+      // of all.
+      void read(String what, void Function() apply) {
+        try {
+          apply();
+        } catch (error) {
+          _loadError = error;
+          debugPrint(
+            'Harness: local setting "$what" could not be read: $error',
+          );
+        }
+      }
+
+      // A store that answers late must not undo a connection made meanwhile.
+      read('address', () {
+        if (!_detailsChanged) _address = prefs.getString('address') ?? '';
+      });
+      read('token', () {
+        if (!_detailsChanged) _token = prefs.getString('token') ?? '';
+      });
+      read('reconnectOnLaunch', () {
+        if (!_flagChanged) {
+          _reconnectOnLaunch = prefs.getBool('reconnectOnLaunch') ?? true;
+        }
+      });
+      read('rememberConnection', () {
+        _rememberConnection = prefs.getBool('rememberConnection') ?? true;
+      });
+      read('themeMode', () {
         _themeMode = switch (prefs.getString('themeMode')) {
           'light' => ThemeMode.light,
           'dark' => ThemeMode.dark,
           _ => ThemeMode.system,
         };
+      });
+      read('previewPlatform', () {
         _previewPlatform = switch (prefs.getString('previewPlatform')) {
           'material' => PreviewPlatform.material,
           'cupertino' => PreviewPlatform.cupertino,
           _ => PreviewPlatform.system,
         };
+      });
+      read('showThinking', () {
         _showThinking = prefs.getBool('showThinking') ?? true;
-        _rememberConnection = prefs.getBool('rememberConnection') ?? true;
-        // A store that answers late must not undo a connection made meanwhile.
-        if (!_detailsChanged) {
-          _address = prefs.getString('address') ?? '';
-          _token = prefs.getString('token') ?? '';
-        }
-        if (!_flagChanged) {
-          _reconnectOnLaunch = prefs.getBool('reconnectOnLaunch') ?? true;
-        }
-      } catch (error) {
-        // Corrupt or unreadable values: keep the defaults above and go on.
-        _loadError = error;
-        debugPrint('Harness: local settings could not be read: $error');
-      }
+      });
     }
     _loaded = true;
     if (!_ready.isCompleted) _ready.complete();
@@ -226,34 +279,51 @@ class SettingsController extends ChangeNotifier {
   }
 
   /// Persistence is best-effort.  A write that fails or a store that never
-  /// answers must not take the caller down with it.
-  Future<void> _setString(String key, String value) async {
+  /// answers must not take the caller down with it, but it is not hidden
+  /// either: see [persistenceProblem].
+  Future<void> _setString(String key, String value) =>
+      _write('save', key, (prefs) => prefs.setString(key, value));
+
+  Future<void> _setBool(String key, bool value) =>
+      _write('save', key, (prefs) => prefs.setBool(key, value));
+
+  Future<void> _remove(String key) =>
+      _write('forget', key, (prefs) => prefs.remove(key));
+
+  /// Hand one write to the platform store and note how it went.  The store
+  /// answers `false`, without raising anything, to a write it did not take.
+  Future<void> _write(
+    String verb,
+    String key,
+    Future<bool> Function(SharedPreferences prefs) write,
+  ) async {
     final prefs = _prefs;
     if (prefs == null) return;
     try {
-      await prefs.setString(key, value);
+      final stored = await write(prefs);
+      _noteWrite(
+        key,
+        stored ? null : 'The settings store refused to $verb "$key".',
+      );
+      if (!stored) debugPrint('Harness: the store did not $verb "$key"');
     } catch (error) {
-      debugPrint('Harness: could not save "$key": $error');
+      _noteWrite(
+        key,
+        'This device could not $verb "$key": ${describeStoreError(error)}.',
+      );
+      debugPrint('Harness: could not $verb "$key": $error');
     }
   }
 
-  Future<void> _setBool(String key, bool value) async {
-    final prefs = _prefs;
-    if (prefs == null) return;
-    try {
-      await prefs.setBool(key, value);
-    } catch (error) {
-      debugPrint('Harness: could not save "$key": $error');
+  /// Keep how the write of [key] went, and tell the screens when what there
+  /// is to say changes.
+  void _noteWrite(String key, String? problem) {
+    final before = _writeProblems[key];
+    if (problem == null) {
+      _writeProblems.remove(key);
+    } else {
+      _writeProblems[key] = problem;
     }
-  }
-
-  Future<void> _remove(String key) async {
-    final prefs = _prefs;
-    if (prefs == null) return;
-    try {
-      await prefs.remove(key);
-    } catch (error) {
-      debugPrint('Harness: could not remove "$key": $error');
-    }
+    if (before != problem) notifyListeners();
   }
 }

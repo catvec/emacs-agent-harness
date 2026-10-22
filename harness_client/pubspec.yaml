@@ -36,6 +36,15 @@ dependencies:
   cupertino_icons: ^1.0.8
   web_socket_channel: ^3.0.3
   shared_preferences: ^2.5.6
+  # The Android implementation of shared_preferences, named here only to say
+  # how old it may be.  2.5.0 and 2.5.1 look Kotlin classes up by name through
+  # JNI and ship no R8 keep rules, and Flutter runs R8 on every release build
+  # (what tool/qr_install.sh installs), which renames them: the plugin then
+  # dies with a NoSuchMethodError, the app can neither read nor write its
+  # preferences, and it forgets the harness's address and its session secret
+  # each time it closes.  2.5.2 adds the rules.  Do not lower this.
+  # (test/dependency_guard_test.dart fails if the lock file goes below it.)
+  shared_preferences_android: ^2.5.2
   flutter_markdown: ^0.7.7+1
   intl: ^0.20.3
   image_picker: ^1.2.4

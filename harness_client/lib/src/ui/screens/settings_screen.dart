@@ -269,9 +269,13 @@ class SettingsScreen extends StatelessWidget {
                       ),
                     ),
                     _SettingRow(
+                      key: const Key('settings-remember'),
                       icon: Icons.key_outlined,
                       title: 'Remember',
+                      // When the device cannot keep anything, say so here
+                      // instead of promising what the switch cannot do.
                       subtitle:
+                          settings.persistenceProblem ??
                           'Stay signed in: keep the address and session here.',
                       trailing: HarnessSwitch(
                         value: settings.rememberConnection,
@@ -412,6 +416,7 @@ class SettingsScreen extends StatelessWidget {
 /// across the width of the card ([below], a segmented control).
 class _SettingRow extends StatelessWidget {
   const _SettingRow({
+    super.key,
     required this.icon,
     required this.title,
     required this.subtitle,

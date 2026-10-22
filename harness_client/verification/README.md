@@ -53,6 +53,15 @@
   Flutter SDK, and `tool/qr_install.sh` finding the package, reinstalling the
   packages of `pubspec.lock` with `flutter pub cache repair` and finishing the
   install.
+- `r8-prefs-release-build.txt` — the report "I have to re-enter my address and
+  token almost every time I open the app, although Remember is on": the
+  release apk (`tool/qr_install.sh`) runs R8, and with
+  `shared_preferences_android` 2.5.0 locked R8 renames the Kotlin classes the
+  plugin looks up by name through JNI (`kotlin.Unit`, `kotlin.Result`,
+  `Continuation`, ...), which kills the plugin at startup, so the app could
+  neither read nor save anything on the phone.  The two release builds (2.5.0
+  from `git archive HEAD`, and this tree with 2.5.2) and what each leaves of
+  those classes in `mapping.txt`, with the merged keep rules.
 
 The toolchain pieces above are reproducible: `tool/install_flutter.sh` installs
 the pinned Flutter SDK under `~/.local/share/flutter-versions` and installs the

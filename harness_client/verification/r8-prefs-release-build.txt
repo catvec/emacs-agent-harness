@@ -1,0 +1,91 @@
+R8 and the Android preference plugin: why the app forgot its harness on a phone
+================================================================================
+
+Report: "I have to re-enter my information (address and token) almost every
+time I open the app, although Remember is on."
+
+Cause.  tool/qr_install.sh installs a RELEASE apk, and Flutter 3.47.7's Gradle
+plugin runs R8 on every release build (flutter_tools/gradle/src/main/kotlin/
+FlutterPlugin.kt sets isMinifyEnabled = true unless `-Pshrink=false` is given;
+shouldShrinkResources() is true by default).  pubspec.lock pinned
+shared_preferences_android 2.5.0, which reaches the platform through
+package:jni 1.1.0.  That package finds Kotlin classes BY NAME at startup:
+
+  kotlin.dart:15  kotlin/coroutines/intrinsics/CoroutineSingletons
+  kotlin.dart:19  kotlin/Result$Failure
+  kotlin.dart:28  kotlin/Result
+  kotlin.dart:37  kotlin/coroutines/intrinsics/IntrinsicsKt
+  kotlin.dart:44  kotlin/Unit
+  kotlin.dart:53  kotlin/coroutines/Continuation
+
+(package:jni, lib/src/kotlin.dart) and shared_preferences_android's generated
+bindings put `Lkotlin/coroutines/Continuation;` in their method signatures.
+2.5.0 ships no R8 keep rules for any of them.
+
+Observed (below): in this project's release build, R8 renames those classes
+(or drops one) when 2.5.0 is locked, and keeps them under 2.5.2.
+Inferred, not run: with the classes gone the JNI lookups fail, which is what the
+plugin's own changelog says of 2.5.2 -- "Fixes a NoSuchMethodError at startup in
+Android release builds by adding consumer R8 rules that keep the Kotlin classes
+looked up through JNI" -- so SharedPreferences.getInstance() fails on the
+phone, the app cannot read or write anything, and it forgets the address and the
+session secret each time it closes, whatever "Remember" says.  (No device or
+emulator was at hand to run the apk.)  Debug builds, the web build and every
+test skip R8, which is why nothing but a release build on a phone shows it.
+The first builds on the phone that sat on their loading screen for ever
+(`await settings.load()` never came back) were very probably this, too.
+
+Experiment.  A throwaway JDK 21, Android SDK 36 (build-tools 36.1.0, cmake 4.1.2,
+ndk 30.0.14904198; licences accepted for that scratch SDK only) and Gradle 9.3.1
+under scripts/.dev, then
+
+  (cd harness_client && flutter build apk --release)      # what qr_install.sh runs
+
+once on a copy of HEAD (`git archive HEAD harness_client`: 2.5.0) and once on
+this tree (2.5.2).  Both built (59.1 MB).  build/app/outputs/mapping/release/
+mapping.txt says, per class (its name, then what R8 left it as in the apk):
+
+  class                                                 2.5.0      2.5.2
+  kotlin.Unit                                          uv         kotlin.Unit
+  kotlin.Result                                        wn         kotlin.Result
+  kotlin.Result$Failure                                vn         kotlin.Result$Failure
+  kotlin.coroutines.Continuation                       i5         kotlin.coroutines.Continuation
+  kotlin.coroutines.intrinsics.CoroutineSingletons     w5         kotlin.coroutines.intrinsics.CoroutineSingletons
+  kotlin.coroutines.intrinsics.IntrinsicsKt            (removed)  kotlin.coroutines.intrinsics.IntrinsicsKt
+
+In the dex itself (build-tools 36.1.0 `dexdump -f` of each apk's classes.dex), which
+is what the JNI lookups search:
+
+  class descriptor present under its own name        2.5.0   2.5.2
+  Lkotlin/Unit;                                      no      yes  (and its static field INSTANCE)
+  Lkotlin/Result;                                    no      yes
+  Lkotlin/Result$Failure;                            no      yes
+  Lkotlin/coroutines/Continuation;                   no      yes
+  Lkotlin/coroutines/intrinsics/CoroutineSingletons; no      yes
+  Lkotlin/coroutines/intrinsics/IntrinsicsKt;        no      yes
+
+  "getCOROUTINE_SUSPENDED", the static method package:jni asks IntrinsicsKt for,
+  occurs 0 times in the 2.5.0 dex: a lookup of it can only end in a
+  NoSuchMethodError.  In the 2.5.2 dex it is there, under its own name, in the
+  (renamed) superclass of the kept IntrinsicsKt, where a JNI static-method
+  lookup finds it.  libdartjni.so is in both apks for arm64-v8a, armeabi-v7a
+  and x86_64.
+
+The merged R8 rules (configuration.txt) of the 2.5.0 build hold none of these
+keep lines (0 found); those of the 2.5.2 build hold these, from the
+plugin's consumer-rules.pro:
+
+  -keep class kotlin.Unit { *; }
+  -keep class kotlin.Result { *; }
+  -keep class kotlin.Result$Failure { *; }
+  -keep class kotlin.coroutines.Continuation { *; }
+  -keep class kotlin.coroutines.intrinsics.CoroutineSingletons { *; }
+  -keep class kotlin.coroutines.intrinsics.IntrinsicsKt { *; }
+
+shared_preferences_android 2.5.2 was published on 2026-10-22.  The pin in
+pubspec.yaml (`shared_preferences_android: ^2.5.2`, a direct dependency now so
+that it holds the minimum) is what makes the difference.
+test/dependency_guard_test.dart fails if pubspec.lock or pubspec.yaml go below
+2.5.2; test/persistence_notice_test.dart and test/settings_controller_test.dart
+cover the app saying so, instead of silently asking again, when a device cannot
+keep its settings after all.

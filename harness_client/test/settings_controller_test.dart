@@ -9,6 +9,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 // ignore: depend_on_referenced_packages
 import 'package:shared_preferences_platform_interface/shared_preferences_platform_interface.dart';
 
+import 'support/broken_preference_stores.dart';
+
 /// A preference store that takes its time over some writes, and over reading,
 /// as a phone's does when it is busy.
 class _SlowStore extends InMemorySharedPreferencesStore {
@@ -96,6 +98,31 @@ void main() {
     expect(settings.loadError, isNotNull);
     expect(settings.themeMode, ThemeMode.system);
     expect(settings.showThinking, isTrue);
+  });
+
+  test('a corrupt value does not make the device forget its harness', () async {
+    // The theme and the thinking switch are damaged; the address and the
+    // secret are fine, and used to be skipped: they were read after them, in
+    // the same try.
+    SharedPreferences.setMockInitialValues({
+      'themeMode': 7,
+      'showThinking': 'not a bool',
+      'reconnectOnLaunch': 'yes',
+      'address': 'ws://192.168.1.20:4276/acp',
+      'token': 'hs1_device',
+    });
+    final settings = SettingsController();
+    await settings.load();
+    expect(settings.loadError, isNotNull);
+    expect(settings.address, 'ws://192.168.1.20:4276/acp');
+    expect(settings.token, 'hs1_device');
+    expect(settings.reconnectOnLaunch, isTrue, reason: 'its default');
+    expect(settings.canResume, isTrue);
+    expect(
+      settings.persistenceProblem,
+      isNull,
+      reason: 'the store works; only some values in it are damaged',
+    );
   });
 
   test('clearConnection forgets the address and token', () async {
@@ -312,6 +339,122 @@ void main() {
         expect((await _onDisk(store))['flutter.address'], 'ws://h/acp');
       },
     );
+  });
+
+  group('when the device cannot keep what it learns', () {
+    // The app goes on without a store that does not work, but it then forgets
+    // the harness's address and the device's secret each time it closes, and
+    // "Remember" being on changes nothing.  A phone ran a release build in
+    // which that was so for days, and nothing said why: the person only found
+    // they had to type it all in again.  It is said now.
+
+    test('a store that dies as the stripped Android plugin did is said', () async {
+      SharedPreferencesStorePlatform.instance = StrippedStore();
+      SharedPreferences.resetStatic();
+      // `getInstance` is left waiting for ever after an Error: do not leave it
+      // so for the tests that follow.
+      addTearDown(SharedPreferences.resetStatic);
+      final settings = SettingsController();
+      expect(settings.persistenceProblem, isNull, reason: 'not known yet');
+      await settings.load();
+
+      // The app starts all the same, with nothing remembered ...
+      expect(settings.loaded, isTrue);
+      expect(settings.persistenceAvailable, isFalse);
+      expect(settings.canResume, isFalse);
+      // ... and says why, in a line: what failed, not a page of it.
+      final problem = settings.persistenceProblem;
+      expect(
+        problem,
+        startsWith('The settings store of this device did not open'),
+      );
+      expect(problem, contains('NoSuchMethodError'));
+      expect(problem, isNot(contains('\n')));
+
+      // What the person does meanwhile still works for this run of the app,
+      // and still does not reach the disk: the problem stays.
+      await settings.rememberConnectionDetails('ws://h/acp', 'hs1_device');
+      expect(settings.address, 'ws://h/acp');
+      expect(settings.persistenceProblem, isNotNull);
+    });
+
+    test('a store that works says nothing', () async {
+      SharedPreferences.setMockInitialValues({});
+      final settings = SettingsController();
+      expect(settings.persistenceProblem, isNull);
+      await settings.load();
+      expect(settings.persistenceProblem, isNull);
+      await settings.rememberConnectionDetails('ws://h/acp', 'hs1_device');
+      await settings.setThemeMode(ThemeMode.dark);
+      await settings.setRememberConnection(true);
+      await settings.clearConnection();
+      expect(settings.persistenceProblem, isNull);
+    });
+
+    test(
+      'a write the store refuses is said, and one that works ends it',
+      () async {
+        final store = RefusingStore();
+        SharedPreferencesStorePlatform.instance = store;
+        SharedPreferences.resetStatic();
+        final settings = SettingsController();
+        await settings.load();
+        expect(settings.persistenceAvailable, isTrue);
+        expect(settings.persistenceProblem, isNull);
+
+        var heard = 0;
+        settings.addListener(() => heard++);
+        await settings.rememberConnectionDetails('ws://h/acp', 'hs1_device');
+        // The first write that did not take is the one it names: later ones
+        // that fail too do not move it, and ones that work do not end it.
+        expect(
+          settings.persistenceProblem,
+          'The settings store refused to save "address".',
+        );
+        expect(heard, greaterThan(0), reason: 'the screens are told');
+
+        store.refuse = false;
+        await settings.rememberConnectionDetails('ws://h/acp', 'hs1_device');
+        expect(settings.persistenceProblem, isNull);
+        expect((await _onDisk(store))['flutter.token'], 'hs1_device');
+      },
+    );
+
+    test('a write that works does not hide one that did not', () async {
+      final store = RefusingStore()
+        ..refuse = false
+        ..refuseKeys.add('flutter.address');
+      SharedPreferencesStorePlatform.instance = store;
+      SharedPreferences.resetStatic();
+      final settings = SettingsController();
+      await settings.load();
+      // The address is refused; the secret and the flag after it are taken.
+      await settings.rememberConnectionDetails('ws://h/acp', 'hs1_device');
+      expect(
+        settings.persistenceProblem,
+        'The settings store refused to save "address".',
+      );
+      expect((await _onDisk(store))['flutter.token'], 'hs1_device');
+      // Written well, in the end, it is no longer a problem.
+      store.refuseKeys.clear();
+      await settings.rememberConnectionDetails('ws://h/acp', 'hs1_device');
+      expect(settings.persistenceProblem, isNull);
+    });
+
+    test('a write that raises is said, in a line', () async {
+      final store = RefusingStore()
+        ..refuse = false
+        ..fail = true;
+      SharedPreferencesStorePlatform.instance = store;
+      SharedPreferences.resetStatic();
+      final settings = SettingsController();
+      await settings.load();
+      await settings.setShowThinking(false);
+      final problem = settings.persistenceProblem;
+      expect(problem, contains('could not save "showThinking"'));
+      expect(problem, contains('disk full'));
+      expect(settings.showThinking, isFalse, reason: 'kept for this run');
+    });
   });
 }
 

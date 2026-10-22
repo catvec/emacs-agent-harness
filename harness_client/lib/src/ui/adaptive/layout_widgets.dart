@@ -452,6 +452,7 @@ class HarnessNotice extends StatelessWidget {
     this.actionLabel,
     this.onAction,
     this.actionKey,
+    this.detailLines = 2,
     this.margin = const EdgeInsets.fromLTRB(
       HarnessSpace.gutter,
       HarnessSpace.sm,
@@ -466,6 +467,11 @@ class HarnessNotice extends StatelessWidget {
   final Widget? leading;
   final String message;
   final String? detail;
+
+  /// How many lines [detail] may take before it is cut short.  A notice that
+  /// only hints at something keeps to two; one whose detail is the point
+  /// (what went wrong, and why) says it in full.
+  final int detailLines;
   final Color? color;
 
   /// Makes the whole notice a button.
@@ -515,7 +521,7 @@ class HarnessNotice extends StatelessWidget {
                           const SizedBox(height: 2),
                           Text(
                             detail!,
-                            maxLines: 2,
+                            maxLines: detailLines,
                             overflow: TextOverflow.ellipsis,
                             style: HarnessText.caption(context),
                           ),

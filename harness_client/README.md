@@ -163,6 +163,24 @@ time it opens. It asks again only when the harness does.
   harness replaced is never overwritten by an older one that was still on its
   way to disk, and a connection made while the preference store was still
   being read is kept, not undone by what the store then says.
+  A device whose preference store does not work (it does not open, or it
+  refuses a write) cannot remember anything, and says so: a notice above the
+  connection form, and in place of the promise under *Remember* in Settings,
+  names what failed ("The settings store of this device did not open:
+  NoSuchMethodError…") and that the address and the secret are asked for
+  again each time the app opens. Without it that looks like *Remember* being
+  broken, with no way to tell why. A damaged value in the store (say the
+  theme) does not make the device forget its harness: each value is read on
+  its own.
+  **Keep `shared_preferences_android` at 2.5.2 or later** (it is a direct
+  dependency in `pubspec.yaml` for that). 2.5.0 and 2.5.1 find Kotlin classes
+  by name through JNI and ship no R8 keep rules, Flutter runs R8 on every
+  release build (what `tool/qr_install.sh` installs), and the plugin then
+  dies at startup: the app could neither read nor write its preferences, so
+  it forgot the address and the session secret each time it closed, though
+  everything was fine in debug builds, in the browser and in the tests, none
+  of which run R8. `verification/r8-prefs-release-build.txt` shows what R8
+  does to those classes with each version.
 - **Keeps a conversation useful.** Local echo, auto-scroll with a "Latest"
   chip, a collapsible plan strip, a context-window meter, cost per session, and
   image attachments to prompts.
@@ -480,7 +498,11 @@ e2e/                  Playwright mobile-emulated flows and screenshots
   preferences), `rememberConnection`, and `reconnectOnLaunch`, which says
   whether the app goes back in by itself next time: a connection makes it
   true, *Disconnect* makes it false. Its writes of the connection go one
-  after another and write what is held when they run.
+  after another and write what is held when they run. It reads each value on
+  its own, and knows when the store does not work: `persistenceProblem` is why
+  the device cannot keep anything (the store did not open, or the last write
+  of some key was refused or raised), which the connection form and Settings
+  put on screen.
 - `WebSocketAcpTransport` pings (`webSocketPingInterval`, 25 s) where
   `dart:io` can, closes a connection whose peer stops answering, and says why
   a connection ended (`AcpClient.closeReason`) in words the banner can show.
@@ -629,7 +651,18 @@ The widget tests drive the real `AcpClient` against an in-memory ACP server
   back in, *Use another address* takes over, and an attempt that was taken
   over does not undo the one that replaced it, even when it fails long after.
   The saved settings: the flag, `canResume`, overlapping writes that finish out
-  of order, a connection made while the store is still being read
+  of order, a connection made while the store is still being read, a damaged
+  value that must not take the address with it
+- a device that cannot keep what it learns (`test/persistence_notice_test.dart`,
+  `settings_controller_test.dart`, `test/support/broken_preference_stores.dart`):
+  a store that dies with a `NoSuchMethodError` as the Android plugin did in a
+  release build, one that refuses a write or raises on it. The app starts and
+  connects all the same, the connection form and Settings say why nothing is
+  remembered, the notice goes when writes work again, and a write that works
+  does not hide one that did not
+- the dependency that made it so (`test/dependency_guard_test.dart`):
+  `pubspec.lock` and `pubspec.yaml` may not take `shared_preferences_android`
+  below 2.5.2
 - real sockets (`test/websocket_transport_test.dart`): a peer that stops
   answering pings is found out and named, an idle connection to one that
   answers stays open, and what the peer said when it closed is reported

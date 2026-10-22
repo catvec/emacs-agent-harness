@@ -7,6 +7,7 @@ import '../../acp/capabilities.dart';
 import '../../acp/connection_target.dart';
 import '../../models/session.dart';
 import '../../state/app_controller.dart';
+import '../../state/settings_controller.dart';
 import '../adaptive/adaptive_widgets.dart';
 import '../adaptive/layout_widgets.dart';
 import '../adaptive/mark.dart';
@@ -195,6 +196,7 @@ class _ConnectScreenState extends State<ConnectScreen> {
         ),
       ),
       const SizedBox(height: 26),
+      _PersistenceNotice(settings: app.settings),
       _ConnectionCard(
         address: _address,
         token: _token,
@@ -272,6 +274,40 @@ class _ConnectScreenState extends State<ConnectScreen> {
     const SizedBox(height: 26),
     _ResumeCard(app: widget.app),
   ];
+}
+
+/// Said above the form when this device cannot keep what it learns of its
+/// harness: "Remember" may be on and the person has typed everything in, yet
+/// the app forgets it when it closes.  Without this it just asks again, and
+/// nothing says why.
+class _PersistenceNotice extends StatelessWidget {
+  const _PersistenceNotice({required this.settings});
+
+  final SettingsController settings;
+
+  @override
+  Widget build(BuildContext context) {
+    return ListenableBuilder(
+      listenable: settings,
+      builder: (context, _) {
+        final problem = settings.persistenceProblem;
+        if (problem == null) return const SizedBox.shrink();
+        return Padding(
+          padding: const EdgeInsets.only(bottom: 14),
+          child: HarnessNotice(
+            key: const Key('persistence-problem'),
+            icon: Icons.warning_amber_rounded,
+            message: 'This device cannot remember the harness',
+            detail:
+                '$problem The address and the session secret are asked for '
+                'again each time the app opens.',
+            detailLines: 8,
+            margin: EdgeInsets.zero,
+          ),
+        );
+      },
+    );
+  }
 }
 
 class _ConnectionCard extends StatelessWidget {
