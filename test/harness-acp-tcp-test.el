@@ -223,9 +223,17 @@
                                          (progn (harness-test-await (harness-acp-authenticate conn "wrong")) nil)
                                        (acp-error (cdr err))))))
               (should (= -32000 (car (harness-acp-tcp-test-error conn "_harness/harness/version" nil))))
+              ;; Until it authenticates it hears nothing of the sessions.
+              (harness-acp--broadcast-update "s1" '(:sessionUpdate "agent_message_chunk"
+                                                    :content (:type "text" :text "secret")))
+              (accept-process-output nil 0.2)
+              (should-not (harness-acp-tcp-test-kinds))
               (should (null (harness-test-await (harness-acp-authenticate conn "s3cret"))))
               (should (equal harness-version (plist-get (harness-acp-tcp-test-request conn "_harness/harness/version" nil)
                                                         :version)))
+              (harness-acp--broadcast-update "s1" '(:sessionUpdate "agent_message_chunk"
+                                                    :content (:type "text" :text "hi")))
+              (harness-test-wait (lambda () (harness-acp-tcp-test-kinds)) 5 "the update")
               (harness-acp-close conn))
             ;; A connection made while the token is set authenticates by itself.
             (let ((conn (harness-acp-tcp-test-connect port)))

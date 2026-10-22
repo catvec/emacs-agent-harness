@@ -1795,6 +1795,9 @@ bytes."
      ((null start)
       (when (> (length bytes) harness-acp-remote-max-header) (harness-acp-remote--close proc)))
      ((eq (aref bytes start) ?{) (harness-acp-remote--serve-lines proc bytes))
+     ;; A TLS handshake: a browser trying https:// first.  Closing at
+     ;; once lets it fall back to http:// without waiting for a timeout.
+     ((eq (aref bytes start) #x16) (harness-acp-remote--close proc))
      (t
       (let ((request (harness-acp-remote-parse-request bytes)))
         (cond

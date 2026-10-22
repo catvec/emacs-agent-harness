@@ -9327,7 +9327,9 @@ Modules add auth methods too: `harness-acp-auth-methods-functions`
 before the token, and `harness-acp-authenticate-functions` (client,
 method id, params → nil for a method not its own, else a value or a
 promise) answer `authenticate` for them; once the answer resolves the
-client is authenticated.
+client is authenticated.  `harness-acp-initialized-functions` (client,
+params) run on every `initialize` before its answer is made, so the
+methods a client is offered may depend on what it says of itself.
 
 Corporate mode (`harness-corporate-mode`): `acp/start` refuses an
 address beyond this machine whatever `harness-acp-allow-remote` says,
@@ -9347,7 +9349,9 @@ ACP for phones and other devices on the network, off until
 details; this is the shape of the module.  One listener
 (`harness-acp-remote-host` 0.0.0.0, `harness-acp-remote-port` 4276,
 binary sockets) reads the first bytes of each connection: `{` hands it to
-ACP's line framing (client kind `remote-tcp`), anything else is an HTTP
+ACP's line framing (client kind `remote-tcp`), a TLS ClientHello
+(`#x16`, a browser trying `https://` first) is closed at once so it
+falls back to `http://`, anything else is an HTTP
 request, parsed by `harness-acp-remote-parse-request` (header block up
 to 16 KB, then `Content-Length` bytes of body up to 8 KB; chunked
 bodies are 411).  A WebSocket upgrade (RFC 6455, implemented in the

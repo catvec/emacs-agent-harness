@@ -239,6 +239,12 @@ promise: once it resolves the client is authenticated; a rejection
 \(an `acp-error' list) is the answer the client gets.  They are asked
 before `harness-acp-token' is compared, whatever the params hold.")
 
+(defvar harness-acp-initialized-functions nil
+  "Functions called with a client and the params of its `initialize'.
+They run before the answer is made, so the auth methods it advertises
+may depend on them.  The remote access module notes there which ACP
+client a device runs.")
+
 (defvar harness-acp-initialize-extras-functions nil
   "Functions adding to the `_harness' object `initialize' answers a client.
 Each is called with the `harness-acp-client' and returns a plist to add,
@@ -1133,6 +1139,9 @@ The standard ones, then what the functions of
         (harness-acp-client-capabilities client) (plist-get params :clientCapabilities))
   (harness-acp--client-set client 'hello (let ((info (plist-get params :clientInfo)))
                                           (and (consp info) (keywordp (car info)) info)))
+  (dolist (fn harness-acp-initialized-functions)
+    (harness-ignore-errors-logged (format "acp: %s on initialize" fn)
+      (funcall fn client params)))
   (if (and (harness-acp-client-remote-info client) (harness-acp--auth-needed-p client))
       ;; A device that has not signed in learns that it must, and how, and
       ;; what any ACP agent says of itself (a client decides on those, such
