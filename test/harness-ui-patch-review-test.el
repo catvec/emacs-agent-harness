@@ -1266,6 +1266,60 @@ to see, with the revision each was written against."
           (should (eql 2 (change-review-thread-line thread))))
         (should (string-match-p "^  [✓ ] M  a\\.el .*   1 closed" (harness-ui-patch-review-test--text popout)))))))
 
+(ert-deftest harness-ui-patch-review-feedback-sent-ends-the-ediff-of-an-earlier-commit-too ()
+  "The feedback sent while the code of an earlier commit shows over the review's
+Ediff ends both, and gives the frame back as it was before them."
+  (harness-ui-patch-review-test-with-task
+    (let* ((popout (harness-ui-patch-review-test--changes board id))
+           (review (gethash id harness-ui-patch-review--reviews))
+           (set (harness-ui-patch-review--r-set review))
+           (task (with-current-buffer board (harness-ui-tasks--find id)))
+           (v1 (harness-ui-patch-review--r-tip review))
+           (two (harness-ui-patch-review-test--comment-on review "a.el" '(:new . 2) "Why two?"))
+           (layout (harness-ui-patch-review-test--layout)))
+      (harness-ui-patch-review-test--advance repo)
+      (harness-test-await (harness-ui-patch-review--load review))
+      (harness-ui-patch-review-ediff review 0)
+      (let ((control (harness-ui-patch-review-test--control review 0)))
+        (harness-test-await (change-review-visit set two v1))
+        (let* ((snapshot (harness-ui-patch-review-test--snapshot review v1))
+               (older (harness-ui-patch-review-test--control snapshot 0)))
+          (should (buffer-live-p control))
+          (should (buffer-live-p older))
+          (harness-ui-patch-review--on-event
+           "task/changed" (list (plist-put (plist-put (copy-sequence task) :state "active")
+                                           :feedback (list (list :text "More." :at (float-time))))))
+          (should-not (buffer-live-p older))
+          (should-not (buffer-live-p control))
+          (should-not (harness-ui-patch-review--r-ediff snapshot))
+          (should-not (harness-ui-patch-review--r-ediff review))
+          (should (equal layout (harness-ui-patch-review-test--layout)))
+          (should (buffer-live-p popout)))))))
+
+(ert-deftest harness-ui-patch-review-a-task-that-goes-takes-the-ediff-of-an-earlier-commit-with-it ()
+  "A task deleted while only the code of an earlier commit shows in Ediff:
+the Ediff ends, the frame is as it was before it."
+  (harness-ui-patch-review-test-with-task
+    (let* ((popout (harness-ui-patch-review-test--changes board id))
+           (review (gethash id harness-ui-patch-review--reviews))
+           (set (harness-ui-patch-review--r-set review))
+           (v1 (harness-ui-patch-review--r-tip review))
+           (two (harness-ui-patch-review-test--comment-on review "a.el" '(:new . 2) "Why two?"))
+           (layout (harness-ui-patch-review-test--layout)))
+      (ignore popout)
+      (harness-ui-patch-review-test--advance repo)
+      (harness-test-await (harness-ui-patch-review--load review))
+      (harness-test-await (change-review-visit set two v1))
+      (let* ((snapshot (harness-ui-patch-review-test--snapshot review v1))
+             (control (harness-ui-patch-review-test--control snapshot 0))
+             (buffers (harness-ui-patch-review--ediff-buffers snapshot)))
+        (should (cl-every #'buffer-live-p buffers))
+        (harness-ui-patch-review--on-event "task/deleted" (list id))
+        (should-not (cl-some #'buffer-live-p buffers))
+        (should-not (buffer-live-p control))
+        (should-not (gethash id harness-ui-patch-review--reviews))
+        (should (equal (mapcar #'cdr layout) (mapcar #'cdr (harness-ui-patch-review-test--layout))))))))
+
 (ert-deftest harness-ui-patch-review-goes-to-the-box-beside-ediff ()
   "While Ediff compares a file the report's box stays in sight under it; e
 goes to it, point at its end, unless a draft of yours is under the difference,
@@ -1550,6 +1604,309 @@ thread of its own there, of the branch's line or of the merge base's."
                            (overlays-in (point-min) (point-max)))))
         (with-current-buffer control
           (harness-ui-patch-review-ediff-quit))))))
+
+;;;; Where a comment was made
+
+(defun harness-ui-patch-review-test--advance-again (repo)
+  "Commit a third change on task/fix of REPO, after `--advance': four lines
+at the top of a.el, and the second line edited once more."
+  (harness-ui-patch-review-test--git repo "checkout" "-q" "task/fix")
+  (harness-ui-patch-review-test--write
+   repo "a.el" (concat "(setq top0 0)\n(setq top1 1)\n(setq top2 2)\n(setq top3 3)\n"
+                       (harness-ui-patch-review-test--numbered
+                        "a" 20 '((2 . "(setq a2 'four)") (18 . "(setq a18 'eighteen)")))))
+  (harness-ui-patch-review-test--git repo "commit" "-q" "-am" "Once more"))
+
+(defun harness-ui-patch-review-test--snapshot (review revision)
+  "Wait for the snapshot of REVIEW at REVISION to be read; return it."
+  (harness-test-wait (lambda ()
+                       (let ((promise (gethash revision (harness-ui-patch-review--r-snapshots review))))
+                         (and promise (eq 'resolved (harness-promise-state promise)))))
+                     10 "the snapshot to be read")
+  (harness-promise-value (gethash revision (harness-ui-patch-review--r-snapshots review))))
+
+(defun harness-ui-patch-review-test--where-lines (set thread)
+  "Return the lines of THREAD of SET drawn with the details of every comment."
+  (split-string (substring-no-properties (change-review-ui-thread-string set thread :width 100 :details t))
+                "\n" t))
+
+(ert-deftest harness-ui-patch-review-where-is-the-diff-of-the-commit-a-comment-was-written-on ()
+  "The details of a comment show the diff of the commit it was written against,
+not the newest: the answer to a comment changes the code it is about, and the
+newest diff would make the comment ask for what is there already.  A reply
+shows the lines of its own commit, found in git once, whatever commit that is."
+  (harness-ui-patch-review-test-with-repo
+    (let* ((review (harness-ui-patch-review-test--review repo))
+           (set (harness-ui-patch-review--r-set review))
+           (v1 (harness-ui-patch-review--r-tip review))
+           (two (harness-ui-patch-review-test--comment-on review "a.el" '(:new . 2) "Why two?"))
+           (thread (harness-ui-patch-review-test--thread-of review two))
+           (bot (change-review-agent "Claude" :session "sess-1" :tool-call "toolu_1")))
+      ;; The commit it was written against is kept with it.
+      (should (equal v1 (change-review-comment-revision two)))
+      ;; The branch moves on: lines at the top, and a2 edited.
+      (harness-ui-patch-review-test--advance repo)
+      (harness-test-await (harness-ui-patch-review--load review))
+      (let* ((v2 (harness-ui-patch-review--r-tip review))
+             (reply (change-review-reply set two "It is 'three now." :author bot)))
+        (should-not (equal v1 v2))
+        (should (equal v2 (change-review-comment-revision reply)))
+        ;; The comment: the diff it was made on, the line it was made on.
+        (let ((location (plist-get (change-review-origin set thread two) :location)))
+          (should (eql 2 (change-review-location-line location)))
+          (should (string-suffix-p "+(setq a2 'two)" (change-review-location-excerpt location))))
+        ;; The reply, written against the branch as it is: that diff, the line the thread is on there.
+        (let* ((origin (change-review-origin set thread reply))
+               (location (plist-get origin :location)))
+          (should-not (plist-get origin :note))
+          (should (eql 5 (change-review-location-line location)))
+          (should (string-suffix-p "+(setq a2 'three)" (change-review-location-excerpt location)))
+          (should-not (string-search "'two" (change-review-location-excerpt location))))
+        (let ((lines (harness-ui-patch-review-test--where-lines set thread)))
+          (should (cl-some (lambda (line) (string-match-p "made at a\\.el:2 · revision v1 ([0-9a-f]\\{7\\})  \\[Source @ v1\\] \\[Source @ v2\\]" line))
+                           lines))
+          (should (cl-some (lambda (line) (string-match-p "made at a\\.el:5 · revision v2 ([0-9a-f]\\{7\\})  \\[Source\\]" line))
+                           lines))
+          (should (cl-some (lambda (line) (string-search "│ +(setq a2 'three)" line)) lines))
+          (should (cl-some (lambda (line) (string-search "│ +(setq a2 'two)" line)) lines)))
+        ;; The branch moves on once more: the reply is about a commit that is not the branch's end.
+        (harness-ui-patch-review-test--advance-again repo)
+        (harness-test-await (harness-ui-patch-review--load review))
+        (should-not (equal v2 (harness-ui-patch-review--r-tip review)))
+        ;; Reading the commit takes a moment, and says so rather than show other lines.
+        (let ((origin (change-review-origin set thread reply)))
+          (should (string-match-p "\\`reading the diff at [0-9a-f]\\{7\\}…\\'" (plist-get origin :note)))
+          (should-not (change-review-location-excerpt (plist-get origin :location))))
+        (harness-ui-patch-review-test--snapshot review v2)
+        (let* ((origin (change-review-origin set thread reply))
+               (location (plist-get origin :location)))
+          (should-not (plist-get origin :note))
+          (should (eql 5 (change-review-location-line location)))
+          (should (string-suffix-p "+(setq a2 'three)" (change-review-location-excerpt location)))
+          (should-not (string-search "'four" (change-review-location-excerpt location))))
+        ;; The comment of the first commit is where it was; the thread has moved since.
+        (let ((lines (harness-ui-patch-review-test--where-lines set thread)))
+          (should (cl-some (lambda (line) (string-search "now: line 6" line)) lines)))))))
+
+(ert-deftest harness-ui-patch-review-lists-a-files-threads-without-reordering-the-set ()
+  "The threads of a file are listed by line; the set keeps them in the order they were started."
+  (harness-ui-patch-review-test-with-repo
+    (let* ((review (harness-ui-patch-review-test--review repo))
+           (set (harness-ui-patch-review--r-set review))
+           (file (harness-ui-patch-review-test--file review "a.el")))
+      (harness-ui-patch-review-test--comment-on review "a.el" '(:new . 18) "Why eighteen?")
+      (harness-ui-patch-review-test--comment-on review "a.el" '(:new . 2) "Why two?")
+      (should (equal '(2 18) (mapcar #'change-review-thread-line
+                                     (harness-ui-patch-review--file-threads review file))))
+      (should (equal '(18 2) (mapcar #'change-review-thread-line (change-review-set-threads set)))))))
+
+(ert-deftest harness-ui-patch-review-where-has-the-diff-of-an-agents-thread ()
+  "A thread the agent started on a line has no excerpt of its own, only the
+commit it was at: the diff of that commit gives the lines."
+  (harness-ui-patch-review-test-with-repo
+    (let* ((review (harness-ui-patch-review-test--review repo))
+           (set (harness-ui-patch-review--r-set review))
+           (tip (harness-ui-patch-review--r-tip review))
+           (comment (change-review-comment
+                     set "This one is odd." :author (change-review-agent "Claude" :session "sess-1")
+                     :revision tip
+                     :location (change-review-make-location :file "a.el" :line 18 :side 'new)))
+           (thread (harness-ui-patch-review-test--thread-of review comment))
+           (location (plist-get (change-review-origin set thread comment) :location)))
+      (should (eql 18 (change-review-location-line location)))
+      (should (string-suffix-p "+(setq a18 'eighteen)" (change-review-location-excerpt location)))
+      (should (cl-some (lambda (line) (string-search "│ -(setq a18 18)" line))
+                       (harness-ui-patch-review-test--where-lines set thread))))))
+
+(ert-deftest harness-ui-patch-review-where-says-when-the-commit-is-gone ()
+  "A comment written against a commit the repository does not have shows what the
+thread kept, and says whose lines they are and why."
+  (harness-ui-patch-review-test-with-repo
+    (let* ((review (harness-ui-patch-review-test--review repo))
+           (set (harness-ui-patch-review--r-set review))
+           (two (harness-ui-patch-review-test--comment-on review "a.el" '(:new . 2) "Why two?"))
+           (thread (harness-ui-patch-review-test--thread-of review two))
+           (gone "0123456789abcdef0123456789abcdef01234567")
+           (reply (change-review-reply set two "Long ago." :revision gone
+                                       :author (change-review-agent "Claude"))))
+      (should (string-match-p "reading the diff at 0123456…"
+                              (plist-get (change-review-origin set thread reply) :note)))
+      (should-error (harness-test-await (harness-ui-patch-review--snapshot review gone)))
+      (let* ((origin (change-review-origin set thread reply))
+             (location (plist-get origin :location)))
+        (should (equal "The commit 0123456 is not in the repository: showing the lines the thread started on"
+                       (plist-get origin :note)))
+        (should (string-suffix-p "+(setq a2 'two)" (change-review-location-excerpt location)))))))
+
+(ert-deftest harness-ui-patch-review-comments-are-written-against-the-commit-their-diff-was-read-at ()
+  "A comment made in Ediff keeps the commit the branch was read at -- the one
+its excerpt is from -- not whichever version the review knows last."
+  (harness-ui-patch-review-test-with-repo
+    (let* ((review (harness-ui-patch-review-test--review repo))
+           (set (harness-ui-patch-review--r-set review))
+           (tip (harness-ui-patch-review--r-tip review)))
+      ;; A hand-in the UI has not read yet is the newest version of the set.
+      (change-review-add-version
+       set (change-review-make-version :id "ffffffffffffffffffffffffffffffffffffffff" :base "abc"))
+      (harness-ui-patch-review--comment-added
+       review (harness-ui-patch-review-test--file review "a.el") '(:new . 18) "Why eighteen?")
+      (let ((root (change-review-thread-root (car (last (change-review-set-threads set))))))
+        (should (equal tip (change-review-comment-revision root)))
+        (should (string-suffix-p "+(setq a18 'eighteen)"
+                                 (change-review-location-excerpt (change-review-comment-location root))))))))
+
+(ert-deftest harness-ui-patch-review-shows-the-source-as-the-comment-was-written-on-it ()
+  "The code a comment was written against, in Ediff, at the commit it was
+written on and with its line in sight, while the branch has gone on: the
+merge base against the file of that commit.  It is looked at, not reviewed: no
+mark of the file, no approval; a comment made there is written against that
+commit.  From the details of the comment, D, and a line of its diff."
+  (harness-ui-patch-review-test-with-repo
+    (let* ((review (harness-ui-patch-review-test--review repo))
+           (set (harness-ui-patch-review--r-set review))
+           (v1 (harness-ui-patch-review--r-tip review))
+           (two (harness-ui-patch-review-test--comment-on review "a.el" '(:new . 2) "Why two?"))
+           (thread (harness-ui-patch-review-test--thread-of review two)))
+      (harness-ui-patch-review-test--advance repo)
+      (harness-test-await (harness-ui-patch-review--load review))
+      (should-not (equal v1 (harness-ui-patch-review--r-tip review)))
+      (harness-test-await (change-review-visit set two v1))
+      (let* ((snapshot (harness-ui-patch-review-test--snapshot review v1))
+             (control (harness-ui-patch-review-test--control snapshot 0))
+             (old (plist-get (harness-ui-patch-review--r-ediff snapshot) :a))
+             (new (plist-get (harness-ui-patch-review--r-ediff snapshot) :b)))
+        ;; The review itself has no Ediff: this is the code as it was.
+        (should-not (harness-ui-patch-review--r-ediff review))
+        (should (equal v1 (harness-ui-patch-review--r-tip snapshot)))
+        (should (string-search (harness-ui-patch-review--short v1) (buffer-name new)))
+        (with-current-buffer new
+          (goto-char (point-min))
+          (should (equal "(setq a1 1)" (buffer-substring (line-beginning-position) (line-end-position))))
+          (should (search-forward "(setq a2 'two)")))
+        (should (= 2 (with-current-buffer new
+                       (save-excursion (goto-char (window-point (get-buffer-window new)))
+                                       (line-number-at-pos)))))
+        ;; The thread is under its line there, as it was.
+        (with-current-buffer new
+          (should (cl-some (lambda (ov) (string-search "Why two?" (or (overlay-get ov 'after-string) "")))
+                           (overlays-in (point-min) (point-max)))))
+        (with-current-buffer control
+          (should (string-search (format "as it was at %s" (harness-ui-patch-review--short v1))
+                                 (harness-ui-patch-review-test--text control)))
+          ;; Looked at, not reviewed.
+          (should-error (harness-ui-patch-review-approve-ediff) :type 'user-error)
+          ;; A reply here, to the thread at the first difference, is written against this commit.
+          (cl-letf (((symbol-function 'string-edit)
+                     (lambda (_prompt _initial callback &rest _) (funcall callback "Still odd."))))
+            (call-interactively #'harness-ui-patch-review-reply))
+          (should (equal v1 (change-review-comment-revision (change-review-thread-last-comment thread))))
+          (call-interactively #'harness-ui-patch-review-toggle-thread)
+          (should (equal v1 (plist-get (car (last (change-review-thread-history thread))) :revision)))
+          ;; A comment made here is written against this commit, on its lines.
+          (with-current-buffer new
+            (goto-char (point-min))
+            (forward-line 17)
+            (harness-ui-patch-review-comment-line "Why eighteen?"))
+          (let ((root (change-review-thread-root (car (last (change-review-set-threads set))))))
+            (should (equal v1 (change-review-comment-revision root)))
+            (should (string-suffix-p "+(setq a18 'eighteen)"
+                                     (change-review-location-excerpt (change-review-comment-location root)))))
+          (call-interactively #'harness-ui-patch-review-ediff-quit))
+        (should-not (buffer-live-p new))
+        (should-not (buffer-live-p old))
+        (should (zerop (hash-table-count (harness-ui-patch-review--r-seen review)))))
+      ;; From the threads view: D shows it, and so does RET on a line of its diff.
+      (let ((view (save-window-excursion (change-review-open-threads set 'all))))
+        (unwind-protect
+            (with-current-buffer view
+              (goto-char (point-min))
+              (search-forward "Why two?")
+              (change-review-ui-show-origin)
+              (re-search-forward "│ \\+(setq a2 'two)")
+              (should (eq #'change-review-ui-follow-source (key-binding (kbd "RET"))))
+              (call-interactively #'change-review-ui-follow-source)
+              (let* ((snapshot (harness-ui-patch-review-test--snapshot review v1))
+                     (control (harness-ui-patch-review-test--control snapshot 0))
+                     (new (plist-get (harness-ui-patch-review--r-ediff snapshot) :b)))
+                (should (= 2 (with-current-buffer new
+                               (save-excursion (goto-char (window-point (get-buffer-window new)))
+                                               (line-number-at-pos)))))
+                (with-current-buffer control (call-interactively #'harness-ui-patch-review-ediff-quit)))
+              (goto-char (point-min))
+              (search-forward "Why two?")
+              (call-interactively #'change-review-ui-show-source)
+              (let ((snapshot (harness-ui-patch-review-test--snapshot review v1)))
+                (with-current-buffer (harness-ui-patch-review-test--control snapshot 0)
+                  (call-interactively #'harness-ui-patch-review-ediff-quit))))
+          (kill-buffer view)))
+      ;; A review that goes takes the Ediffs of earlier commits with it.
+      (harness-test-await (change-review-visit set two v1))
+      (let* ((snapshot (harness-ui-patch-review-test--snapshot review v1))
+             (control (harness-ui-patch-review-test--control snapshot 0)))
+        (should (buffer-live-p control))
+        (harness-ui-patch-review--forget review)
+        (should-not (buffer-live-p control))
+        (should (zerop (hash-table-count (harness-ui-patch-review--r-snapshots review)))))
+      (ignore thread))))
+
+(ert-deftest harness-ui-patch-review-the-source-of-an-earlier-commit-has-the-reports-box ()
+  "The code of an earlier commit in Ediff has the report's box under it, as any
+Ediff of the review does, and the way to it; q gives the frame back and the
+report stays as it was, no file of it marked."
+  (harness-ui-patch-review-test-with-task
+    (let* ((popout (harness-ui-patch-review-test--changes board id))
+           (review (gethash id harness-ui-patch-review--reviews))
+           (set (harness-ui-patch-review--r-set review))
+           (v1 (harness-ui-patch-review--r-tip review))
+           (two (harness-ui-patch-review-test--comment-on review "a.el" '(:new . 2) "Why two?")))
+      (harness-ui-patch-review-test--advance repo)
+      (harness-test-await (harness-ui-patch-review--load review))
+      (harness-test-await (change-review-visit set two v1))
+      (let* ((snapshot (harness-ui-patch-review-test--snapshot review v1))
+             (control (harness-ui-patch-review-test--control snapshot 0))
+             (box (get-buffer-window popout t)))
+        (should-not (harness-ui-patch-review--r-ediff review))
+        (should (window-live-p box))
+        (should (eq popout (window-buffer box)))
+        ;; The box of the report: where the feedback is written.
+        (with-current-buffer control
+          (call-interactively #'harness-ui-patch-review-edit-feedback))
+        (should (eq box (selected-window)))
+        (should (eq popout (window-buffer box)))
+        (should (= (buffer-local-value 'harness-compose-end popout)
+                   (with-current-buffer popout (point))))
+        ;; C-c C-d in the report goes back to that Ediff.
+        (harness-ui-patch-review-test--press #'harness-ui-patch-review-open)
+        (should (eq control (window-buffer (selected-window))))
+        (with-current-buffer control (call-interactively #'harness-ui-patch-review-ediff-quit))
+        (should-not (buffer-live-p control))
+        (should (window-live-p (get-buffer-window popout t)))
+        (should (zerop (hash-table-count (harness-ui-patch-review--r-seen review))))
+        ;; Still the report's own review: not in Ediff, and its files not marked.
+        (should-not (harness-ui-patch-review--r-ediff review))
+        (harness-ui-patch-review-test--wait-text popout "^    M  a\\.el")))))
+
+(ert-deftest harness-ui-patch-review-shows-the-source-of-the-newest-commit-in-the-review ()
+  "The newest commit is the review's own Ediff, not a snapshot: a comment
+written against it, or a location of it, is shown there."
+  (harness-ui-patch-review-test-with-repo
+    (let* ((review (harness-ui-patch-review-test--review repo))
+           (set (harness-ui-patch-review--r-set review))
+           (tip (harness-ui-patch-review--r-tip review))
+           (two (harness-ui-patch-review-test--comment-on review "a.el" '(:new . 2) "Why two?")))
+      (change-review-visit set two tip)
+      (let ((control (harness-ui-patch-review-test--control review 0)))
+        (should-not (harness-ui-patch-review--r-snapshot review))
+        (should (zerop (hash-table-count (harness-ui-patch-review--r-snapshots review))))
+        (with-current-buffer control (call-interactively #'harness-ui-patch-review-ediff-quit)))
+      ;; A location: a line of a file of the diff.
+      (change-review-visit set (change-review-make-location :file "a.el" :side 'new :line 18))
+      (let* ((control (harness-ui-patch-review-test--control review 0))
+             (new (plist-get (harness-ui-patch-review--r-ediff review) :b)))
+        (should (= 18 (with-current-buffer new
+                        (save-excursion (goto-char (window-point (get-buffer-window new)))
+                                        (line-number-at-pos)))))
+        (with-current-buffer control (call-interactively #'harness-ui-patch-review-ediff-quit))))))
 
 ;;;; Choosing the diff
 

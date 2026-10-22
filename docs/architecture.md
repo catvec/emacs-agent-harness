@@ -12830,8 +12830,8 @@ it adds, so performing it twice changes nothing, and that is what lets a
 UI keep its own copy of what the harness keeps.  What differs between
 hosts is a generic function that a subtype of the set answers
 (`change-review-dispatch`, `-save`, `-current-author`, `-own-author-p`,
-`-follow-author`, `-visit`, `-placement`, `-send`, `-file-text`); the
-adapter answers them for a task.
+`-follow-author`, `-visit`, `-placement`, `-origin`, `-send`,
+`-file-text`, `-default-revision`); the adapter answers them for a task.
 
 THE ONE DRAWING.  A thread is drawn in one place,
 `change-review-ui-thread-string`, whichever view shows it: a header (a
@@ -12876,7 +12876,28 @@ agent's comment to the point of its conversation, RET (TAB in the
 threads view) shows where its comment was made -- the file and line, the
 revision, the lines of the diff it was made on, the session and tool
 call of an agent -- and d shows the thread in the diff view
-(`change-review-visit`: the library's diff view; Ediff for a task).
+(`change-review-visit`: the library's diff view; Ediff for a task), in
+the newest version; D shows the code the comment at point was written
+on, in the version it was written against (`change-review-visit` takes
+a version, and a location).
+
+WHERE A COMMENT WAS MADE (`change-review-origin`) is where it was made,
+not where its thread is now.  The answer to a comment changes the code it
+is about, so the lines under `▸ where` are the diff of the revision the
+comment was written against, as it was then, and not the newest
+version's, which would make a comment read as if it asked for what is
+there already.  A comment made on a line keeps the diff around the line
+(its location's excerpt) and that is shown; a reply, whose thread started
+on another revision, and a thread an agent started on a line, which has
+no excerpt, have the lines of their own revision, found by the generic
+function: the library's method places the thread in the diff of the
+version the comment was written against, when the set holds that
+version's files, and else says whose lines it shows ("the lines are those
+of v1, where the thread started").  The details lead to the code: a
+`[Source @ v1]` button (the revision's name), and `[Source @ v2]` for the
+newest version, or one `[Source]` for a comment written against it; D in
+the threads view; RET or a click on a line of the diff, that line of the
+source, on the side a removed line is on (`change-review-ui-follow-source`).
 
 THE ADAPTER.  This module gives a task to the library as a change set of
 its own subtype (`harness-ui-patch-review--set`):
@@ -12902,8 +12923,34 @@ its own subtype (`harness-ui-patch-review--set`):
   changed.  A thread whose revision is no longer in the repository is
   placed by the lines it quotes, and one on a file the branch deleted is
   gone.  This needs nothing the review keeps, so it survives a restart.
+- A comment is written against a commit, which every comment records by
+  its sha: the commit the branch was read at for a comment made in Ediff
+  (the one its excerpt is from), the commit the agent was at for the
+  agent's (`review_comment`).  In an Ediff the commit is the one the
+  Ediff shows (`change-review-default-revision`), so a reply made in the
+  Ediff of an earlier commit is written against that commit.  The
+  commit is the code the comment is about, and the branch has gone past
+  it, so the review reads the branch at that commit when it is asked for
+  the commit's code (`harness-ui-patch-review--snapshot`): once per
+  commit, from the version's recorded merge base, the diff of the commit
+  against it and the places of the threads in that (the same placement
+  as above, for that commit instead of the tip).  The result is a
+  SNAPSHOT, a copy of the review with the files and the places of that
+  commit (its `snapshot` slot is the commit), kept in the review by the
+  commit.  The `change-review-origin` method
+  (`harness-ui-patch-review--set`) answers from the review itself when
+  the commit is the branch's end, from the snapshot once it is read,
+  with the note "reading the diff at 68726a2…" while git answers, and,
+  for a commit the repository does not have, the lines the thread kept
+  and the reason.  The views draw again when it is read
+  (`change-review-ui-refresh`).
 - `change-review-visit` compares the file in Ediff with the thread's line
-  in sight, and `change-review-send` goes to the feedback box.
+  in sight -- as the branch is, or, given a version, as that commit had
+  it: the snapshot's Ediff, the merge base against the file of that
+  commit, whose control panel says "as it was at 68726a2".  An Ediff of
+  a snapshot is looked at, not reviewed: no file of it is marked seen or
+  approved, and a comment made in it is written against that commit.
+  `change-review-send` goes to the feedback box.
 
 The panel is on `harness-ui-report-panel-functions` at depth -10, before
 the review banner, and returns the changes of a task in review that has

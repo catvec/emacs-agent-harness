@@ -75,8 +75,9 @@
 ;; the user is (`change-review-current-author'), what following an
 ;; agent to its conversation does (`change-review-follow-author'), how
 ;; a location is shown (`change-review-visit'), where the drafts go
-;; (`change-review-send') and the text of a file the diff does not hold
-;; (`change-review-file-text').
+;; (`change-review-send'), the text of a file the diff does not hold
+;; (`change-review-file-text') and the revision a comment is written
+;; against (`change-review-default-revision').
 ;;
 ;; The data is plain: `change-review-set-to-data' turns a set into
 ;; lists, strings and numbers, `change-review-set-from-data' back, and
@@ -137,6 +138,21 @@ nil gives \"\"."
   (cond ((not (stringp revision)) "")
         ((string-match-p "\\`[0-9a-f]\\{12,64\\}\\'" revision) (substring revision 0 7))
         (t revision)))
+
+(defun change-review-same-revision-p (a b)
+  "Return non-nil when revisions A and B name the same commit.
+Both are strings.  A hash may be written in full or abbreviated (seven
+characters or more, as git and `change-review-short-revision' do), so
+two that start the same way are one; any other revision, a message id
+or a version name, is the same as itself only."
+  (and (stringp a) (stringp b)
+       (not (string-empty-p a)) (not (string-empty-p b))
+       (or (equal a b)
+           (let ((short (if (<= (length a) (length b)) a b))
+                 (long (if (<= (length a) (length b)) b a)))
+             (and (string-match-p "\\`[0-9a-f]\\{7,64\\}\\'" short)
+                  (string-match-p "\\`[0-9a-f]+\\'" long)
+                  (string-prefix-p short long))))))
 
 ;;;; Plain data helpers
 
@@ -473,6 +489,28 @@ KEY is a version, an id (a source revision), a number or a label."
   "Return the line THREAD is about, or nil."
   (when-let* ((location (change-review-thread-location thread)))
     (change-review-location-line location)))
+
+(defun change-review-kept-location (thread comment)
+  "Return (LOCATION . EXACT) for the place kept with COMMENT of THREAD.
+LOCATION is the comment's own, else its thread's: nil for a comment on
+the change as a whole.  EXACT is non-nil when its lines are those of the
+revision COMMENT was written against: it has an excerpt and is the
+comment's own or was made on the same revision, or it names no line, so
+there is no diff to show.  A reply, or a comment an agent made on a
+line, has no excerpt of the revision it was written against: that is
+found where the files of the revision are (`change-review-origin')."
+  (let* ((own (change-review-comment-location comment))
+         (location (or own (change-review-thread-location thread)))
+         (root (change-review-thread-root thread))
+         (revision (change-review-comment-revision comment))
+         (basis (and root (change-review-comment-revision root))))
+    (cons location
+          (and location
+               (or (null (change-review-location-line location))
+                   (and (change-review-location-excerpt location)
+                        (or own (null revision) (null basis)
+                            (change-review-same-revision-p revision basis))))
+               t))))
 
 (defun change-review-thread-revision (thread)
   "Return the source revision THREAD was started against."
@@ -931,10 +969,19 @@ gives one that shows that.")
 
 ;;;; Changing a set
 
-(defun change-review--default-revision (set)
-  "Return the revision a comment made now in SET is against: the newest's."
+(cl-defgeneric change-review-default-revision (set)
+  "Return the revision a comment made now in SET is written against.
+The method for a plain `change-review-set' is the newest version's.  A
+kind of set whose user can look at the code of another version answers
+that one: what a comment is written against is what its author saw.")
+
+(cl-defmethod change-review-default-revision ((set change-review-set))
   (when-let* ((version (change-review-latest-version set)))
     (change-review-version-id version)))
+
+(defun change-review--default-revision (set)
+  "Return the revision a comment made now in SET is against."
+  (change-review-default-revision set))
 
 (cl-defun change-review-comment (set body &key thread reply-to author location revision
                                      time sent meta)

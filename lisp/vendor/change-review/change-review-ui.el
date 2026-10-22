@@ -69,6 +69,17 @@
 ;; comments on the change as a whole.  n and p move between comments, N
 ;; and P between threads, f changes the filter.
 ;;
+;; WHERE A COMMENT WAS MADE.  The lines under a comment are the diff of
+;; the revision it was written against, as it was then: the answer to a
+;; comment changes the code it is about, and the newest version's diff
+;; would make the comment read as if it asked for what is there already
+;; (`change-review-origin').  A reply, whose thread started on another
+;; revision, has the lines of its own.  The details also lead to the
+;; code: [Source @ v1] shows it as it was when the comment was written
+;; (D does), [Source @ v2] in the newest version (d does), and RET on a
+;; line of the diff shows that line of the source (`change-review-visit'
+;; with a version).
+;;
 ;; THE DIFF VIEW (`change-review-open-diff').  The files of a version as the
 ;; unified diff, with the threads under the lines they are about, drawn
 ;; by the same function.  c comments on the line at point, or on the
@@ -203,6 +214,8 @@ comparison say, has its set through this, or in `change-review-ui--set'.")
 
 (defvar-local change-review-ui--timer nil
   "In a view, the timer that draws it again, while one is waiting.")
+
+(defvar change-review-ui--source-map)
 
 ;;;; Time and width
 
@@ -386,14 +399,81 @@ is \"the file\", one on the change \"the change\"."
                ('gone (format "line %d (gone)" was))
                (_ (format "line %d" (or line was))))))))
 
-(defun change-review-ui--placement-note (placement)
-  "Return what PLACEMENT, a thread's place now, says beyond the line, or nil."
+(defun change-review-ui--placement-note (placement &optional was)
+  "Return what PLACEMENT, a thread's place now, says beyond the line, or nil.
+WAS is the line a comment was made on, when that is not the line the
+thread started on, which PLACEMENT remembers."
   (when placement
-    (let ((line (plist-get placement :line)) (was (plist-get placement :was)))
+    (let ((line (plist-get placement :line)) (was (or was (plist-get placement :was))))
       (pcase (plist-get placement :status)
         ('moved (format "now line %s (was %s)" line was))
         ('changed (if line (format "line %s changed since" line) "its line changed since"))
         ('gone "its line is gone")))))
+
+;;;; Origin
+
+;; Where a comment was made is not where its thread is now.  The code a
+;; comment is about is changed by the answer to it, so the lines the
+;; reader sees under a comment have to be those of the revision the
+;; comment was written against: its diff, as it was.  A comment made on
+;; a line keeps the diff around the line (the excerpt of its location);
+;; a reply has no location of its own, and its thread's is of the
+;; revision the thread started on, not of the reply's.
+
+(defun change-review-ui--location-in-version (set thread location version)
+  "Return LOCATION of THREAD in SET as VERSION's diff has it, or nil.
+The thread is placed in VERSION (`change-review-placement') and the
+location made again at that place, with the lines of VERSION's diff
+around it.  Nil when VERSION has no files, or none that LOCATION names,
+or no line of the thread."
+  (let* ((path (change-review-location-file location))
+         (file (and path (cl-find-if (lambda (f) (or (equal (change-review-file-path f) path)
+                                                     (equal (change-review-file-old-path f) path)))
+                                     (change-review-version-files version))))
+         (placement (and file (change-review-placement set thread version))))
+    (when (and placement (plist-get placement :line))
+      (change-review-diff-location file (or (plist-get placement :side)
+                                            (change-review-location-side location))
+                                   (plist-get placement :line)))))
+
+(defun change-review-ui--stale-origin (set thread comment location)
+  "Return the origin of COMMENT of THREAD in SET when only LOCATION is known.
+LOCATION was made on another revision than COMMENT: when it holds an
+excerpt, a note says whose lines they are."
+  (let ((basis (let ((root (change-review-thread-root thread)))
+                 (and root (change-review-comment-revision root)))))
+    (list :location location
+          :note (and (change-review-location-excerpt location) basis
+                     (not (eq comment (change-review-thread-root thread)))
+                     (format "the lines are those of %s, where the thread started"
+                             (change-review-revision-name set basis))))))
+
+(cl-defgeneric change-review-origin (set thread comment)
+  "Return where COMMENT of THREAD in SET was made, as it was made.
+A plist (:location LOCATION :note NOTE).  LOCATION is a
+`change-review-location' with the line and the excerpt of the revision
+COMMENT was written against -- not the newest version's, which the
+answer to the comment may have changed, nor its thread's when the
+thread started on another revision -- or nil for a comment on the
+change as a whole.  NOTE, a string or nil, says what is not as it
+should be: the lines are being read, or cannot be.
+
+The method for a plain `change-review-set' keeps what the comment has:
+its own location, its thread's when made on the same revision; for a
+comment on another revision it places the thread in the diff of the
+version it was written against, when the set holds that version's
+files, and else says whose lines it shows.  A kind of set that reads
+its files from somewhere else answers better.")
+
+(cl-defmethod change-review-origin ((set change-review-set) thread comment)
+  (pcase-let ((`(,location . ,exact) (change-review-kept-location thread comment)))
+    (cond
+     ((or (null location) exact) (list :location location))
+     ((let* ((revision (change-review-comment-revision comment))
+             (version (and revision (change-review-find-version set revision)))
+             (found (and version (change-review-ui--location-in-version set thread location version))))
+        (and found (list :location found))))
+     (t (change-review-ui--stale-origin set thread comment location)))))
 
 ;;;; Drawing a thread
 
@@ -532,7 +612,13 @@ line does."
         (push (concat body-prefix piece) lines)))
     (when details
       (dolist (line (change-review-ui-origin-lines set thread comment))
-        (push (concat body-prefix line) lines)))
+        ;; A line of the diff is a way to its source all along the line.
+        (push (concat (if-let* ((source (get-text-property 0 'change-review-source line)))
+                          (propertize body-prefix 'change-review-source source
+                                      'keymap change-review-ui--source-map)
+                        body-prefix)
+                      line)
+              lines)))
     (mapcar (lambda (line)
               (propertize (concat line "\n") 'change-review-comment (change-review-comment-id comment)))
             (nreverse lines))))
@@ -801,37 +887,128 @@ TARGET non-nil marks the line the comment was made on."
                                          (t face)))
             (if target (propertize "  ◀" 'face 'change-review-ui-meta-face) ""))))
 
+(defvar change-review-ui--source-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "RET") #'change-review-ui-follow-source)
+    (define-key map [mouse-1] #'change-review-ui-follow-source)
+    map)
+  "Keys on a line of the diff a comment was made on.
+RET or a click shows the line of the source.")
+
+(defun change-review-ui--source-buttons (set thread comment)
+  "Return the buttons that show the source COMMENT of THREAD was written on.
+Two spaces and one button when COMMENT was written against the newest
+version, two when it was written against an earlier one: the code as it
+was then, and as it is now."
+  (let* ((revision (change-review-comment-revision comment))
+         (latest (change-review-latest-version set))
+         (newest (or (null revision) (null latest)
+                     (change-review-same-revision-p revision (change-review-version-id latest)))))
+    (concat
+     "  "
+     (if newest
+         (change-review-ui--button "[Source]" "Show the code this comment is about"
+                                   (lambda () (change-review-visit set comment)))
+       (concat
+        (change-review-ui--button
+         (format "[Source @ %s]" (change-review-revision-name set revision))
+         (format "Show the code this comment was written on: %s (%s), as it was"
+                 (change-review-revision-name set revision)
+                 (change-review-short-revision revision))
+         (lambda () (change-review-visit set comment revision)))
+        " "
+        (change-review-ui--button
+         (format "[Source @ %s]" (change-review-version-name latest))
+         (format "Show the thread in the newest version, %s" (change-review-version-name latest))
+         (lambda () (change-review-visit set thread))))))))
+
+(defun change-review-ui--source-of (line)
+  "Return (SIDE . NUMBER) for LINE, a line of an excerpt, or nil.
+LINE is (KIND TEXT OLD NEW) as `change-review-diff-excerpt-lines' gives
+it: a line of the file after the change, or a removed line, which is the
+file's before it."
+  (pcase (car line)
+    ((or ?\s ?+) (and (nth 3 line) (cons 'new (nth 3 line))))
+    (?- (and (nth 2 line) (cons 'old (nth 2 line))))))
+
+(defun change-review-ui--excerpt-rows (location)
+  "Return the lines that draw the excerpt of LOCATION, a string each.
+Each line of the diff -- not the hunk header -- carries the file, the
+side and the number of the line of the source it is, for
+`change-review-ui-follow-source'."
+  (let* ((excerpt (change-review-location-excerpt location))
+         (path (change-review-location-file location))
+         (rows (split-string excerpt "\n"))
+         (lines (change-review-diff-excerpt-lines excerpt))
+         (first t)
+         out)
+    (while rows
+      (let* ((row (pop rows))
+             (header (and first (change-review-diff--hunk-header-p row)))
+             (line (and (not header) (not (string-empty-p row)) (pop lines)))
+             (source (and line (change-review-ui--source-of line)))
+             (text (concat (propertize "│ " 'face 'change-review-ui-meta-face)
+                           (change-review-ui--excerpt-line row (null rows)))))
+        (setq first nil)
+        (push (if (and source path)
+                  (propertize text
+                              'change-review-source (list path (car source) (cdr source))
+                              'keymap change-review-ui--source-map
+                              'mouse-face 'highlight
+                              'help-echo "RET or a click: show this line of the source")
+                text)
+              out)))
+    (nreverse out)))
+
+(defun change-review-ui--now-note (set comment location placement)
+  "Return what to say of where the thread of COMMENT is now, or nil.
+LOCATION is where COMMENT was made, PLACEMENT where its thread is now.
+A comment written against the newest version has nothing to say: its
+lines are as they are; and a thread that has not moved since the comment
+was made has not moved."
+  (let ((revision (change-review-comment-revision comment))
+        (latest (change-review-latest-version set))
+        (was (and location (change-review-location-line location))))
+    (unless (and revision latest (change-review-same-revision-p revision (change-review-version-id latest)))
+      (unless (and (eq (plist-get placement :status) 'moved) was
+                   (eql was (plist-get placement :line)))
+        (change-review-ui--placement-note placement was)))))
+
 (defun change-review-ui-origin-lines (set thread comment)
   "Return the lines that say where COMMENT of THREAD in SET was made.
-They give its place -- file, line and side -- the revision, where the
-thread is now when that is not where it was made, the lines of the diff
-the comment was made on, the last of them the line it is about, and for
-an agent's comment the session and the tool call."
-  (let* ((location (or (change-review-comment-location comment)
-                       (change-review-thread-location thread)))
+They give its place -- file, line and side -- and the revision, with
+buttons to the source there (`change-review-origin'); where the thread
+is now when the comment was written against an earlier version; the
+lines of the diff of that revision the comment was made on, the last of
+them the line it is about, each a way to its source line
+\(`change-review-ui-follow-source'); and for an agent's comment the
+session and the tool call."
+  (let* ((origin (change-review-origin set thread comment))
+         (location (plist-get origin :location))
          (revision (change-review-comment-revision comment))
          (author (change-review-comment-author comment))
          (placement (change-review-placement set thread))
          (meta 'change-review-ui-meta-face)
          lines)
-    (push (propertize
-           (concat "made at "
-                   (if location (change-review-location-label location t) "the change as a whole")
-                   (if revision (format " · revision %s" (change-review-revision-name set revision)) "")
-                   (if (and revision (not (equal (change-review-short-revision revision)
-                                                 (change-review-revision-name set revision))))
-                       (format " (%s)" (change-review-short-revision revision))
-                     ""))
-           'face meta)
+    (push (concat
+           (propertize
+            (concat "made at "
+                    (if location (change-review-location-label location t) "the change as a whole")
+                    (if revision (format " · revision %s" (change-review-revision-name set revision)) "")
+                    (if (and revision (not (equal (change-review-short-revision revision)
+                                                  (change-review-revision-name set revision))))
+                        (format " (%s)" (change-review-short-revision revision))
+                      ""))
+            'face meta)
+           (if location (change-review-ui--source-buttons set thread comment) ""))
           lines)
-    (when-let* ((note (change-review-ui--placement-note placement)))
-      (push (propertize (concat "now: " note) 'face meta) lines))
-    (when-let* ((excerpt (and location (change-review-location-excerpt location))))
-      (let ((rows (split-string excerpt "\n")))
-        (while rows
-          (let ((row (pop rows)))
-            (push (concat (propertize "│ " 'face meta) (change-review-ui--excerpt-line row (null rows)))
-                  lines)))))
+    (when-let* ((note (plist-get origin :note)))
+      (push (propertize note 'face meta) lines))
+    (when-let* ((note (change-review-ui--now-note set comment location placement)))
+      (push (propertize (concat "now: " (string-remove-prefix "now " note)) 'face meta) lines))
+    (when (and location (change-review-location-excerpt location))
+      (dolist (row (change-review-ui--excerpt-rows location))
+        (push row lines)))
     (when (and author (eq (change-review-author-kind author) 'agent)
                (or (change-review-author-session author) (change-review-author-tool-call author)))
       (push (propertize (concat "from the conversation"
@@ -1182,9 +1359,9 @@ is what TAB is without this library's keys."
 
 (defun change-review-ui-show-origin ()
   "Show where the comment at point was made, or hide that again.
-That is the file and line, the revision, and the lines of the diff it
-was made on.  In the diff view it is the comments of the thread under
-point."
+That is the file and line, the revision, and the lines of the diff of
+that revision it was made on, with a way to the source.  In the diff
+view it is the comments of the thread under point."
   (interactive)
   (pcase-let ((`(,_ ,thread ,comment) (change-review-ui--target)))
     (if (get-text-property (point) 'change-review-comment)
@@ -1195,6 +1372,40 @@ point."
                   (cl-set-difference change-review-ui--details ids :test #'equal)
                 (cl-union change-review-ui--details ids :test #'equal)))
         (change-review-ui-redraw)))))
+
+(defun change-review-ui-show-source ()
+  "Show the code the comment at point was written on, as it was then.
+That is the version the comment was written against: its diff, the code
+the comment is about before the answer to it changed it.  \\`d' shows the
+thread in the newest version instead.  On a thread, not a comment, the
+thread's first."
+  (interactive)
+  (pcase-let ((`(,set ,thread ,_) (change-review-ui--target)))
+    (let ((comment (or (change-review-ui--comment-at-point) (change-review-thread-root thread))))
+      (change-review-visit set comment (change-review-comment-revision comment)))))
+
+(defun change-review-ui-follow-source (&optional event)
+  "Show the line of the source that the diff line at point, or clicked, is.
+It is the line as the version the comment was written against has it
+\(`change-review-visit').  The diff lines are those a comment's details
+show (`change-review-ui-show-origin'); EVENT is the click."
+  (interactive (list (and (mouse-event-p last-nonmenu-event) last-nonmenu-event)))
+  (let* ((posn (and event (event-start event)))
+         (clicked (and posn (posn-string posn)))
+         (buffer (if posn (window-buffer (posn-window posn)) (current-buffer))))
+    (with-current-buffer buffer
+      (let* ((get (lambda (property)
+                    (cond (clicked (get-text-property (cdr clicked) property (car clicked)))
+                          ((and posn (integerp (posn-point posn)))
+                           (get-text-property (posn-point posn) property))
+                          (t (get-text-property (point) property)))))
+             (source (funcall get 'change-review-source))
+             (set (change-review-ui--current-set))
+             (found (change-review-find-comment set (funcall get 'change-review-comment))))
+        (unless (and source found) (user-error "No source line here"))
+        (pcase-let ((`(,path ,side ,line) source))
+          (change-review-visit set (change-review-make-location :file path :side side :line line)
+                               (change-review-comment-revision (cdr found))))))))
 
 ;;;; Drawing a view again
 
@@ -1315,6 +1526,10 @@ The comment or the thread under it, and the line within that."
     map)
   "Keys of the threads view.")
 
+;; Outside the `defvar', which keeps the map an Emacs has already: a
+;; library loaded again gives that Emacs the key too.
+(define-key change-review-threads-mode-map (kbd "D") #'change-review-ui-show-source)
+
 (define-derived-mode change-review-threads-mode special-mode "Review-Threads"
   "The threads of a change set, grouped by file.
 
@@ -1326,7 +1541,8 @@ Point is on a comment; the keys act on it:
 \\[change-review-ui-reply] replies to it, as a draft.
 \\[change-review-ui-toggle-status] closes its thread or opens it again.
 \\[change-review-ui-set-status] sets the status by name.
-\\[change-review-ui-show-in-diff] shows it in the diff view.
+\\[change-review-ui-show-in-diff] shows it in the diff view, in the newest version.
+\\[change-review-ui-show-source] shows the code the comment was written on, as it was then.
 \\[change-review-ui-follow-author] follows an agent's comment to its conversation.
 \\[change-review-ui-edit-draft] edits a draft, \\[change-review-ui-delete-draft] deletes it.
 \\[change-review-ui-comment-on-change] comments on the change as a whole.
@@ -1390,8 +1606,8 @@ The one for CURRENT, the filter in force, is marked instead."
 \\[change-review-ui-next-comment]/\\[change-review-ui-previous-comment] comments  \
 \\[change-review-ui-next-thread]/\\[change-review-ui-previous-thread] threads  \
 \\[change-review-ui-show-origin] where  \\[change-review-ui-reply] reply  \
-\\[change-review-ui-toggle-status] close/open  \\[change-review-ui-show-in-diff] diff  \
-\\[change-review-ui-cycle-filter] filter  \\[quit-window] quit")
+\\[change-review-ui-toggle-status] close/open  \\[change-review-ui-show-in-diff] diff now  \
+\\[change-review-ui-show-source] diff then  \\[change-review-ui-cycle-filter] filter  \\[quit-window] quit")
                  'face 'change-review-ui-meta-face)
      "\n\n")))
 
@@ -1824,6 +2040,17 @@ shown, with the lines of the diff around it kept."
     (recenter)
     (pulse-momentary-highlight-one-line (point))))
 
+(defun change-review-ui--goto-location (location)
+  "Move point to the line LOCATION names in this diff view, and highlight it."
+  (when-let* ((entry (and (change-review-location-file location)
+                          (change-review-ui--file-entry (change-review-location-file location))))
+              (line (change-review-location-line location))
+              (pos (gethash (cons (or (change-review-location-side location) 'new) line)
+                            (nth 3 entry))))
+    (goto-char pos)
+    (recenter)
+    (pulse-momentary-highlight-one-line (point))))
+
 (cl-defmethod change-review-visit ((set change-review-set) target &optional version)
   (let* ((thread (cond ((change-review-thread-p target) target)
                        ((change-review-comment-p target)
@@ -1831,8 +2058,8 @@ shown, with the lines of the diff around it kept."
                        (t nil)))
          (buffer (change-review-open-diff set version)))
     (with-current-buffer buffer
-      (when thread
-        (change-review-ui--goto-thread thread)))
+      (cond (thread (change-review-ui--goto-thread thread))
+            ((change-review-location-p target) (change-review-ui--goto-location target))))
     buffer))
 
 ;;;; Sending, and emailed patches
@@ -1920,6 +2147,7 @@ the thread it answers; importing it again adds nothing."
   (define-key map (kbd "e") #'change-review-ui-edit-draft)
   (define-key map (kbd "RET") #'change-review-ui-return)
   (define-key map (kbd "TAB") #'change-review-ui-cycle-fold))
+(define-key change-review-ui-lines-mode-map (kbd "D") #'change-review-ui-show-source)
 
 (define-minor-mode change-review-ui-lines-mode
   "Keys for the threads drawn under the lines of this buffer.

@@ -3348,8 +3348,12 @@ with), `recap` writes the recaps on the cards,
   `↳ re 1/3` when it answers another than the one before). `r` replies
   in the thread under the line, `x` closes it -- closed is the good
   ending: the point made, the change made -- or opens it again, `RET`
-  shows where each comment was made, with the lines of the diff it was
-  made on, and `e` edits your draft or goes to the box. A closed thread
+  shows where each comment was made, with the lines of the diff of the
+  commit it was written against, as it was then (the answer to a comment
+  changes the code it is about, so a reply shows the code its own commit
+  had, not the code the thread started on), and `[Source @ v1]` shows
+  that code in Ediff, `[Source @ v2]` the branch as it is, and `e` edits
+  your draft or goes to the box. A closed thread
   is one line under its line (`▸ ✓ t-3f9a · 3 comments · closed 2h ago
   “Why eighteen?…”`): `TAB` on that line -- in Ediff's control panel, on
   the threads of the current difference -- or a click on it opens it to
@@ -3362,7 +3366,8 @@ with), `recap` writes the recaps on the cards,
   a view of their own: filtered by status (`f`: open, closed, all),
   `n` and `p` between comments, `N` and `P` between threads, `r` to
   reply to the comment at point, `x` to close or open its thread, `d` to
-  show it in Ediff, `o` to follow an agent's comment to its
+  show it in Ediff, `D` to show the code as it was when the comment was
+  written, `o` to follow an agent's comment to its
   conversation. The agent answers with its own tools, `review_threads`
   and `review_comment`, which record its session and the call, and
   closes a thread when what it raised is done; you close it once you

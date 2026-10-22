@@ -95,6 +95,29 @@
 ;;               it changes, as it does when the two versions are put
 ;;               side by side.
 ;;
+;; WHERE A COMMENT WAS MADE.  The lines under a comment (RET, or its
+;; `▸ where') are the diff of the commit it was written against, as it was
+;; then: the answer to a comment changes the code it is about, and the
+;; newest diff would make the comment read as if it asked for what is
+;; there already.  The commit is recorded with every comment, by its sha: a
+;; comment made in Ediff has the commit the branch was read at, the
+;; agent's the one it was at.  A comment made on a line keeps the diff
+;; around it.  A reply, or a thread the agent started on a line, keeps
+;; none of the commit it was written on, so the review reads the branch at
+;; that commit, once (a snapshot, `harness-ui-patch-review--snapshot'):
+;; its diff against the merge base the version recorded, the thread's
+;; place in it, and the diff around that line.  While git answers, the
+;; details say "reading the diff at 68726a2…"; a commit the repository no
+;; longer has says so, and shows what the thread kept.  The details lead
+;; to the code too.  [Source @ v1], and D in the threads view, show it in
+;; Ediff as that commit had it -- the merge base against the file of that
+;; commit, the line in sight, "as it was at 68726a2" in the control
+;; panel; [Source @ v2], and d, in the branch as it is; RET, or a click,
+;; on a line of the diff, that line of the source.  An Ediff of an
+;; earlier commit is looked at, not reviewed: its files are not marked
+;; seen or approved, and a comment made in it is written against that
+;; commit.
+;;
 ;; THE DIFF SHOWN.  A line under the heading chooses what the files are
 ;; of -- three buttons, or d in the report
 ;; (`harness-ui-patch-review-select-diff'):
@@ -346,7 +369,12 @@ report the changes show in.  EDIFF is the comparison under way: a plist
 of :index, the buffers :a, :b and :control, the :windows to give back as
 it ends, the first line :start the report's window showed and the :box
 window of the report kept beside it.  GONE is non-nil once the task
-went, done or deleted, while its Ediff showed."
+went, done or deleted, while its Ediff showed.  SNAPSHOTS holds the
+review as it was at earlier commits of the branch, by the commit, each a
+promise of a copy of this review with the files and the places of the
+threads of that commit (`harness-ui-patch-review--snapshot'); SNAPSHOT is
+non-nil in such a copy, the commit it is of.  The comments written
+against that commit are about its code, which the branch has gone past."
   id task dir branch base merge-base tip files
   selector shown-selector old-name new-name
   branch-base branch-tip branch-files selection-error
@@ -357,7 +385,9 @@ went, done or deleted, while its Ediff showed."
   placing
   (since (make-hash-table :test 'equal))
   (tree harness-ui-patch-review-file-tree)
-  show dirty loading error popout ediff gone)
+  show dirty loading error popout ediff gone
+  (snapshots (make-hash-table :test 'equal))
+  snapshot)
 
 (defvar harness-ui-patch-review--reviews (make-hash-table :test 'equal)
   "Task id -> the review of its changes.")
@@ -462,30 +492,78 @@ from the repository."
              (gethash (change-review-thread-id thread) (harness-ui-patch-review--r-placements review))))
       (cl-call-next-method)))
 
-(cl-defmethod change-review-visit ((set harness-ui-patch-review--set) target &optional _version)
-  (let* ((review (harness-ui-patch-review--set-review set))
-         (thread (cond ((change-review-thread-p target) target)
+;; What a comment is written against is what its author saw: in an Ediff,
+;; the commit it shows -- the branch's end, or an earlier commit's code.
+(cl-defmethod change-review-default-revision ((set harness-ui-patch-review--set))
+  (or (and (harness-ui-patch-review--review-p harness-ui-patch-review--review)
+           (eq set (harness-ui-patch-review--r-set harness-ui-patch-review--review))
+           (harness-ui-patch-review--r-tip harness-ui-patch-review--review))
+      (cl-call-next-method)))
+
+(cl-defmethod change-review-origin ((set harness-ui-patch-review--set) thread comment)
+  (pcase-let* ((`(,location . ,exact) (change-review-kept-location thread comment))
+               (revision (change-review-comment-revision comment))
+               (review (harness-ui-patch-review--set-review set)))
+    (if (or exact (null location) (null revision) (null review))
+        ;; What the comment kept is the diff it was made on.
+        (cl-call-next-method)
+      ;; A reply, an agent's thread: the diff of the commit it was written on.
+      (let ((view (harness-ui-patch-review--view-at review revision)))
+        (cond
+         ((harness-ui-patch-review--review-p view)
+          (if-let* ((found (harness-ui-patch-review--location-in view thread)))
+              (list :location found)
+            (cl-call-next-method)))
+         ((eq view 'pending)
+          (list :location (harness-ui-patch-review--bare-location location)
+                :note (format "reading the diff at %s…" (harness-ui-patch-review--short revision))))
+         (t
+          (let ((stale (cl-call-next-method)))
+            (list :location (plist-get stale :location)
+                  :note (format "%s: showing the lines the thread started on"
+                                (plist-get view :failed))))))))))
+
+(defun harness-ui-patch-review--target-place (set target)
+  "Return (THREAD . LOCATION) for TARGET, a thread, a comment or a location of SET.
+LOCATION is the thread's, or TARGET itself when it is one; either may be nil."
+  (let* ((thread (cond ((change-review-thread-p target) target)
                        ((change-review-comment-p target)
                         (car (change-review-find-comment set (change-review-comment-id target))))))
-         (location (and thread (change-review-thread-location thread)))
-         (index (and location
-                     (cl-position-if (lambda (file) (harness-ui-patch-review--thread-file-p thread file))
-                                     (harness-ui-patch-review--r-files review))))
-         (placement (and thread (change-review-placement set thread))))
-    (cond
-     ((null thread) (user-error "No thread to show"))
-     ((null index)
-      (user-error "%s is not a file this version changes"
-                  (if location (change-review-location-label location) "The change as a whole")))
-     (t
-      (harness-ui-patch-review-ediff
-       review index
-       (when-let* ((line (or (plist-get placement :line)
-                             (change-review-location-line location))))
-         (cons (intern (concat ":" (symbol-name (or (plist-get placement :side)
-                                                    (change-review-location-side location)
-                                                    'new))))
-               line)))))))
+         (location (cond (thread (change-review-thread-location thread))
+                         ((change-review-location-p target) target))))
+    (cons thread location)))
+
+(defun harness-ui-patch-review--goto (side line)
+  "Return (:SIDE . LINE) for a line of a version Ediff shows, or nil without LINE.
+SIDE is `new' or `old', nil for `new'.  That is the form
+`harness-ui-patch-review-ediff' takes a line to have in sight in."
+  (and line (cons (intern (concat ":" (symbol-name (or side 'new)))) line)))
+
+(cl-defmethod change-review-visit ((set harness-ui-patch-review--set) target &optional version)
+  (let* ((review (harness-ui-patch-review--set-review set))
+         (revision (harness-ui-patch-review--version-revision set version)))
+    (if (and revision (not (change-review-same-revision-p
+                            revision (harness-ui-patch-review--r-tip review))))
+        ;; An earlier commit: the code as it was, when the comment was written.
+        (harness-ui-patch-review--visit-at review target revision)
+      (pcase-let* ((`(,thread . ,location) (harness-ui-patch-review--target-place set target))
+                   (index (and location
+                               (cl-position-if (lambda (file) (harness-ui-patch-review--location-file-p location file))
+                                               (harness-ui-patch-review--r-files review))))
+                   (placement (and thread (change-review-placement set thread))))
+        (cond
+         ((null location)
+          (user-error (if thread
+                          "The change as a whole is not a file this version changes"
+                        "No thread to show")))
+         ((null index)
+          (user-error "%s is not a file this version changes" (change-review-location-label location)))
+         (t
+          (harness-ui-patch-review-ediff
+           review index
+           (harness-ui-patch-review--goto
+            (or (plist-get placement :side) (change-review-location-side location))
+            (or (plist-get placement :line) (change-review-location-line location))))))))))
 
 (cl-defmethod change-review-send ((set harness-ui-patch-review--set))
   (let* ((review (harness-ui-patch-review--set-review set))
@@ -510,19 +588,25 @@ from the repository."
                    (when (eq (window-buffer) buffer) (recenter)))
           (message "The call %s is not in this session's transcript" call-id))))))
 
-(defun harness-ui-patch-review--thread-file-p (thread file)
-  "Return non-nil when THREAD is about FILE: at its path, or the one it had."
-  (let ((path (and (change-review-thread-location thread)
-                   (change-review-location-file (change-review-thread-location thread)))))
+(defun harness-ui-patch-review--location-file-p (location file)
+  "Return non-nil when LOCATION is on FILE: at its path, or the one it had."
+  (let ((path (and location (change-review-location-file location))))
     (and path
          (or (equal path (change-review-file-path file))
              (and (change-review-file-old-path file)
                   (equal path (change-review-file-old-path file)))))))
 
+(defun harness-ui-patch-review--thread-file-p (thread file)
+  "Return non-nil when THREAD is about FILE: at its path, or the one it had."
+  (harness-ui-patch-review--location-file-p (change-review-thread-location thread) file))
+
 (defun harness-ui-patch-review--file-threads (review file)
   "Return the threads of REVIEW's set that are about FILE, by line."
-  (sort (cl-remove-if-not (lambda (thread) (harness-ui-patch-review--thread-file-p thread file))
-                          (change-review-set-threads (harness-ui-patch-review--r-set review)))
+  ;; A copy: `cl-remove-if-not' returns the set's own list when every
+  ;; thread is about FILE, and sorting that would reorder the set.
+  (sort (copy-sequence
+         (cl-remove-if-not (lambda (thread) (harness-ui-patch-review--thread-file-p thread file))
+                           (change-review-set-threads (harness-ui-patch-review--r-set review))))
         (lambda (a b) (< (or (change-review-thread-line a) 0) (or (change-review-thread-line b) 0)))))
 
 (defun harness-ui-patch-review--attach-files (review)
@@ -1038,7 +1122,7 @@ the report's drawing put its start."
   "Draw the report REVIEW shows in again, when it is open.
 Not while it draws: what it draws is current then.  A window beside an
 Ediff, which shows the feedback box, goes on showing it."
-  (unless harness-ui-patch-review--drawing
+  (unless (or harness-ui-patch-review--drawing (harness-ui-patch-review--r-snapshot review))
     (let ((popout (harness-ui-patch-review--r-popout review)))
       (when (buffer-live-p popout)
         (let ((places (harness-ui-patch-review--window-places popout)))
@@ -1156,8 +1240,10 @@ the review, so that they are there after a restart; a failure only says so."
                                 (harness-error-message err))))))
 
 (defun harness-ui-patch-review--mark-seen (review file)
-  "Mark FILE of REVIEW seen, and have the harness keep it so."
-  (when file
+  "Mark FILE of REVIEW seen, and have the harness keep it so.
+Not the file of a snapshot: an earlier commit's code is looked at, not
+reviewed."
+  (when (and file (not (harness-ui-patch-review--r-snapshot review)))
     (let ((key (harness-ui-patch-review--seen-key file))
           (table (harness-ui-patch-review--r-seen review)))
       (unless (gethash key table)
@@ -1283,7 +1369,15 @@ or on its card on the board."
   (dolist (buffer (harness-ui-patch-review--ediff-buffers review))
     (when (buffer-live-p buffer) (kill-buffer buffer)))
   (harness-ui-patch-review--unlimit-box (harness-ui-patch-review--r-popout review))
-  (setf (harness-ui-patch-review--r-ediff review) nil))
+  (setf (harness-ui-patch-review--r-ediff review) nil)
+  ;; The Ediffs of the code as earlier commits had it.
+  (dolist (snapshot (harness-ui-patch-review--snapshot-list review))
+    (condition-case err
+        (harness-ui-patch-review--end-ediff snapshot (not (harness-ui-patch-review--ediff-shows-p snapshot)))
+      (error (harness-log 'warn "patch review: could not end Ediff: %S" err)))
+    (dolist (buffer (harness-ui-patch-review--ediff-buffers snapshot))
+      (when (buffer-live-p buffer) (kill-buffer buffer))))
+  (clrhash (harness-ui-patch-review--r-snapshots review)))
 
 ;;;; Where the threads are now
 
@@ -1497,12 +1591,182 @@ repository has not been asked about yet."
     ('same (propertize "same since your comment" 'face 'harness-dim-face))
     ('changed (propertize "changed since your comment" 'face 'warning))))
 
+;;;; The review at an earlier commit
+
+;; The comments written against an earlier commit are about its code, and
+;; the branch has gone past it: the answer to a comment changed the lines
+;; it is about.  To show them as they were, the review is read again at
+;; that commit -- its diff against the merge base, the files, the places
+;; of the threads in it -- once, and kept: a snapshot, a copy of the
+;; review that has what that commit had.  The diff around a reply's line,
+;; the code in Ediff, come from it.
+
+(defun harness-ui-patch-review--version-at (review revision)
+  "Return the version of REVIEW's set that ends at REVISION, or nil."
+  (let ((set (harness-ui-patch-review--r-set review)))
+    (and set (stringp revision)
+         (cl-find-if (lambda (version)
+                       (change-review-same-revision-p revision (change-review-version-id version)))
+                     (change-review-set-versions set)))))
+
+(defun harness-ui-patch-review--version-revision (set version)
+  "Return the revision VERSION names in SET, or nil for none.
+VERSION is a version, a number or a label of one, or a revision that is
+no version's: itself."
+  (cond ((null version) nil)
+        ((change-review-version-p version) (change-review-version-id version))
+        ((or (numberp version) (stringp version))
+         (if-let* ((found (change-review-find-version set version)))
+             (change-review-version-id found)
+           (and (stringp version) version)))))
+
+(defun harness-ui-patch-review--placement (review thread)
+  "Return where THREAD is in the files of REVIEW, which may be a snapshot.
+For the review itself that is where the thread is in the branch now."
+  (or (gethash (change-review-thread-id thread) (harness-ui-patch-review--r-placements review))
+      (change-review-placement (harness-ui-patch-review--r-set review) thread)))
+
+(defun harness-ui-patch-review--location-in (view thread)
+  "Return the location of THREAD in VIEW, a review or a snapshot of one, or nil.
+That is the lines of the diff of its file in VIEW around the line the
+thread is on there: nil when the file has no change there, or the
+thread no line."
+  (let* ((location (change-review-thread-location thread))
+         (file (and location (change-review-location-line location)
+                    (cl-find-if (lambda (file) (harness-ui-patch-review--location-file-p location file))
+                                (harness-ui-patch-review--r-files view))))
+         (placement (and file (harness-ui-patch-review--placement view thread)))
+         (line (and placement (plist-get placement :line))))
+    (when line
+      (change-review-diff-location
+       file (or (plist-get placement :side) (change-review-location-side location) 'new) line))))
+
+(defun harness-ui-patch-review--bare-location (location)
+  "Return LOCATION without its excerpt."
+  (change-review-make-location
+   :file (change-review-location-file location) :old-file (change-review-location-old-file location)
+   :side (change-review-location-side location) :line (change-review-location-line location)
+   :end-line (change-review-location-end-line location) :patch (change-review-location-patch location)))
+
+(defun harness-ui-patch-review--make-snapshot (review result)
+  "Return a copy of REVIEW that has RESULT, what the branch read gave.
+RESULT is that of `harness-ui-patch-review--read-branch'.  The copy is
+REVIEW as the commit RESULT names had it: its files and merge base,
+with no place of any thread yet, no Ediff, no earlier commits."
+  (let ((snapshot (copy-sequence review)))
+    (setf (harness-ui-patch-review--r-snapshot snapshot) (plist-get result :tip)
+          (harness-ui-patch-review--r-tip snapshot) (plist-get result :tip)
+          (harness-ui-patch-review--r-merge-base snapshot) (plist-get result :merge-base)
+          (harness-ui-patch-review--r-files snapshot) (plist-get result :files)
+          (harness-ui-patch-review--r-placements snapshot) (make-hash-table :test 'equal)
+          (harness-ui-patch-review--r-since snapshot) (make-hash-table :test 'equal)
+          (harness-ui-patch-review--r-snapshots snapshot) (make-hash-table :test 'equal)
+          (harness-ui-patch-review--r-ediff snapshot) nil
+          (harness-ui-patch-review--r-placing snapshot) nil
+          (harness-ui-patch-review--r-loading snapshot) nil
+          (harness-ui-patch-review--r-error snapshot) nil
+          (harness-ui-patch-review--r-dirty snapshot) nil
+          (harness-ui-patch-review--r-gone snapshot) nil)
+    snapshot))
+
+(defun harness-ui-patch-review--read-snapshot (review revision)
+  "Return a promise of the snapshot of REVIEW at REVISION, read from git.
+The merge base is the one the version that ended at REVISION recorded,
+else the one the branch has with its base."
+  (let* ((dir (harness-ui-patch-review--r-dir review))
+         (version (harness-ui-patch-review--version-at review revision))
+         (base (or (and version (change-review-version-base version))
+                   (harness-ui-patch-review--r-base review))))
+    (harness-then
+     (harness-catch
+      (harness-ui-patch-review--read-branch dir revision base)
+      (lambda (err)
+        (let ((text (harness-error-message err)))
+          (harness-ui-patch-review--fail
+           "%s" (if (string-match-p "There is no branch" text)
+                    (format-message "The commit %s is not in the repository"
+                                    (harness-ui-patch-review--short revision))
+                  text)))))
+     (lambda (result)
+       (let ((snapshot (harness-ui-patch-review--make-snapshot review result)))
+         (harness-then (harness-ui-patch-review--place-threads snapshot)
+                       (lambda (_) snapshot)))))))
+
+(defun harness-ui-patch-review--snapshot (review revision)
+  "Return a promise of the snapshot of REVIEW at REVISION, a commit of its branch.
+It is read once: a second ask gets the same promise, and a read that
+failed stays failed.  The views of the review's threads draw again once
+it is there, or is not."
+  (if (not (harness-ui-patch-review--r-dir review))
+      (harness-ui-patch-review--fail "The repository of the branch is not known yet")
+    (let ((table (harness-ui-patch-review--r-snapshots review)))
+      (or (gethash revision table)
+          (let ((promise (harness-ui-patch-review--read-snapshot review revision))
+                (set (harness-ui-patch-review--r-set review)))
+            (puthash revision promise table)
+            (harness-then promise
+                          (lambda (_) (change-review-ui-refresh set) nil)
+                          (lambda (_) (change-review-ui-refresh set) nil))
+            promise)))))
+
+(defun harness-ui-patch-review--snapshot-list (review)
+  "Return the snapshots of REVIEW that are read, in no order."
+  (let (snapshots)
+    (maphash (lambda (_revision promise)
+               (when (eq (harness-promise-state promise) 'resolved)
+                 (push (harness-promise-value promise) snapshots)))
+             (harness-ui-patch-review--r-snapshots review))
+    snapshots))
+
+(defun harness-ui-patch-review--view-at (review revision)
+  "Return REVIEW as REVISION had it: the code the comments written then are about.
+REVIEW itself when the branch is at REVISION; else its snapshot, once
+read; `pending' while that is read -- it starts to be -- and
+\(:failed MESSAGE) when it cannot be."
+  (if (change-review-same-revision-p revision (harness-ui-patch-review--r-tip review))
+      review
+    (let ((promise (harness-ui-patch-review--snapshot review revision)))
+      (pcase (harness-promise-state promise)
+        ('resolved (harness-promise-value promise))
+        ('rejected (list :failed (harness-error-message (harness-promise-value promise))))
+        (_ 'pending)))))
+
+(defun harness-ui-patch-review--visit-at (review target revision)
+  "Show TARGET, a thread, a comment or a location, in Ediff as REVISION had it.
+REVISION is a commit of the branch: the merge base against the file as
+that commit had it, with the line the comment was made on in sight.
+Return a promise."
+  (harness-then
+   (harness-ui-patch-review--snapshot review revision)
+   (lambda (snapshot)
+     (pcase-let* ((`(,thread . ,location) (harness-ui-patch-review--target-place
+                                           (harness-ui-patch-review--r-set review) target))
+                  (index (and location
+                              (cl-position-if (lambda (file) (harness-ui-patch-review--location-file-p location file))
+                                              (harness-ui-patch-review--r-files snapshot))))
+                  (placement (and thread (harness-ui-patch-review--placement snapshot thread))))
+       (if (null index)
+           (message "%s is not a file the commit %s changes"
+                    (if location (change-review-location-label location) "The change as a whole")
+                    (harness-ui-patch-review--short revision))
+         (harness-ui-patch-review-ediff
+          snapshot index
+          (harness-ui-patch-review--goto
+           (or (plist-get placement :side) (change-review-location-side location))
+           (or (plist-get placement :line) (change-review-location-line location)))))))
+   (lambda (err)
+     (message "Could not show the code of %s: %s"
+              (harness-ui-patch-review--short revision) (harness-error-message err)))))
+
 ;;;; The box of the feedback
 
 (defun harness-ui-patch-review--feedback-box (review)
   "Return the report of REVIEW's task, whose box takes the feedback; or signal.
-A report closed meanwhile opens again, out of sight, for its box."
-  (let ((task (harness-ui-patch-review--r-task review)))
+A report closed meanwhile opens again, out of sight, for its box.  A
+snapshot's is the review's own."
+  (let* ((review (or (gethash (harness-ui-patch-review--r-id review) harness-ui-patch-review--reviews)
+                     review))
+         (task (harness-ui-patch-review--r-task review)))
     (unless (harness-ui-patch-review--reviewing-p task)
       (user-error "%s no longer waits for review: there is no feedback to comment in"
                   (harness-ui-patch-review--title review)))
@@ -1862,7 +2126,7 @@ In the report of a task's changes, from a row or anywhere else in it;
 in Ediff, from the control panel or either version.  The list is the
 library's threads view (`change-review-open-threads'): n and p move
 between comments, r replies, x closes a thread or opens it again, d
-shows it in Ediff."
+shows it in Ediff, D the code as it was when the comment was written."
   (interactive)
   (let ((review (or (harness-ui-patch-review--review-here)
                     harness-ui-patch-review--review
@@ -2472,12 +2736,11 @@ and \\<harness-ui-popout-mode-map>\\[harness-ui-popout-submit] there sends the f
   "Return the threads about FILE of REVIEW at the reviewer's place in Ediff.
 In the control panel that is the current difference, in a version the
 line at point; the threads placed on that line there."
-  (let* ((where (harness-ui-patch-review--ediff-where))
-         (set (harness-ui-patch-review--r-set review)))
+  (let ((where (harness-ui-patch-review--ediff-where)))
     (when where
       (cl-remove-if-not
        (lambda (thread)
-         (let ((placement (change-review-placement set thread)))
+         (let ((placement (harness-ui-patch-review--placement review thread)))
            (and placement (eql (plist-get placement :line) (cdr where))
                 (eq (plist-get placement :side) (if (eq (car where) :old) 'old 'new)))))
        (harness-ui-patch-review--file-threads review file)))))
@@ -2656,6 +2919,7 @@ Those of the library's threads under a line -- r, x, o, RET -- are its.")
 \\[change-review-ui-toggle-status] closes it or opens it again.
 \\[change-review-ui-cycle-fold] folds it: one line, its conversation, all of it.
 \\[change-review-ui-return] opens it if it is one line, else shows where its comments were made.
+\\[change-review-ui-show-source] shows the code the comment under the line was written on, as it was then.
 \\[harness-ui-patch-review-approve-ediff] approves the file.
 \\[harness-ui-patch-review-edit-comment] edits your draft there, or goes to the feedback box.
 \\[harness-ui-patch-review-threads] lists the threads."
@@ -2830,9 +3094,13 @@ again once they are."
     (if (or (null files) (not (integerp index)) (< index 0) (>= index (length files)))
         ""
       (let ((threads (length (harness-ui-patch-review--file-threads review (nth index files)))))
-        (format "File %d of %d · %d viewed · %s"
+        (format "File %d of %d · %s · %s"
                 (1+ index) (length files)
-                (cl-count-if (lambda (file) (harness-ui-patch-review--seen-p review file)) files)
+                (if (harness-ui-patch-review--r-snapshot review)
+                    ;; Not the branch as it is: not reviewed here either.
+                    (format "as it was at %s" (harness-ui-patch-review--short (harness-ui-patch-review--r-tip review)))
+                  (format "%d viewed"
+                          (cl-count-if (lambda (file) (harness-ui-patch-review--seen-p review file)) files)))
                 (if (> threads 0)
                     (format "%s · " (harness-ui-patch-review--plural threads "thread"))
                   ""))))))
@@ -3019,11 +3287,15 @@ them, drawn again, with point on the next file."
         (harness-ui-patch-review--restore-windows windows))
       ;; The report has the height it had again, and its windows are free.
       (harness-ui-patch-review--unlimit-box (harness-ui-patch-review--r-popout review))
-      (if (harness-ui-patch-review--r-gone review)
-          (harness-ui-patch-review--forget review)
+      (cond
+       ((harness-ui-patch-review--r-gone review)
+        (harness-ui-patch-review--forget review))
+       ;; The files of an earlier commit are no rows of the report.
+       ((harness-ui-patch-review--r-snapshot review))
+       (t
         (harness-ui-patch-review--refresh review)
         (harness-ui-patch-review--goto-row review (min (1+ index) (max 0 (1- (length files))))
-                                           (plist-get state :start))))))
+                                           (plist-get state :start)))))))
 
 (defun harness-ui-patch-review--really-quit ()
   "Quit the Ediff of this control panel without a question.
@@ -3191,6 +3463,9 @@ It need not be reviewed again unless the branch changes it."
                         (nth index (harness-ui-patch-review--r-files review)))
                    (user-error "No file here")))
          (approved (not (harness-ui-patch-review--approved-p review file))))
+    (when (harness-ui-patch-review--r-snapshot review)
+      (user-error "This is the file as it was at %s; approve it in the branch as it is"
+                  (harness-ui-patch-review--short (harness-ui-patch-review--r-tip review))))
     (harness-ui-patch-review--approve review file approved)
     (harness-ui-patch-review--refresh review)
     (message "%s %s" (if approved "Approved" "No longer approved")
@@ -3214,17 +3489,10 @@ It is a draft: it goes with the feedback that sends the task back.  Say
 so in the echo area.  A blank TEXT is no comment, and says so."
   (if (string-blank-p text)
       (message "No comment")
-    (let* ((location (harness-ui-patch-review--location file where))
-           (set (harness-ui-patch-review--r-set review))
-           (latest (change-review-latest-version set))
-           (tip (harness-ui-patch-review--r-tip review)))
-      ;; A comment records the revision it was written against.  The
-      ;; newest version is the default; a diff that ends elsewhere -- an
-      ;; earlier commit, another branch -- has its own.
-      (apply #'change-review-comment set (string-trim text)
-             :location location
-             (and tip latest (not (equal tip (change-review-version-id latest)))
-                  (list :revision tip)))
+    (let ((location (harness-ui-patch-review--location file where)))
+      ;; Written against the commit the diff -- the excerpt -- was read at.
+      (change-review-comment (harness-ui-patch-review--r-set review) (string-trim text)
+                             :location location :revision (harness-ui-patch-review--r-tip review))
       (message "Draft on %s: it goes with the feedback; T lists the threads, r replies"
                (change-review-location-label location t)))))
 
@@ -3251,8 +3519,13 @@ An Ediff of it on show stays until q gives the windows back."
                (harness-ui-patch-review--title review))
          ;; The feedback went -- from the box beside Ediff, say: the review
          ;; is over, and the frame is the reviewer's again.
-         (when (and sent (harness-ui-patch-review--r-ediff review))
-           (harness-ui-patch-review--end-ediff review)))
+         (when sent
+           ;; The Ediffs of earlier commits' code lie over the review's own.
+           (dolist (snapshot (harness-ui-patch-review--snapshot-list review))
+             (when (harness-ui-patch-review--r-ediff snapshot)
+               (harness-ui-patch-review--end-ediff snapshot)))
+           (when (harness-ui-patch-review--r-ediff review)
+             (harness-ui-patch-review--end-ediff review))))
        ;; Back for review, maybe with more commits: the report open on it
        ;; reads the branch again, and the version the harness recorded.
        (when (and (equal event "task/review") (buffer-live-p (harness-ui-patch-review--r-popout review)))
@@ -3301,10 +3574,13 @@ point of the board."
     (harness-ui-report-popout task)))
 
 (defun harness-ui-patch-review--ediff-window (task)
-  "Return the window of the Ediff of TASK's changes that shows, or nil."
-  (when-let* ((review (gethash (plist-get task :id) harness-ui-patch-review--reviews))
-              (control (plist-get (harness-ui-patch-review--r-ediff review) :control)))
-    (and (buffer-live-p control) (get-buffer-window control t))))
+  "Return the window of the Ediff of TASK's changes that shows, or nil.
+An Ediff of the code as an earlier commit had it is one."
+  (when-let* ((review (gethash (plist-get task :id) harness-ui-patch-review--reviews)))
+    (cl-some (lambda (view)
+               (let ((control (plist-get (harness-ui-patch-review--r-ediff view) :control)))
+                 (and (buffer-live-p control) (get-buffer-window control t))))
+             (cons review (harness-ui-patch-review--snapshot-list review)))))
 
 (defun harness-ui-patch-review--choose-diff-for (task)
   "Ask which diff to open TASK's changes at, and keep the answer for its review.

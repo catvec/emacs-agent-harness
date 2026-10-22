@@ -82,6 +82,19 @@ thread's length, with its place in the thread (`2/3`), its author (marked
 mark when it is still a draft, the comment it answers when that is not
 the one above (`↳ re 1/3`), a `▸ where` button that shows where it was
 made, and for an agent's comment `↗ conversation`, then its text.
+
+**Where a comment was made** is where it was made, not where its thread
+is now. The answer to a comment changes the code it is about, so the
+lines shown under `▸ where` are the diff of the revision the comment was
+written against, as it was then, and not the newest version's, which
+would make a comment read as if it asked for what is already there. A
+comment made on a line keeps the diff around the line. A reply, whose
+thread started on another revision, has the lines of its own, found in
+the diff of the version it was written against (`change-review-origin`);
+a set that cannot find them says whose lines it shows instead. The
+details also lead to the code: `[Source @ v1]` shows it as it was when
+the comment was written, `[Source @ v2]` in the newest version, and
+`RET` or a click on a line of the diff shows that line of the source.
 `change-review-ui-thread-line` draws the same thread as a row of a list.
 
 **No line is wider than the room it has.** A thread is drawn to a width,
@@ -102,10 +115,10 @@ act on it:
 | Key | Does |
 | --- | --- |
 | `n` `p` / `N` `P` | Move between comments / between threads. |
-| `RET` `TAB` | Show where the comment was made (file, line, revision, the lines of the diff around it), or hide that again. |
+| `RET` `TAB` | Show where the comment was made (file, line, revision, the lines of the diff of that revision around it), or hide that again. `RET` on a line of that diff shows the line of the source. |
 | `r` | Reply to the comment, as a draft. |
 | `x` / `s` | Close the thread or open it again / set its status by name. |
-| `d` | Show the thread in the diff view (`change-review-visit`). |
+| `d` / `D` | Show the thread in the diff view of the newest version / the code the comment was written on, in the version it was written against (`change-review-visit`). |
 | `o` | Follow an agent's comment to the conversation it came from. |
 | `e` `k` | Edit / delete a draft. |
 | `c` | Comment on the change as a whole. |
@@ -297,7 +310,9 @@ own, and the generic functions below decide what it does differently:
 | `change-review-follow-author` | What following an agent author to its conversation does. |
 | `change-review-file-text` | The text of a file the diff holds only a part of. |
 | `change-review-placement` | Where a thread is now, in the newest version: by default relocated in the version's diff; a set that can read the files answers better. |
-| `change-review-visit` | How a thread or a location is shown: by default in the diff view. |
+| `change-review-origin` | Where a comment was made, as it was made: the line and the diff of the revision it was written against. By default what the comment keeps, or the thread's place in the diff of the version the comment was written against; a set that reads its files from somewhere else finds the diff of any revision. |
+| `change-review-visit` | How a thread, a comment or a location is shown, in a version (by default the newest): by default in the diff view. |
+| `change-review-default-revision` | The revision a comment made now is written against. By default the newest version's; a set whose user can look at the code of another version answers that one. |
 | `change-review-send` | What sending the drafts does: for emailed patches, compose the replies. |
 
 An adapter is therefore a few methods and the way the host's changes

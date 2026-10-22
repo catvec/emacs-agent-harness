@@ -65,6 +65,24 @@
           " (setq b3 3)\n")
   "A diff of two files, one hunk each.")
 
+(defconst change-review-ui-test--patch-answered
+  (concat "diff --git a/a.el b/a.el\n"
+          "index 1111111..5555555 100644\n"
+          "--- a/a.el\n"
+          "+++ b/a.el\n"
+          "@@ -1,6 +1,8 @@\n"
+          "+(setq top1 1)\n"
+          "+(setq top2 2)\n"
+          " (setq a1 1)\n"
+          "-(setq a2 2)\n"
+          "+(setq a2 'three)\n"
+          " (setq a3 3)\n"
+          " (setq a4 4)\n"
+          " (setq a5 5)\n"
+          " (setq a6 6)\n")
+  "The diff of a.el once the answer to a comment changed it: two lines at
+the top, so a3 is on line 5 now, and a2 is edited again.")
+
 (defmacro change-review-ui-test--drawing (&rest body)
   "Run BODY with times fixed: UTC, and the present `change-review-ui-test--now'.
 Relative times are off, so a drawing does not change with the clock."
@@ -89,6 +107,12 @@ Relative times are off, so a drawing does not change with the clock."
 
 (cl-defmethod change-review-follow-author ((set change-review-ui-test--set) author)
   (push author (change-review-ui-test--set-followed set)))
+
+(cl-defstruct (change-review-ui-test--spy-set (:include change-review-ui-test--set))
+  visited)
+
+(cl-defmethod change-review-visit ((set change-review-ui-test--spy-set) target &optional version)
+  (push (list target version) (change-review-ui-test--spy-set-visited set)))
 
 (defun change-review-ui-test--set ()
   "Return a set with two versions of two files and no thread."
@@ -137,6 +161,40 @@ B is on b.el and closed; C is on the change as a whole; D on a.el, open."
     (mapcar (lambda (comment)
               (change-review-find-thread set (change-review-comment-thread comment)))
             (list a1 b1 c1 d1))))
+
+(defun change-review-ui-test--answered-set (&optional spy no-files)
+  "Return (SET THREAD ROOT REPLY): a comment on a3, answered once a3 moved.
+The set has the versions `first' and `second', whose diffs of a.el
+differ.  The user's comment is on line 3 of the first; the agent's answer
+was written against the second, where that line is line 5.  With SPY the
+set records what `change-review-visit' is asked; with NO-FILES the second
+version has no files, as a version a program has not read yet."
+  (let ((set (funcall (if spy #'make-change-review-ui-test--spy-set #'make-change-review-ui-test--set)
+                      :id "change-1" :title "Fix the flaky test")))
+    (change-review-add-version
+     set (change-review-diff-version change-review-ui-test--patch
+                                     :id "1111111111111111111111111111111111111111" :label "first"
+                                     :time change-review-ui-test--now))
+    (change-review-add-version
+     set (if no-files
+             (change-review-make-version :id "2222222222222222222222222222222222222222" :label "second"
+                                         :time change-review-ui-test--now)
+           (change-review-diff-version change-review-ui-test--patch-answered
+                                       :id "2222222222222222222222222222222222222222" :label "second"
+                                       :time change-review-ui-test--now)))
+    (let* ((file (car (change-review-version-files (change-review-find-version set "first"))))
+           (root (change-review-comment
+                  set "Why 'two?" :author (change-review-ui-test--author)
+                  :time (- change-review-ui-test--now 7200)
+                  :revision "1111111111111111111111111111111111111111" :sent (- change-review-ui-test--now 7000)
+                  :location (change-review-diff-location file 'new 3)))
+           (reply (change-review-reply
+                   set root "Done: it is 'three now."
+                   :author (change-review-agent "Claude" :session "sess-1" :tool-call "toolu_9")
+                   :time (- change-review-ui-test--now 3600)
+                   :revision "2222222222222222222222222222222222222222"
+                   :sent (- change-review-ui-test--now 3600))))
+      (list set (change-review-find-thread set (change-review-comment-thread root)) root reply))))
 
 (defun change-review-ui-test--lines (string)
   "Return the lines of STRING without properties."
@@ -260,7 +318,8 @@ All of that takes 92 columns; in less it says less (see the tests of fitting)."
                    (change-review-ui-thread-string set thread :width 90
                                                    :details (list (change-review-comment-id root))))))
       (should (> (length lines) (length plain)))
-      (should (member "┃      made at a.el:3 · revision second (2222222)" lines))
+      ;; Written against the newest version: one button to the source.
+      (should (member "┃      made at a.el:3 · revision second (2222222)  [Source]" lines))
       (should (cl-some (lambda (line) (string-match-p "│ @@ " line)) lines))
       (should (member "┃      │  (setq a3 3)  ◀" lines))
       (should (member "┃      │ +(setq a2 'two)" lines))
@@ -1028,6 +1087,7 @@ it by the line point is on."
         (change-review-ui-add-thread-overlay set thread (line-end-position) :view 'diff :width 70)
         (should (eq #'change-review-ui-reply (key-binding "r")))
         (should (eq #'change-review-ui-toggle-status (key-binding "x")))
+        (should (eq #'change-review-ui-show-source (key-binding "D")))
         (call-interactively #'change-review-ui-reply)
         (should (equal "From a line" (change-review-comment-body (change-review-thread-last-comment thread))))
         (call-interactively #'change-review-ui-toggle-status)
@@ -1408,6 +1468,215 @@ one whose line is gone, under the first line of its file."
         (should (derived-mode-p 'change-review-diff-view-mode))
         (should (string-match-p "setq b2 'two" (buffer-substring (line-beginning-position) (line-end-position)))))
       (when (buffer-live-p diff) (kill-buffer diff)))))
+
+(ert-deftest change-review-ui-where-of-a-reply-is-the-diff-of-its-own-revision ()
+  "A comment's details show the diff of the revision it was written against:
+the reply that answers a thread, once the code changed, shows the code as the
+answer found it, on the line it is on there, not the lines the thread started on."
+  (change-review-ui-test--drawing
+    (pcase-let* ((`(,set ,thread ,root ,reply) (change-review-ui-test--answered-set))
+                 (origin (change-review-origin set thread reply)))
+      ;; The root keeps the diff it was made on, line 3 of the first version.
+      (let ((location (plist-get (change-review-origin set thread root) :location)))
+        (should (eql 3 (change-review-location-line location)))
+        (should (string-search "+(setq a2 'two)" (change-review-location-excerpt location))))
+      ;; The reply: the second version's diff, where the thread is line 5.
+      (let ((location (plist-get origin :location)))
+        (should (eql 5 (change-review-location-line location)))
+        (should (equal "a.el" (change-review-location-file location)))
+        (should (string-search "+(setq a2 'three)" (change-review-location-excerpt location)))
+        (should-not (string-search "'two" (change-review-location-excerpt location)))
+        (should (string-suffix-p " (setq a3 3)" (change-review-location-excerpt location))))
+      (should-not (plist-get origin :note))
+      (let ((lines (change-review-ui-test--lines
+                    (change-review-ui-thread-string set thread :width 90 :details t))))
+        (should (member "┃      made at a.el:3 · revision first (1111111)  [Source @ first] [Source @ second]" lines))
+        (should (member "┃      made at a.el:5 · revision second (2222222)  [Source]" lines))
+        (should (member "┃      │ +(setq a2 'three)" lines))
+        (should (member "┃      │ +(setq a2 'two)" lines))
+        ;; Where the thread is now is said of the comment written on an
+        ;; earlier version, not of the one written on the newest.
+        (should (member "┃      now: line 5 (was 3)" lines))
+        (should (= 1 (cl-count-if (lambda (line) (string-prefix-p "┃      now:" line)) lines)))))))
+
+(ert-deftest change-review-ui-where-says-whose-lines-it-shows-when-it-has-no-others ()
+  "When the set has not the diff of the version a reply was written against, the
+details show what the thread kept and say whose lines they are."
+  (change-review-ui-test--drawing
+    (pcase-let* ((`(,set ,thread ,_root ,reply) (change-review-ui-test--answered-set nil t))
+                 (origin (change-review-origin set thread reply)))
+      (should (equal "the lines are those of first, where the thread started" (plist-get origin :note)))
+      (should (eql 3 (change-review-location-line (plist-get origin :location))))
+      (should (member "┃      the lines are those of first, where the thread started"
+                      (change-review-ui-test--lines
+                       (change-review-ui-thread-string set thread :width 90 :details t)))))))
+
+(ert-deftest change-review-ui-where-has-the-lines-of-an-agents-thread ()
+  "A thread an agent started on a line of the second version has no excerpt of
+its own; the diff of that version gives it one."
+  (change-review-ui-test--drawing
+    (let* ((set (change-review-ui-test--set))
+           (second (change-review-find-version set 2))
+           (comment (change-review-comment
+                     set "This one is odd." :author (change-review-agent "Claude")
+                     :time change-review-ui-test--now :revision (change-review-version-id second)
+                     :location (change-review-make-location :file "a.el" :line 3 :side 'new)))
+           (thread (change-review-find-thread set (change-review-comment-thread comment)))
+           (location (plist-get (change-review-origin set thread comment) :location)))
+      ;; The set's two versions have the one diff, so the line is as it was.
+      (should (eql 3 (change-review-location-line location)))
+      (should (string-suffix-p " (setq a3 3)" (change-review-location-excerpt location)))
+      (should (member "┃      │ +(setq a2 'two)"
+                      (change-review-ui-test--lines
+                       (change-review-ui-thread-string set thread :width 90 :details t)))))))
+
+(ert-deftest change-review-ui-where-leads-to-the-source ()
+  "The details of a comment written against an earlier version have a button
+for the code as it was then and one for the newest version's; the details of
+one written against the newest have the one."
+  (change-review-ui-test--drawing
+    (pcase-let* ((`(,set ,thread ,root ,reply) (change-review-ui-test--answered-set t))
+                 (string (change-review-ui-thread-string set thread :width 90 :details t)))
+      (change-review-ui-test--press string "[Source @ first]")
+      (change-review-ui-test--press string "[Source @ second]")
+      (change-review-ui-test--press string "[Source]")
+      (should (equal (list (list reply nil)
+                           (list thread nil)
+                           (list root "1111111111111111111111111111111111111111"))
+                     (change-review-ui-test--spy-set-visited set))))))
+
+(ert-deftest change-review-ui-d-and-D-show-the-thread-now-and-the-comment-then ()
+  "d shows the thread in the newest version; D shows the code the comment at
+point was written on, in the version it was written against."
+  (change-review-ui-test--drawing
+    (pcase-let* ((`(,set ,thread ,root ,reply) (change-review-ui-test--answered-set t))
+                 (change-review-ui-sets nil)
+                 (buffer (save-window-excursion (change-review-open-threads set 'all))))
+      (unwind-protect
+          (with-current-buffer buffer
+            (should (eq #'change-review-ui-show-source (key-binding "D")))
+            (goto-char (point-min))
+            (search-forward "Why 'two?")
+            (call-interactively #'change-review-ui-show-source)
+            (goto-char (point-min))
+            (search-forward "Done: it is 'three now.")
+            (call-interactively #'change-review-ui-show-source)
+            (call-interactively #'change-review-ui-show-in-diff)
+            (should (equal (list (list thread nil)
+                                 (list reply "2222222222222222222222222222222222222222")
+                                 (list root "1111111111111111111111111111111111111111"))
+                           (change-review-ui-test--spy-set-visited set))))
+        (kill-buffer buffer)))))
+
+(ert-deftest change-review-ui-follows-a-line-of-the-diff-to-the-source ()
+  "RET on a line of the diff the details show visits that line of the source,
+in the version the comment was written against: a removed line is the old
+file's."
+  (change-review-ui-test--drawing
+    (pcase-let* ((`(,set ,_thread ,root ,reply) (change-review-ui-test--answered-set t))
+                 (change-review-ui-sets nil)
+                 (buffer (save-window-excursion (change-review-open-threads set 'all))))
+      (unwind-protect
+          (with-current-buffer buffer
+            (goto-char (point-min))
+            (search-forward "Why 'two?")
+            (change-review-ui-show-origin)
+            (change-review-ui-test--goto "│ \\+(setq a2 'two)")
+            (should (eq #'change-review-ui-follow-source (key-binding (kbd "RET"))))
+            (call-interactively #'change-review-ui-follow-source)
+            (change-review-ui-test--goto "│ -(setq a2 2)")
+            (call-interactively (key-binding (kbd "RET")))
+            ;; The hunk header is no line of the source.
+            (change-review-ui-test--goto "│ @@ -1,3 \\+1,3 @@")
+            (should-error (call-interactively #'change-review-ui-follow-source) :type 'user-error)
+            ;; The reply's lines are the second version's.
+            (goto-char (point-min))
+            (search-forward "Done: it is 'three now.")
+            (change-review-ui-show-origin)
+            (change-review-ui-test--goto "│ \\+(setq a2 'three)")
+            (call-interactively #'change-review-ui-follow-source)
+            (let ((visits (reverse (change-review-ui-test--spy-set-visited set))))
+              (pcase-let ((`((,a ,a-version) (,b ,b-version) (,c ,c-version)) visits))
+                (should (equal '("a.el" new 2) (list (change-review-location-file a)
+                                                     (change-review-location-side a)
+                                                     (change-review-location-line a))))
+                (should (equal '("a.el" old 2) (list (change-review-location-file b)
+                                                     (change-review-location-side b)
+                                                     (change-review-location-line b))))
+                ;; Line 4 of the second version, where the answer changed a2.
+                (should (equal '("a.el" new 4) (list (change-review-location-file c)
+                                                     (change-review-location-side c)
+                                                     (change-review-location-line c))))
+                (should (equal (change-review-comment-revision root) a-version))
+                (should (equal (change-review-comment-revision root) b-version))
+                (should (equal (change-review-comment-revision reply) c-version))
+                (should (= 3 (length visits))))))
+        (kill-buffer buffer)))))
+
+(ert-deftest change-review-ui-follows-a-click-on-a-line-of-the-diff ()
+  "A click on a line of the diff the details show visits its source line, as RET
+does, wherever point is; a click elsewhere does nothing."
+  (change-review-ui-test--drawing
+    (pcase-let* ((`(,set ,_thread ,root ,_reply) (change-review-ui-test--answered-set t))
+                 (change-review-ui-sets nil)
+                 (buffer (save-window-excursion (change-review-open-threads set 'all))))
+      (unwind-protect
+          (with-current-buffer buffer
+            (save-window-excursion
+              (set-window-buffer (selected-window) buffer)
+              (goto-char (point-min))
+              (search-forward "Why 'two?")
+              (change-review-ui-show-origin)
+              (goto-char (point-min))
+              (re-search-forward "│ \\+(setq a2 'two)")
+              (let* ((on (match-beginning 0))
+                     (click (lambda (position)
+                              (list 'mouse-1 (list (selected-window) position '(0 . 0) 0)))))
+                ;; Point is elsewhere: the click says which line.
+                (goto-char (point-min))
+                (change-review-ui-follow-source (funcall click on))
+                (should (equal (list (list (change-review-make-location :file "a.el" :side 'new :line 2)
+                                           (change-review-comment-revision root)))
+                               (mapcar (lambda (visit)
+                                         (list (change-review-make-location
+                                                :file (change-review-location-file (car visit))
+                                                :side (change-review-location-side (car visit))
+                                                :line (change-review-location-line (car visit)))
+                                               (cadr visit)))
+                                       (change-review-ui-test--spy-set-visited set))))
+                ;; Not a line of the diff.
+                (should-error (change-review-ui-follow-source (funcall click (point-min)))
+                              :type 'user-error))))
+        (kill-buffer buffer)))))
+
+(ert-deftest change-review-ui-visit-takes-a-version-and-a-location ()
+  "The diff view shows the version asked for, with point on the line of a
+location, or at a thread: the thread's place in that version."
+  (change-review-ui-test--drawing
+    (pcase-let* ((`(,set ,thread ,_root ,_reply) (change-review-ui-test--answered-set))
+                 (change-review-ui-sets nil)
+                 (buffers nil))
+      (unwind-protect
+          (save-window-excursion
+            (let ((buffer (change-review-visit set (change-review-make-location :file "a.el" :side 'new :line 4)
+                                               "first")))
+              (push buffer buffers)
+              (with-current-buffer buffer
+                (should (equal "first" (change-review-version-label change-review-ui--version)))
+                (should (equal " (setq a4 4)" (buffer-substring (line-beginning-position) (line-end-position))))))
+            ;; A removed line is a line of the old file.
+            (let ((buffer (change-review-visit set (change-review-make-location :file "a.el" :side 'old :line 2)
+                                               "first")))
+              (with-current-buffer buffer
+                (should (equal "-(setq a2 2)" (buffer-substring (line-beginning-position) (line-end-position))))))
+            ;; The thread, in the second version: line 5 there.
+            (let ((buffer (change-review-visit set thread "second")))
+              (push buffer buffers)
+              (with-current-buffer buffer
+                (should (equal "second" (change-review-version-label change-review-ui--version)))
+                (should (eq thread (change-review-ui--thread-at-point)))
+                (should (equal " (setq a3 3)" (buffer-substring (line-beginning-position) (line-end-position)))))))
+        (dolist (buffer buffers) (when (buffer-live-p buffer) (kill-buffer buffer)))))))
 
 (ert-deftest change-review-ui-diff-view-folds-threads ()
   "A closed thread is one line in the diff view, its triangle pointing right;

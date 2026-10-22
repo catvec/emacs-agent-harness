@@ -88,6 +88,50 @@ function of its parts."
   (should (equal "v2" (change-review-short-revision "v2")))
   (should (equal "" (change-review-short-revision nil))))
 
+(cl-defstruct (change-review-test--looking-set (:include change-review-set)) looking)
+
+(cl-defmethod change-review-default-revision ((set change-review-test--looking-set))
+  (change-review-test--looking-set-looking set))
+
+(ert-deftest change-review-a-kind-of-set-decides-what-a-comment-is-written-against ()
+  "A comment, a reply and a change of status are against the newest version
+unless the kind of set says the user looks at another."
+  (let ((plain (change-review-make-set :id "p")))
+    (change-review-add-version plain (change-review-make-version :id "aaaaaaa1"))
+    (change-review-add-version plain (change-review-make-version :id "bbbbbbb2"))
+    (let ((comment (change-review-comment plain "Plain")))
+      (should (equal "bbbbbbb2" (change-review-comment-revision comment)))
+      (should (equal "bbbbbbb2" (change-review-comment-revision (change-review-reply plain comment "Again"))))))
+  (let ((set (make-change-review-test--looking-set :id "l" :looking "ccccccc3")))
+    (change-review-add-version set (change-review-make-version :id "bbbbbbb2"))
+    (let* ((comment (change-review-comment set "Looking"))
+           (reply (change-review-reply set comment "Again"))
+           (thread (change-review-find-thread set (change-review-comment-thread comment))))
+      (should (equal "ccccccc3" (change-review-comment-revision comment)))
+      (should (equal "ccccccc3" (change-review-comment-revision reply)))
+      ;; A revision given wins; the status change names the revision too.
+      (should (equal "ddddddd4" (change-review-comment-revision
+                                 (change-review-comment set "Said" :revision "ddddddd4"))))
+      (change-review-close set thread)
+      (should (equal "ccccccc3" (plist-get (car (change-review-thread-history thread)) :revision))))))
+
+(ert-deftest change-review-same-revision-p ()
+  "A hash is the same commit written in full or abbreviated; anything else
+is only the same as itself."
+  (let ((full "abcdef0123456789abcdef0123456789abcdef01"))
+    (should (change-review-same-revision-p full full))
+    (should (change-review-same-revision-p full "abcdef0"))
+    (should (change-review-same-revision-p "abcdef0123" full))
+    (should-not (change-review-same-revision-p full "abcdef1"))
+    ;; Too short to say, and not a hash.
+    (should-not (change-review-same-revision-p full "abcde"))
+    (should-not (change-review-same-revision-p full "v2"))
+    (should (change-review-same-revision-p "<m1@example.org>" "<m1@example.org>"))
+    (should-not (change-review-same-revision-p "<m1@example.org>" "<m1@"))
+    (should-not (change-review-same-revision-p full nil))
+    (should-not (change-review-same-revision-p nil nil))
+    (should-not (change-review-same-revision-p "" ""))))
+
 ;;;; Authors and locations
 
 (ert-deftest change-review-authors ()

@@ -105,6 +105,29 @@ DIFF SHOWN), a tree of the directories and their files:
               it changes, as it does when the two versions are put
               side by side.
 
+WHERE A COMMENT WAS MADE.  The lines under a comment (RET, or its
+`▸ where`) are the diff of the commit it was written against, as it was
+then: the answer to a comment changes the code it is about, and the
+newest diff would make the comment read as if it asked for what is
+there already.  The commit is recorded with every comment, by its sha: a
+comment made in Ediff has the commit the branch was read at, the
+agent's the one it was at.  A comment made on a line keeps the diff
+around it.  A reply, or a thread the agent started on a line, keeps
+none of the commit it was written on, so the review reads the branch at
+that commit, once (a snapshot, `harness-ui-patch-review--snapshot`):
+its diff against the merge base the version recorded, the thread's
+place in it, and the diff around that line.  While git answers, the
+details say "reading the diff at 68726a2…"; a commit the repository no
+longer has says so, and shows what the thread kept.  The details lead
+to the code too.  [Source @ v1], and D in the threads view, show it in
+Ediff as that commit had it -- the merge base against the file of that
+commit, the line in sight, "as it was at 68726a2" in the control
+panel; [Source @ v2], and d, in the branch as it is; RET, or a click,
+on a line of the diff, that line of the source.  An Ediff of an
+earlier commit is looked at, not reviewed: its files are not marked
+seen or approved, and a comment made in it is written against that
+commit.
+
 THE DIFF SHOWN.  A line under the heading chooses what the files are
 of -- three buttons, or d in the report
 (`harness-ui-patch-review-select-diff`):
