@@ -77,9 +77,11 @@ this file never touches a session struct.
 - `harness-chat-approve-denied-call` — Approve the denied call whose block point is on.
 - `harness-chat-cancel` — Cancel the running turn.
 - `harness-chat-copy-last-response` — Copy the agent's last message (raw Markdown) to the kill ring.
+- `harness-chat-delete-steering` — Delete the queued message ID, which the model has not got yet.
 - `harness-chat-deny-newest` — Answer the permission request at point, else the newest, with Deny.
 - `harness-chat-edit-permission-pattern` — Edit the glob pattern the permission request PID is answered for.
-- `harness-chat-edit-queued` — Load queued item QID into the compose box; sending removes it from the queue.
+- `harness-chat-edit-queued` — Edit the queued message ID: it comes back into the compose box.
+- `harness-chat-edit-steering` — Take the queued message ID back into the compose box, to edit it.
 - `harness-chat-next-action` — Move point to the next tool call or thinking block.
 - `harness-chat-next-diagram` — Show the diagram of the next option of the question waiting with diagrams.
 - `harness-chat-next-message` — Move point to the next real message.
@@ -91,7 +93,7 @@ this file never touches a session struct.
 - `harness-chat-push` — Run the action of the button at point, or at the position of mouse EVENT.
 - `harness-chat-queue` — Queue the compose box for the next turn.
 - `harness-chat-redraw` — Render this buffer again from the harness.
-- `harness-chat-remove-queued` — Remove queued item QID.
+- `harness-chat-remove-queued` — Delete the queued message ID: a message of the queue leaves it.
 - `harness-chat-reposition` — Show this session in POSITION instead.
 - `harness-chat-scroll-down` — Scroll the chat nearly a window toward its start, by pixels.
 - `harness-chat-scroll-to-bottom` — Show the newest messages and put point in the compose box.
@@ -123,6 +125,7 @@ this file never touches a session struct.
 - `agent/activity` ([agent](agent.md))
 - `agent/prompt` ([agent](agent.md))
 - `agent/send-queue` ([agent](agent.md))
+- `agent/withdraw` ([agent](agent.md))
 - `permission/approve-denied` ([perms](perms.md))
 - `permission/undo` ([perms](perms.md))
 - `session/get` ([session](session.md))
@@ -136,6 +139,7 @@ this file never touches a session struct.
 - `agent/turn-ended` → `harness-chat--on-event`
 - `agent/turn-started` → `harness-chat--on-event`
 - `session/head-moved` → `harness-chat--on-event`
+- `session/nodes-removed` → `harness-chat--on-event`
 
 ### Hooks it adds to
 

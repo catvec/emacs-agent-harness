@@ -10,7 +10,8 @@
 ;; and are called again with the results.  Steering messages sent while
 ;; a turn runs are delivered once, at the next step boundary: with the
 ;; next tool result, or as the next user message when the model stops
-;; first.  Queued messages wait for the turn to end and then go out
+;; first.  Until then the user can take one back (`agent/withdraw').
+;; Queued messages wait for the turn to end and then go out
 ;; together as a turn of their own.  A message is delivered when it
 ;; starts a turn or steers one, a queued one when its queue goes out;
 ;; then, and only then, the `agent/message' filters see it and may
@@ -2055,6 +2056,41 @@ can tell it from a message written now."
     (if (null blocks)
         (harness-resolved (list :stop-reason 'nothing-queued))
       (harness-call 'agent/prompt session-id blocks (list :from from :queued t)))))
+
+;;;; Taking a message back
+
+(defun harness-agent--steering-entry (turn node-id)
+  "Return the pending steering entry of TURN that records the node NODE-ID, or nil."
+  (cl-find-if (lambda (p) (and (consp p) (equal (plist-get p :node) node-id)))
+              (harness-agent-turn-steering turn)))
+
+(harness-defmethod agent/withdraw (session-id node-id)
+  "Take back the steering message NODE-ID of SESSION-ID; return the node it was.
+A message sent while a turn runs waits for the turn's next step, which
+delivers it (`harness-agent--take-pending'): until then it is the
+user's, to delete or to write again.  This removes it from what the turn
+will deliver, so the model never gets it, and from the transcript
+\(`session/discard-nodes', which announces it as `session/nodes-removed').
+It signals when the turn does not hold the message: it was delivered
+at a step boundary meanwhile, the turn is over -- a message it never
+took is read by the next turn -- or NODE-ID is no steering message of the
+session.  Nothing happens then."
+  (let* ((turn (gethash session-id harness-agent--turns))
+         (entry (and turn (harness-agent--steering-entry turn node-id)))
+         (pending (and entry (harness-agent-turn-steering turn)))
+         (node (and entry (harness-call 'session/node session-id node-id))))
+    (unless entry
+      (signal 'harness-error (list "The model has this message already: it cannot be taken back")))
+    ;; Off the turn's list first, so no step can deliver it; back on if the
+    ;; transcript refuses to let it go.  A message whose node is gone
+    ;; already has nothing to deliver either.
+    (setf (harness-agent-turn-steering turn) (delq entry (copy-sequence pending)))
+    (when node
+      (condition-case err
+          (harness-call 'session/discard-nodes session-id (list node-id))
+        (error (setf (harness-agent-turn-steering turn) pending)
+               (signal (car err) (cdr err)))))
+    node))
 
 (harness-defmethod agent/running (&optional session-id)
   "Return running session ids, or non-nil when SESSION-ID is running."

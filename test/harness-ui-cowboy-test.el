@@ -494,6 +494,11 @@ the new conversation, whose first request writes a cache of its own."
                                                                     :content))))
                              10 "the turn to end")
           (harness-test-wait (lambda () (not (harness-ui-cowboy-test--panel buffer))) 5 "the panel to go")
+          ;; The session's own pending list, as the UI last heard it, lags the
+          ;; answer by a push (`harness-acp--session-debounce'): until it comes
+          ;; the question still reads as waiting.
+          (harness-test-wait (lambda () (not (harness-ui-cowboy-waiting-p sid))) 5
+                             "the question to leave the session's pending list")
           (should-not (harness-ui-cowboy-waiting-p sid))
           ;; The new conversation's first request wrote a cache of its own: nothing is dropped any more.
           (let ((cache (plist-get (harness-call 'session/get sid) :cache)))

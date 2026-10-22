@@ -159,8 +159,8 @@ OpenAI-compatible APIs and AWS Bedrock.
 | The task board: each task has a session and a worktree | The conversation tree of a session, a fork and a BTW |
 | ![A task's report popped out of the board: its chart large, the test run it quotes, and the banner and box to verify it or send it back](docs/media/report.png) | ![The chart of that report shown larger, in a popout of its own](docs/media/report-image.png) |
 | A task's report: verify it or send it back from there | An image of the report, clicked: shown larger |
-| ![A chat whose turn runs: a message sent during it says delivered, one sent since says sent, and two queued messages drawn as your messages, each saying queued beside your name with send now, edit and remove buttons, above the line saying what the agent is doing](docs/media/chat-queue.png) | ![A compose box whose message names an image, a file and a task, each reference the same chip: the image's thumbnail, the file's or the task's icon, then its name as a link](docs/media/compose-chips.png) |
-| Messages sent mid-turn say where they stand; queued ones send now, one by one | An image, a file and a task, named in the text: one chip, a click opens it |
+| ![A chat whose turn runs: a message sent during it that the model has already reads as any other, one sent since says queued beside your name with edit and delete buttons, each with its key, and two more queued messages, drawn as your messages, say queued with send now, edit and delete buttons, above the line saying what the agent is doing](docs/media/chat-queue.png) | ![A compose box whose message names an image, a file and a task, each reference the same chip: the image's thumbnail, the file's or the task's icon, then its name as a link](docs/media/compose-chips.png) |
+| A message sent mid-turn is queued until the model has it, and can be edited or deleted till then; queued ones send now, one by one | An image, a file and a task, named in the text: one chip, a click opens it |
 | ![The usage dashboard: a month of cost per day, cost by model, the plan's quota, the fallback list and budgets](docs/media/usage.png) | ![The settings page for one project, which overrides two settings](docs/media/settings.png) |
 | Usage: cost per day and model, plan quota, fallback list, budgets | Settings, here as one project overrides them |
 | ![The session list with forks, BTWs and task sessions](docs/media/sessions.png) | ![The worktrees of a project, with their branches and sessions](docs/media/worktrees.png) |
@@ -688,11 +688,12 @@ so `C-c .` is how you aim a key at a panel from there (see
 |---|---|
 | `C-c C-c` | Send the message; while the agent is working, it steers the current turn |
 | `C-c C-q` | Queue the message for the next turn |
+| `e` / `d` / `s` on a queued message | With point on a message that says `queued`: edit it (it comes back into the box), delete it, or, for a message of the queue, send it now. A message sent while the agent works is queued until the model has it. From the box, `C-c .` and the key |
 | `RET` | Insert a newline |
 | `@` | Complete a file to attach: part of a name finds a project file in any subdirectory, a path (`/`, `~/`, `./`, `../`) any file. The file's `@path` stays in the text as a chip you can click; one typed out in full attaches its file when the message is sent. `@task:` completes a task of the project the same way |
 | `/` | Complete a skill, `/compact`, or `/warm` (`/warm 30m`, `/warm off`) |
 | `C-c C-a` | Attach a file found the same way, by part of a name or by path (`C-u C-c C-a` browses the file system), or a task as `task:ID` |
-| `C-c .` then a key | Press that key on the panel above the box: a question's digit, a permission's `y` or `n`. With a numeric argument, on the Nth panel up. `C-g` quits |
+| `C-c .` then a key | Press that key on the panel above the box: a question's digit, a permission's `y` or `n`, a queued message's `e` or `d`. With a numeric argument, on the Nth panel up. `C-g` quits |
 | `M-<` / `M->` | Go to the top or the bottom of the compose box. Pressed again, from outside the box or with a prefix argument, they go to those of the buffer |
 | `C-y` | Attach the image on the clipboard (or the files a file manager copied), keeping `kill-ring` out of it; text yanks as usual |
 | `M-y` | Right after a media yank, swap it for an earlier capture; otherwise the usual `yank-pop` |
@@ -723,11 +724,23 @@ saying what the agent is doing under them. `[send now]` sends that
 message alone, and the others stay queued: while the agent works it
 gets the message at its next step, otherwise the message starts a turn
 of its own (the tooltip says which). `[edit]` takes a message back into
-the box and `[×]` drops it. A message sent while a turn runs, queued or
-not, gives its state on the line with your name: *sent* until the model
-takes it at its next step, then *delivered*. Nothing is said once the
-turn is over, unless the model never got the message because you
-cancelled the turn: *not delivered*, and the next turn reads it.
+the box and `[delete]` drops it. A message sent while a turn runs is
+queued too, until the model takes it at its next step: its line says
+*queued* with `[edit]` and `[delete]`, which take it back before the
+model gets it, so the model never sees a message you took back (one
+with a picture or another attachment can be deleted but not put back in
+the box). Once the model has the message it reads like any other, with
+nothing beside your name. Nothing is said once the turn is over either,
+unless the model never got the message because you cancelled the turn:
+*not delivered*, and the next turn reads it.
+
+Each button of a queued message shows its key, `s` (send now), `e`
+(edit) and `d` (delete), which acts while point is on the message; from
+the compose box, where those keys type, `C-c .` and then the key presses
+it ([below](#pressing-a-panels-key-from-the-compose-box)). The nearest
+queued message above the box is the one it acts on, and a numeric
+argument takes the Nth up: `C-c . e` brings the last one back into the
+box, `M-2 C-c . d` deletes the one before it.
 
 **Answering inline.** A long message is seldom answered by one reply.
 `C-c >` puts it in the box as a quote; once point is in a quote the echo
@@ -1321,8 +1334,9 @@ dot is the one the harness menu already puts before a view's plain keys
 
 - `C-c . 1` picks the first option of the question above the box,
   `C-c . y` allows the permission request, `C-c . F` starts the
-  fullscreen layout from the task board's box. Point comes back to where
-  it was in the box, and your draft with it.
+  fullscreen layout from the task board's box, and `C-c . e` or
+  `C-c . d` edits or deletes the queued message above it. Point comes
+  back to where it was in the box, and your draft with it.
 - The key is pressed on the nearest panel above the box that has it. A
   numeric argument takes the Nth panel up: `M-2 C-c . 1` answers the
   second question from the box. `C-g` at the prompt for the key quits.

@@ -20,7 +20,8 @@ through a `:respond` callback; native providers stop with `tool-use`
 and are called again with the results.  Steering messages sent while
 a turn runs are delivered once, at the next step boundary: with the
 next tool result, or as the next user message when the model stops
-first.  Queued messages wait for the turn to end and then go out
+first.  Until then the user can take one back (`agent/withdraw`).
+Queued messages wait for the turn to end and then go out
 together as a turn of their own.  A message is delivered when it
 starts a turn or steers one, a queued one when its queue goes out;
 then, and only then, the `agent/message` filters see it and may
@@ -61,6 +62,7 @@ The loop is entirely event driven: nothing here waits.
 - `agent/running` (&optional session-id) — Return running session ids, or non-nil when SESSION-ID is running.
 - `agent/send-queue` (session-id &optional qids) — Send the queued messages of SESSION-ID as one turn; return its promise.
 - `agent/stop-outstanding` (session-id &optional reason) — Stop what runs for SESSION-ID outside its own turn; return what it stopped.
+- `agent/withdraw` (session-id node-id) — Take back the steering message NODE-ID of SESSION-ID; return the node it was.
 
 ### Events
 
@@ -107,6 +109,7 @@ The loop is entirely event driven: nothing here waits.
 - `session/get` ([session](session.md))
 - `session/hint` ([session](session.md))
 - `session/messages` ([session](session.md))
+- `session/node` ([session](session.md))
 - `session/nodes` ([session](session.md))
 - `session/provider-continuation` ([session](session.md))
 - `session/provider-state` ([session](session.md))

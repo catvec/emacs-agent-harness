@@ -424,6 +424,11 @@ leave free.  None is left out by the menu."
                                 (and (eq mode 'harness-ui-tasks-mode) harness-ui-tasks-board-map)
                                 (and (eq mode 'harness-ui-sessions-mode) harness-ui-sessions-permission-map)
                                 (and (eq mode 'harness-ui-popout-mode) harness-ui-popout-content-map)
+                                ;; The keys of a queued message, on its text: the
+                                ;; ones of the queue, and the ones of a message
+                                ;; sent to a turn that has not taken it yet.
+                                (and (eq mode 'harness-chat-mode) harness-chat-queued-map)
+                                (and (eq mode 'harness-chat-mode) harness-chat-steering-map)
                                 ;; Answering a quote in the compose box inline:
                                 ;; the keys of the library's mode, which is on
                                 ;; while point is in a quote of the box.

@@ -284,7 +284,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `session/moved` | [session](session.md) | [session](session.md) |  | yes |
 | `session/node-added` | [session](session.md) | [session](session.md) | [acp](acp.md), [pet](pet.md), [session-search](session-search.md), [tools-sessions](tools-sessions.md) |  |
 | `session/node-updated` | [session](session.md) | [session](session.md) | [acp](acp.md), [session-search](session-search.md) |  |
-| `session/nodes-removed` | [session](session.md) | [session](session.md) |  | yes |
+| `session/nodes-removed` | [session](session.md) | [session](session.md) | [ui-chat](ui-chat.md) | yes |
 | `session/pending-changed` | [session](session.md) | [session](session.md) | [resilience](resilience.md), [tasks](tasks.md), [tools](tools.md), [tools-sessions](tools-sessions.md) | yes |
 | `session/pending-resolved` | [session](session.md) | [session](session.md) |  |  |
 | `session/plan` | [session](session.md) | [session](session.md) |  |  |

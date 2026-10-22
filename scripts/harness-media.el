@@ -3389,11 +3389,13 @@ REQUEST's turn holds once it has it."
 
 (defun harness-media-shot-chat-queue ()
   "A chat whose turn runs, with messages in every state of their sending.
-One sent while the checks ran steered the turn at its next step: its
-line says \"delivered\".  One sent since waits for the next step, and
-says \"sent\".  Two more are queued for the next turn, each drawn as a
-message of the user's, a dim \"queued\" and its [send now], [edit] and
-[×] beside the name, above the line saying what the turn does.  The
+One sent while the checks ran steered the turn at its next step: the
+model has it, and it reads as any message, with nothing beside the name.
+One sent since waits for the next step, and says \"queued\", with its
+[edit] and [delete] and the key of each, and the line telling how to press
+them from the box.  Two more are queued for the next turn, each drawn as
+a message of the user's, a dim \"queued\" and its [send now], [edit] and
+[delete] beside the name, above the line saying what the turn does.  The
 session is made here and deleted after, so no other picture shows it,
 and it comes after the usage pictures, which would count its usage."
   (let ((id (harness-media--new-session :name "Type the database module" :model "claude:claude-opus-5-5"
@@ -3746,6 +3748,11 @@ each is on now; the control panel offers to comment, reply and list them."
   (setq inhibit-startup-screen t
         ring-bell-function #'ignore
         use-dialog-box nil
+        ;; The demo project sits under this checkout (the scratch HOME is
+        ;; in scripts/.dev/media), so visiting its files finds the
+        ;; checkout's .dir-locals.el, and Emacs would ask whether to trust
+        ;; its entries, on a display nobody watches, until the run timed out.
+        enable-local-variables :safe
         frame-inhibit-implied-resize t
         cursor-in-non-selected-windows nil
         confirm-kill-processes nil

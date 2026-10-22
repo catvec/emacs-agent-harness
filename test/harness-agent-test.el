@@ -934,6 +934,105 @@ user message after that answer: \"No user message to send\"."
         (should (equal '("tool_result" "text") (mapcar (lambda (b) (plist-get b :type)) (plist-get (nth 2 msgs) :content))))
         (should (equal "change of plan" (plist-get (cadr (plist-get (nth 2 msgs) :content)) :text)))))))
 
+(ert-deftest harness-agent-withdraw-takes-back-a-message-the-model-has-not-got ()
+  "A steering message the turn has not delivered can be taken back; the model never gets it.
+It leaves what the turn will deliver and the transcript, `session/nodes-removed'
+says so, and the node it was is returned.  Another message sent with it
+is delivered as it would have been."
+  (harness-agent-test-with
+    (let ((id (harness-agent-test-hosted-session))
+          (removed nil)
+          (taken nil))
+      (harness-on 'session/nodes-removed (lambda (_sid ids) (push ids removed)))
+      (harness-define-tool "slow" :label "Slow" :description "slow" :kind 'read
+                           :handler (lambda (_input _ctx)
+                                      (harness-call 'agent/prompt id "wait, no")
+                                      (harness-call 'agent/prompt id "change of plan")
+                                      (setq taken (harness-call 'agent/withdraw id
+                                                                (plist-get (car (harness-agent-test-steering-nodes id))
+                                                                           :id)))
+                                      "slow output"))
+      (harness-agent-test-define-hosted
+       (lambda (_prompt)
+         '((:type tool-call :id "h1" :name "slow" :input (:n 1))
+           (:type text :delta "Done.")
+           (:type done :stop-reason end-turn))))
+      (should (eq 'end-turn (plist-get (harness-test-await (harness-call 'agent/prompt id "go")) :stop-reason)))
+      (should (equal "wait, no" (plist-get taken :content)))
+      (should (equal (list (list (plist-get taken :id))) removed))
+      ;; The result carries the other message, and not the one taken back.
+      (should (equal "slow output\n\n<user_message>\nchange of plan\n</user_message>"
+                     (nth 0 harness-agent-test-results)))
+      (should (equal '("change of plan") (mapcar (lambda (n) (plist-get n :content))
+                                                 (harness-agent-test-steering-nodes id))))
+      (should (plist-get (plist-get (car (harness-agent-test-steering-nodes id)) :meta) :delivered-after))
+      ;; The message that stayed stands where it was sent, as always.
+      (should (equal '(user tool-call user tool-result assistant) (harness-agent-test-kinds id)))
+      (should-not (cl-some (lambda (m) (string-match-p "wait, no" (format "%S" (plist-get m :content))))
+                           (harness-call 'session/messages id))))))
+
+(ert-deftest harness-agent-withdraw-refuses-a-message-the-model-has-got ()
+  "A message a step boundary delivered cannot be taken back, and stays as it is."
+  (harness-agent-test-with
+    (let ((id (harness-agent-test-hosted-session))
+          (node-id nil)
+          (refused nil))
+      (harness-define-tool "slow" :label "Slow" :description "slow" :kind 'read
+                           :handler (lambda (_input _ctx)
+                                      (harness-call 'agent/prompt id "change of plan")
+                                      (setq node-id (plist-get (car (harness-agent-test-steering-nodes id)) :id))
+                                      "slow output"))
+      (harness-define-tool "late" :label "Late" :description "late" :kind 'read
+                           :handler (lambda (_input _ctx)
+                                      (setq refused (condition-case err
+                                                        (harness-call 'agent/withdraw id node-id)
+                                                      (harness-error err)))
+                                      "late output"))
+      (harness-agent-test-define-hosted
+       (lambda (_prompt)
+         '((:type tool-call :id "h1" :name "slow" :input (:n 1))
+           (:type tool-call :id "h2" :name "late" :input (:n 2))
+           (:type text :delta "Done.")
+           (:type done :stop-reason end-turn))))
+      (should (eq 'end-turn (plist-get (harness-test-await (harness-call 'agent/prompt id "go")) :stop-reason)))
+      ;; The first result carried it; taking it back after that is refused.
+      (should (string-match-p "<user_message>\nchange of plan" (nth 0 harness-agent-test-results)))
+      (should (eq 'harness-error (car refused)))
+      (should (string-match-p "already" (cadr refused)))
+      (should (equal '("change of plan") (mapcar (lambda (n) (plist-get n :content))
+                                                 (harness-agent-test-steering-nodes id))))
+      (should (plist-get (plist-get (car (harness-agent-test-steering-nodes id)) :meta) :delivered-after)))))
+
+(ert-deftest harness-agent-withdraw-needs-a-turn-that-holds-the-message ()
+  "Only a steering message a running turn has yet to deliver can be taken back.
+Not a message that started the turn, nor one when no turn runs, nor a
+node that is none of the session's: nothing is removed."
+  (harness-agent-test-with
+    (let* ((id (harness-agent-test-hosted-session))
+           (gate (harness-make-promise))
+           (withdraw (lambda (node) (condition-case err (harness-call 'agent/withdraw id node) (harness-error err)))))
+      (harness-define-tool "hold" :label "Hold" :description "hold" :kind 'read
+                           :handler (lambda (_input _ctx) (harness-then gate (lambda (_) "held"))))
+      (harness-agent-test-define-hosted
+       (lambda (_prompt)
+         '((:type tool-call :id "h1" :name "hold" :input (:n 1))
+           (:type text :delta "Done.")
+           (:type done :stop-reason end-turn))))
+      (should (eq 'harness-error (car (funcall withdraw "n-nothing"))))
+      ;; The turn waits in its tool until the test lets it go.
+      (let ((p (harness-call 'agent/prompt id "go")))
+        (harness-test-wait (lambda () (memq 'tool-call (harness-agent-test-kinds id))) 5 "the turn in its tool")
+        (let ((first (plist-get (car (harness-call 'session/nodes id)) :id)))
+          (should (eq 'harness-error (car (funcall withdraw first))))
+          (should (eq 'harness-error (car (funcall withdraw "n-nothing"))))
+          (should (harness-call 'session/node id first)))
+        (harness-resolve gate t)
+        (harness-test-await p))
+      ;; The turn is over: the node it started with and the session stay whole.
+      (let ((first (plist-get (car (harness-call 'session/nodes id)) :id)))
+        (should (eq 'harness-error (car (funcall withdraw first))))
+        (should (harness-call 'session/node id first))))))
+
 (ert-deftest harness-agent-cancel ()
   (harness-agent-test-with
     (let* ((id (harness-agent-test-session))

@@ -8,7 +8,6 @@ QR codes: an encoder, drawn as an SVG image or with text characters.
 - **Source:** [lisp/ui/harness-ui-qr.el](../../lisp/ui/harness-ui-qr.el)
 - **Loaded:** when enabled (see `harness-enable-modules`)
 - **Requires:** nothing
-- **Required by:** [ui-acp-remote](ui-acp-remote.md)
 
 ## About
 
