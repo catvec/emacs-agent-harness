@@ -12911,7 +12911,9 @@ a branch, and nothing for any other task.  A task that left review can
 still show its changes: `harness-ui-patch-review-open`, on C-c C-d in a
 task's session or on a board card (`harness-ui-patch-review-mode`),
 opens its report with a review whose `:show` is set, and the panel then
-draws for a task no longer in review.  The panel is drawn in the popout
+draws for a task no longer in review.  With a prefix argument it asks
+which diff to show first (`--choose-diff-for`, the question d asks in the
+report) and keeps the answer in the review.  The panel is drawn in the popout
 buffer, so it knows the report it is in; a report opened anew, a popout
 buffer it has not drawn in yet, reads the branch again.  Its rows carry
 a keymap of their own as a text property, which the popout puts before
@@ -12927,6 +12929,46 @@ the commit compared with; `git diff --raw -z -M --no-abbrev` and the
 patch between the two give the files and their hunks, paired by path,
 and `git status` in the worktree tells the panel to say when it has
 changes not committed.
+
+THE DIFF SHOWN.  The commits compared are the reviewer's choice
+(`harness-ui-patch-review-select-diff`, on d and the buttons of the
+`Diff` line under the heading): the branch against its merge base with
+`:base`, which is where a report starts, the branch against where it was
+at the last review, or revisions typed.  The choice is the review's
+`selector` -- nil, `since-review` or the string typed -- kept as the
+tree toggle is, so a report closed and opened again shows it; what is
+drawn is the diff `shown-selector` names, the one read last.
+`harness-ui-patch-review--read-branch` takes the selector and has it
+resolved to two commits.  `--resolve-since` takes the newest version of
+the review's set whose tip is not the branch's (`--last-review`; a
+version's tip is the commit the work was handed in at), among those
+before the branch's own when it has one; a task sent back whose branch did
+not move was handed in again at the same commit, which the round the
+harness recorded in the version's meta (`harness-patch-review--version-op`)
+says against the rounds the task has, and then the diff is empty and the
+report says nothing changed.  `--resolve-spec` reads a string as
+`git diff` takes revisions (`--parse-spec`: A..B, A...B, A B or A; a
+start left out is the branch it was made from, an end left out the
+branch's tip), each resolved to a commit, A...B to the merge base.  The
+whole change of the branch against its merge base is read all the same,
+whichever the diff, as the version of the set (`--attach-files` gives the
+version those files, so the library's own views have them) and as where
+a thread on a file the diff shown does not change is placed
+(`--place-threads` goes through `--unshown-files` after the files shown,
+each with the commit its new side is at).  What is wrong is refused
+before the report changes -- no revision, three, one that starts with a
+dash, a review before this one when the review knows none -- and what
+git cannot read -- a revision that is not there, a commit the repository
+lost -- leaves the diff shown as it is, or brings the default back when
+none was read, and the report says why until the next reading
+(`selection-error`).  Choosing ends an Ediff under way, whose files are
+the old diff's.  A report opened on a diff since the last review fetches
+the versions first (`--sync-and-load`), which say what that is; the other
+diffs read the branch while it does.  Ediff's versions and the comments
+on the old one are named after the diff (`--side-name`, `--old-phrase`),
+and a comment made in a diff whose new side is another commit than the
+newest version's records that commit as its revision, so
+`--place-threads` carries its line through the diff from there.
 
 The files show as a tree by default
 (`harness-ui-patch-review-file-tree`): a directory line with its files'
@@ -12957,8 +12999,8 @@ on a thread's row compares the file with that line in sight (the row's
 `harness-ui-patch-review-where` property); r, x and o act on the thread
 as in the threads view, and c comments on the change as a whole.
 Threads that no file row shows -- those on the change as a whole and on
-files the branch no longer changes -- stay in a block above the files,
-"Other threads".
+files the diff shown does not change, each with its file -- stay in a
+block above the files, "Other threads".
 
 RET on a file runs `ediff-buffers` on the two blobs, laid out by
 `harness-ui-patch-review-ediff-window-setup`, once it saved the frame's

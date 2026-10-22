@@ -32,7 +32,8 @@
 ;; Under the evidence, above the review banner and its box, the report
 ;; shows what the task's branch changes against its merge base with the
 ;; branch it was made from -- what merging it brings in, not what that
-;; branch did since -- a tree of the directories and their files:
+;; branch did since -- or the diff the reviewer chooses instead (see THE
+;; DIFF SHOWN), a tree of the directories and their files:
 ;;
 ;;   a file      its status, its name, the lines it adds and deletes,
 ;;               a mark once it was looked at in Ediff and a firmer one
@@ -94,6 +95,38 @@
 ;;               it changes, as it does when the two versions are put
 ;;               side by side.
 ;;
+;; THE DIFF SHOWN.  A line under the heading chooses what the files are
+;; of -- three buttons, or d in the report
+;; (`harness-ui-patch-review-select-diff'):
+;;
+;;   task branch against main   the one the report starts with: what
+;;                              merging the branch brings in, from its
+;;                              merge base with the branch it was made
+;;                              from;
+;;   since last review          the branch against where it was when its
+;;                              work was last handed in -- the version of
+;;                              the review before the one the branch is
+;;                              at -- so that a task sent back shows only
+;;                              what the agent did since.  Work handed in
+;;                              again with no new commit changed nothing
+;;                              since, and the report says so;
+;;   other                      any revisions of the repository, typed as
+;;                              `git diff' takes them: A..B, A...B (from
+;;                              the merge base of A and B), A B, or A
+;;                              alone, against the branch.  An end left
+;;                              out is the branch's tip, a start left out
+;;                              the branch it was made from.
+;;
+;; The files, their counts, Ediff and the threads follow the choice, which
+;; the review keeps while it lasts: a report closed and opened again
+;; shows it.  Ediff's two versions are named after what they are in the
+;; diff ("merge base 8d1fb32", "v1 1c9e4a0", "main~3 5be0a77"), and so
+;; are the old version's comments ("line 5 of v1").  A thread on a file
+;; the diff shown does not change is among the other threads, with its
+;; file, where it is now in the branch's whole change.  What cannot be
+;; shown -- a revision that is not there, a review before this one of
+;; which nothing is known -- is said, and the diff shown stays.
+;;
 ;; Replies you wrote by hand before there were threads -- under a quote of
 ;; the agent's words, in a round of feedback or typed in its session while it
 ;; worked -- are threads too, closed, each with the quote it answered:
@@ -133,7 +166,8 @@
 ;;
 ;; From a task's session history -- or a board card -- C-c C-d opens the
 ;; review, even after the task left review, when it shows the changes
-;; without the review banner (`harness-ui-patch-review-mode').
+;; without the review banner (`harness-ui-patch-review-mode').  C-u C-c
+;; C-d asks which diff to open it at, as d does in the report.
 ;;
 ;; Git runs here, in the Emacs that shows the UI, in the task's
 ;; repository: the changes show where that is a directory of this
@@ -275,13 +309,25 @@ switches it for the review at point."
                (:copier nil))
   "The review of a task's changes, which the task's report shows.
 ID and TASK are the task's, as last heard.  DIR is the repository the
-branch is read in, BRANCH and BASE the branches compared, MERGE-BASE and
-TIP the commits, FILES what the diff of the two holds.  SET is the
-change set of the review (`harness-ui-patch-review--set'): its versions,
-the newest being the branch at TIP, with FILES, and the threads of
-comments, which the harness keeps; SYNCED is non-nil once they were
-fetched from it.  SEEN holds the files seen in Ediff, APPROVED those
-the reviewer accepted, both by `harness-ui-patch-review--seen-key' -- a
+branch is read in, BRANCH the task's branch and BASE the branch it was
+made from.  SELECTOR says which diff the report shows: nil, the branch
+against its merge base with BASE; `since-review', the branch against
+where it was when the work was last handed in for review; a string, the
+revisions the reviewer typed (`harness-ui-patch-review--parse-spec').
+SHOWN-SELECTOR is the selector FILES were read for, which is SELECTOR
+once the reading is done.  MERGE-BASE and TIP are the commits that diff
+compares -- for the nil selector the merge base and the branch's tip --
+OLD-NAME and NEW-NAME what they are called, FILES what the diff of the
+two holds.  BRANCH-BASE, BRANCH-TIP and BRANCH-FILES are the branch's
+whole change, against its merge base with BASE: the same as MERGE-BASE,
+TIP and FILES for the nil selector, and what the version of SET is
+always.  SELECTION-ERROR says why the diff the reviewer chose could not
+be read, when it could not.  SET is the change set of the review
+\(`harness-ui-patch-review--set'): its versions, the newest being the
+branch at BRANCH-TIP, with BRANCH-FILES, and the threads of comments,
+which the harness keeps; SYNCED is non-nil once they were fetched from
+it.  SEEN holds the files seen in Ediff, APPROVED those the reviewer
+accepted, both by `harness-ui-patch-review--seen-key' -- a
 file the branch changes again is neither -- and both kept by the harness
 \(`harness-ui-patch-review--load-viewed'); ASSUMED, when the harness took
 files as viewed without their being looked at, says which commit and why,
@@ -302,6 +348,8 @@ it ends, the first line :start the report's window showed and the :box
 window of the report kept beside it.  GONE is non-nil once the task
 went, done or deleted, while its Ediff showed."
   id task dir branch base merge-base tip files
+  selector shown-selector old-name new-name
+  branch-base branch-tip branch-files selection-error
   (seen (make-hash-table :test 'equal))
   (approved (make-hash-table :test 'equal))
   assumed set synced
@@ -478,18 +526,23 @@ from the repository."
         (lambda (a b) (< (or (change-review-thread-line a) 0) (or (change-review-thread-line b) 0)))))
 
 (defun harness-ui-patch-review--attach-files (review)
-  "Give the version REVIEW's branch ends at the files REVIEW read.
+  "Give the version REVIEW's branch ends at the files of the branch's change.
 That is the version the harness recorded when the task came to review;
-if it has none yet, the version is made here."
-  (when-let* ((tip (harness-ui-patch-review--r-tip review))
+if it has none yet, the version is made here.  Its files are those of the
+whole change, against the merge base with the branch it was made from,
+whichever diff the report shows (`harness-ui-patch-review--r-selector')."
+  (when-let* ((tip (harness-ui-patch-review--r-branch-tip review))
+              ;; Not when the whole change could not be read, beside a
+              ;; diff the reviewer chose that could.
+              ((harness-ui-patch-review--r-branch-base review))
               (set (harness-ui-patch-review--r-set review)))
-    (let ((files (harness-ui-patch-review--r-files review)))
+    (let ((files (harness-ui-patch-review--r-branch-files review)))
       (if-let* ((version (change-review-find-version set tip)))
           (setf (change-review-version-files version) files)
         (let ((task (harness-ui-patch-review--r-task review)))
           (change-review-add-version
            set (change-review-make-version
-                :id tip :tip tip :base (harness-ui-patch-review--r-merge-base review)
+                :id tip :tip tip :base (harness-ui-patch-review--r-branch-base review)
                 :time (or (plist-get task :report-at) (float-time))
                 :title (harness-ui-patch-review--title review)
                 :files files)))))))
@@ -718,37 +771,180 @@ first line names it, if any."
         (harness-ui-patch-review--count file)))
     files))
 
-(defun harness-ui-patch-review--read-branch (dir branch base &optional worktree)
-  "Return a promise of what BRANCH changes against its merge base with BASE.
-DIR is the repository.  The promise resolves to a plist: :base, the
-branch the merge base is with (HEAD when BASE is not there), :merge-base
-and :tip, the commits compared, :files, the files changed, and :dirty,
-non-nil when WORKTREE, the branch's worktree, has changes not committed."
+(defun harness-ui-patch-review--read-diff (dir old new)
+  "Return a promise of the files commit NEW changes against commit OLD in DIR.
+They come in git's order, each with the part of the patch that is its own,
+and counted."
+  (harness-then
+   (harness-all
+    (list (harness-ui-patch-review--git dir "diff" "--raw" "-z" "-M" "--no-abbrev" old new)
+          (harness-ui-patch-review--git dir "diff" "-M" "--no-color" "--no-ext-diff" "--no-textconv"
+                                        "--src-prefix=a/" "--dst-prefix=b/" old new)))
+   (lambda (outputs)
+     (let ((files (harness-ui-patch-review--parse-raw
+                   (harness-ui-patch-review--decode (nth 0 outputs)))))
+       (harness-ui-patch-review--pair
+        files (harness-ui-patch-review--split-patch (harness-ui-patch-review--decode (nth 1 outputs))))))))
+
+;;;; The diff the reviewer chooses
+
+(defun harness-ui-patch-review--parse-spec (spec)
+  "Return (OLD NEW MERGE-BASE) for SPEC, a diff the reviewer typed.
+SPEC names the revisions of the task's repository to compare as `git
+diff' takes them:
+
+  A..B     from A to B
+  A...B    from the merge base of A and B to B
+  A B      the same as A..B
+  A        from A to the task's branch
+
+OLD and NEW are the revisions as typed, nil for one left out: left out,
+OLD is the branch the task was made from and NEW is the task's branch.
+MERGE-BASE is non-nil for the three dots.  Signal a `user-error' for a
+SPEC that names no revision, names more than two, or has one that starts
+with a dash, which git would take for an option."
+  (let* ((spec (string-trim (or spec "")))
+         (three (string-search "..." spec))
+         (two (and (null three) (string-search ".." spec)))
+         (cut (or three two))
+         (parts (if cut
+                    (list (string-trim (substring spec 0 cut))
+                          (string-trim (substring spec (+ cut (if three 3 2)))))
+                  (split-string spec))))
+    (when (or (null parts) (cl-every #'string-empty-p parts))
+      (user-error "Name the revisions to compare, such as main..HEAD or a commit"))
+    (when (> (length parts) 2)
+      (user-error "A diff is between two revisions: %s names %d" spec (length parts)))
+    (dolist (part parts)
+      (when (string-prefix-p "-" part)
+        (user-error "%s is not a revision: it starts with a dash" part)))
+    (let ((old (car parts))
+          (new (nth 1 parts)))
+      (list (and old (not (string-empty-p old)) old)
+            (and new (not (string-empty-p new)) new)
+            (and three t)))))
+
+(defun harness-ui-patch-review--missing-commit (dir revision)
+  "Return what to say of REVISION, which names no commit in DIR."
+  (format-message "There is no commit `%s' in %s" revision (abbreviate-file-name dir)))
+
+(defconst harness-ui-patch-review--no-earlier-review
+  "No earlier review of this task is known to compare with"
+  "What is said when the diff since the last review is asked for and there is none.")
+
+(defun harness-ui-patch-review--resolve-since (dir branch tip last-review)
+  "Return a promise of the diff from the last review to TIP in DIR.
+TIP is the tip of BRANCH.  LAST-REVIEW is a function of TIP giving
+\(COMMIT . NAME) for where the branch was when its work was last handed
+in, or nil when that is not known.  The promise resolves to a plist:
+:kind `since-review', :old and :new, the commits compared, :old-name and
+:new-name, what they are called."
+  (let ((last (and last-review (funcall last-review tip))))
+    (if (null last)
+        (harness-ui-patch-review--fail "%s" harness-ui-patch-review--no-earlier-review)
+      (harness-then
+       (harness-ui-patch-review--rev
+        dir (concat (car last) "^{commit}")
+        (format-message "The commit of the last review, %s, is no longer in the repository"
+                        (harness-ui-patch-review--short (car last))))
+       (lambda (commit)
+         (list :kind 'since-review :old commit :new tip :old-name (cdr last) :new-name branch))))))
+
+(defun harness-ui-patch-review--resolve-spec (dir branch tip base spec)
+  "Return a promise of the diff SPEC names in DIR.
+It resolves to what `harness-ui-patch-review--resolve-since' gives.  SPEC
+is what `harness-ui-patch-review--parse-spec' reads; BRANCH, TIP
+and BASE are the task's: a revision left out of SPEC is the branch's tip,
+or BASE.  The promise's :kind is `custom'."
+  (condition-case err
+      (pcase-let* ((`(,old ,new ,merge-base) (harness-ui-patch-review--parse-spec spec))
+                   (old-name (or old (if (harness-string-blank-p base) "HEAD" base)))
+                   (new-name (or new branch)))
+        (harness-then
+         (harness-all
+          (list (harness-ui-patch-review--rev dir (concat old-name "^{commit}")
+                                              (harness-ui-patch-review--missing-commit dir old-name))
+                (if new
+                    (harness-ui-patch-review--rev dir (concat new "^{commit}")
+                                                  (harness-ui-patch-review--missing-commit dir new))
+                  tip)))
+         (lambda (commits)
+           (let ((old-commit (nth 0 commits))
+                 (new-commit (nth 1 commits)))
+             (harness-then
+              (if merge-base
+                  (harness-then
+                   (harness-catch (harness-ui-patch-review--git dir "merge-base" old-commit new-commit)
+                                  (lambda (_)
+                                    (harness-ui-patch-review--fail "%s and %s have no commit in common"
+                                                                   old-name new-name)))
+                   (lambda (out) (string-trim (harness-ui-patch-review--decode out))))
+                (harness-resolved old-commit))
+              (lambda (from)
+                (list :kind 'custom :old from :new new-commit
+                      :old-name old-name :new-name new-name)))))))
+    (user-error (harness-ui-patch-review--fail "%s" (cadr err)))))
+
+(defun harness-ui-patch-review--read-branch (dir branch base &optional worktree selector last-review)
+  "Return a promise of what BRANCH changes, by default against its merge base.
+The merge base is that of BRANCH with BASE.  DIR is the repository.
+SELECTOR says what is compared instead:
+`since-review', the branch against where it was when its work was last
+handed in -- LAST-REVIEW, a function of the branch's tip, gives that
+commit and its name, (COMMIT . NAME), or nil -- or a string, the
+revisions the reviewer typed (`harness-ui-patch-review--parse-spec').
+
+The promise resolves to a plist: :base, the branch the merge base is with
+\(HEAD when BASE is not there), :merge-base and :tip, the commits
+compared, :files, the files changed between them, :kind, `base',
+`since-review' or `custom', :old-name and :new-name, what the two commits
+are called, and :dirty, non-nil when WORKTREE, the branch's worktree, has
+changes not committed.  Whichever the diff, :branch-base, :branch-tip and
+:branch-files are those of the branch's whole change against its merge
+base with BASE, which :merge-base, :tip and :files are for a nil SELECTOR."
   (harness-then
    (harness-ui-patch-review--rev dir (concat branch "^{commit}")
                                  (format-message "There is no branch `%s' in %s" branch (abbreviate-file-name dir)))
    (lambda (tip)
-     (harness-then
-      (harness-ui-patch-review--merge-base dir base tip)
-      (lambda (found)
-        (let ((merge-base (cdr found)))
-          (harness-then
-           (harness-all
-            (list (harness-ui-patch-review--git dir "diff" "--raw" "-z" "-M" "--no-abbrev" merge-base tip)
-                  (harness-ui-patch-review--git dir "diff" "-M" "--no-color" "--no-ext-diff" "--no-textconv"
-                                                "--src-prefix=a/" "--dst-prefix=b/" merge-base tip)
-                  (if worktree
-                      (harness-catch (harness-ui-patch-review--git worktree "status" "--porcelain" "-z"
-                                                                   "--untracked-files=no")
-                                     (lambda (_) ""))
-                    "")))
-           (lambda (outputs)
-             (let ((files (harness-ui-patch-review--parse-raw
-                           (harness-ui-patch-review--decode (nth 0 outputs)))))
-               (harness-ui-patch-review--pair
-                files (harness-ui-patch-review--split-patch (harness-ui-patch-review--decode (nth 1 outputs))))
-               (list :base (car found) :merge-base merge-base :tip tip :files files
-                     :dirty (not (string-empty-p (nth 2 outputs)))))))))))))
+     (let* ((whole (harness-then
+                    (harness-ui-patch-review--merge-base dir base tip)
+                    (lambda (found)
+                      (harness-then
+                       (harness-ui-patch-review--read-diff dir (cdr found) tip)
+                       (lambda (files)
+                         (list :kind 'base :base (car found) :old (cdr found) :new tip
+                               :old-name (car found) :new-name branch :files files))))))
+            (picked (and selector
+                         (harness-then
+                          (if (eq selector 'since-review)
+                              (harness-ui-patch-review--resolve-since dir branch tip last-review)
+                            (harness-ui-patch-review--resolve-spec dir branch tip base selector))
+                          (lambda (diff)
+                            (harness-then
+                             (harness-ui-patch-review--read-diff dir (plist-get diff :old) (plist-get diff :new))
+                             (lambda (files) (append diff (list :files files))))))))
+            (status (if worktree
+                        (harness-catch (harness-ui-patch-review--git worktree "status" "--porcelain" "-z"
+                                                                     "--untracked-files=no")
+                                       (lambda (_) ""))
+                      "")))
+       (harness-then
+        ;; The whole change is what the version is; a diff the reviewer
+        ;; chose is shown whether or not it can be read.
+        (harness-all (list (if picked (harness-catch whole (lambda (_) nil)) whole)
+                           status
+                           (or picked (harness-resolved nil))))
+        (lambda (results)
+          (let* ((whole (nth 0 results))
+                 (shown (or (nth 2 results) whole)))
+            (list :base (or (plist-get whole :base) (if (harness-string-blank-p base) "HEAD" base))
+                  :merge-base (plist-get shown :old) :tip (plist-get shown :new)
+                  :files (plist-get shown :files)
+                  :kind (plist-get shown :kind)
+                  :old-name (plist-get shown :old-name) :new-name (plist-get shown :new-name)
+                  :dirty (not (string-empty-p (nth 1 results)))
+                  :branch-base (plist-get whole :old) :branch-tip tip
+                  :branch-files (plist-get whole :files)))))))))
 
 (defun harness-ui-patch-review--blob (review sha)
   "Return a promise of the text of blob SHA in REVIEW's repository, \"\" for nil."
@@ -758,6 +954,43 @@ non-nil when WORKTREE, the branch's worktree, has changes not committed."
                   (lambda (bytes) (harness-ui-patch-review--decode bytes 'undecided)))))
 
 ;;;; Reviews
+
+(defun harness-ui-patch-review--version-tip (version)
+  "Return the commit VERSION of a review ends at."
+  (or (change-review-version-tip version) (change-review-version-id version)))
+
+(defun harness-ui-patch-review--handed-in-again-p (review version)
+  "Non-nil when REVIEW's task was sent back since VERSION was handed in.
+The harness records the round of feedback a version was handed in at
+\(`harness-patch-review--version-op'); a task sent back since then, whose
+branch has no new commit, comes back to review as the same version.  A
+version that has no round -- one this Emacs made for a branch it read --
+says nothing."
+  (let ((round (plist-get (change-review-version-meta version) :round))
+        (rounds (length (plist-get (harness-ui-patch-review--r-task review) :feedback))))
+    (and (integerp round) (> rounds round))))
+
+(defun harness-ui-patch-review--last-review (review tip)
+  "Return (COMMIT . NAME) for where the branch was at the last review, or nil.
+REVIEW is the review, TIP where the branch is now.  Each time the work
+was handed in -- looked at, in the report -- is a version of REVIEW's
+set, named by the commit the branch was at.  The last review is the
+newest version that is not TIP's own, among those before it when TIP is
+a version: the work the reviewer has seen, so what the branch changed
+since is what they have not.  A task sent back whose branch has no new
+commit was handed in again at TIP: that is the last review too, and
+nothing changed since.  COMMIT is that of the version, NAME its name
+\(\"v1\"); nil when the set knows no version to compare with."
+  (let* ((versions (and (harness-ui-patch-review--r-set review)
+                        (change-review-set-versions (harness-ui-patch-review--r-set review))))
+         (here (cl-position tip versions :key #'harness-ui-patch-review--version-tip :test #'equal))
+         (earlier (cl-find tip (if here (cl-subseq versions 0 here) versions)
+                           :key #'harness-ui-patch-review--version-tip :test-not #'equal :from-end t))
+         (version (or earlier
+                      (and here (harness-ui-patch-review--handed-in-again-p review (nth here versions))
+                           (nth here versions)))))
+    (and version
+         (cons (harness-ui-patch-review--version-tip version) (change-review-version-name version)))))
 
 (defun harness-ui-patch-review--review-for (task)
   "Return the review of TASK, made now when it has none."
@@ -812,21 +1045,30 @@ Ediff, which shows the feedback box, goes on showing it."
           (harness-ui-popout-refresh (buffer-local-value 'harness-ui-popout-key popout))
           (harness-ui-patch-review--restore-places popout places))))))
 
-(defun harness-ui-patch-review--load (review)
+(defun harness-ui-patch-review--load (review &optional keep-selection-error)
   "Read REVIEW's branch again, then draw its report.
-Return a promise of REVIEW."
+What is read is the diff the reviewer chose
+\(`harness-ui-patch-review--r-selector').  One that cannot be read is
+not shown: the diff shown before comes back -- the branch against its
+merge base when there was none -- and the report says why, until the
+next reading, unless KEEP-SELECTION-ERROR.  Return a promise of REVIEW."
   (let* ((task (harness-ui-patch-review--r-task review))
          (dir (harness-ui-patch-review--repository task))
          (branch (plist-get task :branch))
+         (selector (harness-ui-patch-review--r-selector review))
          (worktree (let ((wt (plist-get task :worktree)))
                      (and (stringp wt) (not (file-remote-p wt)) (file-directory-p wt) wt)))
          (token (list 'loading)))
     (setf (harness-ui-patch-review--r-loading review) token
           (harness-ui-patch-review--r-error review) nil)
+    (unless keep-selection-error
+      (setf (harness-ui-patch-review--r-selection-error review) nil))
     (harness-ui-patch-review--refresh review)
     (harness-then
      (if dir
-         (harness-ui-patch-review--read-branch dir branch (plist-get task :base) worktree)
+         (harness-ui-patch-review--read-branch
+          dir branch (plist-get task :base) worktree selector
+          (lambda (tip) (harness-ui-patch-review--last-review review tip)))
        (harness-ui-patch-review--fail "%s" (harness-ui-patch-review--why-not task)))
      (lambda (result)
        ;; A later reading wins over this one.
@@ -839,6 +1081,12 @@ Return a promise of REVIEW."
                (harness-ui-patch-review--r-merge-base review) (plist-get result :merge-base)
                (harness-ui-patch-review--r-tip review) (plist-get result :tip)
                (harness-ui-patch-review--r-files review) (plist-get result :files)
+               (harness-ui-patch-review--r-shown-selector review) selector
+               (harness-ui-patch-review--r-old-name review) (plist-get result :old-name)
+               (harness-ui-patch-review--r-new-name review) (plist-get result :new-name)
+               (harness-ui-patch-review--r-branch-base review) (plist-get result :branch-base)
+               (harness-ui-patch-review--r-branch-tip review) (plist-get result :branch-tip)
+               (harness-ui-patch-review--r-branch-files review) (plist-get result :branch-files)
                (harness-ui-patch-review--r-dirty review) (plist-get result :dirty))
          (harness-ui-patch-review--attach-files review)
          (harness-ui-patch-review--refresh review)
@@ -846,11 +1094,36 @@ Return a promise of REVIEW."
          ;; just read, comes a moment later.
          (harness-ui-patch-review--place-threads review)))
      (lambda (err)
-       (when (eq (harness-ui-patch-review--r-loading review) token)
+       (cond
+        ((not (eq (harness-ui-patch-review--r-loading review) token)) review)
+        ;; A diff the reviewer just chose that cannot be read: the one
+        ;; shown before stays, or the default comes, if nothing was.
+        ((and selector (not (equal selector (harness-ui-patch-review--r-shown-selector review))))
+         (setf (harness-ui-patch-review--r-loading review) nil
+               (harness-ui-patch-review--r-selection-error review)
+               (format "Could not show %s: %s" (harness-ui-patch-review--selector-label selector)
+                       (harness-error-message err))
+               (harness-ui-patch-review--r-selector review)
+               (harness-ui-patch-review--r-shown-selector review))
+         (if (harness-ui-patch-review--r-tip review)
+             (progn (harness-ui-patch-review--refresh review) review)
+           (harness-ui-patch-review--load review t)))
+        (t
          (setf (harness-ui-patch-review--r-loading review) nil
                (harness-ui-patch-review--r-error review) (harness-error-message err))
-         (harness-ui-patch-review--refresh review))
-       review))))
+         (harness-ui-patch-review--refresh review)
+         review))))))
+
+(defun harness-ui-patch-review--sync-and-load (review)
+  "Fetch REVIEW's threads and versions from the harness, and read its branch.
+The two go on together, so the changes show as soon as git has answered.
+A diff since the last review needs the versions to tell which commit that
+was, so it waits for them.  Return a promise."
+  (if (eq (harness-ui-patch-review--r-selector review) 'since-review)
+      (harness-then (harness-ui-patch-review--sync review)
+                    (lambda (_) (harness-ui-patch-review--load review)))
+    (harness-ui-patch-review--sync review)
+    (harness-ui-patch-review--load review)))
 
 (defun harness-ui-patch-review--seen-key (file)
   "Return what marks FILE seen: its path and its blob on the branch.
@@ -1066,14 +1339,16 @@ Not a binary file, nor one too large to search; nil for them too."
                            (change-review-comment-revision comment))))))
     (cdr best)))
 
-(defun harness-ui-patch-review--place-file (review file threads)
+(defun harness-ui-patch-review--place-file (review file threads &optional tip)
   "Return a promise of (PLACEMENTS . SINCE) for THREADS about FILE of REVIEW.
 PLACEMENTS is an alist of a thread's id to where the thread is now in
 the newest version of FILE (`change-review-diff-place'), read from the
 repository: the file at the revision each thread was made against, and
 how it changed since.  SINCE is `changed' or `same' for FILE since the
-user's last comment on it, nil when that is not told."
-  (let* ((tip (harness-ui-patch-review--r-tip review))
+user's last comment on it, nil when that is not told.  TIP is the
+commit FILE's new side is at, by default that of the diff the report
+shows."
+  (let* ((tip (or tip (harness-ui-patch-review--r-tip review)))
          (new-blob (change-review-file-new-blob file))
          (old-blob (change-review-file-old-blob file))
          (located (cl-remove-if-not
@@ -1141,22 +1416,45 @@ user's last comment on it, nil when that is not told."
                                               (cdr (assoc revision ranges))))))
                     since)))))))))
 
+(defun harness-ui-patch-review--unshown-files (review)
+  "Return the files of REVIEW's whole change that the diff the report shows lacks.
+Nil when the report shows the whole change."
+  (let ((shown (harness-ui-patch-review--r-files review)))
+    (unless (eq shown (harness-ui-patch-review--r-branch-files review))
+      (cl-remove-if (lambda (file)
+                      (cl-find (change-review-file-path file) shown
+                               :key #'change-review-file-path :test #'equal))
+                    (harness-ui-patch-review--r-branch-files review)))))
+
 (defun harness-ui-patch-review--place-threads (review)
   "Place the threads of REVIEW in the newest version of their files.
 Reads from the repository the files that have threads, and how they
 changed since the revision each thread was made against; then draws the
-report and the views of the threads again.  Return a promise of REVIEW;
-it never rejects."
-  (let ((token (list 'placing))
-        (set (harness-ui-patch-review--r-set review))
-        jobs)
+report and the views of the threads again.  The files are those the
+report shows, as that diff has them, and then those the branch changes
+that it does not, as the whole change has them: a thread is where it is
+now whatever the diff shown.  Return a promise of REVIEW; it never
+rejects."
+  (let* ((token (list 'placing))
+         (set (harness-ui-patch-review--r-set review))
+         (placed (make-hash-table :test 'equal))
+         jobs)
     (setf (harness-ui-patch-review--r-placing review) token)
-    (dolist (file (harness-ui-patch-review--r-files review))
-      (when-let* ((threads (harness-ui-patch-review--file-threads review file)))
-        (push (cons file threads) jobs)))
+    ;; Each job is (FILE THREADS TIP): the file the threads are about and
+    ;; the commit its new side is at.
+    (cl-flet ((add (files tip)
+                (dolist (file files)
+                  (when-let* ((threads (cl-remove-if
+                                        (lambda (thread) (gethash (change-review-thread-id thread) placed))
+                                        (harness-ui-patch-review--file-threads review file))))
+                    (dolist (thread threads) (puthash (change-review-thread-id thread) t placed))
+                    (push (list file threads tip) jobs)))))
+      (add (harness-ui-patch-review--r-files review) (harness-ui-patch-review--r-tip review))
+      (add (harness-ui-patch-review--unshown-files review) (harness-ui-patch-review--r-branch-tip review)))
     (setq jobs (nreverse jobs))
     (harness-then
-     (harness-all (mapcar (lambda (job) (harness-ui-patch-review--place-file review (car job) (cdr job)))
+     (harness-all (mapcar (lambda (job)
+                            (harness-ui-patch-review--place-file review (nth 0 job) (nth 1 job) (nth 2 job)))
                           jobs))
      (lambda (results)
        (when (eq (harness-ui-patch-review--r-placing review) token)
@@ -1165,7 +1463,7 @@ it never rejects."
            (cl-mapc (lambda (job result)
                       (dolist (entry (car result)) (puthash (car entry) (cdr entry) placements))
                       (when (cdr result)
-                        (puthash (change-review-file-path (car job)) (cdr result) since)))
+                        (puthash (change-review-file-path (nth 0 job)) (cdr result) since)))
                     jobs results)
            (setf (harness-ui-patch-review--r-placements review) placements
                  (harness-ui-patch-review--r-since review) since
@@ -1235,6 +1533,7 @@ A report closed meanwhile opens again, out of sight, for its box."
   (define-key map (kbd "V") #'harness-ui-patch-review-assume-viewed)
   (define-key map (kbd "t") #'harness-ui-patch-review-toggle-file-tree)
   (define-key map (kbd "T") #'harness-ui-patch-review-threads)
+  (define-key map (kbd "d") #'harness-ui-patch-review-select-diff)
   (define-key map (kbd "r") #'change-review-ui-reply)
   (define-key map (kbd "x") #'change-review-ui-toggle-status)
   (define-key map (kbd "o") #'change-review-ui-follow-author)
@@ -1301,6 +1600,7 @@ the closed too; each after INDENT.  Empty without threads."
   (define-key map (kbd "RET") #'harness-ui-patch-review-threads)
   (define-key map [mouse-1] #'harness-ui-patch-review-threads)
   (define-key map (kbd "T") #'harness-ui-patch-review-threads)
+  (define-key map (kbd "d") #'harness-ui-patch-review-select-diff)
   (define-key map (kbd "r") #'change-review-ui-reply)
   (define-key map (kbd "x") #'change-review-ui-toggle-status)
   (define-key map (kbd "o") #'change-review-ui-follow-author)
@@ -1308,9 +1608,9 @@ the closed too; each after INDENT.  Empty without threads."
 
 (defun harness-ui-patch-review--other-threads (review)
   "Return the rows of the threads of REVIEW that no file row shows, or nil.
-Those on the change as a whole and on files the branch no longer
-changes, under a heading; the open ones, unless
-`harness-ui-patch-review-closed-threads' says."
+Those on the change as a whole and on files the diff shown does not
+change, under a heading, each with the file it is about; the open ones,
+unless `harness-ui-patch-review-closed-threads' says."
   (let* ((files (harness-ui-patch-review--r-files review))
          (set (harness-ui-patch-review--r-set review))
          (others (cl-stable-sort
@@ -1325,17 +1625,25 @@ changes, under a heading; the open ones, unless
     (when others
       (concat
        (propertize "Other threads" 'face 'harness-label-face)
-       "   " (propertize (format "%s: on the change as a whole, or on files this version does not change"
+       "   " (propertize (format "%s: on the change as a whole, or on files this diff does not change"
                                  (harness-ui-patch-review--plural (length others) "thread"))
                          'face 'harness-dim-face)
        "\n"
        (mapconcat
         (lambda (thread)
-          (let ((row (change-review-ui-thread-line set thread :width 100 :indent "  "
-                                                   :placement (change-review-placement set thread))))
+          (let* ((location (change-review-thread-location thread))
+                 (path (and location (change-review-location-file location)))
+                 (placement (change-review-placement set thread))
+                 ;; A thread about a file says which, the line alone does not.
+                 (row (if path
+                          (concat "  " (propertize path 'face 'bold) "  "
+                                  (change-review-ui-thread-line set thread :width 100 :placement placement))
+                        (change-review-ui-thread-line set thread :width 100 :indent "  "
+                                                      :placement placement))))
             (add-text-properties
              0 (length row)
              (list 'harness-ui-patch-review-task (harness-ui-patch-review--r-id review)
+                   'change-review-thread (change-review-thread-id thread)
                    'mouse-face 'highlight
                    'help-echo "RET: list the threads; r replies, x closes or opens the thread"
                    'keymap harness-ui-patch-review--thread-map)
@@ -1574,6 +1882,88 @@ In a report showing the changes, from a row or anywhere else in it."
                                      "as a tree"
                                    "in a flat list"))))
 
+(defvar harness-ui-patch-review--spec-history nil
+  "The diffs typed to choose what a report compares, newest first.")
+
+(defun harness-ui-patch-review--selector-label (selector)
+  "Return SELECTOR, a diff the report can show, as words for a message."
+  (pcase selector
+    ('since-review "the changes since the last review")
+    ((pred stringp) (format-message "the diff `%s'" selector))
+    (_ "the branch against its base")))
+
+(defun harness-ui-patch-review--selector-of (choice)
+  "Return CHOICE, which diff to show, as the review keeps it.
+CHOICE is `base', which is nil, `since-review', or a string of
+revisions, which is kept trimmed; one that cannot be right signals a
+`user-error' (`harness-ui-patch-review--parse-spec')."
+  (cond ((eq choice 'base) nil)
+        ((stringp choice) (harness-ui-patch-review--parse-spec choice) (string-trim choice))
+        (t choice)))
+
+(defun harness-ui-patch-review--read-spec (review)
+  "Read in the minibuffer revisions of REVIEW's repository to show a diff of.
+They are as `harness-ui-patch-review--parse-spec' takes them; the ones
+the report shows are what an empty answer takes."
+  (let ((current (and (stringp (harness-ui-patch-review--r-selector review))
+                      (harness-ui-patch-review--r-selector review))))
+    (read-string (format-prompt "Diff of revisions (A..B, A...B, A B, or A against the branch)" current)
+                 nil 'harness-ui-patch-review--spec-history current)))
+
+(defun harness-ui-patch-review--read-selector (review)
+  "Read in the minibuffer which diff REVIEW's report shows.
+The answer is `base', `since-review' or, for revisions the reviewer
+types, a string.  The three are offered in this order, with the one
+shown now as the default."
+  (let* ((choices (mapcar (lambda (choice)
+                            (cons (car (harness-ui-patch-review--choice-text review choice)) choice))
+                          '(base since-review other)))
+         (answer (completing-read
+                  "Show the diff: "
+                  (lambda (string pred action)
+                    (if (eq action 'metadata)
+                        '(metadata (display-sort-function . identity)
+                                   (cycle-sort-function . identity))
+                      (complete-with-action action (mapcar #'car choices) string pred)))
+                  nil t nil nil
+                  (car (rassq (harness-ui-patch-review--choice-current review) choices))))
+         (choice (or (cdr (assoc answer choices))
+                     (user-error "No such diff to show: %s" answer))))
+    (if (eq choice 'other) (harness-ui-patch-review--read-spec review) choice)))
+
+(defun harness-ui-patch-review-select-diff (&optional selector review)
+  "Choose the diff the report of the changes shows.
+Asked in the minibuffer, one of three: the task's branch against the
+branch it was made from, what merging it brings in, which the report
+starts with; the branch since its last review, what changed since the
+work was last handed in; or any revisions of the repository, as `git
+diff' takes them -- A..B, A...B (from the merge base of A and B), A B, or
+A alone, against the branch -- from a prompt of their own.  The files,
+their counts, Ediff and the threads follow the choice, which a report
+keeps until another is made; one that cannot be read says why and leaves
+the diff shown as it is.
+
+From Lisp SELECTOR is `base', `since-review' or a string of revisions,
+and REVIEW the review whose report it is for, by default the one at
+point.  In the report of a task's changes, from a row or anywhere else in
+it."
+  (interactive)
+  (let* ((review (or review (harness-ui-patch-review--review-here)
+                     (user-error "No changes here to choose a diff for")))
+         ;; What cannot be right is refused before the report changes.
+         (selector (harness-ui-patch-review--selector-of
+                    (or selector (harness-ui-patch-review--read-selector review)))))
+    (when (and (eq selector 'since-review) (harness-ui-patch-review--r-branch-tip review)
+               (not (harness-ui-patch-review--last-review review (harness-ui-patch-review--r-branch-tip review))))
+      (user-error "%s" harness-ui-patch-review--no-earlier-review))
+    ;; The files Ediff compares are the old diff's: it ends first.
+    (when (harness-ui-patch-review--r-ediff review)
+      (harness-ui-patch-review--end-ediff review))
+    (setf (harness-ui-patch-review--r-selector review) selector
+          (harness-ui-patch-review--r-selection-error review) nil)
+    (message "Reading %s…" (harness-ui-patch-review--selector-label selector))
+    (harness-ui-patch-review--load review)))
+
 (defun harness-ui-patch-review--viewed-text (review)
   "Return how much of REVIEW is reviewed: \"N of M files viewed, K left\".
 N is how many files were compared in Ediff (`harness-ui-patch-review--seen-p'),
@@ -1589,6 +1979,68 @@ or taken as viewed, which the text says when the harness did."
             (if assumed
                 (format ", unchanged since %s taken as viewed" (harness-ui-patch-review--short assumed))
               ""))))
+
+(defun harness-ui-patch-review--kind (review)
+  "Return what the diff REVIEW's report shows is.
+`base' is the branch against its merge base with the branch it was made
+from, the default; `since-review' the branch against where it was when
+its work was last handed in; `custom' the revisions the reviewer typed."
+  (pcase (harness-ui-patch-review--r-shown-selector review)
+    ('nil 'base)
+    ('since-review 'since-review)
+    (_ 'custom)))
+
+(defun harness-ui-patch-review--ref-text (name commit)
+  "Return what to call COMMIT, which was asked for as NAME: \"NAME @ abc1234\".
+Only the short COMMIT when NAME is the start of it already."
+  (let ((short (harness-ui-patch-review--short commit)))
+    (if (or (not (stringp name)) (string-empty-p name)
+            (and (stringp commit) (string-prefix-p name commit)))
+        short
+      (format "%s @ %s" name short))))
+
+(defun harness-ui-patch-review--old-name (review)
+  "Return what REVIEW's report calls the old side of the diff it shows.
+It is the branch the task was made from for the default diff, the version
+for the diff since the last review, and the revision typed for another."
+  (or (harness-ui-patch-review--r-old-name review)
+      (harness-ui-patch-review--r-base review)))
+
+(defun harness-ui-patch-review--new-name (review)
+  "Return what REVIEW's report calls the new side of the diff it shows."
+  (or (harness-ui-patch-review--r-new-name review)
+      (harness-ui-patch-review--r-branch review)))
+
+(defun harness-ui-patch-review--diff-text (review)
+  "Return what the heading of REVIEW's changes says is compared.
+The new side, then the old one with where it is: \"task/fix against main @
+8d1fb32\" for the default diff, \"task/fix since v1 @ 1c9e4a0\" for the diff
+since the last review, \"HEAD against main~3 @ 5be0a77\" for another."
+  (let* ((kind (harness-ui-patch-review--kind review))
+         (tip (harness-ui-patch-review--r-tip review))
+         (old (harness-ui-patch-review--r-merge-base review))
+         (old-name (harness-ui-patch-review--old-name review))
+         (new-name (harness-ui-patch-review--new-name review)))
+    (concat
+     (propertize new-name 'face 'bold)
+     (propertize (format " %s %s" (if (eq kind 'since-review) "since" "against")
+                         (harness-ui-patch-review--ref-text old-name old))
+                 'face 'harness-dim-face
+                 'help-echo
+                 (pcase kind
+                   ('since-review
+                    (format "%s at %s against where it was at the last review, %s (%s): what it changed since then"
+                            new-name (harness-ui-patch-review--short tip) old-name
+                            (harness-ui-patch-review--short old)))
+                   ('custom
+                    (format "The diff %s: %s at %s against %s at %s"
+                            (harness-ui-patch-review--r-shown-selector review)
+                            new-name (harness-ui-patch-review--short tip)
+                            old-name (harness-ui-patch-review--short old)))
+                   (_
+                    (format "The branch at %s against its merge base with %s, %s: what merging it brings in"
+                            (harness-ui-patch-review--short tip) old-name
+                            (harness-ui-patch-review--short old))))))))
 
 (defun harness-ui-patch-review--heading (review)
   "Return the first line of REVIEW's changes: what is compared, how much changed.
@@ -1607,15 +2059,7 @@ It also says how many threads the review has, open and closed."
                                  'help-echo "The files you have compared in Ediff, those approved, and those left; V takes the files the newest commit did not change as viewed")))
      (if (not tip) ""
        (concat
-        "   " (propertize (harness-ui-patch-review--r-branch review) 'face 'bold)
-        (propertize (format " against %s @ %s"
-                            (harness-ui-patch-review--r-base review)
-                            (harness-ui-patch-review--short (harness-ui-patch-review--r-merge-base review)))
-                    'face 'harness-dim-face
-                    'help-echo (format "The branch at %s against its merge base with %s, %s: what merging it brings in"
-                                       (harness-ui-patch-review--short tip)
-                                       (harness-ui-patch-review--r-base review)
-                                       (harness-ui-patch-review--short (harness-ui-patch-review--r-merge-base review))))
+        "   " (harness-ui-patch-review--diff-text review)
         (if (null files) ""
           (concat "   " (propertize (format "+%d" (apply #'+ (mapcar #'change-review-file-added files)))
                                     'face 'harness-ui-patch-review-plus-face)
@@ -1650,6 +2094,10 @@ It also says how many threads the review has, open and closed."
                                                (lambda (_) (harness-ui-patch-review--load review))
                                                nil "Read the branch again")
                                     'mouse-face 'highlight)))
+           ;; The diff the reviewer chose was not there to read: the one
+           ;; before is shown, and this says why.
+           (and (harness-ui-patch-review--r-selection-error review)
+                (propertize (harness-ui-patch-review--r-selection-error review) 'face 'error))
            (let ((drafts (length (and (harness-ui-patch-review--r-set review)
                                       (change-review-drafts (harness-ui-patch-review--r-set review))))))
              (and (> drafts 0)
@@ -1660,12 +2108,105 @@ It also says how many threads the review has, open and closed."
                 (propertize "Its worktree has changes not committed: they are not on the branch, so not here."
                             'face 'warning))
            (and tip (null (harness-ui-patch-review--r-files review))
-                (propertize (format "The branch changes nothing against %s." (harness-ui-patch-review--r-base review))
-                            'face 'harness-dim-face))))))
+                (propertize (harness-ui-patch-review--nothing-text review) 'face 'harness-dim-face))))))
+
+(defun harness-ui-patch-review--nothing-text (review)
+  "Return what REVIEW's report says when the diff it shows changes no file."
+  (let ((old-name (harness-ui-patch-review--old-name review)))
+    (pcase (harness-ui-patch-review--kind review)
+      ('since-review
+       (format "Nothing changed since %s (%s): the branch is where it was at the last review."
+               old-name (harness-ui-patch-review--short (harness-ui-patch-review--r-merge-base review))))
+      ('custom
+       (format "Nothing differs between %s and %s." old-name (harness-ui-patch-review--new-name review)))
+      (_ (format "The branch changes nothing against %s." (harness-ui-patch-review--r-base review))))))
 
 (defconst harness-ui-patch-review--hint
-  "RET or a click compares a file in Ediff, n and p move between them, a approves it, A approves all, V takes the files the newest commit did not change as viewed, t shows a tree or a flat list, T lists the threads by file.  In Ediff c comments on a difference -- in either version, on the line at point -- as a thread of its own, r replies to a thread, x closes it or opens it again and TAB folds it to a line or opens a closed one to its conversation, and e goes to the box below (C-c C-d comes back to Ediff); n at the last difference offers the next file, N and P go on to the next or previous file, q comes back here."
+  "RET or a click compares a file in Ediff, n and p move between them, a approves it, A approves all, V takes the files the newest commit did not change as viewed, t shows a tree or a flat list, T lists the threads by file, d chooses the diff shown: the branch against its base, since the last review, or any revisions.  In Ediff c comments on a difference -- in either version, on the line at point -- as a thread of its own, r replies to a thread, x closes it or opens it again and TAB folds it to a line or opens a closed one to its conversation, and e goes to the box below (C-c C-d comes back to Ediff); n at the last difference offers the next file, N and P go on to the next or previous file, q comes back here."
   "What the report says under the changes.")
+
+;;;;; Choosing the diff
+
+(defvar harness-ui-patch-review--heading-map (make-sparse-keymap)
+  "Keys on the heading of the changes and the line that chooses the diff.")
+
+(let ((map harness-ui-patch-review--heading-map))
+  (define-key map (kbd "d") #'harness-ui-patch-review-select-diff)
+  (define-key map (kbd "t") #'harness-ui-patch-review-toggle-file-tree)
+  (define-key map (kbd "T") #'harness-ui-patch-review-threads))
+
+(defun harness-ui-patch-review--add-keymap (string map)
+  "Give the stretches of STRING with no keymap of their own the keymap MAP.
+A button keeps its own.  Return STRING."
+  (let ((pos 0) (len (length string)))
+    (while (< pos len)
+      (let ((next (or (next-single-property-change pos 'keymap string) len)))
+        (unless (get-text-property pos 'keymap string)
+          (put-text-property pos next 'keymap map string))
+        (setq pos next))))
+  string)
+
+(defun harness-ui-patch-review--choice-text (review choice)
+  "Return (LABEL HELP) for CHOICE, one of the diffs REVIEW's report can show.
+CHOICE is `base', `since-review' or `other'."
+  (pcase choice
+    ('base
+     (let ((base (or (harness-ui-patch-review--r-base review)
+                     (plist-get (harness-ui-patch-review--r-task review) :base)
+                     "its base")))
+       (list (format "Task branch against %s" base)
+             (format "What merging the task's branch brings into %s: the branch against its merge base with it" base))))
+    ('since-review
+     (let ((last (and (harness-ui-patch-review--r-branch-tip review)
+                      (harness-ui-patch-review--last-review
+                       review (harness-ui-patch-review--r-branch-tip review)))))
+       (list (if last (format "Since last review (%s)" (cdr last)) "Since last review")
+             (if last
+                 (format "What the branch changed since the last review: the branch against where it was at %s (%s)"
+                         (cdr last) (harness-ui-patch-review--short (car last)))
+               "What the branch changed since the last review -- no earlier review of this task is known"))))
+    (_
+     (let ((spec (and (stringp (harness-ui-patch-review--r-selector review))
+                      (harness-ui-patch-review--r-selector review))))
+       (list (if spec (format "Other: %s" spec) "Other…")
+             "Any revisions of the repository: A..B, A...B (from the merge base), A B, or A for A against the branch")))))
+
+(defun harness-ui-patch-review--choice-current (review)
+  "Return which of the diffs REVIEW's report can show the reviewer chose."
+  (pcase (harness-ui-patch-review--r-selector review)
+    ('nil 'base)
+    ('since-review 'since-review)
+    (_ 'other)))
+
+(defun harness-ui-patch-review--choice-button (review choice)
+  "Return the button that shows the diff CHOICE of REVIEW, marked when chosen."
+  (pcase-let* ((`(,label ,help) (harness-ui-patch-review--choice-text review choice))
+               (chosen (eq choice (harness-ui-patch-review--choice-current review)))
+               (button (buttonize (concat "[" (if chosen "● " "") label "]")
+                                  (lambda (_) (harness-ui-patch-review--choose review choice))
+                                  nil help)))
+    (propertize (if chosen (propertize button 'face 'bold) button) 'mouse-face 'highlight)))
+
+(defun harness-ui-patch-review--selector-line (review)
+  "Return the line that chooses the diff REVIEW's report shows.
+Three buttons, the one chosen marked: the task's branch against the
+branch it was made from, the branch since its last review, and any
+revisions the reviewer types.  \\<harness-ui-patch-review--heading-map>\
+\\[harness-ui-patch-review-select-diff] chooses from the keyboard.  The
+line ends in a newline."
+  (harness-ui-patch-review--add-keymap
+   (concat "  " (propertize "Diff" 'face 'harness-label-face) "   "
+           (mapconcat (lambda (choice) (harness-ui-patch-review--choice-button review choice))
+                      '(base since-review other) "  ")
+           "\n")
+   harness-ui-patch-review--heading-map))
+
+(defun harness-ui-patch-review--choose (review choice)
+  "Show the diff CHOICE of REVIEW's report: `base', `since-review' or `other'.
+`other' asks for the revisions."
+  (harness-ui-patch-review-select-diff
+   (if (eq choice 'other) (harness-ui-patch-review--read-spec review) choice)
+   review))
 
 (defun harness-ui-patch-review--section (review counts)
   "Return REVIEW's changes as its report shows them.
@@ -1682,7 +2223,13 @@ COUNTS are its threads per file."
                                                  (string-width (harness-ui-patch-review--tree-label file)))
                                                files))))))
     (concat
-     (harness-ui-patch-review--heading review) "\n"
+     (harness-ui-patch-review--add-keymap (harness-ui-patch-review--heading review)
+                                          harness-ui-patch-review--heading-map)
+     "\n"
+     ;; Not before there is a branch to choose a diff of.
+     (if (or (harness-ui-patch-review--r-tip review) (harness-ui-patch-review--r-loading review))
+         (harness-ui-patch-review--selector-line review)
+       "")
      (mapconcat (lambda (note) (concat "  " note "\n")) (harness-ui-patch-review--notes review) "")
      (when-let* ((others (harness-ui-patch-review--other-threads review)))
        (concat "\n" others))
@@ -1724,8 +2271,7 @@ says so (`harness-ui-patch-review--r-show')."
           (if (not (eq (harness-ui-patch-review--r-popout review) (current-buffer)))
               (progn
                 (setf (harness-ui-patch-review--r-popout review) (current-buffer))
-                (harness-ui-patch-review--sync review)
-                (harness-ui-patch-review--load review))
+                (harness-ui-patch-review--sync-and-load review))
             (unless (or (harness-ui-patch-review--r-tip review) (harness-ui-patch-review--r-loading review)
                         (harness-ui-patch-review--r-error review))
               (harness-ui-patch-review--load review)))
@@ -2046,7 +2592,9 @@ thread, \\[harness-ui-patch-review-edit-feedback]'s: the box."
                      (change-review-file-old-mode file) (change-review-file-new-mode file)))))))
 
 (defun harness-ui-patch-review-ediff (&optional review index goto)
-  "Compare the file of the row at point in Ediff, merge base and branch.
+  "Compare the file of the row at point in Ediff, before the change and after.
+For the default diff that is the merge base and the branch; the report
+chooses another (\\[harness-ui-patch-review-select-diff]).
 On the changes in a task's report.  In Ediff, c comments on the
 current difference, into the report's box, N and P go on to the next
 or previous file, and q comes back to the report.  REVIEW and INDEX
@@ -2170,6 +2718,37 @@ says (`change-review-ui-thread-fold')."
         (set-window-point window (point)))
       (with-selected-window window (recenter)))))
 
+(defun harness-ui-patch-review--commit-name (name commit)
+  "Return COMMIT, shortened, after NAME, what it was asked for as.
+Just the short COMMIT when NAME is the start of it."
+  (let ((short (harness-ui-patch-review--short commit)))
+    (if (or (not (stringp name)) (string-empty-p name)
+            (and (stringp commit) (string-prefix-p name commit)))
+        short
+      (format "%s %s" name short))))
+
+(defun harness-ui-patch-review--side-name (review side)
+  "Return what REVIEW's Ediff calls a file's version on SIDE, `old' or `new'.
+It is the commit the version is read at, with the name the diff shown
+has for it: the merge base for the default diff, the version for the
+diff since the last review, the revision typed for another."
+  (if (eq side 'old)
+      (if (eq (harness-ui-patch-review--kind review) 'base)
+          (format "merge base %s" (harness-ui-patch-review--short (harness-ui-patch-review--r-merge-base review)))
+        (harness-ui-patch-review--commit-name (harness-ui-patch-review--old-name review)
+                                              (harness-ui-patch-review--r-merge-base review)))
+    (harness-ui-patch-review--commit-name
+     (let ((name (harness-ui-patch-review--new-name review)))
+       (and (stringp name) (harness-truncate-end name 40)))
+     (harness-ui-patch-review--r-tip review))))
+
+(defun harness-ui-patch-review--old-phrase (review)
+  "Return what to call the old version of a file in REVIEW's Ediff in a sentence.
+\"the merge base\" for the default diff; for another the name it has."
+  (if (eq (harness-ui-patch-review--kind review) 'base)
+      "the merge base"
+    (or (harness-ui-patch-review--old-name review) "the version before")))
+
 (defun harness-ui-patch-review--redraw-side (buffer)
   "Draw the threads of the version BUFFER again, when its window's room changed."
   (when (buffer-live-p buffer)
@@ -2205,11 +2784,7 @@ they are, as `harness-ui-patch-review--place-from-texts' gives it)."
          (path (if old (or (change-review-file-old-path file) (change-review-file-path file))
                  (change-review-file-path file)))
          (buffer (generate-new-buffer
-                  (format "%s (%s)" path
-                          (if old (format "merge base %s" (harness-ui-patch-review--short
-                                                          (harness-ui-patch-review--r-merge-base review)))
-                            (format "%s %s" (harness-truncate-end (harness-ui-patch-review--r-branch review) 40)
-                                    (harness-ui-patch-review--short (harness-ui-patch-review--r-tip review))))))))
+                  (format "%s (%s)" path (harness-ui-patch-review--side-name review side)))))
     (with-current-buffer buffer
       (insert text)
       (let ((buffer-file-name (expand-file-name path (harness-ui-patch-review--r-dir review))))
@@ -2532,7 +3107,8 @@ not know before the last difference that another file follows."
 (defun harness-ui-patch-review--ediff-position ()
   "Return (SIDE . LINE) for the current difference of this Ediff, or nil.
 LINE is the difference's last line: on the branch, SIDE :new, unless
-the difference only deletes, then at the merge base, SIDE :old."
+the difference only deletes, then in the version before it (the merge
+base's, by default), SIDE :old."
   (let ((n ediff-current-difference))
     (when (and (integerp n) (>= n 0) (< n ediff-number-of-differences))
       (let ((b-start (ediff-get-diff-posn 'B 'beg n))
@@ -2552,7 +3128,7 @@ the difference only deletes, then at the merge base, SIDE :old."
             (pcase where
               ('nil " as a whole")
               (`(:new . ,line) (format ", line %d" line))
-              (`(:old . ,line) (format ", line %d of the merge base" line))))))
+              (`(:old . ,line) (format ", line %d of %s" line (harness-ui-patch-review--old-phrase review)))))))
 
 (defun harness-ui-patch-review-comment (&optional text)
   "Comment on the current difference with TEXT.
@@ -2601,7 +3177,7 @@ its own, which may run to several lines."
       (harness-ui-patch-review--read-comment
        (format "Comment on %s, line %d%s: "
                (change-review-file-path file) line
-               (if (eq side :old) " of the merge base" ""))
+               (if (eq side :old) (format " of %s" (harness-ui-patch-review--old-phrase review)) ""))
        (lambda (written)
          (harness-ui-patch-review--comment-added review file where written))))))
 
@@ -2623,7 +3199,8 @@ It need not be reviewed again unless the branch changes it."
 (defun harness-ui-patch-review--location (file where)
   "Return the location of a comment on WHERE of FILE.
 WHERE is (SIDE . LINE), SIDE `:new' for a line of the branch's version
-and `:old' for one of the merge base's; nil for the file as a whole.
+and `:old' for one of the version before it, the merge base's by default;
+nil for the file as a whole.
 The location keeps the lines of the diff around it."
   (if where
       (change-review-diff-location file (car where) (cdr where))
@@ -2637,9 +3214,17 @@ It is a draft: it goes with the feedback that sends the task back.  Say
 so in the echo area.  A blank TEXT is no comment, and says so."
   (if (string-blank-p text)
       (message "No comment")
-    (let ((location (harness-ui-patch-review--location file where)))
-      (change-review-comment (harness-ui-patch-review--r-set review) (string-trim text)
-                             :location location)
+    (let* ((location (harness-ui-patch-review--location file where))
+           (set (harness-ui-patch-review--r-set review))
+           (latest (change-review-latest-version set))
+           (tip (harness-ui-patch-review--r-tip review)))
+      ;; A comment records the revision it was written against.  The
+      ;; newest version is the default; a diff that ends elsewhere -- an
+      ;; earlier commit, another branch -- has its own.
+      (apply #'change-review-comment set (string-trim text)
+             :location location
+             (and tip latest (not (equal tip (change-review-version-id latest)))
+                  (list :revision tip)))
       (message "Draft on %s: it goes with the feedback; T lists the threads, r replies"
                (change-review-location-label location t)))))
 
@@ -2671,8 +3256,7 @@ An Ediff of it on show stays until q gives the windows back."
        ;; Back for review, maybe with more commits: the report open on it
        ;; reads the branch again, and the version the harness recorded.
        (when (and (equal event "task/review") (buffer-live-p (harness-ui-patch-review--r-popout review)))
-         (harness-ui-patch-review--sync review)
-         (harness-ui-patch-review--load review))))
+         (harness-ui-patch-review--sync-and-load review))))
     ("task/done"
      (when-let* ((review (gethash (plist-get (car args) :id) harness-ui-patch-review--reviews)))
        (harness-ui-patch-review--ended review)))
@@ -2722,19 +3306,36 @@ point of the board."
               (control (plist-get (harness-ui-patch-review--r-ediff review) :control)))
     (and (buffer-live-p control) (get-buffer-window control t))))
 
-(defun harness-ui-patch-review-open ()
+(defun harness-ui-patch-review--choose-diff-for (task)
+  "Ask which diff to open TASK's changes at, and keep the answer for its review.
+The three the report offers and any revisions
+\(`harness-ui-patch-review-select-diff'), asked before the report opens.
+A report that is open already reads the diff chosen."
+  (let* ((review (harness-ui-patch-review--review-for task))
+         (selector (harness-ui-patch-review--selector-of
+                    (harness-ui-patch-review--read-selector review))))
+    (setf (harness-ui-patch-review--r-selector review) selector
+          (harness-ui-patch-review--r-selection-error review) nil)
+    (when (buffer-live-p (harness-ui-patch-review--r-popout review))
+      (harness-ui-patch-review--load review))))
+
+(defun harness-ui-patch-review-open (&optional choose)
   "Show the changes of the task this buffer shows, in a popout.
 From its session's history, from its board card, or from its report:
 works after the task left review too, for the task the session is the
 task's.  A session's task not looked up yet is asked for, and its review
 opens when it arrives.  In the report beside an Ediff of its changes
-\(`harness-ui-patch-review-edit-feedback'), it goes back to Ediff."
-  (interactive)
+\(`harness-ui-patch-review-edit-feedback'), it goes back to Ediff.  With
+a prefix argument CHOOSE, which diff to show is asked first: the task's
+branch against main, since the last review, or revisions
+\(`harness-ui-patch-review-select-diff'); the report keeps its choice."
+  (interactive "P")
   (if-let* ((task (harness-ui-patch-review--task-here)))
       (if-let* ((window (harness-ui-patch-review--ediff-window task)))
           ;; An Ediff of it shows beside the report: back to it.
           (progn (select-window window)
                  (message "Back in Ediff"))
+        (when choose (harness-ui-patch-review--choose-diff-for task))
         (harness-ui-patch-review--open-task task))
     (if (and (bound-and-true-p harness-ui-session-id)
              (fboundp 'harness-ui-review--task))
@@ -2743,7 +3344,9 @@ opens when it arrives.  In the report beside an Ediff of its changes
                            (list :session-id harness-ui-session-id)
                            (lambda (found)
                              (if (and found (plist-get found :id))
-                                 (harness-ui-patch-review--open-task found)
+                                 (progn
+                                   (when choose (harness-ui-patch-review--choose-diff-for found))
+                                   (harness-ui-patch-review--open-task found))
                                (message "This session is no task's, so it has no changes to review"))))
           (message "Looking up this session's task…"))
       (user-error "No task here to review"))))

@@ -42,7 +42,8 @@ is the adapter that gives that library a task to review, in this Emacs:
 Under the evidence, above the review banner and its box, the report
 shows what the task's branch changes against its merge base with the
 branch it was made from -- what merging it brings in, not what that
-branch did since -- a tree of the directories and their files:
+branch did since -- or the diff the reviewer chooses instead (see THE
+DIFF SHOWN), a tree of the directories and their files:
 
   a file      its status, its name, the lines it adds and deletes,
               a mark once it was looked at in Ediff and a firmer one
@@ -104,6 +105,38 @@ branch did since -- a tree of the directories and their files:
               it changes, as it does when the two versions are put
               side by side.
 
+THE DIFF SHOWN.  A line under the heading chooses what the files are
+of -- three buttons, or d in the report
+(`harness-ui-patch-review-select-diff`):
+
+  task branch against main   the one the report starts with: what
+                             merging the branch brings in, from its
+                             merge base with the branch it was made
+                             from;
+  since last review          the branch against where it was when its
+                             work was last handed in -- the version of
+                             the review before the one the branch is
+                             at -- so that a task sent back shows only
+                             what the agent did since.  Work handed in
+                             again with no new commit changed nothing
+                             since, and the report says so;
+  other                      any revisions of the repository, typed as
+                             `git diff` takes them: A..B, A...B (from
+                             the merge base of A and B), A B, or A
+                             alone, against the branch.  An end left
+                             out is the branch's tip, a start left out
+                             the branch it was made from.
+
+The files, their counts, Ediff and the threads follow the choice, which
+the review keeps while it lasts: a report closed and opened again
+shows it.  Ediff's two versions are named after what they are in the
+diff ("merge base 8d1fb32", "v1 1c9e4a0", "main~3 5be0a77"), and so
+are the old version's comments ("line 5 of v1").  A thread on a file
+the diff shown does not change is among the other threads, with its
+file, where it is now in the branch's whole change.  What cannot be
+shown -- a revision that is not there, a review before this one of
+which nothing is known -- is said, and the diff shown stays.
+
 Replies you wrote by hand before there were threads -- under a quote of
 the agent's words, in a round of feedback or typed in its session while it
 worked -- are threads too, closed, each with the quote it answered:
@@ -143,7 +176,8 @@ more.
 
 From a task's session history -- or a board card -- C-c C-d opens the
 review, even after the task left review, when it shows the changes
-without the review banner (`harness-ui-patch-review-mode`).
+without the review banner (`harness-ui-patch-review-mode`).  C-u C-c
+C-d asks which diff to open it at, as d does in the report.
 
 Git runs here, in the Emacs that shows the UI, in the task's
 repository: the changes show where that is a directory of this
@@ -169,7 +203,7 @@ part of the report out.
 - `harness-ui-patch-review-comment` — Comment on the current difference with TEXT.
 - `harness-ui-patch-review-comment-line` — Comment on the line at point in the version Ediff shows.
 - `harness-ui-patch-review-cycle-fold` — Fold the threads of the current difference: one line, conversation, all.
-- `harness-ui-patch-review-ediff` — Compare the file of the row at point in Ediff, merge base and branch.
+- `harness-ui-patch-review-ediff` — Compare the file of the row at point in Ediff, before the change and after.
 - `harness-ui-patch-review-ediff-next-file` — On to the next file of the task's changes, in Ediff.
 - `harness-ui-patch-review-ediff-previous-file` — On to the previous file of the task's changes, in Ediff.
 - `harness-ui-patch-review-ediff-quit` — Back to the task's report, the windows as they were, without asking.
@@ -182,6 +216,7 @@ part of the report out.
 - `harness-ui-patch-review-open` — Show the changes of the task this buffer shows, in a popout.
 - `harness-ui-patch-review-previous-file` — Move to the previous file of the changes, or the Nth previous.
 - `harness-ui-patch-review-reply` — Reply to the thread at the current difference, or at point, in Ediff.
+- `harness-ui-patch-review-select-diff` — Choose the diff the report of the changes shows.
 - `harness-ui-patch-review-threads` — List the threads of the review at point by file, with a filter on their status.
 - `harness-ui-patch-review-toggle-file-tree` — Show the changed files flat, in the diff's order, or as a tree.
 - `harness-ui-patch-review-toggle-thread` — Close the thread at the current difference, or at point, or open it again.

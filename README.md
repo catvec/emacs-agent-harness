@@ -186,8 +186,8 @@ OpenAI-compatible APIs and AWS Bedrock.
 
 | ![A task in review, its report at the changes: the files with their open and closed threads, and under each file its open threads, a line each; the drafts waiting to be sent](docs/media/review.png) | ![The threads of that review by file, filtered by status: each comment with who wrote it, when, its version and its place in the thread, one with where it was made and the lines of the diff, the agent's answer linking to its conversation](docs/media/review-threads.png) |
 | A task's changes, and the threads of comments on them | The threads by file: sender, when, content and place in the thread; where a comment was made |
-| ![Ediff on a file of that review: the two versions and the control panel, the threads drawn under their lines in the branch's version -- a closed thread opened to its conversation, another folded to one line -- the report with its box at the bottom](docs/media/review-ediff.png) | |
-| Ediff: the threads under their lines, drawn as the threads view draws them to the width of the window; a closed thread is a line, `TAB` or a click opens it to its conversation | |
+| ![Ediff on a file of that review: the two versions and the control panel, the threads drawn under their lines in the branch's version -- a closed thread opened to its conversation, another folded to one line -- the report with its box at the bottom](docs/media/review-ediff.png) | ![The same report with the diff chosen since the last review: the Diff line marks it, one file changed since, with its threads, and the threads of the file the diff leaves out among the other threads](docs/media/review-diff.png) |
+| Ediff: the threads under their lines, drawn as the threads view draws them to the width of the window; a closed thread is a line, `TAB` or a click opens it | The diff of your choice: the branch against main, since the last review, or any revisions |
 
 ## Requirements
 
@@ -3320,6 +3320,23 @@ with), `recap` writes the recaps on the cards,
   approves the file and `q` comes back to the report as it was, point
   on the next file.
 
+  What the files are of is yours to choose, from the `Diff` line under
+  the heading -- three buttons -- or with `d`: **task branch against
+  main**, the one the report starts with, what merging the branch
+  brings in; **since last review**, the branch against where it was
+  when its work was last handed in, so that a task sent back shows only
+  what the agent did since (work handed in again with no new commit
+  changed nothing since, and the report says so); or **other**, any
+  revisions of the repository, typed as `git diff` takes them: `A..B`,
+  `A...B` (from the merge base of `A` and `B`), `A B`, or `A` alone,
+  against the branch. The files, Ediff and the threads follow the
+  choice, which the report keeps when it is closed and opened again;
+  Ediff's two versions are named after what they are (`merge base
+  8d1fb32`, `v1 1c9e4a0`). A thread on a file the diff shown does not
+  change is among the other threads, with its file. A diff that cannot
+  be shown -- a revision that is not there -- says why and leaves the
+  one shown as it is.
+
   The comments are **threads**. `c` in Ediff comments on the current
   difference -- or, in either version, on the line at point -- in a
   buffer of its own (`C-c C-c` saves the comment), and it starts a
@@ -3371,7 +3388,8 @@ with), `recap` writes the recaps on the cards,
   there goes back to Ediff, which was not left. A task whose feedback
   was written before there were threads shows those comments as closed
   threads. `C-c C-d` in a task's session or on its board card opens the
-  changes after the task left review too. Git runs in the Emacs that
+  changes after the task left review too (`C-u C-c C-d` asks which
+  diff to open them at). Git runs in the Emacs that
   shows the board, so the changes show where the task's repository is on
   this machine. Ediff's own settings apply (`ediff-split-window-function`
   puts the two versions side by side);

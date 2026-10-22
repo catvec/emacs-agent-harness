@@ -3512,6 +3512,10 @@ afterwards."
 (declare-function harness-ui-patch-review--r-ediff "harness-ui-patch-review")
 (declare-function harness-ui-patch-review--location "harness-ui-patch-review")
 (declare-function harness-ui-patch-review-ediff "harness-ui-patch-review")
+(declare-function harness-ui-patch-review-select-diff "harness-ui-patch-review")
+(declare-function harness-ui-patch-review--r-loading "harness-ui-patch-review")
+(declare-function harness-ui-patch-review--r-placing "harness-ui-patch-review")
+(declare-function harness-ui-patch-review--r-shown-selector "harness-ui-patch-review")
 (declare-function change-review-user "change-review")
 (declare-function change-review-agent "change-review")
 (declare-function change-review-comment "change-review")
@@ -3720,6 +3724,39 @@ fold a thread and list them."
         (call-interactively #'harness-ui-patch-review-ediff-quit))
       (harness-media--settle 0.5))))
 
+(defun harness-media--review-diff-read-p (review selector)
+  "Non-nil when REVIEW shows the diff SELECTOR, read and its threads placed."
+  (and (not (harness-ui-patch-review--r-loading review))
+       (not (harness-ui-patch-review--r-placing review))
+       (equal selector (harness-ui-patch-review--r-shown-selector review))))
+
+(defun harness-media-shot-review-diff ()
+  "That report with the diff chosen since the last review: only what the work changed since.
+The Diff line marks the choice.  The files are those the diff changes, each
+with its threads; the threads of the files it leaves out are among the
+other threads, each with its file.  Taken after the other review pictures:
+it puts the report back at the branch against main when it is done."
+  (let* ((popout (harness-media--review-layout))
+         (review harness-media--review)
+         (heading (lambda ()
+                    (with-selected-window (get-buffer-window popout)
+                      (goto-char (point-min))
+                      (re-search-forward "^Changes (")
+                      (beginning-of-line)
+                      (recenter 0)))))
+    (harness-ui-patch-review-select-diff 'since-review review)
+    (harness-media--wait (lambda () (harness-media--review-diff-read-p review 'since-review))
+                         30 "the diff since the last review")
+    (harness-media--settle 1.5)
+    (funcall heading)
+    (harness-media--fit-popout-shot 42)
+    (funcall heading)
+    (harness-media--capture "review-diff")
+    (harness-ui-patch-review-select-diff 'base review)
+    (harness-media--wait (lambda () (harness-media--review-diff-read-p review nil))
+                         30 "the branch against main again")
+    (harness-media--settle 0.5)))
+
 (defconst harness-media-shots
   '(("chat" . harness-media-shot-chat)
     ("chat-permission" . harness-media-shot-chat-permission)
@@ -3778,7 +3815,9 @@ fold a thread and list them."
     ;; threads of its review, which no other picture shows.
     ("review" . harness-media-shot-review)
     ("review-threads" . harness-media-shot-review-threads)
-    ("review-ediff" . harness-media-shot-review-ediff))
+    ("review-ediff" . harness-media-shot-review-ediff)
+    ;; After them: it chooses another diff, and puts the first back.
+    ("review-diff" . harness-media-shot-review-diff))
   "Every picture, as (NAME . FUNCTION), in the order they are taken.")
 
 ;;;; Entry point

@@ -1551,6 +1551,672 @@ thread of its own there, of the branch's line or of the merge base's."
         (with-current-buffer control
           (harness-ui-patch-review-ediff-quit))))))
 
+;;;; Choosing the diff
+
+(ert-deftest harness-ui-patch-review-parses-the-diffs-typed ()
+  "A diff is typed as `git diff' takes it: A..B, A...B, A B or A.  What is
+left out is the branch's tip, or the branch it was made from."
+  (let ((parse #'harness-ui-patch-review--parse-spec))
+    (should (equal '("main" "task/fix" nil) (funcall parse "main..task/fix")))
+    (should (equal '("main" "task/fix" t) (funcall parse "main...task/fix")))
+    (should (equal '("HEAD~2" "HEAD" nil) (funcall parse "HEAD~2..HEAD")))
+    (should (equal '("a" "b" nil) (funcall parse "a b")))
+    (should (equal '("a" "b" nil) (funcall parse "  a    b  ")))
+    (should (equal '("1c9e4a0" nil nil) (funcall parse "1c9e4a0")))
+    (should (equal '("1c9e4a0" nil nil) (funcall parse "1c9e4a0..")))
+    (should (equal '("1c9e4a0" nil t) (funcall parse "1c9e4a0...")))
+    (should (equal '(nil "1c9e4a0" nil) (funcall parse "..1c9e4a0")))
+    (should (equal '("a" "b" t) (funcall parse " a ... b ")))
+    ;; Nothing to compare, too many revisions, an option for a revision.
+    (dolist (bad '("" "   " ".." "..." "a b c" "-p" "--stat" "a..-b" "-x..b"))
+      (ert-info ((format "%S" bad))
+        (should-error (funcall parse bad) :type 'user-error)))
+    (should (string-match-p "names 3" (cadr (should-error (funcall parse "a b c") :type 'user-error))))
+    (should (string-match-p "dash" (cadr (should-error (funcall parse "a..-b") :type 'user-error))))))
+
+(defun harness-ui-patch-review-test--read (repo selector &optional last-review)
+  "Read task/fix of REPO for SELECTOR, with LAST-REVIEW to say its last review."
+  (harness-test-await (harness-ui-patch-review--read-branch repo "task/fix" "main" repo selector last-review)))
+
+(defun harness-ui-patch-review-test--paths (result)
+  "Return the paths of the files RESULT, what a reading gives, holds."
+  (mapcar #'change-review-file-path (plist-get result :files)))
+
+(ert-deftest harness-ui-patch-review-reads-the-diff-since-the-last-review ()
+  "Since the last review the branch is read against the commit the last
+review was at: only what the work added since.  The whole change is read
+all the same, for the version."
+  (harness-ui-patch-review-test-with-repo
+    (let ((first (harness-ui-patch-review-test--git repo "rev-parse" "task/fix"))
+          (start (harness-ui-patch-review-test--git repo "merge-base" "main" "task/fix"))
+          asked)
+      (harness-ui-patch-review-test--advance repo)
+      (let* ((tip (harness-ui-patch-review-test--git repo "rev-parse" "task/fix"))
+             (result (harness-ui-patch-review-test--read
+                      repo 'since-review (lambda (given) (setq asked given) (cons first "v1")))))
+        ;; The function is asked where the branch is now.
+        (should (equal tip asked))
+        (should (eq 'since-review (plist-get result :kind)))
+        (should (equal first (plist-get result :merge-base)))
+        (should (equal tip (plist-get result :tip)))
+        (should (equal "v1" (plist-get result :old-name)))
+        (should (equal "task/fix" (plist-get result :new-name)))
+        (should (equal "main" (plist-get result :base)))
+        (should (equal '("a.el") (harness-ui-patch-review-test--paths result)))
+        ;; Only what the newest commit changed: three lines in, one edited.
+        (let ((file (car (plist-get result :files))))
+          (should (equal '(4 1) (list (change-review-file-added file) (change-review-file-deleted file)))))
+        ;; The branch's whole change is the version's.
+        (should (equal start (plist-get result :branch-base)))
+        (should (equal tip (plist-get result :branch-tip)))
+        (should (equal '("a.el" "b.el" "d.el" "docs/é.txt" "img.bin" "new.el")
+                       (mapcar #'change-review-file-path (plist-get result :branch-files)))))
+      ;; The default diff is its own whole change.
+      (let ((result (harness-ui-patch-review-test--read repo nil)))
+        (should (eq 'base (plist-get result :kind)))
+        (should (equal "main" (plist-get result :old-name)))
+        (should (equal "task/fix" (plist-get result :new-name)))
+        (should (eq (plist-get result :files) (plist-get result :branch-files)))
+        (should (equal start (plist-get result :branch-base)))
+        (should (equal start (plist-get result :merge-base))))
+      ;; Nothing is known of a review before: it says so.
+      (let ((err (should-error (harness-ui-patch-review-test--read
+                                repo 'since-review (lambda (_) nil)))))
+        (should (string-match-p "No earlier review of this task is known" (error-message-string err))))
+      (let ((err (should-error (harness-ui-patch-review-test--read repo 'since-review))))
+        (should (string-match-p "No earlier review of this task is known" (error-message-string err))))
+      ;; A review at a commit the repository lost.
+      (let ((err (should-error (harness-ui-patch-review-test--read
+                                repo 'since-review
+                                (lambda (_) (cons "0123456789abcdef0123456789abcdef01234567" "v1"))))))
+        (should (string-match-p "The commit of the last review, 0123456, is no longer in the repository"
+                                (error-message-string err)))))))
+
+(ert-deftest harness-ui-patch-review-reads-the-revisions-typed ()
+  "Revisions typed are compared as `git diff' compares them: A..B directly,
+A...B from the merge base; a revision left out is the branch's tip."
+  (harness-ui-patch-review-test-with-repo
+    (let ((first (harness-ui-patch-review-test--git repo "rev-parse" "task/fix"))
+          (main (harness-ui-patch-review-test--git repo "rev-parse" "main"))
+          (start (harness-ui-patch-review-test--git repo "merge-base" "main" "task/fix")))
+      (harness-ui-patch-review-test--advance repo)
+      (let ((tip (harness-ui-patch-review-test--git repo "rev-parse" "task/fix"))
+            (read (lambda (spec) (harness-ui-patch-review-test--read repo spec))))
+        ;; Main went on: against its tip, what main changed shows as well.
+        (let ((result (funcall read "main..task/fix")))
+          (should (eq 'custom (plist-get result :kind)))
+          (should (equal main (plist-get result :merge-base)))
+          (should (equal tip (plist-get result :tip)))
+          (should (equal "main" (plist-get result :old-name)))
+          (should (equal "task/fix" (plist-get result :new-name)))
+          (should (member "keep.el" (harness-ui-patch-review-test--paths result)))
+          (should (= 7 (length (plist-get result :files))))
+          ;; The branch's own change is read all the same.
+          (should (= 6 (length (plist-get result :branch-files)))))
+        ;; Two revisions, and a branch alone, are as `git diff' takes them.
+        (should (equal (harness-ui-patch-review-test--paths (funcall read "main..task/fix"))
+                       (harness-ui-patch-review-test--paths (funcall read "main task/fix"))))
+        (should (equal (harness-ui-patch-review-test--paths (funcall read "main..task/fix"))
+                       (harness-ui-patch-review-test--paths (funcall read "main"))))
+        ;; From the merge base: what merging brings in.
+        (let ((result (funcall read "main...task/fix")))
+          (should (equal start (plist-get result :merge-base)))
+          (should-not (member "keep.el" (harness-ui-patch-review-test--paths result)))
+          (should (equal '("a.el" "b.el" "d.el" "docs/é.txt" "img.bin" "new.el")
+                         (harness-ui-patch-review-test--paths result))))
+        ;; A commit alone is compared with the tip, the end left out too.
+        (dolist (spec (list "task/fix~1" "task/fix~1.." "task/fix~1 task/fix" "task/fix~1..task/fix"
+                            "HEAD~1" first))
+          (let ((result (funcall read spec)))
+            (ert-info ((format "%s" spec))
+              (should (equal first (plist-get result :merge-base)))
+              (should (equal tip (plist-get result :tip)))
+              (should (equal '("a.el") (harness-ui-patch-review-test--paths result))))))
+        ;; An empty start is the branch it was made from.
+        (let ((result (funcall read "...task/fix")))
+          (should (equal start (plist-get result :merge-base)))
+          (should (equal "main" (plist-get result :old-name))))
+        ;; Not a diff at all: what git says, in words.
+        (let ((err (should-error (funcall read "nope"))))
+          (should (string-match-p "There is no commit .nope. in" (error-message-string err))))
+        (let ((err (should-error (funcall read "main..task/nope"))))
+          (should (string-match-p "There is no commit .task/nope. in" (error-message-string err))))
+        (let ((err (should-error (funcall read "-p"))))
+          (should (string-match-p "starts with a dash" (error-message-string err))))
+        (let ((err (should-error (funcall read ""))))
+          (should (string-match-p "Name the revisions" (error-message-string err))))))))
+
+(ert-deftest harness-ui-patch-review-says-when-revisions-share-no-commit ()
+  "A... B with nothing in common has no merge base: said, not an empty diff."
+  (harness-ui-patch-review-test-with-repo
+    (harness-ui-patch-review-test--git repo "checkout" "-q" "--orphan" "lone")
+    (harness-ui-patch-review-test--git repo "rm" "-rfq" ".")
+    (harness-ui-patch-review-test--write repo "lone.txt" "alone\n")
+    (harness-ui-patch-review-test--git repo "add" "-A")
+    (harness-ui-patch-review-test--git repo "commit" "-q" "-m" "Alone")
+    (let ((err (should-error (harness-ui-patch-review-test--read repo "lone...task/fix"))))
+      (should (string-match-p "lone and task/fix have no commit in common" (error-message-string err))))
+    ;; Compared directly they differ all the same.
+    (should (harness-ui-patch-review-test--paths (harness-ui-patch-review-test--read repo "lone..task/fix")))))
+
+(ert-deftest harness-ui-patch-review-finds-the-last-review-in-the-versions ()
+  "The last review is the newest version that is not the branch's own: the
+commit the work was handed in at before.  None before the first one."
+  (harness-ui-patch-review-test-with-repo
+    (let* ((review (harness-ui-patch-review-test--review repo))
+           (first (harness-ui-patch-review-test--git repo "rev-parse" "task/fix")))
+      ;; One version, the branch at it: no earlier review.
+      (should-not (harness-ui-patch-review--last-review review first))
+      (harness-ui-patch-review-test--advance repo)
+      (harness-test-await (harness-ui-patch-review--load review))
+      (let ((second (harness-ui-patch-review-test--git repo "rev-parse" "task/fix")))
+        (should (equal (cons first "v1") (harness-ui-patch-review--last-review review second)))
+        ;; At the first version there was none before it.
+        (should-not (harness-ui-patch-review--last-review review first))
+        ;; A branch not at a version: the newest one is the last review.
+        (should (equal (cons second "v2")
+                       (harness-ui-patch-review--last-review
+                        review "0123456789abcdef0123456789abcdef01234567")))
+        ;; No versions, no last review.
+        (should-not (harness-ui-patch-review--last-review
+                     (harness-ui-patch-review--review-create :id "none") second))))))
+
+(ert-deftest harness-ui-patch-review-finds-the-last-review-of-work-handed-in-again ()
+  "A task sent back whose branch did not move was handed in again at the
+same commit: that is its last review, and nothing changed since.  The
+harness records the round each version was handed in at, which says so; a
+version this Emacs made, with no round, says nothing."
+  (harness-ui-patch-review-test-with-repo
+    (let* ((review (harness-ui-patch-review-test--review repo))
+           (set (harness-ui-patch-review--r-set review))
+           (tip (harness-ui-patch-review-test--git repo "rev-parse" "task/fix"))
+           (version (change-review-find-version set tip))
+           (sent-back (lambda (rounds)
+                        (setf (harness-ui-patch-review--r-task review)
+                              (plist-put (copy-sequence (harness-ui-patch-review--r-task review))
+                                         :feedback (make-list rounds (list :text "back")))))))
+      (should (= 1 (length (change-review-set-versions set))))
+      (should-not (harness-ui-patch-review--last-review review tip))
+      ;; Recorded at round 0, the task never sent back: the first hand-in.
+      (setf (change-review-version-meta version) (list :round 0))
+      (funcall sent-back 0)
+      (should-not (harness-ui-patch-review--handed-in-again-p review version))
+      (should-not (harness-ui-patch-review--last-review review tip))
+      ;; Sent back once since: handed in again, at the commit it is at.
+      (funcall sent-back 1)
+      (should (harness-ui-patch-review--handed-in-again-p review version))
+      (should (equal (cons tip "v1") (harness-ui-patch-review--last-review review tip)))
+      ;; Recorded at round 1, the round it is at: that is this hand-in.
+      (setf (change-review-version-meta version) (list :round 1))
+      (should-not (harness-ui-patch-review--last-review review tip))
+      ;; A version this Emacs made has no round to go by.
+      (setf (change-review-version-meta version) nil)
+      (should-not (harness-ui-patch-review--last-review review tip)))))
+
+(defun harness-ui-patch-review-test--section (review)
+  "Return the changes of REVIEW as its report draws them, without properties."
+  (substring-no-properties
+   (harness-ui-patch-review--section review (harness-ui-patch-review--counts review))))
+
+(defun harness-ui-patch-review-test--choose (review selector)
+  "Choose the diff SELECTOR for REVIEW and wait for it to be read."
+  (harness-test-await (harness-ui-patch-review-select-diff selector review)))
+
+(ert-deftest harness-ui-patch-review-says-which-diff-it-shows ()
+  "The heading says what is compared and a line under it offers the three
+diffs, the chosen one marked: the branch against its base, since the last
+review, and any revisions typed."
+  (harness-ui-patch-review-test-with-repo
+    (let* ((review (harness-ui-patch-review-test--review repo))
+           (first (harness-ui-patch-review-test--git repo "rev-parse" "task/fix"))
+           (main (harness-ui-patch-review-test--git repo "rev-parse" "main"))
+           (start (harness-ui-patch-review-test--git repo "merge-base" "main" "task/fix"))
+           (short (lambda (sha) (substring sha 0 7))))
+      ;; At first: the branch against main, no earlier review to offer.
+      (let ((text (harness-ui-patch-review-test--section review)))
+        (should (string-match-p (format "^Changes (6)   0 of 6 files viewed, 6 left   task/fix against main @ %s   \\+7 −8$"
+                                        (funcall short start))
+                                text))
+        (should (string-match-p "^  Diff   \\[● Task branch against main\\]  \\[Since last review\\]  \\[Other…\\]$" text)))
+      (harness-ui-patch-review-test--advance repo)
+      (harness-test-await (harness-ui-patch-review--load review))
+      ;; The versions are known now: the last review is named.
+      (should (string-match-p "^  Diff   \\[● Task branch against main\\]  \\[Since last review (v1)\\]  \\[Other…\\]$"
+                              (harness-ui-patch-review-test--section review)))
+      ;; Since the last review: the files the work changed since.
+      (harness-ui-patch-review-test--choose review 'since-review)
+      (should (eq 'since-review (harness-ui-patch-review--kind review)))
+      (let ((text (harness-ui-patch-review-test--section review)))
+        (should (string-match-p (format "^Changes (1)   0 of 1 file viewed, 1 left   task/fix since v1 @ %s   \\+4 −1$"
+                                        (funcall short first))
+                                text))
+        (should (string-match-p "^  Diff   \\[Task branch against main\\]  \\[● Since last review (v1)\\]  \\[Other…\\]$" text))
+        (should (string-match-p "^    M  a\\.el +\\+4 −1$" text))
+        (should-not (string-search "b.el" text)))
+      ;; Revisions typed: the diff as git has it, main's own change too.
+      (harness-ui-patch-review-test--choose review "main..task/fix")
+      (should (eq 'custom (harness-ui-patch-review--kind review)))
+      (let ((text (harness-ui-patch-review-test--section review)))
+        (should (string-match-p (format "^Changes (7) .*   task/fix against main @ %s   " (funcall short main)) text))
+        (should (string-match-p "^  Diff   \\[Task branch against main\\]  \\[Since last review (v1)\\]  \\[● Other: main\\.\\.task/fix\\]$" text))
+        (should (string-match-p "^    M  keep\\.el " text)))
+      ;; A diff whose ends are commits: the ends are told as typed, not repeated.
+      (harness-ui-patch-review-test--choose review (format "%s..HEAD" (funcall short first)))
+      (let ((text (harness-ui-patch-review-test--section review)))
+        (should (string-match-p (format "^Changes (1) .*   HEAD against %s   " (funcall short first)) text)))
+      ;; And back to the branch against its base.
+      (harness-ui-patch-review-test--choose review 'base)
+      (should (eq 'base (harness-ui-patch-review--kind review)))
+      (should-not (harness-ui-patch-review--r-selector review))
+      (should (string-match-p "^Changes (6) .*   task/fix against main @ "
+                              (harness-ui-patch-review-test--section review))))))
+
+(ert-deftest harness-ui-patch-review-refuses-a-diff-that-cannot-be-right ()
+  "A diff typed that names no revisions, and one since a review there was
+none of, are refused before the report changes."
+  (harness-ui-patch-review-test-with-repo
+    (let ((review (harness-ui-patch-review-test--review repo)))
+      (dolist (spec '("" "a b c" "-p"))
+        (should-error (harness-ui-patch-review-select-diff spec review) :type 'user-error)
+        (should-not (harness-ui-patch-review--r-selector review)))
+      (should-error (harness-ui-patch-review-select-diff 'since-review review) :type 'user-error)
+      (should-not (harness-ui-patch-review--r-selector review))
+      (should (eq 'base (harness-ui-patch-review--kind review)))
+      (should-not (harness-ui-patch-review--r-selection-error review)))))
+
+(ert-deftest harness-ui-patch-review-keeps-the-diff-shown-when-another-cannot-be-read ()
+  "A diff chosen that git cannot read leaves the one shown as it is, and the
+report says why; the choice is not the report's."
+  (harness-ui-patch-review-test-with-repo
+    (let* ((review (harness-ui-patch-review-test--review repo))
+           (files (harness-ui-patch-review--r-files review)))
+      (harness-ui-patch-review-test--choose review "nope..task/fix")
+      (should-not (harness-ui-patch-review--r-selector review))
+      (should (eq files (harness-ui-patch-review--r-files review)))
+      (should-not (harness-ui-patch-review--r-loading review))
+      (should-not (harness-ui-patch-review--r-error review))
+      (should (string-match-p "\\`Could not show the diff .nope\\.\\.task/fix.: There is no commit .nope. in"
+                              (harness-ui-patch-review--r-selection-error review)))
+      (let ((text (harness-ui-patch-review-test--section review)))
+        (should (string-match-p "^  Could not show the diff .nope\\.\\.task/fix.: There is no commit" text))
+        (should (string-match-p "^  Diff   \\[● Task branch against main\\]" text))
+        (should (string-match-p "^Changes (6) " text)))
+      ;; It stays until the next reading.
+      (harness-test-await (harness-ui-patch-review--load review))
+      (should-not (harness-ui-patch-review--r-selection-error review))
+      ;; Another diff shown first: that is the one that comes back.
+      (harness-ui-patch-review-test--advance repo)
+      (harness-test-await (harness-ui-patch-review--load review))
+      (harness-ui-patch-review-test--choose review 'since-review)
+      (let ((shown (harness-ui-patch-review--r-files review)))
+        (should (= 1 (length shown)))
+        (harness-ui-patch-review-test--choose review "main..nothing")
+        (should (eq 'since-review (harness-ui-patch-review--r-selector review)))
+        (should (eq shown (harness-ui-patch-review--r-files review)))
+        (should (string-match-p "\\`Could not show the diff .main\\.\\.nothing.: There is no commit .nothing."
+                                (harness-ui-patch-review--r-selection-error review)))))))
+
+(ert-deftest harness-ui-patch-review-shows-the-default-when-the-chosen-diff-was-never-read ()
+  "A report that opens on a diff it cannot read -- since a review there is
+no version of now -- shows the branch against its base, and says why."
+  (harness-ui-patch-review-test-with-repo
+    (let ((review (harness-ui-patch-review--review-for (harness-ui-patch-review-test--task repo))))
+      (setf (harness-ui-patch-review--r-selector review) 'since-review)
+      (harness-test-await (harness-ui-patch-review--load review))
+      (should-not (harness-ui-patch-review--r-selector review))
+      (should (harness-ui-patch-review--r-tip review))
+      (should (eq 'base (harness-ui-patch-review--kind review)))
+      (should (= 6 (length (harness-ui-patch-review--r-files review))))
+      (should (string-match-p "\\`Could not show the changes since the last review: No earlier review"
+                              (harness-ui-patch-review--r-selection-error review)))
+      (should (string-match-p "^  Could not show the changes since the last review: No earlier review"
+                              (harness-ui-patch-review-test--section review))))))
+
+(ert-deftest harness-ui-patch-review-says-nothing-changed-since-the-last-review ()
+  "Work handed in again with no new commit changed nothing since the last
+review: the report says so, naming the version."
+  (harness-ui-patch-review-test-with-repo
+    (let* ((review (harness-ui-patch-review-test--review repo))
+           (set (harness-ui-patch-review--r-set review))
+           (tip (harness-ui-patch-review-test--git repo "rev-parse" "task/fix")))
+      ;; The harness recorded the version at round 0; the task was sent back since.
+      (setf (change-review-version-meta (change-review-find-version set tip)) (list :round 0))
+      (setf (harness-ui-patch-review--r-task review)
+            (plist-put (copy-sequence (harness-ui-patch-review--r-task review))
+                       :feedback (list (list :text "back"))))
+      (harness-ui-patch-review-test--choose review 'since-review)
+      (should (eq 'since-review (harness-ui-patch-review--kind review)))
+      (should-not (harness-ui-patch-review--r-files review))
+      (let ((text (harness-ui-patch-review-test--section review)))
+        (should (string-match-p (format "^Changes (0) +task/fix since v1 @ %s$" (substring tip 0 7)) text))
+        (should (string-match-p
+                 (format "^  Nothing changed since v1 (%s): the branch is where it was at the last review\\.$"
+                         (substring tip 0 7))
+                 text)))
+      ;; Typed revisions with no difference say so too.
+      (harness-ui-patch-review-test--choose review "task/fix task/fix")
+      (should (string-match-p "^  Nothing differs between task/fix and task/fix\\.$"
+                              (harness-ui-patch-review-test--section review))))))
+
+(ert-deftest harness-ui-patch-review-places-threads-on-files-the-diff-does-not-change ()
+  "A thread on a file the diff shown leaves out is in the block of other
+threads, with its file, where it is now in the branch's whole change; one on
+a file the diff changes is under the file's row, placed in that diff."
+  (harness-ui-patch-review-test-with-repo
+    (let* ((review (harness-ui-patch-review-test--review repo))
+           (set (harness-ui-patch-review--r-set review))
+           (b3 (harness-ui-patch-review-test--comment-on review "b.el" '(:old . 3) "Who used b3?"))
+           (eighteen (harness-ui-patch-review-test--comment-on review "a.el" '(:new . 18) "Why eighteen?"))
+           (whole (harness-ui-patch-review-test--comment-on review "d.el" nil "On the file")))
+      (ignore whole)
+      (harness-ui-patch-review-test--advance repo)
+      (harness-test-await (harness-ui-patch-review--load review))
+      (harness-ui-patch-review-test--choose review 'since-review)
+      (should (equal '("a.el") (harness-ui-patch-review-test--paths
+                                (list :files (harness-ui-patch-review--r-files review)))))
+      (let ((where (lambda (comment)
+                     (change-review-placement set (harness-ui-patch-review-test--thread-of review comment))))
+            (text (harness-ui-patch-review-test--section review)))
+        ;; The thread on b.el, which the branch deleted and the last review
+        ;; saw so, is where it was: placed against the whole change.
+        (should (equal '(same 3) (let ((p (funcall where b3))) (list (plist-get p :status) (plist-get p :line)))))
+        (should (string-match-p "^Other threads +2 threads: on the change as a whole, or on files this diff does not change$"
+                                text))
+        (should (string-match-p "^  b\\.el  ● [^ ]+ · line 3 · Noah[^:]*: “Who used b3\\?” · draft$" text))
+        (should (string-match-p "^  d\\.el  ● [^ ]+ · the file · Noah[^:]*: “On the file” · draft$" text))
+        ;; The line of the thread on a.el, in the file the diff shows, moved.
+        (should (equal '(moved 21 18)
+                       (let ((p (funcall where eighteen)))
+                         (list (plist-get p :status) (plist-get p :line) (plist-get p :was)))))
+        (should (string-match-p "^       ↳ ● [^ ]+ · line 21 (was 18) · Noah[^:]*: “Why eighteen\\?” · draft$" text)))
+      ;; With the whole change shown again no thread is in the block but
+      ;; those on no file, or one the branch left.
+      (harness-ui-patch-review-test--choose review 'base)
+      (should-not (string-search "Other threads" (harness-ui-patch-review-test--section review))))))
+
+(ert-deftest harness-ui-patch-review-names-the-versions-ediff-compares ()
+  "Ediff's two versions are named after what they are in the diff shown: the
+merge base and the branch, the version of the last review, the revisions
+typed.  A comment on the old one says which."
+  (harness-ui-patch-review-test-with-repo
+    (let* ((review (harness-ui-patch-review-test--review repo))
+           (first (harness-ui-patch-review-test--git repo "rev-parse" "task/fix"))
+           (start (harness-ui-patch-review-test--git repo "merge-base" "main" "task/fix"))
+           (short (lambda (sha) (substring sha 0 7))))
+      (harness-ui-patch-review-test--advance repo)
+      (harness-test-await (harness-ui-patch-review--load review))
+      (let ((tip (harness-ui-patch-review-test--git repo "rev-parse" "task/fix")))
+        (should (equal (format "merge base %s" (funcall short start))
+                       (harness-ui-patch-review--side-name review 'old)))
+        (should (equal (format "task/fix %s" (funcall short tip))
+                       (harness-ui-patch-review--side-name review 'new)))
+        (should (equal "the merge base" (harness-ui-patch-review--old-phrase review)))
+        (harness-ui-patch-review-test--choose review 'since-review)
+        (should (equal (format "v1 %s" (funcall short first)) (harness-ui-patch-review--side-name review 'old)))
+        (should (equal (format "task/fix %s" (funcall short tip)) (harness-ui-patch-review--side-name review 'new)))
+        (should (equal "v1" (harness-ui-patch-review--old-phrase review)))
+        (harness-ui-patch-review-test--choose review "task/fix~1")
+        (should (equal (format "task/fix~1 %s" (funcall short first))
+                       (harness-ui-patch-review--side-name review 'old)))
+        (harness-ui-patch-review-test--choose review (format "%s..task/fix~1" (funcall short start)))
+        ;; A commit asked for by its own name is not said twice.
+        (should (equal (funcall short start) (harness-ui-patch-review--side-name review 'old)))
+        (should (equal (format "task/fix~1 %s" (funcall short first))
+                       (harness-ui-patch-review--side-name review 'new)))))))
+
+(ert-deftest harness-ui-patch-review-records-the-revision-a-comment-was-written-against ()
+  "A comment is against the version the branch ends at, as ever; one made
+in a diff that ends elsewhere is against the commit it ends at."
+  (harness-ui-patch-review-test-with-repo
+    (let* ((review (harness-ui-patch-review-test--review repo))
+           (set (harness-ui-patch-review--r-set review))
+           (first (harness-ui-patch-review-test--git repo "rev-parse" "task/fix")))
+      (harness-ui-patch-review-test--advance repo)
+      (harness-test-await (harness-ui-patch-review--load review))
+      (let ((tip (harness-ui-patch-review-test--git repo "rev-parse" "task/fix"))
+            (revision-of (lambda ()
+                           (change-review-comment-revision
+                            (change-review-thread-root (car (last (change-review-set-threads set))))))))
+        (harness-ui-patch-review--comment-added
+         review (harness-ui-patch-review-test--file review "a.el") '(:new . 2) "In the whole change")
+        (should (equal tip (funcall revision-of)))
+        (harness-ui-patch-review-test--choose review 'since-review)
+        (harness-ui-patch-review--comment-added
+         review (harness-ui-patch-review-test--file review "a.el") '(:new . 5) "Since the last review")
+        (should (equal tip (funcall revision-of)))
+        ;; A diff that stops at the earlier commit: the line is that version's.
+        (harness-ui-patch-review-test--choose review "main...task/fix~1")
+        (harness-ui-patch-review--comment-added
+         review (harness-ui-patch-review-test--file review "a.el") '(:new . 2) "In the earlier version")
+        (should (equal first (funcall revision-of)))))))
+
+(defun harness-ui-patch-review-test--push (buffer label)
+  "Push the button LABEL in BUFFER, as a click on it does."
+  (with-current-buffer buffer
+    (save-excursion
+      (goto-char (point-min))
+      (let (pos)
+        (while (and (not pos) (search-forward label nil t))
+          (when (button-at (match-beginning 0)) (setq pos (match-beginning 0))))
+        (unless pos (error "No %s button in %s" label (buffer-name)))
+        (push-button pos)))))
+
+(ert-deftest harness-ui-patch-review-report-chooses-the-diff ()
+  "The report has a line under its heading to choose the diff by: a click on
+a button shows it, d asks in the minibuffer, a diff typed is asked for.
+With no review before this one the choice since it is refused."
+  (harness-ui-patch-review-test-with-task
+    (let* ((popout (harness-ui-patch-review-test--changes board id))
+           (review (gethash id harness-ui-patch-review--reviews))
+           (text (lambda () (harness-ui-patch-review-test--text popout))))
+      (harness-ui-patch-review-test--wait-text
+       popout "^  Diff   \\[● Task branch against main\\]  \\[Since last review\\]  \\[Other…\\]$")
+      ;; d chooses from the heading, from the line, and from a file's row.
+      (with-current-buffer popout
+        (goto-char (point-min))
+        (re-search-forward "^Changes (")
+        (should (eq #'harness-ui-patch-review-select-diff (key-binding "d")))
+        (should (eq #'harness-ui-patch-review-toggle-file-tree (key-binding "t")))
+        (should (eq #'harness-ui-patch-review-threads (key-binding "T")))
+        (re-search-forward "^  Diff")
+        (should (eq #'harness-ui-patch-review-select-diff (key-binding "d")))
+        (goto-char (harness-ui-patch-review--row-start id 0))
+        (should (eq #'harness-ui-patch-review-select-diff (key-binding "d"))))
+      ;; Nothing was reviewed before this: the click says so, and nothing moves.
+      (should-error (harness-ui-patch-review-test--push popout "[Since last review]") :type 'user-error)
+      (should-not (harness-ui-patch-review--r-selector review))
+      ;; The branch moves and is read again: the first version is the last review.
+      (harness-ui-patch-review-test--advance repo)
+      (harness-test-await (harness-ui-patch-review--load review))
+      (harness-ui-patch-review-test--wait-text popout "\\[Since last review (v1)\\]")
+      (harness-ui-patch-review-test--push popout "[Since last review (v1)]")
+      (harness-ui-patch-review-test--wait-text
+       popout "^Changes (1)   0 of 1 file viewed, 1 left   task/fix since v1 @ ")
+      (harness-ui-patch-review-test--wait-text
+       popout "^  Diff   \\[Task branch against main\\]  \\[● Since last review (v1)\\]  \\[Other…\\]$")
+      (should (string-match-p "^    M  a\\.el +\\+4 −1$" (funcall text)))
+      (should-not (string-search "b.el" (funcall text)))
+      ;; Other…: asks for the revisions, and a click on it again asks again,
+      ;; with what was typed to start from.
+      (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "main..task/fix")))
+        (harness-ui-patch-review-test--push popout "[Other…]"))
+      (harness-ui-patch-review-test--wait-text popout "^Changes (7) ")
+      (harness-ui-patch-review-test--wait-text popout "\\[● Other: main\\.\\.task/fix\\]$")
+      (should (string-match-p "^    M  keep\\.el " (funcall text)))
+      (let (default)
+        (cl-letf (((symbol-function 'read-string)
+                   (lambda (_prompt &optional _initial _history def &rest _) (setq default def) "task/fix~1")))
+          (harness-ui-patch-review-test--push popout "[● Other: main..task/fix]"))
+        (should (equal "main..task/fix" default)))
+      (harness-ui-patch-review-test--wait-text popout "\\[● Other: task/fix~1\\]$")
+      (harness-ui-patch-review-test--wait-text popout "^Changes (1) ")
+      ;; d in the minibuffer: the three, the one shown now the default.
+      (let (asked)
+        (cl-letf (((symbol-function 'completing-read)
+                   (lambda (prompt collection &optional _pred _require _initial _history default &rest _)
+                     (setq asked (list prompt (all-completions "" collection) default))
+                     "Task branch against main")))
+          (with-current-buffer popout
+            (goto-char (harness-ui-patch-review--row-start id 0))
+            (call-interactively (key-binding "d"))))
+        (should (equal '("Show the diff: "
+                         ("Task branch against main" "Since last review (v1)" "Other: task/fix~1")
+                         "Other: task/fix~1")
+                       asked)))
+      (harness-ui-patch-review-test--wait-text popout "^Changes (6) ")
+      (harness-ui-patch-review-test--wait-text popout "^  Diff   \\[● Task branch against main\\]")
+      ;; Choosing Other… from the minibuffer asks what to compare.
+      (let (prompts)
+        (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "Other…"))
+                  ((symbol-function 'read-string)
+                   (lambda (prompt &rest _) (push prompt prompts) "main...task/fix")))
+          (with-current-buffer popout
+            (goto-char (point-min))
+            (re-search-forward "^Changes (")
+            (call-interactively (key-binding "d"))))
+        (should (string-match-p "Diff of revisions (A\\.\\.B, A\\.\\.\\.B, A B, or A against the branch)"
+                                (car prompts))))
+      (harness-ui-patch-review-test--wait-text popout "\\[● Other: main\\.\\.\\.task/fix\\]$")
+      (harness-test-wait (lambda () (and (not (harness-ui-patch-review--r-loading review))
+                                         (equal "main...task/fix" (harness-ui-patch-review--r-shown-selector review))))
+                         5 "the diff to be read")
+      ;; A diff that cannot be read is said so; the one shown stays.
+      (harness-test-await (harness-ui-patch-review-select-diff "nope..task/fix" review))
+      (harness-ui-patch-review-test--wait-text popout "^  Could not show the diff .nope\\.\\.task/fix.: There is no commit")
+      (should (string-match-p "\\[● Other: main\\.\\.\\.task/fix\\]$" (funcall text)))
+      (should (equal "main...task/fix" (harness-ui-patch-review--r-selector review))))))
+
+(ert-deftest harness-ui-patch-review-chooses-the-diff-before-opening ()
+  "C-u C-c C-d in a task's session asks which diff to open the changes at,
+and the report keeps the choice; without the prefix nothing is asked.  Asked
+again with the report open, the report reads the diff chosen."
+  (harness-ui-patch-review-test-with-task
+    (harness-ui-patch-review-test--give-branch board id)
+    (let ((chat (harness-ui-display-session sid))
+          (asked nil))
+      (should chat)
+      (harness-test-wait (lambda () (harness-ui-review--task sid)) 5 "the session's task")
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (&rest _) (setq asked t) "Other…"))
+                ((symbol-function 'read-string) (lambda (&rest _) "main..task/fix")))
+        ;; Without the prefix: the report opens at the branch against main.
+        (with-current-buffer chat
+          (call-interactively #'harness-ui-patch-review-open))
+        (should-not asked)
+        (let ((popout (harness-ui-popout-buffer (list 'report id))))
+          (harness-ui-patch-review-test--wait-text popout "^Changes (6) ")
+          (harness-ui-patch-review-test--wait-text popout "\\[● Task branch against main\\]")
+          ;; A diff asked for with the prefix is read, the report being open.
+          (with-current-buffer chat
+            (let ((current-prefix-arg '(4)))
+              (call-interactively #'harness-ui-patch-review-open)))
+          (should asked)
+          (harness-ui-patch-review-test--wait-text popout "^Changes (7) ")
+          (harness-ui-patch-review-test--wait-text popout "\\[● Other: main\\.\\.task/fix\\]$")))
+      ;; Closed, it opens at the diff chosen.
+      (kill-buffer (harness-ui-popout-buffer (list 'report id)))
+      (with-current-buffer chat
+        (call-interactively #'harness-ui-patch-review-open))
+      (let ((popout (harness-ui-popout-buffer (list 'report id))))
+        (harness-ui-patch-review-test--wait-text popout "^Changes (7) ")
+        (should (equal "main..task/fix"
+                       (harness-ui-patch-review--r-selector (gethash id harness-ui-patch-review--reviews)))))
+      ;; Typed revisions that cannot be right are refused: nothing changes.
+      ;; (The choice of typing some is labelled with what was typed.)
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (_prompt collection &rest _)
+                   (car (cl-remove-if-not (lambda (label) (string-prefix-p "Other" label))
+                                          (all-completions "" collection)))))
+                ((symbol-function 'read-string) (lambda (&rest _) "a b c")))
+        (with-current-buffer chat
+          (let ((current-prefix-arg '(4)))
+            (should-error (call-interactively #'harness-ui-patch-review-open) :type 'user-error))))
+      (should (equal "main..task/fix"
+                     (harness-ui-patch-review--r-selector (gethash id harness-ui-patch-review--reviews))))
+      ;; An answer that is none of the three is refused too.
+      (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "Something else")))
+        (with-current-buffer chat
+          (let ((current-prefix-arg '(4)))
+            (should-error (call-interactively #'harness-ui-patch-review-open) :type 'user-error)))))))
+
+(ert-deftest harness-ui-patch-review-keeps-the-diff-chosen-when-the-report-opens-again ()
+  "The diff chosen is the review's, not the popout's: closed and opened again,
+the report shows it.  A diff since the last review waits for the versions,
+which the harness keeps, to say which commit that was."
+  (harness-ui-patch-review-test-with-task
+    (let* ((popout (harness-ui-patch-review-test--changes board id))
+           (review (gethash id harness-ui-patch-review--reviews))
+           (set (harness-ui-patch-review--r-set review)))
+      (harness-ui-patch-review-test--advance repo)
+      (harness-test-await (harness-ui-patch-review--load review))
+      (harness-test-await (harness-ui-patch-review-select-diff 'since-review review))
+      (harness-ui-patch-review-test--wait-text popout "^Changes (1) .*task/fix since v1 @ ")
+      ;; The harness has both versions, which is all a reopened report has to go by.
+      (harness-test-wait (lambda () (= 2 (length (plist-get (harness-call 'patch-review/get id) :versions))))
+                         5 "the harness to keep the two versions")
+      (kill-buffer popout)
+      (setf (change-review-set-versions set) nil)
+      (should-not (harness-ui-patch-review--last-review review (harness-ui-patch-review--r-branch-tip review)))
+      (let ((again (harness-ui-patch-review-test--report board id)))
+        (should-not (eq popout again))
+        (harness-ui-patch-review-test--wait-text again "^Changes (1) .*task/fix since v1 @ ")
+        (harness-ui-patch-review-test--wait-text
+         again "^  Diff   \\[Task branch against main\\]  \\[● Since last review (v1)\\]  \\[Other…\\]$")
+        (should (eq 'since-review (harness-ui-patch-review--r-selector review)))
+        (should-not (harness-ui-patch-review--r-selection-error review))
+        (should (equal '("a.el") (mapcar #'change-review-file-path (harness-ui-patch-review--r-files review))))))))
+
+(ert-deftest harness-ui-patch-review-compares-what-the-diff-chosen-compares ()
+  "Ediff compares the two versions the diff shows, named after them, and the
+comments on the old one say which it is.  Choosing another diff ends Ediff,
+the frame as it was."
+  (harness-ui-patch-review-test-with-task
+    (let* ((popout (harness-ui-patch-review-test--changes board id))
+           (review (gethash id harness-ui-patch-review--reviews))
+           (layout (harness-ui-patch-review-test--layout))
+           (first (harness-ui-patch-review-test--git repo "rev-parse" "task/fix")))
+      (harness-ui-patch-review-test--advance repo)
+      (harness-test-await (harness-ui-patch-review--load review))
+      (harness-test-await (harness-ui-patch-review-select-diff 'since-review review))
+      (harness-ui-patch-review-test--wait-text popout "^Changes (1) .*task/fix since v1 @ ")
+      (with-current-buffer popout
+        (goto-char (harness-ui-patch-review--row-start id 0))
+        (call-interactively (key-binding (kbd "RET"))))
+      (let* ((control (harness-ui-patch-review-test--control review 0))
+             (buffers (harness-ui-patch-review--ediff-buffers review))
+             prompt)
+        (should (string-prefix-p (format "a.el (v1 %s)" (substring first 0 7)) (buffer-name (nth 1 buffers))))
+        (should (string-prefix-p "a.el (task/fix " (buffer-name (nth 2 buffers))))
+        ;; The old version is the last review's: a.el as it was.
+        (should (string-search "(setq a2 'two)" (harness-ui-patch-review-test--text (nth 1 buffers))))
+        (should-not (string-search "(setq top1 1)" (harness-ui-patch-review-test--text (nth 1 buffers))))
+        (should (string-search "(setq top1 1)" (harness-ui-patch-review-test--text (nth 2 buffers))))
+        ;; The first difference is the three lines in at the top.
+        (with-current-buffer control
+          (should (equal '(:new . 3) (harness-ui-patch-review--ediff-position))))
+        (with-current-buffer (nth 1 buffers)
+          (goto-char (point-min))
+          (forward-line 1)
+          (cl-letf (((symbol-function 'string-edit)
+                     (lambda (p _initial callback &rest _)
+                       (setq prompt p)
+                       (funcall callback "As it was?"))))
+            (call-interactively #'harness-ui-patch-review-comment-line)))
+        (should (string-prefix-p "Comment on a.el, line 2 of v1:" prompt))
+        ;; The comment is in the diff's own lines, against the version shown.
+        (let ((root (change-review-thread-root
+                     (car (last (change-review-set-threads (harness-ui-patch-review--r-set review)))))))
+          (should (eq 'old (change-review-location-side (change-review-comment-location root))))
+          (should (string-search "(setq a2 'two)" (change-review-location-excerpt (change-review-comment-location root)))))
+        (should (get-buffer-window control))
+        ;; Another diff: Ediff goes, the frame is back, the report shows it.
+        (harness-test-await (harness-ui-patch-review-select-diff 'base review))
+        (should-not (harness-ui-patch-review--r-ediff review))
+        (should-not (buffer-live-p control))
+        (should (equal layout (harness-ui-patch-review-test--layout)))
+        (harness-ui-patch-review-test--wait-text popout "^Changes (6) .*task/fix against main @ ")
+        (should (equal "the merge base" (harness-ui-patch-review--old-phrase review)))))))
+
 ;;;; The threads in Ediff: folded, and to the room the windows have
 
 (defun harness-ui-patch-review-test--drawn (buffer)
