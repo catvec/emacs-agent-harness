@@ -58,6 +58,116 @@ class HarnessColors {
   };
 }
 
+/// Spacing, on a 4-point grid.  Everything that sits at the edge of a page
+/// uses [gutter], so that titles, rows, cards and labels share a left edge;
+/// sheets are a little roomier ([sheetGutter]).
+class HarnessSpace {
+  const HarnessSpace._();
+
+  static const double xs = 4;
+  static const double sm = 8;
+  static const double md = 12;
+  static const double lg = 16;
+  static const double xl = 24;
+  static const double gutter = 16;
+  static const double sheetGutter = 20;
+
+  /// The widest a page of text and cards is made.
+  static const double pageWidth = 840;
+}
+
+/// The type scale: every piece of text in the app is one of these roles,
+/// rather than a size picked on the spot.  Nothing is set below 11 px.
+///
+///  * [pageTitle]  the title of a page or a sheet header
+///  * [rowTitle]   the first line of a row or a card
+///  * [body]       running text
+///  * [subtitle]   the second line of a row, and the line under a title
+///  * [meta]       small facts that sit at a row's edge: times, costs, counts
+///  * [label]      an upper-case section or field label
+///  * [caption]    helper text under a control
+///  * [mono]       paths, commands, identifiers
+class HarnessText {
+  const HarnessText._();
+
+  static Color _muted(BuildContext context) =>
+      Theme.of(context).colorScheme.onSurfaceVariant;
+
+  static TextStyle pageTitle(BuildContext context) => TextStyle(
+    fontSize: 22,
+    fontWeight: FontWeight.w700,
+    letterSpacing: -0.3,
+    height: 1.2,
+    color: Theme.of(context).colorScheme.onSurface,
+  );
+
+  static TextStyle sheetTitle(BuildContext context) => TextStyle(
+    fontSize: 20,
+    fontWeight: FontWeight.w700,
+    letterSpacing: -0.3,
+    height: 1.25,
+    color: Theme.of(context).colorScheme.onSurface,
+  );
+
+  static TextStyle rowTitle(BuildContext context) => TextStyle(
+    fontSize: 15,
+    fontWeight: FontWeight.w600,
+    letterSpacing: -0.1,
+    height: 1.3,
+    color: Theme.of(context).colorScheme.onSurface,
+  );
+
+  static TextStyle body(BuildContext context) => TextStyle(
+    fontSize: 14,
+    fontWeight: FontWeight.w400,
+    letterSpacing: 0,
+    height: 1.45,
+    color: Theme.of(context).colorScheme.onSurface,
+  );
+
+  static TextStyle subtitle(BuildContext context) => TextStyle(
+    fontSize: 13,
+    fontWeight: FontWeight.w400,
+    letterSpacing: 0,
+    height: 1.3,
+    color: _muted(context),
+  );
+
+  static TextStyle meta(BuildContext context) => TextStyle(
+    fontSize: 12,
+    fontWeight: FontWeight.w500,
+    letterSpacing: 0,
+    height: 1.3,
+    color: _muted(context),
+    fontFeatures: const [FontFeature.tabularFigures()],
+  );
+
+  static TextStyle label(BuildContext context) => TextStyle(
+    fontSize: 11,
+    fontWeight: FontWeight.w700,
+    letterSpacing: 1.0,
+    height: 1.3,
+    color: _muted(context).withValues(alpha: 0.85),
+  );
+
+  static TextStyle caption(BuildContext context) => TextStyle(
+    fontSize: 12,
+    fontWeight: FontWeight.w400,
+    letterSpacing: 0,
+    height: 1.4,
+    color: _muted(context),
+  );
+
+  static TextStyle mono(BuildContext context) => TextStyle(
+    fontFamily: 'monospace',
+    fontSize: 12,
+    fontWeight: FontWeight.w400,
+    letterSpacing: 0,
+    height: 1.4,
+    color: Theme.of(context).colorScheme.onSurface,
+  );
+}
+
 class HarnessTheme {
   static ThemeData material(Brightness brightness) {
     final dark = brightness == Brightness.dark;
@@ -102,10 +212,14 @@ class HarnessTheme {
         scrolledUnderElevation: 0,
         centerTitle: false,
         titleTextStyle: base.textTheme.titleLarge?.copyWith(
-          fontWeight: FontWeight.w600,
-          letterSpacing: -0.4,
+          fontSize: 22,
+          fontWeight: FontWeight.w700,
+          letterSpacing: -0.3,
           color: scheme.onSurface,
         ),
+        // The title of a page that has a back button starts one standard
+        // step from it; on a root page it starts at the page gutter.
+        titleSpacing: HarnessSpace.gutter,
       ),
       cardTheme: CardThemeData(
         elevation: 0,
@@ -181,6 +295,21 @@ class HarnessTheme {
       textButtonTheme: TextButtonThemeData(
         style: TextButton.styleFrom(
           textStyle: const TextStyle(fontWeight: FontWeight.w600),
+        ),
+      ),
+      segmentedButtonTheme: SegmentedButtonThemeData(
+        style: ButtonStyle(
+          side: WidgetStatePropertyAll(BorderSide(color: scheme.outline)),
+          backgroundColor: WidgetStateProperty.resolveWith(
+            (states) => states.contains(WidgetState.selected)
+                ? scheme.primary.withValues(alpha: dark ? 0.24 : 0.12)
+                : Colors.transparent,
+          ),
+          foregroundColor: WidgetStateProperty.resolveWith(
+            (states) => states.contains(WidgetState.selected)
+                ? scheme.primary
+                : scheme.onSurface,
+          ),
         ),
       ),
       chipTheme: ChipThemeData(

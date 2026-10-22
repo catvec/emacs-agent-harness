@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../state/app_controller.dart';
 import '../adaptive/adaptive_widgets.dart';
+import '../adaptive/layout_widgets.dart';
 import '../theme/harness_theme.dart';
 
 /// Says, quietly, that the connection to the harness was lost and is being
@@ -33,75 +34,24 @@ class ConnectionBanner extends StatelessWidget {
       animation: app,
       builder: (context, _) {
         if (!app.isReconnecting) return const SizedBox.shrink();
-        final theme = Theme.of(context);
         final color = HarnessColors.amber;
         // What the last attempt said, else why the connection went.
         final detail = app.reconnectError ?? app.lostReason;
-        final banner = Padding(
-          padding: padding,
-          // Announced when it comes up, to somebody who cannot see it.
-          child: Semantics(
-            container: true,
-            liveRegion: true,
-            label: 'Connection lost. Reconnecting.',
-            child: Material(
-              type: MaterialType.transparency,
-              child: Container(
-                key: const Key('connection-banner'),
-                padding: const EdgeInsets.fromLTRB(14, 9, 6, 9),
-                decoration: BoxDecoration(
-                  color: theme.colorScheme.surface,
-                  borderRadius: BorderRadius.circular(14),
-                  border: Border.all(color: color.withValues(alpha: 0.4)),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withValues(alpha: 0.06),
-                      blurRadius: 16,
-                      offset: const Offset(0, 4),
-                    ),
-                  ],
-                ),
-                child: Row(
-                  children: [
-                    HarnessActivity(radius: 8, color: color),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Text(
-                            'Connection lost. Reconnecting…',
-                            style: theme.textTheme.labelLarge?.copyWith(
-                              color: theme.colorScheme.onSurface,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                          if (detail != null && detail.isNotEmpty)
-                            Padding(
-                              padding: const EdgeInsets.only(top: 2),
-                              child: Text(
-                                detail,
-                                maxLines: 2,
-                                overflow: TextOverflow.ellipsis,
-                                style: theme.textTheme.labelSmall?.copyWith(
-                                  color: theme.colorScheme.onSurfaceVariant,
-                                ),
-                              ),
-                            ),
-                        ],
-                      ),
-                    ),
-                    if (app.waitingToRetry)
-                      HarnessTextButton(
-                        key: const Key('connection-retry'),
-                        label: 'Retry now',
-                        onPressed: app.retryNow,
-                      ),
-                  ],
-                ),
-              ),
-            ),
+        // Announced when it comes up, to somebody who cannot see it.
+        final banner = Semantics(
+          container: true,
+          liveRegion: true,
+          label: 'Connection lost. Reconnecting.',
+          child: HarnessNotice(
+            key: const Key('connection-banner'),
+            leading: HarnessActivity(radius: 8, color: color),
+            message: 'Connection lost. Reconnecting…',
+            detail: detail,
+            color: color,
+            actionLabel: app.waitingToRetry ? 'Retry now' : null,
+            actionKey: const Key('connection-retry'),
+            onAction: app.retryNow,
+            margin: padding,
           ),
         );
         return safeTop ? SafeArea(bottom: false, child: banner) : banner;

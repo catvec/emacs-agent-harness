@@ -538,11 +538,16 @@ void main() {
       await tester.pump(const Duration(milliseconds: 250));
     }
 
+    // What is in the list, which is under the scope bar: the bar says which
+    // project the page is about, and the list is what it adds up.
+    Finder inList(String text) =>
+        find.descendant(of: usageList, matching: find.text(text));
+
     // The project the app opens on: one row, which adds up what was spent
     // in the checkout, in task-flutter's worktree and in task-fix-titles'.
     await toTheEnd();
     expect(find.text('PROJECTS'), findsOneWidget);
-    expect(find.text('emacs-agent-harness'), findsOneWidget);
+    expect(inList('emacs-agent-harness'), findsOneWidget);
     expect(find.text(r'$1.33'), findsOneWidget);
     expect(find.textContaining('task-'), findsNothing);
 
@@ -550,8 +555,8 @@ void main() {
     rig.app.selectProject(null);
     await _settle(tester, 6);
     await toTheEnd();
-    expect(find.text('emacs-agent-harness'), findsOneWidget);
-    expect(find.text('other-project'), findsOneWidget);
+    expect(inList('emacs-agent-harness'), findsOneWidget);
+    expect(inList('other-project'), findsOneWidget);
     expect(find.text(r'$1.33'), findsOneWidget);
     expect(find.textContaining('task-'), findsNothing);
   });

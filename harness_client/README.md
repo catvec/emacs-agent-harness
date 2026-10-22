@@ -468,13 +468,39 @@ e2e/                  Playwright mobile-emulated flows and screenshots
   Cupertino controls from it; it follows the real platform and can be
   previewed in Settings or with `?platform=cupertino` on the web.
 
+## Layout
+
+Every page follows the same rules about where a piece of text goes, so a fact
+is always in the same kind of place. The type scale and the spacing are in
+`lib/src/ui/theme/harness_theme.dart` (`HarnessText`, `HarnessSpace`), the
+pieces in `lib/src/ui/adaptive/layout_widgets.dart`.
+
+| What | Where, and how it is written |
+|---|---|
+| What a page is | The title in the page header and, under it, one line of context: for a conversation, `● Idle · project`. The header never moves and nothing is laid over it. |
+| What a page is about | A **scope bar** under the header: the project (a choice, when there is more than one to choose from) and a short fact at the far end (`Updated just now`). The project is said there once, not on every row. |
+| A way to look at a list | A **tab strip**: one row, starting on the page gutter, a count after each label, a rule under the one that is shown. It scrolls; it never wraps into a block of pills. |
+| A fact about a thing | Text, joined by a middle dot (`HarnessMetaLine`); on a row, the first line has the title and the time at its edge, the second the facts and the cost at its edge, on shared baselines. |
+| A state | A dot and a word (`HarnessStatusLabel`). A tool call that went well is a check mark; one that failed says so, in red. |
+| A message to the person | A **notice**, in the flow of the page under its header (`HarnessNotice`): a session that needs an answer, a failed action, a lost connection. |
+| How the next message is handled | Under the message field: the model and the permission mode (a choice each), then how full the context is and what the conversation has cost. |
+| A choice among a few things | A pill, in a sheet (`HarnessPill`), and only there. |
+| Lists of names (methods, events, models) | Plain words in a grid, grouped under the name of their group; never a pill each. |
+
+Text is one of nine roles (page title, sheet title, row title, body, subtitle,
+meta, label, caption, mono) and nothing is set below 11 px. Space is on a
+4-point grid; titles, rows, cards and labels share a 16-point gutter, and a
+page of text and cards is no wider than 840 points. `test/layout_test.dart`
+states these rules as geometry: where a notice is, which edges line up, that
+nothing overflows on a 320-point phone, and where there are no pills.
+
 ## Testing
 
 ```sh
 flutter analyze                    # no issues
 flutter test                       # 172 tests: ACP, capabilities, reducer,
                                    # connection parsing, boot, widget flows,
-                                   # reconnecting, going back in on launch,
+                                   # layout, reconnecting, going back in on launch,
                                    # saved settings, WebSocket pings
 python3 tool/test_qr_tools.py      # QR encoder against qrencode, the phone
                                    # installer (pairing, install, build
@@ -502,6 +528,12 @@ The widget tests drive the real `AcpClient` against an in-memory ACP server
   server capability table and project list
 - plain ACP fallback (three tabs, working chat, standard notice)
 - Cupertino rendering of the shell
+- layout (`test/layout_test.dart`): the notice that a session needs an answer
+  is under the header and never over it (and the page under it keeps its
+  place), tabs, search and rows start on the gutter, the cost of every row
+  ends on one edge, a conversation has its model and mode under the message
+  field and no pills under its title, nothing overflows on a 320-point phone,
+  and the server page lists methods and events as text
 - a lost connection (`test/reconnect_test.dart`, `reconnect_widget_test.dart`):
   a fake harness that drops the connection, refuses the next ones, goes silent
   or no longer knows the device's secret. The app notices, connects again by

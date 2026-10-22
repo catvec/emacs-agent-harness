@@ -12,6 +12,7 @@ import '../../state/app_controller.dart';
 import '../../state/drafts.dart';
 import '../../state/session_controller.dart';
 import '../adaptive/adaptive_widgets.dart';
+import '../adaptive/layout_widgets.dart';
 import '../adaptive/platform_style.dart';
 import '../app_scope.dart';
 import '../format.dart';
@@ -239,11 +240,6 @@ class _SessionScreenState extends State<SessionScreen> {
             context: context,
             title: _controller.summary?.displayTitle ?? 'Session',
             items: [
-              const HarnessMenuItem(
-                value: 'refresh',
-                label: 'Reload transcript',
-                icon: Icons.refresh_rounded,
-              ),
               if (caps?.renameSession == true)
                 const HarnessMenuItem(
                   value: 'rename',
@@ -284,8 +280,6 @@ class _SessionScreenState extends State<SessionScreen> {
           );
           if (!mounted) return;
           switch (action) {
-            case 'refresh':
-              await _controller.open(force: true);
             case 'rename':
               await _rename();
             case 'fork':
@@ -316,19 +310,22 @@ class _SessionScreenState extends State<SessionScreen> {
             _controller.summary ?? _app.summaryFor(widget.sessionId);
         final title = summary?.displayTitle ?? 'Session';
         final body = _buildBody(context, summary);
+        // Where the conversation is and what it is doing, under its title.
+        final context_ = summary == null
+            ? null
+            : _SessionContext(
+                app: _app,
+                controller: _controller,
+                summary: summary,
+              );
         if (widget.embedded) {
           return Material(
             type: MaterialType.transparency,
-
             child: Column(
               children: [
                 _EmbeddedHeader(
                   title: title,
-                  summary: summary,
-                  project: summary == null
-                      ? null
-                      : _app.projectOfSession(summary),
-                  controller: _controller,
+                  subtitle: context_,
                   actions: _actions(context),
                   onClose: _app.closeSession,
                 ),
@@ -339,6 +336,7 @@ class _SessionScreenState extends State<SessionScreen> {
         }
         return HarnessPage(
           title: title,
+          subtitle: context_,
           actions: _actions(context),
           body: body,
         );
@@ -378,13 +376,6 @@ class _SessionScreenState extends State<SessionScreen> {
         // A conversation opened as a page of its own covers the home
         // screens, and with them their banner.
         if (!widget.embedded) ConnectionBanner(app: _app),
-        _MetaStrip(
-          app: _app,
-          controller: controller,
-          summary: summary,
-          onModel: _chooseModel,
-          onMode: _chooseMode,
-        ),
         if (controller.error != null)
           HarnessErrorBanner(
             message: controller.error!,
@@ -444,6 +435,14 @@ class _SessionScreenState extends State<SessionScreen> {
           offline: !controller.canSend,
           enabled: controller.currentInteraction == null && controller.canSend,
           onStop: controller.cancel,
+          // How the next message is handled: the model, the permission mode,
+          // how full the context is and what the conversation has cost.
+          footer: _SessionFooter(
+            app: _app,
+            summary: summary,
+            onModel: _chooseModel,
+            onMode: _chooseMode,
+          ),
           // What is typed outlives this screen: see DraftStore.
           drafts: _app.drafts,
           draftKey: DraftStore.composerKey(widget.sessionId),
@@ -460,22 +459,18 @@ class _SessionScreenState extends State<SessionScreen> {
   }
 }
 
+/// The header of a conversation that is a pane of a wide screen: the title
+/// over where it is and what it is doing, and the actions.
 class _EmbeddedHeader extends StatelessWidget {
   const _EmbeddedHeader({
     required this.title,
-    required this.summary,
-    required this.project,
-    required this.controller,
+    required this.subtitle,
     required this.actions,
     required this.onClose,
   });
 
   final String title;
-  final SessionSummary? summary;
-
-  /// The project the session works for: the checkout of its worktree.
-  final String? project;
-  final SessionController controller;
+  final Widget? subtitle;
   final List<Widget> actions;
   final VoidCallback onClose;
 
@@ -483,7 +478,12 @@ class _EmbeddedHeader extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     return Container(
-      padding: const EdgeInsets.fromLTRB(18, 12, 8, 10),
+      padding: const EdgeInsets.fromLTRB(
+        HarnessSpace.gutter,
+        HarnessSpace.md,
+        HarnessSpace.sm,
+        HarnessSpace.md,
+      ),
       decoration: BoxDecoration(
         color: HarnessStyle.isCupertino(context)
             ? CupertinoTheme.of(context).barBackgroundColor
@@ -502,24 +502,17 @@ class _EmbeddedHeader extends StatelessWidget {
                   title,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: theme.textTheme.titleMedium?.copyWith(
-                    fontWeight: FontWeight.w700,
-                    letterSpacing: -0.3,
-                  ),
+                  style: HarnessText.pageTitle(context),
                 ),
-                const SizedBox(height: 2),
-                Text(
-                  [
-                    projectName(project ?? summary?.project ?? summary?.cwd),
-                    modelName(summary?.model),
-                    statusLabel(summary?.status),
-                  ].where((part) => part.isNotEmpty).join(' · '),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: theme.textTheme.labelSmall?.copyWith(
-                    color: theme.colorScheme.onSurfaceVariant,
+                if (subtitle != null) ...[
+                  const SizedBox(height: 2),
+                  DefaultTextStyle(
+                    style: HarnessText.subtitle(context),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    child: subtitle!,
                   ),
-                ),
+                ],
               ],
             ),
           ),
@@ -536,115 +529,48 @@ class _EmbeddedHeader extends StatelessWidget {
   }
 }
 
-class _MetaStrip extends StatelessWidget {
-  const _MetaStrip({
+/// The line under the title of a conversation: its state (a dot and a
+/// word), the project it works on, and the task it belongs to, if any.
+class _SessionContext extends StatelessWidget {
+  const _SessionContext({
     required this.app,
     required this.controller,
     required this.summary,
-    required this.onModel,
-    required this.onMode,
   });
 
   final AppController app;
   final SessionController controller;
-  final SessionSummary? summary;
-  final VoidCallback onModel;
-  final VoidCallback onMode;
+  final SessionSummary summary;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final s = summary;
-    final usage = s?.usage;
-    final contextWindow = s?.contextWindow;
-    final contextUsed = usage?.contextInUse ?? 0;
-    final status = controller.currentInteraction != null
-        ? 'blocked'
-        : s?.status;
-    final statusColor = HarnessColors.status(status, theme.brightness);
-    final task = _taskForSession(app, s?.id);
-    final spend = app.spendOf(s);
-    return Container(
-      decoration: BoxDecoration(
-        border: Border(
-          bottom: BorderSide(
-            color: theme.colorScheme.outlineVariant.withValues(alpha: 0.6),
+    final waiting = controller.currentInteraction != null;
+    final status = waiting ? 'blocked' : summary.status;
+    final color = HarnessColors.status(status, theme.brightness);
+    final task = _taskForSession(app, summary.id);
+    final project = app.projectOfSession(summary) ?? summary.project;
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        HarnessDot(color: color, size: 6),
+        const SizedBox(width: 6),
+        Flexible(
+          child: HarnessMetaLine(
+            dropWhatDoesNotFit: true,
+            parts: [
+              HarnessMetaPart(
+                waiting ? 'Needs you' : statusLabel(status),
+                color: color,
+                weight: FontWeight.w600,
+              ),
+              // The project, where there is more than one to tell apart.
+              if (app.projects.length != 1) projectName(project ?? summary.cwd),
+              if (task != null) 'Task: ${task.title}',
+            ],
           ),
         ),
-      ),
-      padding: const EdgeInsets.fromLTRB(12, 5, 12, 5),
-      child: Wrap(
-        spacing: 6,
-        runSpacing: 5,
-        children: [
-          _MetaChip(
-            icon: controller.currentInteraction != null
-                ? Icons.front_hand_rounded
-                : Icons.circle,
-            label: controller.currentInteraction != null
-                ? 'Needs you'
-                : statusLabel(status),
-            color: statusColor,
-            onTap: null,
-          ),
-          _MetaChip(
-            icon: Icons.folder_outlined,
-            label: projectName(
-              s == null ? null : app.projectOfSession(s) ?? s.project ?? s.cwd,
-            ),
-            onTap: null,
-          ),
-          _MetaChip(
-            icon: Icons.memory_rounded,
-            label: modelName(s?.model),
-            onTap: onModel,
-          ),
-          _MetaChip(
-            icon: Icons.shield_outlined,
-            label: permissionLabel(s?.permissionMode),
-            onTap: app.capability?.setMode == true ? onMode : null,
-          ),
-          if (contextWindow != null && contextWindow > 0)
-            _MetaChip(
-              icon: Icons.stacked_line_chart_rounded,
-              label:
-                  '${formatTokens(contextUsed)} / ${formatTokens(contextWindow)}',
-              trailing: SizedBox(
-                width: 42,
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(2),
-                  child: LinearProgressIndicator(
-                    value: (contextUsed / contextWindow).clamp(0.0, 1.0),
-                    minHeight: 3,
-                    backgroundColor: theme.colorScheme.surfaceContainerHigh,
-                    color: (contextUsed / contextWindow) > 0.8
-                        ? HarnessColors.amber
-                        : theme.colorScheme.primary,
-                  ),
-                ),
-              ),
-              onTap: null,
-            ),
-          // What it cost, or the plan that pays for it with the plan's quota.
-          if (spend.worthShowing)
-            SpendChip(
-              key: const Key('session-spend'),
-              status: spend,
-              onTap: () => showPlanSheet(
-                context,
-                status: spend,
-                providerLabel: app.providerLabelOf(spend),
-              ),
-            ),
-          if (task != null)
-            _MetaChip(
-              icon: Icons.checklist_rtl_rounded,
-              label: task.title,
-              color: HarnessColors.column(task.columnName, theme.brightness),
-              onTap: null,
-            ),
-        ],
-      ),
+      ],
     );
   }
 
@@ -657,68 +583,152 @@ class _MetaStrip extends StatelessWidget {
   }
 }
 
-class _MetaChip extends StatelessWidget {
-  const _MetaChip({
-    required this.icon,
-    required this.label,
-    this.onTap,
-    this.color,
-    this.trailing,
+/// The row under the message field.  On the left what decides how the next
+/// message is handled, and can be changed (the model, the permission mode);
+/// on the right how full the context is and what the conversation has cost.
+class _SessionFooter extends StatelessWidget {
+  const _SessionFooter({
+    required this.app,
+    required this.summary,
+    required this.onModel,
+    required this.onMode,
   });
 
-  final IconData icon;
-  final String label;
-  final VoidCallback? onTap;
-  final Color? color;
-  final Widget? trailing;
+  final AppController app;
+  final SessionSummary? summary;
+  final VoidCallback onModel;
+  final VoidCallback onMode;
+
+  @override
+  Widget build(BuildContext context) {
+    final s = summary;
+    final usage = s?.usage;
+    final window = s?.contextWindow;
+    final used = usage?.contextInUse ?? 0;
+    final spend = app.spendOf(s);
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        // On a narrow screen the figures give way to the pickers: the rule
+        // goes, then the cost.  The context's figures stay.
+        final narrow = constraints.maxWidth < 340;
+        final ruled = constraints.maxWidth >= 400;
+        return Row(
+          children: [
+            // The pickers take what the figures at the other end leave, the
+            // model first: its name gives way after the mode's.
+            Expanded(
+              child: Row(
+                children: [
+                  Flexible(
+                    flex: 4,
+                    child: HarnessPicker(
+                      icon: Icons.memory_rounded,
+                      label: modelName(s?.model),
+                      onTap: onModel,
+                    ),
+                  ),
+                  Flexible(
+                    flex: 2,
+                    child: HarnessPicker(
+                      icon: Icons.shield_outlined,
+                      label: permissionLabel(s?.permissionMode),
+                      onTap: app.capability?.setMode == true ? onMode : null,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            // The figures are never more than half the row: where they do
+            // not fit in that, they shrink rather than crowd the pickers.
+            if ((window != null && window > 0) || (spend.worthShowing && !narrow))
+              ConstrainedBox(
+                constraints: BoxConstraints(
+                  maxWidth: constraints.maxWidth * (narrow ? 0.4 : 0.5),
+                ),
+                child: FittedBox(
+                  fit: BoxFit.scaleDown,
+                  alignment: Alignment.centerRight,
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (window != null && window > 0)
+                        _ContextMeter(used: used, window: window, rule: ruled),
+                      // What it cost, or the plan that pays for it with the
+                      // plan's quota.
+                      if (spend.worthShowing && !narrow) ...[
+                        const SizedBox(width: HarnessSpace.md),
+                        Padding(
+                          padding: const EdgeInsets.only(right: 6),
+                          child: SpendChip(
+                            key: const Key('session-spend'),
+                            status: spend,
+                            onTap: () => showPlanSheet(
+                              context,
+                              status: spend,
+                              providerLabel: app.providerLabelOf(spend),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ),
+          ],
+        );
+      },
+    );
+  }
+}
+
+/// How much of the context window is used: the figures, and a rule that
+/// turns amber as it fills.
+class _ContextMeter extends StatelessWidget {
+  const _ContextMeter({
+    required this.used,
+    required this.window,
+    this.rule = true,
+  });
+
+  final int used;
+  final int window;
+
+  /// Whether the rule is drawn, or only the figures.
+  final bool rule;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final tint = color ?? theme.colorScheme.onSurfaceVariant;
-    final content = Container(
-      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
-      decoration: BoxDecoration(
-        color: (color ?? theme.colorScheme.onSurfaceVariant).withValues(
-          alpha: 0.07,
-        ),
-        borderRadius: BorderRadius.circular(999),
-        border: Border.all(
-          color: (color ?? theme.colorScheme.outlineVariant).withValues(
-            alpha: 0.25,
-          ),
-        ),
-      ),
+    final fraction = (used / window).clamp(0.0, 1.0);
+    return Semantics(
+      label: 'Context ${formatTokens(used)} of ${formatTokens(window)}',
+      excludeSemantics: true,
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(icon, size: 12, color: tint),
-          const SizedBox(width: 5),
-          ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 170),
-            child: Text(
-              label,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                fontSize: 10.5,
-                fontWeight: FontWeight.w600,
-                color: tint,
+          if (rule) ...[
+            SizedBox(
+              width: 30,
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(2),
+                child: LinearProgressIndicator(
+                  value: fraction,
+                  minHeight: 3,
+                  backgroundColor: theme.colorScheme.surfaceContainerHigh,
+                  color: fraction > 0.8
+                      ? HarnessColors.amber
+                      : theme.colorScheme.primary,
+                ),
               ),
             ),
-          ),
-          if (onTap != null) ...[
-            const SizedBox(width: 3),
-            Icon(Icons.expand_more_rounded, size: 12, color: tint),
+            const SizedBox(width: 6),
           ],
+          Text(
+            '${formatTokens(used)} / ${formatTokens(window)}',
+            style: HarnessText.meta(context),
+          ),
         ],
       ),
-    );
-    if (onTap == null) return content;
-    return HarnessTap(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(999),
-      child: content,
     );
   }
 }
@@ -733,83 +743,85 @@ class _PlanStrip extends StatelessWidget {
     final done = plan.where((entry) => entry.isDone).length;
     final active = plan.where((entry) => entry.isActive).firstOrNull;
     final progress = plan.isEmpty ? 0.0 : done / plan.length;
-    return HarnessTap(
-      onTap: () => _showPlan(context),
-      child: Container(
-        padding: const EdgeInsets.fromLTRB(16, 8, 12, 8),
-        decoration: BoxDecoration(
-          color: theme.colorScheme.primary.withValues(alpha: 0.04),
-          border: Border(
-            top: BorderSide(
-              color: theme.colorScheme.outlineVariant.withValues(alpha: 0.6),
-            ),
-          ),
-        ),
-        child: Row(
-          children: [
-            Icon(
-              Icons.map_outlined,
-              size: 15,
-              color: theme.colorScheme.primary,
-            ),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Row(
-                    children: [
-                      Text(
-                        'Plan',
-                        style: theme.textTheme.labelSmall?.copyWith(
-                          fontWeight: FontWeight.w700,
-                          color: theme.colorScheme.primary,
-                        ),
-                      ),
-                      const SizedBox(width: 6),
-                      Text(
-                        '$done / ${plan.length}',
-                        style: theme.textTheme.labelSmall?.copyWith(
-                          color: theme.colorScheme.onSurfaceVariant,
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 3),
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(2),
-                    child: LinearProgressIndicator(
-                      value: progress,
-                      minHeight: 3,
-                      backgroundColor: theme.colorScheme.surfaceContainerHigh,
-                      color: theme.colorScheme.primary,
-                    ),
-                  ),
-                ],
+    // One line: the plan and how far it is, then the step being worked on.
+    // How far is also a hairline along the top edge.
+    return Semantics(
+      button: true,
+      label: 'Plan, $done of ${plan.length} done',
+      child: HarnessTap(
+        onTap: () => _showPlan(context),
+        child: Container(
+          decoration: BoxDecoration(
+            color: theme.colorScheme.primary.withValues(alpha: 0.04),
+            border: Border(
+              top: BorderSide(
+                color: theme.colorScheme.outlineVariant.withValues(alpha: 0.6),
               ),
             ),
-            if (active != null) ...[
-              const SizedBox(width: 10),
-              ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 160),
-                child: Text(
-                  active.content,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: theme.textTheme.labelSmall?.copyWith(
-                    color: theme.colorScheme.onSurfaceVariant,
-                  ),
+          ),
+          child: Stack(
+            children: [
+              Positioned(
+                top: 0,
+                left: 0,
+                right: 0,
+                child: LinearProgressIndicator(
+                  value: progress,
+                  minHeight: 2,
+                  backgroundColor: Colors.transparent,
+                  color: theme.colorScheme.primary,
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(
+                  HarnessSpace.gutter,
+                  10,
+                  HarnessSpace.md,
+                  10,
+                ),
+                child: Row(
+                  children: [
+                    Icon(
+                      Icons.map_outlined,
+                      size: 16,
+                      color: theme.colorScheme.primary,
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      'Plan',
+                      style: HarnessText.meta(context).copyWith(
+                        fontWeight: FontWeight.w700,
+                        color: theme.colorScheme.primary,
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    Text(
+                      '$done / ${plan.length}',
+                      style: HarnessText.meta(context),
+                    ),
+                    if (active != null) ...[
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Text(
+                          active.content,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: HarnessText.subtitle(context),
+                        ),
+                      ),
+                    ] else
+                      const Spacer(),
+                    const SizedBox(width: 6),
+                    Icon(
+                      Icons.expand_less_rounded,
+                      size: 18,
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
+                  ],
                 ),
               ),
             ],
-            const SizedBox(width: 6),
-            Icon(
-              Icons.expand_less_rounded,
-              size: 17,
-              color: theme.colorScheme.onSurfaceVariant,
-            ),
-          ],
+          ),
         ),
       ),
     );
@@ -824,11 +836,7 @@ class _PlanStrip extends StatelessWidget {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
-              'Plan',
-              style: Theme.of(sheetContext).textTheme.titleLarge
-                  ?.copyWith(fontWeight: FontWeight.w700),
-            ),
+            Text('Plan', style: HarnessText.sheetTitle(sheetContext)),
             const SizedBox(height: 14),
             ConstrainedBox(
               constraints: BoxConstraints(
@@ -937,7 +945,12 @@ class _ActivityBarState extends State<_ActivityBar> {
         ? HarnessColors.amber
         : theme.colorScheme.primary;
     return Container(
-      padding: const EdgeInsets.fromLTRB(16, 6, 16, 6),
+      padding: const EdgeInsets.fromLTRB(
+        HarnessSpace.gutter,
+        8,
+        HarnessSpace.gutter,
+        8,
+      ),
       decoration: BoxDecoration(
         color: color.withValues(alpha: 0.04),
         border: Border(
@@ -948,34 +961,26 @@ class _ActivityBarState extends State<_ActivityBar> {
       ),
       child: Row(
         children: [
-          if (widget.waiting)
-            Icon(Icons.front_hand_rounded, size: 14, color: color)
-          else
-            HarnessActivity(radius: 7, color: color),
-          const SizedBox(width: 9),
+          SizedBox(
+            width: 16,
+            child: Center(
+              child: widget.waiting
+                  ? Icon(Icons.front_hand_rounded, size: 15, color: color)
+                  : HarnessActivity(radius: 7, color: color),
+            ),
+          ),
+          const SizedBox(width: 8),
           Expanded(
             child: Text(
               label,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: theme.textTheme.labelSmall?.copyWith(
-                color: color,
-                fontWeight: FontWeight.w600,
-                fontSize: 11,
-              ),
+              style: HarnessText.meta(context)
+                  .copyWith(color: color, fontWeight: FontWeight.w600),
             ),
           ),
           if (elapsed != null)
-            Text(
-              _formatElapsed(elapsed),
-              style: theme.textTheme.labelSmall?.copyWith(
-                color: theme.colorScheme.onSurfaceVariant.withValues(
-                  alpha: 0.6,
-                ),
-                fontSize: 10,
-                fontFeatures: const [FontFeature.tabularFigures()],
-              ),
-            ),
+            Text(_formatElapsed(elapsed), style: HarnessText.meta(context)),
         ],
       ),
     );

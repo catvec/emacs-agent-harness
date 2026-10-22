@@ -101,7 +101,7 @@ class HarnessWordmark extends StatelessWidget {
       letterSpacing: 1.4,
       fontWeight: FontWeight.w700,
       color: tint.withValues(alpha: 0.55),
-      fontSize: 9,
+      fontSize: 10,
     );
     return Row(
       mainAxisSize: MainAxisSize.min,

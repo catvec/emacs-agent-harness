@@ -116,7 +116,7 @@ class _InteractionCardState extends State<InteractionCard> {
           mainAxisSize: MainAxisSize.min,
           children: [
             Container(
-              padding: const EdgeInsets.fromLTRB(14, 12, 8, 12),
+              padding: const EdgeInsets.fromLTRB(14, 12, 6, 12),
               decoration: BoxDecoration(
                 color: accent.withValues(alpha: 0.07),
                 borderRadius: const BorderRadius.vertical(
@@ -124,52 +124,53 @@ class _InteractionCardState extends State<InteractionCard> {
                 ),
               ),
               child: Row(
+                // The icon is level with the first line of text, not the
+                // middle of however many lines there are.
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Container(
-                    width: 30,
-                    height: 30,
+                    width: 32,
+                    height: 32,
                     decoration: BoxDecoration(
                       color: accent.withValues(alpha: 0.14),
                       borderRadius: BorderRadius.circular(9),
                     ),
-                    child: Icon(icon, size: 17, color: accent),
+                    child: Icon(icon, size: 18, color: accent),
                   ),
-                  const SizedBox(width: 10),
+                  const SizedBox(width: 12),
                   Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          eyebrow.toUpperCase(),
-                          style: theme.textTheme.labelSmall?.copyWith(
-                            color: accent,
-                            letterSpacing: 1.0,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                        const SizedBox(height: 2),
-                        Text(
-                          title,
-                          maxLines: 3,
-                          overflow: TextOverflow.ellipsis,
-                          style: theme.textTheme.titleSmall?.copyWith(
-                            fontWeight: FontWeight.w700,
-                            fontSize: 14,
-                          ),
-                        ),
-                        if (subtitle != null) ...[
-                          const SizedBox(height: 2),
+                    child: Padding(
+                      padding: EdgeInsets.only(
+                        top: 1,
+                        bottom: onDismiss == null ? 0 : 3,
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
                           Text(
-                            subtitle,
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                            style: theme.textTheme.bodySmall?.copyWith(
-                              color: theme.colorScheme.onSurfaceVariant,
-                              fontSize: 11.5,
-                            ),
+                            eyebrow.toUpperCase(),
+                            style: HarnessText.label(context)
+                                .copyWith(color: accent),
                           ),
+                          const SizedBox(height: 3),
+                          Text(
+                            title,
+                            maxLines: 3,
+                            overflow: TextOverflow.ellipsis,
+                            style: HarnessText.rowTitle(context)
+                                .copyWith(fontWeight: FontWeight.w700),
+                          ),
+                          if (subtitle != null) ...[
+                            const SizedBox(height: 2),
+                            Text(
+                              subtitle,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: HarnessText.caption(context),
+                            ),
+                          ],
                         ],
-                      ],
+                      ),
                     ),
                   ),
                   if (onDismiss != null)
@@ -233,10 +234,7 @@ class _InteractionCardState extends State<InteractionCard> {
                 child: SingleChildScrollView(
                   child: SelectableText(
                     input,
-                    style: const TextStyle(
-                      fontFamily: 'monospace',
-                      fontSize: 11.5,
-                    ),
+                    style: HarnessText.mono(context),
                   ),
                 ),
               ),
@@ -269,10 +267,7 @@ class _InteractionCardState extends State<InteractionCard> {
                             _selectedPattern ?? patterns,
                             maxLines: 2,
                             overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                              fontFamily: 'monospace',
-                              fontSize: 11.5,
-                            ),
+                            style: HarnessText.mono(context),
                           ),
                         ),
                         Icon(
@@ -507,9 +502,9 @@ class _QuestionChoice extends StatelessWidget {
               Expanded(
                 child: Text(
                   label,
-                  style: theme.textTheme.labelLarge?.copyWith(
+                  style: HarnessText.body(context).copyWith(
                     fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
-                    fontSize: 13.5,
+                    height: 1.3,
                   ),
                 ),
               ),
@@ -561,7 +556,7 @@ class _DiagramView extends StatelessWidget {
               text,
               style: const TextStyle(
                 fontFamily: 'monospace',
-                fontSize: 10.5,
+                fontSize: 11,
                 height: 1.25,
               ),
             ),
@@ -625,76 +620,73 @@ class _CowboyNote extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
     final preview = asString(info['preview']);
-    final choices = asMapList(info['choices']).take(4).toList();
+    // The ways to go on, and what each would cost: a table, a way to a row,
+    // with the cost at the edge.
+    final choices = [
+      for (final choice in asMapList(info['choices']).take(4))
+        (
+          asStringOr(choice['label'], asStringOr(choice['choice'], '')),
+          asStringOr(choice['cost-text'], ''),
+        ),
+    ];
     return Container(
       margin: const EdgeInsets.only(bottom: 8),
-      padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
+      padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
       decoration: BoxDecoration(
         color: HarnessColors.amber.withValues(alpha: 0.08),
         borderRadius: BorderRadius.circular(10),
         border: Border.all(color: HarnessColors.amber.withValues(alpha: 0.2)),
       ),
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Row(
             children: [
               const Icon(
                 Icons.bolt_rounded,
-                size: 13,
+                size: 15,
                 color: HarnessColors.amber,
               ),
-              const SizedBox(width: 4),
+              const SizedBox(width: 6),
               Text(
                 'Cold prompt cache',
-                style: theme.textTheme.labelSmall?.copyWith(
+                style: HarnessText.meta(context).copyWith(
                   fontWeight: FontWeight.w700,
                   color: HarnessColors.amber,
-                  fontSize: 10.5,
                 ),
               ),
               if (preview != null && preview.isNotEmpty) ...[
-                const SizedBox(width: 6),
+                const SizedBox(width: 8),
                 Expanded(
                   child: Text(
                     preview,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: theme.textTheme.labelSmall?.copyWith(fontSize: 10),
+                    style: HarnessText.caption(context),
                   ),
                 ),
               ],
             ],
           ),
-          if (choices.isNotEmpty) ...[
-            const SizedBox(height: 5),
-            Wrap(
-              spacing: 5,
-              runSpacing: 4,
-              children: [
-                for (final choice in choices)
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 7,
-                      vertical: 2,
+          for (final (label, cost) in choices)
+            if (label.isNotEmpty || cost.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.baseline,
+                  textBaseline: TextBaseline.alphabetic,
+                  children: [
+                    Expanded(
+                      child: Text(label, style: HarnessText.caption(context)),
                     ),
-                    decoration: BoxDecoration(
-                      color: theme.colorScheme.surfaceContainerHigh,
-                      borderRadius: BorderRadius.circular(999),
-                    ),
-                    child: Text(
-                      '${asStringOr(choice['label'], asStringOr(choice['choice'], ''))} ${asStringOr(choice['cost-text'], '')}'
-                          .trim(),
-                      style: theme.textTheme.labelSmall?.copyWith(
-                        fontSize: 9.5,
-                      ),
-                    ),
-                  ),
-              ],
-            ),
-          ],
+                    if (cost.isNotEmpty) ...[
+                      const SizedBox(width: 8),
+                      Text(cost, style: HarnessText.meta(context)),
+                    ],
+                  ],
+                ),
+              ),
         ],
       ),
     );

@@ -8,6 +8,7 @@ import '../../acp/connection_target.dart';
 import '../../models/session.dart';
 import '../../state/app_controller.dart';
 import '../adaptive/adaptive_widgets.dart';
+import '../adaptive/layout_widgets.dart';
 import '../adaptive/mark.dart';
 import '../app_scope.dart';
 import '../format.dart';
@@ -139,20 +140,13 @@ class _ConnectScreenState extends State<ConnectScreen> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      Row(
-                        children: [
-                          HarnessWordmark(
-                            size: 34,
-                            color: theme.colorScheme.onSurface,
-                            subtitle: 'AGENT CLIENT',
-                          ),
-                          const Spacer(),
-                          HarnessStatusPill(
-                            label: 'ACP 1',
-                            color: theme.colorScheme.primary,
-                            icon: Icons.cable_rounded,
-                          ),
-                        ],
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: HarnessWordmark(
+                          size: 34,
+                          color: theme.colorScheme.onSurface,
+                          subtitle: 'AGENT CLIENT',
+                        ),
                       ),
                       const SizedBox(height: 38),
                       if (app.resuming)
@@ -219,6 +213,7 @@ class _ConnectScreenState extends State<ConnectScreen> {
         const SizedBox(height: 12),
         HarnessErrorBanner(
           message: error,
+          margin: EdgeInsets.zero,
           onDismiss: () {
             setState(() => _localError = null);
             app.clearActionError();
@@ -245,12 +240,9 @@ class _ConnectScreenState extends State<ConnectScreen> {
       const SizedBox(height: 22),
       Center(
         child: Text(
-          'JSON-RPC 2.0 · WebSocket or TCP · your network, your machine',
+          'ACP · JSON-RPC 2.0 · WebSocket or TCP · your network, your machine',
           textAlign: TextAlign.center,
-          style: theme.textTheme.labelSmall?.copyWith(
-            color: theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.7),
-            letterSpacing: 0.2,
-          ),
+          style: HarnessText.caption(context),
         ),
       ),
     ];
@@ -329,29 +321,11 @@ class _ConnectionCard extends StatelessWidget {
         children: [
           Row(
             children: [
-              Text(
-                'CONNECT',
-                style: theme.textTheme.labelSmall?.copyWith(
-                  letterSpacing: 1.3,
-                  fontWeight: FontWeight.w700,
-                  color: theme.colorScheme.onSurfaceVariant,
-                ),
-              ),
+              Text('CONNECT', style: HarnessText.label(context)),
               const Spacer(),
-              Container(
-                width: 7,
-                height: 7,
-                decoration: BoxDecoration(
-                  color: busy ? HarnessColors.amber : HarnessColors.moss,
-                  shape: BoxShape.circle,
-                ),
-              ),
-              const SizedBox(width: 6),
-              Text(
-                busy ? 'Working' : 'Ready',
-                style: theme.textTheme.labelSmall?.copyWith(
-                  color: theme.colorScheme.onSurfaceVariant,
-                ),
+              HarnessStatusLabel(
+                label: busy ? 'Working' : 'Ready',
+                color: busy ? HarnessColors.amber : HarnessColors.moss,
               ),
             ],
           ),
@@ -408,10 +382,7 @@ class _ConnectionCard extends StatelessWidget {
               Expanded(
                 child: Text(
                   'Stay signed in here: reconnect when the app opens.',
-                  style: theme.textTheme.bodySmall?.copyWith(
-                    color: theme.colorScheme.onSurfaceVariant,
-                    height: 1.35,
-                  ),
+                  style: HarnessText.subtitle(context).copyWith(height: 1.35),
                 ),
               ),
               const SizedBox(width: 8),
@@ -444,12 +415,7 @@ class _ConnectionCard extends StatelessWidget {
                   'In Emacs press C-c h P, start serving, and enter the ACP '
                   'address it shows. This app then asks how to sign in: '
                   'choose Approve in Emacs and press Approve there.',
-                  style: theme.textTheme.bodySmall?.copyWith(
-                    color: theme.colorScheme.onSurfaceVariant.withValues(
-                      alpha: 0.78,
-                    ),
-                    height: 1.4,
-                  ),
+                  style: HarnessText.caption(context).copyWith(height: 1.4),
                 ),
               ),
             ],
@@ -588,14 +554,7 @@ class _FieldLabel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Text(
-      text,
-      style: Theme.of(context).textTheme.labelSmall?.copyWith(
-        letterSpacing: 1.1,
-        fontWeight: FontWeight.w700,
-        color: Theme.of(context).colorScheme.onSurfaceVariant,
-      ),
-    );
+    return Text(text, style: HarnessText.label(context));
   }
 }
 
@@ -645,9 +604,8 @@ class _AuthCard extends StatelessWidget {
               Expanded(
                 child: Text(
                   'Sign in to this harness',
-                  style: theme.textTheme.titleSmall?.copyWith(
-                    fontWeight: FontWeight.w700,
-                  ),
+                  style: HarnessText.rowTitle(context)
+                      .copyWith(fontWeight: FontWeight.w700),
                 ),
               ),
             ],
@@ -662,10 +620,7 @@ class _AuthCard extends StatelessWidget {
                         'session secret: put it in the field above.'
                   : 'Choose how this device signs in. The harness keeps a '
                         'session for it, so the next connection needs none.',
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
-                height: 1.4,
-              ),
+              style: HarnessText.subtitle(context).copyWith(height: 1.4),
             ),
             if (busy) ...[
               const SizedBox(height: 14),
@@ -675,7 +630,7 @@ class _AuthCard extends StatelessWidget {
                   const SizedBox(width: 10),
                   Text(
                     'Checking the session…',
-                    style: theme.textTheme.bodySmall,
+                    style: HarnessText.subtitle(context),
                   ),
                 ],
               ),
@@ -702,10 +657,7 @@ class _AuthCard extends StatelessWidget {
                 const SizedBox(height: 6),
                 Text(
                   method.description,
-                  style: theme.textTheme.bodySmall?.copyWith(
-                    color: theme.colorScheme.onSurfaceVariant,
-                    height: 1.35,
-                  ),
+                  style: HarnessText.subtitle(context).copyWith(height: 1.35),
                 ),
               ],
             ],
@@ -751,21 +703,14 @@ class _Waiting extends StatelessWidget {
                 method.isOidc
                     ? 'Waiting for your sign-in'
                     : 'Waiting for approval in Emacs',
-                style: theme.textTheme.bodyMedium?.copyWith(
-                  fontWeight: FontWeight.w600,
-                ),
+                style: HarnessText.body(context)
+                    .copyWith(fontWeight: FontWeight.w600),
               ),
             ),
           ],
         ),
         const SizedBox(height: 10),
-        Text(
-          what,
-          style: theme.textTheme.bodySmall?.copyWith(
-            color: theme.colorScheme.onSurfaceVariant,
-            height: 1.4,
-          ),
-        ),
+        Text(what, style: HarnessText.subtitle(context).copyWith(height: 1.4)),
         if (code != null) ...[
           const SizedBox(height: 8),
           Center(
@@ -784,10 +729,7 @@ class _Waiting extends StatelessWidget {
           method.isOidc
               ? 'Come back here once the page says you are signed in.'
               : 'Then press Approve there (C-c h y). Nothing to type here.',
-          style: theme.textTheme.bodySmall?.copyWith(
-            color: theme.colorScheme.onSurfaceVariant,
-            height: 1.4,
-          ),
+          style: HarnessText.subtitle(context).copyWith(height: 1.4),
         ),
         const SizedBox(height: 12),
         HarnessSecondaryButton(
@@ -810,61 +752,49 @@ class _DiscoveryCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final caps = app.capability!;
-    final enabled = caps.features.where((feature) => feature.enabled).length;
-    return Container(
+    final enabled = caps.features.where((feature) => feature.enabled).toList();
+    return HarnessCard(
+      radius: 20,
       padding: const EdgeInsets.all(18),
-      decoration: BoxDecoration(
-        color: theme.colorScheme.surfaceContainerLow,
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: theme.colorScheme.outlineVariant),
-      ),
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Row(
             children: [
-              HarnessMark(size: 22, color: theme.colorScheme.primary),
-              const SizedBox(width: 8),
+              HarnessMark(size: 24, color: theme.colorScheme.primary),
+              const SizedBox(width: 10),
               Expanded(
-                child: Text(
-                  caps.agentName,
-                  style: theme.textTheme.titleSmall?.copyWith(
-                    fontWeight: FontWeight.w700,
-                  ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(caps.agentName, style: HarnessText.rowTitle(context)),
+                    const SizedBox(height: 1),
+                    HarnessMetaLine(
+                      parts: [
+                        if (caps.agentVersion.isNotEmpty)
+                          'v${caps.agentVersion}',
+                        'ACP ${caps.protocolVersion}',
+                        caps.isHarness
+                            ? '${caps.extensionCount} extensions'
+                            : 'Standard ACP',
+                      ],
+                      style: HarnessText.caption(context),
+                    ),
+                  ],
                 ),
               ),
-              HarnessStatusPill(
-                label: caps.isHarness
-                    ? '${caps.extensionCount} extensions'
-                    : 'Standard ACP',
-                color: caps.isHarness
-                    ? HarnessColors.moss
-                    : theme.colorScheme.onSurfaceVariant,
-              ),
             ],
-          ),
-          const SizedBox(height: 6),
-          Text(
-            '${caps.agentVersion.isEmpty ? '' : 'v${caps.agentVersion} · '}'
-            'ACP ${caps.protocolVersion} · $enabled features detected',
-            style: theme.textTheme.bodySmall?.copyWith(
-              color: theme.colorScheme.onSurfaceVariant,
-            ),
           ),
           const SizedBox(height: 12),
-          Wrap(
-            spacing: 6,
-            runSpacing: 6,
-            children: [
-              for (final feature
-                  in caps.features.where((feature) => feature.enabled).take(7))
-                HarnessStatusPill(
-                  label: feature.name,
-                  color: feature.standard
-                      ? theme.colorScheme.onSurfaceVariant
-                      : theme.colorScheme.primary,
-                ),
-            ],
+          Text(
+            '${enabled.length} features detected',
+            style: HarnessText.label(context),
+          ),
+          const SizedBox(height: 6),
+          HarnessMetaLine(
+            parts: [for (final feature in enabled.take(7)) feature.name],
+            maxLines: 3,
+            style: HarnessText.subtitle(context),
           ),
         ],
       ),
@@ -920,17 +850,14 @@ class _FeatureTeaser extends StatelessWidget {
                       children: [
                         Text(
                           item.$2,
-                          style: theme.textTheme.labelLarge?.copyWith(
-                            fontWeight: FontWeight.w700,
-                          ),
+                          style: HarnessText.rowTitle(context)
+                              .copyWith(fontSize: 14),
                         ),
                         const SizedBox(height: 3),
                         Text(
                           item.$3,
-                          style: theme.textTheme.bodySmall?.copyWith(
-                            color: theme.colorScheme.onSurfaceVariant,
-                            height: 1.35,
-                          ),
+                          style: HarnessText.subtitle(context)
+                              .copyWith(height: 1.35),
                         ),
                       ],
                     ),

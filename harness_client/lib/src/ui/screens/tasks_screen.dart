@@ -9,6 +9,7 @@ import '../../state/drafts.dart';
 import '../../state/prompt_attachment.dart';
 import '../../state/task_controller.dart';
 import '../adaptive/adaptive_widgets.dart';
+import '../adaptive/layout_widgets.dart';
 import '../format.dart';
 import '../theme/harness_theme.dart';
 import '../widgets/connection_banner.dart';
@@ -171,6 +172,10 @@ class _TasksScreenState extends State<TasksScreen> {
   }
 }
 
+/// What the board is about (the project) and how the queue is doing, in two
+/// lines.  The settings of the queue (pause it, how the backlog joins it)
+/// are real controls, and are kept where controls are: inline on a wide
+/// screen, in a sheet that the line opens on a phone.
 class _TaskHeader extends StatelessWidget {
   const _TaskHeader({
     required this.app,
@@ -184,122 +189,244 @@ class _TaskHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final slots = controller.slots;
-    final limit = slots?.limit;
-    final holders = slots?.holders.length ?? 0;
-    final queued = slots?.queue.length ?? 0;
-    final suspended = slots?.suspended ?? false;
-    final settings = controller.settings;
-    final autoQueue = settings?.backlogMode == 'auto';
+    final wide = MediaQuery.sizeOf(context).width >= 920;
+    final choose = app.projects.length > 1;
     // What the board's tasks cost, or the plan that pays for them with its
-    // quota, as a session's header says it for the session.  The model new
-    // tasks use names the provider whose account stands for them all.
-    final spend = app.spendOfTasks(controller.tasks, model: settings?.model);
-    return Container(
-      padding: const EdgeInsets.fromLTRB(16, 6, 16, 10),
+    // quota.  The model new tasks use names the provider whose account
+    // stands for them all.
+    final spend = app.spendOfTasks(
+      controller.tasks,
+      model: controller.settings?.model,
+    );
+    return DecoratedBox(
       decoration: BoxDecoration(
-        border: Border(
-          bottom: BorderSide(
-            color: theme.colorScheme.outlineVariant.withValues(alpha: 0.7),
-          ),
-        ),
+        border: wide
+            ? Border(
+                bottom: BorderSide(
+                  color: Theme.of(context).colorScheme.outlineVariant,
+                ),
+              )
+            : null,
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Wrap(
-            spacing: 6,
-            runSpacing: 6,
-            children: [
-              HarnessPill(
-                label: projectName(app.selectedProject),
-                icon: Icons.folder_outlined,
-                selected: app.selectedProject != null,
-                onTap: () async {
-                  final chosen = await showHarnessMenu<String>(
-                    context: context,
-                    title: 'Task project',
-                    items: [
-                      for (final project in app.projects)
-                        HarnessMenuItem(
-                          value: project,
-                          label: projectName(project),
-                          icon: Icons.folder_outlined,
-                        ),
-                    ],
-                  );
-                  if (chosen != null) app.selectProject(chosen);
-                },
-              ),
-              if (spend.worthShowing)
-                SpendChip(
-                  key: const Key('tasks-spend'),
-                  status: spend,
-                  dense: false,
-                  onTap: () => showPlanSheet(
-                    context,
+          HarnessScopeBar(
+            label: app.selectedProject == null
+                ? 'All projects'
+                : projectName(app.selectedProject),
+            onTap: choose
+                ? () async {
+                    final chosen = await showHarnessMenu<String>(
+                      context: context,
+                      title: 'Task project',
+                      items: [
+                        for (final project in app.projects)
+                          HarnessMenuItem(
+                            value: project,
+                            label: projectName(project),
+                            icon: Icons.folder_outlined,
+                          ),
+                      ],
+                    );
+                    if (chosen != null) app.selectProject(chosen);
+                  }
+                : null,
+            trailing: spend.worthShowing
+                ? SpendChip(
+                    key: const Key('tasks-spend'),
                     status: spend,
-                    providerLabel: app.providerLabelOf(spend),
-                  ),
-                ),
-              HarnessPill(
-                label: limit == null
-                    ? '$holders working'
-                    : '$holders / $limit working',
-                icon: Icons.people_outline_rounded,
-                color: HarnessColors.moss,
-                onTap: null,
-              ),
-              if (queued > 0)
-                HarnessPill(
-                  label: '$queued queued',
-                  icon: Icons.schedule_rounded,
-                  color: theme.colorScheme.primary,
-                  onTap: null,
-                ),
-              if (settings?.requireVerification == true)
-                const HarnessPill(
-                  label: 'Review required',
-                  icon: Icons.visibility_outlined,
-                  color: Color(0xFF6B7FD1),
-                  onTap: null,
-                ),
-              HarnessPill(
-                label: suspended ? 'Resume queue' : 'Pause queue',
-                icon: suspended
-                    ? Icons.play_arrow_rounded
-                    : Icons.pause_rounded,
-                color: suspended ? HarnessColors.amber : null,
-                selected: suspended,
-                onTap: () => controller.toggleQueue(),
-              ),
-              HarnessPill(
-                label: autoQueue ? 'Auto queue' : 'Manual queue',
-                icon: autoQueue
-                    ? Icons.auto_mode_rounded
-                    : Icons.pan_tool_alt_outlined,
-                color: const Color(0xFFB08956),
-                selected: autoQueue,
-                onTap: () => controller.toggleBacklog(),
-              ),
-            ],
+                    onTap: () => showPlanSheet(
+                      context,
+                      status: spend,
+                      providerLabel: app.providerLabelOf(spend),
+                    ),
+                  )
+                : null,
           ),
-          if (queued > 0 || suspended)
-            Padding(
-              padding: const EdgeInsets.only(top: 7),
-              child: Text(
-                suspended
-                    ? 'Waiting tasks do not start on their own until the queue resumes.'
-                    : 'Queued tasks start by priority as slots free.',
-                style: theme.textTheme.labelSmall?.copyWith(
-                  color: theme.colorScheme.onSurfaceVariant,
-                  fontSize: 10.5,
+          _QueueLine(controller: controller, wide: wide),
+          const SizedBox(height: HarnessSpace.sm),
+        ],
+      ),
+    );
+  }
+}
+
+String _slotsText(TaskController controller) {
+  final slots = controller.slots;
+  final holders = slots?.holders.length ?? 0;
+  final limit = slots?.limit;
+  return limit == null ? '$holders working' : '$holders of $limit working';
+}
+
+/// How the queue is doing: who is working, who waits, and whether it is
+/// paused (which is said first, and can be undone from the line).
+class _QueueLine extends StatelessWidget {
+  const _QueueLine({required this.controller, required this.wide});
+
+  final TaskController controller;
+  final bool wide;
+
+  @override
+  Widget build(BuildContext context) {
+    final queued = controller.slots?.queue.length ?? 0;
+    final suspended = controller.slots?.suspended ?? false;
+    final autoQueue = controller.settings?.backlogMode == 'auto';
+    final summary = HarnessMetaLine(
+      parts: [
+        if (suspended)
+          const HarnessMetaPart(
+            'Queue paused',
+            color: HarnessColors.amber,
+            weight: FontWeight.w700,
+          ),
+        _slotsText(controller),
+        if (queued > 0) '$queued queued',
+      ],
+    );
+    final resume = HarnessTextButton(
+      label: 'Resume',
+      icon: Icons.play_arrow_rounded,
+      onPressed: controller.toggleQueue,
+    );
+    final Widget line;
+    if (wide) {
+      line = Row(
+        children: [
+          Expanded(child: summary),
+          if (suspended)
+            resume
+          else
+            HarnessTextButton(
+              label: 'Pause queue',
+              icon: Icons.pause_rounded,
+              onPressed: controller.toggleQueue,
+            ),
+          HarnessTextButton(
+            label: autoQueue ? 'Backlog: auto' : 'Backlog: manual',
+            icon: autoQueue
+                ? Icons.auto_mode_rounded
+                : Icons.pan_tool_alt_outlined,
+            onPressed: controller.toggleBacklog,
+          ),
+        ],
+      );
+    } else {
+      line = Row(
+        children: [
+          Expanded(
+            child: Semantics(
+              button: true,
+              label: 'Queue settings',
+              child: HarnessTap(
+                onTap: () => _showQueue(context, controller),
+                borderRadius: BorderRadius.circular(8),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 8),
+                  child: Row(
+                    children: [
+                      Expanded(child: summary),
+                      if (!suspended) adaptiveChevron(context),
+                    ],
+                  ),
                 ),
               ),
             ),
+          ),
+          if (suspended) resume,
         ],
+      );
+    }
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(
+        HarnessSpace.gutter,
+        0,
+        HarnessSpace.gutter,
+        0,
       ),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: 36),
+        child: line,
+      ),
+    );
+  }
+}
+
+Future<void> _showQueue(BuildContext context, TaskController controller) {
+  return showHarnessSheet<void>(
+    context: context,
+    builder: (sheetContext) => _QueueSheet(controller: controller),
+  );
+}
+
+/// The queue's settings: what pausing it does, how the backlog joins it,
+/// and whether finished work waits for a review.
+class _QueueSheet extends StatelessWidget {
+  const _QueueSheet({required this.controller});
+
+  final TaskController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: controller,
+      builder: (context, _) {
+        final queued = controller.slots?.queue.length ?? 0;
+        final suspended = controller.slots?.suspended ?? false;
+        final autoQueue = controller.settings?.backlogMode == 'auto';
+        final review = controller.settings?.requireVerification == true;
+        return Padding(
+          padding: EdgeInsets.fromLTRB(
+            HarnessSpace.sheetGutter,
+            4,
+            HarnessSpace.sheetGutter,
+            MediaQuery.viewInsetsOf(context).bottom + 22,
+          ),
+          child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text('Queue', style: HarnessText.sheetTitle(context)),
+                const SizedBox(height: 4),
+                HarnessMetaLine(
+                  parts: [
+                    _slotsText(controller),
+                    if (queued > 0) '$queued queued',
+                  ],
+                ),
+                const SizedBox(height: HarnessSpace.lg),
+                _ToggleRow(
+                  icon: Icons.pause_rounded,
+                  title: 'Pause the queue',
+                  subtitle:
+                      'Waiting tasks do not start on their own until it '
+                      'resumes.',
+                  value: suspended,
+                  onChanged: (_) => controller.toggleQueue(),
+                ),
+                _ToggleRow(
+                  icon: Icons.auto_mode_rounded,
+                  title: 'Queue the backlog automatically',
+                  subtitle:
+                      'A task that is written up joins the queue by itself, '
+                      'instead of waiting to be started.',
+                  value: autoQueue,
+                  onChanged: (_) => controller.toggleBacklog(),
+                ),
+                const SizedBox(height: HarnessSpace.sm),
+                Divider(color: Theme.of(context).colorScheme.outlineVariant),
+                HarnessInfoRow(
+                  label: 'Review',
+                  value: review
+                      ? 'Required: finished work waits for you to verify it.'
+                      : 'Not required: finished work merges on its own.',
+                ),
+              ],
+            ),
+          ),
+        );
+      },
     );
   }
 }
@@ -355,27 +482,23 @@ class _TaskBoard extends StatelessWidget {
     final selected = present.contains(selectedColumn)
         ? selectedColumn
         : present.firstOrNull;
+    final brightness = Theme.of(context).brightness;
     return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(14, 4, 14, 4),
-          child: Wrap(
-            spacing: 6,
-            runSpacing: 6,
-            children: [
-              for (final column in present)
-                HarnessPill(
-                  label: _columnLabel(column),
-                  count: controller.countFor(column),
-                  color: HarnessColors.column(
-                    column,
-                    Theme.of(context).brightness,
-                  ),
-                  selected: selected == column,
-                  onTap: () => onSelectColumn(column),
-                ),
-            ],
-          ),
+        // The columns of the board, as tabs: one row, from the gutter.
+        HarnessTabStrip<String>(
+          value: selected ?? '',
+          onChanged: onSelectColumn,
+          tabs: [
+            for (final column in present)
+              HarnessTab(
+                value: column,
+                label: _columnLabel(column),
+                count: controller.countFor(column),
+                color: HarnessColors.column(column, brightness),
+              ),
+          ],
         ),
         Expanded(
           child: selected == null
@@ -385,7 +508,12 @@ class _TaskBoard extends StatelessWidget {
                       controller.load(project: app.selectedProject),
                   child: ListView(
                     physics: const AlwaysScrollableScrollPhysics(),
-                    padding: const EdgeInsets.fromLTRB(14, 6, 14, 20),
+                    padding: const EdgeInsets.fromLTRB(
+                      HarnessSpace.gutter,
+                      HarnessSpace.md,
+                      HarnessSpace.gutter,
+                      20,
+                    ),
                     children: [
                       for (final task in controller.forColumn(selected))
                         Padding(
@@ -404,12 +532,7 @@ class _TaskBoard extends StatelessWidget {
                           child: Center(
                             child: Text(
                               'Nothing in ${_columnLabel(selected).toLowerCase()}.',
-                              style: Theme.of(context).textTheme.bodySmall
-                                  ?.copyWith(
-                                    color: Theme.of(context)
-                                        .colorScheme
-                                        .onSurfaceVariant,
-                                  ),
+                              style: HarnessText.subtitle(context),
                             ),
                           ),
                         ),
@@ -449,27 +572,16 @@ class _TaskColumn extends StatelessWidget {
         Padding(
           padding: const EdgeInsets.fromLTRB(4, 2, 4, 8),
           child: Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
             children: [
-              Container(
-                width: 7,
-                height: 7,
-                decoration: BoxDecoration(color: color, shape: BoxShape.circle),
-              ),
-              const SizedBox(width: 7),
+              HarnessDot(color: color),
+              const SizedBox(width: 8),
               Text(
                 _columnLabel(column),
-                style: theme.textTheme.labelMedium?.copyWith(
-                  fontWeight: FontWeight.w700,
-                  letterSpacing: 0.1,
-                ),
+                style: HarnessText.rowTitle(context).copyWith(fontSize: 14),
               ),
-              const SizedBox(width: 5),
-              Text(
-                '${tasks.length}',
-                style: theme.textTheme.labelSmall?.copyWith(
-                  color: theme.colorScheme.onSurfaceVariant,
-                ),
-              ),
+              const SizedBox(width: 6),
+              Text('${tasks.length}', style: HarnessText.meta(context)),
             ],
           ),
         ),
@@ -502,14 +614,7 @@ class _TaskColumn extends StatelessWidget {
                   Padding(
                     padding: const EdgeInsets.symmetric(vertical: 28),
                     child: Center(
-                      child: Text(
-                        'Empty',
-                        style: theme.textTheme.labelSmall?.copyWith(
-                          color: theme.colorScheme.onSurfaceVariant.withValues(
-                            alpha: 0.6,
-                          ),
-                        ),
-                      ),
+                      child: Text('Empty', style: HarnessText.caption(context)),
                     ),
                   ),
               ],
@@ -542,9 +647,24 @@ class TaskCard extends StatelessWidget {
     final theme = Theme.of(context);
     final color = HarnessColors.column(task.columnName, theme.brightness);
     final report = task.report;
-    final session = task.sessionId == null
-        ? null
-        : app.summaryFor(task.sessionId!);
+    // Where the work is, and anything out of the ordinary about it.  The
+    // project is the board's own scope, and the column says the state: a
+    // card does not repeat either.
+    final meta = HarnessMetaLine(
+      parts: [
+        if (app.selectedProject == null) projectName(app.projectOfTask(task)),
+        task.branch,
+        if (task.priority == 'high')
+          const HarnessMetaPart(
+            'High priority',
+            color: HarnessColors.oxide,
+            weight: FontWeight.w700,
+          )
+        else if (task.priority == 'low')
+          'Low priority',
+      ],
+      style: HarnessText.caption(context),
+    );
     return Semantics(
       button: true,
       label: 'Task ${task.title}',
@@ -571,94 +691,58 @@ class TaskCard extends StatelessWidget {
                   ),
                 ),
                 Expanded(
-                  child: Padding(
-                    padding: const EdgeInsets.fromLTRB(11, 10, 10, 10),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Row(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(12, 12, 12, 0),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            _PriorityDot(priority: task.priority),
-                            const SizedBox(width: 6),
-                            Expanded(
-                              child: Text(
-                                task.title,
+                            Text(
+                              task.title,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: HarnessText.rowTitle(context),
+                            ),
+                            const SizedBox(height: 3),
+                            meta,
+                            if (report != null &&
+                                report.summary.isNotEmpty) ...[
+                              const SizedBox(height: 8),
+                              Text(
+                                truncate(report.summary, 140),
                                 maxLines: 2,
                                 overflow: TextOverflow.ellipsis,
-                                style: theme.textTheme.titleSmall?.copyWith(
-                                  fontWeight: FontWeight.w600,
-                                  fontSize: 13.5,
-                                  height: 1.25,
-                                ),
+                                style: HarnessText.subtitle(context),
                               ),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 5),
-                        Row(
-                          children: [
-                            Expanded(
-                              child: Text(
-                                [
-                                      projectName(app.projectOfTask(task)),
-                                      if (task.branch != null) task.branch,
-                                      if (session != null)
-                                        statusLabel(session.status),
-                                    ]
-                                    .where(
-                                      (part) => part != null && part.isNotEmpty,
-                                    )
-                                    .join(' · '),
-                                maxLines: 1,
+                            ],
+                            if (task.error != null &&
+                                task.error!.isNotEmpty) ...[
+                              const SizedBox(height: 8),
+                              Text(
+                                truncate(task.error!, 100),
+                                maxLines: 2,
                                 overflow: TextOverflow.ellipsis,
-                                style: theme.textTheme.labelSmall?.copyWith(
-                                  color: theme.colorScheme.onSurfaceVariant,
-                                  fontSize: 10.5,
-                                ),
+                                style: HarnessText.caption(context)
+                                    .copyWith(color: theme.colorScheme.error),
                               ),
-                            ),
-                            if (task.priority == 'high')
-                              const HarnessStatusPill(
-                                label: 'High',
-                                color: HarnessColors.oxide,
-                                icon: Icons.flag_rounded,
-                              ),
+                            ],
                           ],
                         ),
-                        if (report != null && report.summary.isNotEmpty) ...[
-                          const SizedBox(height: 7),
-                          Text(
-                            truncate(report.summary, 120),
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                            style: theme.textTheme.bodySmall?.copyWith(
-                              fontSize: 11.5,
-                              color: theme.colorScheme.onSurfaceVariant,
-                              height: 1.35,
-                            ),
-                          ),
-                        ],
-                        if (task.error != null && task.error!.isNotEmpty) ...[
-                          const SizedBox(height: 7),
-                          Text(
-                            truncate(task.error!, 100),
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                            style: theme.textTheme.labelSmall?.copyWith(
-                              color: theme.colorScheme.error,
-                              fontSize: 10.5,
-                            ),
-                          ),
-                        ],
-                        const SizedBox(height: 8),
-                        _TaskActions(
+                      ),
+                      // The buttons are a little further out than the text
+                      // above: their icon, not their padding, lines up.
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(4, 2, 4, 4),
+                        child: _TaskActions(
                           task: task,
                           controller: controller,
                           onOpenSession: onOpenSession,
                           onReview: onTap,
                         ),
-                      ],
-                    ),
+                      ),
+                    ],
                   ),
                 ),
               ],
@@ -691,30 +775,35 @@ class _TaskActions extends StatelessWidget {
       primary = HarnessTextButton(
         label: 'Review',
         icon: Icons.rate_review_outlined,
+        dense: true,
         onPressed: onReview,
       );
     } else if (task.needsInput) {
       primary = HarnessTextButton(
         label: 'Answer',
         icon: Icons.front_hand_outlined,
+        dense: true,
         onPressed: onReview,
       );
     } else if (task.isPending) {
       primary = HarnessTextButton(
         label: 'Start now',
         icon: Icons.play_arrow_rounded,
+        dense: true,
         onPressed: () => controller.start(task.id),
       );
     } else if (task.isBacklog) {
       primary = HarnessTextButton(
         label: 'Start',
         icon: Icons.play_arrow_rounded,
+        dense: true,
         onPressed: () => controller.start(task.id),
       );
     } else if (task.sessionId != null) {
       primary = HarnessTextButton(
         label: 'Open',
         icon: Icons.open_in_new_rounded,
+        dense: true,
         onPressed: () => onOpenSession(task.sessionId!),
       );
     }
@@ -1038,7 +1127,6 @@ class _NewTaskSheetState extends State<_NewTaskSheet> {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
     final app = widget.app;
     return Padding(
       padding: EdgeInsets.only(
@@ -1052,25 +1140,19 @@ class _NewTaskSheetState extends State<_NewTaskSheet> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           mainAxisSize: MainAxisSize.min,
           children: [
-            Text(
-              'New task',
-              style: theme.textTheme.titleLarge?.copyWith(
-                fontWeight: FontWeight.w700,
-              ),
-            ),
+            Text('New task', style: HarnessText.sheetTitle(context)),
             const SizedBox(height: 4),
             Text(
-              'The harness gives it a session, a worktree and a place in the queue.',
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
-              ),
+              'The harness gives it a session, a worktree and a place in the '
+              'queue.',
+              style: HarnessText.subtitle(context),
             ),
             // The sheet covers the banner of the screens under it. What is
             // written here is kept, and goes when the connection is back.
             ConnectionBanner(app: app, padding: const EdgeInsets.only(top: 12)),
             const SizedBox(height: 16),
             if (app.projects.isNotEmpty) ...[
-              Text('PROJECT', style: _label(theme)),
+              Text('PROJECT', style: HarnessText.label(context)),
               const SizedBox(height: 7),
               Wrap(
                 spacing: 6,
@@ -1099,7 +1181,7 @@ class _NewTaskSheetState extends State<_NewTaskSheet> {
               },
             ),
             const SizedBox(height: 14),
-            Text('WHAT SHOULD IT DO?', style: _label(theme)),
+            Text('WHAT SHOULD IT DO?', style: HarnessText.label(context)),
             const SizedBox(height: 7),
             HarnessTextField(
               controller: _prompt,
@@ -1110,7 +1192,7 @@ class _NewTaskSheetState extends State<_NewTaskSheet> {
             ),
             _attachmentsRow(theme),
             const SizedBox(height: 14),
-            Text('PRIORITY', style: _label(theme)),
+            Text('PRIORITY', style: HarnessText.label(context)),
             const SizedBox(height: 7),
             HarnessSegmented<String>(
               options: const [
@@ -1147,7 +1229,7 @@ class _NewTaskSheetState extends State<_NewTaskSheet> {
             ),
             if (_error != null) ...[
               const SizedBox(height: 10),
-              HarnessErrorBanner(message: _error!),
+              HarnessErrorBanner(message: _error!, margin: EdgeInsets.zero),
             ],
             const SizedBox(height: 18),
             HarnessPrimaryButton(
@@ -1225,11 +1307,6 @@ class _NewTaskSheetState extends State<_NewTaskSheet> {
     );
   }
 
-  TextStyle? _label(ThemeData theme) => theme.textTheme.labelSmall?.copyWith(
-    letterSpacing: 1.1,
-    fontWeight: FontWeight.w700,
-    color: theme.colorScheme.onSurfaceVariant,
-  );
 }
 
 class _ToggleRow extends StatelessWidget {
@@ -1251,31 +1328,22 @@ class _ToggleRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4),
+      padding: const EdgeInsets.symmetric(vertical: 6),
       child: Row(
         children: [
-          Icon(icon, size: 18, color: theme.colorScheme.onSurfaceVariant),
-          const SizedBox(width: 10),
+          Icon(icon, size: 20, color: theme.colorScheme.onSurfaceVariant),
+          const SizedBox(width: 12),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  title,
-                  style: theme.textTheme.labelLarge?.copyWith(
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                Text(
-                  subtitle,
-                  style: theme.textTheme.labelSmall?.copyWith(
-                    color: theme.colorScheme.onSurfaceVariant,
-                    fontSize: 10.5,
-                  ),
-                ),
+                Text(title, style: HarnessText.rowTitle(context)),
+                const SizedBox(height: 1),
+                Text(subtitle, style: HarnessText.caption(context)),
               ],
             ),
           ),
+          const SizedBox(width: 12),
           HarnessSwitch(value: value, onChanged: onChanged),
         ],
       ),
@@ -1312,14 +1380,15 @@ class _TaskDetail extends StatelessWidget {
           );
         }
         final theme = Theme.of(context);
+        final muted = theme.colorScheme.onSurfaceVariant;
         final color = HarnessColors.column(task.columnName, theme.brightness);
         final session = task.sessionId == null
             ? null
             : app.summaryFor(task.sessionId!);
         return Padding(
           padding: EdgeInsets.only(
-            left: 20,
-            right: 20,
+            left: HarnessSpace.sheetGutter,
+            right: HarnessSpace.sheetGutter,
             top: 2,
             bottom: MediaQuery.viewInsetsOf(context).bottom + 22,
           ),
@@ -1328,30 +1397,30 @@ class _TaskDetail extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.stretch,
               mainAxisSize: MainAxisSize.min,
               children: [
+                // Where the task stands: its column and its priority, then
+                // its name, then where it lives.
                 Row(
                   children: [
-                    Container(
-                      width: 9,
-                      height: 9,
-                      decoration: BoxDecoration(
-                        color: color,
-                        shape: BoxShape.circle,
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    HarnessStatusPill(
+                    HarnessStatusLabel(
                       label: _columnLabel(task.columnName),
                       color: color,
+                      style: HarnessText.subtitle(context),
                     ),
-                    const SizedBox(width: 6),
-                    HarnessStatusPill(
-                      label: task.priorityLabel,
-                      color: task.priority == 'high'
-                          ? HarnessColors.oxide
-                          : theme.colorScheme.onSurfaceVariant,
-                      icon: Icons.flag_outlined,
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: HarnessMetaLine(
+                        parts: [
+                          if (task.priority == 'high')
+                            const HarnessMetaPart(
+                              'High priority',
+                              color: HarnessColors.oxide,
+                              weight: FontWeight.w700,
+                            )
+                          else
+                            '${task.priorityLabel} priority',
+                        ],
+                      ),
                     ),
-                    const Spacer(),
                     HarnessIconButton(
                       icon: Icons.close_rounded,
                       label: 'Close',
@@ -1359,60 +1428,37 @@ class _TaskDetail extends StatelessWidget {
                     ),
                   ],
                 ),
-                const SizedBox(height: 10),
+                const SizedBox(height: 4),
                 Text(
                   task.title,
-                  style: theme.textTheme.headlineSmall?.copyWith(
-                    fontSize: 24,
-                    fontWeight: FontWeight.w700,
-                    letterSpacing: -0.6,
-                  ),
+                  style: HarnessText.sheetTitle(context)
+                      .copyWith(fontSize: 24, letterSpacing: -0.5),
                 ),
-                const SizedBox(height: 8),
-                Wrap(
-                  spacing: 6,
-                  runSpacing: 6,
-                  children: [
-                    HarnessStatusPill(
-                      label: projectName(app.projectOfTask(task)),
-                      color: theme.colorScheme.onSurfaceVariant,
-                      icon: Icons.folder_outlined,
-                    ),
-                    if (task.branch != null)
-                      HarnessStatusPill(
-                        label: task.branch!,
-                        color: theme.colorScheme.onSurfaceVariant,
-                        icon: Icons.call_split_rounded,
-                      ),
+                const SizedBox(height: 6),
+                HarnessMetaLine(
+                  maxLines: 3,
+                  parts: [
+                    projectName(app.projectOfTask(task)),
+                    task.branch,
                     if (session != null)
-                      HarnessStatusPill(
-                        label: 'Session ${statusLabel(session.status)}',
-                        color: HarnessColors.status(
-                          session.status,
-                          theme.brightness,
-                        ),
-                      ),
+                      'Session ${statusLabel(session.status)}',
                     if (task.verified)
-                      const HarnessStatusPill(
-                        label: 'Verified',
+                      const HarnessMetaPart(
+                        'Verified',
                         color: HarnessColors.moss,
-                        icon: Icons.verified_outlined,
+                        weight: FontWeight.w700,
                       ),
-                    if (task.noMerge)
-                      const HarnessStatusPill(
-                        label: 'No merge',
-                        color: HarnessColors.slate,
-                        icon: Icons.call_merge_rounded,
-                      ),
+                    if (task.noMerge) 'No merge',
                     if (task.cannotContinue)
-                      const HarnessStatusPill(
-                        label: 'Cannot continue',
+                      const HarnessMetaPart(
+                        'Cannot continue',
                         color: HarnessColors.amber,
+                        weight: FontWeight.w700,
                       ),
                   ],
                 ),
                 if (task.sessionId != null) ...[
-                  const SizedBox(height: 14),
+                  const SizedBox(height: HarnessSpace.lg),
                   HarnessSecondaryButton(
                     label: 'Open the task’s session',
                     icon: Icons.open_in_new_rounded,
@@ -1424,17 +1470,20 @@ class _TaskDetail extends StatelessWidget {
                   ),
                 ],
                 if (task.error != null && task.error!.isNotEmpty) ...[
-                  const SizedBox(height: 12),
-                  HarnessErrorBanner(message: task.error!),
+                  const SizedBox(height: HarnessSpace.md),
+                  HarnessErrorBanner(
+                    message: task.error!,
+                    margin: EdgeInsets.zero,
+                  ),
                 ],
-                const SizedBox(height: 18),
+                const SizedBox(height: HarnessSpace.lg),
                 _DetailSection(
                   title: 'Prompt',
                   child: Text(
                     task.prompt.trim().isEmpty
                         ? 'No prompt recorded.'
                         : task.prompt,
-                    style: theme.textTheme.bodyMedium?.copyWith(height: 1.5),
+                    style: HarnessText.body(context).copyWith(height: 1.5),
                   ),
                 ),
                 if (task.attachments.isNotEmpty) ...[
@@ -1467,55 +1516,61 @@ class _TaskDetail extends StatelessWidget {
                   ),
                 ],
                 if (task.report != null) ...[
-                  const SizedBox(height: 16),
+                  const SizedBox(height: HarnessSpace.md),
                   _DetailSection(
                     title: 'Report',
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         if (task.report!.missing)
-                          Text(
-                            'No report was handed in; this is the last message.',
-                            style: theme.textTheme.labelSmall?.copyWith(
-                              color: HarnessColors.amber,
+                          Padding(
+                            padding: const EdgeInsets.only(bottom: 6),
+                            child: Text(
+                              'No report was handed in; this is the last '
+                              'message.',
+                              style: HarnessText.caption(context)
+                                  .copyWith(color: HarnessColors.amber),
                             ),
                           ),
                         if (task.report!.summary.isNotEmpty)
                           Text(
                             task.report!.summary,
-                            style: theme.textTheme.bodyMedium?.copyWith(
-                              height: 1.5,
-                            ),
+                            style: HarnessText.body(context)
+                                .copyWith(height: 1.5),
                           ),
                         if (task.report!.reproduction != null &&
                             task.report!.reproduction!.isNotEmpty) ...[
-                          const SizedBox(height: 10),
+                          const SizedBox(height: HarnessSpace.md),
                           Text(
                             'TO REPRODUCE',
-                            style: theme.textTheme.labelSmall?.copyWith(
-                              letterSpacing: 1,
-                              fontWeight: FontWeight.w700,
-                              color: theme.colorScheme.onSurfaceVariant,
-                            ),
+                            style: HarnessText.label(context),
                           ),
                           const SizedBox(height: 4),
-                          Text(task.report!.reproduction!),
+                          Text(
+                            task.report!.reproduction!,
+                            style: HarnessText.body(context)
+                                .copyWith(height: 1.5),
+                          ),
                         ],
                         for (final line in task.report!.evidenceLines) ...[
-                          const SizedBox(height: 5),
+                          const SizedBox(height: 6),
                           Row(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              const Icon(
-                                Icons.check_circle_outline_rounded,
-                                size: 14,
+                              Padding(
+                                padding: const EdgeInsets.only(top: 2),
+                                child: Icon(
+                                  Icons.check_circle_outline_rounded,
+                                  size: 15,
+                                  color: muted,
+                                ),
                               ),
-                              const SizedBox(width: 6),
+                              const SizedBox(width: 8),
                               Expanded(
                                 child: Text(
                                   line,
-                                  style: theme.textTheme.bodySmall?.copyWith(
-                                    fontSize: 12,
+                                  style: HarnessText.subtitle(context).copyWith(
+                                    color: theme.colorScheme.onSurface,
                                   ),
                                 ),
                               ),
@@ -1527,7 +1582,7 @@ class _TaskDetail extends StatelessWidget {
                   ),
                 ],
                 if (task.feedback.isNotEmpty) ...[
-                  const SizedBox(height: 16),
+                  const SizedBox(height: HarnessSpace.md),
                   _DetailSection(
                     title: 'Feedback rounds',
                     child: Column(
@@ -1538,14 +1593,22 @@ class _TaskDetail extends StatelessWidget {
                             child: Row(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
-                                const Icon(Icons.reply_rounded, size: 14),
-                                const SizedBox(width: 6),
+                                Padding(
+                                  padding: const EdgeInsets.only(top: 2),
+                                  child: Icon(
+                                    Icons.reply_rounded,
+                                    size: 15,
+                                    color: muted,
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
                                 Expanded(
                                   child: Text(
                                     round.text,
-                                    style: theme.textTheme.bodySmall?.copyWith(
-                                      fontSize: 12.5,
-                                    ),
+                                    style: HarnessText.subtitle(context)
+                                        .copyWith(
+                                          color: theme.colorScheme.onSurface,
+                                        ),
                                   ),
                                 ),
                               ],
@@ -1556,13 +1619,16 @@ class _TaskDetail extends StatelessWidget {
                   ),
                 ],
                 if (task.conflicts.isNotEmpty) ...[
-                  const SizedBox(height: 16),
+                  const SizedBox(height: HarnessSpace.md),
                   _DetailSection(
                     title: 'Merge conflicts',
-                    child: Text(task.conflicts.join('\n')),
+                    child: Text(
+                      task.conflicts.join('\n'),
+                      style: HarnessText.mono(context),
+                    ),
                   ),
                 ],
-                const SizedBox(height: 20),
+                const SizedBox(height: HarnessSpace.xl),
                 _DetailActions(
                   task: task,
                   controller: controller,
@@ -1590,6 +1656,9 @@ class _TaskDetail extends StatelessWidget {
   }
 }
 
+/// What can be done with the task.  The one action to take is full width;
+/// the others share a row, in equal parts: no ragged edge, and a thumb can
+/// find them in the same place every time.
 class _DetailActions extends StatelessWidget {
   const _DetailActions({
     required this.task,
@@ -1605,66 +1674,90 @@ class _DetailActions extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Wrap(
-      spacing: 8,
-      runSpacing: 8,
+    final primary = <Widget>[
+      if (task.isReview)
+        HarnessPrimaryButton(
+          label: 'Verify and merge',
+          icon: Icons.check_rounded,
+          expand: true,
+          onPressed: () => controller.verify(task.id),
+        ),
+      if (task.isPending)
+        HarnessPrimaryButton(
+          label: 'Start now',
+          icon: Icons.play_arrow_rounded,
+          expand: true,
+          onPressed: () => controller.start(task.id),
+        ),
+      if (task.isBacklog)
+        HarnessPrimaryButton(
+          label: 'Start',
+          icon: Icons.play_arrow_rounded,
+          expand: true,
+          onPressed: () => controller.start(task.id),
+        ),
+    ];
+    final secondary = <Widget>[
+      if (task.isReview)
+        HarnessSecondaryButton(
+          label: 'Send back',
+          icon: Icons.reply_rounded,
+          expand: true,
+          onPressed: onReject,
+        ),
+      if (task.isBacklog)
+        HarnessSecondaryButton(
+          label: 'Queue it',
+          icon: Icons.playlist_add_rounded,
+          expand: true,
+          onPressed: () => controller.queue(task.id),
+        ),
+      if (task.isStopped && !task.isReview)
+        HarnessSecondaryButton(
+          label: 'Retry',
+          icon: Icons.replay_rounded,
+          expand: true,
+          onPressed: () => controller.retry(task.id),
+        ),
+      if (!task.isDone)
+        HarnessSecondaryButton(
+          label: 'Mark complete',
+          icon: Icons.done_all_rounded,
+          expand: true,
+          onPressed: () async {
+            final confirmed = await showHarnessDialog<bool>(
+              context: context,
+              title: 'Mark this task complete?',
+              message: 'That accepts the work without waiting for a merge.',
+              confirmLabel: 'Complete',
+              destructive: true,
+            );
+            if (confirmed == true) await controller.complete(task.id);
+          },
+        ),
+      if (task.isDone)
+        HarnessSecondaryButton(
+          label: 'Archive',
+          icon: Icons.archive_outlined,
+          expand: true,
+          onPressed: () => controller.archive(task.id),
+        ),
+    ];
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        if (task.isReview) ...[
-          HarnessPrimaryButton(
-            label: 'Verify and merge',
-            icon: Icons.check_rounded,
-            onPressed: () => controller.verify(task.id),
-          ),
-          HarnessSecondaryButton(
-            label: 'Send back',
-            icon: Icons.reply_rounded,
-            onPressed: onReject,
-          ),
+        for (final button in primary) ...[
+          button,
+          const SizedBox(height: HarnessSpace.sm),
         ],
-        if (task.isPending)
-          HarnessPrimaryButton(
-            label: 'Start now',
-            icon: Icons.play_arrow_rounded,
-            onPressed: () => controller.start(task.id),
-          ),
-        if (task.isBacklog) ...[
-          HarnessPrimaryButton(
-            label: 'Start',
-            icon: Icons.play_arrow_rounded,
-            onPressed: () => controller.start(task.id),
-          ),
-          HarnessSecondaryButton(
-            label: 'Queue it',
-            icon: Icons.playlist_add_rounded,
-            onPressed: () => controller.queue(task.id),
-          ),
-        ],
-        if (task.isStopped && !task.isReview)
-          HarnessSecondaryButton(
-            label: 'Retry',
-            icon: Icons.replay_rounded,
-            onPressed: () => controller.retry(task.id),
-          ),
-        if (!task.isDone)
-          HarnessSecondaryButton(
-            label: 'Mark complete',
-            icon: Icons.done_all_rounded,
-            onPressed: () async {
-              final confirmed = await showHarnessDialog<bool>(
-                context: context,
-                title: 'Mark this task complete?',
-                message: 'That accepts the work without waiting for a merge.',
-                confirmLabel: 'Complete',
-                destructive: true,
-              );
-              if (confirmed == true) await controller.complete(task.id);
-            },
-          ),
-        if (task.isDone)
-          HarnessSecondaryButton(
-            label: 'Archive',
-            icon: Icons.archive_outlined,
-            onPressed: () => controller.archive(task.id),
+        if (secondary.isNotEmpty)
+          Row(
+            children: [
+              for (var index = 0; index < secondary.length; index++) ...[
+                if (index > 0) const SizedBox(width: HarnessSpace.sm),
+                Expanded(child: secondary[index]),
+              ],
+            ],
           ),
       ],
     );
@@ -1678,52 +1771,16 @@ class _DetailSection extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Container(
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: theme.colorScheme.surfaceContainerLow,
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: theme.colorScheme.outlineVariant),
-      ),
+    return HarnessCard(
+      padding: const EdgeInsets.all(HarnessSpace.lg),
+      radius: 14,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            title.toUpperCase(),
-            style: theme.textTheme.labelSmall?.copyWith(
-              letterSpacing: 1.1,
-              fontWeight: FontWeight.w700,
-              color: theme.colorScheme.onSurfaceVariant,
-            ),
-          ),
-          const SizedBox(height: 8),
+          Text(title.toUpperCase(), style: HarnessText.label(context)),
+          const SizedBox(height: HarnessSpace.sm),
           child,
         ],
-      ),
-    );
-  }
-}
-
-class _PriorityDot extends StatelessWidget {
-  const _PriorityDot({required this.priority});
-  final String? priority;
-
-  @override
-  Widget build(BuildContext context) {
-    final color = switch (priority) {
-      'high' => HarnessColors.oxide,
-      'low' => Theme.of(
-        context,
-      ).colorScheme.onSurfaceVariant.withValues(alpha: 0.4),
-      _ => HarnessColors.amber,
-    };
-    return Tooltip(
-      message: '${priority ?? 'medium'} priority',
-      child: Container(
-        width: 6,
-        height: 6,
-        decoration: BoxDecoration(color: color, shape: BoxShape.circle),
       ),
     );
   }

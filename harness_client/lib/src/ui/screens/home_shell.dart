@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 
 import '../../state/app_controller.dart';
 import '../adaptive/adaptive_widgets.dart';
+import '../adaptive/layout_widgets.dart';
 import '../adaptive/mark.dart';
 import '../adaptive/platform_style.dart';
 import '../format.dart';
@@ -99,6 +100,37 @@ class _HomeShellState extends State<HomeShell> {
     };
   }
 
+  /// The notices of the shell, in the order a person should meet them: what
+  /// went wrong, then what waits for an answer.
+  Widget _notices(BuildContext context, {required bool attention}) {
+    final app = widget.app;
+    final count = app.attentionCount;
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (app.lastActionError != null)
+          HarnessErrorBanner(
+            message: app.lastActionError!,
+            onDismiss: app.clearActionError,
+          ),
+        if (attention && count > 0)
+          HarnessNotice(
+            icon: Icons.front_hand_rounded,
+            message: count == 1
+                ? 'One session needs your answer'
+                : '$count sessions need your answer',
+            onTap: _openAttentionSession,
+            margin: const EdgeInsets.fromLTRB(
+              HarnessSpace.gutter,
+              HarnessSpace.sm,
+              HarnessSpace.gutter,
+              HarnessSpace.xs,
+            ),
+          ),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final app = widget.app;
@@ -109,36 +141,15 @@ class _HomeShellState extends State<HomeShell> {
     final index = tabs.indexWhere((tab) => tab.id == _tab);
     final wide = MediaQuery.sizeOf(context).width >= 920;
     final cupertino = HarnessStyle.isCupertino(context);
-    final body = Stack(
-      children: [
-        IndexedStack(
-          index: index < 0 ? 0 : index,
-          children: [for (final tab in tabs) _screen(tab.id)],
-        ),
-        Positioned(
-          top: 0,
-          left: 0,
-          right: 0,
-          child: SafeArea(
-            bottom: false,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (app.lastActionError != null)
-                  HarnessErrorBanner(
-                    message: app.lastActionError!,
-                    onDismiss: app.clearActionError,
-                  ),
-                if (app.attentionCount > 0)
-                  _AttentionBanner(
-                    count: app.attentionCount,
-                    onTap: _openAttentionSession,
-                  ),
-              ],
-            ),
-          ),
-        ),
-      ],
+    // What the shell has to say (a failed action, a session that needs an
+    // answer) is not laid over the pages: each page puts it in its own flow,
+    // under its header (see [HarnessChrome]).
+    final body = HarnessChrome(
+      notices: _notices,
+      child: IndexedStack(
+        index: index < 0 ? 0 : index,
+        children: [for (final tab in tabs) _screen(tab.id)],
+      ),
     );
 
     if (wide) {
@@ -317,9 +328,7 @@ class _Sidebar extends StatelessWidget {
           child: HarnessWordmark(
             size: 30,
             color: theme.colorScheme.onSurface,
-            subtitle: app.capability?.isHarness == true
-                ? 'HARNESS'
-                : 'ACP CLIENT',
+            subtitle: 'AGENT CLIENT',
           ),
         ),
         for (final tab in tabs)
@@ -333,60 +342,53 @@ class _Sidebar extends StatelessWidget {
             ),
           ),
         const Spacer(),
+        // Who this is connected to, and the way out: one block, its two
+        // lines left-aligned under the dot.
         Padding(
-          padding: const EdgeInsets.all(14),
-          child: Container(
-            padding: const EdgeInsets.all(13),
-            decoration: BoxDecoration(
-              color: theme.colorScheme.primary.withValues(alpha: 0.06),
-              borderRadius: BorderRadius.circular(16),
-              border: Border.all(
-                color: theme.colorScheme.primary.withValues(alpha: 0.16),
-              ),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+          padding: const EdgeInsets.all(HarnessSpace.md),
+          child: HarnessCard(
+            padding: const EdgeInsets.fromLTRB(14, 10, 4, 10),
+            child: Row(
               children: [
-                Row(
-                  children: [
-                    Container(
-                      width: 7,
-                      height: 7,
-                      decoration: BoxDecoration(
-                        color: app.isReconnecting
-                            ? HarnessColors.amber
-                            : HarnessColors.moss,
-                        shape: BoxShape.circle,
-                      ),
-                    ),
-                    const SizedBox(width: 7),
-                    Expanded(
-                      child: Text(
-                        app.isReconnecting
-                            ? 'Reconnecting…'
-                            : app.capability?.agentName ?? 'Connected',
+                HarnessDot(
+                  color: app.isReconnecting
+                      ? HarnessColors.amber
+                      : HarnessColors.moss,
+                  size: 8,
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        app.capability?.agentName ?? 'Connected',
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
-                        style: theme.textTheme.labelMedium?.copyWith(
-                          fontWeight: FontWeight.w700,
-                        ),
+                        style: HarnessText.rowTitle(context)
+                            .copyWith(fontSize: 14),
                       ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  shortAddress(app.address),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: theme.textTheme.bodySmall?.copyWith(
-                    color: theme.colorScheme.onSurfaceVariant,
+                      const SizedBox(height: 2),
+                      Text(
+                        app.isReconnecting
+                            ? 'Reconnecting…'
+                            : shortAddress(app.address),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: HarnessText.caption(context),
+                      ),
+                    ],
                   ),
                 ),
-                const SizedBox(height: 10),
-                HarnessTextButton(
+                HarnessIconButton(
+                  icon: adaptiveIcon(
+                    context,
+                    Icons.logout_rounded,
+                    CupertinoIcons.square_arrow_right,
+                  ),
                   label: 'Disconnect',
-                  icon: Icons.logout_rounded,
+                  size: 19,
                   onPressed: app.disconnect,
                 ),
               ],
@@ -488,63 +490,6 @@ class _SidebarItem extends StatelessWidget {
   }
 }
 
-class _AttentionBanner extends StatelessWidget {
-  const _AttentionBanner({required this.count, required this.onTap});
-  final int count;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final color = HarnessColors.amber;
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 6, 16, 0),
-      child: Material(
-        color: Colors.transparent,
-        child: InkWell(
-          borderRadius: BorderRadius.circular(999),
-          onTap: onTap,
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
-            decoration: BoxDecoration(
-              color: color.withValues(alpha: 0.14),
-              borderRadius: BorderRadius.circular(999),
-              border: Border.all(color: color.withValues(alpha: 0.3)),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.06),
-                  blurRadius: 16,
-                  offset: const Offset(0, 4),
-                ),
-              ],
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(Icons.front_hand_rounded, size: 16, color: color),
-                const SizedBox(width: 8),
-                Flexible(
-                  child: Text(
-                    count == 1
-                        ? 'One session needs your answer'
-                        : '$count sessions need your answer',
-                    style: theme.textTheme.labelMedium?.copyWith(
-                      color: theme.colorScheme.onSurface,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 6),
-                Icon(Icons.arrow_forward_rounded, size: 15, color: color),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
 class SessionsWorkspace extends StatelessWidget {
   const SessionsWorkspace({
     super.key,
@@ -562,6 +507,19 @@ class SessionsWorkspace extends StatelessWidget {
     if (!wide) {
       return SessionsScreen(app: app, onOpenSession: onOpenSession);
     }
+    // The two panes have no page header between them to put a notice under:
+    // what went wrong is above both.  (The list says what needs an answer.)
+    final notices = HarnessChrome.maybeOf(context)
+        ?.notices(context, attention: false);
+    return Column(
+      children: [
+        notices ?? const SizedBox.shrink(),
+        Expanded(child: _panes(context, selectedId)),
+      ],
+    );
+  }
+
+  Widget _panes(BuildContext context, String? selectedId) {
     return Row(
       children: [
         SizedBox(

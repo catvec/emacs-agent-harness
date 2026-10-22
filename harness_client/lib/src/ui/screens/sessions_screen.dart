@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import '../../models/session.dart';
 import '../../state/app_controller.dart';
 import '../adaptive/adaptive_widgets.dart';
+import '../adaptive/layout_widgets.dart';
 import '../adaptive/platform_style.dart';
 import '../format.dart';
 import '../theme/harness_theme.dart';
@@ -86,6 +87,9 @@ class _SessionsScreenState extends State<SessionsScreen> {
   Widget build(BuildContext context) {
     final app = widget.app;
     final sessions = _visible;
+    // The project is said once, in the scope bar: a row names its project
+    // only where there is more than one to tell apart.
+    final showProject = _project == null && app.projects.length != 1;
     final body = Column(
       children: [
         _Toolbar(
@@ -102,6 +106,7 @@ class _SessionsScreenState extends State<SessionsScreen> {
           child: _SessionList(
             app: app,
             sessions: sessions,
+            showProject: showProject,
             onOpen: widget.onOpenSession,
             onRefresh: _refresh,
             onNew: () => _newSession(context),
@@ -136,25 +141,34 @@ class _SessionsScreenState extends State<SessionsScreen> {
           right: false,
           child: Column(
             children: [
+              // The header of this pane: the title, how many, the actions.
               Padding(
-                padding: const EdgeInsets.fromLTRB(20, 14, 8, 0),
+                padding: const EdgeInsets.fromLTRB(
+                  HarnessSpace.gutter,
+                  HarnessSpace.md,
+                  HarnessSpace.sm,
+                  0,
+                ),
                 child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.center,
                   children: [
-                    Text(
-                      'Sessions',
-                      style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                        fontWeight: FontWeight.w700,
-                        letterSpacing: -0.5,
+                    Expanded(
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.baseline,
+                        textBaseline: TextBaseline.alphabetic,
+                        children: [
+                          Text(
+                            'Sessions',
+                            style: HarnessText.pageTitle(context),
+                          ),
+                          const SizedBox(width: HarnessSpace.sm),
+                          Text(
+                            '${app.sessions.length}',
+                            style: HarnessText.meta(context),
+                          ),
+                        ],
                       ),
                     ),
-                    const SizedBox(width: 8),
-                    Text(
-                      '${app.sessions.length}',
-                      style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                        color: Theme.of(context).colorScheme.onSurfaceVariant,
-                      ),
-                    ),
-                    const Spacer(),
                     refreshButton,
                     newButton,
                   ],
@@ -169,6 +183,8 @@ class _SessionsScreenState extends State<SessionsScreen> {
     return HarnessPage(
       title: 'Sessions',
       actions: [refreshButton, newButton],
+      // The first section of the list is the sessions that need an answer.
+      attentionNotice: false,
       body: body,
     );
   }
@@ -185,6 +201,8 @@ class _SessionsScreenState extends State<SessionsScreen> {
   }
 }
 
+/// What narrows the list, top to bottom: the project, the search, the way
+/// to look at it.  Each is full width and starts on the gutter.
 class _Toolbar extends StatelessWidget {
   const _Toolbar({
     required this.app,
@@ -213,12 +231,41 @@ class _Toolbar extends StatelessWidget {
         .where((s) => app.needsAttention(s.id))
         .length;
     final active = app.sessions.where((s) => s.isActive).length;
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 6, 16, 6),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          HarnessTextField(
+    // A project to choose is only worth a line where there is a choice.
+    final scoped = app.projects.length > 1 || project != null;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (scoped)
+          HarnessScopeBar(
+            label: project == null ? 'All projects' : projectName(project),
+            onTap: () async {
+              final choice = await showHarnessMenu<String>(
+                context: context,
+                title: 'Projects',
+                items: [
+                  const HarnessMenuItem(value: '', label: 'All projects'),
+                  for (final item in app.projects)
+                    HarnessMenuItem(
+                      value: item,
+                      label: projectName(item),
+                      icon: Icons.folder_outlined,
+                    ),
+                ],
+              );
+              if (choice != null) {
+                onProject(choice.isEmpty ? null : choice);
+              }
+            },
+          ),
+        Padding(
+          padding: EdgeInsets.fromLTRB(
+            HarnessSpace.gutter,
+            scoped ? 0 : HarnessSpace.sm,
+            HarnessSpace.gutter,
+            HarnessSpace.sm,
+          ),
+          child: HarnessTextField(
             key: const Key('session-search'),
             controller: search,
             focusNode: focus,
@@ -246,87 +293,60 @@ class _Toolbar extends StatelessWidget {
                     },
                   ),
           ),
-          const SizedBox(height: 10),
-          Wrap(
-            spacing: 6,
-            runSpacing: 6,
-            children: [
-              HarnessPill(
-                label: 'All',
-                count: app.sessions.length,
-                selected: filter == _SessionFilter.all,
-                onTap: () => onFilter(_SessionFilter.all),
-              ),
-              HarnessPill(
-                label: 'Active',
-                count: active,
-                selected: filter == _SessionFilter.active,
-                onTap: () => onFilter(_SessionFilter.active),
-              ),
-              HarnessPill(
-                label: 'Needs you',
-                count: attention,
-                selected: filter == _SessionFilter.needsYou,
-                color: attention > 0 ? HarnessColors.amber : null,
-                onTap: () => onFilter(_SessionFilter.needsYou),
-              ),
-              HarnessPill(
-                label: project == null ? 'All projects' : projectName(project),
-                icon: Icons.folder_outlined,
-                selected: project != null,
-                onTap: () async {
-                  final choice = await showHarnessMenu<String>(
-                    context: context,
-                    title: 'Projects',
-                    items: [
-                      const HarnessMenuItem(value: '', label: 'All projects'),
-                      for (final item in app.projects)
-                        HarnessMenuItem(
-                          value: item,
-                          label: projectName(item),
-                          icon: Icons.folder_outlined,
-                        ),
-                    ],
-                  );
-                  if (choice != null) {
-                    onProject(choice.isEmpty ? null : choice);
-                  }
-                },
-              ),
-            ],
-          ),
-          if (app.capability?.isHarness != true) ...[
-            const SizedBox(height: 8),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
-              decoration: BoxDecoration(
-                color: theme.colorScheme.surfaceContainerLow,
-                borderRadius: BorderRadius.circular(10),
-                border: Border.all(color: theme.colorScheme.outlineVariant),
-              ),
-              child: Row(
-                children: [
-                  Icon(
-                    Icons.cable_rounded,
-                    size: 14,
-                    color: theme.colorScheme.onSurfaceVariant,
-                  ),
-                  const SizedBox(width: 7),
-                  Expanded(
-                    child: Text(
-                      'Standard ACP agent · the task board and usage views are hidden.',
-                      style: theme.textTheme.labelSmall?.copyWith(
-                        color: theme.colorScheme.onSurfaceVariant,
-                        fontSize: 10.5,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
+        ),
+        HarnessTabStrip<_SessionFilter>(
+          value: filter,
+          onChanged: onFilter,
+          tabs: [
+            HarnessTab(
+              value: _SessionFilter.all,
+              label: 'All',
+              count: app.sessions.length,
+            ),
+            HarnessTab(
+              value: _SessionFilter.active,
+              label: 'Active',
+              count: active,
+            ),
+            HarnessTab(
+              value: _SessionFilter.needsYou,
+              label: 'Needs you',
+              count: attention,
+              color: attention > 0 ? HarnessColors.amber : null,
             ),
           ],
-        ],
-      ),
+        ),
+        if (app.capability?.isHarness != true)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(
+              HarnessSpace.gutter,
+              HarnessSpace.md,
+              HarnessSpace.gutter,
+              0,
+            ),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.only(top: 1),
+                  child: Icon(
+                    Icons.cable_rounded,
+                    size: 15,
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
+                ),
+                const SizedBox(width: HarnessSpace.sm),
+                Expanded(
+                  child: Text(
+                    'Standard ACP agent · the task board and usage views are '
+                    'hidden.',
+                    style: HarnessText.caption(context),
+                  ),
+                ),
+              ],
+            ),
+          ),
+      ],
     );
   }
 }
@@ -335,6 +355,7 @@ class _SessionList extends StatelessWidget {
   const _SessionList({
     required this.app,
     required this.sessions,
+    required this.showProject,
     required this.onOpen,
     required this.onRefresh,
     required this.onNew,
@@ -343,6 +364,7 @@ class _SessionList extends StatelessWidget {
 
   final AppController app;
   final List<SessionSummary> sessions;
+  final bool showProject;
   final ValueChanged<String> onOpen;
   final Future<void> Function() onRefresh;
   final VoidCallback onNew;
@@ -404,13 +426,14 @@ class _SessionList extends StatelessWidget {
         _SessionRow(
           app: app,
           session: session,
+          showProject: showProject,
           onTap: () => onOpen(session.id),
         ),
       );
       children.add(
         Divider(
           height: 1,
-          indent: 68,
+          indent: _SessionRow.textInset,
           color: Theme.of(context).colorScheme.outlineVariant
               .withValues(alpha: 0.7),
         ),
@@ -446,24 +469,26 @@ class _SectionLabel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
+    final style = HarnessText.label(context);
     return Padding(
-      padding: const EdgeInsets.fromLTRB(20, 16, 20, 6),
+      // On the gutter, the left edge of the avatars below it.
+      padding: const EdgeInsets.fromLTRB(
+        HarnessSpace.gutter,
+        HarnessSpace.lg,
+        HarnessSpace.gutter,
+        HarnessSpace.xs,
+      ),
       child: Row(
+        crossAxisAlignment: CrossAxisAlignment.baseline,
+        textBaseline: TextBaseline.alphabetic,
         children: [
-          Text(
-            label.toUpperCase(),
-            style: theme.textTheme.labelSmall?.copyWith(
-              letterSpacing: 1.15,
-              fontWeight: FontWeight.w700,
-              color: theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.72),
-            ),
-          ),
+          Text(label.toUpperCase(), style: style),
           const SizedBox(width: 6),
           Text(
             '$count',
-            style: theme.textTheme.labelSmall?.copyWith(
-              color: theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.55),
+            style: style.copyWith(
+              fontWeight: FontWeight.w500,
+              color: style.color?.withValues(alpha: 0.7),
             ),
           ),
         ],
@@ -472,16 +497,25 @@ class _SectionLabel extends StatelessWidget {
   }
 }
 
+/// A conversation in the list.  Three columns: the avatar (its state), the
+/// title over what it is about, and at the edge the time over the cost; the
+/// two lines of text and the two facts at the edge share their baselines.
 class _SessionRow extends StatelessWidget {
   const _SessionRow({
     required this.app,
     required this.session,
+    required this.showProject,
     required this.onTap,
   });
 
   final AppController app;
   final SessionSummary session;
+  final bool showProject;
   final VoidCallback onTap;
+
+  /// Where the text starts: the gutter, the avatar and the gap after it.
+  static const textInset = HarnessSpace.gutter + _avatar + HarnessSpace.md;
+  static const _avatar = 40.0;
 
   @override
   Widget build(BuildContext context) {
@@ -491,9 +525,11 @@ class _SessionRow extends StatelessWidget {
     final status = attention ? 'blocked' : live.status;
     final statusColor = HarnessColors.status(status, theme.brightness);
     final spend = app.spendOf(live);
+    final cupertino = HarnessStyle.isCupertino(context);
     final selected =
         app.activeSessionId == session.id &&
         MediaQuery.sizeOf(context).width >= 920;
+    final kind = live.kind != null && live.kind != 'main' ? live.kind : null;
     return Semantics(
       button: true,
       selected: selected,
@@ -506,7 +542,12 @@ class _SessionRow extends StatelessWidget {
               ? theme.colorScheme.primary.withValues(alpha: 0.06)
               : Colors.transparent,
           child: Padding(
-            padding: const EdgeInsets.fromLTRB(16, 11, 12, 11),
+            padding: const EdgeInsets.fromLTRB(
+              HarnessSpace.gutter,
+              HarnessSpace.md,
+              HarnessSpace.gutter,
+              HarnessSpace.md,
+            ),
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.center,
               children: [
@@ -516,114 +557,80 @@ class _SessionRow extends StatelessWidget {
                   running: live.isRunning && !attention,
                   attention: attention,
                 ),
-                const SizedBox(width: 12),
+                const SizedBox(width: HarnessSpace.md),
                 Expanded(
                   child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    mainAxisSize: MainAxisSize.min,
                     children: [
                       Row(
+                        crossAxisAlignment: CrossAxisAlignment.baseline,
+                        textBaseline: TextBaseline.alphabetic,
                         children: [
-                          Flexible(
+                          Expanded(
                             child: Text(
                               live.displayTitle,
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
-                              style: theme.textTheme.titleSmall?.copyWith(
-                                fontWeight: FontWeight.w600,
-                                letterSpacing: -0.2,
-                                fontSize: 15,
-                              ),
+                              style: HarnessText.rowTitle(context),
                             ),
                           ),
-                          if (live.kind != null && live.kind != 'main') ...[
-                            const SizedBox(width: 6),
-                            _KindTag(kind: live.kind!),
-                          ],
-                          if (live.isBlocked && !attention) ...[
-                            const SizedBox(width: 6),
-                            HarnessStatusPill(
-                              label: 'Waiting',
-                              color: HarnessColors.amber,
+                          const SizedBox(width: HarnessSpace.sm),
+                          Text(
+                            relativeTime(live.touchedAt),
+                            style: HarnessText.meta(context),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 2),
+                      Row(
+                        crossAxisAlignment: CrossAxisAlignment.baseline,
+                        textBaseline: TextBaseline.alphabetic,
+                        children: [
+                          Expanded(
+                            child: HarnessMetaLine(
+                              parts: [
+                                if (kind != null)
+                                  HarnessMetaPart(
+                                    kindLabel(kind),
+                                    weight: FontWeight.w600,
+                                    color: theme.colorScheme.onSurface,
+                                  ),
+                                if (showProject)
+                                  projectName(app.projectOfSession(live)),
+                                modelName(live.model),
+                              ],
+                            ),
+                          ),
+                          // The price, or the plan that pays: "$0.73", "Max".
+                          if (spend.worthShowing) ...[
+                            const SizedBox(width: HarnessSpace.sm),
+                            Text(
+                              spend.text,
+                              key: const Key('session-row-spend'),
+                              style: HarnessText.meta(context).copyWith(
+                                color: spend.planned ? planAccent(theme) : null,
+                                fontWeight: spend.planned
+                                    ? FontWeight.w700
+                                    : null,
+                              ),
                             ),
                           ],
                         ],
                       ),
-                      const SizedBox(height: 3),
-                      Text(
-                        _subtitle(live),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: theme.textTheme.bodySmall?.copyWith(
-                          color: theme.colorScheme.onSurfaceVariant,
-                          fontSize: 12.5,
-                        ),
-                      ),
                     ],
                   ),
                 ),
-                const SizedBox(width: 8),
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.end,
-                  children: [
-                    Text(
-                      relativeTime(live.touchedAt),
-                      style: theme.textTheme.labelSmall?.copyWith(
-                        color: attention
-                            ? HarnessColors.amber
-                            : theme.colorScheme.onSurfaceVariant,
-                        fontWeight: attention
-                            ? FontWeight.w700
-                            : FontWeight.w500,
-                      ),
-                    ),
-                    const SizedBox(height: 4),
-                    if (attention)
-                      const HarnessStatusPill(
-                        label: 'Needs you',
-                        color: HarnessColors.amber,
-                      )
-                    else if (spend.worthShowing)
-                      // The price, or the plan that pays: "$0.73", "Max".
-                      Text(
-                        spend.text,
-                        key: const Key('session-row-spend'),
-                        style: theme.textTheme.labelSmall?.copyWith(
-                          color: spend.planned
-                              ? planAccent(theme)
-                              : theme.colorScheme.onSurfaceVariant.withValues(
-                                  alpha: 0.65,
-                                ),
-                          fontWeight: spend.planned
-                              ? FontWeight.w700
-                              : FontWeight.w500,
-                          fontSize: 10,
-                        ),
-                      )
-                    else
-                      Text(
-                        statusLabel(live.status),
-                        style: theme.textTheme.labelSmall?.copyWith(
-                          color: statusColor,
-                          fontSize: 10,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                  ],
-                ),
-                const SizedBox(width: 2),
-                adaptiveChevron(context),
+                if (cupertino) ...[
+                  const SizedBox(width: HarnessSpace.xs),
+                  adaptiveChevron(context),
+                ],
               ],
             ),
           ),
         ),
       ),
     );
-  }
-
-  String _subtitle(SessionSummary live) {
-    final project = projectName(app.projectOfSession(live));
-    final model = modelName(live.model);
-    return '$project · $model';
   }
 }
 
@@ -650,8 +657,8 @@ class _SessionAvatar extends StatelessWidget {
       _ => attention ? Icons.front_hand_rounded : Icons.auto_awesome_rounded,
     };
     return Container(
-      width: 40,
-      height: 40,
+      width: _SessionRow._avatar,
+      height: _SessionRow._avatar,
       decoration: BoxDecoration(
         color: color.withValues(alpha: dark ? 0.2 : 0.12),
         shape: BoxShape.circle,
@@ -709,31 +716,6 @@ class _PulseState extends State<_Pulse> with SingleTickerProviderStateMixin {
           ),
         );
       },
-    );
-  }
-}
-
-class _KindTag extends StatelessWidget {
-  const _KindTag({required this.kind});
-  final String kind;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
-      decoration: BoxDecoration(
-        color: Theme.of(context).colorScheme.surfaceContainerHigh,
-        borderRadius: BorderRadius.circular(6),
-      ),
-      child: Text(
-        kindLabel(kind),
-        style: TextStyle(
-          fontSize: 9,
-          fontWeight: FontWeight.w600,
-          decoration: TextDecoration.none,
-          color: Theme.of(context).colorScheme.onSurfaceVariant,
-        ),
-      ),
     );
   }
 }
@@ -801,7 +783,6 @@ class _NewSessionSheetState extends State<_NewSessionSheet> {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
     final app = widget.app;
     final projects = app.projects;
     return Padding(
@@ -816,22 +797,15 @@ class _NewSessionSheetState extends State<_NewSessionSheet> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           mainAxisSize: MainAxisSize.min,
           children: [
-            Text(
-              'New session',
-              style: theme.textTheme.titleLarge?.copyWith(
-                fontWeight: FontWeight.w700,
-              ),
-            ),
+            Text('New session', style: HarnessText.sheetTitle(context)),
             const SizedBox(height: 4),
             Text(
               'A conversation is scoped to a directory.',
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
-              ),
+              style: HarnessText.subtitle(context),
             ),
-            const SizedBox(height: 18),
+            const SizedBox(height: 20),
             if (projects.isNotEmpty) ...[
-              Text('PROJECT', style: _labelStyle(theme)),
+              Text('PROJECT', style: HarnessText.label(context)),
               const SizedBox(height: 7),
               Wrap(
                 spacing: 6,
@@ -860,7 +834,7 @@ class _NewSessionSheetState extends State<_NewSessionSheet> {
               },
             ),
             const SizedBox(height: 14),
-            Text('NAME (OPTIONAL)', style: _labelStyle(theme)),
+            Text('NAME (OPTIONAL)', style: HarnessText.label(context)),
             const SizedBox(height: 7),
             HarnessTextField(
               controller: _name,
@@ -868,7 +842,7 @@ class _NewSessionSheetState extends State<_NewSessionSheet> {
             ),
             if (app.capability?.isHarness == true) ...[
               const SizedBox(height: 14),
-              Text('MODEL (OPTIONAL)', style: _labelStyle(theme)),
+              Text('MODEL (OPTIONAL)', style: HarnessText.label(context)),
               const SizedBox(height: 7),
               HarnessTextField(
                 controller: _model,
@@ -877,7 +851,7 @@ class _NewSessionSheetState extends State<_NewSessionSheet> {
             ],
             if (_error != null) ...[
               const SizedBox(height: 12),
-              HarnessErrorBanner(message: _error!),
+              HarnessErrorBanner(message: _error!, margin: EdgeInsets.zero),
             ],
             const SizedBox(height: 20),
             HarnessPrimaryButton(
@@ -892,11 +866,4 @@ class _NewSessionSheetState extends State<_NewSessionSheet> {
       ),
     );
   }
-
-  TextStyle? _labelStyle(ThemeData theme) =>
-      theme.textTheme.labelSmall?.copyWith(
-        letterSpacing: 1.1,
-        fontWeight: FontWeight.w700,
-        color: theme.colorScheme.onSurfaceVariant,
-      );
 }

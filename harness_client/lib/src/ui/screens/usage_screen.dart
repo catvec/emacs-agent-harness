@@ -8,8 +8,8 @@ import '../../acp/acp_message.dart';
 import '../../models/session.dart';
 import '../../models/usage.dart';
 import '../../state/app_controller.dart';
-import '../../state/usage_controller.dart';
 import '../adaptive/adaptive_widgets.dart';
+import '../adaptive/layout_widgets.dart';
 import '../format.dart';
 import '../theme/harness_theme.dart';
 import '../widgets/quota_widgets.dart';
@@ -34,6 +34,7 @@ class UsageScreen extends StatelessWidget {
       animation: Listenable.merge([controller, app]),
       builder: (context, _) {
         final overview = controller.overview;
+        final choose = app.projects.length > 1;
         final quota = app.quota;
         final plans = quota?.quotas ?? const [];
         // Asking again also has the providers ask their plans again.
@@ -43,33 +44,8 @@ class UsageScreen extends StatelessWidget {
         ]);
         return HarnessPage(
           title: 'Usage',
+          maxContentWidth: HarnessSpace.pageWidth,
           actions: [
-            HarnessIconButton(
-              icon: adaptiveIcon(
-                context,
-                Icons.folder_outlined,
-                CupertinoIcons.folder,
-              ),
-              label: 'Usage project',
-              onPressed: () async {
-                final chosen = await showHarnessMenu<String>(
-                  context: context,
-                  title: 'Usage project',
-                  items: [
-                    const HarnessMenuItem(value: '', label: 'All projects'),
-                    for (final project in app.projects)
-                      HarnessMenuItem(
-                        value: project,
-                        label: projectName(project),
-                        icon: Icons.folder_outlined,
-                      ),
-                  ],
-                );
-                if (chosen != null) {
-                  app.selectProject(chosen.isEmpty ? null : chosen);
-                }
-              },
-            ),
             HarnessIconButton(
               icon: adaptiveIcon(
                 context,
@@ -80,99 +56,140 @@ class UsageScreen extends StatelessWidget {
               onPressed: reload,
             ),
           ],
-          body: RefreshIndicator(
-            onRefresh: reload,
-            child: ListView(
-              physics: const AlwaysScrollableScrollPhysics(),
-              padding: const EdgeInsets.fromLTRB(16, 6, 16, 28),
-              children: [
-                if (controller.error != null)
-                  HarnessErrorBanner(message: controller.error!),
-                _ScopeLine(app: app, controller: controller),
-                const SizedBox(height: 12),
-                _SpendHero(overview: overview, project: app.selectedProject),
-                // How each provider bills and what is left of its plan,
-                // beside what the plan has covered.
-                if (plans.isNotEmpty) ...[
-                  HarnessSectionHeader(
-                    label: 'Plan',
-                    padding: const EdgeInsets.fromLTRB(2, 22, 2, 8),
-                    trailing: _PlanRefresh(
-                      busy: quota!.loading,
-                      onPressed: () =>
-                          quota.load(refresh: true, showSpinner: true),
-                    ),
-                  ),
-                  for (final plan in plans)
-                    PlanCard(label: quota.labelOf(plan.provider), quota: plan),
-                ],
-                if (overview.live.isNotEmpty) ...[
-                  const HarnessSectionHeader(
-                    label: 'Live now',
-                    padding: EdgeInsets.fromLTRB(2, 22, 2, 8),
-                  ),
-                  for (final live in overview.live)
-                    _LiveRow(
-                      live: live,
-                      session: app.summaryFor(live.sessionId),
-                      onTap: () => onOpenSession(live.sessionId),
-                    ),
-                ],
-                const HarnessSectionHeader(
-                  label: 'Spend by day',
-                  padding: EdgeInsets.fromLTRB(2, 22, 2, 8),
-                ),
-                _SpendChart(points: overview.byDay),
-                if (overview.byModel.isNotEmpty) ...[
-                  const HarnessSectionHeader(
-                    label: 'Models',
-                    padding: EdgeInsets.fromLTRB(2, 24, 2, 8),
-                  ),
-                  _UsageBars(rows: overview.byModel),
-                ],
-                if (overview.byProject.isNotEmpty) ...[
-                  const HarnessSectionHeader(
-                    label: 'Projects',
-                    padding: EdgeInsets.fromLTRB(2, 24, 2, 8),
-                  ),
-                  _UsageBars(rows: overview.byProject, showMain: true),
-                ],
-                if (overview.budgets.isNotEmpty) ...[
-                  const HarnessSectionHeader(
-                    label: 'Budgets',
-                    padding: EdgeInsets.fromLTRB(2, 24, 2, 8),
-                  ),
-                  if (plans.any((plan) => plan.isPlan))
-                    Padding(
-                      padding: const EdgeInsets.fromLTRB(2, 0, 2, 8),
-                      child: Text(
-                        'Budgets count billed cost; calls a plan covers do '
-                        'not spend them.',
-                        style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                          color: Theme.of(context).colorScheme.onSurfaceVariant,
-                        ),
+          body: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              // What the numbers are about, and how fresh they are.
+              HarnessScopeBar(
+                label: app.selectedProject == null
+                    ? 'All projects'
+                    : projectName(app.selectedProject),
+                onTap: choose
+                    ? () async {
+                        final chosen = await showHarnessMenu<String>(
+                          context: context,
+                          title: 'Usage project',
+                          items: [
+                            const HarnessMenuItem(
+                              value: '',
+                              label: 'All projects',
+                            ),
+                            for (final project in app.projects)
+                              HarnessMenuItem(
+                                value: project,
+                                label: projectName(project),
+                                icon: Icons.folder_outlined,
+                              ),
+                          ],
+                        );
+                        if (chosen != null) {
+                          app.selectProject(chosen.isEmpty ? null : chosen);
+                        }
+                      }
+                    : null,
+                trailing: controller.lastLoaded == null
+                    ? null
+                    : Text(
+                        'Updated ${relativeTime(controller.lastLoaded)}',
+                        style: HarnessText.meta(context),
                       ),
+              ),
+              Expanded(
+                child: RefreshIndicator(
+                  onRefresh: reload,
+                  child: ListView(
+                    physics: const AlwaysScrollableScrollPhysics(),
+                    padding: const EdgeInsets.fromLTRB(
+                      HarnessSpace.gutter,
+                      HarnessSpace.xs,
+                      HarnessSpace.gutter,
+                      28,
                     ),
-                  for (final budget in overview.budgets)
-                    _BudgetRow(budget: budget),
-                ],
-                if (overview.totals.calls == 0 && !controller.loading) ...[
-                  const SizedBox(height: 30),
-                  HarnessEmptyState(
-                    icon: Icons.insights_rounded,
-                    title: 'No usage recorded yet',
-                    message:
-                        'Once this harness makes model calls, its spend, tokens and '
-                        'cache use appear here.',
+                    children: [
+                      if (controller.error != null)
+                        HarnessErrorBanner(
+                          message: controller.error!,
+                          margin: const EdgeInsets.only(bottom: 12),
+                        ),
+                      _SpendHero(
+                        overview: overview,
+                        project: app.selectedProject,
+                      ),
+                      // How each provider bills and what is left of its plan,
+                      // beside what the plan has covered.
+                      if (plans.isNotEmpty) ...[
+                        HarnessSectionHeader(
+                          label: 'Plan',
+                          trailing: _PlanRefresh(
+                            busy: quota!.loading,
+                            onPressed: () =>
+                                quota.load(refresh: true, showSpinner: true),
+                          ),
+                        ),
+                        for (final plan in plans)
+                          PlanCard(
+                            label: quota.labelOf(plan.provider),
+                            quota: plan,
+                          ),
+                      ],
+                      if (overview.live.isNotEmpty) ...[
+                        const HarnessSectionHeader(label: 'Live now'),
+                        for (final live in overview.live)
+                          _LiveRow(
+                            live: live,
+                            session: app.summaryFor(live.sessionId),
+                            onTap: () => onOpenSession(live.sessionId),
+                          ),
+                      ],
+                      const HarnessSectionHeader(label: 'Spend by day'),
+                      _SpendChart(points: overview.byDay),
+                      if (overview.byModel.isNotEmpty) ...[
+                        const HarnessSectionHeader(label: 'Models'),
+                        _UsageBars(rows: overview.byModel),
+                      ],
+                      if (overview.byProject.isNotEmpty) ...[
+                        const HarnessSectionHeader(label: 'Projects'),
+                        _UsageBars(rows: overview.byProject, showMain: true),
+                      ],
+                      if (overview.budgets.isNotEmpty) ...[
+                        const HarnessSectionHeader(label: 'Budgets'),
+                        if (plans.any((plan) => plan.isPlan))
+                          Padding(
+                            padding: const EdgeInsets.only(bottom: 8),
+                            child: Text(
+                              'Budgets count billed cost; calls a plan covers '
+                              'do not spend them.',
+                              style: HarnessText.caption(context),
+                            ),
+                          ),
+                        HarnessCardList(
+                          children: [
+                            for (final budget in overview.budgets)
+                              _BudgetRow(budget: budget),
+                          ],
+                        ),
+                      ],
+                      if (overview.totals.calls == 0 &&
+                          !controller.loading) ...[
+                        const SizedBox(height: 30),
+                        HarnessEmptyState(
+                          icon: Icons.insights_rounded,
+                          title: 'No usage recorded yet',
+                          message:
+                              'Once this harness makes model calls, its spend, '
+                              'tokens and cache use appear here.',
+                        ),
+                      ],
+                      if (controller.loading)
+                        const Padding(
+                          padding: EdgeInsets.only(top: 30),
+                          child: Center(child: HarnessActivity(radius: 10)),
+                        ),
+                    ],
                   ),
-                ],
-                if (controller.loading)
-                  const Padding(
-                    padding: EdgeInsets.only(top: 30),
-                    child: Center(child: HarnessActivity(radius: 10)),
-                  ),
-              ],
-            ),
+                ),
+              ),
+            ],
           ),
         );
       },
@@ -225,49 +242,6 @@ class _PlanRefresh extends StatelessWidget {
     );
   }
 }
-
-class _ScopeLine extends StatelessWidget {
-  const _ScopeLine({required this.app, required this.controller});
-  final AppController app;
-  final UsageController controller;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final scope = app.selectedProject == null
-        ? 'All projects'
-        : projectName(app.selectedProject);
-    return Row(
-      children: [
-        Icon(
-          Icons.folder_outlined,
-          size: 14,
-          color: theme.colorScheme.onSurfaceVariant,
-        ),
-        const SizedBox(width: 6),
-        Expanded(
-          child: Text(
-            scope,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: theme.textTheme.labelMedium?.copyWith(
-              color: theme.colorScheme.onSurfaceVariant,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-        ),
-        if (controller.lastLoaded != null)
-          Text(
-            'Updated ${relativeTime(controller.lastLoaded)}',
-            style: theme.textTheme.labelSmall?.copyWith(
-              color: theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.6),
-            ),
-          ),
-      ],
-    );
-  }
-}
-
 class _SpendHero extends StatelessWidget {
   const _SpendHero({required this.overview, this.project});
   final UsageOverview overview;
@@ -280,7 +254,7 @@ class _SpendHero extends StatelessWidget {
     final totals = overview.totals;
     final covered = totals.listCost - totals.cost;
     return Container(
-      padding: const EdgeInsets.fromLTRB(20, 18, 20, 18),
+      padding: const EdgeInsets.fromLTRB(20, 16, 20, 18),
       decoration: BoxDecoration(
         gradient: LinearGradient(
           begin: Alignment.topLeft,
@@ -303,25 +277,26 @@ class _SpendHero extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          // The label of the number, and what it counts, at the far edge.
           Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
             children: [
               Text(
                 'SPEND',
-                style: theme.textTheme.labelSmall?.copyWith(
-                  letterSpacing: 1.2,
-                  fontWeight: FontWeight.w700,
-                  color: HarnessColors.oxide,
-                ),
+                style: HarnessText.label(context)
+                    .copyWith(color: HarnessColors.oxide),
               ),
               const Spacer(),
-              HarnessStatusPill(
-                label: '${totals.calls} calls',
-                color: HarnessColors.oxide,
-                icon: Icons.bolt_rounded,
+              Icon(
+                Icons.bolt_rounded,
+                size: 15,
+                color: HarnessColors.oxide.withValues(alpha: 0.8),
               ),
+              const SizedBox(width: 3),
+              Text('${totals.calls} calls', style: HarnessText.meta(context)),
             ],
           ),
-          const SizedBox(height: 6),
+          const SizedBox(height: 4),
           Text(
             formatMoney(totals.cost),
             style: theme.textTheme.displaySmall?.copyWith(
@@ -332,54 +307,24 @@ class _SpendHero extends StatelessWidget {
             ),
           ),
           if (covered > 0.005)
-            Text(
-              '${formatMoney(totals.listCost)} at list prices · ${formatMoney(covered)} covered',
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
-                fontSize: 11,
+            Padding(
+              padding: const EdgeInsets.only(top: 2),
+              child: HarnessMetaLine(
+                parts: [
+                  '${formatMoney(totals.listCost)} at list prices',
+                  '${formatMoney(covered)} covered',
+                ],
+                style: HarnessText.caption(context),
               ),
             ),
-          const SizedBox(height: 16),
-          Row(
-            children: [
-              _Stat(label: 'Tokens', value: formatTokens(totals.tokens)),
-              _Stat(label: 'Input', value: formatTokens(totals.input)),
-              _Stat(label: 'Output', value: formatTokens(totals.output)),
-              _Stat(label: 'Cache read', value: formatTokens(totals.cacheRead)),
+          const SizedBox(height: 18),
+          HarnessStatRow(
+            stats: [
+              (formatTokens(totals.tokens), 'Tokens'),
+              (formatTokens(totals.input), 'Input'),
+              (formatTokens(totals.output), 'Output'),
+              (formatTokens(totals.cacheRead), 'Cache read'),
             ],
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _Stat extends StatelessWidget {
-  const _Stat({required this.label, required this.value});
-  final String label;
-  final String value;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Expanded(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            value,
-            style: theme.textTheme.titleMedium?.copyWith(
-              fontWeight: FontWeight.w700,
-              fontSize: 16,
-              fontFeatures: const [FontFeature.tabularFigures()],
-            ),
-          ),
-          Text(
-            label,
-            style: theme.textTheme.labelSmall?.copyWith(
-              color: theme.colorScheme.onSurfaceVariant,
-              fontSize: 9.5,
-            ),
           ),
         ],
       ),
@@ -399,36 +344,31 @@ class _LiveRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
     final title = session?.displayTitle ?? 'Running session';
     return Padding(
       padding: const EdgeInsets.only(bottom: 8),
       child: HarnessTap(
         onTap: onTap,
         borderRadius: BorderRadius.circular(14),
-        child: Container(
+        child: HarnessCard(
+          radius: 14,
           padding: const EdgeInsets.all(12),
-          decoration: BoxDecoration(
-            color: theme.colorScheme.surfaceContainerLow,
-            borderRadius: BorderRadius.circular(14),
-            border: Border.all(color: theme.colorScheme.outlineVariant),
-          ),
           child: Row(
             children: [
               Container(
-                width: 30,
-                height: 30,
+                width: 32,
+                height: 32,
                 decoration: BoxDecoration(
                   color: HarnessColors.moss.withValues(alpha: 0.12),
                   shape: BoxShape.circle,
                 ),
                 child: const Icon(
                   Icons.bolt_rounded,
-                  size: 16,
+                  size: 17,
                   color: HarnessColors.moss,
                 ),
               ),
-              const SizedBox(width: 10),
+              const SizedBox(width: 12),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -437,22 +377,21 @@ class _LiveRow extends StatelessWidget {
                       title,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: theme.textTheme.labelLarge?.copyWith(
-                        fontWeight: FontWeight.w600,
-                        fontSize: 13,
-                      ),
+                      style: HarnessText.rowTitle(context),
                     ),
-                    Text(
-                      '${formatTokens(live.context)} context · ${formatTokens(live.output)} output'
-                      '${live.estimated ? ' · estimated' : ''}',
-                      style: theme.textTheme.labelSmall?.copyWith(
-                        color: theme.colorScheme.onSurfaceVariant,
-                        fontSize: 10.5,
-                      ),
+                    const SizedBox(height: 1),
+                    HarnessMetaLine(
+                      parts: [
+                        '${formatTokens(live.context)} context',
+                        '${formatTokens(live.output)} output',
+                        if (live.estimated) 'estimated',
+                      ],
+                      style: HarnessText.caption(context),
                     ),
                   ],
                 ),
               ),
+              const SizedBox(width: 8),
               _LivePulse(),
             ],
           ),
@@ -509,30 +448,23 @@ class _SpendChart extends StatelessWidget {
         ? points.sublist(points.length - 14)
         : points;
     if (recent.isEmpty) {
-      return Container(
-        height: 120,
-        alignment: Alignment.center,
-        decoration: BoxDecoration(
-          color: theme.colorScheme.surfaceContainerLow,
-          borderRadius: BorderRadius.circular(14),
-          border: Border.all(color: theme.colorScheme.outlineVariant),
-        ),
-        child: Text(
-          'No daily spend yet.',
-          style: theme.textTheme.bodySmall?.copyWith(
-            color: theme.colorScheme.onSurfaceVariant,
+      return HarnessCard(
+        radius: 14,
+        child: SizedBox(
+          height: 88,
+          child: Center(
+            child: Text(
+              'No daily spend yet.',
+              style: HarnessText.subtitle(context),
+            ),
           ),
         ),
       );
     }
     final maxCost = recent.map((point) => point.cost).fold<double>(0, math.max);
-    return Container(
-      padding: const EdgeInsets.fromLTRB(12, 12, 12, 8),
-      decoration: BoxDecoration(
-        color: theme.colorScheme.surfaceContainerLow,
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: theme.colorScheme.outlineVariant),
-      ),
+    return HarnessCard(
+      radius: 14,
+      padding: const EdgeInsets.fromLTRB(12, 14, 12, 10),
       child: Column(
         children: [
           SizedBox(
@@ -547,7 +479,7 @@ class _SpendChart extends StatelessWidget {
               size: Size.infinite,
             ),
           ),
-          const SizedBox(height: 6),
+          const SizedBox(height: 8),
           Row(
             children: [
               for (final point in recent)
@@ -555,12 +487,7 @@ class _SpendChart extends StatelessWidget {
                   child: Text(
                     _shortDay(point.key),
                     textAlign: TextAlign.center,
-                    style: theme.textTheme.labelSmall?.copyWith(
-                      fontSize: 8,
-                      color: theme.colorScheme.onSurfaceVariant.withValues(
-                        alpha: 0.65,
-                      ),
-                    ),
+                    style: HarnessText.meta(context).copyWith(fontSize: 11),
                   ),
                 ),
             ],
@@ -627,19 +554,14 @@ class _UsageBars extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
     final maxCost = rows.map((row) => row.listCost).fold<double>(0, math.max);
-    return Container(
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: theme.colorScheme.surfaceContainerLow,
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: theme.colorScheme.outlineVariant),
-      ),
+    return HarnessCard(
+      radius: 14,
+      padding: const EdgeInsets.fromLTRB(14, 14, 14, 14),
       child: Column(
         children: [
           for (var index = 0; index < rows.length; index++) ...[
-            if (index > 0) const SizedBox(height: 12),
+            if (index > 0) const SizedBox(height: 14),
             _UsageBarRow(
               row: rows[index],
               maxCost: maxCost,
@@ -652,6 +574,9 @@ class _UsageBars extends StatelessWidget {
   }
 }
 
+/// A name, what it cost and how many tokens that was, over a bar of how it
+/// compares with the rest.  The three share a baseline; the figures are at
+/// the edge, the amount before the tokens.
 class _UsageBarRow extends StatelessWidget {
   const _UsageBarRow({
     required this.row,
@@ -675,36 +600,37 @@ class _UsageBarRow extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Row(
+          crossAxisAlignment: CrossAxisAlignment.baseline,
+          textBaseline: TextBaseline.alphabetic,
           children: [
             Expanded(
               child: Text(
                 label.isEmpty ? 'Unknown' : label,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style: theme.textTheme.labelMedium?.copyWith(
-                  fontWeight: FontWeight.w600,
-                  fontSize: 12,
-                ),
+                style: HarnessText.rowTitle(context).copyWith(fontSize: 14),
               ),
             ),
+            const SizedBox(width: 10),
             Text(
               formatMoney(row.listCost == 0 ? row.cost : row.listCost),
-              style: theme.textTheme.labelSmall?.copyWith(
-                fontWeight: FontWeight.w700,
+              style: HarnessText.rowTitle(context).copyWith(
+                fontSize: 14,
                 fontFeatures: const [FontFeature.tabularFigures()],
               ),
             ),
-            const SizedBox(width: 6),
-            Text(
-              '${formatTokens(row.tokens)} tok',
-              style: theme.textTheme.labelSmall?.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
-                fontSize: 9.5,
+            const SizedBox(width: 8),
+            SizedBox(
+              width: 72,
+              child: Text(
+                '${formatTokens(row.tokens)} tok',
+                textAlign: TextAlign.end,
+                style: HarnessText.meta(context),
               ),
             ),
           ],
         ),
-        const SizedBox(height: 4),
+        const SizedBox(height: 6),
         ClipRRect(
           borderRadius: BorderRadius.circular(3),
           child: LinearProgressIndicator(
@@ -730,40 +656,45 @@ class _BudgetRow extends StatelessWidget {
     final scope = asStringOr(budget['scope'], 'budget');
     final target = asString(budget['target']);
     final hard = asBool(budget['hard']);
-    return Container(
-      margin: const EdgeInsets.only(bottom: 8),
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: theme.colorScheme.surfaceContainerLow,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: theme.colorScheme.outlineVariant),
-      ),
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
       child: Row(
         children: [
           Icon(
             Icons.savings_outlined,
-            size: 17,
-            color: theme.colorScheme.primary,
+            size: 19,
+            color: theme.colorScheme.onSurfaceVariant,
           ),
-          const SizedBox(width: 9),
+          const SizedBox(width: 12),
           Expanded(
-            child: Text(
-              [scope, if (target != null) projectName(target)].join(' · '),
-              style: theme.textTheme.labelMedium?.copyWith(
-                fontWeight: FontWeight.w600,
-              ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  [scope, if (target != null) projectName(target)].join(' · '),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: HarnessText.rowTitle(context).copyWith(fontSize: 14),
+                ),
+                const SizedBox(height: 1),
+                // Whether it stops the spending, or only says so.
+                Text(
+                  hard ? 'Hard limit' : 'Soft limit',
+                  style: HarnessText.caption(context).copyWith(
+                    color: hard ? theme.colorScheme.error : HarnessColors.amber,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
             ),
           ),
+          const SizedBox(width: 8),
           Text(
             formatMoney(amount),
-            style: theme.textTheme.labelMedium?.copyWith(
-              fontWeight: FontWeight.w700,
+            style: HarnessText.rowTitle(context).copyWith(
+              fontSize: 14,
+              fontFeatures: const [FontFeature.tabularFigures()],
             ),
-          ),
-          const SizedBox(width: 6),
-          HarnessStatusPill(
-            label: hard ? 'hard' : 'soft',
-            color: hard ? theme.colorScheme.error : HarnessColors.amber,
           ),
         ],
       ),

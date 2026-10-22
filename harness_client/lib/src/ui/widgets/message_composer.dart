@@ -7,6 +7,7 @@ import '../../state/drafts.dart';
 import '../../state/prompt_attachment.dart';
 import '../adaptive/adaptive_widgets.dart';
 import '../adaptive/platform_style.dart';
+import '../theme/harness_theme.dart';
 import 'image_attachments.dart';
 
 class MessageComposer extends StatefulWidget {
@@ -22,6 +23,7 @@ class MessageComposer extends StatefulWidget {
     this.offline = false,
     this.drafts,
     this.draftKey = '',
+    this.footer,
   });
 
   /// Takes the message to send.  Whether it was taken: where it was not
@@ -45,6 +47,10 @@ class MessageComposer extends StatefulWidget {
   /// that was not sent after all comes back).
   final DraftStore? drafts;
   final String draftKey;
+
+  /// A row under the field: what decides how the next message is handled,
+  /// and how the conversation stands.  Without one, a line of help.
+  final Widget? footer;
 
   @override
   State<MessageComposer> createState() => _MessageComposerState();
@@ -131,6 +137,13 @@ class _MessageComposerState extends State<MessageComposer> {
       if (mounted) setState(() => _picking = false);
     }
   }
+
+  /// Whether there is a physical keyboard to say how to send with.
+  bool get _keyboardHint =>
+      (kIsWeb ||
+          defaultTargetPlatform == TargetPlatform.macOS ||
+          defaultTargetPlatform == TargetPlatform.linux) &&
+      MediaQuery.sizeOf(context).width >= 600;
 
   KeyEventResult _onKey(FocusNode node, KeyEvent event) {
     if (event is! KeyDownEvent) return KeyEventResult.ignored;
@@ -243,9 +256,8 @@ class _MessageComposerState extends State<MessageComposer> {
                   padding: const EdgeInsets.only(bottom: 6),
                   child: Text(
                     _attachmentError!,
-                    style: theme.textTheme.labelSmall?.copyWith(
-                      color: theme.colorScheme.error,
-                    ),
+                    style: HarnessText.caption(context)
+                        .copyWith(color: theme.colorScheme.error),
                   ),
                 ),
               Row(
@@ -295,6 +307,8 @@ class _MessageComposerState extends State<MessageComposer> {
                             ? 'Answer above to continue'
                             : widget.running
                             ? 'The agent is working…'
+                            : _keyboardHint
+                            ? 'Message the harness · Enter to send'
                             : 'Message the harness',
                         maxLines: 5,
                         minLines: 1,
@@ -334,23 +348,19 @@ class _MessageComposerState extends State<MessageComposer> {
                     ),
                 ],
               ),
-              if (!widget.running && _text.text.isEmpty)
+              if (widget.footer != null)
+                Padding(
+                  padding: const EdgeInsets.only(top: 2),
+                  child: widget.footer!,
+                )
+              else if (!widget.running && _text.text.isEmpty)
                 Padding(
                   padding: const EdgeInsets.only(left: 4, top: 6),
                   child: Text(
-                    (kIsWeb ||
-                                defaultTargetPlatform == TargetPlatform.macOS ||
-                                defaultTargetPlatform ==
-                                    TargetPlatform.linux) &&
-                            MediaQuery.sizeOf(context).width >= 600
+                    _keyboardHint
                         ? 'Enter to send · Shift + Enter for a new line'
                         : 'The harness may ask before it runs a tool.',
-                    style: theme.textTheme.labelSmall?.copyWith(
-                      color: theme.colorScheme.onSurfaceVariant.withValues(
-                        alpha: 0.55,
-                      ),
-                      fontSize: 10,
-                    ),
+                    style: HarnessText.caption(context),
                   ),
                 ),
             ],

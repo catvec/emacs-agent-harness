@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import '../../acp/acp_message.dart';
 import '../../models/transcript.dart';
 import '../adaptive/adaptive_widgets.dart';
+import '../adaptive/layout_widgets.dart';
 import '../adaptive/mark.dart';
 import '../adaptive/platform_style.dart';
 import '../format.dart';
@@ -200,8 +201,9 @@ class _TranscriptViewState extends State<TranscriptView> {
                       const SizedBox(width: 5),
                       Text(
                         'Latest',
-                        style: theme.textTheme.labelSmall?.copyWith(
+                        style: HarnessText.meta(context).copyWith(
                           fontWeight: FontWeight.w700,
+                          color: theme.colorScheme.onSurface,
                         ),
                       ),
                     ],
@@ -313,7 +315,7 @@ class _UserBubble extends StatelessWidget {
               padding: const EdgeInsets.only(right: 4, bottom: 4),
               child: Text(
                 sender,
-                style: theme.textTheme.labelSmall?.copyWith(
+                style: HarnessText.meta(context).copyWith(
                   color: fromSomeoneElse
                       ? theme.colorScheme.onSurfaceVariant
                       : theme.colorScheme.onSurfaceVariant.withValues(
@@ -383,18 +385,21 @@ class _AssistantMessage extends StatelessWidget {
                 const SizedBox(width: 6),
                 Text(
                   label,
-                  style: theme.textTheme.labelSmall?.copyWith(
-                    fontWeight: FontWeight.w700,
-                    color: theme.colorScheme.onSurfaceVariant,
-                  ),
+                  style: HarnessText.meta(context)
+                      .copyWith(fontWeight: FontWeight.w700),
                 ),
                 if (model.isNotEmpty) ...[
                   const SizedBox(width: 6),
-                  Text(
-                    modelName(model),
-                    style: theme.textTheme.labelSmall?.copyWith(
-                      color: theme.colorScheme.onSurfaceVariant.withValues(
-                        alpha: 0.6,
+                  // The model's name gives way, not the sender's.
+                  Flexible(
+                    child: Text(
+                      modelName(model),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: HarnessText.meta(context).copyWith(
+                        color: theme.colorScheme.onSurfaceVariant.withValues(
+                          alpha: 0.7,
+                        ),
                       ),
                     ),
                   ),
@@ -512,10 +517,8 @@ class _ThinkingBlockState extends State<_ThinkingBlock> {
                     Expanded(
                       child: Text(
                         widget.item.streaming ? 'Thinking…' : 'Thought',
-                        style: theme.textTheme.labelSmall?.copyWith(
-                          color: theme.colorScheme.onSurfaceVariant,
-                          fontWeight: FontWeight.w600,
-                        ),
+                        style: HarnessText.meta(context)
+                            .copyWith(fontWeight: FontWeight.w600),
                       ),
                     ),
                     Icon(
@@ -633,32 +636,34 @@ class _ToolCardState extends State<_ToolCard> {
                             tool.displayTitle,
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
-                            style: theme.textTheme.labelLarge?.copyWith(
-                              fontWeight: FontWeight.w600,
-                              fontSize: 13,
-                            ),
+                            style: HarnessText.rowTitle(context)
+                                .copyWith(fontSize: 14),
                           ),
-                          const SizedBox(height: 2),
-                          Text(
-                            [
-                              toolKindIconLabel(tool.kind),
-                              if (tool.sender != null) tool.sender,
-                            ].whereType<String>().join(' · '),
-                            style: theme.textTheme.labelSmall?.copyWith(
-                              color: theme.colorScheme.onSurfaceVariant,
-                              fontSize: 10.5,
-                            ),
+                          const SizedBox(height: 1),
+                          HarnessMetaLine(
+                            parts: [toolKindIconLabel(tool.kind), tool.sender],
+                            style: HarnessText.caption(context),
                           ),
                         ],
                       ),
                     ),
-                    const SizedBox(width: 6),
+                    const SizedBox(width: 8),
+                    // A call that went well needs no word: a check says it.
+                    // One that did not is said in words, and in red.
                     if (tool.isRunning)
                       HarnessActivity(radius: 7, color: color)
-                    else
-                      HarnessStatusPill(
-                        label: tool.isFailed ? 'Failed' : 'Done',
+                    else if (tool.isFailed)
+                      HarnessStatusLabel(
+                        label: 'Failed',
                         color: color,
+                        icon: Icons.error_outline_rounded,
+                      )
+                    else
+                      Icon(
+                        Icons.check_rounded,
+                        size: 17,
+                        color: color.withValues(alpha: 0.85),
+                        semanticLabel: 'Done',
                       ),
                     const SizedBox(width: 4),
                     Icon(
@@ -682,16 +687,11 @@ class _ToolCardState extends State<_ToolCard> {
                     if (inputText.isNotEmpty) ...[
                       Row(
                         children: [
-                          Text(
-                            'Input',
-                            style: theme.textTheme.labelSmall?.copyWith(
-                              color: theme.colorScheme.onSurfaceVariant,
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
+                          Text('INPUT', style: HarnessText.label(context)),
                           const Spacer(),
                           HarnessTextButton(
                             label: _inputOpen ? 'Less' : 'More',
+                            dense: true,
                             onPressed: () =>
                                 setState(() => _inputOpen = !_inputOpen),
                           ),
@@ -710,10 +710,7 @@ class _ToolCardState extends State<_ToolCard> {
                         child: SingleChildScrollView(
                           child: SelectableText(
                             inputText,
-                            style: const TextStyle(
-                              fontFamily: 'monospace',
-                              fontSize: 11.5,
-                            ),
+                            style: HarnessText.mono(context),
                           ),
                         ),
                       ),
@@ -722,13 +719,7 @@ class _ToolCardState extends State<_ToolCard> {
                     if (outputText.isNotEmpty) ...[
                       Row(
                         children: [
-                          Text(
-                            'Output',
-                            style: theme.textTheme.labelSmall?.copyWith(
-                              color: theme.colorScheme.onSurfaceVariant,
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
+                          Text('OUTPUT', style: HarnessText.label(context)),
                           const Spacer(),
                           HarnessIconButton(
                             icon: Icons.copy_rounded,
@@ -757,10 +748,7 @@ class _ToolCardState extends State<_ToolCard> {
                         child: SingleChildScrollView(
                           child: SelectableText(
                             outputText,
-                            style: TextStyle(
-                              fontFamily: 'monospace',
-                              fontSize: 11.5,
-                              height: 1.4,
+                            style: HarnessText.mono(context).copyWith(
                               color: tool.isFailed
                                   ? color
                                   : theme.colorScheme.onSurface,
@@ -849,11 +837,8 @@ class _HintLine extends StatelessWidget {
               ],
             ),
             textAlign: TextAlign.center,
-            style: theme.textTheme.labelSmall?.copyWith(
-              color: theme.colorScheme.onSurfaceVariant,
-              fontStyle: FontStyle.italic,
-              height: 1.4,
-            ),
+            style: HarnessText.caption(context)
+                .copyWith(fontStyle: FontStyle.italic),
           ),
         ),
       ),
@@ -896,9 +881,7 @@ class _DividerNote extends StatelessWidget {
                   ],
                 ),
                 textAlign: TextAlign.center,
-                style: theme.textTheme.labelSmall?.copyWith(
-                  color: theme.colorScheme.onSurfaceVariant,
-                ),
+                style: HarnessText.caption(context),
               ),
             ),
           ),
@@ -940,7 +923,7 @@ class _PlanMessage extends StatelessWidget {
                 const SizedBox(width: 7),
                 Text(
                   'Plan',
-                  style: theme.textTheme.labelSmall?.copyWith(
+                  style: HarnessText.meta(context).copyWith(
                     fontWeight: FontWeight.w700,
                     color: theme.colorScheme.primary,
                   ),

@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -5,20 +7,48 @@ import 'package:flutter/services.dart';
 import '../theme/harness_theme.dart';
 import 'platform_style.dart';
 
+/// What the home shell has to say to the person (an action that failed, a
+/// session that needs an answer), handed down to the pages it holds.  A
+/// [HarnessPage] puts it in its own flow, under its header: it never floats
+/// over a page, so a title and its buttons are never covered.
+class HarnessChrome extends InheritedWidget {
+  const HarnessChrome({super.key, required this.notices, required super.child});
+
+  /// Builds the notices.  [attention] is whether the one that says a session
+  /// needs an answer is wanted: the list of sessions shows that on its own.
+  final Widget Function(BuildContext context, {required bool attention})
+  notices;
+
+  static HarnessChrome? maybeOf(BuildContext context) =>
+      context.dependOnInheritedWidgetOfExactType<HarnessChrome>();
+
+  @override
+  bool updateShouldNotify(HarnessChrome oldWidget) => true;
+}
+
+/// A page: a header (the [title], a [subtitle] under it, and [actions] at the
+/// far end), whatever the shell has to say ([HarnessChrome]), and the
+/// [body].  The header is the platform's own bar.
 class HarnessPage extends StatelessWidget {
   const HarnessPage({
     super.key,
     required this.title,
     required this.body,
+    this.subtitle,
     this.actions = const [],
     this.leading,
     this.bottom,
     this.backgroundColor,
     this.resizeToAvoidBottomInset = true,
     this.centerTitle = false,
+    this.attentionNotice = true,
+    this.maxContentWidth,
   });
 
   final String title;
+
+  /// One line under the title: where a conversation is, what it is doing.
+  final Widget? subtitle;
   final Widget body;
   final List<Widget> actions;
   final Widget? leading;
@@ -27,13 +57,63 @@ class HarnessPage extends StatelessWidget {
   final bool resizeToAvoidBottomInset;
   final bool centerTitle;
 
+  /// Whether the notice that a session needs an answer belongs on this page.
+  final bool attentionNotice;
+
+  /// How wide the content may be.  A page of text and cards is not made
+  /// wider than a line can be read: on a wide screen it keeps this width, at
+  /// the start, so that the title, the notices and the content share a left
+  /// edge.  Null: as wide as the screen (a board of columns).
+  final double? maxContentWidth;
+
   @override
   Widget build(BuildContext context) {
-    if (HarnessStyle.isCupertino(context)) {
+    final cupertino = HarnessStyle.isCupertino(context);
+    final chrome = HarnessChrome.maybeOf(context);
+    // Always a column of the same shape, so that the body keeps its state
+    // (a scroll position, what was typed) as notices come and go.
+    final column = Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        chrome?.notices(context, attention: attentionNotice) ??
+            const SizedBox.shrink(),
+        Expanded(child: body),
+      ],
+    );
+    final content = maxContentWidth == null
+        ? column
+        : Align(
+            alignment: AlignmentDirectional.topStart,
+            child: ConstrainedBox(
+              constraints: BoxConstraints(maxWidth: maxContentWidth!),
+              child: column,
+            ),
+          );
+    final line = subtitle == null
+        ? null
+        : DefaultTextStyle(
+            style: HarnessText.subtitle(context),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            child: subtitle!,
+          );
+    if (cupertino) {
       return CupertinoPageScaffold(
         backgroundColor: backgroundColor,
         navigationBar: CupertinoNavigationBar(
-          middle: Semantics(header: true, child: Text(title)),
+          middle: Semantics(
+            header: true,
+            child: line == null
+                ? Text(title, maxLines: 1, overflow: TextOverflow.ellipsis)
+                : Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(title, maxLines: 1, overflow: TextOverflow.ellipsis),
+                      const SizedBox(height: 1),
+                      line,
+                    ],
+                  ),
+          ),
           leading: leading,
           trailing: actions.isEmpty
               ? null
@@ -41,19 +121,43 @@ class HarnessPage extends StatelessWidget {
         ),
         child: Material(
           type: MaterialType.transparency,
-          child: SafeArea(child: body),
+          child: SafeArea(child: content),
         ),
       );
     }
     return Scaffold(
       backgroundColor: backgroundColor,
       appBar: AppBar(
-        title: Text(title),
+        title: line == null
+            ? Text(title, maxLines: 1, overflow: TextOverflow.ellipsis)
+            : Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontSize: 19),
+                  ),
+                  const SizedBox(height: 2),
+                  line,
+                ],
+              ),
+        // Two lines of text, which grow with the text size the person set.
+        toolbarHeight: line == null
+            ? null
+            : math.max(
+                64,
+                MediaQuery.textScalerOf(context).scale(19) * 1.25 +
+                    MediaQuery.textScalerOf(context).scale(13) * 1.3 +
+                    18,
+              ),
         leading: leading,
         actions: actions,
         centerTitle: centerTitle,
       ),
-      body: SafeArea(top: false, child: body),
+      body: SafeArea(top: false, child: content),
       bottomNavigationBar: bottom,
       resizeToAvoidBottomInset: resizeToAvoidBottomInset,
     );
@@ -276,12 +380,18 @@ class HarnessTextButton extends StatelessWidget {
     required this.onPressed,
     this.icon,
     this.destructive = false,
+    this.dense = false,
   });
 
   final String label;
   final VoidCallback? onPressed;
   final IconData? icon;
   final bool destructive;
+
+  /// Less padding around the label, for a button that sits in a card
+  /// under text it should line up with: the icon, not the padding, is on
+  /// the text's edge.
+  final bool dense;
 
   @override
   Widget build(BuildContext context) {
@@ -294,7 +404,7 @@ class HarnessTextButton extends StatelessWidget {
               : Theme.of(context).colorScheme.primary);
     if (HarnessStyle.isCupertino(context)) {
       return CupertinoButton(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+        padding: EdgeInsets.symmetric(horizontal: dense ? 6 : 10, vertical: 8),
         minimumSize: const Size(0, 36),
         onPressed: onPressed,
         child: Row(
@@ -320,7 +430,13 @@ class HarnessTextButton extends StatelessWidget {
       onPressed: onPressed,
       icon: icon == null ? null : Icon(icon, size: 18),
       label: Text(label),
-      style: destructive ? TextButton.styleFrom(foregroundColor: color) : null,
+      style: destructive || dense
+          ? TextButton.styleFrom(
+              foregroundColor: destructive ? color : null,
+              padding: dense ? const EdgeInsets.symmetric(horizontal: 8) : null,
+              minimumSize: dense ? const Size(0, 36) : null,
+            )
+          : null,
     );
   }
 }
@@ -706,7 +822,12 @@ class HarnessSectionHeader extends StatelessWidget {
     super.key,
     required this.label,
     this.trailing,
-    this.padding = const EdgeInsets.fromLTRB(20, 22, 20, 10),
+    this.padding = const EdgeInsets.fromLTRB(
+      HarnessSpace.xs,
+      HarnessSpace.xl,
+      HarnessSpace.xs,
+      HarnessSpace.sm,
+    ),
   });
 
   final String label;
@@ -715,23 +836,14 @@ class HarnessSectionHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
     return Padding(
       padding: padding,
       child: Row(
+        crossAxisAlignment: CrossAxisAlignment.baseline,
+        textBaseline: TextBaseline.alphabetic,
         children: [
           Expanded(
-            child: Text(
-              label.toUpperCase(),
-              style: TextStyle(
-                fontSize: 11,
-                fontWeight: FontWeight.w700,
-                letterSpacing: 1.1,
-                color: theme.colorScheme.onSurfaceVariant.withValues(
-                  alpha: 0.75,
-                ),
-              ),
-            ),
+            child: Text(label.toUpperCase(), style: HarnessText.label(context)),
           ),
           if (trailing != null) trailing!,
         ],
@@ -802,48 +914,59 @@ class HarnessErrorBanner extends StatelessWidget {
     this.onDismiss,
     this.actionLabel,
     this.onAction,
+    this.margin = const EdgeInsets.fromLTRB(
+      HarnessSpace.gutter,
+      HarnessSpace.sm,
+      HarnessSpace.gutter,
+      0,
+    ),
   });
 
   final String message;
   final VoidCallback? onDismiss;
   final String? actionLabel;
   final VoidCallback? onAction;
+  final EdgeInsets margin;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final color = theme.colorScheme.error;
-    return Container(
-      margin: const EdgeInsets.fromLTRB(16, 8, 16, 8),
-      padding: const EdgeInsets.fromLTRB(14, 12, 8, 12),
-      decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.09),
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: color.withValues(alpha: 0.22)),
-      ),
-      child: Row(
-        children: [
-          Icon(Icons.error_outline_rounded, color: color, size: 19),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Text(
-              message,
-              style: TextStyle(
-                fontSize: 13,
-                color: theme.colorScheme.onSurface,
+    return Padding(
+      padding: margin,
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(14, 10, 6, 10),
+        decoration: BoxDecoration(
+          color: color.withValues(alpha: 0.09),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: color.withValues(alpha: 0.28)),
+        ),
+        child: Row(
+          children: [
+            Icon(Icons.error_outline_rounded, color: color, size: 19),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Padding(
+                padding: EdgeInsets.symmetric(
+                  vertical: onDismiss == null && actionLabel == null ? 4 : 0,
+                ),
+                child: Text(
+                  message,
+                  style: HarnessText.body(context).copyWith(height: 1.35),
+                ),
               ),
             ),
-          ),
-          if (actionLabel != null)
-            HarnessTextButton(label: actionLabel!, onPressed: onAction),
-          if (onDismiss != null)
-            HarnessIconButton(
-              icon: Icons.close_rounded,
-              label: 'Dismiss',
-              size: 18,
-              onPressed: onDismiss,
-            ),
-        ],
+            if (actionLabel != null)
+              HarnessTextButton(label: actionLabel!, onPressed: onAction),
+            if (onDismiss != null)
+              HarnessIconButton(
+                icon: Icons.close_rounded,
+                label: 'Dismiss',
+                size: 18,
+                onPressed: onDismiss,
+              ),
+          ],
+        ),
       ),
     );
   }
@@ -973,32 +1096,28 @@ class HarnessInfoRow extends StatelessWidget {
   final String value;
   final bool monospace;
 
+  /// The width of the label column, shared by every row of every card.
+  static const labelWidth = 104.0;
+
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
+    final text = HarnessText.body(context).copyWith(height: 1.35);
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 5),
+      padding: const EdgeInsets.symmetric(vertical: 6),
       child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.baseline,
+        textBaseline: TextBaseline.alphabetic,
         children: [
           SizedBox(
-            width: 116,
-            child: Text(
-              label,
-              style: TextStyle(
-                fontSize: 13,
-                color: theme.colorScheme.onSurfaceVariant,
-              ),
-            ),
+            width: labelWidth,
+            child: Text(label, style: HarnessText.subtitle(context)),
           ),
           Expanded(
             child: SelectableText(
               value,
-              style: TextStyle(
-                fontSize: 13,
-                fontFamily: monospace ? 'monospace' : null,
-                color: theme.colorScheme.onSurface,
-              ),
+              style: monospace
+                  ? text.copyWith(fontFamily: 'monospace', fontSize: 13)
+                  : text,
             ),
           ),
         ],

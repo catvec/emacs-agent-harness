@@ -7,6 +7,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../../state/app_controller.dart';
 import '../../state/settings_controller.dart';
 import '../adaptive/adaptive_widgets.dart';
+import '../adaptive/layout_widgets.dart';
 import '../adaptive/mark.dart';
 import '../adaptive/platform_style.dart';
 import '../format.dart';
@@ -26,55 +27,67 @@ class SettingsScreen extends StatelessWidget {
         final theme = Theme.of(context);
         return HarnessPage(
           title: 'Settings',
+          maxContentWidth: HarnessSpace.pageWidth,
           body: ListView(
-            padding: const EdgeInsets.fromLTRB(16, 8, 16, 30),
+            padding: const EdgeInsets.fromLTRB(
+              HarnessSpace.gutter,
+              HarnessSpace.sm,
+              HarnessSpace.gutter,
+              30,
+            ),
             children: [
               const HarnessSectionHeader(
                 label: 'Connection',
-                padding: EdgeInsets.fromLTRB(2, 4, 2, 8),
+                padding: EdgeInsets.fromLTRB(
+                  HarnessSpace.xs,
+                  HarnessSpace.xs,
+                  HarnessSpace.xs,
+                  HarnessSpace.sm,
+                ),
               ),
-              _Card(
+              HarnessCard(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
+                    // Who, where, and whether the line is up.
                     Row(
                       children: [
                         Container(
-                          width: 38,
-                          height: 38,
+                          width: 40,
+                          height: 40,
                           decoration: BoxDecoration(
                             color: HarnessColors.moss.withValues(alpha: 0.12),
                             shape: BoxShape.circle,
                           ),
                           child: const Icon(
                             Icons.link_rounded,
-                            size: 19,
+                            size: 20,
                             color: HarnessColors.moss,
                           ),
                         ),
-                        const SizedBox(width: 11),
+                        const SizedBox(width: 12),
                         Expanded(
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                               Text(
                                 app.capability?.agentName ?? 'Harness',
-                                style: theme.textTheme.labelLarge?.copyWith(
-                                  fontWeight: FontWeight.w700,
-                                ),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: HarnessText.rowTitle(context),
                               ),
+                              const SizedBox(height: 1),
                               Text(
                                 shortAddress(app.address),
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
-                                style: theme.textTheme.labelSmall?.copyWith(
-                                  color: theme.colorScheme.onSurfaceVariant,
-                                ),
+                                style: HarnessText.caption(context),
                               ),
                             ],
                           ),
                         ),
-                        HarnessStatusPill(
+                        const SizedBox(width: 8),
+                        HarnessStatusLabel(
                           key: const Key('connection-status'),
                           label: app.isReconnecting
                               ? 'Reconnecting'
@@ -85,7 +98,14 @@ class SettingsScreen extends StatelessWidget {
                         ),
                       ],
                     ),
-                    const SizedBox(height: 14),
+                    const SizedBox(height: HarnessSpace.md),
+                    Divider(
+                      height: 1,
+                      color: theme.colorScheme.outlineVariant.withValues(
+                        alpha: 0.8,
+                      ),
+                    ),
+                    const SizedBox(height: HarnessSpace.sm),
                     HarnessInfoRow(
                       label: 'Protocol',
                       value:
@@ -96,7 +116,7 @@ class SettingsScreen extends StatelessWidget {
                       value:
                           '${app.capability?.extensionCount ?? 0} harness methods',
                     ),
-                    const SizedBox(height: 14),
+                    const SizedBox(height: HarnessSpace.md),
                     Row(
                       children: [
                         Expanded(
@@ -109,15 +129,17 @@ class SettingsScreen extends StatelessWidget {
                                 ? 'Retry now'
                                 : 'Reconnect',
                             icon: Icons.refresh_rounded,
+                            expand: true,
                             onPressed: app.reconnect,
                           ),
                         ),
-                        const SizedBox(width: 8),
+                        const SizedBox(width: HarnessSpace.sm),
                         Expanded(
                           child: HarnessSecondaryButton(
                             label: 'Disconnect',
                             icon: Icons.logout_rounded,
                             destructive: true,
+                            expand: true,
                             onPressed: () async {
                               final confirmed = await showHarnessDialog<bool>(
                                 context: context,
@@ -136,7 +158,7 @@ class SettingsScreen extends StatelessWidget {
                       ],
                     ),
                     if (app.canSignOut) ...[
-                      const SizedBox(height: 8),
+                      const SizedBox(height: HarnessSpace.sm),
                       HarnessSecondaryButton(
                         label: 'Sign out of this harness',
                         icon: Icons.key_off_rounded,
@@ -160,11 +182,8 @@ class SettingsScreen extends StatelessWidget {
                   ],
                 ),
               ),
-              const HarnessSectionHeader(
-                label: 'Appearance',
-                padding: EdgeInsets.fromLTRB(2, 22, 2, 8),
-              ),
-              _Card(
+              const HarnessSectionHeader(label: 'Appearance'),
+              HarnessCard(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
@@ -172,8 +191,7 @@ class SettingsScreen extends StatelessWidget {
                       icon: Icons.brightness_6_outlined,
                       title: 'Theme',
                       subtitle: 'Follow the system, or pin light or dark.',
-                      stacked: true,
-                      child: HarnessSegmented<ThemeMode>(
+                      below: HarnessSegmented<ThemeMode>(
                         options: const [
                           (ThemeMode.system, 'System'),
                           (ThemeMode.light, 'Light'),
@@ -183,13 +201,14 @@ class SettingsScreen extends StatelessWidget {
                         onChanged: settings.setThemeMode,
                       ),
                     ),
-                    const SizedBox(height: 16),
+                    const SizedBox(height: HarnessSpace.lg),
                     _SettingRow(
                       icon: Icons.phone_iphone_rounded,
                       title: 'Platform feel',
-                      subtitle: 'Cupertino controls on Apple platforms, Material 3 elsewhere.',
-                      stacked: true,
-                      child: HarnessSegmented<PreviewPlatform>(
+                      subtitle:
+                          'Cupertino controls on Apple platforms, Material 3 '
+                          'elsewhere.',
+                      below: HarnessSegmented<PreviewPlatform>(
                         options: const [
                           (PreviewPlatform.system, 'System'),
                           (PreviewPlatform.material, 'Android'),
@@ -199,24 +218,25 @@ class SettingsScreen extends StatelessWidget {
                         onChanged: settings.setPreviewPlatform,
                       ),
                     ),
-                    const SizedBox(height: 8),
+                    const SizedBox(height: HarnessSpace.md),
                     Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Icon(
-                          Icons.info_outline_rounded,
-                          size: 13,
-                          color: theme.colorScheme.onSurfaceVariant,
+                        Padding(
+                          padding: const EdgeInsets.only(top: 1),
+                          child: Icon(
+                            Icons.info_outline_rounded,
+                            size: 14,
+                            color: theme.colorScheme.onSurfaceVariant,
+                          ),
                         ),
-                        const SizedBox(width: 6),
+                        const SizedBox(width: 8),
                         Expanded(
                           child: Text(
                             settings.useCupertino
                                 ? 'Cupertino navigation, sheets and typography are active.'
                                 : 'Material 3 navigation, sheets and typography are active.',
-                            style: theme.textTheme.labelSmall?.copyWith(
-                              color: theme.colorScheme.onSurfaceVariant,
-                              fontSize: 10.5,
-                            ),
+                            style: HarnessText.caption(context),
                           ),
                         ),
                       ],
@@ -224,11 +244,12 @@ class SettingsScreen extends StatelessWidget {
                   ],
                 ),
               ),
-              const HarnessSectionHeader(
-                label: 'Chat',
-                padding: EdgeInsets.fromLTRB(2, 22, 2, 8),
-              ),
-              _Card(
+              const HarnessSectionHeader(label: 'Chat'),
+              HarnessCard(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: HarnessSpace.lg,
+                  vertical: HarnessSpace.sm,
+                ),
                 child: Column(
                   children: [
                     _SettingRow(
@@ -236,21 +257,23 @@ class SettingsScreen extends StatelessWidget {
                       title: 'Show thinking',
                       subtitle:
                           'Show the agent’s streamed thoughts, collapsed.',
-                      child: HarnessSwitch(
+                      trailing: HarnessSwitch(
                         value: settings.showThinking,
                         onChanged: settings.setShowThinking,
                       ),
                     ),
                     Divider(
-                      height: 20,
-                      color: theme.colorScheme.outlineVariant,
+                      height: 1,
+                      color: theme.colorScheme.outlineVariant.withValues(
+                        alpha: 0.8,
+                      ),
                     ),
                     _SettingRow(
                       icon: Icons.key_outlined,
                       title: 'Remember',
                       subtitle:
                           'Stay signed in: keep the address and session here.',
-                      child: HarnessSwitch(
+                      trailing: HarnessSwitch(
                         value: settings.rememberConnection,
                         onChanged: settings.setRememberConnection,
                       ),
@@ -258,58 +281,51 @@ class SettingsScreen extends StatelessWidget {
                   ],
                 ),
               ),
-              const HarnessSectionHeader(
-                label: 'About',
-                padding: EdgeInsets.fromLTRB(2, 22, 2, 8),
-              ),
-              _Card(
+              const HarnessSectionHeader(label: 'About'),
+              HarnessCard(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
                     Row(
                       children: [
-                        HarnessMark(size: 28, color: theme.colorScheme.primary),
-                        const SizedBox(width: 10),
+                        HarnessMark(size: 30, color: theme.colorScheme.primary),
+                        const SizedBox(width: 12),
                         Expanded(
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                               Text(
                                 'Harness',
-                                style: theme.textTheme.labelLarge?.copyWith(
-                                  fontWeight: FontWeight.w700,
-                                ),
+                                style: HarnessText.rowTitle(context),
                               ),
+                              const SizedBox(height: 1),
                               Text(
                                 'Version 1.0.0 · ACP 1',
-                                style: theme.textTheme.labelSmall?.copyWith(
-                                  color: theme.colorScheme.onSurfaceVariant,
-                                ),
+                                style: HarnessText.caption(context),
                               ),
                             ],
                           ),
                         ),
                       ],
                     ),
-                    const SizedBox(height: 10),
+                    const SizedBox(height: HarnessSpace.md),
                     Text(
                       'A native client for the emacs-agent-harness. It detects '
                       'the harness’s extensions one by one; when only standard '
                       'ACP is offered, the chat and permissions still work and '
                       'the enhanced views stay out of the way.',
-                      style: theme.textTheme.bodySmall?.copyWith(
-                        color: theme.colorScheme.onSurfaceVariant,
-                        height: 1.5,
-                      ),
+                      style: HarnessText.subtitle(context)
+                          .copyWith(height: 1.5),
                     ),
-                    const SizedBox(height: 12),
+                    const SizedBox(height: HarnessSpace.sm),
                     Wrap(
-                      spacing: 6,
-                      runSpacing: 6,
+                      spacing: HarnessSpace.xs,
+                      runSpacing: HarnessSpace.xs,
                       children: [
                         HarnessTextButton(
                           label: 'Agent Client Protocol',
                           icon: Icons.open_in_new_rounded,
+                          dense: true,
                           onPressed: () => launchUrl(
                             Uri.parse('https://agentclientprotocol.com'),
                             mode: LaunchMode.externalApplication,
@@ -318,6 +334,7 @@ class SettingsScreen extends StatelessWidget {
                         HarnessTextButton(
                           label: 'Copy diagnostics',
                           icon: Icons.copy_rounded,
+                          dense: true,
                           onPressed: () => _copyDiagnostics(context),
                         ),
                       ],
@@ -325,15 +342,12 @@ class SettingsScreen extends StatelessWidget {
                   ],
                 ),
               ),
-              const SizedBox(height: 24),
+              const SizedBox(height: HarnessSpace.xl),
               Center(
                 child: Text(
                   'Made for people who run agents on their own machines.',
-                  style: theme.textTheme.labelSmall?.copyWith(
-                    color: theme.colorScheme.onSurfaceVariant.withValues(
-                      alpha: 0.6,
-                    ),
-                  ),
+                  textAlign: TextAlign.center,
+                  style: HarnessText.caption(context).copyWith(fontSize: 11.5),
                 ),
               ),
             ],
@@ -369,39 +383,23 @@ class SettingsScreen extends StatelessWidget {
   }
 }
 
-class _Card extends StatelessWidget {
-  const _Card({required this.child});
-  final Widget child;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Container(
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: theme.colorScheme.surfaceContainerLow,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: theme.colorScheme.outlineVariant),
-      ),
-      child: child,
-    );
-  }
-}
-
+/// One setting: its icon, its name and what it does, and what changes it,
+/// which is either at the far edge ([trailing], a switch) or under the text,
+/// across the width of the card ([below], a segmented control).
 class _SettingRow extends StatelessWidget {
   const _SettingRow({
     required this.icon,
     required this.title,
     required this.subtitle,
-    required this.child,
-    this.stacked = false,
+    this.trailing,
+    this.below,
   });
 
   final IconData icon;
   final String title;
   final String subtitle;
-  final Widget child;
-  final bool stacked;
+  final Widget? trailing;
+  final Widget? below;
 
   @override
   Widget build(BuildContext context) {
@@ -409,43 +407,30 @@ class _SettingRow extends StatelessWidget {
     final heading = Row(
       crossAxisAlignment: CrossAxisAlignment.center,
       children: [
-        Icon(icon, size: 18, color: theme.colorScheme.onSurfaceVariant),
-        const SizedBox(width: 10),
+        Icon(icon, size: 20, color: theme.colorScheme.onSurfaceVariant),
+        const SizedBox(width: 12),
         Expanded(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(
-                title,
-                style: theme.textTheme.labelLarge?.copyWith(
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-              Text(
-                subtitle,
-                style: theme.textTheme.labelSmall?.copyWith(
-                  color: theme.colorScheme.onSurfaceVariant,
-                  fontSize: 10.5,
-                ),
-              ),
+              Text(title, style: HarnessText.rowTitle(context)),
+              const SizedBox(height: 1),
+              Text(subtitle, style: HarnessText.caption(context)),
             ],
           ),
         ),
+        if (trailing != null) ...[const SizedBox(width: 12), trailing!],
       ],
     );
-    if (stacked) {
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [heading, const SizedBox(height: 10), child],
+    if (below == null) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        child: heading,
       );
     }
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.center,
-      children: [
-        Expanded(child: heading),
-        const SizedBox(width: 10),
-        Flexible(child: child),
-      ],
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [heading, const SizedBox(height: 12), below!],
     );
   }
 }

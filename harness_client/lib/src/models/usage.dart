@@ -157,8 +157,19 @@ class OutputRate {
 String formatMoney(double value) {
   if (value == 0) return r'$0.00';
   if (value < 0.01) return '\$${value.toStringAsFixed(4)}';
-  if (value < 10) return '\$${value.toStringAsFixed(2)}';
-  return '\$${value.toStringAsFixed(1)}';
+  return '\$${_groupThousands(value.toStringAsFixed(2))}';
+}
+
+/// `1234.5` as `1,234.5`: the whole part in groups of three.
+String _groupThousands(String fixed) {
+  final dot = fixed.indexOf('.');
+  final whole = dot < 0 ? fixed : fixed.substring(0, dot);
+  final rest = dot < 0 ? '' : fixed.substring(dot);
+  final grouped = whole.replaceAllMapped(
+    RegExp(r'\B(?=(\d{3})+(?!\d))'),
+    (match) => ',',
+  );
+  return '$grouped$rest';
 }
 
 String formatTokens(int value) {
