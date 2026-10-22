@@ -63,7 +63,7 @@ The pictures, by the name `scripts/media.sh` takes:
 | `usage` | The usage dashboard over 30 days, by model, with the fallback list beneath the plan | `harness-media-shot-usage` |
 | `usage-projects` | The usage dashboard by project, the tasks' worktrees folded under the demo project | `harness-media-shot-usage-projects` |
 | `usage-worktrees` | The same, the demo project's worktrees unfolded | `harness-media-shot-usage-worktrees` |
-| `worktrees` | The worktrees of the demo project | `harness-media-shot-worktrees` |
+| `worktrees` | The worktrees of the demo project, a task's assumed as the project (`a`), reset again after the picture | `harness-media-shot-worktrees` |
 | `settings` | The settings page for the demo project, which overrides two settings | `harness-media-shot-settings` |
 | `settings-policy` | The settings page under an administrator's policy (docs/policy.md): the banner listing what it sets, the settings it sets locked | `harness-media-shot-settings-policy` |
 | `btw` | A BTW under the rate-limit session's chat, `acme/ratelimit.py` beside it | `harness-media-shot-btw` |

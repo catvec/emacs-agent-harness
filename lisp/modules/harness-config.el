@@ -299,10 +299,15 @@ Their values never leave the harness through `config/describe' or
       (harness-call 'project/root cwd)
     (file-name-as-directory (expand-file-name cwd))))
 
+(defvar worktree-assume-inhibit)
+
 (defun harness-config--in-project-p (cwd)
-  "Non-nil when CWD lies in a project."
+  "Non-nil when CWD lies in a project.
+As the harness has it, whichever worktree the user assumed for it
+\(`worktree-assume')."
   (and (harness-method-exists-p 'project/root)
-       (ignore-errors (project-current nil cwd))
+       (let ((worktree-assume-inhibit t))
+         (ignore-errors (project-current nil cwd)))
        t))
 
 (defun harness-config--cwd (opts)

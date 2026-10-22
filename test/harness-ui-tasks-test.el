@@ -2429,6 +2429,127 @@ session, which a click on its title opens."
                          "the worktree's dev loop to run")
       (should (equal "start" (cdr (assoc "args" (car (harness-test-dev-invocations checkout)))))))))
 
+;;;; Review: the task's worktree as the project
+
+(defvar worktree-assume-mode)
+(declare-function worktree-assume-assumed "worktree-assume" (&optional dir))
+(declare-function worktree-assume-mode "worktree-assume" (&optional arg))
+(declare-function harness-ui-tasks-assume-worktree "harness-ui-tasks")
+
+(defun harness-ui-tasks-test--git (dir &rest args)
+  "Run git ARGS in DIR; signal when it fails."
+  (let ((default-directory (file-name-as-directory dir)))
+    (unless (zerop (apply #'call-process "git" nil nil nil args))
+      (error "git %s failed" args))))
+
+(defun harness-ui-tasks-test--repo-with-worktree ()
+  "Make a repository with one commit and a worktree; return (ROOT . WORKTREE)."
+  (let* ((base (file-name-as-directory (file-truename (make-temp-file "harness-tasks-wt-" t))))
+         (root (file-name-as-directory (expand-file-name "repo" base)))
+         (worktree (file-name-as-directory (expand-file-name ".worktrees/task-a" root))))
+    (make-directory root t)
+    (harness-ui-tasks-test--git root "init" "-q" "-b" "main")
+    (harness-ui-tasks-test--git root "config" "user.name" "Harness Test")
+    (harness-ui-tasks-test--git root "config" "user.email" "test@example.invalid")
+    (harness-ui-tasks-test--git root "config" "commit.gpgsign" "false")
+    (with-temp-file (expand-file-name "README" root) (insert "main\n"))
+    (harness-ui-tasks-test--git root "add" "README")
+    (harness-ui-tasks-test--git root "commit" "-q" "-m" "initial")
+    (harness-ui-tasks-test--git root "worktree" "add" "-q" "-b" "task/a" worktree)
+    (cons root worktree)))
+
+(defun harness-ui-tasks-test--task-with (task &rest fields)
+  "Return a copy of TASK with the plist FIELDS set."
+  (let ((task (copy-sequence task)))
+    (while fields
+      (setq task (plist-put task (pop fields) (pop fields))))
+    task))
+
+(ert-deftest harness-ui-tasks-card-menu-assumes-the-tasks-worktree ()
+  "A card whose worktree is there has Assume worktree in its menu, then Reset to main worktree.
+The menu entry and w run one command, which assumes the task's worktree as
+the project (the worktree-assume library), so that the project's commands
+look at the task's files, and resets it when it is the one assumed.  The
+harness still finds the project, so the board and the task stay as they
+were.  The card has no button for it, and a task with no worktree, or
+one whose directory is gone, has no entry."
+  (skip-unless (executable-find "git"))
+  (harness-ui-tasks-test-with
+    (let* ((harness-tasks-require-verification t)
+           (repo (harness-ui-tasks-test--repo-with-worktree))
+           (root (car repo))
+           (worktree (cdr repo))
+           (labels (lambda (task) (mapcar #'car (harness-ui-tasks--actions task)))))
+      (unwind-protect
+          (progn
+            (harness-ui-tasks-test--type-and-submit board "Look at its files")
+            (harness-ui-tasks-test--wait-text board "Ready for review  1\\(.\\|\n\\)*Look at its files")
+            (harness-ui-tasks-test--goto-card board "Look at its files")
+            (with-current-buffer board
+              (harness-ui-tasks--render)
+              (harness-ui-tasks-test--goto-card board "Look at its files")
+              (should (eq #'harness-ui-tasks-assume-worktree
+                          (lookup-key harness-ui-tasks-board-map (kbd "w"))))
+              (let* ((task (harness-ui-tasks--task))
+                     (mine (harness-ui-tasks-test--task-with task :worktree worktree :project root))
+                     (current mine))
+                ;; Without a worktree, one that is gone, or a remote one: none to assume.
+                (dolist (none (list nil "" (expand-file-name "no-such-worktree/" root)
+                                    "/ssh:nowhere.invalid:/srv/repo/.worktrees/task-a/"))
+                  (let ((task (harness-ui-tasks-test--task-with task :worktree none)))
+                    (should-not (member "Assume worktree" (funcall labels task)))
+                    (should-not (member "Reset to main worktree" (funcall labels task)))
+                    (setq current task)
+                    (cl-letf (((symbol-function 'harness-ui-tasks--task) (lambda (&optional _) current)))
+                      (should-error (harness-ui-tasks-assume-worktree) :type 'user-error))))
+                (should-not worktree-assume-mode)
+                ;; With one: in the menu, after the column's own actions, not a button.
+                (let ((all (funcall labels mine)))
+                  (should (member "Assume worktree" all))
+                  (should-not (member "Reset to main worktree" all))
+                  (should (< (cl-position "Archive" all :test #'equal)
+                             (cl-position "Assume worktree" all :test #'equal)))
+                  (should (equal "harness-ui-tasks-assume-worktree"
+                                 (symbol-name (cadr (assoc "Assume worktree"
+                                                           (harness-ui-tasks--actions mine)))))))
+                (should-not (assoc "Assume worktree" (harness-ui-tasks--actions mine t)))
+                (should-not (string-match-p "Assume worktree" (harness-ui-tasks-test--board-text board)))
+                (setq current mine)
+                (cl-letf (((symbol-function 'harness-ui-tasks--task) (lambda (&optional _) current)))
+                  ;; Assumed: the project is the worktree, to Emacs.
+                  (call-interactively (key-binding (kbd "w")))
+                  (should worktree-assume-mode)
+                  (should (equal worktree (worktree-assume-assumed root)))
+                  (should (equal worktree (project-root (project-current nil root))))
+                  (should (equal worktree (project-root (project-current nil (expand-file-name "x/" root)))))
+                  ;; To the harness it is not: the board keeps its project.
+                  (should (equal root (harness-files-project-root root)))
+                  (should (equal root (harness-files-main-root worktree)))
+                  (let ((all (funcall labels mine)))
+                    (should (member "Reset to main worktree" all))
+                    (should-not (member "Assume worktree" all)))
+                  ;; Again, it is reset.
+                  (harness-ui-tasks-assume-worktree)
+                  (should-not (worktree-assume-assumed root))
+                  (should (equal root (project-root (project-current nil root))))
+                  (let ((all (funcall labels mine)))
+                    (should (member "Assume worktree" all))
+                    (should-not (member "Reset to main worktree" all)))))))
+        (worktree-assume-mode -1)
+        (ignore-errors (delete-directory (file-name-directory (directory-file-name root)) t))))))
+
+(ert-deftest harness-ui-tasks-w-types-off-a-card ()
+  "The key for a task's worktree acts on a card; off one it types into the box.
+Like the board's other keys for the task at point, so a w typed in the box
+is a w."
+  (harness-ui-tasks-test-with
+    (should (eq (get 'harness-ui-tasks-assume-worktree 'harness-compose-acts-p)
+                (get 'harness-ui-tasks-attach 'harness-compose-acts-p)))
+    (with-current-buffer board
+      (goto-char harness-compose-end)
+      (should-not (funcall (get 'harness-ui-tasks-assume-worktree 'harness-compose-acts-p)))
+      (should (eq (lookup-key harness-ui-tasks-board-map (kbd "w")) #'harness-ui-tasks-assume-worktree)))))
+
 (defvar harness-config-sections)
 
 ;;;; Review: turning it off

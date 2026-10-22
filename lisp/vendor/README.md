@@ -10,6 +10,7 @@ out](#splitting-a-library-out)).
 |---|---|---|
 | [compose-quote](compose-quote/README.md) | not split out yet: this directory is its source | -- |
 | [change-review](change-review/README.md) | not split out yet: this directory is its source | -- |
+| [worktree-assume](worktree-assume/README.md) | not split out yet: this directory is its source | -- |
 
 ## The rule
 
@@ -40,12 +41,20 @@ the library's own directory on its load path.
   new files and so can `require` a library they need.
 - **Loading.** A library the harness needs is listed in
   `harness--library-files` (compose-quote is, and the four files of
-  change-review after it, in the order they require each other): it
-  loads compiled,
+  change-review after it, in the order they require each other, and
+  worktree-assume's after them): it loads compiled,
   before any module, when the harness starts, and `harness-reload`
   checks that it compiles and loads it again. One that is only on the
   load path is loaded from its source on its first `require`, and not
   reloaded.
+- **Asking for it.** A file of the harness that `require`s a library
+  looks for it beside itself when `locate-library` cannot find it, as
+  harness-ui-compose.el does for compose-quote: a running harness older
+  than `lisp/vendor`, reloading after an update, checks the new files with
+  the `load-path` it has, which lacks the libraries' directories. A file
+  that loads before the library, such as `lisp/harness-files.el`, does not
+  require it and sets its variables instead
+  (`worktree-assume-inhibit` there).
 - **The update check.** `harness-update` checks a version out and
   compiles it elsewhere before it installs it (`harness--verify-program`).
   The check puts the libraries' directories on its load path too and

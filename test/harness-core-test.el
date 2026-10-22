@@ -1510,19 +1510,25 @@ at every reload, as the harness's other libraries do."
                    "lisp/vendor/change-review/change-review-mail.el"
                    "lisp/vendor/change-review/change-review-ui.el")
                  (cl-remove-if-not (lambda (file) (string-prefix-p "lisp/vendor/change-review/" file))
-                                   harness--library-files))))
+                                   harness--library-files)))
+  ;; worktree-assume, with which a task's worktree stands in for its
+  ;; project: the task board and the worktree list use it.
+  (should (member "lisp/vendor/worktree-assume/worktree-assume.el" harness--library-files)))
 
 (ert-deftest harness-modules-find-their-libraries-with-an-old-load-path ()
-  "The modules that require change-review compile where its directory is not on `load-path'.
+  "The modules that require a vendored library compile where its directory is not on `load-path'.
 A harness older than lisp/vendor, reloading after an update, first
 compiles every file of the new tree with the `load-path' it has, which
 lacks the library's directory: the modules look for it beside
 themselves, as the compose box does for compose-quote, or the reload
-is refused."
+is refused.  That goes for change-review, which the task review is
+made with, and for worktree-assume, which the task board and the
+worktree list use."
   (let ((emacs (expand-file-name invocation-name invocation-directory))
         (out (harness-test-temp-dir)))
     (unwind-protect
-        (dolist (file '("lisp/modules/harness-patch-review.el" "lisp/ui/harness-ui-patch-review.el"))
+        (dolist (file '("lisp/modules/harness-patch-review.el" "lisp/ui/harness-ui-patch-review.el"
+                        "lisp/ui/harness-ui-worktree.el" "lisp/ui/harness-ui-tasks.el"))
           (with-temp-buffer
             (let* ((elc (expand-file-name "checked.elc" out))
                    (status (call-process

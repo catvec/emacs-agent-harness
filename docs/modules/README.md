@@ -421,9 +421,10 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `post-command-hook` |  | [ui-cache-warm](ui-cache-warm.md), [ui-chat](ui-chat.md), [ui-compose](ui-compose.md), `compose-quote.el` |
 | `pre-command-hook` |  | [ui-chat](ui-chat.md), [ui-compose](ui-compose.md) |
 | `pre-redisplay-functions` |  | [ui-compose](ui-compose.md), [ui-popout](ui-popout.md) |
+| `project-find-functions` |  | `worktree-assume.el` |
 | `tabulated-list-revert-hook` |  | [ui-sessions](ui-sessions.md), [ui-worktree](ui-worktree.md) |
 | `window-buffer-change-functions` |  | [ui-access](ui-access.md), [ui-chat](ui-chat.md), [ui-slots](ui-slots.md), [ui-tasks](ui-tasks.md) |
 | `window-configuration-change-hook` |  | [ui-insights](ui-insights.md), [ui-slots](ui-slots.md), [ui-tree](ui-tree.md), [ui-usage](ui-usage.md) |
 | `window-scroll-functions` |  | [ui-chat](ui-chat.md) |
 | `window-size-change-functions` |  | [ui-chat](ui-chat.md), [ui-compose](ui-compose.md), [ui-patch-review](ui-patch-review.md), [ui-pet](ui-pet.md), [ui-tasks](ui-tasks.md) |
-
+| `worktree-assume-change-functions` | `worktree-assume.el` | [ui-worktree](ui-worktree.md) |

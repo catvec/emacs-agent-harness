@@ -154,6 +154,17 @@
 ;; (`harness-ui-tasks--title-help'), so the board is not drawn again for
 ;; figures that change with every model call.
 ;;
+;; Looking at a task's files.  Its worktree is a directory below the
+;; project, and a project's commands -- `project-find-file',
+;; `project-dired', projectile's -- work on the project, not on that.  w on
+;; a card, or Assume worktree in its menu, assumes the task's worktree as
+;; the project (the worktree-assume library, lisp/vendor/worktree-assume):
+;; from any buffer of the project those commands then work on the
+;; worktree, until w again, or Reset to main worktree, makes the project its main
+;; checkout again.  The board, the session list and the rest of the
+;; harness go on finding the project itself, so the task stays there to be
+;; answered.  The mode line says while a worktree is assumed.
+;;
 ;; Everything comes over ACP (`_harness/task/…', `_harness/config/set'
 ;; for turning review off and the limit, `_harness/usage/project-budgets' for the
 ;; header's budgets, plus the session cache), so the board works
@@ -198,6 +209,25 @@
 (require 'harness-ui-compose)
 (require 'harness-ui-pending)
 (require 'harness-ui-priority)
+
+;; worktree-assume is in lisp/vendor/worktree-assume, which the harness
+;; puts on `load-path' (`harness--setup-load-path').  A harness older than
+;; that directory, reloading after an update, first checks that this file
+;; compiles with the `load-path' it has, before it loads the harness.el
+;; that adds the directory.  So when the library is not found, look for it
+;; beside the file being compiled or loaded.
+(defvar byte-compile-current-file)
+(eval-and-compile
+  (unless (or (featurep 'worktree-assume) (locate-library "worktree-assume"))
+    (when-let* ((file (or (and (boundp 'byte-compile-current-file)
+                               (stringp byte-compile-current-file)
+                               byte-compile-current-file)
+                          load-file-name
+                          buffer-file-name))
+                (dir (expand-file-name "../vendor/worktree-assume/" (file-name-directory file)))
+                ((file-directory-p dir)))
+      (add-to-list 'load-path dir))))
+(require 'worktree-assume)
 
 (defgroup harness-ui-tasks nil
   "Task mode." :group 'harness-ui)
@@ -1110,6 +1140,29 @@ session's priority.  See `harness-ui-tasks--shown-priority'."
         ((< seconds 3600) (format "%dm" (truncate (/ seconds 60))))
         (t (format "%dh%02dm" (truncate (/ seconds 3600)) (truncate (/ (mod seconds 3600) 60))))))
 
+;;;; Assuming a task's worktree
+
+(defun harness-ui-tasks--assumable-worktree (task)
+  "Return TASK's worktree when it can be assumed as a project, else nil.
+That is a worktree of this Emacs's machine that is still there: one a
+merged task's was removed from, or a task in the main tree has none.
+The library checks the rest, that it is a worktree of the project."
+  (let ((worktree (plist-get task :worktree)))
+    (and (stringp worktree)
+         (not (string-empty-p worktree))
+         (not (file-remote-p worktree))
+         (file-directory-p worktree)
+         worktree)))
+
+(defun harness-ui-tasks--assume-actions (task)
+  "Return the action that assumes TASK's worktree as the project, or resets it.
+Reset when it is the worktree assumed already; nothing when TASK has no
+worktree to assume.  Both are the command `harness-ui-tasks-assume-worktree'."
+  (when-let* ((worktree (harness-ui-tasks--assumable-worktree task)))
+    (if (worktree-assume-parent worktree)
+        '(("Reset to main worktree" harness-ui-tasks-assume-worktree))
+      '(("Assume worktree" harness-ui-tasks-assume-worktree)))))
+
 ;;;; Actions (shared by keys, buttons and the context menu)
 
 (defvar harness-ui-tasks-action-functions nil
@@ -1223,6 +1276,7 @@ come alone, as for the card's buttons."
                   ("Open" harness-ui-tasks-open)))))
      ;; In the menu only, never among the card's buttons (OWN).
      (unless own (harness-ui-tasks--extra-actions task))
+     (unless own (harness-ui-tasks--assume-actions task))
      ;; Before it starts a task runs with the settings it was submitted
      ;; with, not its write-up session's, so those are not offered.
      (when (and (plist-get task :session) (not (harness-ui-tasks--unstarted-p task)))
@@ -4143,7 +4197,7 @@ so they type, into the compose box (`harness-compose-acts-p')."
                    harness-ui-tasks-complete harness-ui-tasks-verify harness-ui-tasks-reject
                    harness-ui-tasks-merge harness-ui-tasks-archive harness-ui-tasks-delete
                    harness-ui-tasks-raise-priority harness-ui-tasks-lower-priority
-                   harness-ui-tasks-attach))
+                   harness-ui-tasks-attach harness-ui-tasks-assume-worktree))
   (put command 'harness-compose-acts-p #'harness-ui-tasks--on-card-p))
 
 ;; Filled at top level, not in the `defvar', so a reload updates the map.
@@ -4170,6 +4224,8 @@ so they type, into the compose box (`harness-compose-acts-p')."
   (define-key map (kbd "+") #'harness-ui-tasks-raise-priority)
   (define-key map (kbd "-") #'harness-ui-tasks-lower-priority)
   (define-key map (kbd "@") #'harness-ui-tasks-attach)
+  ;; The task's worktree as the project, to look at its files (worktree-assume).
+  (define-key map (kbd "w") #'harness-ui-tasks-assume-worktree)
   (define-key map (kbd "u") #'harness-ui-tasks-return-to-pending)
   (define-key map (kbd "P") #'harness-ui-tasks-toggle-queue)
   ;; The project's slots: who holds them, who waits (harness-ui-slots.el).
@@ -4263,6 +4319,7 @@ act on from there.
         (". +" "Raise priority" harness-ui-tasks-raise-priority)
         (". -" "Lower priority" harness-ui-tasks-lower-priority)
         (". @" "Attach to the box" harness-ui-tasks-attach)
+        (". w" "Assume its worktree as the project, or reset" harness-ui-tasks-assume-worktree)
         (". y" "Allow request" harness-ui-tasks-allow)
         (". n" "Deny request" harness-ui-tasks-deny)]
        ["Finish"
@@ -4388,6 +4445,27 @@ Off a card, @ types into the box, as the board's other keys for a task
 do."
   (interactive)
   (harness-compose-attach-task (harness-ui-tasks--task)))
+
+(defun harness-ui-tasks-assume-worktree ()
+  "Assume the worktree of the task at point as the project, or reset it.
+The task's worktree stands in for its project (`worktree-assume'):
+until it is reset, `project-find-file', `project-dired', projectile and
+the rest work on the worktree from any buffer of the project, as if it
+were the project, to look at the files of a task under review.  On the
+task whose worktree is assumed already, reset: the project is its main
+checkout again.  The harness itself keeps finding the project, so this
+board, and the task on it, stay as they are."
+  (interactive)
+  (let* ((task (harness-ui-tasks--task))
+         (worktree (or (harness-ui-tasks--assumable-worktree task)
+                       (user-error "This task has no worktree to assume%s"
+                                   (if (plist-get task :worktree) ": its directory is gone" "")))))
+    (if (worktree-assume-parent worktree)
+        (let ((reset (worktree-assume-reset worktree)))
+          (message "%s is its own worktree again"
+                   (abbreviate-file-name (or (caar reset) worktree))))
+      (worktree-assume worktree
+                       (or (plist-get task :project) harness-ui-tasks--project harness-ui-tasks--dir)))))
 
 (defun harness-ui-tasks--on-error (what)
   "Return a handler of a failed request that shows on this board WHAT failed."

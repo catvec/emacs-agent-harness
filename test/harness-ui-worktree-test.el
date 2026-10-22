@@ -330,6 +330,137 @@
         (harness-test-wait (lambda () (cl-some (lambda (m) (string-match-p "No merged worktrees" m)) messages))
                            5 "the empty message")))))
 
+(defvar worktree-assume-mode)
+(declare-function worktree-assume "worktree-assume" (worktree &optional project))
+(declare-function worktree-assume-assumed "worktree-assume" (&optional dir))
+(declare-function worktree-assume-reset "worktree-assume" (&optional project))
+(declare-function worktree-assume-mode "worktree-assume" (&optional arg))
+
+(ert-deftest harness-ui-worktree-assume-keys ()
+  "a assumes the worktree at point as the project, r resets it to the main worktree.
+The row says it is assumed while it is, and the mode line offers the
+reset then; the main worktree is the project already, so there is
+nothing to assume there."
+  (harness-ui-worktree-test-with
+    (unwind-protect
+        (progn
+          (harness-ui-worktree-test-open root 2)
+          (should (eq (lookup-key harness-ui-worktree-mode-map (kbd "a")) #'harness-ui-worktree-assume))
+          (should (eq (lookup-key harness-ui-worktree-mode-map (kbd "r")) #'harness-ui-worktree-assume-reset))
+          (should (string-match-p "\\[a assume\\]" (harness-ui-worktree-test-mode-line)))
+          (should-not (string-match-p "reset" (harness-ui-worktree-test-mode-line)))
+          ;; The main worktree: nothing to assume, nothing assumed to reset.
+          (harness-ui-worktree-test-goto root)
+          (should-error (harness-ui-worktree-assume) :type 'user-error)
+          (should-error (harness-ui-worktree-assume-reset) :type 'user-error)
+          ;; a on the other one.
+          (harness-ui-worktree-test-goto wt)
+          (should-not (string-match-p "assumed" (harness-ui-worktree-test-column "Flags")))
+          (call-interactively (key-binding (kbd "a")))
+          (should worktree-assume-mode)
+          (should (harness-ui-worktree-test-same-p wt (worktree-assume-assumed root)))
+          (should (harness-ui-worktree-test-same-p wt (project-root (project-current nil root))))
+          (harness-ui-worktree-test-goto wt)
+          (should (string-match-p "assumed" (harness-ui-worktree-test-column "Flags")))
+          (should (string-match-p "\\[r reset\\]" (harness-ui-worktree-test-mode-line)))
+          (harness-ui-worktree-test-goto root)
+          (should-not (string-match-p "assumed" (harness-ui-worktree-test-column "Flags")))
+          ;; The harness still has the project.
+          (should (harness-ui-worktree-test-same-p root (harness-files-project-root root)))
+          (should (harness-ui-worktree-test-same-p root (harness-files-main-root root)))
+          ;; r resets, wherever point is.
+          (call-interactively (key-binding (kbd "r")))
+          (should-not (worktree-assume-assumed root))
+          (should (harness-ui-worktree-test-same-p root (project-root (project-current nil root))))
+          (harness-ui-worktree-test-goto wt)
+          (should-not (string-match-p "assumed" (harness-ui-worktree-test-column "Flags")))
+          (should-not (string-match-p "reset" (harness-ui-worktree-test-mode-line)))
+          (should-error (harness-ui-worktree-assume-reset) :type 'user-error)
+          ;; A worktree whose directory is gone cannot be assumed.
+          (delete-directory wt t)
+          (should-error (harness-ui-worktree-assume) :type 'user-error)
+          (should-not (worktree-assume-assumed root)))
+      (worktree-assume-mode -1))))
+
+(ert-deftest harness-ui-worktree-redraws-when-a-worktree-is-assumed-from-elsewhere ()
+  "The list shows an assumption made or reset by anything else, the card menu say."
+  (harness-ui-worktree-test-with
+    (unwind-protect
+        (progn
+          (harness-ui-worktree-test-open root 2)
+          (worktree-assume wt root)
+          (harness-ui-worktree-test-goto wt)
+          (should (string-match-p "assumed" (harness-ui-worktree-test-column "Flags")))
+          (should (string-match-p "reset" (harness-ui-worktree-test-mode-line)))
+          (worktree-assume-reset root)
+          (harness-ui-worktree-test-goto wt)
+          (should-not (string-match-p "assumed" (harness-ui-worktree-test-column "Flags")))
+          (should-not (string-match-p "reset" (harness-ui-worktree-test-mode-line)))
+          ;; Nothing breaks without a list to redraw.
+          (kill-buffer harness-ui-worktree--buffer-name)
+          (worktree-assume wt root)
+          (worktree-assume-reset root))
+      (worktree-assume-mode -1))))
+
+(ert-deftest harness-ui-worktree-reset-resets-what-the-rows-show ()
+  "r resets an assumption between two linked worktrees, which a row shows as assumed.
+`worktree-assume' made it elsewhere, from a buffer of the one worktree for
+the other: the list is of the repository, so it resets it as well."
+  (harness-ui-worktree-test-with
+    (let ((other (expand-file-name ".worktrees/other" root)))
+      (harness-ui-worktree-test--git root "worktree" "add" "-q" "-b" "task/other" other)
+      (unwind-protect
+          (progn
+            (harness-ui-worktree-test-open root 3)
+            (should-not (harness-ui-worktree--assumptions))
+            (worktree-assume other wt)
+            (harness-ui-worktree-test-goto other)
+            (should (string-match-p "assumed" (harness-ui-worktree-test-column "Flags")))
+            (should (string-match-p "\\[r reset\\]" (harness-ui-worktree-test-mode-line)))
+            (should (equal 1 (length (harness-ui-worktree--assumptions))))
+            ;; The main worktree is the project still, with nothing of its own to reset.
+            (harness-ui-worktree-test-goto root)
+            (should-error (harness-ui-worktree-assume) :type 'user-error)
+            (call-interactively (key-binding (kbd "r")))
+            (should-not (worktree-assume-assumptions))
+            (harness-ui-worktree-test-goto other)
+            (should-not (string-match-p "assumed" (harness-ui-worktree-test-column "Flags")))
+            (should-not (string-match-p "reset" (harness-ui-worktree-test-mode-line)))
+            (should-error (harness-ui-worktree-assume-reset) :type 'user-error))
+        (worktree-assume-mode -1)))))
+
+(ert-deftest harness-ui-worktree-reset-leaves-another-repositorys-assumption-alone ()
+  "A repository below the main checkout has its own assumptions, which r does not reset."
+  (harness-ui-worktree-test-with
+    (let* ((inner (file-name-as-directory (expand-file-name "vendor/inner" root)))
+           (inner-wt (file-name-as-directory (expand-file-name "../inner-wt" inner))))
+      (make-directory inner t)
+      (harness-ui-worktree-test--git inner "init" "-q" "-b" "main")
+      (harness-ui-worktree-test--git inner "config" "user.name" "Harness Test")
+      (harness-ui-worktree-test--git inner "config" "user.email" "test@example.invalid")
+      (harness-ui-worktree-test--git inner "config" "commit.gpgsign" "false")
+      (with-temp-file (expand-file-name "README" inner) (insert "inner\n"))
+      (harness-ui-worktree-test--git inner "add" "README")
+      (harness-ui-worktree-test--git inner "commit" "-q" "-m" "initial")
+      (harness-ui-worktree-test--git inner "worktree" "add" "-q" "-b" "inner-wt" inner-wt)
+      (unwind-protect
+          (progn
+            (harness-ui-worktree-test-open root 2)
+            (worktree-assume inner-wt inner)
+            (should (worktree-assume-assumed inner))
+            ;; Not this repository's: nothing to reset, no [r reset], and r says so.
+            (should-not (harness-ui-worktree--assumptions))
+            (should-not (string-match-p "reset" (harness-ui-worktree-test-mode-line)))
+            (should-error (harness-ui-worktree-assume-reset) :type 'user-error)
+            (should (worktree-assume-assumed inner))
+            ;; This repository's own is reset, the other stays.
+            (worktree-assume wt root)
+            (should (equal 1 (length (harness-ui-worktree--assumptions))))
+            (harness-ui-worktree-assume-reset)
+            (should-not (worktree-assume-assumed root))
+            (should (worktree-assume-assumed inner)))
+        (worktree-assume-mode -1)))))
+
 (ert-deftest harness-ui-worktree-fork-and-merge-queue ()
   (harness-ui-worktree-test-with
     (harness-ui-worktree-test-open root 2)

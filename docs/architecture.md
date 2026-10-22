@@ -587,7 +587,10 @@ without the harness.  The first is `compose-quote`, which the compose
 box quotes with (see Compose box); the second is `change-review`, which
 the changes of a task are reviewed with, in threads of comments (see
 the review of a task's changes, under Presentation contracts), and
-which reviews emailed patches as well.  lisp/vendor/README.md is the
+which reviews emailed patches as well; the third is `worktree-assume`,
+with which a task's worktree stands in for its project, so that the
+project's commands look at its files (see Assuming a task's worktree,
+under Presentation contracts).  lisp/vendor/README.md is the
 guide; the contract is this:
 
 - A library needs nothing of the harness and never mentions it: no
@@ -609,11 +612,15 @@ guide; the contract is this:
   older than this one, reloading after an update, compiles every file
   with the `load-path` it has before it loads the new harness.el:
   harness-ui-compose.el therefore looks for `compose-quote` beside
-  itself when `locate-library` does not find it.
+  itself when `locate-library` does not find it, as harness-ui-worktree.el
+  and harness-ui-tasks.el do for `worktree-assume`.  A file that loads
+  before the library, harness-files.el, does not require it: it binds the
+  library's `worktree-assume-inhibit`, which is nil where nothing is
+  assumed (and wherever the library is not loaded at all).
 - A library the harness needs at start is in `harness--library-files`
   (compose-quote is, and the four files of change-review -- the model,
-  the diff, the mail and the UI -- after it, last): it loads compiled
-  before any module, and
+  the diff, the mail and the UI -- after it, and worktree-assume's one
+  file last): it loads compiled before any module, and
   `harness-reload` checks it compiles and loads it again.  One that is
   only on `load-path` loads from its source on its first `require` and is
   not reloaded.  `harness-auto-reload-mode` watches the directories.
@@ -11741,7 +11748,12 @@ the task and returns (LABEL COMMAND) entries, whose command runs with
 point on the card (`harness-ui-tasks-task-at-point`,
 `harness-ui-tasks-request`).  They are never one of the card's
 buttons (`harness-ui-tasks--actions` with OWN), and a function that
-fails adds nothing.  The harness repository's own plugin adds Open
+fails adds nothing.  The board adds one of its own after them, for a
+task whose worktree is a directory of this machine that is still there:
+Assume worktree, or Reset to main worktree once that worktree is the one
+assumed (`harness-ui-tasks--assume-actions`; both are the command
+`harness-ui-tasks-assume-worktree`, `w`, which toggles; see Assuming a
+task's worktree).  The harness repository's own plugin adds Open
 harness this way (ui-tools-dev, `harness-ui-tools-dev-open-harness`)
 for a card in Ready for review whose worktree is itself a checkout of
 the harness: it starts the worktree's own live development loop in an
@@ -12671,8 +12683,10 @@ sessions, tools, permissions and tasks; its periods and their `:since`
 are the dashboard's (`harness-ui-usage--since`), so its usage figures
 are too; `t` the period, `p` the project, `n` the summary again, `g`
 all again, RET a session or task line's session; a redraw keeps every
-window's start and point lines), worktrees (`harness-ui-worktree`),
-notifier
+window's start and point lines), worktrees (`harness-ui-worktree`; `a`
+assumes the worktree at point as the project, `r` resets it, and the row
+of the one assumed has the flag `assumed`; see Assuming a task's
+worktree), notifier
 (`harness-ui-notify`: global mode-line segment with blocked and running
 counts of the user's sessions (`harness-ui-user-sessions`, so no internal
 session), idle ones too with `harness-ui-notify-show-idle`, clickable;
@@ -13422,3 +13436,58 @@ review has its branch read again, and the version the harness recorded
 -- `patch-review/changed`, and `task/done` and `task/deleted`, which
 drop the review: at once when its Ediff does not show, else when q
 leaves it.
+
+Assuming a task's worktree.  Reviewing a task means looking at the
+files of its worktree, a directory below the project, and the project's
+commands (`project-find-file`, `project-dired`, projectile's) work on the
+project.  The library `worktree-assume` (lisp/vendor/worktree-assume,
+see Vendored libraries) lets the user ASSUME a worktree: for the
+project it stands in for, `project-current` and `projectile-project-root`
+answer with the worktree until it is reset (`worktree-assume-reset`).  It
+knows nothing of the harness: an assumption maps a project root to the
+root of another worktree of the same git repository
+(`worktree-assume`, which asks `git worktree list`), the global
+`worktree-assume-mode` puts a finder at the head of
+`project-find-functions` and a filter on `projectile-project-root`, and
+only the directories whose own project is the one assumed for change.
+The parent stays known (`worktree-assume-parent`, `-assumed`,
+`-assumptions`, `worktree-assume-change-functions`), and code that must
+see the project as it really is binds `worktree-assume-inhibit`
+(`worktree-assume-with-parent`).
+
+The harness's side is small and keeps to the rule that it depends on
+the library, never the other way round:
+
+- `harness-files-project-root`, which every project the harness keys by
+  comes from -- `harness-files-main-root`, `project/root`, the session
+  list's and the board's project, what a new session starts in -- and
+  the two other lookups of harness-files.el (`harness-files--git-root-p`,
+  `harness-files--projectile-root-p`) bind `worktree-assume-inhibit`
+  around the lookup.  So with a worktree assumed, sessions, tasks,
+  settings and file lists still belong to the project, and the task
+  stays on its board to be verified, sent back or answered.  The file
+  binds the variable and does not require the library, which loads
+  after it; where nothing is assumed, or the library is not there, the
+  variable is nil.  `harness-project-keeps-the-project-while-a-worktree-is-assumed`
+  (test/harness-project-test.el) holds this.
+- The task board (`harness-ui-tasks`) adds Assume worktree, or Reset
+  worktree, to the menu of a card whose task's worktree is a directory of
+  this Emacs's machine that is still there: one command,
+  `harness-ui-tasks-assume-worktree` (`w`, which types off a card like
+  the board's other keys for a task), asks the library to assume the
+  worktree for the task's `:project`, and resets when it is the one
+  assumed already.  A remote worktree is not offered, as the library
+  handles local git worktrees only.
+- The worktree list (`harness-ui-worktree`) has `a`
+  (`harness-ui-worktree-assume`) and `r` (`harness-ui-worktree-assume-reset`)
+  for the worktree at point and for the list's repository, an `assumed`
+  flag on the row of the worktree assumed, and `[a assume]` and, while
+  one is assumed, `[r reset]` in the mode line.  The list redraws when an
+  assumption changes, whoever changed it (`worktree-assume-change-functions`).
+- Both files require the library the way the compose box requires
+  compose-quote, looking beside themselves for it when `locate-library`
+  does not find it (see Vendored libraries).
+
+The assumption is the user's Emacs's, one for each project, kept only
+in memory: a restart resets it.  The harness process, a separate Emacs,
+has none, and needs none: it is given the project's root explicitly.

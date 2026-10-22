@@ -3150,10 +3150,28 @@ Its tool calls are logged with the permission decisions they took."
   (harness-media--settle 0.5)
   (harness-media--capture "insights-activity"))
 
+(declare-function harness-ui-worktree-assume "harness-ui-worktree")
+(declare-function worktree-assume-reset "worktree-assume" (&optional project))
+(declare-function worktree-assume-mode "worktree-assume" (&optional arg))
+
 (defun harness-media-shot-worktrees ()
-  "The worktrees of the demo project."
+  "The worktrees of the demo project, one of a task's assumed as the project.
+`a' on the row of the second worktree, as a user does to look at a task's
+files: the row says `assumed', the mode line offers [r reset] and names
+the worktree, and until the picture is taken `project-find-file' would
+list its files.  Nothing stays assumed afterwards: the pictures that
+follow are of the project as it is."
   (harness-media--view (lambda () (harness-worktrees harness-media-project)))
-  (harness-media--capture "worktrees"))
+  (unwind-protect
+      (progn
+        (with-current-buffer (window-buffer)
+          (goto-char (point-min))
+          (forward-line 1)
+          (harness-ui-worktree-assume))
+        (harness-media--settle 0.5)
+        (harness-media--capture "worktrees"))
+    (worktree-assume-reset 'all)
+    (worktree-assume-mode -1)))
 
 (defun harness-media-shot-settings ()
   "The settings page, for the demo project, which overrides two settings."

@@ -18,11 +18,23 @@
 ;; point, f fork the current session into a fresh worktree, m ask for
 ;; the worktree's session to be merged back into its parent session (the
 ;; merge queue shows in the mode line), RET open the directory in Dired,
-;; g refresh.
+;; a assume the worktree as the project and r reset it to the main
+;; worktree (worktree-assume, see below), g refresh.
 ;; The mode line carries a clickable segment for every command.
 ;;
-;; Everything goes through ACP (`_harness/worktree/*', `_harness/merge/*',
-;; `session/new', `_harness/session/fork').
+;; Assuming.  Reviewing a task means looking at the files of its
+;; worktree, and a project's commands -- `project-find-file',
+;; `project-dired', projectile's -- work on the project, not on a
+;; worktree somewhere below it.  `a' assumes the worktree at point with
+;; the worktree-assume library (lisp/vendor/worktree-assume): until `r'
+;; resets, the project of the main checkout is that worktree, and the
+;; row says `assumed'.  What the harness keys by project -- the session
+;; list, the task board, settings -- still sees the main checkout: the
+;; library keeps the parent, and `harness-files-project-root' asks for
+;; it.
+;;
+;; Everything else goes through ACP (`_harness/worktree/*',
+;; `_harness/merge/*', `session/new', `_harness/session/fork').
 
 ;;; Code:
 
@@ -32,6 +44,25 @@
 (require 'harness-core)
 (require 'harness-util)
 (require 'harness-ui)
+
+;; worktree-assume is in lisp/vendor/worktree-assume, which the harness
+;; puts on `load-path' (`harness--setup-load-path').  A harness older than
+;; that directory, reloading after an update, first checks that this file
+;; compiles with the `load-path' it has, before it loads the harness.el
+;; that adds the directory.  So when the library is not found, look for it
+;; beside the file being compiled or loaded.
+(defvar byte-compile-current-file)
+(eval-and-compile
+  (unless (or (featurep 'worktree-assume) (locate-library "worktree-assume"))
+    (when-let* ((file (or (and (boundp 'byte-compile-current-file)
+                               (stringp byte-compile-current-file)
+                               byte-compile-current-file)
+                          load-file-name
+                          buffer-file-name))
+                (dir (expand-file-name "../vendor/worktree-assume/" (file-name-directory file)))
+                ((file-directory-p dir)))
+      (add-to-list 'load-path dir))))
+(require 'worktree-assume)
 
 (defgroup harness-ui-worktree nil
   "The worktree list." :group 'harness-ui)
@@ -45,6 +76,8 @@
   "Worktrees with uncommitted changes." :group 'harness-ui-worktree)
 (defface harness-worktree-clean-face '((t :inherit success))
   "Clean worktrees." :group 'harness-ui-worktree)
+(defface harness-worktree-assumed-face '((t :inherit (bold font-lock-keyword-face)))
+  "The worktree assumed as the project." :group 'harness-ui-worktree)
 
 (defvar-local harness-ui-worktree--root nil "Main repository root shown.")
 (defvar-local harness-ui-worktree--worktrees nil "Last worktree list received.")
@@ -102,10 +135,39 @@
             (if (stringp reason) (format " (%s)" reason) "")
             ": git worktree prune keeps it, and the prune here leaves it alone")))
 
+(defun harness-ui-worktree--assumed-p (path)
+  "Non-nil when the worktree at PATH is assumed as the project of its repository.
+That is what `a' does (`harness-ui-worktree-assume'), until `r' resets."
+  (and (stringp path)
+       (not (file-remote-p path))
+       (worktree-assume-parent path)
+       t))
+
+(defun harness-ui-worktree--assumptions ()
+  "Return the assumptions (PARENT . ASSUMED) that stand in this list's repository.
+The one of the main checkout, as `a' makes it, and any other worktree's
+that `worktree-assume' made elsewhere: those whose project is one of the
+worktrees listed, not a repository that lies below one of them.  Nothing
+for a remote repository, which the library leaves alone."
+  (and harness-ui-worktree--root
+       (not (file-remote-p harness-ui-worktree--root))
+       (cl-remove-if-not
+        (lambda (assumption)
+          (cl-some (lambda (wt)
+                     (let ((path (plist-get wt :path)))
+                       (and (stringp path)
+                            (harness-ui-worktree--same-p (car assumption) path))))
+                   (cons (list :path harness-ui-worktree--root) harness-ui-worktree--worktrees)))
+        (worktree-assume-assumptions))))
+
 (defun harness-ui-worktree--flags (wt)
   "Return the flags string of worktree WT."
   (string-join (delq nil (list (and (harness-json-true-p (plist-get wt :main)) (propertize "main" 'face 'harness-worktree-main-face))
                                (and (harness-json-true-p (plist-get wt :bare)) "bare")
+                               (and (harness-ui-worktree--assumed-p (plist-get wt :path))
+                                    (propertize "assumed" 'face 'harness-worktree-assumed-face
+                                                'help-echo (concat "Assumed as the project: its commands work on this worktree."
+                                                                   "  r resets to the main worktree")))
                                (and (harness-json-true-p (plist-get wt :locked))
                                     (propertize "locked" 'face 'warning 'help-echo (harness-ui-worktree--lock-help wt)))
                                (and (harness-json-true-p (plist-get wt :detached)) (propertize "detached" 'face 'harness-dim-face))
@@ -169,6 +231,12 @@
    (harness-ui-worktree--segment "[s session]" #'harness-ui-worktree-new-session "Start a session in the worktree at point (s)")
    (harness-ui-worktree--segment "[f fork]" #'harness-ui-worktree-fork-session "Fork the current session into a new worktree (f)")
    (harness-ui-worktree--segment "[m merge]" #'harness-ui-worktree-merge "Queue the worktree's session for a merge into its parent (m)")
+   (harness-ui-worktree--segment "[a assume]" #'harness-ui-worktree-assume
+                                 "Assume the worktree at point as the project: its commands work on it (a)")
+   (if (harness-ui-worktree--assumptions)
+       (harness-ui-worktree--segment "[r reset]" #'harness-ui-worktree-assume-reset
+                                     "Reset the project to its main worktree (r)")
+     "")
    (harness-ui-worktree--segment "[g]" #'harness-ui-worktree-refresh "Refresh (g)")
    (cond (harness-ui-worktree--loading (propertize " loading…" 'face 'harness-dim-face))
          (harness-ui-worktree--error (propertize (format " error: %s" harness-ui-worktree--error) 'face 'error))
@@ -296,6 +364,8 @@ dropped: a reload clears the cache, so it would carry stale data."
     (define-key map (kbd "s") #'harness-ui-worktree-new-session)
     (define-key map (kbd "f") #'harness-ui-worktree-fork-session)
     (define-key map (kbd "m") #'harness-ui-worktree-merge)
+    (define-key map (kbd "a") #'harness-ui-worktree-assume)
+    (define-key map (kbd "r") #'harness-ui-worktree-assume-reset)
     (define-key map (kbd "g") #'harness-ui-worktree-refresh)
     (define-key map (kbd "q") #'harness-ui-quit-view)
     (define-key map (kbd "?") #'harness-menu)
@@ -308,7 +378,7 @@ dropped: a reload clears the cache, so it would carry stale data."
         (vector (list "Path" 40 t)
                 (list "Branch" 24 t)
                 (list "Head" 9 nil)
-                (list "Flags" 16 nil)
+                (list "Flags" 22 nil)
                 (list "Status" 14 nil)
                 (list "Sessions" 40 nil)))
   (setq tabulated-list-padding 1)
@@ -323,6 +393,7 @@ dropped: a reload clears the cache, so it would carry stale data."
         (". RET" "Open in Dired" harness-ui-worktree-dired)
         (". s" "New session in it" harness-ui-worktree-new-session)
         (". m" "Merge its session" harness-ui-worktree-merge)
+        (". a" "Assume it as the project" harness-ui-worktree-assume)
         (". l" "Lock or unlock" harness-ui-worktree-toggle-lock)
         (". d" "Remove" harness-ui-worktree-remove)]
        ["Repository"
@@ -331,6 +402,7 @@ dropped: a reload clears the cache, so it would carry stale data."
         (". p" "Prune stale records" harness-ui-worktree-prune)
         (". P" "Remove merged worktrees" harness-ui-worktree-prune-merged)
         (". L" "Lock the harness's worktrees" harness-ui-worktree-lock-existing)
+        (". r" "Reset to the main worktree" harness-ui-worktree-assume-reset)
         (". g" "Refresh" harness-ui-worktree-refresh)]))
 
 ;;;; Commands
@@ -591,6 +663,46 @@ before the harness locked them, or registered again after a prune."
                                 position)
                        (harness-ui-worktree--show-queue parent)))))
 
+;;;; Assuming a worktree
+
+(defun harness-ui-worktree-assume ()
+  "Assume the worktree at point as the project of this repository.
+Until `harness-ui-worktree-assume-reset' (r) the project of the main
+checkout is the worktree, for `project-current' and projectile: its
+commands, `project-find-file' and the rest, work on the worktree's files
+as if it were the project.  A task's worktree is looked at that way when
+the task is reviewed.  What the harness scopes by project, the sessions
+and the tasks, still finds the main checkout."
+  (interactive)
+  (let ((wt (harness-ui-worktree--worktree))
+        (path (harness-ui-worktree--path)))
+    (when (harness-json-true-p (plist-get wt :main))
+      (user-error "The main worktree is the project itself%s"
+                  (if (harness-ui-worktree--assumptions) "; r resets to it" "")))
+    (unless (and (not (file-remote-p path)) (file-directory-p path))
+      (user-error "%s is not a directory here" (abbreviate-file-name path)))
+    (worktree-assume path harness-ui-worktree--root)
+    (harness-ui-worktree--redraw)))
+
+(defun harness-ui-worktree-assume-reset ()
+  "Reset the project to its main worktree: stop assuming a worktree.
+Every assumption that stands in this repository, as the rows show them."
+  (interactive)
+  (let ((assumptions (harness-ui-worktree--assumptions)))
+    (unless assumptions
+      (user-error "No worktree is assumed for this project"))
+    (dolist (assumption assumptions)
+      (worktree-assume-reset (car assumption)))
+    (message "%s is its own worktree again"
+             (mapconcat (lambda (assumption) (abbreviate-file-name (car assumption)))
+                        assumptions ", "))
+    (harness-ui-worktree--redraw)))
+
+(defun harness-ui-worktree--on-assumed (&rest _)
+  "Redraw the list after a worktree is assumed or reset, from wherever."
+  (when-let* ((buf (harness-ui-worktree--buffer)))
+    (with-current-buffer buf (harness-ui-worktree--redraw))))
+
 ;;;; Live refresh
 
 (defun harness-ui-worktree--buffer ()
@@ -629,6 +741,7 @@ before the harness locked them, or registered again after a prune."
   (add-hook 'harness-ui-event-functions #'harness-ui-worktree--on-event)
   (add-hook 'harness-ui-sessions-changed-hook #'harness-ui-worktree--on-sessions-changed)
   (add-hook 'harness-ui-redraw-hook #'harness-ui-worktree--redraw-all)
+  (add-hook 'worktree-assume-change-functions #'harness-ui-worktree--on-assumed)
   (define-key harness-ui-map (kbd "w") #'harness-worktrees))
 
 (harness-define-module 'ui-worktree

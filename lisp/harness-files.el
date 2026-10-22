@@ -24,10 +24,22 @@
 (require 'harness-core)
 (require 'harness-util)
 
+;; The worktree-assume library (lisp/vendor/worktree-assume) lets the
+;; user assume a task's worktree: for the project it stands in for,
+;; `project-current' and projectile then answer with the worktree.  What
+;; the harness keys by project -- sessions, tasks, settings, file lists --
+;; is the project itself, the parent, so every lookup here is made with
+;; the assumption off.  Only the variable is used, not the library: this
+;; file loads before it, and wherever nothing is assumed it is nil.
+(defvar worktree-assume-inhibit)
+
 (defun harness-files-project-root (dir)
-  "Return the project root directory of DIR, or DIR itself."
+  "Return the project root directory of DIR, or DIR itself.
+The project is the one around DIR, whichever worktree the user has
+assumed for it (`worktree-assume'): the harness works with the project."
   (let* ((dir (file-name-as-directory (expand-file-name dir)))
-         (pr (ignore-errors (project-current nil dir))))
+         (pr (let ((worktree-assume-inhibit t))
+               (ignore-errors (project-current nil dir)))))
     (if pr
         (file-name-as-directory (expand-file-name (project-root pr)))
       dir)))
@@ -210,7 +222,8 @@ failing command resolves to what it printed; a timeout kills it."
 (defun harness-files--projectile-root-p (root)
   "Non-nil when projectile considers ROOT a project root."
   (and (featurep 'projectile)
-       (let ((pr (ignore-errors (projectile-project-root root))))
+       (let ((pr (let ((worktree-assume-inhibit t))
+                   (ignore-errors (projectile-project-root root)))))
          (and pr (string= (file-name-as-directory (expand-file-name pr)) root)))))
 
 (defun harness-files--projectile-cached (root)
@@ -242,7 +255,8 @@ Git submodules, which projectile lists synchronously, are not included."
 
 (defun harness-files--git-root-p (root)
   "Non-nil when ROOT is a project.el project with a git checkout at its root."
-  (let ((pr (ignore-errors (project-current nil root))))
+  (let ((pr (let ((worktree-assume-inhibit t))
+              (ignore-errors (project-current nil root)))))
     (and pr (file-exists-p (expand-file-name ".git" (project-root pr))))))
 
 (defun harness-files--start-listing (root fn)

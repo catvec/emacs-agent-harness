@@ -215,7 +215,8 @@ every file (see `harness--compiled-fresh-p').")
                                   "lisp/vendor/change-review/change-review.el"
                                   "lisp/vendor/change-review/change-review-diff.el"
                                   "lisp/vendor/change-review/change-review-mail.el"
-                                  "lisp/vendor/change-review/change-review-ui.el")
+                                  "lisp/vendor/change-review/change-review-ui.el"
+                                  "lisp/vendor/worktree-assume/worktree-assume.el")
   "Libraries loaded after the core files and before any module, in order.
 Both sides of the process split use them: the UI requires them all,
 harness-module-docs among them (which reads the modules' pages from
@@ -237,8 +238,9 @@ calls a library function as it was before the update; they define no
 macros, so a change to one does not recompile the modules.
 
 The last are vendored (lisp/vendor/README.md): compose-quote, which the
-compose box quotes with, and change-review, the threads of comments on a
-change, whose files are listed in the order they require each other.
+compose box quotes with, change-review, the threads of comments on a
+change, whose files are listed in the order they require each other, and
+worktree-assume, with which a task's worktree stands in for its project.
 Listed here a library loads compiled at start, and `harness-reload'
 checks it compiles and loads it again, as it does the others.")
 

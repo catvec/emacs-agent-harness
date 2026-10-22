@@ -146,6 +146,88 @@ and `projectile-invalidate-cache' makes the next request list again."
               (should (equal plain (plist-get (nth 4 answer) :main)))))
         (ignore-errors (delete-directory base t))))))
 
+;;;; An assumed worktree
+
+(defvar worktree-assume-mode)
+(declare-function worktree-assume "worktree-assume" (worktree &optional project))
+(declare-function worktree-assume-mode "worktree-assume" (&optional arg))
+
+(ert-deftest harness-project-keeps-the-project-while-a-worktree-is-assumed ()
+  "With a task's worktree assumed for the project, the harness still has the project.
+Emacs's own project (`project-current', so `project-find-file') is the
+worktree then, which is what assuming is for.  What the harness keys by
+project -- its root, its main checkout, its file list -- does not move,
+so the sessions and tasks stay where they were."
+  (skip-unless (executable-find "git"))
+  (require 'worktree-assume)
+  (harness-project-test-with-module
+    (let* ((base (harness-test-temp-dir))
+           (root (harness-project-test--committed-repo base))
+           (worktree (file-name-as-directory (expand-file-name ".worktrees/task-a" root)))
+           (src (expand-file-name "src/" root)))
+      (unwind-protect
+          (progn
+            (harness-project-test--git root "worktree" "add" "-q" "-b" "task/a" worktree)
+            (harness-project-test--touch worktree "task-only.el")
+            (harness-project-test--git worktree "add" "task-only.el")
+            (harness-project-test--git worktree "commit" "-q" "-m" "task work")
+            (make-directory src t)
+            (should (harness-project-test--same-dir root (harness-files-project-root src)))
+            (worktree-assume worktree root)
+            ;; Emacs's project is the worktree, from every directory of the project.
+            (should (harness-project-test--same-dir worktree (project-root (project-current nil root))))
+            (should (harness-project-test--same-dir worktree (project-root (project-current nil src))))
+            ;; The harness's is still the project.
+            (dolist (dir (list root src))
+              (should (harness-project-test--same-dir root (harness-files-project-root dir)))
+              (should (harness-project-test--same-dir root (harness-files-main-root dir)))
+              (should (harness-project-test--same-dir root (harness-call 'project/root dir))))
+            (should (harness-project-test--same-dir root (harness-project-main root)))
+            (should (harness-files--git-root-p root))
+            ;; Its file list is the project's, not the worktree's.
+            (let ((files (harness-test-await (harness-call 'project/files root))))
+              (should (member "README" files))
+              (should-not (member "task-only.el" files)))
+            ;; The worktree's own directories are the worktree's, as ever,
+            ;; and belong to the project.
+            (should (harness-project-test--same-dir worktree (harness-files-project-root worktree)))
+            (should (harness-project-test--same-dir root (harness-files-main-root worktree)))
+            (should (harness-project-test--same-dir root (harness-project-main worktree)))
+            (should-not (default-value 'worktree-assume-inhibit)))
+        (worktree-assume-mode -1)
+        (ignore-errors (delete-directory base t))))))
+
+(ert-deftest harness-project-asks-projectile-for-the-project-while-a-worktree-is-assumed ()
+  "Projectile's root of the project is the harness's own, assumed or not.
+The library filters `projectile-project-root' while a worktree is
+assumed, so the root the harness gets from it is asked for with the
+assumption off.  A stand-in finds the roots as projectile does."
+  (skip-unless (and (executable-find "git") (not (featurep 'projectile))))
+  (require 'worktree-assume)
+  (harness-project-test-with-module
+    (let* ((base (harness-test-temp-dir))
+           (root (harness-project-test--committed-repo base))
+           (worktree (file-name-as-directory (expand-file-name ".worktrees/task-a" root))))
+      (unwind-protect
+          (progn
+            (provide 'projectile)
+            (defalias 'projectile-project-root
+              (lambda (&optional dir)
+                (let ((worktree-assume-inhibit t))
+                  (when-let* ((project (project-current nil (or dir default-directory))))
+                    (project-root project)))))
+            (harness-project-test--git root "worktree" "add" "-q" "-b" "task/a" worktree)
+            (should (harness-files--projectile-root-p (file-name-as-directory (expand-file-name root))))
+            (worktree-assume worktree root)
+            ;; Projectile's project is the worktree, to everything but the harness.
+            (should (harness-project-test--same-dir worktree (projectile-project-root root)))
+            (should (harness-files--projectile-root-p (file-name-as-directory (expand-file-name root)))))
+        (advice-remove 'projectile-project-root #'worktree-assume--projectile-root)
+        (fmakunbound 'projectile-project-root)
+        (setq features (delq 'projectile features))
+        (worktree-assume-mode -1)
+        (ignore-errors (delete-directory base t))))))
+
 ;;;; Scratch directories
 
 (defvar harness-sessions)

@@ -165,8 +165,8 @@ OpenAI-compatible APIs and AWS Bedrock.
 | A message sent mid-turn is queued until the model has it, and can be edited or deleted till then; queued ones send now, one by one | An image, a file and a task, named in the text: one chip, a click opens it |
 | ![The usage dashboard: a month of cost per day, cost by model, the plan's quota, the fallback list and budgets](docs/media/usage.png) | ![The settings page for one project, which overrides two settings](docs/media/settings.png) |
 | Usage: cost per day and model, plan quota, fallback list, budgets | Settings, here as one project overrides them |
-| ![The session list with forks, BTWs and task sessions](docs/media/sessions.png) | ![The worktrees of a project, with their branches and sessions](docs/media/worktrees.png) |
-| The session list | The worktrees of a project and their sessions |
+| ![The session list with forks, BTWs and task sessions](docs/media/sessions.png) | ![The worktrees of a project, with their branches and sessions, one assumed as the project](docs/media/worktrees.png) |
+| The session list | The worktrees of a project and their sessions, one assumed as the project to look at its files |
 | ![The session list with a permission request popped out, its allow and deny buttons under it](docs/media/popout-permission.png) | ![The task board with a question popped out, its options and a box to type another answer under it](docs/media/popout-question.png) |
 | A request popped out of the session list, answered there | A question popped out of the task board, answered there |
 | ![A BTW side conversation open under a session](docs/media/btw.png) | ![The task board writing a message to the session of a task at work, the compose box in amber](docs/media/tasks-message.png) |
@@ -532,7 +532,8 @@ default), or nil for nowhere.
 | `C` | `harness-cost-compare` | In the usage dashboard, compare what the recorded usage would have cost at other models' prices |
 | `C-c h A` | `harness-insights` | Show the Insights report: how a period of work with the agents went |
 | `C-c h B` | `harness-delete-budget` | Delete a budget, chosen by name |
-| `C-c h w` | `harness-worktrees` | List the git worktrees of the project |
+| `C-c h w` | `harness-worktrees` | List the git worktrees of the project (`a` assumes the one at point as the project, `r` resets; see [Looking at a task's worktree](#looking-at-a-tasks-worktree)) |
+| `w` | `harness-ui-tasks-assume-worktree` | On the task board, assume the worktree of the task at point as the project, or reset it if it is assumed already (see [Looking at a task's worktree](#looking-at-a-tasks-worktree)) |
 | `C-c h Q` | `harness-slots` | Show the project's task slots: who holds each one and at which priority, who waits for one and for how long (`S` on the task board) |
 | `C-c h S` | `harness-settings` | Show the settings page |
 | `C-c h z` | `harness-pet` | Show your companion pet, or the egg it hatches from |
@@ -3227,6 +3228,13 @@ with), `recap` writes the recaps on the cards,
   it does for a task that is pre-empted: the workers of its supervisor
   plan and its sub-agents are cancelled, and what they were on is
   reported to the task, to read when it carries on.
+- To look at a task's files, **Assume worktree** in a card's menu
+  (right-click; `w` on the card) makes the task's worktree the project
+  for `project-find-file`, `project-dired` and the rest, until **Reset
+  to main worktree** (`w` again) goes back to the main checkout. The
+  board, the session list and every other view of the harness keep
+  finding the project, so the task stays there to be answered. See
+  [Looking at a task's worktree](#looking-at-a-tasks-worktree).
 - When the project is the harness itself, and its own plugin is
   loaded (see [Development](#development)), a card in *Ready for
   review* whose worktree is a checkout of the harness also has
@@ -3527,6 +3535,52 @@ with), `recap` writes the recaps on the cards,
 
 Press `?` on the board, or `C-c h ?` in its compose box, to see all of
 the board's commands.
+
+### Looking at a task's worktree
+
+A task works in a worktree, a directory below its project
+(`.worktrees/`). To review it you want its files as the project's
+commands see them -- `C-x p f` to find a file, `C-x p g` to search, `C-x
+p D` for Dired, projectile's the same -- but those work on the *project*,
+the main checkout, and you had to find where the worktree is and open it
+in Dired. Instead you **assume** the worktree, as you assume a role: until
+you reset, the project is that worktree.
+
+- **From the board**, right-click a task's card and choose **Assume
+  worktree**, or press `w` on it. **Reset to main worktree** (`w` again) goes back.
+- **From the worktree list** (`C-c h w`), `a` assumes the worktree at
+  point and `r` resets. The row says `assumed` while it is, and `r`
+  shows in the mode line then.
+- **From anywhere**, `M-x worktree-assume` picks one of the other
+  worktrees of the current project, and `M-x worktree-assume-reset` goes
+  back (`C-u` resets them all).
+
+While a worktree is assumed, every buffer of the project -- the board, a
+file of the main checkout, a buffer far from any file -- has the worktree
+for its project: `C-x p f` offers its files, `C-x p D` opens its root,
+`C-x p g` searches it. The mode line says `⇒task-name` in every window
+until you reset, and hovering over it names the project and the worktree.
+Directories of the worktree itself, of other worktrees and of other
+projects are found as they were. A worktree that is removed meanwhile is
+forgotten.
+
+It is the *project* that changes, not what the harness keeps by it. The
+session list, the task board, settings, `@` completion and what a new
+session starts in all go on finding the main checkout, so with a task's
+worktree assumed the task is still on its board to verify, to send back
+or to answer, and `C-c h a` from a buffer of the worktree opens that
+board. The harness does it by looking the project up with the
+assumption off (`harness-files-project-root`); the library keeps the
+parent for such code (`worktree-assume-parent`,
+`worktree-assume-with-parent`).
+
+The assumption is one for each project, for the whole Emacs, and it is
+not saved: a restart resets it. It is local git worktrees only. A
+language server started for a buffer of the project (Eglot, lsp-mode)
+asks for the project too, so reset before editing the project itself.
+All of this is the [worktree-assume](lisp/vendor/worktree-assume/README.md)
+library's, which needs nothing of the harness and may be used without
+it: the harness only offers it where tasks are.
 
 ### Commit messages without Claude attribution
 
@@ -4858,9 +4912,10 @@ shows one in Emacs. [docs/module-audit.md](docs/module-audit.md) is an
 audit of the modules and their API made with them.
 Beside the modules, `lisp/vendor` holds libraries the harness ships that
 need nothing of it, and may be used without it: `compose-quote`, which
-the compose box quotes with, and `change-review`, the threads of
-comments on a change, which the review of a task's changes is built on.
-See [lisp/vendor/README.md](lisp/vendor/README.md).
+the compose box quotes with, `change-review`, the threads of
+comments on a change, which the review of a task's changes is built on,
+and `worktree-assume`, which makes a task's worktree the project to look
+at its files. See [lisp/vendor/README.md](lisp/vendor/README.md).
 
 ### Modules of your own
 
@@ -5099,6 +5154,7 @@ scripts/media.sh [NAME...]                   # take the screenshots in docs/medi
 scripts/module-docs.sh [--check]             # write the module pages in docs/modules again
 make -C lisp/vendor/compose-quote test       # a vendored library's own tests, on their own
 make -C lisp/vendor/change-review test
+make -C lisp/vendor/worktree-assume test
 ```
 
 A development Emacs (`scripts/dev.sh`) loads every module; set

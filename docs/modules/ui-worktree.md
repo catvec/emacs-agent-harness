@@ -28,16 +28,30 @@ registered again after a prune), s start a session in the worktree at
 point, f fork the current session into a fresh worktree, m ask for
 the worktree's session to be merged back into its parent session (the
 merge queue shows in the mode line), RET open the directory in Dired,
-g refresh.
+a assume the worktree as the project and r reset it to the main
+worktree (worktree-assume, see below), g refresh.
 The mode line carries a clickable segment for every command.
 
-Everything goes through ACP (`_harness/worktree/*`, `_harness/merge/*`,
-`session/new`, `_harness/session/fork`).
+Assuming.  Reviewing a task means looking at the files of its
+worktree, and a project's commands -- `project-find-file`,
+`project-dired`, projectile's -- work on the project, not on a
+worktree somewhere below it.  `a` assumes the worktree at point with
+the worktree-assume library (lisp/vendor/worktree-assume): until `r`
+resets, the project of the main checkout is that worktree, and the
+row says `assumed`.  What the harness keys by project -- the session
+list, the task board, settings -- still sees the main checkout: the
+library keeps the parent, and `harness-files-project-root` asks for
+it.
+
+Everything else goes through ACP (`_harness/worktree/*`,
+`_harness/merge/*`, `session/new`, `_harness/session/fork`).
 
 ## Provides
 
 ### Commands
 
+- `harness-ui-worktree-assume` — Assume the worktree at point as the project of this repository.
+- `harness-ui-worktree-assume-reset` — Reset the project to its main worktree: stop assuming a worktree.
 - `harness-ui-worktree-create` — Create a worktree on BRANCH (from BASE with a prefix argument).
 - `harness-ui-worktree-dired` — Open the worktree at point in Dired.
 - `harness-ui-worktree-fork-session` — Fork SESSION-ID into a new worktree on BRANCH.
@@ -81,4 +95,5 @@ Everything goes through ACP (`_harness/worktree/*`, `_harness/merge/*`,
 - `harness-ui-redraw-hook` → `harness-ui-worktree--redraw-all`
 - `harness-ui-sessions-changed-hook` → `harness-ui-worktree--on-sessions-changed`
 - `tabulated-list-revert-hook` → `harness-ui-worktree--refresh-entries`
+- `worktree-assume-change-functions` → `harness-ui-worktree--on-assumed`
 

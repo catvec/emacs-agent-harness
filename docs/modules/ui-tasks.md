@@ -165,6 +165,17 @@ is in the tooltip of the title, made when you hover
 (`harness-ui-tasks--title-help`), so the board is not drawn again for
 figures that change with every model call.
 
+Looking at a task's files.  Its worktree is a directory below the
+project, and a project's commands -- `project-find-file`,
+`project-dired`, projectile's -- work on the project, not on that.  w on
+a card, or Assume worktree in its menu, assumes the task's worktree as
+the project (the worktree-assume library, lisp/vendor/worktree-assume):
+from any buffer of the project those commands then work on the
+worktree, until w again, or Reset to main worktree, makes the project its main
+checkout again.  The board, the session list and the rest of the
+harness go on finding the project itself, so the task stays there to be
+answered.  The mode line says while a worktree is assumed.
+
 Everything comes over ACP (`_harness/task/…`, `_harness/config/set`
 for turning review off and the limit, `_harness/usage/project-budgets` for the
 header's budgets, plus the session cache), so the board works
@@ -213,6 +224,7 @@ the chevron that folds a card's recap, which only draws the card again.
 - `harness-ui-tasks-allow` — Answer the permission request the task at point waits on with Allow.
 - `harness-ui-tasks-archive` — Archive the task at point, completed or in review, or restore it when archived.
 - `harness-ui-tasks-archive-done` — Archive every completed task of this project.
+- `harness-ui-tasks-assume-worktree` — Assume the worktree of the task at point as the project, or reset it.
 - `harness-ui-tasks-attach` — Attach the task at point to the board's compose box.
 - `harness-ui-tasks-btw` — Ask about the tasks in a BTW side conversation over the board.
 - `harness-ui-tasks-cancel` — Stop the task at point, or drop it when it is still pending.
