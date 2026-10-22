@@ -35,13 +35,24 @@ all log in with ssh: /sudo::/ and /docker:...: are no hosts.
 Permissions: a call is of kind exec, so the permission mode and the
 auto-mode judge decide it as they decide a bash command, and its path
 is the directory it runs in on HOST, so the jail asks for HOST the
-first time.  Granting /ssh:HOST:/ lets a session work anywhere on
-HOST, with this tool and every other; a non-interactive session needs
-it granted beforehand (`harness-allowed-directories`).  The path is
-worked out without connecting -- nothing in the permission chain may
-wait on the network -- so a call without an absolute cwd, which runs
-in the remote home directory, is about the host's root.  Corporate
-mode turns the tool off (see harness-tools.el).
+first time.  The path is worked out without connecting -- nothing in
+the permission chain may wait on the network -- and only HOST knows
+where its login's home directory is.  So a call that runs there (no
+cwd, a cwd starting with ~, a relative cwd) is about the home
+directory as TRAMP writes it, /ssh:HOST:~/ or /ssh:HOST:~/src/, a
+place of its own that the chain never expands (`harness-remote-home-p`),
+and the first prompt for a host asks for that, not for the whole
+host.  A cwd that leaves the home (~/..) or is another user's (~bob)
+is about the host's root, /ssh:HOST:/, which the prompt offers as its
+widest answer; an absolute cwd is about itself.  Granting /ssh:HOST:/
+lets a session work anywhere on HOST, home directory included, with
+this tool and every other; granting /ssh:HOST:~/ only the home
+directory, and /ssh:HOST:/home/u/ not that, since the harness does not
+know where the home is.  A non-interactive session needs the grant
+beforehand (`harness-allowed-directories`).  The prompt for the
+call itself offers lasting answers for this host alone
+(`harness-perms--cover-ladder`).  Corporate mode turns the tool off
+(see harness-tools.el).
 
 The harness has no terminal: a connection that needs a password, a
 key passphrase or a host key confirmation fails.  Then ssh is asked

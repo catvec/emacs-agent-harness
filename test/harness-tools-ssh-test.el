@@ -21,6 +21,7 @@
 (defvar harness-tools-corporate-hint)
 (defvar harness-corporate-mode)
 (defvar harness-allowed-directories)
+(defvar harness-perms-rules)
 (defvar harness-non-interactive)
 (defvar harness-sessions)
 
@@ -156,32 +157,136 @@ Methods that reach no other host are refused too."
 
 (ert-deftest harness-tools-ssh-paths-without-connecting ()
   "Where a call runs, and the path the jail checks, are worked out
-without connecting: an absolute cwd is the path, anything the host has
-to expand (its home, a relative cwd) makes the host's root the path."
+without connecting.  An absolute cwd is the path.  Where the host decides,
+in the login's home directory (no cwd, ~, a relative cwd), the path is
+that home directory by name, /ssh:HOST:~/src/, which nothing expands; a
+cwd that leaves the home, or is another user's, is about the host's root."
   (harness-tools-ssh-test--setup)
-  (cl-letf (((symbol-function 'tramp-maybe-open-connection)
-             (lambda (&rest _) (error "Nothing may connect"))))
+  (harness-test-without-connections
     (cl-flet ((where (&rest input) (harness-tools-ssh--where input))
               (paths (&rest input) (harness-tools-ssh--paths input)))
+      ;; Where the call runs is worked out as before: the host's own
+      ;; expansion of ~ is still left to the host.
       (should (equal '("/ssh:box:" "~/") (where :host "box")))
-      (should (equal '("/ssh:box:/") (paths :host "box")))
       (should (equal '("/ssh:box:" "/srv/app/") (where :host "box" :cwd "/srv/app")))
-      (should (equal '("/ssh:box:/srv/app/") (paths :host "box" :cwd "/srv/app")))
       (should (equal '("/ssh:box:" "/etc/") (where :host "box" :cwd "/srv/../etc/")))
       (should (equal '("/ssh:box:" "~/app/") (where :host "box" :cwd "app")))
-      (should (equal '("/ssh:box:/") (paths :host "box" :cwd "app")))
       (should (equal '("/ssh:box:" "~/src/") (where :host "box" :cwd "~/src")))
+      (should (equal '("/ssh:box:" "~/") (where :host "box" :cwd " ")))
       (should (equal '("/ssh:box:" "/srv/") (where :host "/ssh:box:/srv")))
       (should (equal '("/ssh:box:" "/var/") (where :host "/ssh:box:/srv" :cwd "/var")))
-      (should (equal '("/ssh:box:" "~/") (where :host "box" :cwd " ")))
+      ;; The path the jail checks: the home directory by name ...
+      (should (equal '("/ssh:box:~/") (paths :host "box")))
+      (should (equal '("/ssh:box:~/") (paths :host "box" :cwd " ")))
+      (should (equal '("/ssh:box:~/") (paths :host "box" :cwd "~")))
+      (should (equal '("/ssh:box:~/app/") (paths :host "box" :cwd "app")))
+      (should (equal '("/ssh:box:~/projects/x/") (paths :host "box" :cwd "projects/x")))
+      (should (equal '("/ssh:box:~/projects/x/") (paths :host "box" :cwd "~/projects/x")))
+      (should (equal '("/ssh:box:~/src/") (paths :host "box" :cwd "~/src")))
+      ;; ... with `.' and `..' resolved inside it.
+      (should (equal '("/ssh:box:~/b/") (paths :host "box" :cwd "~/a/../b")))
+      (should (equal '("/ssh:box:~/a/b/") (paths :host "box" :cwd "./a//b/.")))
+      (should (equal '("/ssh:box:~/") (paths :host "box" :cwd "a/..")))
+      ;; ... or the host's root when the cwd leaves the home or is another user's.
+      (should (equal '("/ssh:box:/") (paths :host "box" :cwd "~/..")))
+      (should (equal '("/ssh:box:/") (paths :host "box" :cwd "../x")))
+      (should (equal '("/ssh:box:/") (paths :host "box" :cwd "~bob/x")))
+      ;; An absolute cwd is itself, normalised.
+      (should (equal '("/ssh:box:/srv/app/") (paths :host "box" :cwd "/srv/app")))
+      (should (equal '("/ssh:box:/etc/") (paths :host "box" :cwd "/srv/../etc/")))
+      (should (equal '("/ssh:box:/") (paths :host "box" :cwd "/")))
+      ;; The host may bring a directory of its own, a TRAMP name too.
+      (should (equal '("/ssh:box:/srv/") (paths :host "/ssh:box:/srv")))
+      (should (equal '("/ssh:box:~/") (paths :host "/ssh:box:")))
+      (should (equal '("/ssh:box:~/") (paths :host "/ssh:box:~")))
+      (should (equal '("/ssh:box:~/x/") (paths :host "/ssh:box:~/x")))
+      (should (equal '("/ssh:box:/var/") (paths :host "/ssh:box:/srv" :cwd "/var")))
       ;; A cwd with a TRAMP prefix: on the same host only.
       (should (equal '("/ssh:box:" "/var/log/") (where :host "box" :cwd "/ssh:box:/var/log")))
+      (should (equal '("/ssh:box:" "~/src/") (where :host "box" :cwd "/ssh:box:~/src")))
+      (should (equal '("/ssh:box:/var/log/") (paths :host "box" :cwd "/ssh:box:/var/log")))
+      (should (equal '("/ssh:box:~/src/") (paths :host "box" :cwd "/ssh:box:~/src")))
+      (should (equal '("/ssh:box:~/") (paths :host "box" :cwd "/ssh:box:~")))
       (should (string-match-p "is not on /ssh:box:"
                               (cadr (should-error (where :host "box" :cwd "/ssh:other:/var/log")))))
+      (should (string-match-p "is not on /ssh:box:"
+                              (cadr (should-error (where :host "box" :cwd "/ssh:other:~/src")))))
       (should-not (paths :host "box" :cwd "/ssh:other:/var/log"))
+      (should-not (paths :host "box" :cwd "/ssh:other:~/src"))
+      ;; A host with a user and a port, an IPv6 address, another method, a jump host.
+      (should (equal '("/ssh:admin@laptop-0#4358:~/") (paths :host "admin@laptop-0:4358" :command "uptime")))
+      (should (equal '("/ssh:admin@laptop-0#4358:~/projects/x/")
+                     (paths :host "admin@laptop-0:4358" :cwd "projects/x")))
+      (should (equal '("/ssh:[::1]#2222:~/") (paths :host "[::1]:2222")))
+      (should (equal '("/scp:noah@box:~/src/") (paths :host "/scp:noah@box:~/src")))
+      (should (equal '("/ssh:j|ssh:box:~/") (paths :host "/ssh:j|ssh:box:")))
+      (should (equal '("/ssh:j|ssh:box:~/src/") (paths :host "/ssh:j|ssh:box:" :cwd "~/src")))
+      (should (equal '("/ssh:j|ssh:box:/") (paths :host "/ssh:j|ssh:box:" :cwd "~/..")))
+      ;; A call whose host is no good has no path: it fails before it connects.
       (should-not (paths :host "-oProxyCommand=x"))
-      (should-not (paths))
-      (should (equal '("/ssh:j|ssh:box:/") (paths :host "/ssh:j|ssh:box:"))))))
+      (should-not (paths :host "/sudo::"))
+      (should-not (paths)))))
+
+(defun harness-tools-ssh-test--attempts (fn)
+  "Call FN where TRAMP cannot connect; return the hosts it tried, oldest first.
+Errors FN signals are ignored: the question is only whether it tried."
+  (let (attempts)
+    (cl-letf (((symbol-function 'tramp-maybe-open-connection)
+               (lambda (vec &rest _)
+                 (push (tramp-make-tramp-file-name vec 'noloc) attempts)
+                 (error "Nothing may connect"))))
+      (ignore-errors (funcall fn)))
+    (nreverse attempts)))
+
+(ert-deftest harness-tools-ssh-paths-do-not-depend-on-an-open-connection ()
+  "A name in a home directory is read as it is written, connected or not.
+TRAMP's `file-remote-p' expands a ~ once it is connected to the host, so
+the local part of /mock:127.0.0.1:~/x is the real home directory after a
+call ran there.  The prompt for a host's home directory must not turn into
+one for the whole host, or for another directory, the moment a connection
+opens: the permission chain reads names itself, and asks no connection."
+  (harness-tools-ssh-test--setup)
+  (harness-tools-ssh-test--with-mock
+    (let ((name "/mock:127.0.0.1:~/x")
+          (call '(:host "/mock:127.0.0.1:" :command "pwd")))
+      (unwind-protect
+          (progn
+            ;; Before any connection TRAMP reads the name as it is written,
+            ;; and expanding it is what would connect ...
+            (should (equal "~/x" (file-remote-p name 'localname)))
+            (should (equal '("/mock:127.0.0.1:")
+                           (harness-tools-ssh-test--attempts (lambda () (expand-file-name name "/")))))
+            ;; ... a connection opens ...
+            (should (file-exists-p "/mock:127.0.0.1:/tmp"))
+            (should (file-remote-p "/mock:127.0.0.1:" nil t))
+            ;; ... and TRAMP expands the ~.
+            (let ((expanded (file-remote-p name 'localname)))
+              (should-not (equal "~/x" expanded))
+              (should (string-prefix-p "/" expanded))
+              (should (string-suffix-p "/x" expanded)))
+            ;; The permission chain does not, and asks the connection nothing.
+            (harness-test-without-connections
+              (should (equal '("/mock:127.0.0.1:" . "~/x") (harness-remote-parts name)))
+              (should (harness-remote-home-p name))
+              (should (equal "~/x" (harness-file-remote-p name 'localname)))
+              (should (equal "/mock:127.0.0.1:" (harness-file-remote-p name)))
+              (should (equal name (harness-absolute-file-name name "/")))
+              (should (equal name (harness-abbreviate-file-name name)))
+              (should (equal '("/mock:127.0.0.1:" "~/") (harness-tools-ssh--where call)))
+              (should (equal '("/mock:127.0.0.1:~/") (harness-tools-ssh--paths call)))
+              (should (equal '("/mock:127.0.0.1:~/src/") (harness-tools-ssh--paths (append call '(:cwd "~/src")))))
+              (should (equal '("/mock:127.0.0.1:~/src/")
+                             (harness-tools-ssh--paths (append call '(:cwd "/mock:127.0.0.1:~/src")))))
+              (should (equal '("/mock:127.0.0.1:~/src/")
+                             (harness-tools-ssh--paths '(:host "/mock:127.0.0.1:~/src" :command "pwd"))))
+              (should (equal '("/mock:127.0.0.1:~/x/")
+                             (harness-tools--paths (harness-tool-get "ssh") (list :host name :command "pwd")
+                                                   (list :cwd "/work/"))))
+              ;; Messages name a path without asking an open connection about it either:
+              ;; TRAMP's abbreviating asks the host whether its file system is case sensitive.
+              (should (equal "/mock:127.0.0.1:/tmp/x" (harness-abbreviate-file-name "/mock:127.0.0.1:/tmp/x")))
+              (should (equal "/mock:127.0.0.1:/tmp/x/../y" (harness-abbreviate-file-name "/mock:127.0.0.1:/tmp/x/../y")))))
+        (ignore-errors (tramp-cleanup-connection (tramp-dissect-file-name "/mock:127.0.0.1:") t t))))))
 
 ;;;; Running commands
 
@@ -369,36 +474,58 @@ what it would have asked or why it failed."
 
 ;;;; Sessions: the jail, corporate mode and the other tools
 
+(defun harness-tools-ssh-test--ask (id input)
+  "Start a call of the ssh tool with INPUT in session ID; return (PROMISE . PROMPT).
+The prompt is the first permission request the call waits on."
+  (let ((p (harness-tools-ssh-test--run id "ssh" input)))
+    (cons p (harness-tools-ssh-test--prompt id))))
+
 (ert-deftest harness-tools-ssh-jail-asks-for-the-host ()
-  "A call reaches the directory it runs in on the host, or the host's
-root when the host decides where that is; the jail asks for it as for
-any directory outside the session's, and a grant of the root lets
-every tool work on the host."
+  "A call reaches the directory it runs in on the host.  The jail asks for
+it as for any directory outside the session's; for a call that runs in the
+login's home directory that is the home directory by name, which no
+connection has to find.  A grant of it holds for the home: an absolute
+directory asks again, and a grant of the host's root lets every tool work
+anywhere on the host."
   (harness-tools-ssh-test--with-session (id :permission-mode 'yolo)
     (let* ((remote (harness-test-temp-dir))
            (dir (concat "/mock:localhost:" remote)))
       (with-temp-file (expand-file-name "data.txt" remote) (insert "on the host\n"))
       ;; Denied: the call does not run.
-      (let* ((p (harness-tools-ssh-test--run id "ssh" (list :host "/mock:localhost:" :cwd remote
-                                                           :command "touch ran")))
-             (prompt (harness-tools-ssh-test--prompt id)))
-        (should (equal dir (plist-get (plist-get prompt :payload) :dir)))
-        (harness-call 'permission/answer id (plist-get prompt :id) "deny-once")
-        (let ((r (harness-await p 60)))
+      (let ((asked (harness-test-without-connections
+                     (harness-tools-ssh-test--ask id (list :host "/mock:localhost:" :cwd remote
+                                                           :command "touch ran")))))
+        (should (equal dir (plist-get (plist-get (cdr asked) :payload) :dir)))
+        (harness-call 'permission/answer id (plist-get (cdr asked) :id) "deny-once")
+        (let ((r (harness-await (car asked) 60)))
           (should (plist-get r :is-error))
           (should (string-match-p "denied access" (plist-get r :content))))
         (should-not (file-exists-p (expand-file-name "ran" remote))))
-      ;; No cwd: the host's root, granted to the session.
-      (let* ((p (harness-tools-ssh-test--run id "ssh" (list :host "/mock:localhost:" :command "echo hi")))
-             (prompt (harness-tools-ssh-test--prompt id)))
-        (should (equal "/mock:localhost:/" (plist-get (plist-get prompt :payload) :dir)))
-        (harness-call 'permission/answer id (plist-get prompt :id) "allow-session")
-        (should (string-prefix-p "hi\nexit 0" (plist-get (harness-await p 60) :content))))
+      ;; No cwd: the home directory of the login, by name, granted to the session.
+      (let* ((asked (harness-test-without-connections
+                      (harness-tools-ssh-test--ask id (list :host "/mock:localhost:" :command "echo hi"))))
+             (payload (plist-get (cdr asked) :payload)))
+        (should (equal "/mock:localhost:~/" (plist-get payload :dir)))
+        (should (equal "/mock:localhost:~/**" (plist-get payload :pattern)))
+        (should (equal '("/mock:localhost:~/") (plist-get payload :paths)))
+        (should (equal "Access /mock:localhost:~/ (the login's home directory)" (plist-get payload :title)))
+        (should (string-match-p "the home directory of the login on localhost, where ssh starts"
+                                (plist-get payload :reason)))
+        (harness-call 'permission/answer id (plist-get (cdr asked) :id) "allow-session")
+        (should (string-prefix-p "hi\nexit 0" (plist-get (harness-await (car asked) 60) :content))))
+      (should (member "/mock:localhost:~/" (harness-call 'permission/allowed-dirs id)))
+      (should-not (member "/mock:localhost:/" (harness-call 'permission/allowed-dirs id)))
+      ;; The home is granted, not the host: an absolute directory asks again ...
+      (let ((asked (harness-test-without-connections
+                     (harness-tools-ssh-test--ask id (list :host "/mock:localhost:" :cwd remote
+                                                           :command "cat data.txt")))))
+        (should (equal dir (plist-get (plist-get (cdr asked) :payload) :dir)))
+        ;; ... and is answered for the whole host, by a pattern of the user's own.
+        (harness-call 'permission/answer id (plist-get (cdr asked) :id)
+                      (list :option "allow-session" :pattern "/mock:localhost:/**"))
+        (should (string-prefix-p "on the host\n" (plist-get (harness-await (car asked) 60) :content))))
+      (should (member "/mock:localhost:/" (harness-call 'permission/allowed-dirs id)))
       ;; Then everything on the host is the session's, for every tool.
-      (let ((r (harness-await (harness-tools-ssh-test--run id "ssh" (list :host "/mock:localhost:" :cwd remote
-                                                                         :command "cat data.txt"))
-                              60)))
-        (should (string-prefix-p "on the host\n" (plist-get r :content))))
       (should (string-match-p "on the host"
                               (plist-get (harness-await (harness-tools-ssh-test--run
                                                          id "read_file" (list :path (concat dir "data.txt")))
@@ -408,18 +535,56 @@ every tool work on the host."
 
 (ert-deftest harness-tools-ssh-jail-without-a-user ()
   "A non-interactive session cannot be asked: a host it was not granted
-is denied at once, and one granted beforehand is reached."
+is denied at once, the directory it needs named as the prompt would have
+named it, and one granted beforehand is reached: the host's root for
+every directory on it, its home directory for the home and what is in it."
   (harness-tools-ssh-test--with-session (id :permission-mode 'yolo :non-interactive t)
-    (let ((r (harness-await (harness-tools-ssh-test--run id "ssh" (list :host "/mock:localhost:" :command "echo hi"))
-                            60)))
-      (should (plist-get r :is-error))
-      (should (string-match-p "/mock:localhost:/ is outside the allowed directories" (plist-get r :content))))
-    (should-not (harness-call 'permission/pending id))
-    (let* ((harness-allowed-directories '("/mock:localhost:/"))
-           (r (harness-await (harness-tools-ssh-test--run id "ssh" (list :host "/mock:localhost:" :command "echo hi"))
-                             60)))
-      (should-not (plist-get r :is-error))
-      (should (string-prefix-p "hi\nexit 0 in /mock:localhost:/" (plist-get r :content))))))
+    (cl-flet ((run (host command &rest more)
+                (harness-await (harness-tools-ssh-test--run id "ssh" (append (list :host host :command command) more))
+                               60)))
+      (harness-test-without-connections
+        ;; No cwd: the home directory, which the hint names to be granted.
+        (let ((r (run "/mock:localhost:" "echo hi")))
+          (should (plist-get r :is-error))
+          (should (string-match-p
+                   "/mock:localhost:~/ (the home directory of the login on localhost, where ssh starts) is outside the allowed directories"
+                   (plist-get r :content)))
+          (should (string-match-p
+                   "ask the user to grant access to /mock:localhost:~/ (the home directory of the login on localhost, where ssh starts) with the allow-dir command"
+                   (plist-get r :content))))
+        ;; An absolute directory is named as it is, a cwd out of the home is the host.
+        (let ((r (run "/mock:localhost:" "echo hi" :cwd "/srv/app")))
+          (should (string-match-p "/mock:localhost:/srv/app/ is outside the allowed directories" (plist-get r :content)))
+          (should-not (string-match-p "home directory" (plist-get r :content))))
+        (let ((r (run "/mock:localhost:" "echo hi" :cwd "~/..")))
+          (should (string-match-p
+                   "/mock:localhost:/ (the root directory of localhost, which is the whole host) is outside the allowed directories"
+                   (plist-get r :content))))
+        (should-not (harness-call 'permission/pending id)))
+      ;; Granted beforehand: the host's root, for every directory on it.
+      (let* ((harness-allowed-directories '("/mock:localhost:/"))
+             (r (run "/mock:localhost:" "echo hi")))
+        (should-not (plist-get r :is-error))
+        (should (string-prefix-p "hi\nexit 0 in /mock:localhost:/" (plist-get r :content)))
+        (should-not (plist-get (run "/mock:localhost:" "echo hi" :cwd "/tmp") :is-error)))
+      ;; Its home directory alone: the home and what is in it, not a directory the harness
+      ;; cannot tell is the home, even when it is.  A host of its own, whose home is a
+      ;; directory of ours.
+      (let* ((home (harness-test-temp-dir))
+             (process-environment (cons (concat "HOME=" (directory-file-name home)) process-environment))
+             (harness-allowed-directories '("/mock:localhost6:~/")))
+        (make-directory (expand-file-name "sub" home))
+        (let ((r (run "/mock:localhost6:" "pwd")))
+          (should-not (plist-get r :is-error))
+          (should (string-prefix-p (concat (directory-file-name home) "\nexit 0") (plist-get r :content))))
+        (dolist (cwd '("sub" "~/sub" "./sub/." "/mock:localhost6:~/sub"))
+          (let ((r (run "/mock:localhost6:" "pwd" :cwd cwd)))
+            (should-not (plist-get r :is-error))
+            (should (string-prefix-p (concat (directory-file-name home) "/sub\nexit 0") (plist-get r :content)))))
+        (dolist (cwd (list (directory-file-name home) (concat home "sub") "/tmp" "~/.."))
+          (let ((r (harness-test-without-connections (run "/mock:localhost6:" "pwd" :cwd cwd))))
+            (should (plist-get r :is-error))
+            (should (string-match-p "is outside the allowed directories" (plist-get r :content)))))))))
 
 (ert-deftest harness-tools-ssh-prompt-names-paths-on-the-host ()
   "A prompt about an ssh command names the paths it reaches on the host
@@ -446,6 +611,199 @@ it runs on, not on the session's machine."
         (should (equal '("/mock:localhost:/etc/hostname") (plist-get (plist-get prompt :payload) :paths)))
         (harness-call 'permission/answer id (plist-get prompt :id) "deny-once"))
       (should (plist-get (harness-await p 60) :is-error)))))
+
+(ert-deftest harness-tools-ssh-prompt-names-paths-in-the-home ()
+  "A command run in the login's home directory names its relative paths in
+it: they are the home directory's, so a command that names nothing but
+them is about where it runs, and one that names a path elsewhere is about
+that.  A word that leaves the home goes somewhere on the host, which only
+the host can say, so it names the host's root, as the call's own cwd does
+when it leaves the home; a word that starts with ~ names nothing the
+harness can place, as before."
+  (harness-tools-ssh-test--with-session (id :permission-mode 'ask)
+    (let ((harness-allowed-directories '("/mock:localhost:~/")))
+      ;; Only home paths: the prompt is about where the command runs.
+      (let* ((asked (harness-test-without-connections
+                      (harness-tools-ssh-test--ask id (list :host "/mock:localhost:"
+                                                            :command "cat ./notes ./sub/../more"))))
+             (payload (plist-get (cdr asked) :payload)))
+        (should (equal "/mock:localhost:~/" (plist-get payload :cwd)))
+        (should (equal '("/mock:localhost:~/") (plist-get payload :paths)))
+        (harness-call 'permission/answer id (plist-get (cdr asked) :id) "deny-once")
+        (should (plist-get (harness-await (car asked) 60) :is-error)))
+      ;; The paths elsewhere on the host are what the prompt is about: the root
+      ;; of the host for a word that leaves the home, and a path on it; the home
+      ;; paths and the words nothing can place are left out.
+      (let* ((asked (harness-test-without-connections
+                      (harness-tools-ssh-test--ask id (list :host "/mock:localhost:" :cwd "projects/x"
+                                                            :command "cat ./notes ../up ../../../out ~/other /etc/hostname"))))
+             (payload (plist-get (cdr asked) :payload)))
+        (should (equal "/mock:localhost:~/projects/x/" (plist-get payload :cwd)))
+        (should (equal '("/mock:localhost:/" "/mock:localhost:/etc/hostname") (plist-get payload :paths)))
+        (harness-call 'permission/answer id (plist-get (cdr asked) :id) "deny-once")
+        (should (plist-get (harness-await (car asked) 60) :is-error)))
+      ;; The same command without the word that leaves the home asks about the one path.
+      (let* ((asked (harness-test-without-connections
+                      (harness-tools-ssh-test--ask id (list :host "/mock:localhost:" :cwd "projects/x"
+                                                            :command "cat ./notes ../up ~/other /etc/hostname"))))
+             (payload (plist-get (cdr asked) :payload)))
+        (should (equal '("/mock:localhost:/etc/hostname") (plist-get payload :paths)))
+        (harness-call 'permission/answer id (plist-get (cdr asked) :id) "deny-once")
+        (should (plist-get (harness-await (car asked) 60) :is-error))))))
+
+(ert-deftest harness-tools-ssh-prompts-for-a-host-ask-without-connecting ()
+  "The first call to a host reaches a person, whatever the mode, and nothing
+the permission chain does for it connects: the prompt, its answer and the
+denial that follows are worked out for a host that exists nowhere.  A call
+that runs in the login's home is asked about as the home directory by
+name, a relative or ~/ cwd as the directory in it, an absolute cwd as
+itself, and a cwd that leaves the home as the host's root."
+  (harness-tools-ssh-test--with-session (id :permission-mode 'ask)
+    (harness-test-without-connections
+      (dolist (mode '(ask accept-edits yolo))
+        (harness-call 'session/update id :permission-mode mode)
+        (dolist (case '(("box.example.invalid" nil "/ssh:box.example.invalid:~/")
+                        ("admin@laptop-0:4358" nil "/ssh:admin@laptop-0#4358:~/")
+                        ("admin@laptop-0:4358" (:cwd "projects/x") "/ssh:admin@laptop-0#4358:~/projects/x/")
+                        ("benito.example.invalid" (:cwd "~/p/x") "/ssh:benito.example.invalid:~/p/x/")
+                        ("benito.example.invalid" (:cwd "/var/log/nginx") "/ssh:benito.example.invalid:/var/log/nginx/")
+                        ("box.example.invalid" (:cwd "~/..") "/ssh:box.example.invalid:/")
+                        ("box.example.invalid" (:cwd "~bob/x") "/ssh:box.example.invalid:/")
+                        ("/ssh:u@box.example.invalid:~/src" nil "/ssh:u@box.example.invalid:~/src/")
+                        ;; The permission model knows a host by its last hop, as TRAMP's own name for it does.
+                        ("/ssh:j|ssh:box.example.invalid:" nil "/ssh:box.example.invalid:~/"
+                         "/ssh:j|ssh:box.example.invalid:~/")))
+          (let* ((asked (harness-tools-ssh-test--ask id (append (list :host (nth 0 case) :command "uptime") (nth 1 case))))
+                 (payload (plist-get (cdr asked) :payload))
+                 (dir (nth 2 case)))
+            ;; A person is asked, and about the directory the call needs.
+            (should (equal dir (plist-get payload :dir)))
+            (should (equal (concat dir "**") (plist-get payload :pattern)))
+            (should (equal (list (or (nth 3 case) dir)) (plist-get payload :paths)))
+            (should (string-prefix-p (concat "Access " dir) (plist-get payload :title)))
+            (should (string-match-p "outside the allowed directories" (plist-get payload :reason)))
+            (should (equal '(allow-once allow-session allow-always deny-once deny-always) (plist-get payload :options)))
+            ;; The call waits for the answer, which here is no.
+            (should-not (harness-promise-settled-p (car asked)))
+            (harness-call 'permission/answer id (plist-get (cdr asked) :id) "deny-once")
+            (let ((r (harness-await (car asked) 60)))
+              (should (plist-get r :is-error))
+              (should (string-match-p "denied access" (plist-get r :content))))
+            (should-not (harness-call 'permission/pending id))))))))
+
+(ert-deftest harness-tools-ssh-prompts-say-what-the-home-directory-is ()
+  "The prompt for the login's home says what it is: its title and its reason
+name the home directory of the login on the host, where ssh starts, rather
+than just a path with a tilde in it."
+  (harness-tools-ssh-test--with-session (id :permission-mode 'ask)
+    (harness-test-without-connections
+      (let* ((asked (harness-tools-ssh-test--ask id '(:host "admin@laptop-0:4358" :command "uptime")))
+             (payload (plist-get (cdr asked) :payload)))
+        (should (equal "Access /ssh:admin@laptop-0#4358:~/ (the login's home directory)"
+                       (plist-get payload :title)))
+        (should (equal "SSH wants /ssh:admin@laptop-0#4358:~/ (the home directory of the login on admin@laptop-0#4358, where ssh starts), which is outside the allowed directories"
+                       (plist-get payload :reason)))
+        (harness-call 'permission/answer id (plist-get (cdr asked) :id) "deny-once")
+        (harness-await (car asked) 60))
+      ;; A directory in the home, and the host's root, say so as well.
+      (let* ((asked (harness-tools-ssh-test--ask id '(:host "benito.example.invalid" :command "ls" :cwd "projects/x")))
+             (payload (plist-get (cdr asked) :payload)))
+        (should (equal "Access /ssh:benito.example.invalid:~/projects/x/ (in the login's home directory)"
+                       (plist-get payload :title)))
+        (should (equal "SSH wants /ssh:benito.example.invalid:~/projects/x/ (in the home directory of the login on benito.example.invalid), which is outside the allowed directories"
+                       (plist-get payload :reason)))
+        (harness-call 'permission/answer id (plist-get (cdr asked) :id) "deny-once")
+        (harness-await (car asked) 60))
+      (let* ((asked (harness-tools-ssh-test--ask id '(:host "benito.example.invalid" :command "ls" :cwd "~/..")))
+             (payload (plist-get (cdr asked) :payload)))
+        (should (equal "Access /ssh:benito.example.invalid:/ (the whole host)" (plist-get payload :title)))
+        (should (string-match-p "the root directory of benito.example.invalid, which is the whole host"
+                                (plist-get payload :reason)))
+        (harness-call 'permission/answer id (plist-get (cdr asked) :id) "deny-once")
+        (harness-await (car asked) 60))
+      ;; An absolute directory is just that.
+      (let* ((asked (harness-tools-ssh-test--ask id '(:host "benito.example.invalid" :command "ls" :cwd "/var/log")))
+             (payload (plist-get (cdr asked) :payload)))
+        (should (equal "Access /ssh:benito.example.invalid:/var/log/" (plist-get payload :title)))
+        (should (equal "SSH wants /ssh:benito.example.invalid:/var/log/, which is outside the allowed directories"
+                       (plist-get payload :reason)))
+        (harness-call 'permission/answer id (plist-get (cdr asked) :id) "deny-once")
+        (harness-await (car asked) 60)))))
+
+(ert-deftest harness-tools-ssh-tool-prompt-offers-this-host-first ()
+  "After the home directory is granted, the prompt for the call itself offers
+lasting answers for this host: the exact call, the programs on the host (the
+step the answers start on), any command on the host, and only then the
+programs and the tool for every host."
+  (harness-tools-ssh-test--with-session (id :permission-mode 'ask)
+    (harness-test-without-connections
+      (let* ((command "journalctl -u k3s | tail -50")
+             (asked (harness-tools-ssh-test--ask id (list :host "admin@laptop-0:4358" :command command))))
+        ;; First the jail's prompt, about the home directory.
+        (should (equal "/ssh:admin@laptop-0#4358:~/" (plist-get (plist-get (cdr asked) :payload) :dir)))
+        (harness-call 'permission/answer id (plist-get (cdr asked) :id) "allow-session")
+        ;; Then the call's own.
+        (let* ((prompt (harness-tools-ssh-test--prompt id))
+               (payload (plist-get prompt :payload)))
+          (should-not (plist-get payload :dir))
+          (should (equal "/ssh:admin@laptop-0#4358:~/" (plist-get payload :cwd)))
+          (should (equal '("/ssh:admin@laptop-0#4358:~/") (plist-get payload :paths)))
+          (should (equal '(("journalctl") ("tail")) (plist-get payload :commands)))
+          (should (equal "host-programs" (plist-get payload :cover)))
+          (should (equal '("exact" "host-programs" "host-tool" "programs" "tool")
+                         (mapcar (lambda (s) (plist-get s :id)) (plist-get payload :ladder))))
+          (should (equal (list (format "every ssh call whose host is exactly \"admin@laptop-0:4358\" and command is exactly \"%s\""
+                                       command)
+                               "every journalctl and tail call on admin@laptop-0:4358 (any arguments)"
+                               "every ssh call on admin@laptop-0:4358 (any command)"
+                               "every journalctl and tail call (any host, any arguments)"
+                               "every ssh call (any host, any command)")
+                         (mapcar (lambda (s) (plist-get s :label)) (plist-get payload :ladder))))
+          (harness-call 'permission/answer id (plist-get prompt :id) "deny-once")
+          (let ((r (harness-await (car asked) 60)))
+            (should (plist-get r :denied))))))))
+
+(ert-deftest harness-tools-ssh-denying-a-host-denies-that-host-only ()
+  "\"Always deny\" on the programs on a host holds for that host and those
+programs, as the cover says: the same programs with other arguments are
+denied at once on that host, and other programs, and the same programs on
+another host, are asked about as ever.  Nothing connects."
+  (harness-tools-ssh-test--with-session (id :permission-mode 'ask)
+    (let ((harness-perms-rules nil)
+          (harness-allowed-directories nil))
+      (cl-letf (((symbol-function 'harness-save-user-option) (lambda (sym value) (set sym value))))
+        (harness-test-without-connections
+          (cl-flet ((start (host command)
+                      (harness-tools-ssh-test--ask id (list :host host :command command))))
+            ;; The first call: the home directory, granted; then the call, denied for good.
+            (let ((asked (start "box.example.invalid" "journalctl -u k3s | tail -50")))
+              (harness-call 'permission/answer id (plist-get (cdr asked) :id) "allow-session")
+              (let ((prompt (harness-tools-ssh-test--prompt id)))
+                (harness-call 'permission/answer id (plist-get prompt :id)
+                              (list :option "deny-always" :cover "host-programs")))
+              (should (plist-get (harness-await (car asked) 60) :denied)))
+            (should (equal '((:tool "ssh" :input (:host "box.example.invalid")
+                                    :commands (("journalctl") ("tail")) :behavior deny))
+                           harness-perms-rules))
+            ;; The same programs on that host: denied at once, by the rule, with nobody asked.
+            (let ((r (harness-await (harness-tools-ssh-test--run
+                                     id "ssh" '(:host "box.example.invalid" :command "journalctl -n 5 | tail -1"))
+                                    60)))
+              (should (plist-get r :denied))
+              (should (string-match-p
+                       "denied by a standing rule for ssh (journalctl and tail) whose host is exactly \"box.example.invalid\""
+                       (plist-get r :content))))
+            (should-not (harness-call 'permission/pending id))
+            ;; Another program on that host: the call is asked about.
+            (let ((asked (start "box.example.invalid" "uptime")))
+              (should (plist-get (plist-get (cdr asked) :payload) :ladder))
+              (harness-call 'permission/answer id (plist-get (cdr asked) :id) "deny-once")
+              (should (plist-get (harness-await (car asked) 60) :denied)))
+            ;; The same programs on another host: its home is asked about first.
+            (let ((asked (start "other.example.invalid" "journalctl -u k3s | tail -50")))
+              (should (equal "/ssh:other.example.invalid:~/" (plist-get (plist-get (cdr asked) :payload) :dir)))
+              (harness-call 'permission/answer id (plist-get (cdr asked) :id) "deny-once")
+              (should (plist-get (harness-await (car asked) 60) :denied)))))))))
 
 (ert-deftest harness-tools-ssh-corporate-mode-turns-it-off ()
   "Corporate mode offers no session the ssh tool and denies a call of

@@ -26,13 +26,24 @@
 ;; Permissions: a call is of kind exec, so the permission mode and the
 ;; auto-mode judge decide it as they decide a bash command, and its path
 ;; is the directory it runs in on HOST, so the jail asks for HOST the
-;; first time.  Granting /ssh:HOST:/ lets a session work anywhere on
-;; HOST, with this tool and every other; a non-interactive session needs
-;; it granted beforehand (`harness-allowed-directories').  The path is
-;; worked out without connecting -- nothing in the permission chain may
-;; wait on the network -- so a call without an absolute cwd, which runs
-;; in the remote home directory, is about the host's root.  Corporate
-;; mode turns the tool off (see harness-tools.el).
+;; first time.  The path is worked out without connecting -- nothing in
+;; the permission chain may wait on the network -- and only HOST knows
+;; where its login's home directory is.  So a call that runs there (no
+;; cwd, a cwd starting with ~, a relative cwd) is about the home
+;; directory as TRAMP writes it, /ssh:HOST:~/ or /ssh:HOST:~/src/, a
+;; place of its own that the chain never expands (`harness-remote-home-p'),
+;; and the first prompt for a host asks for that, not for the whole
+;; host.  A cwd that leaves the home (~/..) or is another user's (~bob)
+;; is about the host's root, /ssh:HOST:/, which the prompt offers as its
+;; widest answer; an absolute cwd is about itself.  Granting /ssh:HOST:/
+;; lets a session work anywhere on HOST, home directory included, with
+;; this tool and every other; granting /ssh:HOST:~/ only the home
+;; directory, and /ssh:HOST:/home/u/ not that, since the harness does not
+;; know where the home is.  A non-interactive session needs the grant
+;; beforehand (`harness-allowed-directories').  The prompt for the
+;; call itself offers lasting answers for this host alone
+;; (`harness-perms--cover-ladder').  Corporate mode turns the tool off
+;; (see harness-tools.el).
 ;;
 ;; The harness has no terminal: a connection that needs a password, a
 ;; key passphrase or a host key confirmation fails.  Then ssh is asked
@@ -173,11 +184,11 @@ Signal an error when the host or the directory is no good."
   (pcase-let* ((`(,prefix . ,localname) (harness-tools-ssh-prefix (plist-get input :host)))
                (given (plist-get input :cwd))
                (cwd (if (and (stringp given) (not (string-blank-p given))) (string-trim given) localname))
-               (on (and (stringp cwd) (file-remote-p cwd))))
+               (on (and (stringp cwd) (harness-file-remote-p cwd))))
     (when on
-      (unless (equal on (file-remote-p (concat prefix "/")))
+      (unless (equal on (harness-file-remote-p (concat prefix "/")))
         (error "The cwd %s is not on %s" cwd prefix))
-      (setq cwd (file-remote-p cwd 'localname)))
+      (setq cwd (harness-file-remote-p cwd 'localname)))
     (list prefix
           (file-name-as-directory
            (cond ((or (null cwd) (string-empty-p cwd)) "~")
@@ -186,15 +197,33 @@ Signal an error when the host or the directory is no good."
                  ((string-prefix-p "~" cwd) cwd)
                  (t (concat "~/" cwd)))))))
 
+(defun harness-tools-ssh--home-path (prefix local)
+  "Return the TRAMP name of LOCAL, a directory in the login's home, or nil.
+PREFIX is the TRAMP prefix of the host.  LOCAL is a directory name
+starting with ~ (see `harness-tools-ssh--where').
+The result is /ssh:HOST:~/ for the home directory itself and
+/ssh:HOST:~/src/ for one in it, `.' and `..' resolved, and nothing
+connects: only the host knows where its home directory is, so the name
+is never expanded (`harness-remote-home-p').  Nil when LOCAL leaves the
+home (~/..) or is another user's home (~bob/src), which are about the
+host's root."
+  (when (string-match-p "\\`~\\(?:/\\|\\'\\)" local)
+    (harness-remote-home-tidy (concat prefix local))))
+
 (defun harness-tools-ssh--paths (input)
   "Return the paths a call with INPUT is about, for the permission jail.
-That is the directory it runs in on its host, or the host's root when
-the host has to say where that is (the home directory, a relative
-cwd): nothing in the permission chain connects.  A call whose host is
-no good has none; it fails before it connects."
+That is the directory it runs in on its host.  Where that is the
+login's home directory -- no cwd, one starting with ~, a relative one
+-- only the host knows it, and nothing in the permission chain
+connects, so it is the home directory by name, /ssh:HOST:~/ or
+/ssh:HOST:~/src/ (`harness-tools-ssh--home-path').  A cwd that leaves
+the home, or is another user's, is about the host's root.  A call whose
+host is no good has no path; it fails before it connects."
   (condition-case nil
       (pcase-let ((`(,prefix ,local) (harness-tools-ssh--where input)))
-        (list (concat prefix (if (string-prefix-p "/" local) local "/"))))
+        (list (cond ((string-prefix-p "/" local) (concat prefix local))
+                    ((harness-tools-ssh--home-path prefix local))
+                    (t (concat prefix "/")))))
     (error nil)))
 
 ;;;; The tool

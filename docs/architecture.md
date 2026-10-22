@@ -2578,7 +2578,8 @@ stage's label, else `gate`; the access module's judgements and the
   each directory of it it reached.  The directory holding a file, or a
   directory itself, when there is no root, it is `/`, is or holds the
   home directory, or holds the session's cwd or worktree (the main
-  checkout of a worktree), and for a remote path.  For an agent's
+  checkout of a worktree), and for a remote path (the repository root
+  is not looked for there).  For an agent's
   request it is the directory asked for.  No other prompt
   carries one (see the tool prompt below).  ANSWER's `:pattern`,
   absolute or relative to the session's cwd, replaces it: more specific
@@ -2594,6 +2595,58 @@ stage's label, else `gate`; the access module's judgements and the
   everything below the directories it matches.  A grant of `DIR/**` is
   kept as the directory DIR/, so default grants read as before; a grant
   narrowed to one file keeps its name.
+- Paths on another host (TRAMP names), and the login's home directory
+  there.  Nothing in the chain may connect to a host -- not to expand a
+  path, not to ask for its home directory, not to learn whether a
+  connection is open -- and only the host knows where its login's home
+  directory is, so a call that runs there (the ssh tool without an
+  absolute cwd, `read_file /ssh:box:~/notes`) is about a place the
+  harness can name and not find, written as TRAMP writes it:
+  `/ssh:box:~/`, `/ssh:box:~/src/`.  Such a name (`harness-remote-home-p`)
+  is a place of its own and is never expanded, because `expand-file-name`,
+  `file-truename`, `file-in-directory-p` and `abbreviate-file-name`
+  (it asks whether the file system is case sensitive) all connect to the
+  host for it, expanding its local part as a local name gives the home
+  directory of THIS machine's user, and `file-remote-p` expands it too once
+  TRAMP is connected to the host.  So harness-util.el reads such names
+  without expanding them (`harness-remote-parts`, from
+  `tramp-dissect-file-name`; jump hosts stay in the prefix),
+  tidies their `.` and `..` by text (`harness-remote-home-tidy`: `~/a/../b`
+  is `~/b`, and a `..` that leaves the home has no name), and offers
+  `harness-file-remote-p`, `harness-absolute-file-name` and
+  `harness-abbreviate-file-name` for `file-remote-p`,
+  `expand-file-name` and `abbreviate-file-name`; the permission
+  chain, the access module and the pending panels use those on every path
+  that may be a request's.  The tools' own handlers still use
+  `harness-tools-resolve-path` (they run once the call is allowed and
+  connect for the real directory); the request's `:paths` are made by
+  `harness-tools--request-path`, which does not (so `read_file
+  /ssh:box:~/x` no longer connects while it is being decided).
+  `harness-perms--within-p` compares by place: a root in a home
+  directory holds what lies in the same home (the local parts below the
+  tilde are compared as they are for any remote path, `~bob` being
+  another home); a root elsewhere on the host holds a path in a home only
+  if it holds the whole host, `/ssh:box:/` or `/ssh:box:/**`, the grant
+  older prompts offered, so those keep working and `/ssh:box:/home/u/`
+  does not (the harness does not know that is the home); a root in a home
+  never holds an absolute path; and a path whose `..` leaves the home is
+  held by roots for the whole host only.  Deny rules therefore deny
+  exactly what they say.  The ssh tool's jail path is the home directory
+  for a call with no cwd, a relative one or one starting with `~`
+  (`harness-tools-ssh--home-path`: `~/a/../b` is `~/b/`), the host's root
+  for a cwd that leaves the home or is another user's, and the
+  directory itself for an absolute one.  The jail prompt for a home
+  path says what it is -- title `Access /ssh:box:~/ (the login's home
+  directory)`, reason `SSH wants /ssh:box:~/ (the home directory of the
+  login on box, where ssh starts), which is outside the allowed
+  directories`, a non-interactive denial and its hint name the same
+  directory -- and is answered for `/ssh:box:~/**` by default;
+  the lines of its patterns go from the path itself through its parent
+  directories (the home directory after those in it) to the host's whole
+  file system, `/ssh:box:/**`, the widest and last
+  (`harness-ui-pending--pattern-suggestions`, shown with the notes `home
+  directory` and `whole host`).  `request_directory_access` for such a
+  path asks the same way.
 - What a shell command reaches: the bash tool's `:paths` is where it
   runs, which is all the jail checks (the sandbox confines the command,
   and the mode and the judge read it whole).  For an `exec` call with a
@@ -2609,7 +2662,12 @@ stage's label, else `gate`; the access module's judgements and the
   not `/dev/null` and the like, and on this machine not an absolute word
   whose first directory does not exist, so a `/api/v1` in a grep is no
   path (on a remote host nothing is looked up, and `~` words are left
-  out).  A here-document's body is data, not paths.  The paths are on
+  out).  A command that runs in a home directory of a host
+  (`/ssh:box:~/src/`) has its relative words in it (`./a.el` is
+  `/ssh:box:~/src/a.el`, made by text and never with this machine's home
+  directory), and one that leaves it (`cat ../../x`) names the root of
+  the host, `/ssh:box:/`, which only a grant of the whole host holds.
+  A here-document's body is data, not paths.  The paths are on
   the host the command runs on, its
   directory's: the session's for bash, the ssh tool's host for ssh.  The call is about its subject paths
   (`harness-perms--subject-paths`): the ones it names outside the
@@ -2838,6 +2896,22 @@ stage's label, else `gate`; the access module's judgements and the
     `harness-perms--command-groups`; steps that hold the same calls are
     one, named for the widest (`ls -la` has `exact`, `programs`,
     `tool`).  A line the reader cannot read has `exact` and `tool`;
+  - a shell call on a host -- the ssh tool (its `:host` argument, as the
+    agent wrote it), or bash in a TRAMP directory -- has those steps
+    for that host first, ids `host-subcommands`, `host-commands`,
+    `host-programs` and `host-tool`, labelled `... on HOST (any arguments)`
+    and `every ssh call on HOST (any command)`, recorded with
+    `(:input (:host "admin@laptop-0:4358"))` for ssh and with
+    `(:path "/ssh:box:/**")` (the host's whole file system) for bash, and then
+    the programs and the tool for any host (`programs`, `tool`, labelled
+    `(any host, any arguments)` and `(any host, any command)`).  The
+    prompt starts on the programs of the host, so "Always allow" on
+    `journalctl -u k3s` run on a host covers journalctl there, where it
+    used to cover journalctl on every host the agent would ever name;
+    a command the reader cannot read starts on `host-tool`.  A rule for one
+    host does not match a call that spells the host differently; that
+    asks again.  The rule's subject reads `ssh (journalctl and tail) whose
+    host is exactly "admin@laptop-0:4358"`;
   - a call that reads or writes files: `path` `(:path "/p/lisp/a.el")`,
     `dir` `(:path "/p/lisp/")`, `project` `(:path "/p/")` (the session's
     working directory or worktree, when the file lies below it) and
@@ -7379,7 +7453,7 @@ TRAMP prefixes come from the session host):
 | `glob` | Find files | pattern, path | read |
 | `grep` | Search files | pattern, path, glob, case_sensitive, max_results | read |
 | `bash` | Bash | command, timeout, cwd | exec |
-| `ssh` | SSH | host, command, cwd, timeout | exec (tools-ssh; its path is the directory it runs in on the host, or the host's root when the host expands it: home, a relative cwd) |
+| `ssh` | SSH | host, command, cwd, timeout | exec (tools-ssh; its path is the directory it runs in on the host, or the login's home directory by name, `/ssh:HOST:~/`, when the host decides where that is: no cwd, a relative cwd) |
 | `elisp` | Emacs Lisp | code, timeout | exec |
 | `emacs_buffers` | List buffers | filter, all | read (needs no approval: `harness-perms--inspection-tools`) |
 | `emacs_windows` | List windows | — | read (needs no approval: `harness-perms--inspection-tools`) |
@@ -7866,8 +7940,14 @@ absolute, relative to the home directory, or a TRAMP name on the same
 host; the default is the home directory.  The call's path for the jail
 is worked out without connecting (nothing in the permission chain
 waits on the network): the absolute directory it runs in, else the
-host's root, so the first call to a host asks for it, and a grant of
-`/ssh:HOST:/` opens the whole host to every tool.  A missing directory
+login's home directory by name, `/ssh:HOST:~/` or `/ssh:HOST:~/src/`
+(only the host knows where that is, so the name is never expanded; see
+perms), so the first call to a host asks for its home directory, not
+the whole host; a cwd that leaves the home (`~/..`) or is another user's
+is about the host's root.  A grant of `/ssh:HOST:/` opens the whole
+host, home included, to every tool; `/ssh:HOST:~/` only the home
+directory; the prompt for the call itself offers lasting answers for
+this host alone.  A missing directory
 is an error before the command runs.  The result is what the command
 printed, standard error mixed in, then its status and the directory it
 ran in, as a TRAMP path (`exit 0 in /ssh:box:/srv/app/`); `:meta` has
@@ -9339,8 +9419,12 @@ hold for, as radio lines under `Answers hold for:` -- the patterns
 around the request's own
 (`harness-ui-pending--pattern-suggestions`: the path itself, its
 directory's files of its extension, each directory from the path's up
-to the pattern's, the pattern, its parent), narrowest first, the
-request's own noted `default`, the one picked marked and bold, and a
+to the pattern's, the pattern, its parent; on a host, where no
+repository root is known, every directory above the pattern's up to the
+login's home directory and the host's whole file system, the widest and
+last), narrowest first, the
+request's own noted `default`, the home directory and the whole host
+noted as such, the one picked marked and bold, and a
 pattern typed that is none of them its own line noted `edited`.  A click
 on a line, `<` (narrower) and `>` (wider) pick one
 (`harness-ui-pending-cover-narrower`, `-wider`), `[Edit]`/`e`
@@ -9551,8 +9635,12 @@ the section, directory, tool or call they were on, and fetches again
 (0.3 s after the last of a burst, or once a window shows it) on
 `access/changed`, `access/judged`, the session's moves, requests and
 ext changes, its node and tool call updates, every directory grant or
-revocation and `config/changed`.  A view whose session was deleted says
-so and fetches nothing more.  The buffers that look for a session's
+revocation and `config/changed`.  Its rules section words each rule as a
+line (`harness-ui-access--rule-text`): the tool, the programs, the
+arguments the rule is exact about -- `whose host is exactly "box"`, so
+that the lasting answer to an ssh call, which holds for one host, does not
+read as one for every host -- and the directory.  A view whose session
+was deleted says so and fetches nothing more.  The buffers that look for a session's
 chat (the merge, children, tasks and review views) take only a buffer
 in `harness-chat-mode`, so the access view, which has a session id too,
 is never taken for one.

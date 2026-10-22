@@ -836,6 +836,164 @@ ITEM alone keeps its own numbers, as the user wrote them."
     (or (string= (file-name-as-directory path) dir)
         (string-prefix-p dir path))))
 
+;;;;; Remote home directories
+;;
+;; A TRAMP name whose local part starts with a tilde, /ssh:HOST:~/ or
+;; /ssh:HOST:~/src, is in the home directory of the login on HOST, and
+;; only HOST knows where that is.  Expanding such a name connects to
+;; HOST: `expand-file-name', `file-truename', `file-in-directory-p' and
+;; `abbreviate-file-name' (which asks whether the file system is case
+;; sensitive) all do.  Expanding its local part as if it were a local name
+;; gives the home directory of the user on THIS machine instead.  And
+;; `file-remote-p' expands it too, when TRAMP is connected to HOST
+;; already, so its local part is the home directory in one moment and
+;; "~/" in the next.  The permission chain may do none of this: it may not
+;; wait on the network, and what it decides may not depend on whether a
+;; connection happens to be open.  So it takes such a name as a place of
+;; its own and works on its text, which the functions below do; they are
+;; here and not in the permission module because the views draw such
+;; names too.  Nothing here connects, expands a name or looks one up.
+
+(declare-function tramp-tramp-file-p "tramp" (name))
+(declare-function tramp-dissect-file-name "tramp" (name &optional nodefault))
+(declare-function tramp-file-name-localname "tramp" (vec))
+(declare-function tramp-make-tramp-file-name "tramp" (&rest args))
+
+(defun harness-remote-parts (name)
+  "Return (PREFIX . LOCAL) for NAME, a TRAMP file name, or nil for any other.
+PREFIX is NAME up to its local part and LOCAL the local part, both as
+they are written: the jump hosts stay in PREFIX (`file-remote-p' leaves
+them out), a ~ stays in LOCAL.  The name is read and not expanded: unlike
+`file-remote-p', this never turns the ~ of a name into the home directory
+of a host TRAMP is connected to."
+  (when (and (stringp name) (find-file-name-handler name 'file-remote-p))
+    (require 'tramp)
+    (condition-case nil
+        (when (tramp-tramp-file-p name)
+          (let* ((vec (tramp-dissect-file-name name))
+                 (local (or (tramp-file-name-localname vec) "")))
+            (cons (if (string-suffix-p local name)
+                      (substring name 0 (- (length name) (length local)))
+                    (tramp-make-tramp-file-name vec 'noloc))
+                  local)))
+      (error nil))))
+
+(defun harness-remote-home-p (name)
+  "Non-nil when NAME is a TRAMP name in a home directory on its host.
+That is a remote name whose local part starts with a tilde, such as
+/ssh:box:~/ or /ssh:box:~/src/a.el.  Only the host knows where its
+home directories are, so nothing here may expand NAME.  Nothing
+connects."
+  (let ((parts (harness-remote-parts name)))
+    (and parts (string-prefix-p "~" (cdr parts)))))
+
+(defun harness-file-remote-p (name &optional identification connected)
+  "Like `file-remote-p', but a name in a home directory is not expanded.
+`file-remote-p' expands NAME when TRAMP is connected to its host, which
+turns a ~ into the home directory there (and may ask the host for it);
+this returns what it returns for the same name without a connection:
+the host, or with IDENTIFICATION `localname' the local part as written.
+See `harness-remote-home-p'.  CONNECTED is as for `file-remote-p'."
+  (let ((parts (harness-remote-parts name)))
+    (cond ((not (and parts (string-prefix-p "~" (cdr parts))))
+           (file-remote-p name identification connected))
+          ((eq identification 'localname) (and (not connected) (cdr parts)))
+          (t (file-remote-p (concat (car parts) "/") identification connected)))))
+
+(defun harness-remote-prefix (name)
+  "Return the TRAMP prefix of remote NAME as it is written, or nil.
+That is NAME up to its local part, jump hosts and all
+\(\"/ssh:jump|ssh:box:\"): `file-remote-p' leaves the hops out.  Nothing
+connects."
+  (car (harness-remote-parts name)))
+
+(defun harness-remote-home-parts (name)
+  "Return (PREFIX TILDE REST) for NAME, a name in a remote home directory, or nil.
+PREFIX is the host's TRAMP prefix (\"/ssh:u@box:\"; see
+`harness-remote-prefix'), TILDE the ~ or ~USER the local part starts
+with and REST what follows it: empty, or starting with a slash.  See
+`harness-remote-home-p'."
+  (let* ((parts (harness-remote-parts name))
+         (local (cdr parts)))
+    (when (and parts (string-match "\\`~[^/]*" local))
+      (list (car parts) (match-string 0 local) (substring local (match-end 0))))))
+
+(defun harness-remote-home-tidy-local (local)
+  "Return LOCAL, the local part of a name in a remote home, tidied, or nil.
+LOCAL starts with ~ or ~USER and goes on with a slash or not at all.
+The result has its `.' and `..' resolved and starts with the same
+tilde, \"~/\" for the home itself, and keeps a trailing slash.  Nil when
+LOCAL is no such local part, or when a `..' leaves the home: where that
+goes only the host knows."
+  (when (string-match "\\`~[^/]*" local)
+    (let* ((tilde (match-string 0 local))
+           (rest (substring local (match-end 0)))
+           (directory (or (string-empty-p rest) (string-suffix-p "/" rest)
+                          (string-suffix-p "/." rest) (string-suffix-p "/.." rest)))
+           (stack nil)
+           (inside t))
+      (dolist (component (split-string rest "/" t))
+        (cond ((equal component "."))
+              ((equal component "..") (if stack (pop stack) (setq inside nil)))
+              (t (push component stack))))
+      (when inside
+        (concat tilde "/" (string-join (reverse stack) "/") (if (and stack directory) "/" ""))))))
+
+(defun harness-remote-home-tidy (name)
+  "Return NAME, in a remote home directory, with `.' and `..' resolved, or nil.
+The result is PREFIX~/ for the home itself and PREFIX~/a/b for what lies
+in it, a trailing slash kept; nothing is looked up, nothing connects.
+Nil when NAME is in no remote home directory, or when a `..' leaves the
+home (see `harness-remote-home-tidy-local')."
+  (when-let* ((parts (harness-remote-home-parts name))
+              (local (harness-remote-home-tidy-local (concat (nth 1 parts) (nth 2 parts)))))
+    (concat (car parts) local)))
+
+(defun harness-absolute-file-name (name &optional dir)
+  "Return NAME made absolute against DIR, as `expand-file-name' does.
+A remote NAME in a home directory is only tidied (`harness-remote-home-tidy'),
+since expanding it would connect to its host; NAME comes back as it is
+when a `..' leaves the home.  A host with no directory, /ssh:box:, is
+its login's home directory to TRAMP, so it comes back as /ssh:box:~/.
+A relative NAME against such a DIR is put inside it likewise.  Anything
+else is `expand-file-name''s."
+  (let ((in-home (and dir (harness-remote-home-p dir)))
+        (parts (harness-remote-parts name)))
+    (cond
+     ((harness-remote-home-p name) (or (harness-remote-home-tidy name) name))
+     ;; A host with no directory, /ssh:box:, is its login's home directory to
+     ;; TRAMP, which asks the host for it.
+     ((and parts (string-empty-p (cdr parts))) (concat (car parts) "~/"))
+     ;; DIR plays no part for an absolute NAME; keep it out of the way.
+     ((and in-home (file-name-absolute-p name)) (expand-file-name name "/"))
+     (in-home (let ((joined (concat (file-name-as-directory dir) name)))
+                (or (harness-remote-home-tidy joined) joined)))
+     (t (expand-file-name name dir)))))
+
+(defun harness-abbreviate-file-name (name)
+  "Return NAME abbreviated for a message, as `abbreviate-file-name' does.
+A remote name is left as it is.  TRAMP expands one in a home directory
+\(see `harness-remote-home-p') on the host to find the home, which
+connects, and, once it is connected to the host, asks it whether its file
+system is case sensitive before it abbreviates any other: a round trip
+to the host that no message is worth.  Use this, not
+`abbreviate-file-name', for any path a permission prompt or a message
+about one may name."
+  (if (harness-remote-parts name) name (abbreviate-file-name name)))
+
+(defun harness-remote-parent-dir (dir)
+  "Return the directory that holds directory DIR on its host, or nil.
+DIR is a remote directory name, and so is the result.  Nil for a local
+name and for the root of the host.  The directory above a home
+directory is the root of the host: what lies between the two is for the
+host to say.  Nothing is looked up."
+  (when-let* ((parts (harness-remote-parts dir)))
+    (let* ((local (file-name-as-directory (if (string-empty-p (cdr parts)) "/" (cdr parts))))
+           (up (file-name-directory (directory-file-name local))))
+      (cond ((equal local "/") nil)
+            ((null up) (concat (car parts) "/"))
+            (t (concat (car parts) up))))))
+
 (defun harness-glob-regexp (pattern &optional no-classes)
   "Translate glob PATTERN into a regexp that matches a whole string.
 `*' matches any run of characters but `/', `**' any run across

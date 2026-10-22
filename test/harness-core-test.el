@@ -438,6 +438,193 @@ such a run: tens of seconds for one of 100,000."
   (apply #'unibyte-string
          (apply #'append (mapcar (lambda (p) (if (stringp p) (append (string-to-unibyte p) nil) (list p))) parts))))
 
+;;;; Remote home directories
+;;
+;; The permission chain may not connect to a host, so it takes a TRAMP
+;; name in a home directory (/ssh:box:~/src) as a place of its own and
+;; works on its text.  Everything here runs where a connection attempt
+;; fails the test, even one the code under test caught.
+
+(defun harness-core-test--connection-attempts (fn)
+  "Call FN where TRAMP cannot connect; return the hosts it tried, oldest first.
+Errors FN signals are ignored: the question is only whether it tried."
+  (require 'tramp)
+  (let (attempts)
+    (cl-letf (((symbol-function 'tramp-maybe-open-connection)
+               (lambda (vec &rest _)
+                 (push (tramp-make-tramp-file-name vec 'noloc) attempts)
+                 (error "Nothing may connect"))))
+      (ignore-errors (funcall fn)))
+    (nreverse attempts)))
+
+(ert-deftest harness-util-connection-guard-catches-a-swallowed-attempt ()
+  "The guard of these tests fails a test whose code connected, and plain
+Emacs functions do connect for a name in a remote home directory.
+That is why the permission chain has functions of its own for them."
+  (let ((home "/ssh:u@box.example.invalid:~/x"))
+    ;; The functions the chain must not call on such a name.
+    (dolist (fn (list (lambda () (expand-file-name home "/"))
+                      (lambda () (abbreviate-file-name home))
+                      (lambda () (file-truename home))))
+      (should (equal '("/ssh:u@box.example.invalid:") (harness-core-test--connection-attempts fn))))
+    ;; A name with an absolute local part is only normalised.
+    (should-not (harness-core-test--connection-attempts
+                 (lambda () (expand-file-name "/ssh:u@box.example.invalid:/var/log/../x" "/"))))
+    ;; The guard fails the test even when the attempt was caught.
+    (should-error (harness-test-without-connections
+                    (ignore-errors (expand-file-name home "/")))
+                  :type 'ert-test-failed)
+    (should (equal 'fine (harness-test-without-connections 'fine)))))
+
+(ert-deftest harness-util-remote-parts-read-a-name-as-written ()
+  "A TRAMP name splits into its prefix, jump hosts and all, and its local
+part, a ~ staying a ~; anything that is no TRAMP name has no parts."
+  (harness-test-without-connections
+    (should (equal '("/ssh:u@box.example.invalid:" . "~/x")
+                   (harness-remote-parts "/ssh:u@box.example.invalid:~/x")))
+    (should (equal '("/ssh:u@box.example.invalid:" . "")
+                   (harness-remote-parts "/ssh:u@box.example.invalid:")))
+    (should (equal '("/ssh:u@box.example.invalid:" . "/var/log/")
+                   (harness-remote-parts "/ssh:u@box.example.invalid:/var/log/")))
+    ;; The jump hosts stay in the prefix, which `file-remote-p' leaves out.
+    (should (equal '("/ssh:j|ssh:u@box#22:" . "~/x/") (harness-remote-parts "/ssh:j|ssh:u@box#22:~/x/")))
+    (should (equal "/ssh:u@box#22:" (file-remote-p "/ssh:j|ssh:u@box#22:~/x/")))
+    (should (equal '("/ssh:j1|ssh:u@j2#22|ssh:box:" . "/tmp") (harness-remote-parts "/ssh:j1|ssh:u@j2#22|ssh:box:/tmp")))
+    (should (equal '("/ssh:[::1]#22:" . "~/x") (harness-remote-parts "/ssh:[::1]#22:~/x")))
+    (should (equal '("/sudo:root@localhost:" . "~/x") (harness-remote-parts "/sudo:root@localhost:~/x")))
+    ;; Another user's home and a quoted name are read as written too.
+    (should (equal '("/ssh:box:" . "~bob/x") (harness-remote-parts "/ssh:box:~bob/x")))
+    (should (equal '("/ssh:box:" . "/:~/x") (harness-remote-parts "/ssh:box:/:~/x")))
+    ;; No TRAMP names: a local path, a relative one, nothing, an unfinished prefix.
+    (dolist (name (list "/home/u/x" "x" "" nil 'symbol "/ssh:h" "/ssh:" "/tmp/archive.zip/inside"))
+      (should-not (harness-remote-parts name)))
+    (should (equal "/ssh:j|ssh:box:" (harness-remote-prefix "/ssh:j|ssh:box:~/a")))
+    (should-not (harness-remote-prefix "/etc"))))
+
+(ert-deftest harness-util-remote-home-names ()
+  "A name is in a remote home directory when the local part of a TRAMP
+name starts with a tilde: ~, ~/x and ~bob/x, but not a tilde further in,
+a quoted one, or a local ~."
+  (harness-test-without-connections
+    (dolist (name '("/ssh:box:~" "/ssh:box:~/" "/ssh:box:~/x/y" "/ssh:box:~bob/x" "/ssh:j|ssh:box:~/x"
+                    "/sudo:root@localhost:~/x" "/ssh:u@box.example.invalid:~/.ssh/config"))
+      (should (harness-remote-home-p name)))
+    (dolist (name '("/ssh:box:/x/~" "/ssh:box:/home/u" "/ssh:box:" "/ssh:box:/:~/x" "~/x" "~" "/home/u/~"
+                    "x/~/y" "" nil 42))
+      (should-not (harness-remote-home-p name)))
+    (should (equal '("/ssh:box:" "~" "") (harness-remote-home-parts "/ssh:box:~")))
+    (should (equal '("/ssh:box:" "~" "/") (harness-remote-home-parts "/ssh:box:~/")))
+    (should (equal '("/ssh:box:" "~" "/x/y") (harness-remote-home-parts "/ssh:box:~/x/y")))
+    (should (equal '("/ssh:box:" "~bob" "/x/y") (harness-remote-home-parts "/ssh:box:~bob/x/y")))
+    (should (equal '("/ssh:j|ssh:box:" "~" "/a") (harness-remote-home-parts "/ssh:j|ssh:box:~/a")))
+    (should-not (harness-remote-home-parts "/ssh:box:/etc"))
+    (should-not (harness-remote-home-parts "~/x"))))
+
+(ert-deftest harness-util-remote-home-tidy ()
+  "The text of a name in a home directory is tidied without looking
+anything up: `.', `..' and repeated slashes go, a trailing slash stays, the
+home itself is ~/, and a `..' that leaves the home leaves nothing to
+return, since only the host knows what lies above it."
+  (harness-test-without-connections
+    (dolist (case '(("~" . "~/") ("~/" . "~/") ("~/a" . "~/a") ("~/a/" . "~/a/")
+                    ("~/a/./b//c/" . "~/a/b/c/") ("~/." . "~/") ("~/a/." . "~/a/")
+                    ("~/a/.." . "~/") ("~/a/../b/" . "~/b/") ("~/a/b/../../c" . "~/c")
+                    ("~bob/x/../y" . "~bob/y") ("~bob" . "~bob/")))
+      (should (equal (cdr case) (harness-remote-home-tidy-local (car case))))
+      (should (equal (and (cdr case) (concat "/ssh:j|ssh:box:" (cdr case)))
+                     (harness-remote-home-tidy (concat "/ssh:j|ssh:box:" (car case))))))
+    ;; Leaving the home: where it goes is the host's to say.
+    (dolist (local '("~/.." "~/a/../.." "~/../x" "~bob/../.."))
+      (should-not (harness-remote-home-tidy-local local))
+      (should-not (harness-remote-home-tidy (concat "/ssh:box:" local))))
+    ;; Not a name in a home directory.
+    (should-not (harness-remote-home-tidy-local "/etc"))
+    (should-not (harness-remote-home-tidy-local "x"))
+    (should-not (harness-remote-home-tidy "/ssh:box:/etc"))
+    (should-not (harness-remote-home-tidy "~/x"))
+    (should-not (harness-remote-home-tidy nil))))
+
+(ert-deftest harness-util-absolute-file-name-does-not-connect ()
+  "A name in a remote home directory is only tidied, never expanded, against
+any directory; every other name is `expand-file-name''s."
+  (harness-test-without-connections
+    (let ((home (concat "/ssh:u@box.example.invalid:")))
+      (should (equal (concat home "~/b") (harness-absolute-file-name (concat home "~/a/../b"))))
+      (should (equal (concat home "~/") (harness-absolute-file-name (concat home "~"))))
+      (should (equal (concat home "~/b/") (harness-absolute-file-name (concat home "~/./b//") "/tmp/")))
+      ;; A `..' out of the home stays as it was written.
+      (should (equal (concat home "~/..") (harness-absolute-file-name (concat home "~/.."))))
+      ;; Against a home directory: a relative name is put in it, an absolute one is not.
+      (should (equal (concat home "~/d/foo") (harness-absolute-file-name "foo" (concat home "~/d/"))))
+      (should (equal (concat home "~/foo") (harness-absolute-file-name "../foo" (concat home "~/d/"))))
+      (should (equal (concat home "~/d/../../foo") (harness-absolute-file-name "../../foo" (concat home "~/d/"))))
+      (should (equal "/etc/foo" (harness-absolute-file-name "/etc/foo" (concat home "~/d/"))))
+      (should (equal "/ssh:other.example.invalid:/etc/x"
+                     (harness-absolute-file-name "/ssh:other.example.invalid:/etc/foo/../x" (concat home "~/d/"))))
+      ;; Everything else is as `expand-file-name' has it, a TRAMP name with an absolute local part too.
+      (should (equal "/tmp/x/a/b" (harness-absolute-file-name "a/b" "/tmp/x/")))
+      (should (equal "/tmp/b" (harness-absolute-file-name "../b" "/tmp/x/")))
+      (should (equal (expand-file-name "~/b") (harness-absolute-file-name "~/b" "/tmp/x/")))
+      (should (equal (concat home "/var/x") (harness-absolute-file-name (concat home "/var/log/../x") "/")))
+      (should (equal (concat home "/foo") (harness-absolute-file-name "foo" (concat home "/")))))))
+
+(ert-deftest harness-util-abbreviate-file-name-does-not-connect ()
+  "A message names a path as `abbreviate-file-name' does, except that a remote
+name is left as it is written: abbreviating one in a home directory asks
+the host where its home is, and any other asks it, once TRAMP is connected
+to it, whether its file system is case sensitive."
+  (harness-test-without-connections
+    (dolist (name '("/ssh:u@box.example.invalid:~/x" "/ssh:u@box.example.invalid:~/" "/ssh:box.example.invalid:~bob/x"
+                    "/ssh:u@box.example.invalid:/var/log/x" "/ssh:u@box.example.invalid:/var/log/../x"
+                    "/ssh:j|ssh:box.example.invalid:/" "/ssh:box.example.invalid:"))
+      (should (equal name (harness-abbreviate-file-name name))))
+    (dolist (name (list "/tmp/x" "/" "relative/x"
+                        (expand-file-name "~/foo/bar") (expand-file-name "~") (concat (expand-file-name "~") "/")))
+      (should (equal (abbreviate-file-name name) (harness-abbreviate-file-name name))))))
+
+(ert-deftest harness-util-file-remote-p-reads-a-home-name-as-written ()
+  "For a name in a remote home directory `harness-file-remote-p' says what
+`file-remote-p' says of a host nothing is connected to: the host, and
+with `localname' the local part as written.  Any other name it leaves
+to `file-remote-p'."
+  (harness-test-without-connections
+    (let ((name "/ssh:admin@box.example.invalid#22:~/x"))
+      (should (equal "/ssh:admin@box.example.invalid#22:" (harness-file-remote-p name)))
+      (should (equal "~/x" (harness-file-remote-p name 'localname)))
+      (should (equal "admin" (harness-file-remote-p name 'user)))
+      (should (equal "box.example.invalid#22" (harness-file-remote-p name 'host)))
+      (should (equal "ssh" (harness-file-remote-p name 'method)))
+      ;; Connected: to nothing, as no connection is open.
+      (should-not (harness-file-remote-p name nil t))
+      (should-not (harness-file-remote-p name 'localname t)))
+    (should (equal "/ssh:box.example.invalid:" (harness-file-remote-p "/ssh:j|ssh:box.example.invalid:~/x")))
+    (dolist (name '("/ssh:box.example.invalid:/etc/x" "/etc/x" "x" "/ssh:box.example.invalid:"))
+      (dolist (id '(nil localname host user method))
+        (should (equal (file-remote-p name id) (harness-file-remote-p name id)))))))
+
+(ert-deftest harness-util-remote-parent-dir ()
+  "The directory above a remote directory is the next one up its path; above
+a home directory it is the root of the host, and the root has none."
+  (harness-test-without-connections
+    (should (equal "/ssh:box:~/a/" (harness-remote-parent-dir "/ssh:box:~/a/b/")))
+    (should (equal "/ssh:box:~/" (harness-remote-parent-dir "/ssh:box:~/a/")))
+    (should (equal "/ssh:box:~/a/" (harness-remote-parent-dir "/ssh:box:~/a/b")))
+    (should (equal "/ssh:box:/" (harness-remote-parent-dir "/ssh:box:~/")))
+    (should (equal "/ssh:box:/" (harness-remote-parent-dir "/ssh:box:~")))
+    (should (equal "/ssh:box:/" (harness-remote-parent-dir "/ssh:box:~bob/")))
+    (should (equal "/ssh:box:/var/" (harness-remote-parent-dir "/ssh:box:/var/log/")))
+    (should (equal "/ssh:box:/" (harness-remote-parent-dir "/ssh:box:/var/")))
+    (should (equal "/ssh:box:/" (harness-remote-parent-dir "/ssh:box:/a")))
+    (should-not (harness-remote-parent-dir "/ssh:box:/"))
+    (should-not (harness-remote-parent-dir "/ssh:box:"))
+    ;; Jump hosts are kept.
+    (should (equal "/ssh:j|ssh:box:~/a/" (harness-remote-parent-dir "/ssh:j|ssh:box:~/a/b/")))
+    (should (equal "/ssh:j|ssh:box:/" (harness-remote-parent-dir "/ssh:j|ssh:box:~/")))
+    (should-not (harness-remote-parent-dir "/ssh:j|ssh:box:/"))
+    ;; A local name has no host to hold it.
+    (should-not (harness-remote-parent-dir "/var/log/"))
+    (should-not (harness-remote-parent-dir "relative/"))))
+
 (ert-deftest harness-util-image-pixel-size ()
   "An image's size is read from its header, for every raster format
 ask_user takes; an SVG, a format it does not know and a missing file

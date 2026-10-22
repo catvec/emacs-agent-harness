@@ -374,14 +374,32 @@ SESSION-ID and `default-directory' as its `:cwd'."
         (concat host p)
       p)))
 
+(defun harness-tools--request-path (path ctx)
+  "Return PATH absolute under CTX, for the permission chain.
+As `harness-tools-resolve-path' does, but nothing may connect: the
+chain decides a call before the user has said it may reach a host, and
+`expand-file-name' on a TRAMP name in a home directory
+\(/ssh:box:~/src) asks the host where that is.  Such a name stays as it
+is, tidied (`harness-remote-home-tidy'); the chain treats it as the
+place it names (the login's home on that host), which only the host can
+turn into a directory."
+  (let ((cwd (or (plist-get ctx :cwd) default-directory))
+        (host (plist-get ctx :host)))
+    (let ((p (harness-absolute-file-name path cwd)))
+      (if (and host (not (harness-file-remote-p p)))
+          (concat host p)
+        p))))
+
 (defun harness-tools--paths (tool input ctx)
   "Return the paths a call of TOOL with INPUT touches, absolute under CTX.
-They are what its paths function says, resolved by
-`harness-tools-resolve-path'; nil without that function, or when it
-fails, which is logged."
+They are what its paths function says, resolved without connecting to
+a host (`harness-tools--request-path'; the handlers of the tools resolve
+a path with `harness-tools-resolve-path', which does connect, once the
+call is allowed); nil without that function, or when it fails, which is
+logged."
   (when (harness-tool-paths-fn tool)
     (condition-case err
-        (mapcar (lambda (p) (harness-tools-resolve-path p ctx))
+        (mapcar (lambda (p) (harness-tools--request-path p ctx))
                 (delq nil (funcall (harness-tool-paths-fn tool) input)))
       (error (harness-log 'warn "tool %s: paths function failed: %S" (harness-tool-name tool) err) nil))))
 

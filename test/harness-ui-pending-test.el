@@ -1497,7 +1497,9 @@ NOTE is the dim word after it."
   "Return the label of the picked line of the block of request PID of SID, as drawn."
   (let ((on (substring-no-properties (harness-ui-icon 'harness-icon-radio-on)))
         (text (harness-ui-pending-test-rendered sid pid)))
-    (when (string-match (concat "^     " (regexp-quote on) " \\(.*?\\)\\(?:  default\\|  edited\\)?$") text)
+    (when (string-match (concat "^     " (regexp-quote on)
+                                " \\(.*?\\)\\(?:  default\\|  edited\\|  home directory\\|  whole host\\)?$")
+                        text)
       (match-string 1 text))))
 
 (ert-deftest harness-ui-pending-ladder-panel-lists-the-covers ()
@@ -2001,6 +2003,375 @@ minibuffer did, and the answer carries the pattern picked."
         (should (string-search "   Answers hold for: /**  [Edit] e\n" text))
         (should-not (string-search "[Narrower]" text))
         (should-not (cdr (harness-ui-pending--cover-steps (harness-ui-pending-record sid "root"))))))))
+
+;;;; Paths on a host
+
+;; A request about a path on another host is answered for a pattern like
+;; any other, but a host has no repository root for the harness to look
+;; for (nothing in the permission chain connects): the lines around the
+;; pattern are the directories above it up to the host's root, which is
+;; always the last.  A path in the home directory of the login is written
+;; with its tilde, which nothing here may expand: a tilde name expanded
+;; would connect to the host, or give this machine's own home directory.
+
+(declare-function harness-ui-pending--pattern-choices "harness-ui-pending")
+(declare-function harness-ui-pending--pattern-place "harness-ui-pending")
+(declare-function harness-ui-pending--permission-facts "harness-ui-pending")
+(defvar harness-ui-pending--ancestors-near)
+
+(defconst harness-ui-pending-test-host "/ssh:admin@laptop-0#4358:"
+  "TRAMP's name of a host that exists nowhere, with a user and a port.")
+
+(defun harness-ui-pending-test-ssh-jail-item (&optional id)
+  "Return the pending item of the jail's prompt about the home directory on a host.
+ID names it (\"ssh-jail\" by default): the first call of the ssh tool to
+the host, which runs in the login's home directory."
+  (let ((home (concat harness-ui-pending-test-host "~/")))
+    (list :id (or id "ssh-jail") :kind "permission"
+          :payload (list :title (format "Access %s (the login's home directory)" home)
+                         :tool "ssh" :kind "exec"
+                         :input '(:host "admin@laptop-0:4358" :command "uptime")
+                         :paths (list home) :dir home :pattern (concat home "**")
+                         :reason (format "SSH wants %s (the home directory of the login on admin@laptop-0#4358, where ssh starts), which is outside the allowed directories" home)
+                         :options harness-ui-pending-test-options))))
+
+(defun harness-ui-pending-test-ssh-tool-item (&optional id paths)
+  "Return the pending item of the ssh tool's own prompt, once the home is allowed.
+ID names it (\"ssh-tool\" by default); PATHS are the paths the command
+names outside the session's directories, the home directory it runs in by
+default.  Its covers are those the harness works out for
+`journalctl -u k3s | tail -50' on the host: the last but two, every call
+of its programs on the host, is the one the lasting answers start on."
+  (let ((home (concat harness-ui-pending-test-host "~/")))
+    (list :id (or id "ssh-tool") :kind "permission"
+          :payload (list :title "SSH: admin@laptop-0:4358: journalctl -u k3s | tail -50" :tool "ssh" :kind "exec"
+                         :input '(:host "admin@laptop-0:4358" :command "journalctl -u k3s | tail -50")
+                         :cwd home :paths (or paths (list home))
+                         :commands '(("journalctl") ("tail")) :covers "journalctl and tail"
+                         :ladder '((:id "exact" :label "every ssh call whose host is exactly \"admin@laptop-0:4358\" and command is exactly \"journalctl -u k3s | tail -50\"")
+                                   (:id "host-programs" :label "every journalctl and tail call on admin@laptop-0:4358 (any arguments)")
+                                   (:id "host-tool" :label "every ssh call on admin@laptop-0:4358 (any command)")
+                                   (:id "programs" :label "every journalctl and tail call (any host, any arguments)")
+                                   (:id "tool" :label "every ssh call (any host, any command)"))
+                         :cover "host-programs"
+                         :options harness-ui-pending-test-options))))
+
+(ert-deftest harness-ui-pending-patterns-on-a-host-go-up-to-its-root ()
+  "The lines for a path on a host are the path, its pattern, each directory
+above it, and last the root of the host, the widest answer there is.  The
+home directory of a login comes after the directories in it, before the
+root.  Nothing is looked up or expanded."
+  (require 'harness-ui-pending)
+  (harness-test-without-connections
+    (let ((host harness-ui-pending-test-host))
+      (cl-flet ((choices (pattern paths &rest more)
+                  (harness-ui-pending--pattern-choices (append (list :pattern pattern :paths paths) more))))
+        ;; The first call of the ssh tool to a host: its home directory.
+        (should (equal (list (concat host "~/") (concat host "~/**") (concat host "/**"))
+                       (choices (concat host "~/**") (list (concat host "~/")))))
+        ;; A directory in it: each one above, the home, the host.
+        (should (equal (list (concat host "~/projects/x/") (concat host "~/projects/x/**")
+                             (concat host "~/projects/**") (concat host "~/**") (concat host "/**"))
+                       (choices (concat host "~/projects/x/**") (list (concat host "~/projects/x/")))))
+        ;; An absolute directory has no home to stop at.
+        (should (equal '("/ssh:benito:/var/log/nginx/" "/ssh:benito:/var/log/nginx/**" "/ssh:benito:/var/log/**"
+                         "/ssh:benito:/var/**" "/ssh:benito:/**")
+                       (choices "/ssh:benito:/var/log/nginx/**" '("/ssh:benito:/var/log/nginx/"))))
+        ;; The host's root has nothing above it.
+        (should (equal '("/ssh:benito:/" "/ssh:benito:/**")
+                       (choices "/ssh:benito:/**" '("/ssh:benito:/"))))
+        ;; A file: the files like it beside it, the directories between it and the pattern's.
+        (should (equal (list (concat host "~/projects/x/src/a.el") (concat host "~/projects/x/src/*.el")
+                             (concat host "~/projects/x/src/**") (concat host "~/projects/x/**")
+                             (concat host "~/projects/**") (concat host "~/**") (concat host "/**"))
+                       (choices (concat host "~/projects/**") (list (concat host "~/projects/x/src/a.el")))))
+        ;; A path outside the pattern's directory is a line of its own and nothing between.
+        (should (equal '("/ssh:benito:/etc/hosts" "/ssh:benito:/srv/**" "/ssh:benito:/**")
+                       (choices "/ssh:benito:/srv/**" '("/ssh:benito:/etc/hosts"))))
+        ;; Another user's home is a home, with the host above it.
+        (should (equal '("/ssh:benito:~bob/**" "/ssh:benito:/**")
+                       (choices "/ssh:benito:~bob/**" nil)))
+        ;; A pattern that is no directory's has nothing around it.
+        (should (equal '("/ssh:benito:~/src/*.el") (choices "/ssh:benito:~/src/*.el" nil)))
+        ;; One the user typed is a line of its own, last, as for a path here.
+        (should (equal (list (concat host "~/") (concat host "~/**") (concat host "/**")
+                             (concat host "~/notes/*.org"))
+                       (choices (concat host "~/**") (list (concat host "~/"))
+                                :edited-pattern (concat host "~/notes/*.org"))))
+        ;; ... unless it is one of them.
+        (should (equal (list (concat host "~/") (concat host "~/**") (concat host "/**"))
+                       (choices (concat host "~/**") (list (concat host "~/"))
+                                :edited-pattern (concat host "/**"))))))))
+
+(ert-deftest harness-ui-pending-patterns-on-a-host-keep-the-block-short ()
+  "A path with many directories lists the nearest few of the ones above it
+and the two highest, the host's root last: the block does not grow with
+the path."
+  (require 'harness-ui-pending)
+  (harness-test-without-connections
+    (cl-flet ((suggestions (pattern) (harness-ui-pending--pattern-suggestions (list :pattern pattern))))
+      ;; As many directories above as are listed whole: all of them.
+      (should (equal '("/ssh:box:/a/b/c/d/e/**" "/ssh:box:/a/b/c/d/**" "/ssh:box:/a/b/c/**" "/ssh:box:/a/b/**"
+                       "/ssh:box:/a/**" "/ssh:box:/**")
+                     (suggestions "/ssh:box:/a/b/c/d/e/**")))
+      ;; More: the nearest three, then the two highest.
+      (should (equal '("/ssh:box:/a/b/c/d/e/f/g/h/**" "/ssh:box:/a/b/c/d/e/f/g/**" "/ssh:box:/a/b/c/d/e/f/**"
+                       "/ssh:box:/a/b/c/d/e/**" "/ssh:box:/a/**" "/ssh:box:/**")
+                     (suggestions "/ssh:box:/a/b/c/d/e/f/g/h/**")))
+      (should (= (+ 1 harness-ui-pending--ancestors-near 2)
+                 (length (suggestions "/ssh:box:/a/b/c/d/e/f/g/h/i/j/k/l/**"))))
+      (should (equal "/ssh:box:/**"
+                     (car (last (suggestions "/ssh:box:/a/b/c/d/e/f/g/h/i/j/k/l/**")))))
+      ;; Under a home directory the home and the host close the list.
+      (should (equal '("/ssh:box:~/a/b/c/d/e/f/**" "/ssh:box:~/a/b/c/d/e/**" "/ssh:box:~/a/b/c/d/**"
+                       "/ssh:box:~/a/b/c/**" "/ssh:box:~/**" "/ssh:box:/**")
+                     (suggestions "/ssh:box:~/a/b/c/d/e/f/**"))))))
+
+(ert-deftest harness-ui-pending-patterns-here-are-as-they-were ()
+  "A pattern on this machine has the lines it always had: no host to stop
+at, and the home directory as `abbreviate-file-name' writes it."
+  (require 'harness-ui-pending)
+  (let ((home (expand-file-name "~/")))
+    (should (equal (mapcar #'abbreviate-file-name
+                           (list (concat home "notes/todo.org") (concat home "notes/*.org") (concat home "notes/**")
+                                 (concat home "**")))
+                   (harness-ui-pending--pattern-choices
+                    (list :pattern (concat home "notes/**") :paths (list (concat home "notes/todo.org"))))))
+    (should (equal '("/srv/x/" "/srv/x/**" "/srv/**")
+                   (harness-ui-pending--pattern-choices (list :pattern "/srv/x/**" :paths '("/srv/x/")))))))
+
+(ert-deftest harness-ui-pending-pattern-place-names-the-whole-places ()
+  "A line of the block says when it is a whole home directory or a whole host."
+  (require 'harness-ui-pending)
+  (harness-test-without-connections
+    (dolist (pattern '("/ssh:box:~/**" "/ssh:box:~/" "/ssh:box:~" "/ssh:box:~bob/**"))
+      (should (equal "home directory" (harness-ui-pending--pattern-place pattern))))
+    (dolist (pattern '("/ssh:box:/**" "/ssh:box:/" "/ssh:box:" "/ssh:u@box#22:/**"))
+      (should (equal "whole host" (harness-ui-pending--pattern-place pattern))))
+    (dolist (pattern '("/ssh:box:~/src/**" "/ssh:box:~/src/" "/ssh:box:/var/**" "/ssh:box:/etc/hosts"
+                       "/ssh:box:~/*.el" "/srv/**" "/" "~/**" "/ssh:box:/*"))
+      (should-not (harness-ui-pending--pattern-place pattern)))))
+
+(ert-deftest harness-ui-pending-facts-of-a-call-on-a-host ()
+  "The facts of an ssh call say where it runs, and the paths it names
+elsewhere on the host; a path in the home directory is named as it is."
+  (harness-ui-pending-test-with
+    (let ((sid (harness-ui-pending-test-session))
+          (host harness-ui-pending-test-host))
+      (harness-ui-pending-sync
+       sid (list (harness-ui-pending-test-ssh-tool-item "home")
+                 (harness-ui-pending-test-ssh-tool-item "elsewhere" (list (concat host "/etc/hostname")))
+                 (harness-ui-pending-test-ssh-tool-item "inside" (list (concat host "~/notes")))
+                 (harness-ui-pending-test-ssh-jail-item "jail")))
+      (harness-test-without-connections
+        (should (equal (list (format "kind: exec   runs in: %s~/" host))
+                       (harness-ui-pending--permission-facts (harness-ui-pending-record sid "home"))))
+        (should (equal (list (format "kind: exec   runs in: %s~/" host) (format "paths: %s/etc/hostname" host))
+                       (harness-ui-pending--permission-facts (harness-ui-pending-record sid "elsewhere"))))
+        (should (equal (list (format "kind: exec   runs in: %s~/" host) (format "paths: %s~/notes" host))
+                       (harness-ui-pending--permission-facts (harness-ui-pending-record sid "inside"))))
+        ;; The jail's prompt has no command, so no directory it runs in.
+        (should (equal (list (format "kind: exec   paths: %s~/" host))
+                       (harness-ui-pending--permission-facts (harness-ui-pending-record sid "jail"))))))))
+
+(ert-deftest harness-ui-pending-panel-of-the-first-call-to-a-host ()
+  "The jail's prompt for a host's home directory lists, narrowest first, the
+home directory, its pattern (the default) and the whole host, each line
+saying so when it is a whole place, and the panel is drawn without a
+connection."
+  (harness-ui-pending-test-with
+    (let ((sid (harness-ui-pending-test-session))
+          (host harness-ui-pending-test-host))
+      (harness-ui-pending-sync sid (list (harness-ui-pending-test-ssh-jail-item)))
+      (harness-test-without-connections
+        (let ((text (harness-ui-pending-test-rendered sid "ssh-jail")))
+          (should (string-search "Permission  Access /ssh:admin@laptop-0#4358:~/ (the login's home directory)" text))
+          (should (string-search "   host: admin@laptop-0:4358  command: uptime\n" text))
+          (should (string-search (format "   kind: exec   paths: %s~/\n" host) text))
+          (should (string-search "(the home directory of the login on admin@laptop-0#4358, where ssh starts)" text))
+          (should (string-search
+                   (concat "   Answers hold for:\n"
+                           (harness-ui-pending-test-step-line nil (concat host "~/") "home directory") "\n"
+                           (harness-ui-pending-test-step-line t (concat host "~/**") "default") "\n"
+                           (harness-ui-pending-test-step-line nil (concat host "/**") "whole host") "\n"
+                           "   [Edit] e  [Narrower] <  [Wider] >\n"
+                           "   [Allow] y")
+                   text)))
+        (should (equal (concat host "~/**") (harness-ui-pending-test-picked sid "ssh-jail")))
+        (should (equal (concat host "~/**") (harness-ui-pending--cover-selected (harness-ui-pending-record sid "ssh-jail"))))
+        ;; The tooltips name the pattern the answers hold for.
+        (let ((help (lambda (option) (harness-ui-pending-answer-help (harness-ui-pending-record sid "ssh-jail") option))))
+          (should (equal (format "Let this call reach %s~/**, this time" host) (funcall help "allow-once")))
+          (should (equal (format "Allow %s~/** for this session" host) (funcall help "allow-session")))
+          (should (equal (format "Always allow %s~/**, in every session" host) (funcall help "allow-always")))
+          (should (equal (format "Always deny %s~/**, to every tool" host) (funcall help "deny-always"))))
+        ;; The host's root is the widest line: the pick stops there.
+        (harness-ui-pending-set-pattern sid "ssh-jail" (concat host "/**"))
+        (should (equal (concat host "/**") (harness-ui-pending-test-picked sid "ssh-jail")))
+        (should-not (string-search "edited" (harness-ui-pending-test-rendered sid "ssh-jail")))
+        (should (equal (format "Always allow %s/**, in every session" host)
+                       (harness-ui-pending-answer-help (harness-ui-pending-record sid "ssh-jail") "allow-always")))))))
+
+(ert-deftest harness-ui-pending-keys-widen-a-home-prompt-to-the-host ()
+  "> from the default of the home directory's prompt picks the whole host, and
+nothing is wider; < goes back, the pattern the answer carries following."
+  (harness-ui-pending-test-with
+    (let* ((sid (harness-ui-pending-test-session))
+           (host harness-ui-pending-test-host)
+           (buf (progn (harness-ui-pending-test-record-answers)
+                       (harness-ui-pending-sync sid (list (harness-ui-pending-test-ssh-jail-item)))
+                       (harness-ui-pending-test-popout-panel sid)))
+           (shown nil)
+           (press (lambda (key)
+                    (setq shown nil)
+                    (cl-letf (((symbol-function 'message)
+                               (lambda (fmt &rest args) (when fmt (push (apply #'format fmt args) shown)))))
+                      (call-interactively (key-binding (kbd key))))
+                    (car shown))))
+      (harness-test-without-connections
+        (with-current-buffer buf
+          (should (equal (format "Answers now hold for %s/**" host) (funcall press ">")))
+          (should (equal (concat host "/**") (plist-get (harness-ui-pending-record sid "ssh-jail") :edited-pattern)))
+          (should (equal (format "Already the widest pattern: %s/**" host) (funcall press ">")))
+          (should (equal (concat host "/**") (harness-ui-pending-test-picked sid "ssh-jail")))
+          (should (equal (format "Answers now hold for %s~/**" host) (funcall press "<")))
+          ;; Back on the request's own pattern: no edit.
+          (should-not (plist-get (harness-ui-pending-record sid "ssh-jail") :edited-pattern))
+          (should (equal (format "Answers now hold for %s~/" host) (funcall press "<")))
+          (should (equal (format "Already the narrowest pattern: %s~/" host) (funcall press "<")))
+          (funcall press ">")
+          (funcall press ">")
+          ;; The answer carries the whole host as the pattern it holds for.
+          (goto-char (point-min))
+          (search-forward "Permission")
+          (call-interactively (key-binding (kbd "s")))))
+      (harness-test-wait (lambda () harness-ui-pending-test-answers) 5 "the answer")
+      (should (equal (list 'permission sid "ssh-jail" (list :option "allow-session" :pattern (concat host "/**")))
+                     (car harness-ui-pending-test-answers))))))
+
+(ert-deftest harness-ui-pending-clicking-the-whole-host-line-picks-it ()
+  "A click on the line of the whole host picks it, and the answer carries it:
+the widest answer is one click away from the default, and it is always the
+last line."
+  (harness-ui-pending-test-with
+    (let* ((sid (harness-ui-pending-test-session))
+           (host harness-ui-pending-test-host)
+           (buf (progn (harness-ui-pending-test-record-answers)
+                       (harness-ui-pending-sync sid (list (harness-ui-pending-test-ssh-jail-item)))
+                       (harness-ui-pending-test-popout-panel sid))))
+      (harness-test-without-connections
+        (with-current-buffer buf
+          (goto-char (point-min))
+          (search-forward (concat host "/**"))
+          (harness-ui-action-push)
+          (should (equal (concat host "/**") (plist-get (harness-ui-pending-record sid "ssh-jail") :edited-pattern)))
+          (should (equal "ssh-jail" (get-text-property (point) 'harness-ui-pending-selected)))
+          (should (equal (concat host "/**") (harness-ui-pending-test-picked sid "ssh-jail")))
+          (goto-char (point-min))
+          (search-forward "Permission")
+          (call-interactively (key-binding (kbd "a")))))
+      (harness-test-wait (lambda () harness-ui-pending-test-answers) 5 "the answer")
+      (should (equal (list 'permission sid "ssh-jail" (list :option "allow-always" :pattern (concat host "/**")))
+                     (car harness-ui-pending-test-answers))))))
+
+(ert-deftest harness-ui-pending-edit-a-pattern-on-a-host ()
+  "[Edit] offers the pattern as the text to change and the lines around it
+to step through, the host's root among them; what is typed is what the
+answers hold for, an empty answer goes back to the request's own, and the
+whole thing is done without a connection."
+  (harness-ui-pending-test-with
+    (let ((sid (harness-ui-pending-test-session))
+          (host harness-ui-pending-test-host)
+          (asked nil))
+      (harness-ui-pending-sync sid (list (harness-ui-pending-test-ssh-jail-item)))
+      (harness-test-without-connections
+        (cl-flet ((edit (typed)
+                    (cl-letf (((symbol-function 'read-string)
+                               (lambda (prompt &optional initial _history default &rest _)
+                                 (setq asked (list prompt initial default))
+                                 typed))
+                              ((symbol-function 'message) #'ignore))
+                      (let ((harness-ui-session-id sid))
+                        (harness-ui-pending-edit-pattern "ssh-jail")))))
+          ;; The user steps to the whole host, as M-n offers it.
+          (edit (concat host "/**"))
+          (should (string-prefix-p "Pattern (" (nth 0 asked)))
+          (should (equal (concat host "~/**") (nth 1 asked)))
+          (should (equal (list (concat host "~/") (concat host "~/**") (concat host "/**")) (nth 2 asked)))
+          (should (equal (concat host "/**") (plist-get (harness-ui-pending-record sid "ssh-jail") :edited-pattern)))
+          ;; Typed afresh: a pattern of the user's own, kept as it is, tilde and all.
+          (edit (concat host "~/notes/*.org"))
+          (should (equal (concat host "/**") (nth 1 asked)))
+          (should (equal (concat host "~/notes/*.org")
+                         (plist-get (harness-ui-pending-record sid "ssh-jail") :edited-pattern)))
+          (should (equal (concat host "~/notes/*.org") (harness-ui-pending-test-picked sid "ssh-jail")))
+          (should (string-search (harness-ui-pending-test-step-line t (concat host "~/notes/*.org") "edited")
+                                 (harness-ui-pending-test-rendered sid "ssh-jail")))
+          ;; Empty: back to the request's own.
+          (edit "")
+          (should-not (plist-get (harness-ui-pending-record sid "ssh-jail") :edited-pattern))
+          (should (equal (concat host "~/**") (harness-ui-pending-test-picked sid "ssh-jail"))))))))
+
+(ert-deftest harness-ui-pending-panel-of-a-call-on-a-host-offers-its-host-first ()
+  "The ladder of an ssh call lists the exact call, the programs on its host
+\(where the lasting answers start), any command on the host, and then the
+programs and the tool for every host, each saying what it leaves free.  The
+tooltips say what the pick covers, and the answer carries the pick."
+  (harness-ui-pending-test-with
+    (let ((sid (harness-ui-pending-test-session))
+          (host harness-ui-pending-test-host))
+      (harness-ui-pending-test-record-answers)
+      (harness-ui-pending-sync sid (list (harness-ui-pending-test-ssh-tool-item)))
+      (harness-test-without-connections
+        (let ((text (harness-ui-pending-test-rendered sid "ssh-tool")))
+          (should (string-search (format "   kind: exec   runs in: %s~/\n" host) text))
+          (should (string-search
+                   (concat "   Lasting answers (s, a, N) cover:\n"
+                           (harness-ui-pending-test-step-line nil "every ssh call whose host is exactly \"admin@laptop-0:4358\" and command is exactly \"journalctl -u k3s | tail -50\"") "\n"
+                           (harness-ui-pending-test-step-line t "every journalctl and tail call on admin@laptop-0:4358 (any arguments)") "\n"
+                           (harness-ui-pending-test-step-line nil "every ssh call on admin@laptop-0:4358 (any command)") "\n"
+                           (harness-ui-pending-test-step-line nil "every journalctl and tail call (any host, any arguments)") "\n"
+                           (harness-ui-pending-test-step-line nil "every ssh call (any host, any command)") "\n"
+                           "   [Narrower] <  [Wider] >")
+                   text)))
+        (should (equal "host-programs" (harness-ui-pending--cover-id (harness-ui-pending-record sid "ssh-tool"))))
+        (let ((help (lambda (option) (harness-ui-pending-answer-help (harness-ui-pending-record sid "ssh-tool") option))))
+          (should (equal "Allow every journalctl and tail call on admin@laptop-0:4358 (any arguments) for this session"
+                         (funcall help "allow-session")))
+          (should (equal "Always allow every journalctl and tail call on admin@laptop-0:4358 (any arguments), in every session"
+                         (funcall help "allow-always")))
+          (should (equal "Always deny every journalctl and tail call on admin@laptop-0:4358 (any arguments)"
+                         (funcall help "deny-always")))
+          ;; Wider: any command on this host, then the programs on any host, then the tool.
+          (harness-ui-pending-set-cover sid "ssh-tool" "host-tool")
+          (should (equal "Always allow every ssh call on admin@laptop-0:4358 (any command), in every session"
+                         (funcall help "allow-always")))
+          (harness-ui-pending-set-cover sid "ssh-tool" "programs")
+          (should (equal "Always allow every journalctl and tail call (any host, any arguments), in every session"
+                         (funcall help "allow-always")))
+          (harness-ui-pending-set-cover sid "ssh-tool" "tool")
+          (should (equal "Always deny every ssh call (any host, any command)" (funcall help "deny-always")))
+          (harness-ui-pending-set-cover sid "ssh-tool" "host-tool"))
+        ;; The answer carries the cover picked, and Allow and Deny none.
+        (harness-ui-pending-answer-permission sid "ssh-tool" "allow-session")
+        (harness-test-wait (lambda () harness-ui-pending-test-answers) 5 "the answer")
+        (should (equal (list 'permission sid "ssh-tool" '(:option "allow-session" :cover "host-tool"))
+                       (car harness-ui-pending-test-answers)))))))
+
+(ert-deftest harness-ui-pending-the-phone-gets-a-default-that-is-no-wider-than-this-host ()
+  "A client that knows no ladder (the phone's) answers with no cover, which is
+the step the prompt started on: the programs on the host, narrower than the
+programs on any host it used to hold for."
+  (harness-ui-pending-test-with
+    (let ((sid (harness-ui-pending-test-session)))
+      (harness-ui-pending-test-record-answers)
+      (harness-ui-pending-sync sid (list (harness-ui-pending-test-ssh-tool-item)))
+      (let ((r (harness-ui-pending-record sid "ssh-tool")))
+        (should (equal "host-programs" (plist-get r :cover)))
+        (should (equal "every journalctl and tail call on admin@laptop-0:4358 (any arguments)"
+                       (harness-ui-pending--cover-label r)))
+        ;; What the answer carries is the cover picked; picking none, the one it started on.
+        (should (equal '(:cover "host-programs") (harness-ui-pending--answer-extras r "allow-always")))))))
 
 (provide 'harness-ui-pending-test)
 ;;; harness-ui-pending-test.el ends here

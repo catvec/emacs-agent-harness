@@ -180,7 +180,7 @@ Case and dashes for underscores do not matter."
 
 (defun harness-access--abbrev (dir)
   "Return DIR abbreviated for a message."
-  (abbreviate-file-name (or dir "")))
+  (harness-abbreviate-file-name (or dir "")))
 
 ;;;; The profile
 
@@ -259,7 +259,7 @@ file standing for the directory holding it."
   "Non-nil when A and B name the same directory, symbolic links aside."
   (and (stringp a) (stringp b)
        (or (equal (file-name-as-directory a) (file-name-as-directory b))
-           (and (not (file-remote-p a)) (not (file-remote-p b))
+           (and (not (harness-file-remote-p a)) (not (harness-file-remote-p b))
                 (equal (file-name-as-directory (harness-path-normalize a))
                        (file-name-as-directory (harness-path-normalize b)))))))
 
@@ -1122,7 +1122,7 @@ the tool, the reason, the call id or the call's title) and `:limit'
   (let* ((status (and (harness-method-exists-p 'sandbox/status)
                       (ignore-errors (harness-call 'sandbox/status))))
          (dir (harness-readonly-dir session))
-         (remote (and (stringp dir) (file-remote-p dir) t)))
+         (remote (and (stringp dir) (harness-file-remote-p dir) t)))
     (list :backend (or (plist-get status :backend) 'none)
           :available (plist-get status :available)
           :policy (or (and (harness-method-exists-p 'config/get)

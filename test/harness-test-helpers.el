@@ -266,6 +266,30 @@ closing the connection with a reset, as a proxy dropping it does) or
   "Block until PROMISE settles; return its value or signal."
   (harness-await promise (or timeout 10)))
 
+(defun harness-test--without-connections (fn)
+  "Call FN with TRAMP unable to open a connection; fail afterwards if it tried.
+See `harness-test-without-connections'."
+  (require 'tramp)
+  (let ((attempts nil))
+    (cl-letf (((symbol-function 'tramp-maybe-open-connection)
+               (lambda (vec &rest _)
+                 (push (format "%s" (tramp-make-tramp-file-name vec)) attempts)
+                 (error "Nothing may connect: %s" (car attempts)))))
+      (prog1 (funcall fn)
+        (when attempts
+          (ert-fail (list "Something connected to a host" (reverse attempts))))))))
+
+(defmacro harness-test-without-connections (&rest body)
+  "Run BODY, which may not connect to a host through TRAMP, and return its value.
+A connection attempt signals an error, as a host that cannot be reached
+does, and is recorded, so that one BODY caught and went on from fails
+the test all the same.  It is for the permission chain, which decides a
+call before the user has said it may reach a host and may not wait on the
+network: BODY runs it with hosts that exist nowhere, such as
+box.example.invalid."
+  (declare (indent 0))
+  `(harness-test--without-connections (lambda () ,@body)))
+
 (defun harness-test-temp-dir ()
   "Create and return a fresh temporary directory."
   (file-name-as-directory (make-temp-file "harness-tmp-" t)))

@@ -357,7 +357,7 @@ outside the allowed directories, which allow-once lets that call reach;
 or the directory an agent asked for, which allow-once grants until the
 session's turn ends."
   (let ((pattern (or (harness-ui-pending--permission-pattern r)
-                     (and (plist-get r :dir) (abbreviate-file-name (format "%s" (plist-get r :dir))))))
+                     (and (plist-get r :dir) (harness-abbreviate-file-name (format "%s" (plist-get r :dir))))))
         (tool (or (plist-get r :tool) "this tool"))
         (covers (plist-get r :covers))
         (label (harness-ui-pending--cover-label r))
@@ -387,7 +387,7 @@ session's turn ends."
   "Return the echo-area message after answering permission record R with OPTION.
 It says what the answer covered, as its button's tooltip did."
   (let ((shown (or (harness-ui-pending--permission-pattern r)
-                   (and (plist-get r :dir) (abbreviate-file-name (format "%s" (plist-get r :dir))))))
+                   (and (plist-get r :dir) (harness-abbreviate-file-name (format "%s" (plist-get r :dir))))))
         (covers (plist-get r :covers))
         (label (harness-ui-pending--cover-label r)))
     (pcase option
@@ -510,7 +510,29 @@ all."
   "Return the glob pattern permission record R is answered for, as shown, or nil.
 That is the one the user edited, else the request's own, abbreviated."
   (or (plist-get r :edited-pattern)
-      (and (stringp (plist-get r :pattern)) (abbreviate-file-name (plist-get r :pattern)))))
+      (and (stringp (plist-get r :pattern)) (harness-abbreviate-file-name (plist-get r :pattern)))))
+
+(defconst harness-ui-pending--ancestors-near 3
+  "How many of the directories above a remote pattern's own its lines list.
+The nearest ones, before the last two: the home directory and the root
+of the host, or the two highest of an absolute path.")
+
+(defun harness-ui-pending--ancestor-patterns (dir)
+  "Return the patterns of the directories above remote DIR, narrowest first.
+Each is a directory's name and `**'.  The home directory of a login
+comes after the directories in it, and the root of the host, the whole
+host, is the last, since a path on a host has no repository root to
+stop at (the harness cannot look).  A path with many directories keeps
+the nearest few and the two highest, so the block does not grow with
+it.  Nothing is looked up."
+  (let (all (up (harness-remote-parent-dir dir)))
+    (while up
+      (push (concat up "**") all)
+      (setq up (harness-remote-parent-dir up)))
+    (setq all (nreverse all))
+    (if (<= (length all) (+ harness-ui-pending--ancestors-near 2))
+        all
+      (append (cl-subseq all 0 harness-ui-pending--ancestors-near) (last all 2)))))
 
 (defun harness-ui-pending--pattern-suggestions (r)
   "Return patterns more or less specific than permission record R's own.
@@ -519,10 +541,17 @@ directory, that directory and each one above it up to the pattern's,
 which may be the root of a repository, then the pattern and the
 directory above its own: what
 \\<minibuffer-local-map>\\[next-history-element] offers while editing,
-narrowest first.  They are worked out from the names alone."
+narrowest first.  They are worked out from the names alone.
+
+On a host there is no repository root to stop at, so the pattern is
+followed by every directory above it (the nearest few and the two
+highest of a long path): in a home directory the home directory
+itself, and last the root of the host, the whole host, which is the
+widest answer there is for it."
   (let* ((pattern (plist-get r :pattern))
          (dir (and (string-suffix-p "/**" pattern) (substring pattern 0 -2)))
-         (parent (and dir (file-name-directory (directory-file-name dir))))
+         (remote (and dir (harness-file-remote-p dir)))
+         (parent (and dir (not remote) (file-name-directory (directory-file-name dir))))
          (paths (mapcar (lambda (p) (format "%s" p)) (append (plist-get r :paths) nil)))
          ;; A path's own directory and those above it, while they lie
          ;; inside the pattern's directory.
@@ -533,7 +562,7 @@ narrowest first.  They are worked out from the names alone."
                      (setq d (file-name-directory (directory-file-name d))))
                    (nreverse out)))))
     (delete-dups
-     (mapcar #'abbreviate-file-name
+     (mapcar #'harness-abbreviate-file-name
              (delq nil (append paths
                                (mapcar (lambda (p)
                                          (let ((d (file-name-directory p)))
@@ -541,8 +570,10 @@ narrowest first.  They are worked out from the names alone."
                                                 (concat d "*." (file-name-extension p)))))
                                        paths)
                                (mapcan (lambda (p) (funcall dirs p)) paths)
-                               (list pattern
-                                     (and parent (not (equal parent dir)) (concat parent "**")))))))))
+                               (list pattern)
+                               (if remote
+                                   (harness-ui-pending--ancestor-patterns dir)
+                                 (list (and parent (not (equal parent dir)) (concat parent "**"))))))))))
 
 (defun harness-ui-pending-set-pattern (session-id pid pattern)
   "Make PATTERN, or the request's own when nil, the one PID is answered for.
@@ -597,7 +628,7 @@ the request's own; an empty answer goes back to it."
             pid (plist-get r :id)))
     (unless r
       (user-error "No request about a path outside the allowed directories is waiting"))
-    (let* ((own (abbreviate-file-name (plist-get r :pattern)))
+    (let* ((own (harness-abbreviate-file-name (plist-get r :pattern)))
            (typed (string-trim (read-string "Pattern (* within a name, ** across directories): "
                                             (harness-ui-pending--permission-pattern r) nil
                                             (harness-ui-pending--pattern-suggestions r)))))
@@ -673,7 +704,7 @@ pattern the user typed when it is none of them.  Nil when R is not
 answered for a pattern."
   (when (stringp (plist-get r :pattern))
     (let ((suggestions (harness-ui-pending--pattern-suggestions r))
-          (current (abbreviate-file-name (harness-ui-pending--permission-pattern r))))
+          (current (harness-abbreviate-file-name (harness-ui-pending--permission-pattern r))))
       (if (member current suggestions)
           suggestions
         (append suggestions (list current))))))
@@ -694,7 +725,7 @@ neither."
   (if (harness-ui-pending--ladder r)
       (harness-ui-pending--cover-id r)
     (when (stringp (plist-get r :pattern))
-      (abbreviate-file-name (harness-ui-pending--permission-pattern r)))))
+      (harness-abbreviate-file-name (harness-ui-pending--permission-pattern r)))))
 
 (defun harness-ui-pending--lasting-names (r)
   "Return the names of the lasting answers R offers, as a phrase, or nil.
@@ -744,7 +775,7 @@ being what it is when nothing was edited."
   (if (harness-ui-pending--ladder r)
       (harness-ui-pending-set-cover session-id (plist-get r :id) id)
     (harness-ui-pending-set-pattern session-id (plist-get r :id)
-                                    (unless (equal id (abbreviate-file-name (plist-get r :pattern))) id))))
+                                    (unless (equal id (harness-abbreviate-file-name (plist-get r :pattern))) id))))
 
 (defun harness-ui-pending--move-cover (n pid)
   "Pick the choice N places on in the cover block of request PID.
@@ -888,6 +919,18 @@ have been answered since it was drawn."
     (unless r (user-error "That request was answered already"))
     (harness-ui-pending--choose session-id r pattern)))
 
+(defun harness-ui-pending--pattern-place (pattern)
+  "Return a word for what remote PATTERN holds as a whole, or nil.
+\"home directory\" for the home directory of a login (/ssh:box:~/**) and
+\"whole host\" for the root of a host (/ssh:box:/**), the places a line of
+the block of patterns would otherwise leave its reader to work out."
+  (let ((dir (if (string-suffix-p "/**" pattern) (substring pattern 0 -2) pattern)))
+    (cond ((and (harness-remote-home-p dir)
+                (member (nth 2 (harness-remote-home-parts dir)) '("" "/")))
+           "home directory")
+          ((and (harness-file-remote-p dir) (member (harness-file-remote-p dir 'localname) '("" "/")))
+           "whole host"))))
+
 (defun harness-ui-pending--insert-patterns (r)
   "Insert the block of the patterns permission record R is answered for.
 R is a request about a path outside the allowed directories: every
@@ -900,7 +943,7 @@ others as edited.  A click picks a line, [Edit] types another pattern."
          (choices (harness-ui-pending--pattern-choices r))
          (suggestions (harness-ui-pending--pattern-suggestions r))
          (selected (harness-ui-pending--cover-selected r))
-         (own (abbreviate-file-name (plist-get r :pattern)))
+         (own (harness-abbreviate-file-name (plist-get r :pattern)))
          (start (point)))
     (if (null (cdr choices))
         (insert (propertize "   Answers hold for: " 'face 'harness-dim-face)
@@ -915,7 +958,8 @@ others as edited.  A click picks a line, [Edit] types another pattern."
                      (format "Make the answers hold for %s, the request's own pattern (click)" pattern)
                    (format "Make the answers hold for %s (click)" pattern))
                  (cond ((equal pattern own) "default")
-                       ((not (member pattern suggestions)) "edited")))))
+                       ((not (member pattern suggestions)) "edited")
+                       (t (harness-ui-pending--pattern-place pattern))))))
       (insert "   " (harness-ui-pending--cover-buttons r t) "\n"))
     (put-text-property start (point) 'harness-ui-pending-cover pid)))
 
@@ -1116,10 +1160,10 @@ draw (`harness-ui-pending--insert-cover-block')."
          (only-cwd (and cwd paths (null (cdr paths))
                         (equal (file-name-as-directory (car paths)) (file-name-as-directory cwd))))
          (about (and paths (not only-cwd)
-                     (format "paths: %s" (mapconcat #'abbreviate-file-name paths " "))))
+                     (format "paths: %s" (mapconcat #'harness-abbreviate-file-name paths " "))))
          (covers (and (not (harness-ui-pending--ladder r)) (plist-get r :covers)))
          (first (delq nil (list (and (plist-get r :tool-kind) (format "kind: %s" (plist-get r :tool-kind)))
-                                (and cwd (format "runs in: %s" (abbreviate-file-name cwd)))
+                                (and cwd (format "runs in: %s" (harness-abbreviate-file-name cwd)))
                                 (and (not cwd) about)))))
     (delq nil (list (and first (string-join first "   "))
                     (and cwd about)

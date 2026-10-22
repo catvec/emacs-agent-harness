@@ -123,7 +123,11 @@ a BTW's model too, and this setting then changes nothing."
   "Extra directories sessions may touch besides their working directory.
 An entry may also be a glob pattern, such as ~/notes/*.org, to allow
 only the paths it matches: `*' matches within a name, `**' across
-directories."
+directories.  A TRAMP name allows a directory on another host:
+/ssh:box:/srv/app/, or /ssh:box:~/ for the home directory of the login
+there (which the harness does not expand, since only the host knows
+where it is) and everything in it; /ssh:box:/ allows the whole host,
+the home directory included."
   :type '(repeat directory)
   :safe (lambda (v) (and (listp v) (cl-every #'stringp v)))
   :group 'harness)

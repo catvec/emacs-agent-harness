@@ -17,7 +17,9 @@
 (defvar harness-provider-demo-script-override)
 (defvar harness-ui--sessions)
 (defvar harness-perms--allowed-dirs)
+(defvar harness-perms--session-rules)
 (defvar harness-perms--turn-dirs)
+(defvar harness-perms-rules)
 (defvar harness-access--judged)
 (defvar harness-ui-access--describe)
 (defvar harness-ui-access--judgements)
@@ -126,6 +128,57 @@ revocation, and give the working directory up for reading only and back."
       (harness-ui-access-restore-dir cwd)
       (harness-test-wait (lambda () (string-match-p "\\`  rw " (harness-ui-access-test-row cwd))) 5 "back"))))
 
+(ert-deftest harness-ui-access-lists-directories-on-another-host-without-connecting ()
+  "A directory on another host is a row like any other: the host's root, the
+home directory of the login there (a name with a tilde, which only the host
+can expand), a directory in it, one only read.  Drawing the rows, their
+buttons' tooltips and what the buttons do ask the host nothing: abbreviating
+a tilde name for display would connect, and the view is redrawn at every
+change."
+  (harness-ui-access-test-with
+    (let ((host "/ssh:box.example.invalid:/")
+          (home "/ssh:box.example.invalid:~/")
+          (sub "/ssh:box.example.invalid:~/projects/x/")
+          (notes "/ssh:other.example.invalid:~/notes/"))
+      (harness-test-without-connections
+        (harness-ui-access-test-open sid 'directories)
+        ;; Granted from the view, as the user does: it follows.
+        (dolist (dir (list home host sub))
+          (harness-ui-access-allow-dir dir)
+          (harness-ui-access-test-wait-text (concat (regexp-quote dir) " +granted to this session")))
+        (should (string-match-p "\\`  rw +/ssh:box.example.invalid:~/ +granted to this session +\\[Revoke\\] \\[Read only\\]"
+                                (harness-ui-access-test-row home)))
+        (should (string-match-p "\\`  rw +/ssh:box.example.invalid:/ +granted to this session +\\[Revoke\\]"
+                                (harness-ui-access-test-row host)))
+        (should (string-match-p "\\`  rw +/ssh:box.example.invalid:~/projects/x/ +granted to this session"
+                                (harness-ui-access-test-row sub)))
+        ;; The buttons' tooltips name the directory as it is.
+        (goto-char (harness-ui-access--find-anchor (cons 'dir home)))
+        (let ((revoke (progn (search-forward "[Revoke]") (get-text-property (1- (point)) 'help-echo))))
+          (should (string-match-p (concat "Revoke the grant of " (regexp-quote home)) revoke)))
+        ;; One only read, from the view, on another host: one inside a home directory granted is writable already.
+        (should (string-match-p "already readable and writable"
+                                (harness-call 'access/add-read-dir sid "/ssh:box.example.invalid:~/notes/")))
+        (harness-ui-access-allow-read-dir notes)
+        (harness-ui-access-test-wait-text (concat (regexp-quote notes) " +read only"))
+        (should (string-match-p "\\`  ro +/ssh:other.example.invalid:~/notes/ +read only +\\[Remove\\] \\[Make writable\\]"
+                                (harness-ui-access-test-row notes)))
+        (should (cl-find notes (plist-get (harness-call 'access/describe sid) :dirs)
+                         :key (lambda (e) (plist-get e :dir)) :test #'equal))
+        ;; Revoked from the view, the row is gone and the message names it as it is.
+        (let ((messages nil))
+          (cl-letf (((symbol-function 'message)
+                     (lambda (fmt &rest args) (when fmt (push (apply #'format fmt args) messages)))))
+            (harness-ui-access-revoke sub)
+            (harness-ui-access-test-wait-text (regexp-quote sub) t)
+            (harness-ui-access-remove-read-dir notes)
+            (harness-ui-access-test-wait-text (regexp-quote notes) t)
+            (harness-test-wait (lambda () (member (concat notes " may no longer be read") messages)) 5 "the message"))
+          (should (member (concat "Revoked " sub) messages)))
+        (should-not (member sub (harness-call 'permission/allowed-dirs sid)))
+        ;; The ones left are drawn still.
+        (should (string-match-p "rw +/ssh:box.example.invalid:~/ " (harness-ui-access-test-row home)))))))
+
 (ert-deftest harness-ui-access-follows-grants-made-elsewhere ()
   "A grant made from a prompt, or until the turn ends, redraws the view;
 the turn's end takes it out again."
@@ -216,6 +269,56 @@ writing and a tool off and on again for the session."
     (should (member "test_fetch" (plist-get (harness-access-profile (harness-call 'session/get sid)) :tools-off)))
     (harness-ui-access-toggle-tool "test_fetch")
     (harness-ui-access-test-wait-text "test_fetch +turned off" t)))
+
+;;;; Rules
+
+(ert-deftest harness-ui-access-rules-say-which-host-they-hold-for ()
+  "A rule for one host reads as one: the lasting answer to an ssh call holds
+for the host that call named (and the programs it ran), and a line that left
+the host out would read as an answer for every host.  A rule that pins other
+arguments says so too, a long one cut to a line, and one without arguments
+reads as it did."
+  (let ((host "admin@laptop-0:4358"))
+    (should (equal "allow ssh: journalctl, tail whose host is exactly \"admin@laptop-0:4358\""
+                   (substring-no-properties
+                    (harness-ui-access--rule-text
+                     (list :tool "ssh" :input (list :host host) :commands '(("journalctl") ("tail")) :behavior "allow")))))
+    (should (equal "allow ssh whose host is exactly \"admin@laptop-0:4358\""
+                   (substring-no-properties
+                    (harness-ui-access--rule-text (list :tool "ssh" :input (list :host host) :behavior "allow")))))
+    (should (equal "deny ssh whose host is exactly \"benito\" and command is exactly \"ls -la\""
+                   (substring-no-properties
+                    (harness-ui-access--rule-text
+                     (list :tool "ssh" :input '(:host "benito" :command "ls -la") :behavior "deny")))))
+    (should (string-match-p "\\`allow bash whose command is exactly \"[^\"]\\{49\\}…\"\\'"
+                            (substring-no-properties
+                             (harness-ui-access--rule-text
+                              (list :tool "bash" :input (list :command (make-string 80 ?x)) :behavior "allow")))))
+    ;; A rule about a host's file system, and the ones that never had arguments.
+    (should (equal "allow bash: ls, cat in /ssh:u@box:/**"
+                   (substring-no-properties
+                    (harness-ui-access--rule-text
+                     (list :tool "bash" :commands '(("ls") ("cat")) :path "/ssh:u@box:/**" :behavior "allow")))))
+    (should (equal "allow ssh: journalctl, tail"
+                   (substring-no-properties
+                    (harness-ui-access--rule-text
+                     (list :tool "ssh" :commands '(("journalctl") ("tail")) :behavior "allow")))))
+    ;; An argument list nobody could have written is not shown as one.
+    (should (equal "allow ssh" (substring-no-properties
+                                (harness-ui-access--rule-text (list :tool "ssh" :input "host" :behavior "allow")))))))
+
+(ert-deftest harness-ui-access-draws-the-rules-of-a-host ()
+  "The rules section lists the answers of this session and the lasting ones,
+each for the host it holds for, drawn from what the harness describes."
+  (harness-ui-access-test-with
+    (let ((harness-perms-rules (list (list :tool "ssh" :input '(:host "benito") :commands '(("uptime")) :behavior 'allow)))
+          (rule '(:tool "ssh" :input (:host "admin@laptop-0:4358") :commands (("journalctl") ("tail")) :behavior allow)))
+      (puthash sid (list rule) harness-perms--session-rules)
+      (harness-ui-access-test-open sid 'rules)
+      (harness-ui-access-test-wait-text
+       "this session +allow ssh: journalctl, tail whose host is exactly \"admin@laptop-0:4358\"")
+      (should (string-match-p "every session +allow ssh: uptime whose host is exactly \"benito\""
+                              (harness-ui-access-test-text))))))
 
 ;;;; Judgements
 

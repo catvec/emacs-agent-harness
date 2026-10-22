@@ -2,6 +2,11 @@
 ;;; Code:
 
 (require 'harness-test-helpers)
+;; `tramp-maybe-open-connection', which `harness-test-without-connections'
+;; replaces, is defined in tramp-sh: loaded under the macro, it would be
+;; undefined again when the macro ends.
+(require 'tramp)
+(require 'tramp-sh)
 
 (defvar harness-providers)
 (defvar harness-allowed-directories)
@@ -4111,10 +4116,12 @@ they are few; a shell-like tool pins its texts, not a timeout."
                        "every web_fetch call (any arguments)")
                      (harness-perms-test--steps l :label)))
       (should (equal "tool" (plist-get l :default))))
-    ;; A shell-like call: its texts, not the timeout.
+    ;; A shell-like call: its texts, not the timeout; and the host it names, which
+    ;; its lasting answers hold for before they hold for every host.
     (let ((l (funcall ladder "ssh" 'exec '(:host "dev" :command "uptime" :timeout 30))))
-      (should (equal '("exact" "programs" "tool") (harness-perms-test--steps l)))
-      (should (equal '(:input (:host "dev" :command "uptime")) (plist-get (car (plist-get l :steps)) :rule))))
+      (should (equal '("exact" "host-programs" "host-tool" "programs" "tool") (harness-perms-test--steps l)))
+      (should (equal '(:input (:host "dev" :command "uptime")) (plist-get (car (plist-get l :steps)) :rule)))
+      (should (equal "host-programs" (plist-get l :default))))
     ;; No arguments, nothing to pin: the tool alone.
     (should (equal '("tool") (harness-perms-test--steps (funcall ladder "emacs_trace" 'write nil))))
     ;; Too long, or a list, an object or a flag among them: the tool alone.
@@ -5118,6 +5125,1429 @@ gate's and the supervisor's included."
             (should-not (plist-get rerun :is-error))
             (should (equal '((:command "x")) harness-perms-test--ran))))
       (harness-remove-filter 'permission/decide gate))))
+
+;;;; Remote home directories
+;;
+;; A TRAMP name whose local part starts with a tilde (/ssh:box:~/src) is
+;; in the home directory of the login on its host, which only the host
+;; can find out.  The permission chain never expands it: it may not
+;; connect to a host, and the local machine's home is the wrong answer.
+;; Everything below runs under `harness-test-without-connections', with
+;; hosts that exist nowhere, so any attempt to connect fails the test
+;; even when the code caught the error.
+
+(defconst harness-perms-test--box "/ssh:u@box.example.invalid:"
+  "A host that exists nowhere, as TRAMP writes it.")
+
+(defconst harness-perms-test--laptop "/ssh:admin@laptop-0#4358:"
+  "The TRAMP prefix of the host `harness-perms-test--laptop-host' names.")
+
+(defconst harness-perms-test--laptop-host "admin@laptop-0:4358"
+  "The host as an agent gives it to the ssh tool, user, host and port.")
+
+(defun harness-perms-test--on (host local)
+  "Return the TRAMP name of LOCAL on HOST, a prefix such as `harness-perms-test--box'."
+  (concat host local))
+
+(ert-deftest harness-perms-remote-home-holds-what-lies-in-it ()
+  "A root in a remote home directory holds the paths in that home, and no others.
+The home directory is a place of its own, a ~ never expanded: the root
+itself, a pattern in it, a directory in it or a glob hold what lies below
+them, in the same home on the same host.  Another host, another login,
+another user's home, a local path and a path the host decides all stay out."
+  (harness-perms-test--setup)
+  (harness-test-without-connections
+    (let* ((box harness-perms-test--box)
+           (in (lambda (root path)
+                 (harness-perms--within-p (concat box root) (concat box path)))))
+      ;; The home itself, however it is written, holds all it contains.
+      (dolist (root '("~/" "~" "~/**"))
+        (dolist (path '("~/" "~" "~/x" "~/x/y.el" "~/x/y/"))
+          (ert-info ((format "%s holds %s" root path))
+            (should (funcall in root path)))))
+      ;; A directory in it holds itself and what lies below, not its siblings.
+      (dolist (path '("~/proj/" "~/proj" "~/proj/a.el" "~/proj/sub/deep/b.el"))
+        (ert-info ((format "~/proj/ holds %s" path))
+          (should (funcall in "~/proj/" path))))
+      (dolist (path '("~/" "~/projx" "~/proj.el" "~/other/a.el"))
+        (ert-info ((format "~/proj/ does not hold %s" path))
+          (should-not (funcall in "~/proj/" path))))
+      ;; Globs: `*' within a name, `**' across directories.
+      (should (funcall in "~/proj/*.el" "~/proj/a.el"))
+      (should-not (funcall in "~/proj/*.el" "~/proj/sub/a.el"))
+      (should-not (funcall in "~/proj/*.el" "~/proj/a.txt"))
+      (should (funcall in "~/proj/**/*.el" "~/proj/a.el"))
+      (should (funcall in "~/proj/**/*.el" "~/proj/sub/deep/a.el"))
+      (should-not (funcall in "~/proj/**/*.el" "~/other/a.el"))
+      ;; `.' and `..' that stay in the home are worked out from the text.
+      (should (funcall in "~/b/" "~/a/../b/x"))
+      (should-not (funcall in "~/a/" "~/a/../b/x"))
+      (should (funcall in "~/" "~/./a//b"))
+      ;; Another user's home, or another tilde, is another place.
+      (should (funcall in "~bob/" "~bob/x"))
+      (should (funcall in "~bob/**" "~bob/x/y"))
+      (should-not (funcall in "~bob/" "~/x"))
+      (should-not (funcall in "~/" "~bob/x"))
+      (should-not (funcall in "~bob/" "~alice/x"))
+      ;; Another host, another login or port on it, a local path.
+      (dolist (other '("/ssh:u@other.example.invalid:" "/ssh:v@box.example.invalid:"
+                       "/ssh:u@box.example.invalid#2222:" "/scp:u@box.example.invalid:"))
+        (should-not (harness-perms--within-p (concat box "~/") (concat other "~/x")))
+        (should-not (harness-perms--within-p (concat other "~/") (concat box "~/x"))))
+      (should-not (harness-perms--within-p "/tmp/" (concat box "~/x")))
+      (should-not (harness-perms--within-p (concat box "~/") "/home/u/x"))
+      (should-not (harness-perms--within-p (concat box "~/") "~/x")))))
+
+(ert-deftest harness-perms-remote-home-is-not-the-local-home ()
+  "A ~ on a host is not the home directory of this machine's user.
+Expanding the local part of /ssh:box:~/ as if it were a local name gave
+the local home, so a root in the remote home held a remote path that only
+looks like the local one, and a grant of that path held the remote home.
+Neither holds, in the jail or in a rule."
+  (harness-perms-test--setup)
+  (harness-test-without-connections
+    (let* ((box harness-perms-test--box)
+           (home (file-name-as-directory (expand-file-name "~")))
+           (looks-local (concat box home "secrets/x"))
+           (tilde-secret (concat box "~/secrets/x")))
+      ;; The text decides, not this machine's home.
+      (dolist (root (list "~/" "~/**" "~/secrets/" "~/secrets/**" "~"))
+        (ert-info ((format "%s does not hold %s" root looks-local))
+          (should-not (harness-perms--within-p (concat box root) looks-local))))
+      (dolist (root (list home (concat home "**") (concat home "secrets/") (concat home "secrets/**")))
+        (ert-info ((format "%s does not hold ~/secrets/x" root))
+          (should-not (harness-perms--within-p (concat box root) tilde-secret))))
+      ;; The same in the jail: a grant of one place lets the other stay out.
+      (harness-perms-test--setup :permission-mode 'yolo :non-interactive t)
+      (harness-call 'permission/allow-dir "s1" (concat box "~/"))
+      (should (eq 'allow (harness-perms-test--behavior "read_file" 'read tilde-secret)))
+      (should (eq 'deny (harness-perms-test--behavior "read_file" 'read looks-local)))
+      (harness-perms-test--setup :permission-mode 'yolo :non-interactive t)
+      (harness-call 'permission/allow-dir "s1" (concat box home))
+      (should (eq 'allow (harness-perms-test--behavior "read_file" 'read looks-local)))
+      (should (eq 'deny (harness-perms-test--behavior "read_file" 'read tilde-secret)))
+      ;; And in a rule: a deny of the remote home does not deny the path that looks local.
+      (let ((request (harness-perms-test--request "read_file" 'read looks-local))
+            (deny (list :path (concat box "~/**") :behavior 'deny)))
+        (should-not (harness-perms--rule-matches-p deny request))
+        (should (harness-perms--rule-matches-p deny (harness-perms-test--request "read_file" 'read tilde-secret)))))))
+
+(ert-deftest harness-perms-host-roots-hold-the-remote-home ()
+  "A grant of a whole host, as older prompts offered it, holds its home directories.
+/ssh:HOST:/, /ssh:HOST:/** and a bare /ssh:HOST: keep covering the
+home-directory form on that host, a path that leaves the home included.
+A narrower root never does: the harness does not know where the home is,
+so /home/u/, /home/u/** and /*/x do not hold ~ paths, and a ~ root holds no
+absolute path.  A `..' that leaves the home is a path only the host's root
+holds, and a root that leaves its home holds nothing."
+  (harness-perms-test--setup)
+  (harness-test-without-connections
+    (let* ((box harness-perms-test--box)
+           (in (lambda (root path)
+                 (harness-perms--within-p (concat box root) (concat box path)))))
+      (dolist (root '("/" "/**" ""))
+        (dolist (path '("~/" "~" "~/x" "~/x/y.el" "~bob/x" "~/../x" "~/a/../../x" "~/.." "/home/u/x" "/"))
+          (ert-info ((format "host root %S holds %s" root path))
+            (should (funcall in root path)))))
+      (dolist (root '("/home/u/" "/home/u/**" "/home/**" "/home/*/" "/*/x" "/*/x/**" "/root/" "/*"))
+        (dolist (path '("~/" "~/x" "~/x/y.el" "~bob/x" "~/../x"))
+          (ert-info ((format "%S does not hold %s" root path))
+            (should-not (funcall in root path)))))
+      ;; The absolute readings of the same patterns do hold, to show the pairs differ.
+      (should (funcall in "/home/u/" "/home/u/x"))
+      (should (funcall in "/*/x" "/home/x"))
+      ;; A ~ root holds no absolute path, not even the home as the host would name it.
+      (dolist (root '("~/" "~/**" "~/x/" "~"))
+        (dolist (path '("/" "/home/u/" "/home/u/x" "/etc/passwd"))
+          (ert-info ((format "%S does not hold %s" root path))
+            (should-not (funcall in root path)))))
+      ;; A path that leaves the home is no place in it.
+      (dolist (root '("~/" "~/**" "~/x/" "~"))
+        (dolist (path '("~/.." "~/../x" "~/a/../../x"))
+          (ert-info ((format "%S does not hold %s" root path))
+            (should-not (funcall in root path)))))
+      ;; A root that leaves its home holds nothing, itself included.
+      (should-not (funcall in "~/../**" "~/../x"))
+      (should-not (funcall in "~/../x/" "~/../x/y"))
+      (should-not (funcall in "~/../x/" "/x/y")))))
+
+(ert-deftest harness-perms-rules-about-a-remote-home ()
+  "A rule's path in a remote home holds exactly that home's subtree.
+An allow rule needs every path of the call in it, a deny rule any one; a
+deny of ~/proj/** denies neither ~/other nor /home/u/proj, which is the
+host's name for the same place and not one the harness can tell."
+  (harness-test-without-connections
+    (harness-perms-test--setup :permission-mode 'ask)
+    (let* ((box harness-perms-test--box)
+           (at (lambda (&rest paths) (apply #'harness-perms-test--request "read_file" 'read
+                                            (mapcar (lambda (p) (concat box p)) paths))))
+           (allow (list :path (concat box "~/proj/**") :behavior 'allow))
+           (deny (list :path (concat box "~/proj/**") :behavior 'deny)))
+      (should (harness-perms--rule-matches-p allow (funcall at "~/proj/a")))
+      (should (harness-perms--rule-matches-p allow (funcall at "~/proj/a" "~/proj/b/c")))
+      (should-not (harness-perms--rule-matches-p allow (funcall at "~/proj/a" "~/other")))
+      (should-not (harness-perms--rule-matches-p allow (funcall at "~/other")))
+      (should-not (harness-perms--rule-matches-p allow (funcall at "/home/u/proj/a")))
+      (should-not (harness-perms--rule-matches-p allow (harness-perms-test--request
+                                                        "read_file" 'read "/ssh:v@box.example.invalid:~/proj/a")))
+      (should (harness-perms--rule-matches-p deny (funcall at "~/proj/a")))
+      (should (harness-perms--rule-matches-p deny (funcall at "~/other" "~/proj/a")))
+      (should-not (harness-perms--rule-matches-p deny (funcall at "~/other")))
+      (should-not (harness-perms--rule-matches-p deny (funcall at "/home/u/proj/a")))
+      (should-not (harness-perms--rule-matches-p deny (funcall at "~bob/proj/a")))
+      ;; The whole chain: a saved deny of the home subtree denies a call there at once,
+      ;; and leaves the rest of the host to the jail.
+      (let* ((harness-perms-rules (list deny))
+             (d (harness-perms-test--decide (funcall at "~/proj/a"))))
+        (should (eq 'deny (plist-get d :behavior)))
+        (should (plist-get d :final))
+        (should (string-match-p "denied by a standing rule" (plist-get d :reason)))
+        (harness-perms-test--install-pending)
+        (let ((started (harness-perms-test--start "read_file" 'read (concat box "/home/u/proj/a"))))
+          (should (equal (concat box "/home/u/proj/") (plist-get (plist-get (cdr started) :payload) :dir)))
+          (harness-call 'permission/answer "s1" (plist-get (cdr started) :id) "deny-once")
+          (harness-test-await (car started)))))))
+
+(defun harness-perms-test--enable-mock ()
+  "Make TRAMP's local mock method known: a host that is this machine's shell."
+  (require 'tramp)
+  (unless (assoc "mock" tramp-methods)
+    (add-to-list 'tramp-methods
+                 `("mock"
+                   (tramp-login-program        ,tramp-default-remote-shell)
+                   (tramp-login-args           (("-i")))
+                   (tramp-direct-async         ("-c"))
+                   (tramp-remote-shell         ,tramp-default-remote-shell)
+                   (tramp-remote-shell-args    ("-c"))
+                   (tramp-connection-timeout   10))))
+  (setq tramp-verbose 1))
+
+(ert-deftest harness-perms-remote-home-stays-opaque-with-a-connection ()
+  "A ~ is not expanded when TRAMP happens to be connected to the host either.
+`file-remote-p' expands a name in a home directory once there is a
+connection to its host, so the local part of /host:~/ turns into the
+home directory in one moment and stays a ~ in the next.  The chain reads
+the name instead, so that what it decides never depends on whether a call
+connected earlier: the same answers with a connection open, and not one
+operation sent over it."
+  (harness-perms-test--setup)
+  (harness-perms-test--enable-mock)
+  (let* ((remote (harness-test-temp-dir))
+         (host "/mock:localhost:")
+         (home (concat host "~/")))
+    ;; A connection, opened as a tool call that ran earlier would have.
+    (should (file-directory-p (concat host remote)))
+    (should-not (equal "~/" (file-remote-p home 'localname)))
+    (harness-test-without-connections
+      (should (equal (cons host "~/") (harness-perms--split home)))
+      (should (equal (cons host "~/x") (harness-perms--split (concat home "x"))))
+      (should (harness-perms--within-p home (concat host "~/x/y")))
+      (should-not (harness-perms--within-p home (concat host remote "x")))
+      (should-not (harness-perms--within-p (concat host remote) (concat host "~/x")))
+      (should (harness-perms--within-p (concat host "/") (concat host "~/x")))
+      (should (equal home (harness-perms--dir-of (concat home "x"))))
+      (should (equal (concat home "**") (harness-perms--default-pattern home)))
+      (should (equal home (harness-perms--expand-root (concat host "~") remote)))
+      (should (equal (concat host "~/p/") (harness-perms--requested-dir (list :cwd remote) (concat host "~/p")))))))
+
+;;;;; Working a remote home out without connecting
+
+(ert-deftest harness-perms-remote-home-names-are-worked-out-without-connecting ()
+  "Making a name in a remote home absolute, finding its directory or its pattern is text work.
+Each of these used to run `expand-file-name' on the name, which asks the
+host where the home is, and the permission chain may not wait on a host
+that nobody has said it may reach.  The name comes back tidied, as the host
+would after the expansion, and a `..' that leaves the home as it was written."
+  (harness-perms-test--setup)
+  (harness-test-without-connections
+    (let* ((box harness-perms-test--box)
+           (on (lambda (local) (concat box local)))
+           (session (list :id "s1" :cwd "/tmp/harness-cwd/" :permission-mode 'ask)))
+      ;; Making a root or a pattern absolute.
+      (should (equal (funcall on "~/") (harness-perms--expand-root (funcall on "~/") "/tmp/")))
+      (should (equal (funcall on "~/") (harness-perms--expand-root (funcall on "~") "/tmp/")))
+      (should (equal (funcall on "~/proj/") (harness-perms--expand-root (funcall on "~/proj") "/tmp/")))
+      (should (equal (funcall on "~/b/") (harness-perms--expand-root (funcall on "~/a/../b/./") "/tmp/")))
+      (should (equal (funcall on "~/proj/**") (harness-perms--expand-root (funcall on "~/proj/**") "/tmp/")))
+      (should (equal (funcall on "~/proj/*.el") (harness-perms--expand-root (funcall on "~/proj/*.el") "/tmp/")))
+      (should (equal (funcall on "~bob/x/") (harness-perms--expand-root (funcall on "~bob/x") "/tmp/")))
+      (should (equal (funcall on "~/../x/") (harness-perms--expand-root (funcall on "~/../x") "/tmp/")))
+      ;; A host with no directory is its login's home to TRAMP, which asks the host for it.
+      (should (equal (funcall on "~/") (harness-perms--expand-root box "/tmp/")))
+      (should (equal (funcall on "~/") (harness-perms--requested-dir session box)))
+      (should (equal (funcall on "~/") (harness-perms--expand-pattern session box)))
+      (should (equal (funcall on "~/p/**") (harness-perms--expand-pattern session (funcall on "~/p/**"))))
+      (should (equal (funcall on "~/p/*.el") (harness-perms--expand-pattern session (funcall on "~/a/../p/*.el"))))
+      ;; A rule's path, and what the session grants and a rule is made of.
+      (should (equal (funcall on "~/proj/**")
+                     (harness-perms--rule-pattern (list :path (funcall on "~/proj/**") :behavior 'deny) session)))
+      (should (equal (funcall on "~/proj/**")
+                     (harness-perms--rule-pattern (list :path (concat " " (funcall on "~/proj/**") " ")) session)))
+      ;; The directory an agent asks for: a file stands for its directory, a directory for itself.
+      (should (equal (funcall on "~/projects/x/") (harness-perms--requested-dir session (funcall on "~/projects/x"))))
+      (should (equal (funcall on "~/projects/x/") (harness-perms--requested-dir session (funcall on "~/projects/x/"))))
+      (should (equal (funcall on "~/") (harness-perms--requested-dir session (funcall on "~"))))
+      (should (equal (funcall on "~/y/") (harness-perms--requested-dir session (funcall on "~/x/../y/."))))
+      ;; The directory to grant for a path, and the pattern and grant a prompt about it makes.
+      (should (equal (funcall on "~/x/") (harness-perms--dir-of (funcall on "~/x/y.txt"))))
+      (should (equal (funcall on "~/") (harness-perms--dir-of (funcall on "~/y.txt"))))
+      (should (equal (funcall on "~/") (harness-perms--dir-of (funcall on "~/"))))
+      (should (equal (funcall on "~/") (harness-perms--dir-of (funcall on "~"))))
+      (should (equal (funcall on "~/a/b/") (harness-perms--dir-of (funcall on "~/a/b/"))))
+      (should (equal (funcall on "~/**") (harness-perms--default-pattern (funcall on "~/"))))
+      (should (equal (funcall on "~/proj/**") (harness-perms--default-pattern (funcall on "~/proj/"))))
+      (should (equal (funcall on "/**") (harness-perms--default-pattern (funcall on "/"))))
+      (should (equal (funcall on "~/") (harness-perms--grant-form (funcall on "~/**"))))
+      (should (equal (funcall on "~/proj/") (harness-perms--grant-form (funcall on "~/proj/**"))))
+      (should (equal (funcall on "~/proj/*.el") (harness-perms--grant-form (funcall on "~/proj/*.el"))))
+      (should (equal (funcall on "/") (harness-perms--grant-form (funcall on "/**"))))
+      (should (equal (funcall on "~/") (harness-perms--prompt-dir session (funcall on "~/"))))
+      (should (equal (funcall on "~/projects/") (harness-perms--prompt-dir session (funcall on "~/projects/"))))
+      ;; What holds several paths.
+      (should (equal (funcall on "~/") (harness-perms--paths-dir (list (funcall on "~/a/x") (funcall on "~/b/y")))))
+      (should (equal (funcall on "~/a/") (harness-perms--paths-dir (list (funcall on "~/a/x") (funcall on "~/a/y")))))
+      (should (equal (funcall on "~/a/") (harness-perms--paths-dir (list (funcall on "~/a/")))))
+      (should-not (harness-perms--paths-dir (list (funcall on "~/a/x") (funcall on "/etc/y"))))
+      (should-not (harness-perms--paths-dir (list (funcall on "~/a/x") "/ssh:v@box.example.invalid:~/a/y")))
+      ;; How a name splits: the host, and the local part as it is written.
+      (should (equal (cons box "~/x") (harness-perms--split (funcall on "~/x"))))
+      (should (equal (cons box "~") (harness-perms--split (funcall on "~"))))
+      (should (equal (cons box "~bob/x") (harness-perms--split (funcall on "~bob/x"))))
+      (should (equal (cons box "/home/u/x") (harness-perms--split (funcall on "/home/u/x"))))
+      (should (equal (cons nil "/tmp/x") (harness-perms--split "/tmp/x")))
+      ;; Whether a pattern is a glob, and what is told of the name.
+      (should (harness-perms--glob-p (funcall on "~/proj/*.el")))
+      (should-not (harness-perms--glob-p (funcall on "~/proj/")))
+      (should (equal (funcall on "~/x") (harness-perms--with-host (funcall on "~/x") "/ssh:other:")))
+      (should (equal (concat box "~/x") (harness-perms--with-host "~/x" box))))))
+
+(ert-deftest harness-perms-command-paths-in-a-remote-home ()
+  "What a command run in the login's home names is worked out in the home.
+The ssh tool, called without a cwd, runs there, and so does a bash call
+given a ~ directory on a host.  A relative word is in the home, not in
+this machine's home directory, which expanding it with `expand-file-name'
+gave; a word that leaves the home goes somewhere on the host, which only
+the host can say, so it names the root of the host; a word that starts
+with ~ or $HOME is a path only the host knows and is left out; an
+absolute word is the host's."
+  (harness-perms-test--setup :permission-mode 'ask)
+  (harness-test-without-connections
+    (let* ((box harness-perms-test--box)
+           (paths (lambda (tool dir command)
+                    (harness-perms--command-paths
+                     (list :session harness-perms-test--session :tool tool :kind 'exec
+                           :input (list :command command) :paths (list dir)))))
+           (home (concat box "~/work/")))
+      (should (equal (list (concat box "~/work/a") (concat box "~/work/") (concat box "~/")
+                           (concat box "/etc/hosts") (concat box "/var/log/x"))
+                     (funcall paths "ssh" home "cat ./a . .. /etc/hosts && ls /var/log/x")))
+      ;; Out of the home: the root of the host.  The host's to expand: no path.
+      (should (equal (list (concat box "/")) (funcall paths "ssh" home "cat ../../x ~/n ~bob/m $HOME/q")))
+      (should (equal nil (funcall paths "ssh" home "cat ~/n ~bob/m $HOME/q")))
+      (should (equal (list (concat box "~/work/sub/b")) (funcall paths "ssh" home "cat ./sub/b ~/n")))
+      ;; In the home itself.
+      (should (equal (list (concat box "~/x") (concat box "~/")) (funcall paths "ssh" (concat box "~/") "cat ./x .")))
+      (should (equal (list (concat box "/")) (funcall paths "ssh" (concat box "~/") "cat .. ../y")))
+      ;; The same for bash given a directory on the host; a name made with the local home
+      ;; (this machine's) would show in the paths.
+      (should (equal (list (concat box "~/work/a")) (funcall paths "bash" home "cat ./a")))
+      (let ((local-home (file-name-as-directory (expand-file-name "~"))))
+        (should-not (cl-some (lambda (p) (string-search local-home p))
+                             (funcall paths "ssh" home "cat ./a . .. ./b/c")))))))
+
+;;;; The jail for an ssh call
+
+(defun harness-perms-test--ssh (input)
+  "Return the permission request of an ssh call with INPUT.
+Its path is what the tool works out without connecting."
+  (require 'harness-tools-ssh)
+  (list :session harness-perms-test--session :tool "ssh" :kind 'exec :input input
+        :paths (harness-tools-ssh--paths input) :call-id (harness-short-id)))
+
+(defun harness-perms-test--laptop-call (&rest input)
+  "Return the permission request of an ssh call to the laptop with INPUT after the host."
+  (harness-perms-test--ssh (append (list :host harness-perms-test--laptop-host) input)))
+
+(defun harness-perms-test--start-ssh (request)
+  "Start deciding ssh REQUEST; return (PROMISE . PENDING) of the prompt it asks."
+  (let ((n (length harness-perms-test--pending))
+        (p (harness-run-filter-async 'permission/decide (list :behavior 'ask) request)))
+    (harness-test-wait (lambda () (> (length harness-perms-test--pending) n)) 2 "the prompt")
+    (cons p (car harness-perms-test--pending))))
+
+(defun harness-perms-test--outcome (request)
+  "Run REQUEST through the chain; return its decision, or (asked . PENDING).
+A call that needs an answer is left waiting for it by the chain; this
+one answers deny-once, so that nothing waits, and returns the prompt
+that came up, not the decision."
+  (let* ((n (length harness-perms-test--pending))
+         (p (harness-run-filter-async 'permission/decide (list :behavior 'ask) request)))
+    (harness-test-wait (lambda () (or (harness-promise-settled-p p) (> (length harness-perms-test--pending) n)))
+                       2 "a decision or a prompt")
+    (if (harness-promise-settled-p p)
+        (harness-test-await p)
+      (let ((pending (car harness-perms-test--pending)))
+        (harness-call 'permission/answer "s1" (plist-get pending :id) "deny-once")
+        (harness-test-await p)
+        (cons 'asked pending)))))
+
+(defun harness-perms-test--asked-dir (outcome)
+  "Return the directory the prompt of OUTCOME asked for, or nil if OUTCOME is none."
+  (and (eq 'asked (car-safe outcome)) (plist-get (plist-get (cdr outcome) :payload) :dir)))
+
+(ert-deftest harness-perms-ssh-jail-prompt-is-about-the-home-directory ()
+  "An ssh call without a cwd runs in the login's home, and the prompt says so.
+The jail asks about /ssh:HOST:~/, the home directory of the login on that
+host, not about the whole host: its default pattern is that directory's, the
+title and the reason say what the path is, and the answers are the ones every
+directory prompt offers.  Nothing connects while it is up."
+  (harness-perms-test--setup :permission-mode 'ask)
+  (harness-perms-test--install-pending)
+  (harness-test-without-connections
+    (let* ((home (concat harness-perms-test--laptop "~/"))
+           (started (harness-perms-test--start-ssh
+                     (harness-perms-test--laptop-call :command "journalctl -u k3s | tail -50")))
+           (payload (plist-get (cdr started) :payload)))
+      (should-not (harness-promise-settled-p (car started)))
+      (should (eq 'permission (plist-get (cdr started) :kind)))
+      (should (equal "ssh" (plist-get payload :tool)))
+      (should (equal (list home) (plist-get payload :paths)))
+      (should (equal home (plist-get payload :dir)))
+      (should (equal (concat home "**") (plist-get payload :pattern)))
+      (should (equal (concat "Access " home " (the login's home directory)") (plist-get payload :title)))
+      (should (equal (concat "SSH wants " home " (the home directory of the login on admin@laptop-0#4358, "
+                             "where ssh starts), which is outside the allowed directories")
+                     (plist-get payload :reason)))
+      (should (equal harness-perms-dir-options (plist-get payload :options)))
+      ;; Said no: the call is denied, for the pattern shown.
+      (harness-call 'permission/answer "s1" (plist-get (cdr started) :id) "deny-once")
+      (let ((d (harness-test-await (car started))))
+        (should (eq 'deny (plist-get d :behavior)))
+        (should (plist-get d :final))
+        (should (string-match-p (regexp-quote (concat "the user denied access to " home)) (plist-get d :reason)))))))
+
+(ert-deftest harness-perms-ssh-jail-asks-about-the-directory-the-call-runs-in ()
+  "The jail asks about the directory an ssh call runs in, as narrowly as the harness can tell.
+In the home directory (no cwd, a relative cwd, one starting with ~) that is
+a place in /ssh:HOST:~/; an absolute cwd is itself; a cwd that leaves the
+home or is another user's can only be the host's root, the whole host."
+  (harness-perms-test--setup :permission-mode 'ask)
+  (harness-perms-test--install-pending)
+  (harness-test-without-connections
+    (let ((laptop harness-perms-test--laptop))
+      (dolist (case `((nil "~/" "the login's home directory")
+                      ("projects/x" "~/projects/x/" "in the login's home directory")
+                      ("~/p/x" "~/p/x/" "in the login's home directory")
+                      ("~" "~/" "the login's home directory")
+                      ("~/a/../b" "~/b/" "in the login's home directory")
+                      ("/var/log/nginx" "/var/log/nginx/" nil)
+                      ("~/.." "/" "the whole host")
+                      ("~bob/x" "/" "the whole host")))
+        (pcase-let ((`(,cwd ,local ,tag) case))
+          (ert-info ((format "cwd %S" cwd))
+            (let* ((outcome (harness-perms-test--outcome
+                             (apply #'harness-perms-test--laptop-call :command "uptime"
+                                    (and cwd (list :cwd cwd)))))
+                   (payload (plist-get (cdr outcome) :payload)))
+              (should (eq 'asked (car outcome)))
+              (should (equal (concat laptop local) (plist-get payload :dir)))
+              (should (equal (concat laptop local "**") (plist-get payload :pattern)))
+              (should (equal (concat "Access " laptop local (and tag (format " (%s)" tag))) (plist-get payload :title)))))))
+      ;; The host may carry the directory, as a TRAMP name does.
+      (let ((outcome (harness-perms-test--outcome (harness-perms-test--ssh '(:host "/ssh:benito:~/src" :command "ls")))))
+        (should (equal "/ssh:benito:~/src/" (harness-perms-test--asked-dir outcome))))
+      (let ((outcome (harness-perms-test--outcome (harness-perms-test--ssh '(:host "/ssh:benito:/srv/app" :command "ls")))))
+        (should (equal "/ssh:benito:/srv/app/" (harness-perms-test--asked-dir outcome)))))))
+
+(ert-deftest harness-perms-ssh-jail-session-grant-holds-the-home-only ()
+  "Allowing for the session grants the home directory, which is what was asked.
+The next call with no cwd, or one in the home, goes through without a
+question; a call in an absolute directory of the same host, one that
+leaves the home, and any call to another host or another login ask again.
+The grant is the directory shown, /ssh:HOST:~/, not the host."
+  (harness-perms-test--setup :permission-mode 'yolo)
+  (harness-perms-test--install-pending)
+  (harness-test-without-connections
+    (let* ((laptop harness-perms-test--laptop)
+           (home (concat laptop "~/"))
+           (started (harness-perms-test--start-ssh (harness-perms-test--laptop-call :command "uptime"))))
+      (should (eq 'continue (harness-call 'permission/answer "s1" (plist-get (cdr started) :id) "allow-session")))
+      (let ((d (harness-test-await (car started))))
+        (should (eq 'allow (plist-get d :behavior))))
+      (should (member home (harness-call 'permission/allowed-dirs "s1")))
+      (should-not (member (concat laptop "/") (harness-call 'permission/allowed-dirs "s1")))
+      (should (null harness-perms-test--pending))
+      ;; In the home: no question.
+      (dolist (cwd '(nil "sub" "~/a/b" "~" "~/x/../y"))
+        (ert-info ((format "cwd %S" cwd))
+          (should (eq 'allow (plist-get (harness-perms-test--outcome
+                                         (apply #'harness-perms-test--laptop-call :command "uptime" (and cwd (list :cwd cwd))))
+                                        :behavior)))))
+      (should (null harness-perms-test--pending))
+      ;; Elsewhere on the host, and on other hosts: the question again, about that place.
+      (dolist (case `(("/var/log" "/var/log/")
+                      ("/home/admin" "/home/admin/")
+                      ("~/.." "/")
+                      ("~bob" "/")))
+        (ert-info ((format "cwd %S" (car case)))
+          (should (equal (concat laptop (cadr case))
+                         (harness-perms-test--asked-dir
+                          (harness-perms-test--outcome
+                           (harness-perms-test--laptop-call :command "uptime" :cwd (car case))))))))
+      (should (equal "/ssh:benito:~/"
+                     (harness-perms-test--asked-dir
+                      (harness-perms-test--outcome (harness-perms-test--ssh '(:host "benito" :command "uptime"))))))
+      (should (equal "/ssh:root@laptop-0#4358:~/"
+                     (harness-perms-test--asked-dir
+                      (harness-perms-test--outcome (harness-perms-test--ssh '(:host "root@laptop-0:4358" :command "uptime"))))))
+      (should (equal "/ssh:admin@laptop-0#22:~/"
+                     (harness-perms-test--asked-dir
+                      (harness-perms-test--outcome (harness-perms-test--ssh '(:host "admin@laptop-0:22" :command "uptime")))))))))
+
+(ert-deftest harness-perms-ssh-jail-answer-for-the-whole-host ()
+  "The user may widen the answer to the whole host, and then it covers everything there.
+The whole-host pattern is on offer as the widest choice, never the default; typed
+into the answer it grants /ssh:HOST:/, which holds the home directory and every
+absolute directory of that host, but no other host.  A pattern that leaves the
+call's directory out is a grant like any other: the jail asks again."
+  (harness-perms-test--setup :permission-mode 'yolo)
+  (harness-perms-test--install-pending)
+  (harness-test-without-connections
+    (let* ((laptop harness-perms-test--laptop)
+           (root (concat laptop "/"))
+           (started (harness-perms-test--start-ssh (harness-perms-test--laptop-call :command "uptime"))))
+      (should-not (equal (concat root "**") (plist-get (plist-get (cdr started) :payload) :pattern)))
+      (harness-call 'permission/answer "s1" (plist-get (cdr started) :id)
+                    (list :option "allow-session" :pattern (concat root "**")))
+      (should (eq 'allow (plist-get (harness-test-await (car started)) :behavior)))
+      (should (member root (harness-call 'permission/allowed-dirs "s1")))
+      (should-not (member (concat laptop "~/") (harness-call 'permission/allowed-dirs "s1")))
+      (dolist (cwd '(nil "sub" "~" "/var/log" "/" "~/.." "~bob/x"))
+        (ert-info ((format "cwd %S" cwd))
+          (should (eq 'allow (plist-get (harness-perms-test--outcome
+                                         (apply #'harness-perms-test--laptop-call :command "uptime" (and cwd (list :cwd cwd))))
+                                        :behavior)))))
+      (should (null harness-perms-test--pending))
+      (should (equal "/ssh:benito:~/"
+                     (harness-perms-test--asked-dir
+                      (harness-perms-test--outcome (harness-perms-test--ssh '(:host "benito" :command "uptime")))))))
+    ;; A pattern that leaves the home itself out: the call is not inside it, so it is asked again.
+    (harness-perms-test--setup :permission-mode 'yolo)
+    (harness-perms-test--install-pending)
+    (let* ((laptop harness-perms-test--laptop)
+           (started (harness-perms-test--start-ssh (harness-perms-test--laptop-call :command "uptime"))))
+      (should (eq 'continue (harness-call 'permission/answer "s1" (plist-get (cdr started) :id)
+                                          (list :option "allow-session" :pattern (concat laptop "~/projects/**")))))
+      (harness-test-wait (lambda () harness-perms-test--pending) 2 "the second prompt")
+      (should (equal (concat laptop "~/") (plist-get (plist-get (car harness-perms-test--pending) :payload) :dir)))
+      (should (member (concat laptop "~/projects/") (harness-call 'permission/allowed-dirs "s1")))
+      (harness-call 'permission/answer "s1" (plist-get (car harness-perms-test--pending) :id) "deny-once")
+      (should (eq 'deny (plist-get (harness-test-await (car started)) :behavior))))))
+
+(ert-deftest harness-perms-ssh-jail-allow-once-lets-this-call-in ()
+  "Allowing once lets this one call reach the home directory, and grants nothing.
+The next call there asks again, and the session's roots do not change."
+  (harness-perms-test--setup :permission-mode 'yolo)
+  (harness-perms-test--install-pending)
+  (harness-test-without-connections
+    (let* ((home (concat harness-perms-test--laptop "~/"))
+           (started (harness-perms-test--start-ssh (harness-perms-test--laptop-call :command "uptime"))))
+      (should (eq 'continue (harness-call 'permission/answer "s1" (plist-get (cdr started) :id) "allow-once")))
+      (should (eq 'allow (plist-get (harness-test-await (car started)) :behavior)))
+      (should-not (member home (harness-call 'permission/allowed-dirs "s1")))
+      (should (equal home (harness-perms-test--asked-dir
+                           (harness-perms-test--outcome (harness-perms-test--laptop-call :command "uptime"))))))))
+
+(ert-deftest harness-perms-ssh-jail-always-deny-denies-only-what-it-says ()
+  "Always deny of the home directory records that pattern and denies no more.
+The rule is the prompt's pattern, /ssh:HOST:~/**; the next call that runs in
+that home is denied at once, with no question, whatever the tool; a call in an
+absolute directory of the same host, which the pattern does not say, and a call
+to another host are asked about as before."
+  (let ((saved nil)
+        (harness-perms-rules nil))
+    (harness-perms-test--setup :permission-mode 'ask)
+    (harness-perms-test--install-pending)
+    (harness-test-without-connections
+      (cl-letf (((symbol-function 'harness-save-user-option)
+                 (lambda (sym value) (set sym value) (push (cons sym value) saved))))
+        (let* ((laptop harness-perms-test--laptop)
+               (pattern (concat laptop "~/**"))
+               (started (harness-perms-test--start-ssh (harness-perms-test--laptop-call :command "uptime"))))
+          (harness-call 'permission/answer "s1" (plist-get (cdr started) :id) "deny-always")
+          (let ((d (harness-test-await (car started))))
+            (should (eq 'deny (plist-get d :behavior)))
+            (should (string-match-p (regexp-quote (concat "the user denied access to " pattern)) (plist-get d :reason))))
+          (should (equal (list (list :path pattern :behavior 'deny)) harness-perms-rules))
+          (should (eq 'harness-perms-rules (caar saved)))
+          ;; Denied at once, with no question: this tool, another tool, a place in the home.
+          (dolist (request (list (harness-perms-test--laptop-call :command "uptime")
+                                 (harness-perms-test--laptop-call :command "ls" :cwd "projects/x")
+                                 (harness-perms-test--request "read_file" 'read (concat laptop "~/notes.txt"))))
+            (let ((d (harness-perms-test--decide request)))
+              (should (eq 'deny (plist-get d :behavior)))
+              (should (plist-get d :final))
+              (should (string-match-p (regexp-quote (concat "denied by a standing rule for " pattern))
+                                      (plist-get d :reason)))))
+          (should (null harness-perms-test--pending))
+          ;; An absolute directory of the same host, the whole host, another host: asked.
+          (should (equal (concat laptop "/home/admin/")
+                         (harness-perms-test--asked-dir
+                          (harness-perms-test--outcome (harness-perms-test--laptop-call :command "ls" :cwd "/home/admin")))))
+          (should (equal (concat laptop "/")
+                         (harness-perms-test--asked-dir
+                          (harness-perms-test--outcome (harness-perms-test--laptop-call :command "ls" :cwd "~/..")))))
+          (should (equal "/ssh:benito:~/"
+                         (harness-perms-test--asked-dir
+                          (harness-perms-test--outcome (harness-perms-test--ssh '(:host "benito" :command "uptime"))))))
+          ;; The same, for the session: the rule lives with it and not in the saved ones.
+          (setq harness-perms-rules nil)
+          (clrhash harness-perms--session-rules)
+          (let ((started (harness-perms-test--start-ssh (harness-perms-test--laptop-call :command "uptime"))))
+            (harness-call 'permission/answer "s1" (plist-get (cdr started) :id) '(:behavior deny :scope session))
+            (should (eq 'deny (plist-get (harness-test-await (car started)) :behavior))))
+          (should-not harness-perms-rules)
+          (should (equal (list (list :path pattern :behavior 'deny)) (gethash "s1" harness-perms--session-rules)))
+          (should (eq 'deny (plist-get (harness-perms-test--decide (harness-perms-test--laptop-call :command "uptime"))
+                                       :behavior))))))))
+
+(ert-deftest harness-perms-ssh-jail-always-deny-follows-the-pattern-the-user-types ()
+  "Always deny holds for the pattern the user answers, narrower or wider than the prompt's.
+Typed narrower, ~/projects/**, it denies what runs there and nothing else of
+the host, the home itself included, which is asked about; typed wider, the
+whole host, it denies the home and every other directory of that host too, but
+no other host."
+  (let ((harness-perms-rules nil))
+    (harness-test-without-connections
+      (cl-letf (((symbol-function 'harness-save-user-option) (lambda (sym value) (set sym value))))
+        (let ((laptop harness-perms-test--laptop))
+          (cl-flet ((deny-with (pattern)
+                      (setq harness-perms-rules nil)
+                      (harness-perms-test--setup :permission-mode 'ask)
+                      (setq harness-perms-rules nil)
+                      (harness-perms-test--install-pending)
+                      (let ((started (harness-perms-test--start-ssh (harness-perms-test--laptop-call :command "uptime"))))
+                        (harness-call 'permission/answer "s1" (plist-get (cdr started) :id)
+                                      (list :option "deny-always" :pattern pattern))
+                        (should (eq 'deny (plist-get (harness-test-await (car started)) :behavior))))
+                      (should (equal (list (list :path pattern :behavior 'deny)) harness-perms-rules)))
+                    (denied-p (&rest input)
+                      (let ((d (harness-perms-test--outcome (apply #'harness-perms-test--laptop-call :command "ls" input))))
+                        (and (eq 'deny (plist-get d :behavior)) (plist-get d :final) (eq 'rule (plist-get d :by))))))
+            ;; Narrower.
+            (deny-with (concat laptop "~/projects/**"))
+            (should (denied-p :cwd "projects/x"))
+            (should (denied-p :cwd "~/projects"))
+            (should (equal (concat laptop "~/") (harness-perms-test--asked-dir
+                                                 (harness-perms-test--outcome (harness-perms-test--laptop-call :command "ls")))))
+            (should (equal (concat laptop "/home/admin/projects/")
+                           (harness-perms-test--asked-dir
+                            (harness-perms-test--outcome (harness-perms-test--laptop-call :command "ls" :cwd "/home/admin/projects")))))
+            ;; Wider.
+            (deny-with (concat laptop "/**"))
+            (dolist (cwd '(nil "projects" "~" "/var/log" "~/.." "/"))
+              (should (apply #'denied-p (and cwd (list :cwd cwd)))))
+            (should (equal "/ssh:benito:~/"
+                           (harness-perms-test--asked-dir
+                            (harness-perms-test--outcome (harness-perms-test--ssh '(:host "benito" :command "ls"))))))))))))
+
+(ert-deftest harness-perms-ssh-jail-without-a-user-names-the-home ()
+  "Nobody to ask: the call is denied at once, and the agent is told which directory.
+The reason and the hint name /ssh:HOST:~/ and say what it is, the home directory of the
+login where ssh starts, as the prompt does, so the agent can tell the user what to
+grant; the hint also lists the roots and says how.  No prompt comes up, in any mode."
+  (harness-perms-test--setup :permission-mode 'ask :non-interactive t)
+  (harness-perms-test--install-pending)
+  (harness-test-without-connections
+    (let* ((home (concat harness-perms-test--laptop "~/"))
+           (text (concat home " (the home directory of the login on admin@laptop-0#4358, where ssh starts)"))
+           (probe (harness-perms-test--allowing-judge))
+           (harness-perms-auto-model "judge:x"))
+      (dolist (mode '(ask accept-edits auto yolo))
+        (ert-info ((format "%s mode" mode))
+          (setq harness-perms-test--session (plist-put harness-perms-test--session :permission-mode mode))
+          (let ((d (harness-perms-test--decide (harness-perms-test--laptop-call :command "uptime"))))
+            (should (eq 'deny (plist-get d :behavior)))
+            (should (plist-get d :final))
+            (should (equal (concat text " is outside the allowed directories") (plist-get d :reason)))
+            (should (string-match-p (regexp-quote (abbreviate-file-name (plist-get harness-perms-test--session :cwd)))
+                                    (plist-get d :hint)))
+            (should (string-match-p (regexp-quote (concat "ask the user to grant access to " text " with the allow-dir command"))
+                                    (plist-get d :hint))))))
+      (should (null harness-perms-test--pending))
+      ;; A person has to say, and the judge, who decides for one who is away, is not asked.
+      (should (null (funcall probe 'requests)))
+      ;; A directory of the home, and the whole host, are named for what they are.
+      (let ((d (harness-perms-test--decide (harness-perms-test--laptop-call :command "ls" :cwd "projects/x"))))
+        (should (equal (concat home "projects/x/ (in the home directory of the login on admin@laptop-0#4358)"
+                               " is outside the allowed directories")
+                       (plist-get d :reason))))
+      (let ((d (harness-perms-test--decide (harness-perms-test--laptop-call :command "ls" :cwd "~/.."))))
+        (should (equal (concat harness-perms-test--laptop "/ (the root directory of admin@laptop-0#4358, "
+                               "which is the whole host) is outside the allowed directories")
+                       (plist-get d :reason))))
+      ;; An absolute directory is just the directory, as before.
+      (let ((d (harness-perms-test--decide (harness-perms-test--laptop-call :command "ls" :cwd "/var/log"))))
+        (should (equal (concat harness-perms-test--laptop "/var/log/ is outside the allowed directories")
+                       (plist-get d :reason)))
+        (should (string-match-p (regexp-quote (concat "grant access to " harness-perms-test--laptop "/var/log/ with"))
+                                (plist-get d :hint)))))))
+
+(ert-deftest harness-perms-ssh-jail-grants-made-for-a-whole-host-still-hold ()
+  "A grant of a host's root keeps holding a call that runs in its home directory.
+Grants written before the prompt offered a home directory -- /ssh:HOST:/ and
+/ssh:HOST:/** in `harness-allowed-directories', or the root granted to the
+session -- let an ssh call with no cwd through without any question, and so
+does a call in an absolute directory of that host.  A grant of the home itself
+(/ssh:HOST:~/, ~/**, or a bare /ssh:HOST:, which is the home to TRAMP) lets the
+calls that run in the home through and asks about the rest of the host; a grant
+of a directory the harness cannot tell is the home (/home/admin/) lets in none
+of the calls that run there."
+  (let ((laptop harness-perms-test--laptop))
+    (harness-test-without-connections
+      ;; The whole host.
+      (dolist (grant (list (list (concat laptop "/")) (list (concat laptop "/**"))))
+        (ert-info ((format "allowed directories %S" grant))
+          (harness-perms-test--setup :permission-mode 'yolo)
+          (harness-perms-test--install-pending)
+          (let ((harness-allowed-directories grant))
+            (dolist (cwd '(nil "~/projects/x" "/var/log" "~/.." "~bob"))
+              (should (eq 'allow (plist-get (harness-perms-test--outcome
+                                             (apply #'harness-perms-test--laptop-call :command "uptime"
+                                                    (and cwd (list :cwd cwd))))
+                                            :behavior))))
+            (should (null harness-perms-test--pending)))))
+      ;; The root granted to the session.
+      (harness-perms-test--setup :permission-mode 'yolo)
+      (harness-perms-test--install-pending)
+      (harness-call 'permission/allow-dir "s1" (concat laptop "/"))
+      (should (eq 'allow (plist-get (harness-perms-test--outcome (harness-perms-test--laptop-call :command "uptime"))
+                                    :behavior)))
+      (should (null harness-perms-test--pending))
+      ;; The home directory, however it is written: its calls go through, the rest of the host asks.
+      (dolist (grant (list (list (concat laptop "~/")) (list (concat laptop "~/**")) (list laptop)))
+        (ert-info ((format "allowed directories %S" grant))
+          (harness-perms-test--setup :permission-mode 'yolo)
+          (harness-perms-test--install-pending)
+          (let ((harness-allowed-directories grant))
+            (dolist (cwd '(nil "~/projects/x" "~"))
+              (should (eq 'allow (plist-get (harness-perms-test--outcome
+                                             (apply #'harness-perms-test--laptop-call :command "uptime"
+                                                    (and cwd (list :cwd cwd))))
+                                            :behavior))))
+            (should (null harness-perms-test--pending))
+            (should (equal (concat laptop "/var/log/")
+                           (harness-perms-test--asked-dir
+                            (harness-perms-test--outcome (harness-perms-test--laptop-call :command "ls" :cwd "/var/log")))))
+            (should (equal (concat laptop "/")
+                           (harness-perms-test--asked-dir
+                            (harness-perms-test--outcome (harness-perms-test--laptop-call :command "ls" :cwd "~/.."))))))))
+      ;; What the harness cannot tell is the home does not hold what runs there.
+      (harness-perms-test--setup :permission-mode 'yolo)
+      (harness-perms-test--install-pending)
+      (dolist (grant (list (concat laptop "/home/admin/") (concat laptop "/home/admin/**")))
+        (let ((harness-allowed-directories (list grant)))
+          (should (equal (concat laptop "~/")
+                         (harness-perms-test--asked-dir
+                          (harness-perms-test--outcome (harness-perms-test--laptop-call :command "uptime")))))
+          (should (equal (concat laptop "~/projects/x/")
+                         (harness-perms-test--asked-dir
+                          (harness-perms-test--outcome (harness-perms-test--laptop-call :command "ls" :cwd "projects/x")))))
+          ;; ... though the directory itself, written out, is allowed as it says.
+          (should (eq 'allow (plist-get (harness-perms-test--outcome
+                                         (harness-perms-test--laptop-call :command "ls" :cwd "/home/admin/projects"))
+                                        :behavior)))))
+      ;; Another host's grant is not this host's.
+      (let ((harness-allowed-directories (list "/ssh:benito:/" "/ssh:benito:~/")))
+        (should (equal (concat laptop "~/")
+                       (harness-perms-test--asked-dir
+                        (harness-perms-test--outcome (harness-perms-test--laptop-call :command "uptime")))))))))
+
+(ert-deftest harness-perms-ssh-jail-asks-a-person-in-every-mode ()
+  "The first ssh call to a host is answered by a person whatever the mode.
+Ask, accept-edits, auto and yolo all stop at the jail with a prompt about the
+home directory, and the auto-mode judge never sees the call; once the person
+has allowed the directory, the mode decides the call itself as it decides a
+command: ask and accept-edits ask about it, auto has the judge rule, yolo allows."
+  (dolist (mode '(ask accept-edits auto yolo))
+    (ert-info ((format "%s mode" mode))
+      (harness-perms-test--setup :permission-mode mode)
+      (harness-perms-test--install-pending)
+      (let ((probe (harness-perms-test--allowing-judge))
+            (harness-perms-auto-model "judge:x")
+            (home (concat harness-perms-test--laptop "~/")))
+        (harness-test-without-connections
+          (let ((started (harness-perms-test--start-ssh (harness-perms-test--laptop-call :command "uptime"))))
+            (should-not (harness-promise-settled-p (car started)))
+            (should (equal home (plist-get (plist-get (cdr started) :payload) :dir)))
+            (should (null (funcall probe 'requests)))
+            (harness-call 'permission/answer "s1" (plist-get (cdr started) :id) "allow-session")
+            (pcase mode
+              ((or 'ask 'accept-edits)
+               ;; The call is a command: the mode asks about it.
+               (harness-test-wait (lambda () harness-perms-test--pending) 2 "the question about the call")
+               (let ((payload (plist-get (car harness-perms-test--pending) :payload)))
+                 (should-not (plist-get payload :dir))
+                 (should (equal "ssh" (plist-get payload :tool))))
+               (harness-call 'permission/answer "s1" (plist-get (car harness-perms-test--pending) :id) "deny-once")
+               (should (eq 'deny (plist-get (harness-test-await (car started)) :behavior)))
+               (should (null (funcall probe 'requests))))
+              ('auto
+               (let ((d (harness-test-await (car started))))
+                 (should (eq 'allow (plist-get d :behavior)))
+                 (should (equal "ordinary work" (plist-get d :reason)))
+                 (should (= 1 (length (funcall probe 'requests))))))
+              ('yolo
+               (should (eq 'allow (plist-get (harness-test-await (car started)) :behavior)))
+               (should (null (funcall probe 'requests)))))))))))
+
+(ert-deftest harness-perms-ssh-jail-reads-in-the-home-ask-about-the-home ()
+  "A file tool given a path in a remote home asks about that home, in words.
+A read_file of /ssh:HOST:~/notes.txt is about the file in the login's home directory,
+and the prompt offers the home directory, not the host: the same pattern, and a
+reason that names the file and says where it is."
+  (harness-perms-test--setup :permission-mode 'ask)
+  (harness-perms-test--install-pending)
+  (harness-test-without-connections
+    (let* ((box harness-perms-test--box)
+           (started (harness-perms-test--start "read_file" 'read (concat box "~/notes.txt")))
+           (payload (plist-get (cdr started) :payload)))
+      (should (equal (concat box "~/") (plist-get payload :dir)))
+      (should (equal (concat box "~/**") (plist-get payload :pattern)))
+      (should (equal (concat "Access " box "~/ (the login's home directory)") (plist-get payload :title)))
+      (should (equal (concat "read_file wants " box "~/notes.txt (in the home directory of the login on u@box.example.invalid), "
+                             "which is outside the allowed directories")
+                     (plist-get payload :reason)))
+      (harness-call 'permission/answer "s1" (plist-get (cdr started) :id) "allow-session")
+      (should (eq 'allow (plist-get (harness-test-await (car started)) :behavior)))
+      (should (member (concat box "~/") (harness-call 'permission/allowed-dirs "s1")))
+      ;; The file, and one deeper in the home, are inside now; a file of the host's other places is not.
+      (should (eq 'allow (harness-perms-test--behavior "read_file" 'read (concat box "~/deep/er/file.org"))))
+      (should (equal (concat box "/etc/")
+                     (harness-perms-test--asked-dir
+                      (harness-perms-test--outcome (harness-perms-test--request "read_file" 'read (concat box "/etc/hosts")))))))))
+
+;;;; An agent's request for a directory in a remote home
+
+(ert-deftest harness-perms-dir-request-in-a-remote-home ()
+  "An agent asking for a directory in a remote home gets a prompt about that directory.
+request_directory_access given /ssh:HOST:~/projects/x asks about that
+directory, in the login's home, with its own pattern; nothing connects to work
+the directory out, to word the prompt or to grant it, and once granted the
+handler tells the agent what it can reach, and the next request is answered
+at once."
+  (harness-perms-test--setup :permission-mode 'ask)
+  (harness-perms-test--install-pending)
+  (harness-test-without-connections
+    (let* ((box harness-perms-test--box)
+           (path (concat box "~/projects/x"))
+           (dir (concat box "~/projects/x/"))
+           (started (harness-perms-test--start-request path "Read the deploy scripts"))
+           (payload (plist-get (cdr started) :payload)))
+      (should (equal "request_directory_access" (plist-get payload :tool)))
+      (should (equal dir (plist-get payload :dir)))
+      (should (equal (concat dir "**") (plist-get payload :pattern)))
+      (should (equal (concat "Access " dir " (in the login's home directory)") (plist-get payload :title)))
+      (should (equal "The agent asks for access: Read the deploy scripts" (plist-get payload :reason)))
+      (should (equal (list :path path) (plist-get payload :input)))
+      (should (equal harness-perms-dir-request-options (plist-get payload :options)))
+      (should (eq 'allow (plist-get (harness-call 'permission/answer "s1" (plist-get (cdr started) :id) "allow-session")
+                                    :behavior)))
+      (should (member dir (harness-call 'permission/allowed-dirs "s1")))
+      ;; What the agent is told, with the name as it is.
+      (let ((r (harness-perms--dir-request-result (list :path path :granted dir) (list :session-id "s1"))))
+        (should-not (plist-get r :is-error))
+        (should (string-prefix-p (concat dir " is now an allowed directory of this session.") (plist-get r :content))))
+      ;; It is allowed already: nothing to grant, said at once; so is a place below it.
+      (let ((d (harness-perms-test--decide (harness-perms-test--dir-request path))))
+        (should (eq 'allow (plist-get d :behavior)))
+        (should (equal (concat dir " is already allowed; nothing to grant") (plist-get d :reason))))
+      (let ((d (harness-perms-test--decide (harness-perms-test--dir-request (concat box "~/projects/x/sub")))))
+        (should (eq 'allow (plist-get d :behavior))))
+      (should (null harness-perms-test--pending)))))
+
+(ert-deftest harness-perms-dir-request-in-a-remote-home-user-edits-and-nobody-answers ()
+  "A request in a remote home can be granted narrower, and is refused when nobody can say.
+The user may type another pattern, the home itself say, and the handler
+says what was granted instead; a non-interactive session is denied at once,
+and so is a request a saved deny rule covers, with the hint that it must not
+ask again."
+  (harness-perms-test--setup :permission-mode 'ask)
+  (harness-perms-test--install-pending)
+  (harness-test-without-connections
+    (let* ((box harness-perms-test--box)
+           (home (concat box "~/"))
+           (dir (concat box "~/projects/x/"))
+           (started (harness-perms-test--start-request (concat box "~/projects/x") "need it")))
+      (harness-call 'permission/answer "s1" (plist-get (cdr started) :id)
+                    (list :option "allow-session" :pattern (concat home "projects/**")))
+      (should (eq 'allow (plist-get (harness-test-await (car started)) :behavior)))
+      (should (member (concat home "projects/") (harness-call 'permission/allowed-dirs "s1")))
+      (let ((r (harness-perms--dir-request-result (list :path (concat box "~/projects/x") :granted (concat home "projects/"))
+                                                  (list :session-id "s1"))))
+        (should (string-prefix-p (concat "The user granted " home "projects/ instead of " dir ": it is now allowed for this session.")
+                                 (plist-get r :content)))))
+    ;; Nobody to ask.
+    (harness-perms-test--setup :permission-mode 'ask :non-interactive t)
+    (harness-perms-test--install-pending)
+    (let* ((box harness-perms-test--box)
+           (dir (concat box "~/projects/x/"))
+           (d (harness-perms-test--decide (harness-perms-test--dir-request (concat box "~/projects/x") "need it"))))
+      (should (eq 'deny (plist-get d :behavior)))
+      (should (plist-get d :final))
+      (should (equal (concat "nobody can grant " dir ": the session is non-interactive and the user is away")
+                     (plist-get d :reason)))
+      (should (string-match-p (regexp-quote (concat "If the task cannot be done without " dir ", finish what you can"))
+                              (plist-get d :hint)))
+      (should (null harness-perms-test--pending)))
+    ;; A saved deny of the home covers the request: refused without a question.
+    (harness-perms-test--setup :permission-mode 'ask)
+    (harness-perms-test--install-pending)
+    (let* ((box harness-perms-test--box)
+           (harness-perms-rules (list (list :path (concat box "~/**") :behavior 'deny)))
+           (d (harness-perms-test--decide (harness-perms-test--dir-request (concat box "~/projects/x") "need it"))))
+      (should (eq 'deny (plist-get d :behavior)))
+      (should (plist-get d :final))
+      (should (string-match-p "Do not ask for it again" (plist-get d :hint)))
+      (should (null harness-perms-test--pending)))))
+
+(ert-deftest harness-perms-dir-request-on-a-remote-session-stays-on-its-host ()
+  "A relative directory asked for in a session on a host is that host's, not this machine's.
+The session's working directory is a local part of its host's, and a directory
+asked for relative to it is on that host; the prompt names it with the host.
+Inside the working directory it needs no asking."
+  (harness-perms-test--setup :permission-mode 'ask :cwd "/home/u/proj/" :host harness-perms-test--box)
+  (harness-perms-test--install-pending)
+  (harness-test-without-connections
+    (let* ((box harness-perms-test--box)
+           (started (harness-perms-test--start-request "../other/dir" "need it"))
+           (payload (plist-get (cdr started) :payload)))
+      (should (equal (concat box "/home/u/other/dir/") (plist-get payload :dir)))
+      (should (equal (concat box "/home/u/other/dir/**") (plist-get payload :pattern)))
+      (should (equal (concat "Access " box "/home/u/other/dir/") (plist-get payload :title)))
+      (harness-call 'permission/answer "s1" (plist-get (cdr started) :id) "deny-once")
+      (should (eq 'deny (plist-get (harness-test-await (car started)) :behavior)))
+      (let ((d (harness-perms-test--decide (harness-perms-test--dir-request "sub/dir"))))
+        (should (eq 'allow (plist-get d :behavior)))
+        (should (equal (concat box "/home/u/proj/sub/dir/ is already allowed; nothing to grant") (plist-get d :reason)))))))
+
+(ert-deftest harness-perms-grants-in-a-remote-home-are-listed-and-revoked-without-connecting ()
+  "Granting, listing and withdrawing a remote home are text work too.
+The session's grants, the saved ones, those until the turn ends and the
+entries `permission/dirs' lists all name /ssh:HOST:~/ as it is, a path given
+without its slash comes back with it, and a directory is revocable by its
+name."
+  (let ((saved nil)
+        (harness-allowed-directories nil))
+    (harness-perms-test--setup :permission-mode 'yolo)
+    (harness-test-without-connections
+      (cl-letf (((symbol-function 'harness-save-user-option)
+                 (lambda (sym value) (set sym value) (push (cons sym value) saved))))
+        (let* ((box harness-perms-test--box)
+               (home (concat box "~/"))
+               (projects (concat box "~/projects/"))
+               (events nil))
+          (harness-on 'permission/dir-allowed (lambda (sid dir) (push (list 'allowed sid dir) events)))
+          (harness-on 'permission/dir-revoked (lambda (sid dir) (push (list 'revoked sid dir) events)))
+          ;; For the session, written without its slash.
+          (let ((roots (harness-call 'permission/allow-dir "s1" (concat box "~"))))
+            (should (member home roots)))
+          (should (equal (list home) (gethash "s1" harness-perms--allowed-dirs)))
+          (should (equal (list 'allowed "s1" home) (car events)))
+          ;; Saved for every session, and until the turn ends.
+          (harness-call 'permission/allow-dir "s1" (concat projects "**") 'always)
+          (should (equal (list (concat projects "**")) harness-allowed-directories))
+          (harness-call 'permission/allow-dir "s1" (concat box "~bob/") 'turn)
+          (should (equal (list (concat box "~bob/")) (gethash "s1" harness-perms--turn-dirs)))
+          ;; What is listed, and what can be taken back.
+          (let ((entries (harness-call 'permission/dirs "s1")))
+            ;; In the order the sources come: the saved ones, the session's, until the turn ends.
+            (should (equal (list (concat projects "**") home (concat box "~bob/"))
+                           (cl-remove-if-not (lambda (d) (string-prefix-p box d))
+                                             (mapcar (lambda (e) (plist-get e :dir)) entries))))
+            (should (equal '(t t t) (mapcar (lambda (e) (plist-get e :revocable))
+                                            (cl-remove-if-not (lambda (e) (string-prefix-p box (plist-get e :dir))) entries)))))
+          (should (member home (harness-call 'permission/allowed-dirs "s1")))
+          ;; Taking them back, in the order a directory is looked up.
+          (harness-call 'permission/revoke-dir "s1" home)
+          (should-not (gethash "s1" harness-perms--allowed-dirs))
+          (harness-call 'permission/revoke-dir "s1" (concat box "~bob"))
+          (should-not (gethash "s1" harness-perms--turn-dirs))
+          (harness-call 'permission/revoke-dir "s1" (concat projects "**"))
+          (should-not harness-allowed-directories)
+          (should (equal (list 'revoked "s1" (concat projects "**")) (car events)))
+          (let ((err (cadr (should-error (harness-call 'permission/revoke-dir "s1" home) :type 'harness-error))))
+            (should (string-match-p (regexp-quote (concat home " is not a grant")) err))))))))
+
+(ert-deftest harness-perms-remote-home-grants-are-noted-undone-and-redone ()
+  "A grant of a remote home, made for the session or always, is noted, undone and redone.
+The note under the call says it as it says any grant, the home by its
+name; undo withdraws that grant only and redo grants it again, and none of
+it needs the host."
+  (harness-perms-test--with-decisions
+    (harness-test-without-connections
+      (let* ((home (concat harness-perms-test--box "~/"))
+             (read (lambda (name answer)
+                     (harness-perms-test--answered sid "t_read" (list :path (concat home name)) answer)
+                     (car (last (harness-perms-test--notes sid))))))
+        ;; For the session.
+        (let ((note (funcall read "f.txt" "allow-session")))
+          (should (equal (format "Allowing %s for this session" home) (plist-get note :content)))
+          (should (equal (list :scope 'session :dir home :undo 'offered) (harness-node-permission note)))
+          (should (equal (list home) (plist-get (harness-call 'session/get sid) :allowed-dirs)))
+          ;; The next call there needs no question.
+          (should (equal "read" (plist-get (harness-test-await
+                                            (harness-call 'tools/execute sid (list :id "again" :name "t_read"
+                                                                                   :input (list :path (concat home "deep/x")))))
+                                           :content)))
+          (should-not (harness-call 'session/pending sid))
+          (should (equal (cons 'undone (format "Undone: no longer allowing %s for this session" home))
+                         (harness-perms-test--undo sid note)))
+          (should-not (plist-get (harness-call 'session/get sid) :allowed-dirs))
+          (should (equal (cons 'done (format "Redone: allowing %s for this session" home))
+                         (harness-perms-test--redo sid note)))
+          (should (equal (list home) (plist-get (harness-call 'session/get sid) :allowed-dirs))))
+        ;; Always, for another host's home.
+        (let* ((other (concat harness-perms-test--laptop "~/"))
+               (note (progn (harness-perms-test--answered sid "t_read" (list :path (concat other "g.txt")) "allow-always")
+                            (car (last (harness-perms-test--notes sid))))))
+          (should (equal (format "Always allowing %s, in every session" other) (plist-get note :content)))
+          (should (equal (list other) harness-allowed-directories))
+          (should (equal (cons 'undone (format "Undone: no longer always allowing %s, in every session" other))
+                         (harness-perms-test--undo sid note)))
+          (should-not harness-allowed-directories)
+          (should (eq 'done (car (harness-perms-test--redo sid note))))
+          (should (equal (list other) harness-allowed-directories))
+          (harness-perms-test--undo sid note))
+        ;; Always deny of a home: its rule is noted and undone like any other.
+        (let ((other (concat "/ssh:benito:~/")))
+          (harness-perms-test--answered sid "t_read" (list :path (concat other "f")) "deny-always")
+          (let ((note (car (last (harness-perms-test--notes sid)))))
+            (should (equal (list (list :path (concat other "**") :behavior 'deny)) harness-perms-rules))
+            (should (equal (format "Always denying %s to every tool, in every session" (concat other "**"))
+                           (plist-get note :content)))
+            (should (eq 'undone (car (harness-perms-test--undo sid note))))
+            (should-not harness-perms-rules)))))))
+
+;;;; What a lasting answer covers: the host, and files in a remote home
+
+(ert-deftest harness-perms-cover-ladder-of-a-call-on-files-in-a-remote-home ()
+  "A call on a file in a remote home is covered by that file, its directory in the home, or the tool.
+The covers are worked out from the names, a ~ never expanded: the file, its
+directory (the home itself for a file directly in it, but never the host's root),
+or every call of the tool."
+  (harness-perms-test--setup :permission-mode 'ask)
+  (harness-test-without-connections
+    (let* ((box harness-perms-test--box)
+           (ladder (lambda (tool kind &rest paths)
+                     (harness-perms--cover-ladder (apply #'harness-perms-test--request tool kind
+                                                         (mapcar (lambda (p) (concat box p)) paths))))))
+      (let ((l (funcall ladder "write_file" 'write "~/projects/x/a.el")))
+        (should (equal '("path" "dir" "tool") (harness-perms-test--steps l)))
+        (should (equal `((:path ,(concat box "~/projects/x/a.el"))
+                         (:path ,(concat box "~/projects/x/"))
+                         nil)
+                       (harness-perms-test--steps l :rule)))
+        (should (equal (list (format "every write_file call on %s~/projects/x/a.el" box)
+                             (format "every write_file call under %s~/projects/x/ (any file)" box)
+                             "every write_file call (any path)")
+                       (harness-perms-test--steps l :label))))
+      (should (equal `(:path ,(concat box "~/"))
+                     (plist-get (nth 1 (plist-get (funcall ladder "write_file" 'write "~/notes.txt") :steps)) :rule)))
+      ;; Several files: the directory that holds them all, which may be the home.
+      (let ((l (funcall ladder "write_file" 'write "~/a/x" "~/b/y")))
+        (should (equal '("dir" "tool") (harness-perms-test--steps l)))
+        (should (equal `(:path ,(concat box "~/")) (plist-get (car (plist-get l :steps)) :rule))))
+      ;; A path in the home and one the host decides share nothing.
+      (should (equal '("tool") (harness-perms-test--steps (funcall ladder "write_file" 'write "~/a/x" "/etc/y")))))))
+
+;;;; What a lasting answer to an ssh call covers: its host
+
+(ert-deftest harness-perms-cover-ladder-of-an-ssh-call-is-kept-to-its-host ()
+  "A lasting answer to an ssh call can hold for the host it names, and starts there.
+The ladder has the exact call, then the programs and the tool for this host
+alone, then the same for any host, each said by what it leaves free: an
+answer for one host must not hold for every host the agent names next.  The
+steps for the host are rules about the call's `:host' argument, a key rules
+already have; the usual step, where the answers start, is the host's
+programs."
+  (harness-perms-test--setup :permission-mode 'ask)
+  (harness-test-without-connections
+    (let ((ladder (lambda (&rest input)
+                    (harness-perms--cover-ladder
+                     (harness-perms-test--ssh (append (list :host harness-perms-test--laptop-host) input)))))
+          (host harness-perms-test--laptop-host))
+      ;; Two programs, no subcommand to narrow by.
+      (let ((l (funcall ladder :command "journalctl -u k3s | tail -50")))
+        (should (equal '("exact" "host-programs" "host-tool" "programs" "tool") (harness-perms-test--steps l)))
+        (should (equal `("every ssh call whose host is exactly \"admin@laptop-0:4358\" and command is exactly \"journalctl -u k3s | tail -50\""
+                         "every journalctl and tail call on admin@laptop-0:4358 (any arguments)"
+                         "every ssh call on admin@laptop-0:4358 (any command)"
+                         "every journalctl and tail call (any host, any arguments)"
+                         "every ssh call (any host, any command)")
+                       (harness-perms-test--steps l :label)))
+        (should (equal `((:input (:host ,host :command "journalctl -u k3s | tail -50"))
+                         (:input (:host ,host) :commands (("journalctl") ("tail")))
+                         (:input (:host ,host))
+                         (:commands (("journalctl") ("tail")))
+                         nil)
+                       (harness-perms-test--steps l :rule)))
+        ;; The answers start on this host's programs.
+        (should (equal "host-programs" (plist-get l :default))))
+      ;; A subcommand: the host's steps go from the subcommand to the programs, as bash's do.
+      (let ((l (funcall ladder :command "systemctl status k3s")))
+        (should (equal '("exact" "host-subcommands" "host-programs" "host-tool" "programs" "tool")
+                       (harness-perms-test--steps l)))
+        (should (equal `((:input (:host ,host) :commands (("systemctl" "status" "k3s")))
+                         (:input (:host ,host) :commands (("systemctl"))))
+                       (list (plist-get (nth 1 (plist-get l :steps)) :rule)
+                             (plist-get (nth 2 (plist-get l :steps)) :rule))))
+        (should (equal "every systemctl status k3s call on admin@laptop-0:4358 (any arguments)"
+                       (plist-get (nth 1 (plist-get l :steps)) :label)))
+        (should (equal "host-programs" (plist-get l :default))))
+      ;; Several commands that share words: what an answer always held for lies between.
+      (let ((l (funcall ladder :command "systemctl status k3s && systemctl status k3d")))
+        (should (equal '("exact" "host-commands" "host-programs" "host-tool" "programs" "tool")
+                       (harness-perms-test--steps l)))
+        (should (equal "host-commands" (plist-get l :default)))
+        (should (equal `(:input (:host ,host) :commands (("systemctl" "status")))
+                       (plist-get (nth 1 (plist-get l :steps)) :rule))))
+      ;; The cwd is pinned by the exact step, a timeout is not.
+      (let ((l (funcall ladder :command "ls" :cwd "/var/log" :timeout 30)))
+        (should (equal `(:input (:host ,host :command "ls" :cwd "/var/log"))
+                       (plist-get (car (plist-get l :steps)) :rule))))
+      ;; A line the reader cannot read: the exact call, this host, the tool.
+      (let ((l (funcall ladder :command "FOO=1")))
+        (should (equal '("exact" "host-tool" "tool") (harness-perms-test--steps l)))
+        (should (equal "host-tool" (plist-get l :default)))
+        (should (equal '("every ssh call whose host is exactly \"admin@laptop-0:4358\" and command is exactly \"FOO=1\""
+                         "every ssh call on admin@laptop-0:4358 (any command)"
+                         "every ssh call (any host, any command)")
+                       (harness-perms-test--steps l :label))))
+      ;; A host as the agent wrote it, spaces round it included: the rule holds for just that.
+      (let ((l (harness-perms--cover-ladder
+                (harness-perms-test--ssh '(:host " benito " :command "uptime")))))
+        (should (equal '(:input (:host " benito ") :commands (("uptime"))) (plist-get (nth 1 (plist-get l :steps)) :rule)))
+        (should (equal "every uptime call on benito (any arguments)" (plist-get (nth 1 (plist-get l :steps)) :label))))
+      ;; The narrowest, when asked for it; the default is always a step of the ladder.
+      (let ((harness-perms-default-cover 'narrowest))
+        (should (equal "exact" (plist-get (funcall ladder :command "journalctl -u k3s | tail -50") :default))))
+      (dolist (command '("make" "git status && git log --oneline" "sudo -u me systemctl status k3s" "FOO=1"))
+        (let* ((l (funcall ladder :command command))
+               (usual (harness-perms--command-rule-prefixes command))
+               (step (cl-find (plist-get l :default) (plist-get l :steps)
+                              :key (lambda (s) (plist-get s :id)) :test #'equal)))
+          (should step)
+          (should (equal (if usual (list :input (list :host host) :commands usual) (list :input (list :host host)))
+                         (plist-get step :rule))))))))
+
+(ert-deftest harness-perms-cover-ladder-of-bash-on-a-host-is-kept-to-the-host ()
+  "A bash call that runs on a host has the host's steps too, by path.
+bash given a TRAMP directory runs there, and its programs cover held for local
+bash as well; the host's steps are a rule about the host's whole file system
+\(a `:path'), so a call on this machine is not covered by them.  The local
+ladder is the one it always was."
+  (harness-perms-test--setup :permission-mode 'ask)
+  (harness-test-without-connections
+    (let* ((box harness-perms-test--box)
+           (remote (lambda (command &rest more)
+                     (harness-perms--cover-ladder
+                      (list :session harness-perms-test--session :tool "bash" :kind 'exec
+                            :input (append (list :command command :cwd (concat box "/var/log")) more)
+                            :paths (list (concat box "/var/log/")) :call-id "c"))))
+           (l (funcall remote "ls -la")))
+      (should (equal '("exact" "host-programs" "host-tool" "programs" "tool") (harness-perms-test--steps l)))
+      (should (equal `((:input (:command "ls -la" :cwd ,(concat box "/var/log")))
+                       (:path ,(concat box "/**") :commands (("ls")))
+                       (:path ,(concat box "/**"))
+                       (:commands (("ls")))
+                       nil)
+                     (harness-perms-test--steps l :rule)))
+      (should (equal `(,(format "every bash call whose command is exactly \"ls -la\" and cwd is exactly \"%s/var/log\"" box)
+                       "every ls call on u@box.example.invalid (any arguments)"
+                       "every bash call on u@box.example.invalid (any command)"
+                       "every ls call (any host, any arguments)"
+                       "every bash call (any host, any command)")
+                     (harness-perms-test--steps l :label)))
+      (should (equal "host-programs" (plist-get l :default)))
+      ;; Under the home of that host the steps are the same ones.
+      (let ((l (harness-perms--cover-ladder
+                (list :session harness-perms-test--session :tool "bash" :kind 'exec
+                      :input (list :command "ls") :paths (list (concat box "~/work/")) :call-id "c"))))
+        (should (equal "host-programs" (plist-get l :default)))
+        (should (equal (list :path (concat box "/**") :commands '(("ls")))
+                       (plist-get (nth 1 (plist-get l :steps)) :rule))))
+      ;; Here: the ladder it always was, with no word of a host.
+      (let ((l (harness-perms--cover-ladder (harness-perms-test--bash "gcloud compute instances list --project p"))))
+        (should (equal '("exact" "subcommands" "programs" "tool") (harness-perms-test--steps l)))
+        (should (equal '("every bash call whose command is exactly \"gcloud compute instances list --project p\""
+                         "every gcloud compute instances call (any arguments)"
+                         "every gcloud call (any arguments)"
+                         "every bash call (any command)")
+                       (harness-perms-test--steps l :label)))
+        (should (equal "programs" (plist-get l :default)))))))
+
+(defun harness-perms-test--ssh-to (host command)
+  "Return the permission request of an ssh call to HOST running COMMAND."
+  (harness-perms-test--ssh (list :host host :command command)))
+
+(defun harness-perms-test--asks-p (outcome)
+  "Non-nil when OUTCOME, from `harness-perms-test--outcome', is a prompt."
+  (eq 'asked (car-safe outcome)))
+
+(ert-deftest harness-perms-ssh-lasting-answer-holds-for-its-host ()
+  "\"Allow for the session\" on an ssh call allows those programs on that host, not on every host.
+The default step records a rule about the call's `:host' as the call wrote
+it and the programs of its command line.  A later call to the same host with
+other arguments of those programs runs on the rule's word; one that runs
+another program, or goes to another host, or names the same host another way,
+is asked about again."
+  (let ((harness-perms-rules nil))
+    (harness-perms-test--setup :permission-mode 'ask)
+    (harness-perms-test--install-pending)
+    (harness-test-without-connections
+      (let ((host harness-perms-test--laptop-host)
+            (call #'harness-perms-test--ssh-to))
+        ;; The jail has nothing to say: the homes are allowed.
+        (dolist (home (list (concat harness-perms-test--laptop "~/") "/ssh:benito:~/"))
+          (harness-call 'permission/allow-dir "s1" home))
+        (let* ((started (harness-perms-test--start-ssh (funcall call host "journalctl -u k3s | tail -50")))
+               (payload (plist-get (cdr started) :payload)))
+          ;; The prompt is about the call itself: no pattern, a ladder, the host's programs picked.
+          (should-not (plist-get payload :dir))
+          (should-not (plist-get payload :pattern))
+          (should (equal "host-programs" (plist-get payload :cover)))
+          (should (equal '("exact" "host-programs" "host-tool" "programs" "tool")
+                         (mapcar (lambda (step) (plist-get step :id)) (plist-get payload :ladder))))
+          (harness-call 'permission/answer "s1" (plist-get (cdr started) :id) "allow-session")
+          (should (eq 'allow (plist-get (harness-test-await (car started)) :behavior))))
+        (should (equal (list (list :tool "ssh" :input (list :host host) :commands '(("journalctl") ("tail")) :behavior 'allow))
+                       (gethash "s1" harness-perms--session-rules)))
+        (should-not harness-perms-rules)
+        ;; The same host, other arguments of those programs: the rule answers.
+        (dolist (command '("journalctl -n 20" "tail -f /var/log/syslog" "journalctl --since today | tail -5"))
+          (ert-info (command)
+            (let ((d (harness-perms-test--outcome (funcall call host command))))
+              (should (eq 'allow (plist-get d :behavior)))
+              (should (eq 'rule (plist-get d :by)))
+              (should (equal "allowed by a standing rule for ssh (journalctl and tail) whose host is exactly \"admin@laptop-0:4358\""
+                             (plist-get d :reason))))))
+        (should (null harness-perms-test--pending))
+        ;; Asked about again: another program, one more, another host, the host written another way.
+        (dolist (case `((,host "systemctl restart k3s")
+                        (,host "journalctl -n 3 && tail -f x | grep err")
+                        ("benito" "journalctl -n 3")
+                        ("/ssh:admin@laptop-0#4358:" "journalctl -n 3")
+                        (" admin@laptop-0:4358" "journalctl -n 3")))
+          (ert-info ((format "%S" case))
+            (should (harness-perms-test--asks-p (harness-perms-test--outcome (apply call case))))))
+        ;; The ladder of the other host speaks of that host.
+        (let ((outcome (harness-perms-test--outcome (funcall call "benito" "journalctl -n 3"))))
+          (should (equal "every journalctl call on benito (any arguments)"
+                         (plist-get (nth 1 (plist-get (plist-get (cdr outcome) :payload) :ladder)) :label))))))))
+
+(ert-deftest harness-perms-ssh-lasting-answer-names-its-cover ()
+  "The answer names the step it holds for, and the rule is that step's.
+The host's tool step allows every command on that host; the programs step for
+any host allows those programs everywhere; the exact step that call alone;
+and an answer that names no step, or one the prompt did not offer, holds for
+the one the prompt started on.  Always is saved and for every session, and a
+deny of a host's programs denies those on that host only."
+  (let ((harness-perms-rules nil)
+        (saved nil)
+        (host harness-perms-test--laptop-host)
+        (call #'harness-perms-test--ssh-to))
+    (harness-test-without-connections
+      (cl-letf (((symbol-function 'harness-save-user-option)
+                 (lambda (sym value) (set sym value) (push (cons sym value) saved))))
+        (cl-flet ((answer (answer)
+                    (harness-perms-test--setup :permission-mode 'ask)
+                    (harness-perms-test--install-pending)
+                    (dolist (home (list (concat harness-perms-test--laptop "~/") "/ssh:benito:~/"))
+                      (harness-call 'permission/allow-dir "s1" home))
+                    (let ((started (harness-perms-test--start-ssh (funcall call host "journalctl -u k3s | tail -50"))))
+                      (harness-call 'permission/answer "s1" (plist-get (cdr started) :id) answer)
+                      (harness-test-await (car started)))))
+          ;; The tool, for this host: any command there, not on other hosts.
+          (answer '(:option "allow-session" :cover "host-tool"))
+          (should (equal (list (list :tool "ssh" :input (list :host host) :behavior 'allow))
+                         (gethash "s1" harness-perms--session-rules)))
+          (should (eq 'allow (plist-get (harness-perms-test--outcome (funcall call host "rm -rf /tmp/x")) :behavior)))
+          (should (harness-perms-test--asks-p (harness-perms-test--outcome (funcall call "benito" "uptime"))))
+          ;; The programs, for any host.
+          (answer '(:option "allow-session" :cover "programs"))
+          (should (equal (list (list :tool "ssh" :commands '(("journalctl") ("tail")) :behavior 'allow))
+                         (gethash "s1" harness-perms--session-rules)))
+          (should (eq 'allow (plist-get (harness-perms-test--outcome (funcall call "benito" "tail -n 2 x")) :behavior)))
+          (should (eq 'allow (plist-get (harness-perms-test--outcome (funcall call host "journalctl -n 2")) :behavior)))
+          (should (harness-perms-test--asks-p (harness-perms-test--outcome (funcall call "benito" "rm -rf /tmp/x"))))
+          ;; The tool, for any host.
+          (answer '(:option "allow-session" :cover "tool"))
+          (should (equal (list (list :tool "ssh" :behavior 'allow)) (gethash "s1" harness-perms--session-rules)))
+          (should (eq 'allow (plist-get (harness-perms-test--outcome (funcall call "benito" "rm -rf /tmp/x")) :behavior)))
+          ;; This call alone.
+          (answer '(:option "allow-session" :cover "exact"))
+          (should (equal (list (list :tool "ssh" :input (list :host host :command "journalctl -u k3s | tail -50") :behavior 'allow))
+                         (gethash "s1" harness-perms--session-rules)))
+          (should (eq 'allow (plist-get (harness-perms-test--outcome (funcall call host "journalctl -u k3s | tail -50"))
+                                        :behavior)))
+          (should (harness-perms-test--asks-p (harness-perms-test--outcome (funcall call host "journalctl -u k3s | tail -5"))))
+          ;; No cover, or one that is no step: where the prompt started.
+          (answer "allow-session")
+          (should (equal (list :tool "ssh" :input (list :host host) :commands '(("journalctl") ("tail")) :behavior 'allow)
+                         (car (gethash "s1" harness-perms--session-rules))))
+          (answer '(:option "allow-session" :cover "gcloud"))
+          (should (equal (list :tool "ssh" :input (list :host host) :commands '(("journalctl") ("tail")) :behavior 'allow)
+                         (car (gethash "s1" harness-perms--session-rules))))
+          ;; Always: saved, and for sessions to come.
+          (answer "allow-always")
+          (should (equal (list (list :tool "ssh" :input (list :host host) :commands '(("journalctl") ("tail")) :behavior 'allow))
+                         harness-perms-rules))
+          (should (eq 'harness-perms-rules (caar saved)))
+          ;; A session that starts later has the rule, which the test setup would clear.
+          (let ((rules harness-perms-rules))
+            (harness-perms-test--setup :permission-mode 'ask)
+            (setq harness-perms-rules rules))
+          (harness-perms-test--install-pending)
+          (harness-call 'permission/allow-dir "s1" (concat harness-perms-test--laptop "~/"))
+          (should (eq 'allow (plist-get (harness-perms-test--outcome (funcall call host "tail -n 1 x")) :behavior)))
+          ;; A deny of the host's programs: those programs on that host, nothing else.
+          (setq harness-perms-rules nil)
+          (answer '(:option "deny-always" :cover "host-programs"))
+          (should (equal (list (list :tool "ssh" :input (list :host host) :commands '(("journalctl") ("tail")) :behavior 'deny))
+                         harness-perms-rules))
+          (let ((d (harness-perms-test--outcome (funcall call host "tail -n 1 x"))))
+            (should (eq 'deny (plist-get d :behavior)))
+            (should (eq 'rule (plist-get d :by)))
+            (should (equal "denied by a standing rule for ssh (journalctl and tail) whose host is exactly \"admin@laptop-0:4358\""
+                           (plist-get d :reason))))
+          (should (harness-perms-test--asks-p (harness-perms-test--outcome (funcall call "benito" "journalctl -n 2"))))
+          (should (harness-perms-test--asks-p (harness-perms-test--outcome (funcall call host "uptime")))))))))
+
+(ert-deftest harness-perms-bash-lasting-answer-on-a-host-holds-for-that-host ()
+  "\"Allow for the session\" on a bash call on a host holds on that host, not for local bash.
+The default step records a rule about the programs and the host's file
+system as a path; a bash call on this machine, or on another host, is not
+covered by it, and one more call on the host is."
+  (harness-perms-test--setup :permission-mode 'ask)
+  (harness-perms-test--install-pending)
+  (harness-test-without-connections
+    (let* ((box harness-perms-test--box)
+           (other "/ssh:v@other.example.invalid:")
+           (remote (lambda (prefix command &optional dir)
+                     (list :session harness-perms-test--session :tool "bash" :kind 'exec
+                           :input (list :command command) :call-id (harness-short-id)
+                           :paths (list (concat prefix (or dir "/var/log/"))))))
+           (started nil))
+      (dolist (host (list box other))
+        (harness-call 'permission/allow-dir "s1" (concat host "/")))
+      (setq started (harness-perms-test--start-ssh (funcall remote box "ls /var/log")))
+      (should (equal "host-programs" (plist-get (plist-get (cdr started) :payload) :cover)))
+      (harness-call 'permission/answer "s1" (plist-get (cdr started) :id) "allow-session")
+      (harness-test-await (car started))
+      (should (equal (list (list :tool "bash" :path (concat box "/**") :commands '(("ls")) :behavior 'allow))
+                     (gethash "s1" harness-perms--session-rules)))
+      ;; More calls of that program on that host, in other directories: the rule answers.
+      (dolist (request (list (funcall remote box "ls -la")
+                             (funcall remote box "ls /etc" "/etc/")
+                             (funcall remote box "ls ~/x" "/srv/app/")))
+        (let ((d (harness-perms-test--outcome request)))
+          (should (eq 'allow (plist-get d :behavior)))
+          (should (eq 'rule (plist-get d :by)))))
+      ;; Another program, another host, and bash here.
+      (should (harness-perms-test--asks-p (harness-perms-test--outcome (funcall remote box "rm -rf x"))))
+      (should (harness-perms-test--asks-p (harness-perms-test--outcome (funcall remote other "ls"))))
+      (let ((local (harness-perms-test--bash "ls")))
+        (should (harness-perms-test--asks-p (harness-perms-test--outcome local)))))))
+
+(ert-deftest harness-perms-ssh-rules-are-worded ()
+  "A lasting rule for an ssh call or a call on a host reads well wherever it is shown.
+The subject of a decision and of an undo message, and the note under the
+call, name the tool, the programs and the host the rule is exact about; a rule
+that holds for a path as well names that last; the rule comes back from a
+note, over JSON, as the same rule."
+  (harness-perms-test--setup :permission-mode 'ask)
+  (let ((rule '(:tool "ssh" :input (:host "admin@laptop-0:4358") :commands (("journalctl") ("tail")) :behavior allow)))
+    (should (equal "ssh (journalctl and tail) whose host is exactly \"admin@laptop-0:4358\""
+                   (harness-perms--rule-subject rule)))
+    (should (equal "ssh whose host is exactly \"admin@laptop-0:4358\""
+                   (harness-perms--rule-subject '(:tool "ssh" :input (:host "admin@laptop-0:4358") :behavior allow))))
+    (should (equal "ssh (journalctl and tail)" (harness-perms--rule-subject '(:tool "ssh" :commands (("journalctl") ("tail"))))))
+    (should (equal "every ssh call to journalctl and tail whose host is exactly \"admin@laptop-0:4358\""
+                   (harness-perms--recorded-what (list :scope 'always :rule rule))))
+    (should (equal "every ssh call whose host is exactly \"admin@laptop-0:4358\""
+                   (harness-perms--recorded-what (list :scope 'always :rule '(:tool "ssh" :input (:host "admin@laptop-0:4358"))))))
+    (should (equal "Always allowing every ssh call to journalctl and tail whose host is exactly \"admin@laptop-0:4358\", in every session"
+                   (harness-perms--recorded-text (list :scope 'always :rule rule))))
+    (should (equal "Allowing every ssh call to journalctl and tail whose host is exactly \"admin@laptop-0:4358\" for this session"
+                   (harness-perms--recorded-text (list :scope 'session :rule rule))))
+    (should (equal "Always denying every ssh call to journalctl and tail whose host is exactly \"admin@laptop-0:4358\", in every session"
+                   (harness-perms--recorded-text (list :scope 'always :rule (plist-put (copy-sequence rule) :behavior 'deny)))))
+    ;; The decision a rule makes says it.
+    (should (equal "allowed by a standing rule for ssh (journalctl and tail) whose host is exactly \"admin@laptop-0:4358\""
+                   (plist-get (harness-perms--rule-decision rule "s1") :reason)))
+    ;; A rule about a host's file system and programs.
+    (let ((rule '(:tool "bash" :commands (("ls") ("cat")) :path "/ssh:u@box:/**" :behavior allow)))
+      (should (equal "bash (ls and cat) in /ssh:u@box:/**" (harness-perms--rule-subject rule)))
+      (should (equal "every bash call to ls and cat in /ssh:u@box:/**"
+                     (harness-perms--recorded-what (list :scope 'always :rule rule))))
+      (should (equal "bash calls in /ssh:u@box:/**"
+                     (harness-perms--recorded-what (list :scope 'always :rule '(:tool "bash" :path "/ssh:u@box:/**"))))))
+    ;; The same rule, back from the note over JSON, or with its keys the other way round.
+    (let* ((key (harness-perms--rule-key rule))
+           (back (harness-json-parse (harness-json-encode-text rule))))
+      (should (equal key (harness-perms--rule-key (harness-perms--rule-from-record back))))
+      (should (equal key (harness-perms--rule-key '(:behavior allow :commands (("tail") ("journalctl"))
+                                                    :input (:host "admin@laptop-0:4358") :tool "ssh"))))
+      ;; Another host, or another program, is another rule.
+      (should-not (equal key (harness-perms--rule-key (plist-put (copy-sequence rule) :input '(:host "benito")))))
+      (should-not (equal key (harness-perms--rule-key (plist-put (copy-sequence rule) :commands '(("journalctl")))))))))
+
+(ert-deftest harness-perms-ssh-lasting-answer-is-noted-undone-and-redone ()
+  "The lasting answer to an ssh call is noted, and undo takes back that rule only.
+A call there asks again after the undo, and runs on the rule's word again after
+a redo.  The tool here stands in for ssh, which would connect once allowed:
+the rule is about the call's `:host' whatever the tool is named."
+  (harness-perms-test--with-decisions
+    (harness-test-without-connections
+      (require 'harness-tools-ssh)
+      (harness-define-tool "t_remote" :label "Remote" :kind 'exec
+                           :paths #'harness-tools-ssh--paths
+                           :handler (lambda (_in _ctx) "ran"))
+      (let* ((host harness-perms-test--laptop-host)
+             (input (lambda (command) (list :host host :command command)))
+             (rule (list :tool "t_remote" :input (list :host host) :commands '(("journalctl") ("tail")) :behavior 'allow))
+             (text "Always allowing every t_remote call to journalctl and tail whose host is exactly \"admin@laptop-0:4358\", in every session"))
+        (harness-call 'permission/allow-dir sid (concat harness-perms-test--laptop "~/"))
+        (should (equal "ran" (plist-get (harness-perms-test--answered sid "t_remote" (funcall input "journalctl -u k3s | tail -50")
+                                                                      "allow-always")
+                                        :content)))
+        (should (equal (list rule) harness-perms-rules))
+        (let ((note (car (last (harness-perms-test--notes sid)))))
+          (should (equal text (plist-get note :content)))
+          (should (equal (list :scope 'always :rule rule :undo 'offered) (harness-node-permission note)))
+          ;; The rule answers a call of the host.
+          (should (equal "ran" (plist-get (harness-test-await
+                                           (harness-call 'tools/execute sid (list :id "n1" :name "t_remote"
+                                                                                  :input (funcall input "tail -n 3 syslog"))))
+                                          :content)))
+          (should-not (harness-call 'session/pending sid))
+          ;; Undone: only that rule goes, and the host is asked about again.
+          (should (equal (cons 'undone (concat "Undone: no longer always allowing every t_remote call to journalctl and tail "
+                                               "whose host is exactly \"admin@laptop-0:4358\", in every session"))
+                         (harness-perms-test--undo sid note)))
+          (should-not harness-perms-rules)
+          (let ((p (harness-call 'tools/execute sid (list :id "n2" :name "t_remote" :input (funcall input "tail -n 3 syslog")))))
+            (harness-test-wait (lambda () (harness-call 'session/pending sid)) 2 "the prompt")
+            (harness-call 'permission/answer sid (plist-get (car (harness-call 'session/pending sid)) :id) "deny-once")
+            (should (plist-get (harness-test-await p) :denied)))
+          ;; Redone: the rule is back, with the host in it.
+          (should (eq 'done (car (harness-perms-test--redo sid note))))
+          (should (equal (list rule) harness-perms-rules))
+          (should (equal "ran" (plist-get (harness-test-await
+                                           (harness-call 'tools/execute sid (list :id "n3" :name "t_remote"
+                                                                                  :input (funcall input "tail -n 3 syslog"))))
+                                          :content))))))))
 
 (provide 'harness-perms-test)
 ;;; harness-perms-test.el ends here

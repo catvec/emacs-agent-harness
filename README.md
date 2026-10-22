@@ -1402,8 +1402,9 @@ the top:
   corporate mode, a read-only session -- and a button to turn each back
   on. Tools that belong to other kinds of session, a task's `hand_in`
   say, are named apart.
-- **Rules**: the session's own and every session's, and the tools that
-  never ask.
+- **Rules**: the session's own and every session's, each with the
+  programs, the arguments (a rule for an `ssh` call says which host) and
+  the directory it holds for, and the tools that never ask.
 - **Waiting for you**: the requests the session waits on, the same
   panels as in its chat.
 - **Judgements**: every call of the session the permission chain
@@ -3380,13 +3381,24 @@ in ssh's own words, and how the host is set up.
 
 A host is a directory outside the session's like any other. The first
 call that reaches it asks for access: to `/ssh:box:/srv/app/` when the
-call runs there, to the host's root `/ssh:box:/` when it runs in the
-home directory. Granting the root lets the session work anywhere on the
-host, with every tool. A non-interactive session, such as a task's,
-needs the host in `harness-allowed-directories` beforehand. An `ssh`
-call is a command, so the permission mode decides it as it decides a
-`bash` command. Commands on another host run outside the sandbox, which
-confines this machine.
+call runs there, to the login's home directory, `/ssh:box:~/`, when it
+runs in the home directory (no `cwd`, a relative one, or one starting
+with `~`). Only the host knows where its home directory is, so the
+harness names it the way TRAMP does and never connects to find out;
+the prompt says what it is and lists the directories above it as wider
+answers, the whole host, `/ssh:box:/`, last. Granting the home
+directory lets the session work in it, with every tool; granting the
+root, anywhere on the host. `/ssh:box:/home/me/` does not cover `~`,
+since the harness cannot tell that it is the home, and an older grant
+of `/ssh:box:/` covers it, as it covers everything on the host. A
+non-interactive session, such as a task's, needs the host (or its home
+directory) in `harness-allowed-directories` beforehand. An `ssh` call is
+a command, so the permission mode decides it as it decides a `bash`
+command, and its prompt offers lasting answers for that host alone
+("every journalctl call on box (any arguments)", the one it starts on),
+then the wider ones that hold on any host and say so. The same goes for
+`bash` run in a TRAMP directory. Commands on another host run outside
+the sandbox, which confines this machine.
 
 The harness process reaches hosts through a TRAMP of its own, and the
 TRAMP settings you made, such as `tramp-default-method`,

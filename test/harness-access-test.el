@@ -479,6 +479,85 @@ the listing filters by behavior, by who decided and by tool."
         (should (eq 'allow (plist-get item :behavior)))
         (should (eq 'user (plist-get item :by)))))))
 
+;;;; Directories on another host
+
+;; The login's home directory on a host is a place of its own, written
+;; /ssh:HOST:~/: only the host knows where it is, and nothing here asks it.
+;; Abbreviating its name for a message, as Emacs does, would.
+
+(declare-function harness-access--abbrev "harness-access")
+
+(ert-deftest harness-access-abbreviates-a-name-without-asking-its-host ()
+  "A message names a directory as Emacs abbreviates it, except that a name on
+another host is left as it is: abbreviating one in the home directory of a
+login connects to the host."
+  (harness-access-test-with
+    (harness-test-without-connections
+      (dolist (dir '("/ssh:box.example.invalid:~/" "/ssh:box.example.invalid:~/notes/" "/ssh:box.example.invalid:/srv/"))
+        (should (equal dir (harness-access--abbrev dir))))
+      (should (equal "" (harness-access--abbrev nil)))
+      (should (equal (abbreviate-file-name (expand-file-name "~/x/")) (harness-access--abbrev (expand-file-name "~/x/")))))))
+
+(ert-deftest harness-access-directories-on-a-host-need-no-connection ()
+  "A directory on another host is one of the session's like any other, the
+home directory of a login there included: granting it, describing it,
+giving it up, asking for another in it to read or to write, and taking
+it away asks no connection."
+  (harness-access-test-with
+    (let* ((sid (harness-access-test-session))
+           (home "/ssh:box.example.invalid:~/")
+           (notes "/ssh:box.example.invalid:~/notes/")
+           (work "/ssh:box.example.invalid:~/projects/x/"))
+      (harness-test-without-connections
+        ;; A grant, listed with the session's own directories.
+        (harness-call 'permission/allow-dir sid home)
+        (should (eq 'session (plist-get (harness-access-test-dir-entry sid home) :source)))
+        (should (cl-find home (plist-get (harness-call 'access/describe sid) :dirs)
+                         :key (lambda (e) (plist-get e :dir)) :test #'equal))
+        ;; The agent gives it up, and the message names it as it is.
+        (let ((r (harness-access-test-result sid "drop_access" (list :attribute "directory" :value home))))
+          (should-not (plist-get r :is-error))
+          (should (string-prefix-p (concat home " is no longer granted to this session.") (plist-get r :content))))
+        (should-not (harness-access-test-dir-entry sid home))
+        ;; Asking to read a directory in the home: the prompt, the grant and the call it allows.
+        (let* ((p (harness-access-test-run sid "request_escalation"
+                                           (list :attribute "read_directory" :value notes :reason "look")))
+               (pending (harness-access-test-pending sid)))
+          (should (equal (concat "Let the agent read " notes) (plist-get (plist-get pending :payload) :title)))
+          (harness-call 'permission/answer sid (plist-get pending :id) "allow-once")
+          (let ((r (harness-test-await p)))
+            (should-not (plist-get r :is-error))
+            (should (string-prefix-p (concat notes " may now be read by this session") (plist-get r :content)))))
+        (let ((e (harness-access-test-dir-entry sid notes)))
+          (should (plist-get e :read-only))
+          (should (eq 'read (plist-get e :source))))
+        (let ((file (concat notes "todo.org")))
+          (should (eq 'allow (plist-get (harness-access-test-decide sid "read_file" 'read (list file)) :behavior)))
+          ;; Writing there is not what it may do.
+          (should (eq 'deny (harness-access-test-asks sid file))))
+        ;; The user takes the read grant away.
+        (should (harness-call 'access/remove-read-dir sid notes))
+        (should-not (harness-access-test-dir-entry sid notes))
+        ;; Asking to write in the home directory: the very prompt request_directory_access makes.
+        (let* ((p (harness-access-test-run sid "request_escalation"
+                                           (list :attribute "directory" :value work :reason "the shared types")))
+               (pending (harness-access-test-pending sid))
+               (payload (plist-get pending :payload)))
+          (should (equal work (plist-get payload :dir)))
+          (should (equal (concat work "**") (plist-get payload :pattern)))
+          (should (string-match-p "The agent asks for access: the shared types" (plist-get payload :reason)))
+          (harness-call 'permission/answer sid (plist-get pending :id) "allow-session")
+          (let ((r (harness-test-await p)))
+            (should-not (plist-get r :is-error))
+            (should (string-match-p (concat (regexp-quote work) " is now an allowed directory of this session")
+                                    (plist-get r :content)))))
+        (should (eq 'session (plist-get (harness-access-test-dir-entry sid work) :source)))
+        ;; The user revokes it.
+        (harness-call 'permission/revoke-dir sid work)
+        (should-not (harness-access-test-dir-entry sid work))
+        (should-error (harness-call 'access/remove-read-dir sid notes))
+        (should (cl-some (lambda (h) (string-match-p (regexp-quote notes) h)) (harness-access-test-hints sid)))))))
+
 ;;;; Describing a session's access
 
 (ert-deftest harness-access-describe ()

@@ -335,7 +335,7 @@ Each line after the first starts with INDENT."
                                                   (format "session %s" (substring sid 0 (min 8 (length sid))))))
                         'face 'bold)
             (propertize (format "  %s · %s%s\n"
-                                (abbreviate-file-name (or (plist-get s :cwd) ""))
+                                (harness-abbreviate-file-name (or (plist-get s :cwd) ""))
                                 (or (harness-ui-access--str (plist-get s :kind)) "main")
                                 (if (plist-get s :host) (format " · on %s" (plist-get s :host)) ""))
                         'face 'harness-dim-face))
@@ -440,7 +440,7 @@ Each line after the first starts with INDENT."
   (let* ((dir (plist-get entry :dir))
          (source (harness-ui-access--str (plist-get entry :source)))
          (revocable (harness-ui-access--true-p (plist-get entry :revocable)))
-         (shown (abbreviate-file-name dir))
+         (shown (harness-abbreviate-file-name dir))
          (give-up (lambda (keep)
                     (harness-ui-access--button
                      (if keep "[Read only]" "[Give up]")
@@ -474,7 +474,7 @@ Each line after the first starts with INDENT."
   "Insert the directories section of the session described as D."
   (let* ((sid (plist-get (plist-get d :session) :id))
          (dirs (plist-get d :dirs))
-         (width (min 60 (max 30 (apply #'max 0 (mapcar (lambda (e) (string-width (abbreviate-file-name (plist-get e :dir))))
+         (width (min 60 (max 30 (apply #'max 0 (mapcar (lambda (e) (string-width (harness-abbreviate-file-name (plist-get e :dir))))
                                                         dirs))))))
     (harness-ui-access--heading "Directories" 'directories
                                 "rw may be written, ro only read, -- given up")
@@ -488,7 +488,7 @@ Each line after the first starts with INDENT."
                         (t (propertize "rw" 'face 'harness-ui-access-allowed-face))))
              (buttons (harness-ui-access--dir-buttons sid e)))
         (insert "  " tag "  "
-                (propertize (harness-ui-access--pad (abbreviate-file-name (plist-get e :dir)) width)
+                (propertize (harness-ui-access--pad (harness-abbreviate-file-name (plist-get e :dir)) width)
                             'face (if dropped 'harness-dim-face 'default))
                 "  "
                 (propertize (harness-ui-access--pad (harness-ui-access--source-label e) 26) 'face 'harness-dim-face)
@@ -511,8 +511,8 @@ Each line after the first starts with INDENT."
       (when (or inspect skills)
         (insert (propertize
                  (format "  Every call that only reads also reaches %s.\n"
-                         (string-join (append (mapcar (lambda (dir) (format "%s (the harness)" (abbreviate-file-name dir))) inspect)
-                                              (mapcar (lambda (dir) (format "%s (skills)" (abbreviate-file-name dir))) skills))
+                         (string-join (append (mapcar (lambda (dir) (format "%s (the harness)" (harness-abbreviate-file-name dir))) inspect)
+                                              (mapcar (lambda (dir) (format "%s (skills)" (harness-abbreviate-file-name dir))) skills))
                                       ", "))
                  'face 'harness-dim-face))))))
 
@@ -572,13 +572,38 @@ Each line after the first starts with INDENT."
     (when builtin
       (insert (propertize "  * run by the session's provider, under the harness's permission\n" 'face 'harness-dim-face)))))
 
+(defun harness-ui-access--input-text (input)
+  "Return the clause that says what the arguments INPUT of a rule hold, or nil.
+It reads `whose host is exactly \"box\"' or `whose host is exactly \"box\"
+and command is exactly \"ls\"', as the permission module words it (a
+module this view cannot call: it may run in a process of its own).  A
+rule for one host, as a lasting answer to an ssh call makes, would
+otherwise read as one for every host."
+  (when (and (consp input) (proper-list-p input) (cl-evenp (length input))
+             (cl-loop for (k _v) on input by #'cddr always (keywordp k)))
+    (let ((words (cl-loop for (k v) on input by #'cddr
+                          collect (format "%s is exactly %s" (substring (symbol-name k) 1)
+                                          (if (stringp v)
+                                              (let* ((text (string-trim v))
+                                                     (line (harness-first-line text)))
+                                                (format "\"%s\""
+                                                        (if (or (string-search "\n" text) (> (length line) 50))
+                                                            (concat (substring line 0 (min (length line) 49)) "…")
+                                                          line)))
+                                            (format "%s" v))))))
+      (concat "whose "
+              (if (cdr words)
+                  (concat (string-join (butlast words) ", ") " and " (car (last words)))
+                (car words))))))
+
 (defun harness-ui-access--rule-text (rule)
   "Return RULE, a permission rule, as one line."
   (let* ((behavior (or (harness-ui-access--str (plist-get rule :behavior)) "?"))
          (tool (harness-ui-access--str (plist-get rule :tool)))
          (kind (harness-ui-access--str (plist-get rule :kind)))
          (path (plist-get rule :path))
-         (commands (plist-get rule :commands)))
+         (commands (plist-get rule :commands))
+         (input (harness-ui-access--input-text (plist-get rule :input))))
     (concat (propertize behavior 'face (if (equal behavior "allow") 'harness-ui-access-allowed-face
                                          'harness-ui-access-denied-face))
             " "
@@ -588,7 +613,8 @@ Each line after the first starts with INDENT."
                                                        (format "%s" c)))
                                           commands ", "))
               "")
-            (if path (format " in %s" (abbreviate-file-name path)) ""))))
+            (if input (concat " " input) "")
+            (if path (format " in %s" (harness-abbreviate-file-name path)) ""))))
 
 (defun harness-ui-access--insert-rules (d)
   "Insert the rules section of the session described as D."
@@ -916,14 +942,14 @@ EXPANDED are the ids of the calls to draw unfolded."
 EVERYWHERE says DIR is one every session may reach: it is taken out of
 `harness-allowed-directories', after you confirm."
   (when (or (not everywhere)
-            (y-or-n-p (format "Revoke %s for every session? " (abbreviate-file-name dir))))
+            (y-or-n-p (format "Revoke %s for every session? " (harness-abbreviate-file-name dir))))
     (harness-ui-call "_harness/permission/revoke-dir" (list :session-id (harness-ui-access--session) :dir dir)
-                     (harness-ui-access--after (format "Revoked %s" (abbreviate-file-name dir))))))
+                     (harness-ui-access--after (format "Revoked %s" (harness-abbreviate-file-name dir))))))
 
 (defun harness-ui-access-remove-read-dir (dir)
   "Stop this buffer's session reading DIR."
   (harness-ui-call "_harness/access/remove-read-dir" (list :session-id (harness-ui-access--session) :dir dir)
-                   (harness-ui-access--after (format "%s may no longer be read" (abbreviate-file-name dir)))))
+                   (harness-ui-access--after (format "%s may no longer be read" (harness-abbreviate-file-name dir)))))
 
 (defun harness-ui-access-make-writable (dir)
   "Grant DIR, which this buffer's session may only read, for writing too."
@@ -931,12 +957,12 @@ EVERYWHERE says DIR is one every session may reach: it is taken out of
     (harness-ui-call "_harness/permission/allow-dir" (list :session-id sid :dir dir)
                      (lambda (_)
                        (harness-ui-call "_harness/access/remove-read-dir" (list :session-id sid :dir dir)
-                                        (harness-ui-access--after (format "%s may be written" (abbreviate-file-name dir))))))))
+                                        (harness-ui-access--after (format "%s may be written" (harness-abbreviate-file-name dir))))))))
 
 (defun harness-ui-access-restore-dir (dir)
   "Give this buffer's session back DIR, which it gave up."
   (harness-ui-call "_harness/access/restore-dir" (list :session-id (harness-ui-access--session) :dir dir)
-                   (harness-ui-access--after (format "%s given back" (abbreviate-file-name dir)))))
+                   (harness-ui-access--after (format "%s given back" (harness-abbreviate-file-name dir)))))
 
 (defun harness-ui-access--start-dir ()
   "Return the directory to start reading a directory from.
@@ -958,7 +984,7 @@ With a prefix argument ALWAYS, every session: DIR joins
                      current-prefix-arg))
   (harness-ui-call "_harness/permission/allow-dir"
                    (append (list :session-id (harness-ui-access--session) :dir dir) (and always (list :scope "always")))
-                   (harness-ui-access--after (format "Allowed %s%s" (abbreviate-file-name dir)
+                   (harness-ui-access--after (format "Allowed %s%s" (harness-abbreviate-file-name dir)
                                                      (if always " for every session" "")))))
 
 (defun harness-ui-access-allow-read-dir (dir)
@@ -983,7 +1009,7 @@ given up for this session alone, after you confirm."
   (interactive)
   (let* ((e (harness-ui-access--dir-at-point))
          (dir (plist-get e :dir))
-         (shown (abbreviate-file-name dir)))
+         (shown (harness-abbreviate-file-name dir)))
     (pcase (harness-ui-access--str (plist-get e :source))
       ((or "session" "turn") (harness-ui-access-revoke dir))
       ("read" (harness-ui-access-remove-read-dir dir))
@@ -998,7 +1024,7 @@ given up for this session alone, after you confirm."
   (let ((e (harness-ui-access--dir-at-point)))
     (unless (or (harness-ui-access--true-p (plist-get e :dropped))
                 (harness-ui-access--true-p (plist-get e :given-up)))
-      (user-error "%s was not given up" (abbreviate-file-name (plist-get e :dir))))
+      (user-error "%s was not given up" (harness-abbreviate-file-name (plist-get e :dir))))
     (harness-ui-access-restore-dir (plist-get e :dir))))
 
 (defun harness-ui-access-set-mode ()

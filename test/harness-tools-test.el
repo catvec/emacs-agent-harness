@@ -403,5 +403,71 @@ the filter gets the session and the call it filters for."
                      10)
       (should (equal '((nil "c2" "AGAIN")) progress)))))
 
+;;;; The paths a call touches, for the permission chain
+
+(ert-deftest harness-tools-paths-are-worked-out-without-connecting ()
+  "The permission chain decides a call before the user has said it may reach a
+host, so the paths of a call are made absolute without asking any: a TRAMP
+name in a home directory (/ssh:box:~/src) stays what it says, tidied, where
+`expand-file-name' would connect to find the home.  A relative path is
+relative to the session's directory, on its host; one that leaves the home
+stays as written."
+  (harness-tools-test-with
+    (harness-define-tool "t_paths" :label "Paths" :kind 'read
+                         :paths (lambda (input) (plist-get input :paths))
+                         :handler #'ignore)
+    (let ((tool (harness-tool-get "t_paths"))
+          (host "/ssh:u@box.example.invalid:"))
+      (cl-flet ((paths (names &optional ctx)
+                  (harness-tools--paths tool (list :paths names) (or ctx (list :cwd "/work/proj/")))))
+        (harness-test-without-connections
+          ;; A home directory is a place of its own, never expanded.
+          (should (equal (list (concat host "~/x") (concat host "~/") (concat host "~/b") (concat host "~/b/")
+                               (concat host "/etc"))
+                         (paths (list (concat host "~/x") (concat host "~") (concat host "~/a/../b")
+                                      (concat host "~/./b//") (concat host "/var/../etc")))))
+          ;; The local home directory is not the one of the host.
+          (should-not (string-search (expand-file-name "~") (car (paths (list (concat host "~/x"))))))
+          ;; Leaving the home: written as it was.
+          (should (equal (list (concat host "~/..") (concat host "~/a/../../x"))
+                         (paths (list (concat host "~/..") (concat host "~/a/../../x")))))
+          ;; Local paths are made absolute against the session's directory.
+          (should (equal '("/work/proj/src/a.el" "/work/b" "/etc/hosts" "/work/proj")
+                         (paths '("src/a.el" "../b" "/etc/hosts" "."))))
+          ;; A session on a host: its paths are on it, a name of another host stays there.
+          (let ((ctx (list :cwd "/home/u/proj/" :host host)))
+            (should (equal (list (concat host "/home/u/proj/src/a.el") (concat host "/etc/hosts")
+                                 (concat host "~/x") "/ssh:other.example.invalid:/etc/hosts")
+                           (paths (list "src/a.el" "/etc/hosts" (concat host "~/x")
+                                        "/ssh:other.example.invalid:/etc/hosts")
+                                  ctx))))
+          ;; A session whose directory is a home directory has the relative paths in it.
+          (let ((ctx (list :cwd (concat host "~/proj/"))))
+            (should (equal (list (concat host "~/proj/src/a.el") (concat host "~/proj/") (concat host "~/x")
+                                 "/etc/hosts")
+                           (paths '("src/a.el" "." "../x" "/etc/hosts") ctx))))
+          ;; A call that touches no path has none.
+          (should-not (paths nil)))))))
+
+(ert-deftest harness-tools-resolve-path-is-the-tools-own ()
+  "The handlers of the tools resolve a path with `harness-tools-resolve-path',
+which expands it as ever once the call is allowed; only the permission
+chain's paths avoid that."
+  (should (equal "/work/proj/src/a.el" (harness-tools-resolve-path "src/a.el" '(:cwd "/work/proj/"))))
+  (should (equal "/work/b" (harness-tools-resolve-path "../b" '(:cwd "/work/proj/"))))
+  (should (equal "/etc/hosts" (harness-tools-resolve-path "/etc/hosts" '(:cwd "/work/proj/"))))
+  (should (equal (expand-file-name "~/notes") (harness-tools-resolve-path "~/notes" '(:cwd "/work/proj/"))))
+  (should (equal "/ssh:box:/srv/app/src/x.el"
+                 (harness-tools-resolve-path "src/x.el" '(:cwd "/srv/app/" :host "/ssh:box:"))))
+  ;; Where a home directory is named, it is the host that expands it, so the resolver connects.
+  (require 'tramp)
+  (let (attempts)
+    (cl-letf (((symbol-function 'tramp-maybe-open-connection)
+               (lambda (vec &rest _)
+                 (push (tramp-make-tramp-file-name vec 'noloc) attempts)
+                 (error "Nothing may connect"))))
+      (ignore-errors (harness-tools-resolve-path "/ssh:u@box.example.invalid:~/x" '(:cwd "/work/proj/"))))
+    (should (equal '("/ssh:u@box.example.invalid:") attempts))))
+
 (provide 'harness-tools-test)
 ;;; harness-tools-test.el ends here

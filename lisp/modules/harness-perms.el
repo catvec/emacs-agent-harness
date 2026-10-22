@@ -130,6 +130,22 @@
 ;; Roots and rules alike are directories or patterns (see
 ;; `harness-perms--within-p').
 ;;
+;; The paths of another host are TRAMP names, and nothing in the chain may
+;; connect to the host to look at one: not to expand it, not to ask for
+;; its home directory, not to find out whether a connection is open.  The
+;; login's home directory, where an ssh call without a cwd starts, is
+;; therefore a place the harness can name but not find, and it names it
+;; as TRAMP does, /ssh:HOST:~/ (`harness-remote-home-p').  Such a name is
+;; compared by its text and never expanded: not with the host's home
+;; directory, which is unknown, and not with this machine's, which is
+;; another one altogether.  A root in a home directory holds what lies in
+;; that home; a root elsewhere on the host holds it only if it holds the
+;; whole host (/ssh:HOST:/ or /ssh:HOST:/**, what the prompts for a host
+;; used to ask for, so those grants go on working), and a directory
+;; such as /ssh:HOST:/home/u/ never does.  The prompt asks about the home
+;; directory, the narrowest honest question, says what it is, and
+;; offers the directories above it and the whole host as wider answers.
+;;
 ;; A shell command's only path is where it runs, which is all the jail
 ;; checks; what it reaches is read off the command line (see "What a
 ;; shell command reaches").  Its prompt is about the paths it names
@@ -551,14 +567,14 @@ what would ask them."
 
 (defun harness-perms--split (path)
   "Return (HOST . LOCAL) for PATH; HOST is nil for a local path."
-  (let ((host (file-remote-p path)))
+  (let ((host (harness-file-remote-p path)))
     (if host
-        (cons host (or (file-remote-p path 'localname) "/"))
+        (cons host (or (harness-file-remote-p path 'localname) "/"))
       (cons nil path))))
 
 (defun harness-perms--with-host (path host)
   "Return PATH prefixed with HOST unless it is already remote or HOST is nil."
-  (if (and host (not (file-remote-p path))) (concat host path) path))
+  (if (and host (not (harness-file-remote-p path))) (concat host path) path))
 
 (defconst harness-perms--wildcards "[*?]"
   "Regexp of the characters that make a path a glob pattern.
@@ -596,34 +612,79 @@ matches, as a directory does."
     (or (string-match-p rx path)
         (string-match-p rx (file-name-as-directory path)))))
 
+(defun harness-perms--home-place (local)
+  "Return where LOCAL, the local part of a remote name, lies in a home directory.
+That is (TILDE . REST) when it starts with a tilde: TILDE is the ~ or
+~USER, REST the tidy rest, absolute-looking (\"/\" for the home itself).
+The symbol `escapes' when a `..' leaves the home, nil when LOCAL is no
+home directory name.  Only the host knows where its home directories
+are, so such a name is a place of its own and is never expanded: the
+local machine's home directory would be the wrong answer, and asking the
+host would connect (see `harness-remote-home-p')."
+  (when (string-prefix-p "~" local)
+    (if-let* ((tidy (harness-remote-home-tidy-local local)))
+        (progn (string-match "\\`~[^/]*" tidy)
+               (cons (match-string 0 tidy) (substring tidy (match-end 0))))
+      'escapes)))
+
+(defun harness-perms--host-wide-p (local)
+  "Non-nil when LOCAL, the local part of a root on a host, holds the whole host.
+That is / or /** (or nothing at all, as the prefix of a host alone has):
+the grant of a host that older prompts offered, and the widest answer the
+new ones do."
+  (and (member local '("" "/" "/**")) t))
+
 (defun harness-perms--within-p (root path)
   "Non-nil when PATH lies inside ROOT.
 ROOT is a directory, which holds itself and everything below it, or a
 glob pattern (see `harness-perms--glob-p'): `*' matches within a name,
 `**' across directories, `?' one character, and the pattern holds the
 paths it matches.  Remote paths only match when the hosts are the
-same; then the local parts are compared."
+same; then the local parts are compared.
+
+A remote name in a home directory (/ssh:box:~/src, see
+`harness-remote-home-p') is a place of its own, never expanded: the
+login's home on that host, which the harness cannot find out and the
+local home directory is not.  A root there holds what lies in the same
+home, compared below it; a root elsewhere on the host holds it only if
+it holds the whole host (/ or /**), and never a root in a home a path
+outside it; a `..' that leaves the home makes a place only a root for
+the whole host holds."
   (pcase-let ((`(,rh . ,rl) (harness-perms--split root))
               (`(,ph . ,pl) (harness-perms--split path)))
     (and (equal rh ph)
-         (cond
-          ((string-match-p harness-perms--wildcards rl) (harness-perms--glob-covers-p rl pl (not rh)))
-          (rh
-           (let ((dir (file-name-as-directory (expand-file-name rl "/")))
-                 (p (expand-file-name pl "/")))
-             (or (string= (file-name-as-directory p) dir)
-                 (string-prefix-p dir p))))
-          (t (harness-path-within-p rl pl))))))
+         (let ((rhome (and rh (harness-perms--home-place rl)))
+               (phome (and ph (harness-perms--home-place pl))))
+           (cond
+            ((and (null rhome) (null phome)) (harness-perms--within-local-p rh rl pl))
+            ((null rhome) (harness-perms--host-wide-p rl))
+            ((or (null phome) (eq rhome 'escapes) (eq phome 'escapes)) nil)
+            (t (and (equal (car rhome) (car phome))
+                    (harness-perms--within-local-p rh (cdr rhome) (cdr phome)))))))))
+
+(defun harness-perms--within-local-p (host root path)
+  "Non-nil when local part PATH lies inside local part ROOT, both on HOST.
+HOST is nil for this machine, where symbolic links are resolved first;
+on a host the parts are only compared (`harness-perms--within-p')."
+  (cond
+   ((string-match-p harness-perms--wildcards root) (harness-perms--glob-covers-p root path (not host)))
+   (host
+    (let ((dir (file-name-as-directory (expand-file-name root "/")))
+          (p (expand-file-name path "/")))
+      (or (string= (file-name-as-directory p) dir)
+          (string-prefix-p dir p))))
+   (t (harness-path-within-p root path))))
 
 (defun harness-perms--expand-root (root dir)
   "Return ROOT made absolute against DIR.
 A directory comes back as a directory name, even one whose name has a
 wildcard; a glob pattern, or a grant narrowed to one local file, as it
-is.  Only local paths are looked up on disk."
-  (let ((abs (expand-file-name root dir)))
+is.  Only local paths are looked up on disk, and a remote name in a
+home directory is not expanded (`harness-absolute-file-name')."
+  (let ((abs (harness-absolute-file-name root dir)))
     (cond
      ((directory-name-p abs) abs)
-     ((file-remote-p abs) (if (harness-perms--glob-p abs) abs (file-name-as-directory abs)))
+     ((harness-file-remote-p abs) (if (harness-perms--glob-p abs) abs (file-name-as-directory abs)))
      ((file-directory-p abs) (file-name-as-directory abs))
      ((or (harness-perms--glob-p abs) (file-regular-p abs)) abs)
      (t (file-name-as-directory abs)))))
@@ -744,7 +805,7 @@ whose files link into the package's repository."
   (when (and (boundp 'harness-directory) (stringp harness-directory))
     (let* ((dir (file-name-as-directory (expand-file-name harness-directory)))
            (self (expand-file-name "harness.el" dir))
-           (real (and (not (file-remote-p dir)) (file-exists-p self)
+           (real (and (not (harness-file-remote-p dir)) (file-exists-p self)
                       (file-name-directory (file-truename self)))))
       (if (and real (not (equal real dir))) (list dir real) (list dir)))))
 
@@ -790,7 +851,7 @@ are resolved first, as the jail resolves them, so a link elsewhere
 does not lead into the harness, nor one in the harness out of it."
   (and (eq (harness-perms--sym (plist-get request :kind)) 'read)
        (stringp path)
-       (not (file-remote-p path))
+       (not (harness-file-remote-p path))
        (cl-some (lambda (e) (harness-perms--within-p (plist-get e :dir) path))
                 (harness-perms-inspection-dirs))
        (not (harness-perms--private-p (plist-get request :tool) path))))
@@ -804,7 +865,7 @@ needs no grant, and a read refused for reaching the credentials
 learns which files those are.  Elsewhere the hint is that of a skills
 directory (`harness-perms--skills-hint')."
   (cond
-   ((or (file-remote-p path)
+   ((or (harness-file-remote-p path)
         (not (cl-some (lambda (e) (harness-perms--within-p (plist-get e :dir) path))
                       (harness-perms-inspection-dirs))))
     (harness-perms--skills-hint request path))
@@ -814,7 +875,7 @@ directory (`harness-perms--skills-hint')."
       ""))
    (t
     (format " No tool may read the harness's credentials (%s); the rest of the harness needs no grant, so read or search the files and directories beside them instead."
-            (mapconcat #'abbreviate-file-name (harness-perms--private-paths) ", ")))))
+            (mapconcat #'harness-abbreviate-file-name (harness-perms--private-paths) ", ")))))
 
 (defun harness-perms--unreachable (request roots)
   "Return the first path of REQUEST it may not reach, or nil.
@@ -890,7 +951,7 @@ REQUEST's session, and the call must not reach the harness's
 credentials."
   (and (eq (harness-perms--sym (plist-get request :kind)) 'read)
        (stringp path)
-       (not (file-remote-p path))
+       (not (harness-file-remote-p path))
        (let ((files (gethash (plist-get (plist-get request :session) :id) harness-perms--revealed)))
          (and files (member (harness-path-normalize path) files)))
        (not (harness-perms--private-p (plist-get request :tool) path))
@@ -918,7 +979,7 @@ becomes readable, not its directory; see \"Files the user's Emacs
 showed a definition in\".  Return FILE as recorded, its symbolic links
 resolved, or nil when it is no local, existing regular file."
   (when (and (stringp session-id) (stringp file)
-             (file-name-absolute-p file) (not (file-remote-p file)))
+             (file-name-absolute-p file) (not (harness-file-remote-p file)))
     (let ((real (harness-path-normalize file)))
       (when (file-regular-p real)
         (let ((files (gethash session-id harness-perms--revealed)))
@@ -967,7 +1028,7 @@ are none."
     (let ((cwd (plist-get session :cwd)))
       (condition-case err
           (harness-call 'skills/directories
-                        (and (stringp cwd) (not (plist-get session :host)) (not (file-remote-p cwd)) cwd))
+                        (and (stringp cwd) (not (plist-get session :host)) (not (harness-file-remote-p cwd)) cwd))
         (error (harness-log 'warn "perms: could not list the skills directories: %S" err)
                nil)))))
 
@@ -979,7 +1040,7 @@ links resolved, in one of the `:contained' directories of
 must not reach the harness's credentials."
   (and (eq (harness-perms--sym (plist-get request :kind)) 'read)
        (stringp path)
-       (not (file-remote-p path))
+       (not (harness-file-remote-p path))
        (cl-some (lambda (e) (and (plist-get e :contained) (harness-perms--within-p (plist-get e :dir) path)))
                 (or dirs (harness-perms-skill-dirs (plist-get request :session))))
        (not (harness-perms--private-p (plist-get request :tool) path))))
@@ -1008,8 +1069,8 @@ this is where PATH says it is.  A remote PATH names one of them,
 which are on this machine, when its local part is the same path, or
 the same place in a home directory on its host, such as
 /home/USER/.claude/skills/x for ~/.claude/skills."
-  (let* ((remote (file-remote-p path))
-         (local (file-name-as-directory (if remote (or (file-remote-p path 'localname) "/") path)))
+  (let* ((remote (harness-file-remote-p path))
+         (local (file-name-as-directory (if remote (or (harness-file-remote-p path 'localname) "/") path)))
          (home (file-name-as-directory (expand-file-name "~"))))
     (cl-find-if (lambda (dir)
                   (or (string-prefix-p dir local)
@@ -1049,23 +1110,23 @@ asked about a directory the agent has a tool for."
                                             (not (harness-perms--skill-readable-p as-read p dirs))))
                            outside)))
     (when path
-      (let* ((dir (abbreviate-file-name (harness-perms--skills-dir-of path dirs)))
-             (host (file-remote-p path))
+      (let* ((dir (harness-abbreviate-file-name (harness-perms--skills-dir-of path dirs)))
+             (host (harness-file-remote-p path))
              (target (and (not host) (harness-path-normalize path))))
         (list :behavior 'deny :final t
               :reason (cond
                        (host (format "%s is a skills directory on %s, not the skills the harness serves, which are on this machine"
                                      path host))
                        (exec (format "the command names %s, in the skills directory %s, but that leads to %s, which the sandbox does not show"
-                                     (abbreviate-file-name path) dir (abbreviate-file-name target)))
+                                     (harness-abbreviate-file-name path) dir (harness-abbreviate-file-name target)))
                        (t (format "%s is in the skills directory %s, but leads to %s, outside what may be read without approval"
-                                  (abbreviate-file-name path) dir (abbreviate-file-name target))))
+                                  (harness-abbreviate-file-name path) dir (harness-abbreviate-file-name target))))
               :hint (concat harness-perms-skills-hint
                             (if host
                                 (format " Ask for the directory with request_directory_access only if the task is about the files of %s itself."
                                         host)
                               (format " If the task needs %s itself, ask for it with request_directory_access."
-                                      (abbreviate-file-name (harness-perms--dir-of target))))))))))
+                                      (harness-abbreviate-file-name (harness-perms--dir-of target))))))))))
 
 (defun harness-perms--skills-hint (request path)
   "Return what REQUEST's agent may still do with PATH in a skills directory, or \"\".
@@ -1084,8 +1145,9 @@ Symbolic links are resolved first: the jail compares resolved paths,
 so the prompt has to name the directory a grant really opens."
   ;; Never touch the file system for a remote path: that would open
   ;; a TRAMP connection from inside the permission chain.
-  (if (file-remote-p path)
-      (or (file-name-directory path) path)
+  (if (harness-file-remote-p path)
+      (let ((path (or (harness-remote-home-tidy path) path)))
+        (or (file-name-directory path) path))
     (let ((path (harness-path-normalize path)))
       (if (file-directory-p path)
           (file-name-as-directory path)
@@ -1100,7 +1162,7 @@ That is the closest directory holding DIR, DIR included, with one of
 `harness-perms--repository-markers': a project, a package's checkout,
 a configuration kept in git.  A remote DIR has none here: looking would
 open a TRAMP connection from inside the permission chain."
-  (unless (file-remote-p dir)
+  (unless (harness-file-remote-p dir)
     (when-let* ((root (locate-dominating-file
                        dir (lambda (d)
                              (cl-some (lambda (m) (file-exists-p (expand-file-name m d)))
@@ -1124,7 +1186,7 @@ edit the prompt's pattern to something narrower."
     (if (and root
              (not (equal root "/"))
              (not (harness-path-within-p root home))
-             (not (cl-some (lambda (d) (and (stringp d) (not (file-remote-p d)) (harness-path-within-p root d)))
+             (not (cl-some (lambda (d) (and (stringp d) (not (harness-file-remote-p d)) (harness-path-within-p root d)))
                            own)))
         root
       dir)))
@@ -1135,12 +1197,12 @@ When PATH lies in the system's temporary directory but outside the
 session's own temporary directory, the agent most likely wanted a
 scratch file, which belongs in its own directory, already allowed, so
 it carries on there instead of stopping.  Otherwise return \"\"."
-  (let ((tmp (and (not (file-remote-p path)) (harness-perms--tmp-dir session))))
+  (let ((tmp (and (not (harness-file-remote-p path)) (harness-perms--tmp-dir session))))
     (if (and tmp
              (harness-perms--within-p temporary-file-directory path)
              (not (harness-perms--within-p tmp path)))
         (format " For scratch files use your own temporary directory, %s: it is already allowed, bash included."
-                (abbreviate-file-name tmp))
+                (harness-abbreviate-file-name tmp))
       "")))
 
 ;;;; What a shell command reaches
@@ -1202,15 +1264,18 @@ left out (see `harness-perms--shell-ast-path-words'), and files such as
 this machine an absolute word counts only when its first directory
 exists, so a pattern such as /api/v1 in a grep is no path; on a remote
 host none is looked up, and words starting with ~ are left out, since
-only that host knows its home."
+only that host knows its home.  A command run in a home directory of
+a host (/ssh:box:~/src/) has its relative words in it
+\(/ssh:box:~/src/a.el); one that leaves it (../../x) names the root of the
+host, as the place it goes to is for the host to say."
   (when-let* ((command (harness-perms--command request)))
     (condition-case err
         (let* ((dir (harness-perms--command-dir request))
                ;; The host the command runs on: its directory's, which
                ;; for the ssh tool is not the session's, else the
                ;; session's.
-               (remote (or (file-remote-p dir) (plist-get (plist-get request :session) :host)))
-               (local-dir (or (file-remote-p dir 'localname) dir))
+               (remote (or (harness-file-remote-p dir) (plist-get (plist-get request :session) :host)))
+               (local-dir (or (harness-file-remote-p dir 'localname) dir))
                paths)
           (dolist (word (harness-perms--shell-ast-path-words
                          (harness-perms--shell-ast command)))
@@ -1218,6 +1283,15 @@ only that host knows its home."
               (when (and value (not (string-match-p "\n" value)))
                 (let ((path (cond ((not remote) (expand-file-name value dir))
                                   ((string-prefix-p "~" value) nil)
+                                  ;; Run in a home directory, which only the
+                                  ;; host can expand: a relative word is in it,
+                                  ;; or, when it leaves it, somewhere on the host,
+                                  ;; which only a grant of the whole host holds.
+                                  ((and (string-prefix-p "~" local-dir) (not (string-prefix-p "/" value)))
+                                   (let ((prefix (or (harness-remote-prefix dir) remote)))
+                                     (or (harness-remote-home-tidy
+                                          (concat prefix (file-name-as-directory local-dir) value))
+                                         (concat prefix "/"))))
                                   (t (harness-perms--with-host (expand-file-name value local-dir) remote)))))
                   (when (and path
                              (not (string-match-p harness-perms--pseudo-files (cdr (harness-perms--split path))))
@@ -2385,8 +2459,11 @@ printed as it is."
   (concat (file-name-as-directory dir) "**"))
 
 (defun harness-perms--expand-pattern (session pattern)
-  "Return PATTERN absolute for SESSION: against its cwd, on its host."
-  (harness-perms--with-host (expand-file-name pattern (or (plist-get session :cwd) default-directory))
+  "Return PATTERN absolute for SESSION: against its cwd, on its host.
+A remote pattern in a home directory (/ssh:box:~/src/**) is not
+expanded, which would connect: it stays what it says
+\(`harness-absolute-file-name')."
+  (harness-perms--with-host (harness-absolute-file-name pattern (or (plist-get session :cwd) default-directory))
                             (plist-get session :host)))
 
 (defun harness-perms--answered-pattern (session waiting answer)
@@ -2405,6 +2482,53 @@ the prompt offered; nil for a prompt that offered none."
     (if (and (string-suffix-p "/**" local) (not (string-match-p harness-perms--wildcards (substring local 0 -2))))
         (concat (or host "") (substring local 0 -2))
       pattern)))
+
+(defun harness-perms--login-on (path)
+  "Return the login on remote PATH's host, as USER@HOST#PORT or HOST alone."
+  (let ((user (harness-file-remote-p path 'user))
+        (host (or (harness-file-remote-p path 'host) (harness-file-remote-p path))))
+    (if user (concat user "@" host) host)))
+
+(defun harness-perms--place-phrase (path &optional tool)
+  "Return what remote PATH is, in a few words, when its name does not say, or nil.
+The home directory of a login (/ssh:box:~/), a directory in it, the
+root of a host: an ssh call that runs in the home directory is about a
+place the harness can only name, not find (nothing in the permission
+chain connects), and a prompt that said just `ssh wants /ssh:box:~/'
+would leave its reader to work out what that is.  TOOL, the tool the
+call is of, adds where it starts: ssh starts in the home directory."
+  (cond
+   ((harness-remote-home-p path)
+    (pcase-let* ((`(,_ ,tilde ,rest) (harness-remote-home-parts path))
+                 (home (if (equal tilde "~")
+                           (format "the home directory of the login on %s" (harness-perms--login-on path))
+                         (format "the home directory %s on %s" tilde (harness-perms--login-on path)))))
+      (cond ((not (member rest '("" "/"))) (format "in %s" home))
+            ((and (equal tool "ssh") (equal tilde "~")) (concat home ", where ssh starts"))
+            (t home))))
+   ((and (harness-file-remote-p path) (member (cdr (harness-perms--split path)) '("" "/")))
+    (format "the root directory of %s, which is the whole host" (harness-perms--login-on path)))))
+
+(defun harness-perms--place-tag (path)
+  "Return a few words for the title of a prompt about remote PATH, or nil.
+They say which place a directory the prompt names is, as
+`harness-perms--place-phrase' does in the reason."
+  (cond
+   ((harness-remote-home-p path)
+    (if (member (nth 2 (harness-remote-home-parts path)) '("" "/"))
+        "the login's home directory"
+      "in the login's home directory"))
+   ((and (harness-file-remote-p path) (member (cdr (harness-perms--split path)) '("" "/")))
+    "the whole host")))
+
+(defun harness-perms--path-text (path &optional tool)
+  "Return PATH abbreviated for a message, with what it is when that needs saying.
+\"/ssh:box:~/ (the home directory of the login on box, where ssh
+starts)\", say (see `harness-perms--place-phrase'); the path alone
+otherwise."
+  (let ((shown (harness-abbreviate-file-name path))
+        (phrase (harness-perms--place-phrase path tool)))
+    (if phrase (format "%s (%s)" shown phrase) shown)))
 
 (defun harness-perms--jail (decision next request)
   "Pass REQUEST on when its paths lie inside the session's roots.
@@ -2438,10 +2562,11 @@ current value and NEXT continues the chain.  Roots in the request's
          (t
           (funcall next
                    (list :behavior 'deny :final t
-                         :reason (format "%s is %s" bad (harness-perms--outside-phrase session bad))
+                         :reason (format "%s is %s" (harness-perms--path-text bad (plist-get request :tool))
+                                         (harness-perms--outside-phrase session bad))
                          :hint (format "Allowed roots: %s. Work inside them, or ask the user to grant access to %s with the allow-dir command.%s%s"
-                                       (mapconcat #'abbreviate-file-name roots ", ")
-                                       (abbreviate-file-name (harness-perms--dir-of bad))
+                                       (mapconcat #'harness-abbreviate-file-name roots ", ")
+                                       (harness-perms--path-text (harness-perms--dir-of bad) (plist-get request :tool))
                                        (harness-perms--scratch-hint session bad)
                                        (harness-perms--inspection-hint request bad))))))))))
 
@@ -2471,7 +2596,10 @@ properties to the entry kept until then."
                                        :call-id (plist-get request :call-id)
                                        :dir dir
                                        :pattern pattern
-                                       :title (format "Access %s" (abbreviate-file-name dir))
+                                       :title (format "Access %s%s" (harness-abbreviate-file-name dir)
+                                                      (if-let* ((tag (harness-perms--place-tag dir)))
+                                                          (format " (%s)" tag)
+                                                        ""))
                                        :reason reason
                                        :options options)))
          (pid (harness-call 'session/pending-add sid pending)))
@@ -2487,7 +2615,8 @@ continue the chain once `permission/answer' arrives."
   (harness-perms--pend-dir request next
                            (harness-perms--prompt-dir (plist-get request :session) (harness-perms--dir-of bad))
                            (format "%s wants %s, which is %s"
-                                   (harness-tools-label (plist-get request :tool)) (abbreviate-file-name bad)
+                                   (harness-tools-label (plist-get request :tool))
+                                   (harness-perms--path-text bad (plist-get request :tool))
                                    (harness-perms--outside-phrase (plist-get request :session) bad))
                            (harness-perms--dir-prompt-options harness-perms-dir-options)
                            :decision decision))
@@ -2516,7 +2645,7 @@ decision, or `continue' when the chain goes on."
       (let ((d (list :behavior 'deny :final t
                      :reason (or (plist-get answer :reason)
                                  (format "the user denied access to %s"
-                                         (abbreviate-file-name (if (memq scope '(session always)) pattern dir))))
+                                         (harness-abbreviate-file-name (if (memq scope '(session always)) pattern dir))))
                      :hint (if (plist-get waiting :explicit)
                                "Do not ask for it again; work inside the allowed directories."
                              "Do not retry; work inside the allowed directories."))))
@@ -2546,10 +2675,10 @@ the user is asked about the directory a grant really opens.  A path
 naming a file stands for the directory holding it; anything else is a
 directory, so one that does not exist yet is not widened to its
 parent."
-  (let ((abs (harness-perms--with-host (expand-file-name path (or (plist-get session :cwd) default-directory))
+  (let ((abs (harness-perms--with-host (harness-absolute-file-name path (or (plist-get session :cwd) default-directory))
                                        (plist-get session :host))))
     ;; Never touch the file system for a remote path (see `harness-perms--dir-of').
-    (if (file-remote-p abs)
+    (if (harness-file-remote-p abs)
         (file-name-as-directory abs)
       (let ((real (harness-path-normalize abs)))
         (if (file-regular-p real)
@@ -2612,20 +2741,20 @@ the user granted when they did, for `harness-perms--dir-request-result'."
      ((not (harness-perms--outside (list dir) roots))
       ;; The handler gets the path alone: nothing was granted.
       (funcall next (list :behavior 'allow :final t :input (list :path path) :by 'jail
-                          :reason (format "%s is already allowed; nothing to grant" (abbreviate-file-name dir)))))
+                          :reason (format "%s is already allowed; nothing to grant" (harness-abbreviate-file-name dir)))))
      ((eq (harness-perms--sym (plist-get rule :behavior)) 'deny)
       (funcall next (plist-put (plist-put (harness-perms--rule-decision rule (plist-get session :id)) :final t)
                                :hint "Do not ask for it again; work inside the allowed directories.")))
      ((or (harness-perms--non-interactive-p session)
           (not (harness-method-exists-p 'session/pending-add)))
       (funcall next (list :behavior 'deny :final t :by 'away
-                          :reason (format "nobody can grant %s: %s" (abbreviate-file-name dir)
+                          :reason (format "nobody can grant %s: %s" (harness-abbreviate-file-name dir)
                                           (if (harness-perms--non-interactive-p session)
                                               "the session is non-interactive and the user is away"
                                             "no user is available"))
                           :hint (format "Work inside the allowed directories (%s). If the task cannot be done without %s, finish what you can and say so in your answer; the user can grant it with M-x harness-directories.%s%s"
-                                        (mapconcat #'abbreviate-file-name roots ", ")
-                                        (abbreviate-file-name dir)
+                                        (mapconcat #'harness-abbreviate-file-name roots ", ")
+                                        (harness-abbreviate-file-name dir)
                                         (harness-perms--scratch-hint session dir)
                                         (harness-perms--inspection-hint request dir)))))
      (t
@@ -2654,7 +2783,7 @@ session."
           (harness-perms--grant-for-turn session-id grant))
         (list :behavior 'allow :final t
               :input (list :path (plist-get input :path) :granted grant)
-              :reason (format "the user granted %s %s" (abbreviate-file-name grant)
+              :reason (format "the user granted %s %s" (harness-abbreviate-file-name grant)
                               (pcase scope
                                 ('always "to every session")
                                 ('session "to this session")
@@ -2662,7 +2791,7 @@ session."
     (error
      (harness-log 'error "perms: granting %s to %s failed: %S" grant session-id err)
      (list :behavior 'deny :final t
-           :reason (format "granting %s failed: %s" (abbreviate-file-name grant) (harness-error-message err))))))
+           :reason (format "granting %s failed: %s" (harness-abbreviate-file-name grant) (harness-error-message err))))))
 
 (defun harness-perms--grant-for-turn (session-id grant)
   "Grant GRANT, a directory or a glob pattern, to SESSION-ID until its turn ends.
@@ -2718,7 +2847,7 @@ CTX names the session."
                                (plist-get session :host))
                               entries :key (lambda (e) (plist-get e :dir)) :test #'equal)))
          (entry (and dir (cl-find-if (lambda (e) (harness-perms--within-p (plist-get e :dir) dir)) entries)))
-         (shown (and dir (abbreviate-file-name dir))))
+         (shown (and dir (harness-abbreviate-file-name dir))))
     (cond
      ((null dir) (harness-tool-error "Give path, the directory you need"))
      ;; The user edited the prompt's pattern: say what they granted.
@@ -2726,7 +2855,7 @@ CTX names the session."
       (let ((glob (harness-perms--glob-p (plist-get grant :dir))))
         (harness-tool-ok
          (format "The user granted %s instead of %s: it is now allowed for %s. Tools that take paths can use %s%s."
-                 (abbreviate-file-name (plist-get grant :dir)) shown
+                 (harness-abbreviate-file-name (plist-get grant :dir)) shown
                  (pcase (plist-get grant :source)
                    ('config "every session")
                    ('turn "the rest of this turn (ask again in a later turn if you need it then)")
@@ -2746,7 +2875,7 @@ CTX names the session."
                              shown))
           ('(config t) (format "%s is now an allowed directory of every session." shown))
           (`(,source ,_) (format "%s is already accessible: it lies inside %s (%s)." shown
-                                 (abbreviate-file-name (plist-get entry :dir))
+                                 (harness-abbreviate-file-name (plist-get entry :dir))
                                  (harness-perms--source-label source))))
         " Tools that take paths can use it, and bash sees it at the same path."))))))
 
@@ -2945,7 +3074,7 @@ name what it holds for."
          (commands (harness-perms--rule-command-title rule))
          (input (harness-perms--input-title (plist-get rule :input)))
          (path (and (stringp path) (not (harness-string-blank-p path))
-                    (abbreviate-file-name path)))
+                    (harness-abbreviate-file-name path)))
          (subject (cond ((and tool commands) (format "%s (%s)" tool commands))
                         (commands (format "%s calls" commands))
                         (tool tool)))
@@ -3912,10 +4041,15 @@ agent to carry on as it is."
 ;;                     under the session's project; of the tool
 ;;   any other call    every call whose arguments are exactly these; of the
 ;;                     tool
+;;   a call on a host  the steps of a shell command for that host alone
+;;                     first (the ssh tool's `:host', as the agent wrote
+;;                     it; the host of a TRAMP directory bash runs in),
+;;                     then the programs and the tool for any host
 ;;
 ;; Each step says what it leaves free in its label ("(any arguments)",
-;; "(any path)"), because that is what one reads a lasting answer for:
-;; whether it is all calls of a tool, or only some arguments of them.
+;; "(any path)", "(any host, any command)"), because that is what one
+;; reads a lasting answer for: whether it is all calls of a tool, or only
+;; some arguments of them, on some host or on any.
 ;; The steps are listed in the prompt (`:ladder', each with an `:id' and
 ;; a `:label'), and `:cover' names the one the answers start on.  That is
 ;; the usual cover, what a lasting answer always held for -- the programs
@@ -3928,6 +4062,12 @@ agent to carry on as it is."
 ;; A step records the keys of a rule (`harness-perms-rules'): `:input'
 ;; for exact arguments, `:path' for a file, a directory or a project,
 ;; `:commands' for programs and subcommands, and nothing for the tool.
+;; A step for one host adds `:input' with the ssh tool's `:host' (the
+;; rule holds for calls that wrote the host that way; one that spells it
+;; differently asks again), or, for bash in a TRAMP directory, `:path'
+;; with the host's whole file system.  "Always allow" on `journalctl -u k3s'
+;; run on a host therefore covers journalctl on that host, where it used to
+;; cover journalctl on every host the agent would ever name.
 
 (defcustom harness-perms-default-cover 'usual
   "Which cover the lasting answers of a permission prompt start on.
@@ -3979,7 +4119,7 @@ more calls than the one asked about."
   "Return the directory that holds all of PATHS, as a directory name, or nil.
 PATHS are absolute.  Nil when they are on different hosts, or the
 directory would be the root of a file system."
-  (when (and paths (null (cdr (delete-dups (mapcar (lambda (p) (or (file-remote-p p) "")) paths)))))
+  (when (and paths (null (cdr (delete-dups (mapcar (lambda (p) (or (harness-file-remote-p p) "")) paths)))))
     (let* ((dirs (mapcar (lambda (p) (if (directory-name-p p) p (or (file-name-directory p) ""))) paths))
            (common (car dirs)))
       (dolist (d (cdr dirs))
@@ -3990,6 +4130,26 @@ directory would be the root of a file system."
           (let ((dir (substring common 0 (1+ slash))))
             (unless (equal (cdr (harness-perms--split dir)) "/") dir)))))))
 
+(defun harness-perms--host-scope (request)
+  "Return how a lasting answer to REQUEST's call can be kept to its host, or nil.
+The result is (RULE . NAME): RULE the keys a rule adds so that it holds
+for calls on this host only, NAME what the labels call the host.  An
+ssh call (any exec call with a `:host' argument) names its host in that
+argument, which a rule can require of a call as it wrote it
+\(`:input'); a call that runs in a directory on a host, such as bash in
+a TRAMP directory, has the host's whole file system as its `:path'.
+Nil for a call on this machine, which is no host to scope to."
+  (let ((input (plist-get request :input))
+        (dir (harness-perms--command-dir request)))
+    (cond
+     ((and (proper-list-p input) (stringp (plist-get input :host))
+           (not (harness-string-blank-p (plist-get input :host))))
+      (cons (list :input (list :host (plist-get input :host)))
+            (string-trim (plist-get input :host))))
+     ((and (stringp dir) (harness-file-remote-p dir))
+      (cons (list :path (concat (harness-file-remote-p dir) "/**"))
+            (harness-perms--login-on dir))))))
+
 (defun harness-perms--shell-covers (request tool)
   "Return the cover steps for REQUEST, a shell call of TOOL, and the usual one.
 The result is (STEPS . USUAL), USUAL the id of the step a lasting
@@ -3997,7 +4157,14 @@ answer always held for.  Narrowest first: the exact arguments, the
 programs with the subcommands the line shares, what it always covered,
 its programs alone, the tool.  Steps that would hold the same calls are
 one, named for the widest; a command line the reader cannot read has
-the exact arguments and the tool only."
+the exact arguments and the tool only.
+
+A call on a host (`harness-perms--host-scope') has the same steps for
+that host alone -- \"every journalctl call on box (any arguments)\" --
+and they come first, the programs of the host being what a lasting
+answer starts on; the wider steps that follow hold on any host (the
+programs and the tool), and say so.  An answer for a host must not hold
+for every host the agent may name next."
   (let* ((command (harness-perms--command request))
          (groups (harness-perms--command-groups command))
          (usual (harness-perms--command-rule-prefixes command))
@@ -4005,6 +4172,9 @@ the exact arguments and the tool only."
          (subs (harness-perms--sort-prefixes
                 (mapcar (lambda (e) (harness-perms--command-common-prefix (cdr e))) groups)))
          (exact (harness-perms--exact-arguments request))
+         (scope (harness-perms--host-scope request))
+         (keys (car scope))
+         (host (cdr scope))
          (steps nil))
     (cl-flet ((add (id label &rest rule)
                 (let ((step (apply #'harness-perms--cover-step id label rule)))
@@ -4012,22 +4182,33 @@ the exact arguments and the tool only."
                   (if (equal (plist-get (car steps) :rule) rule)
                       (setcar steps step)
                     (push step steps))))
-              (calls (prefixes)
-                (format "every %s call (any arguments)" (harness-perms--command-pattern-title prefixes))))
+              (calls (prefixes &optional where)
+                (format "every %s call%s (%sany arguments)" (harness-perms--command-pattern-title prefixes)
+                        (if where (format " on %s" where) "")
+                        (if (and host (not where)) "any host, " ""))))
       (when exact
         (add "exact" (format "every %s call %s" tool (harness-perms--input-title exact))
              :input exact))
+      (when scope
+        ;; This host alone.
+        (when groups
+          (apply #'add "host-subcommands" (calls subs host) (append keys (list :commands subs)))
+          (apply #'add "host-commands" (calls usual host) (append keys (list :commands usual)))
+          (apply #'add "host-programs" (calls programs host) (append keys (list :commands programs))))
+        (apply #'add "host-tool" (format "every %s call on %s (any command)" tool host) keys))
       (when groups
-        (add "subcommands" (calls subs) :commands subs)
-        (add "commands" (calls usual) :commands usual)
+        (unless scope
+          (add "subcommands" (calls subs) :commands subs)
+          (add "commands" (calls usual) :commands usual))
         (add "programs" (calls programs) :commands programs))
-      (add "tool" (format "every %s call (any command)" tool)))
+      (add "tool" (format "every %s call (%sany command)" tool (if scope "any host, " ""))))
     (setq steps (nreverse steps))
     (cons steps
-          (or (plist-get (cl-find-if (lambda (s) (and groups (equal (plist-get s :rule) (list :commands usual))))
-                                     steps)
-                         :id)
-              "tool"))))
+          (let ((usual-rule (if scope (append keys (list :commands usual)) (list :commands usual))))
+            (or (plist-get (cl-find-if (lambda (s) (and groups (equal (plist-get s :rule) usual-rule)))
+                                       steps)
+                           :id)
+                (if scope "host-tool" "tool"))))))
 
 (defun harness-perms--path-covers (request tool)
   "Return the cover steps for REQUEST, a call of TOOL on files, or nil.
@@ -4040,7 +4221,7 @@ paths."
          (paths (delete-dups (copy-sequence (plist-get request :paths))))
          (dir (harness-perms--paths-dir paths))
          (project (cl-some (lambda (root)
-                             (when (and (stringp root) (not (file-remote-p root)) dir
+                             (when (and (stringp root) (not (harness-file-remote-p root)) dir
                                         (harness-perms--within-p root dir))
                                (file-name-as-directory (expand-file-name root))))
                            (list (plist-get session :worktree) (plist-get session :cwd))))
@@ -4052,14 +4233,14 @@ paths."
                         (setcar steps step)
                       (push step steps)))))
         (when (null (cdr paths))
-          (add "path" (format "every %s call on %s" tool (abbreviate-file-name (car paths)))
+          (add "path" (format "every %s call on %s" tool (harness-abbreviate-file-name (car paths)))
                :path (car paths)))
         (when dir
-          (add "dir" (format "every %s call under %s (any file)" tool (abbreviate-file-name dir))
+          (add "dir" (format "every %s call under %s (any file)" tool (harness-abbreviate-file-name dir))
                :path dir))
         (when (and project dir (not (equal project dir)) (harness-perms--within-p project dir)
                    (not (equal (cdr (harness-perms--split project)) "/")))
-          (add "project" (format "every %s call under %s (any file)" tool (abbreviate-file-name project))
+          (add "project" (format "every %s call under %s (any file)" tool (harness-abbreviate-file-name project))
                :path project))
         (add "tool" (format "every %s call (any path)" tool)))
       (nreverse steps))))
@@ -4317,13 +4498,14 @@ as for a tool rule.  The jail still decides where each call may reach."
   (let ((dir (plist-get record :dir))
         (rule (plist-get record :rule)))
     (if (stringp dir)
-        (abbreviate-file-name dir)
+        (harness-abbreviate-file-name dir)
       (let* ((tool (plist-get rule :tool))
              (path (plist-get rule :path))
              (commands (harness-perms--rule-command-title rule))
              (input (harness-perms--input-title (plist-get rule :input)))
-             (path (and (stringp path) (not (harness-string-blank-p path)) (abbreviate-file-name path)))
-             (what (cond ((and tool path) (format "%s calls in %s" tool path))
+             (path (and (stringp path) (not (harness-string-blank-p path)) (harness-abbreviate-file-name path)))
+             (what (cond ((and tool commands path) (format "every %s call to %s in %s" tool commands path))
+                         ((and tool path) (format "%s calls in %s" tool path))
                          ((and tool commands) (format "every %s call to %s" tool commands))
                          (tool (format "every %s call" tool))
                          (commands (format "every %s call" commands))
@@ -4488,9 +4670,9 @@ settings page say), every entry stays as it is.  Return (OUTCOME
       (cons 'changed (format "Not undone: %s changed since%s, and %s still covers %s, so they stay as they are"
                              (if always "the allowed directories" "this session's directories")
                              (if always " (in Settings, say)" "")
-                             (abbreviate-file-name cover) (abbreviate-file-name dir))))
+                             (harness-abbreviate-file-name cover) (harness-abbreviate-file-name dir))))
      (t
-      (cons 'gone (format "Nothing to undo: %s is no longer %s" (abbreviate-file-name dir)
+      (cons 'gone (format "Nothing to undo: %s is no longer %s" (harness-abbreviate-file-name dir)
                           (if always "among the allowed directories" "granted to this session")))))))
 
 (defun harness-perms--record-scope (record)
@@ -4699,11 +4881,11 @@ directories not set by the policy.  Return (OUTCOME . MESSAGE) as
      ((and always (harness-policy-pinned-p 'harness-allowed-directories))
       (cons 'changed "Not redone: the policy sets the allowed directories now"))
      ((equal cover dir)
-      (cons 'changed (format "Not redone: %s is %s again already" (abbreviate-file-name dir)
+      (cons 'changed (format "Not redone: %s is %s again already" (harness-abbreviate-file-name dir)
                              (if always "among the allowed directories" "granted to this session"))))
      (cover
       (cons 'changed (format "Not redone: %s covers %s now, so %s stay as they are"
-                             (abbreviate-file-name cover) (abbreviate-file-name dir)
+                             (harness-abbreviate-file-name cover) (harness-abbreviate-file-name dir)
                              (if always "the allowed directories" "this session's directories"))))
      (t (harness-call 'permission/allow-dir session-id dir (and always 'always))
         (list 'done)))))
@@ -5346,7 +5528,7 @@ here.  Return the session's effective roots."
        (cl-remove-if (lambda (d) (equal dir (harness-perms--expand-dir session d))) global)))
      (t (signal 'harness-error
                 (list (format "%s is not a grant (it comes from the cwd, the worktree, the session's temporary directory or .dir-locals.el)"
-                              (abbreviate-file-name dir))))))
+                              (harness-abbreviate-file-name dir))))))
     (harness-emit 'permission/dir-revoked session-id dir)
     (harness-perms-roots (harness-perms--session session-id))))
 

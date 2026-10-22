@@ -140,6 +140,22 @@ with `harness-perms-default-cover`, on the narrowest step.
 Roots and rules alike are directories or patterns (see
 `harness-perms--within-p`).
 
+The paths of another host are TRAMP names, and nothing in the chain may
+connect to the host to look at one: not to expand it, not to ask for
+its home directory, not to find out whether a connection is open.  The
+login's home directory, where an ssh call without a cwd starts, is
+therefore a place the harness can name but not find, and it names it
+as TRAMP does, /ssh:HOST:~/ (`harness-remote-home-p`).  Such a name is
+compared by its text and never expanded: not with the host's home
+directory, which is unknown, and not with this machine's, which is
+another one altogether.  A root in a home directory holds what lies in
+that home; a root elsewhere on the host holds it only if it holds the
+whole host (/ssh:HOST:/ or /ssh:HOST:/**, what the prompts for a host
+used to ask for, so those grants go on working), and a directory
+such as /ssh:HOST:/home/u/ never does.  The prompt asks about the home
+directory, the narrowest honest question, says what it is, and
+offers the directories above it and the whole host as wider answers.
+
 A shell command's only path is where it runs, which is all the jail
 checks; what it reaches is read off the command line (see "What a
 shell command reaches").  Its prompt is about the paths it names
