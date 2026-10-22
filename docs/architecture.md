@@ -5559,6 +5559,29 @@ priority).
   values a new task would get, the configured ones included --
   `:supervisor' only while the module is loaded -- and the board submits
   them with each task.
+  `:attachments` are files of the harness's machine (`:path`, with
+  `:mime`, `:name` and `:size`), as the compose box of the Emacs it runs
+  in attaches them, or, for a client on another device, which can name no
+  such file, pictures sent as data: `{data, mime, name}`, `data` in
+  base64, with no path.  Each picture sent as data is checked: it is
+  `image/png`, `image/jpeg`, `image/gif` or `image/webp`, its bytes are
+  what the type says (a `mime` that disagrees is refused, and one left
+  out is read from them), and it is no larger than
+  `harness-tasks--inline-max-bytes` (10 MB), with no more than
+  `harness-tasks--inline-max-count` (8) to a request.  A request with
+  one that fails is refused whole, before anything is written.  The
+  rest are written to `attachments/TASK-ID/NAME` under the state
+  directory, a name made of plain characters whatever the client called
+  the picture, and the task holds the ordinary file attachment that
+  names it (`harness-tasks--keep-inline-attachments`), so what reads a
+  task's attachments takes no notice, and no byte rides in the record or
+  in every `task/changed`.  `task/update` takes them the same way.  The
+  files stay as long as the task's session does, whose transcript names
+  them, and go with it (`harness-tasks--forget-attachments`): a task
+  cancelled before it started, `task/delete` with its session, a deleted
+  session.  `task/settings` says whether a harness takes them, as
+  `:inline-attachments`, the media types: an older harness does not say,
+  and a client must not offer it pictures, which it would lose.
   With `:refine` the task goes to the backlog instead (below).
   With `:main-tree` it works in the project's main checkout: no worktree
   is made, it gets no branch, and nothing merges when its turn ends, so
@@ -9280,7 +9303,9 @@ as a task.  `session/load` renders a virtual session as a single
 `harness:projects` refreshes it by rewriting that same message in place
 (the same `_harness.nodeId`), and prompting `harness:new-task` runs
 `task/submit` and answers with a confirmation `agent_message_chunk`
-naming the new task (`_harness.taskId`).  Virtual sessions send only
+naming the new task (`_harness.taskId`); the pictures a client attaches
+to that prompt go with the task, as attachments sent as data
+(`harness-acp--prompt-attachments`).  Virtual sessions send only
 standard update kinds, never `_harness/*` ones, so a third-party ACP
 client shows them.
 

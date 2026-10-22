@@ -1077,6 +1077,18 @@ was made from (`harness-files-owning-checkout'), not a project of its own."
                   ""))
               blocks "")))
 
+(defun harness-acp--prompt-attachments (blocks)
+  "Return the pictures of BLOCKS, a prompt, as attachments carrying their data.
+For `task/submit', which keeps each as a file of the task: what a
+client attaches to the task it composes in `harness:new-task' is the
+task's, as it is a session's message's.  An image's `_harness.label',
+its `:label' here, is the name it is kept under."
+  (delq nil (mapcar (lambda (b)
+                      (and (equal (plist-get b :type) "image") (plist-get b :data)
+                           (append (list :data (plist-get b :data) :mime (plist-get b :mime))
+                                   (and (stringp (plist-get b :label)) (list :name (plist-get b :label))))))
+                    blocks)))
+
 (defun harness-acp--prompt-virtual (client sid blocks)
   "Act on a prompt of virtual session SID and answer it."
   (let* ((state (gethash sid harness-acp--virtual-state))
@@ -1098,7 +1110,9 @@ was made from (`harness-files-owning-checkout'), not a project of its own."
           (signal 'harness-acp-invalid-params (list "a task needs a prompt")))
         (unless (harness-method-exists-p 'task/submit)
           (signal 'harness-no-such-method (list 'task/submit)))
-        (let* ((task (harness-call 'task/submit cwd text))
+        (let* ((attachments (harness-acp--prompt-attachments blocks))
+               (task (apply #'harness-call 'task/submit cwd text
+                            (and attachments (list (list :attachments attachments)))))
                (id (plist-get task :id))
                (name (plist-get task :name)))
           (harness-acp--client-notify

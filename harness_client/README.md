@@ -133,6 +133,16 @@ time it opens. It asks again only when the harness does.
 - **Keeps a conversation useful.** Local echo, auto-scroll with a "Latest"
   chip, a collapsible plan strip, a context-window meter, cost per session, and
   image attachments to prompts.
+- **Takes pictures with a new task.** The New task sheet attaches up to four
+  images to the description, as a message does. A phone can name no file of
+  the harness's machine, so the bytes go with `task/submit`
+  (`opts.attachments`, each `{mime, name, data}` with `data` in base64) and the
+  harness keeps each as a file of the task's own, which its session is handed
+  and its detail view lists. The type is read from the bytes (PNG, JPEG, GIF
+  or WebP; anything else is refused on the sheet, as is a picture over 10 MB),
+  the pictures stay with the description if the sheet is closed or the
+  connection lost, and the button shows only when the harness's `task/settings`
+  say it takes them (`inlineAttachments`): an older harness would lose them.
 - **Survives a lost connection.** A phone loses its connection all the time:
   it sleeps, changes network, a VPN restarts, the harness reloads. The app
   does not tell the person to go and reconnect. Over `ws://` and `wss://` it
@@ -472,7 +482,11 @@ The widget tests drive the real `AcpClient` against an in-memory ACP server
 - sessions, search and project filter (worktrees fold into their project)
 - transcript replay, streaming, tool cards, thought blocks and plan
 - permission request and allow, question with a diagram and send
-- creating a session and opening the new-task sheet / submitting a task
+- creating a session and opening the new-task sheet / submitting a task, with
+  pictures (`test/new_task_images_test.dart`: attached, removed, kept in the
+  draft, limited to four, refused by type and size, hidden from a harness that
+  does not take them, listed on the task), and the message composer still
+  attaching as it did
 - task review and verification, usage (a row per project, worktrees added),
   server capability table and project list
 - plain ACP fallback (three tabs, working chat, standard notice)

@@ -1079,6 +1079,183 @@ retried."
         (should (= 1 (length (harness-test-await
                               (harness-acp-request conn "_harness/task/list" (list :cwd default-directory))))))))))
 
+;;;; Pictures sent as data
+
+;; A client on another device cannot name a file of the harness's
+;; machine, so it sends a picture's bytes (`harness-tasks--keep-inline-attachments').
+
+(defconst harness-tasks-test--png
+  (base64-decode-string
+   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==")
+  "The bytes of a picture one pixel large.")
+
+(defun harness-tasks-test--picture (&optional name mime bytes)
+  "An attachment that sends BYTES (a PNG) as data, as NAME and of type MIME."
+  (append (list :data (base64-encode-string (or bytes harness-tasks-test--png) t))
+          (and (not (eq mime t)) (list :mime (or mime "image/png")))
+          (and name (list :name name))))
+
+(defun harness-tasks-test--file-bytes (path)
+  "The bytes of the file PATH."
+  (with-temp-buffer
+    (set-buffer-multibyte nil)
+    (insert-file-contents-literally path)
+    (buffer-string)))
+
+(defun harness-tasks-test--attachment-dirs ()
+  "The directories task attachments are kept in, in this test's state directory."
+  (let ((root (expand-file-name "attachments/" harness-state-directory)))
+    (and (file-directory-p root) (directory-files root t "\\`[^.]"))))
+
+(ert-deftest harness-tasks-picture-sent-as-data-is-kept-as-a-file ()
+  "A picture sent as data is kept in a file of the task's own, which the task names.
+Over the wire, as the phone app sends it: the name is the client's only as far as it is
+plain, two of one name get two files, and neither the record nor the event carries a byte."
+  (harness-tasks-test-with
+    (let* ((conn (harness-acp-connect))
+           (task (harness-test-await
+                  (harness-acp-request
+                   conn "_harness/task/submit"
+                   (list :cwd default-directory :prompt "make it look like this"
+                         :opts (list :attachments
+                                     (list (harness-tasks-test--picture "../../shot one.PNG")
+                                           (harness-tasks-test--picture "shot one.png")
+                                           (harness-tasks-test--picture nil t)))))))
+           (id (plist-get task :id))
+           (atts (plist-get task :attachments))
+           (kept-in (expand-file-name (concat "attachments/" id "/") dir)))
+      (should (equal '("shot-one.png" "shot-one-2.png" "image.png") (mapcar (lambda (a) (plist-get a :name)) atts)))
+      (dolist (att atts)
+        (should (equal kept-in (file-name-directory (plist-get att :path))))
+        (should (equal "image/png" (plist-get att :mime)))
+        (should (= (length harness-tasks-test--png) (plist-get att :size)))
+        (should (equal harness-tasks-test--png (harness-tasks-test--file-bytes (plist-get att :path))))
+        (should-not (plist-member att :data)))
+      ;; Not a byte of it in the record, which every change of the task sends everyone.
+      (should-not (string-search "iVBOR" (prin1-to-string (harness-call 'task/get id))))
+      ;; The session's opening message names the files, as it does an attachment of the compose box.
+      (harness-tasks-test-wait-state id 'done)
+      (let* ((message (car (harness-tasks-test-user-nodes (harness-tasks-test-session-id id))))
+             (images (cl-remove-if-not (lambda (b) (equal "image" (plist-get b :type))) (plist-get message :blocks))))
+        (should (equal (mapcar (lambda (a) (plist-get a :path)) atts)
+                       (mapcar (lambda (b) (plist-get b :path)) images)))))))
+
+(ert-deftest harness-tasks-picture-types-are-read-from-the-bytes ()
+  "The type of a picture is what its bytes say: PNG, JPEG, GIF and WebP, whatever it is called.
+A client may leave the type out; one that names the wrong type, or sends something that is no
+picture, is refused, and with it everything it sent: nothing is written."
+  (harness-tasks-test-with
+    (let ((jpeg (concat (unibyte-string #xff #xd8 #xff #xe0) "JFIF"))
+          (gif (concat "GIF89a" (make-string 8 0)))
+          (webp (concat "RIFF" (make-string 4 0) "WEBPVP8 ")))
+      (let* ((task (harness-call 'task/submit default-directory "pictures"
+                                 (list :attachments
+                                       (list (harness-tasks-test--picture "a.png" t jpeg)
+                                             (harness-tasks-test--picture "b" t gif)
+                                             (harness-tasks-test--picture "c.bin" "image/webp" webp)))))
+             (atts (plist-get task :attachments)))
+        (should (equal '("image/jpeg" "image/gif" "image/webp") (mapcar (lambda (a) (plist-get a :mime)) atts)))
+        (should (equal '("a.jpg" "b.gif" "c.webp") (mapcar (lambda (a) (plist-get a :name)) atts))))
+      (dolist (case (list (list "is not base64 data" (list :data "!!not base64!!" :mime "image/png" :name "a.png"))
+                          (list "is no picture a task takes"
+                                (harness-tasks-test--picture "notes.png" "image/png" "just some text"))
+                          (list "says it is image/jpeg but holds image/png"
+                                (harness-tasks-test--picture "a.jpg" "image/jpeg"))))
+        (let ((err (should-error (harness-call 'task/submit default-directory "refused"
+                                                (list :attachments (list (harness-tasks-test--picture "fine.png")
+                                                                         (cadr case)))))))
+          (should (string-match-p (regexp-quote (car case)) (error-message-string err)))))
+      ;; The good picture sent before each bad one was not kept either, and no task was made.
+      (should (= 1 (length (harness-call 'task/list default-directory))))
+      (should (= 1 (length (harness-tasks-test--attachment-dirs))))
+      (should (= 3 (length (directory-files (car (harness-tasks-test--attachment-dirs)) nil "\\`[^.]")))))))
+
+(ert-deftest harness-tasks-pictures-sent-as-data-are-limited ()
+  "A picture may be no larger than the limit, and a request holds no more than the limit's number."
+  (harness-tasks-test-with
+    (let ((harness-tasks--inline-max-bytes (1- (length harness-tasks-test--png))))
+      (should (string-match-p "is larger than"
+                              (error-message-string
+                               (should-error (harness-call 'task/submit default-directory "big"
+                                                           (list :attachments (list (harness-tasks-test--picture "big.png")))))))))
+    (let ((harness-tasks--inline-max-count 2))
+      (should (string-match-p "at most 2 pictures"
+                              (error-message-string
+                               (should-error (harness-call 'task/submit default-directory "many"
+                                                           (list :attachments (make-list 3 (harness-tasks-test--picture)))))))))
+    (should-not (harness-call 'task/list default-directory))
+    (should-not (harness-tasks-test--attachment-dirs))))
+
+(ert-deftest harness-tasks-file-attachments-are-left-as-they-are ()
+  "An attachment naming a file of this machine is kept as it was sent, beside pictures sent as data.
+Even one that also carries data: the path a client names is no path of ours, and is dropped."
+  (harness-tasks-test-with
+    (let* ((shot (expand-file-name "after.png" default-directory))
+           (file (list :path shot :mime "image/png" :name "after.png" :size 16)))
+      (with-temp-file shot (insert "not really a png"))
+      (let* ((task (harness-call 'task/submit default-directory "mixed"
+                                 (list :attachments (list file (append (harness-tasks-test--picture "sent.png")
+                                                                       (list :path "/etc/passwd"))))))
+             (atts (plist-get task :attachments)))
+        (should (equal file (car atts)))
+        (should (equal "sent.png" (plist-get (cadr atts) :name)))
+        (should (string-prefix-p (expand-file-name "attachments/" dir) (plist-get (cadr atts) :path)))))))
+
+(ert-deftest harness-tasks-picture-sent-as-data-replaces-the-attachments-of-an-edit ()
+  "Editing a task that waits takes pictures sent as data too, as it takes files."
+  (harness-tasks-test-with
+    (let* ((harness-tasks-max-running 0)
+           (id (harness-tasks-test-submit "first words"))
+           (view (harness-call 'task/update id "second words"
+                               (list (harness-tasks-test--picture "later.png"))))
+           (att (car (plist-get view :attachments))))
+      (should (equal "second words" (plist-get view :prompt)))
+      (should (equal "later.png" (plist-get att :name)))
+      (should (equal (expand-file-name (concat "attachments/" id "/later.png") dir) (plist-get att :path)))
+      (should (equal harness-tasks-test--png (harness-tasks-test--file-bytes (plist-get att :path)))))))
+
+(ert-deftest harness-tasks-pictures-sent-as-data-go-with-the-session ()
+  "The files of a task's pictures are named by its session's transcript, so they stay while the session does.
+Cancelling a task that never started, or deleting one with its session, takes them away."
+  (harness-tasks-test-with
+    (let ((picture (list :attachments (list (harness-tasks-test--picture)))))
+      ;; Never started, so its session goes with it.
+      (let* ((harness-tasks-max-running 0)
+             (waiting (plist-get (harness-call 'task/submit default-directory "wait" picture) :id)))
+        (should (= 1 (length (harness-tasks-test--attachment-dirs))))
+        (harness-call 'task/cancel waiting)
+        (should-not (harness-tasks-test--attachment-dirs)))
+      ;; Worked on: forgetting the task keeps its session, and what the session names.
+      (let* ((kept (plist-get (harness-call 'task/submit default-directory "keep" picture) :id))
+             (kept-session (harness-tasks-test-session-id kept))
+             (gone (plist-get (harness-call 'task/submit default-directory "drop" picture) :id)))
+        (harness-tasks-test-wait-state kept 'done)
+        (harness-tasks-test-wait-state gone 'done)
+        (should (= 2 (length (harness-tasks-test--attachment-dirs))))
+        (harness-call 'task/delete kept)
+        (should (harness-call 'session/exists-p kept-session))
+        (should (= 2 (length (harness-tasks-test--attachment-dirs))))
+        (harness-call 'task/delete gone t)
+        (should (equal (list (expand-file-name (concat "attachments/" kept) dir))
+                       (mapcar #'directory-file-name (harness-tasks-test--attachment-dirs))))
+        ;; Deleting the session itself ends a task too.
+        (let* ((other (plist-get (harness-call 'task/submit default-directory "other" picture) :id)))
+          (harness-tasks-test-wait-state other 'done)
+          (should (= 2 (length (harness-tasks-test--attachment-dirs))))
+          (harness-call 'session/delete (harness-tasks-test-session-id other))
+          (should (= 1 (length (harness-tasks-test--attachment-dirs)))))))))
+
+(ert-deftest harness-tasks-settings-say-which-pictures-a-client-may-send-as-data ()
+  "The settings list the types a client may attach as data: a harness that does not says none."
+  (harness-tasks-test-with
+    (let ((types '("image/png" "image/jpeg" "image/gif" "image/webp"))
+          (conn (harness-acp-connect)))
+      (should (equal types (plist-get (harness-call 'task/settings default-directory) :inline-attachments)))
+      (should (equal types (plist-get (harness-test-await
+                                       (harness-acp-request conn "_harness/task/settings"
+                                                            (list :cwd default-directory)))
+                                      :inline-attachments))))))
+
 (defvar harness-model)
 (defvar harness-thinking)
 (defvar harness-tasks-thinking)

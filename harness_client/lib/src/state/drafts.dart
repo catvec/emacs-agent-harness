@@ -1,5 +1,7 @@
 import 'package:flutter/foundation.dart';
 
+import 'prompt_attachment.dart';
+
 /// What a person typed and has not sent yet, kept apart from the screens it
 /// is typed on.
 ///
@@ -63,9 +65,13 @@ class TaskDraft {
   bool plan = false;
   bool mainTree = false;
 
-  /// Whether anything worth keeping was typed: the prompt is the work, the
-  /// rest is a choice among defaults.
-  bool get isEmpty => prompt.trim().isEmpty;
+  /// The pictures attached so far.  They are kept like the words, in memory:
+  /// picking them again is worse than retyping.
+  List<PromptAttachment> attachments = const [];
+
+  /// Whether anything worth keeping was typed: the prompt is the work, and
+  /// the pictures attached to it, the rest is a choice among defaults.
+  bool get isEmpty => prompt.trim().isEmpty && attachments.isEmpty;
 
   void clear() {
     prompt = '';
@@ -75,5 +81,6 @@ class TaskDraft {
     refine = false;
     plan = false;
     mainTree = false;
+    attachments = const [];
   }
 }

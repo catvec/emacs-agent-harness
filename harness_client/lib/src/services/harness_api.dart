@@ -283,11 +283,15 @@ class HarnessApi {
     String? model,
     String? thinking,
     String? permissionMode,
+    List<Map<String, Object?>> attachments = const [],
   }) async {
     final result = await extension('task/submit', {
       'cwd': cwd,
       'prompt': prompt,
       'opts': {
+        // Pictures sent as data, which the harness keeps as files of the
+        // task's own (see `PromptAttachment.toTaskAttachment`).
+        if (attachments.isNotEmpty) 'attachments': attachments,
         if (priority != null) 'priority': priority,
         if (refine) 'refine': true,
         if (plan) 'plan': true,

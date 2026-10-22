@@ -1513,6 +1513,50 @@ for one made beside the repository."
                   (should confirm)))))
         (ignore-errors (delete-directory dir t))))))
 
+(ert-deftest harness-acp-local-virtual-task-submit-with-pictures ()
+  "A picture sent with the prompt of the new-task session is attached to the task it submits.
+A standard ACP client composes the task there: what it attaches must not be dropped."
+  (harness-acp-test-with
+    (harness-test-load-module 'priority)
+    (harness-test-load-module 'tasks)
+    (clrhash harness-tasks--table)
+    (clrhash harness-tasks--starting)
+    (clrhash harness-tasks--naming)
+    (harness-tasks--forget-stores)
+    (setq harness-tasks--loaded t
+          harness-tasks--dirty nil
+          harness-tasks--naming-queue nil)
+    (let* ((harness-tasks-max-running 0)
+           (harness-naming-auto nil)
+           (conn (harness-acp-test-connect))
+           (project (make-temp-file "harness-acp-task-" t))
+           (png (base64-decode-string
+                 "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="))
+           (prompt "Make the button look like this"))
+      (unwind-protect
+          (progn
+            (harness-acp-test-request conn "session/load"
+                                      (list :sessionId "harness:new-task" :cwd project))
+            (let* ((r (harness-acp-test-request
+                       conn "session/prompt"
+                       (list :sessionId "harness:new-task"
+                             :prompt (list (list :type "text" :text prompt)
+                                           (list :type "image" :mimeType "image/png"
+                                                 :data (base64-encode-string png t)
+                                                 :_harness (list :label "button.png"))))))
+                   (task (harness-call 'task/get (plist-get (plist-get r :_harness) :taskId)))
+                   (att (car (plist-get task :attachments))))
+              (should (equal prompt (plist-get task :prompt)))
+              (should (= 1 (length (plist-get task :attachments))))
+              (should (equal "button.png" (plist-get att :name)))
+              (should (equal "image/png" (plist-get att :mime)))
+              (should (file-in-directory-p (plist-get att :path) (expand-file-name "attachments" harness-state-directory)))
+              (with-temp-buffer
+                (set-buffer-multibyte nil)
+                (insert-file-contents-literally (plist-get att :path))
+                (should (equal png (buffer-string))))))
+        (ignore-errors (delete-directory project t))))))
+
 ;;;; Polling the TCP sockets
 
 ;; GUI Emacs on macOS can leave a socket unread until the next input event

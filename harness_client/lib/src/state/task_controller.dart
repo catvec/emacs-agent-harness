@@ -4,6 +4,7 @@ import '../acp/acp_client.dart';
 import '../acp/acp_message.dart';
 import '../models/task.dart';
 import '../services/harness_api.dart';
+import 'prompt_attachment.dart';
 
 class TaskController extends ChangeNotifier {
   TaskController(this.api);
@@ -159,6 +160,7 @@ class TaskController extends ChangeNotifier {
     bool refine = false,
     bool plan = false,
     bool mainTree = false,
+    List<PromptAttachment> attachments = const [],
   }) => _run(
     () => api.submitTask(
       cwd: cwd,
@@ -167,6 +169,7 @@ class TaskController extends ChangeNotifier {
       refine: refine,
       plan: plan,
       mainTree: mainTree,
+      attachments: [for (final image in attachments) image.toTaskAttachment()],
     ),
   );
 

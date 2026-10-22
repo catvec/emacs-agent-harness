@@ -6,11 +6,13 @@ import 'package:flutter/material.dart';
 import '../../models/task.dart';
 import '../../state/app_controller.dart';
 import '../../state/drafts.dart';
+import '../../state/prompt_attachment.dart';
 import '../../state/task_controller.dart';
 import '../adaptive/adaptive_widgets.dart';
 import '../format.dart';
 import '../theme/harness_theme.dart';
 import '../widgets/connection_banner.dart';
+import '../widgets/image_attachments.dart';
 import '../widgets/quota_widgets.dart';
 
 class TasksScreen extends StatefulWidget {
@@ -878,6 +880,11 @@ class _NewTaskSheetState extends State<_NewTaskSheet> {
   bool _busy = false;
   String? _error;
 
+  /// The pictures attached to the task, as the draft keeps them.
+  final _attachments = <PromptAttachment>[];
+  String? _attachmentError;
+  bool _picking = false;
+
   /// What was written of the task, kept where it outlives this sheet: a
   /// sheet that is closed by accident, or thrown away with the screens when
   /// the connection is lost, must not take the description with it.
@@ -898,6 +905,7 @@ class _NewTaskSheetState extends State<_NewTaskSheet> {
       _refine = draft.refine;
       _plan = draft.plan;
       _mainTree = draft.mainTree;
+      _attachments.addAll(draft.attachments);
     }
     _prompt.addListener(_keepDraft);
     _cwd.addListener(_keepDraft);
@@ -911,7 +919,72 @@ class _NewTaskSheetState extends State<_NewTaskSheet> {
       ..priority = _priority
       ..refine = _refine
       ..plan = _plan
-      ..mainTree = _mainTree;
+      ..mainTree = _mainTree
+      ..attachments = List.of(_attachments);
+  }
+
+  /// Whether the harness takes pictures sent with a task.  One that does not
+  /// say would lose them, so none is offered: a harness without the setting
+  /// is an older one.
+  bool get _canAttach => widget.app.tasks?.settings?.takesImages ?? false;
+
+  /// Pick pictures to attach.  The harness takes only what its settings
+  /// name, up to a size, and refuses the whole task for one it does not, so
+  /// what it would refuse is kept off, and said.
+  Future<void> _pickImages() async {
+    if (_picking || _busy) return;
+    final accepted = widget.app.tasks?.settings?.inlineAttachments ?? const [];
+    setState(() {
+      _picking = true;
+      _attachmentError = null;
+    });
+    try {
+      final picked = await pickImageAttachments(
+        room: maxImageAttachments - _attachments.length,
+      );
+      if (!mounted) return;
+      final problems = <String>[];
+      final kept = <PromptAttachment>[];
+      for (final image in picked) {
+        // What the bytes are, not what the file is called.
+        final type = sniffImageMime(image.bytes);
+        if (type == null || !accepted.contains(type)) {
+          final types = [
+            for (final mime in accepted) mime.split('/').last.toUpperCase(),
+          ];
+          problems.add(
+            '${image.name} is not a picture a task takes (${types.join(', ')}).',
+          );
+        } else if (image.bytes.length > maxTaskImageBytes) {
+          problems.add(
+            '${image.name} is larger than ${maxTaskImageBytes ~/ (1024 * 1024)} MB.',
+          );
+        } else {
+          kept.add(image);
+        }
+      }
+      setState(() {
+        _attachments.addAll(kept);
+        _attachmentError = problems.isEmpty ? null : problems.join('\n');
+      });
+      _keepDraft();
+    } catch (error) {
+      if (!mounted) return;
+      setState(
+        () => _attachmentError =
+            'This platform cannot open the photo picker: ${error.toString().split('\n').first}',
+      );
+    } finally {
+      if (mounted) setState(() => _picking = false);
+    }
+  }
+
+  void _removeAttachment(int index) {
+    setState(() {
+      _attachments.removeAt(index);
+      _attachmentError = null;
+    });
+    _keepDraft();
   }
 
   /// Change a choice on the sheet, and keep it with the rest of the draft.
@@ -948,6 +1021,7 @@ class _NewTaskSheetState extends State<_NewTaskSheet> {
       refine: _refine,
       plan: _plan,
       mainTree: _mainTree,
+      attachments: _canAttach ? List.of(_attachments) : const [],
     );
     if (!mounted) return;
     if (task == null) {
@@ -1034,6 +1108,7 @@ class _NewTaskSheetState extends State<_NewTaskSheet> {
               minLines: 4,
               textInputAction: TextInputAction.newline,
             ),
+            _attachmentsRow(theme),
             const SizedBox(height: 14),
             Text('PRIORITY', style: _label(theme)),
             const SizedBox(height: 7),
@@ -1089,6 +1164,64 @@ class _NewTaskSheetState extends State<_NewTaskSheet> {
           ],
         ),
       ),
+    );
+  }
+
+  /// The pictures attached to the task, and the button that attaches more:
+  /// only when the harness takes them, which its settings say once they are
+  /// read, so the row comes up when they are.
+  Widget _attachmentsRow(ThemeData theme) {
+    final controller = widget.app.tasks;
+    if (controller == null) return const SizedBox.shrink();
+    return ListenableBuilder(
+      listenable: controller,
+      builder: (context, _) {
+        if (!_canAttach) return const SizedBox.shrink();
+        return Padding(
+          padding: const EdgeInsets.only(top: 10),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: [
+                  for (var i = 0; i < _attachments.length; i++)
+                    ImageAttachmentThumbnail(
+                      // Not by name: two files of one name can be picked.
+                      key: ObjectKey(_attachments[i]),
+                      attachment: _attachments[i],
+                      size: 64,
+                      onRemove: () => _removeAttachment(i),
+                    ),
+                  if (_attachments.length < maxImageAttachments)
+                    HarnessPill(
+                      key: const Key('task-attach'),
+                      label: _picking
+                          ? 'Opening photos…'
+                          : _attachments.isEmpty
+                          ? 'Attach images'
+                          : 'Add more',
+                      icon: Icons.add_photo_alternate_outlined,
+                      onTap: _picking || _busy ? null : _pickImages,
+                    ),
+                ],
+              ),
+              if (_attachmentError != null) ...[
+                const SizedBox(height: 6),
+                Text(
+                  _attachmentError!,
+                  key: const Key('task-attachment-error'),
+                  style: theme.textTheme.labelSmall?.copyWith(
+                    color: theme.colorScheme.error,
+                  ),
+                ),
+              ],
+            ],
+          ),
+        );
+      },
     );
   }
 
@@ -1304,6 +1437,35 @@ class _TaskDetail extends StatelessWidget {
                     style: theme.textTheme.bodyMedium?.copyWith(height: 1.5),
                   ),
                 ),
+                if (task.attachments.isNotEmpty) ...[
+                  const SizedBox(height: 16),
+                  _DetailSection(
+                    title: 'Attachments',
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        for (final name in task.attachments)
+                          Padding(
+                            padding: const EdgeInsets.only(bottom: 4),
+                            child: Row(
+                              children: [
+                                const Icon(Icons.image_outlined, size: 14),
+                                const SizedBox(width: 6),
+                                Expanded(
+                                  child: Text(
+                                    name,
+                                    style: theme.textTheme.bodySmall?.copyWith(
+                                      fontSize: 12.5,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                ],
                 if (task.report != null) ...[
                   const SizedBox(height: 16),
                   _DetailSection(

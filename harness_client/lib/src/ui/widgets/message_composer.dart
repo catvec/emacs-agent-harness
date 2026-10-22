@@ -2,12 +2,12 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:image_picker/image_picker.dart';
 
 import '../../state/drafts.dart';
-import '../../state/session_controller.dart';
+import '../../state/prompt_attachment.dart';
 import '../adaptive/adaptive_widgets.dart';
 import '../adaptive/platform_style.dart';
+import 'image_attachments.dart';
 
 class MessageComposer extends StatefulWidget {
   const MessageComposer({
@@ -116,24 +116,10 @@ class _MessageComposerState extends State<MessageComposer> {
       _attachmentError = null;
     });
     try {
-      final picker = ImagePicker();
-      final files = await picker.pickMultiImage(
-        imageQuality: 88,
-        maxWidth: 2400,
+      final loaded = await pickImageAttachments(
+        room: maxImageAttachments - _attachments.length,
       );
-      if (files.isEmpty) return;
-      final loaded = <PromptAttachment>[];
-      for (final file in files.take(4 - _attachments.length)) {
-        final bytes = await file.readAsBytes();
-        loaded.add(
-          PromptAttachment(
-            name: file.name.isEmpty ? 'image' : file.name,
-            mimeType: file.mimeType ?? _mimeOf(file.name),
-            bytes: bytes,
-          ),
-        );
-      }
-      if (!mounted) return;
+      if (loaded.isEmpty || !mounted) return;
       setState(() => _attachments.addAll(loaded));
     } catch (error) {
       if (!mounted) return;
@@ -144,14 +130,6 @@ class _MessageComposerState extends State<MessageComposer> {
     } finally {
       if (mounted) setState(() => _picking = false);
     }
-  }
-
-  String _mimeOf(String name) {
-    final lower = name.toLowerCase();
-    if (lower.endsWith('.png')) return 'image/png';
-    if (lower.endsWith('.gif')) return 'image/gif';
-    if (lower.endsWith('.webp')) return 'image/webp';
-    return 'image/jpeg';
   }
 
   KeyEventResult _onKey(FocusNode node, KeyEvent event) {

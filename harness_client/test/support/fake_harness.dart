@@ -76,6 +76,7 @@ class FakeHarness {
     this.oidcUrl,
     this.issueSecret,
     this.projectMains = true,
+    this.taskPictures = true,
     this.quota = true,
     Set<String>? knownSecrets,
   }) : knownSecrets = knownSecrets ?? <String>{} {
@@ -157,6 +158,11 @@ class FakeHarness {
   /// Whether the harness offers `project/mains`, which says what checkout a
   /// directory is a git worktree of.  An older harness does not.
   final bool projectMains;
+
+  /// Whether the harness takes pictures sent as data with a task, which its
+  /// `task/settings` say (`inlineAttachments`).  An older harness does not
+  /// say, and would lose them.
+  final bool taskPictures;
 
   /// Whether the harness offers `provider/quota`: the billing and plan quota
   /// of the providers that report one.  An older harness does not.
@@ -1185,12 +1191,29 @@ class FakeHarness {
           'requireVerification': true,
           'model': 'claude:claude-fable-5-1',
           'permissionMode': 'auto',
+          if (taskPictures)
+            'inlineAttachments': [
+              'image/png',
+              'image/jpeg',
+              'image/gif',
+              'image/webp',
+            ],
         });
         return;
       }
       if (method == '_harness/task/submit') {
         final taskId = 'task-${tasks.length + 1}';
         final opts = asMap(params['opts']);
+        // The harness keeps each picture sent as data as a file of the
+        // task's own, and the task names the file.
+        final attachments = [
+          for (final item in asMapList(opts['attachments']))
+            {
+              'name': item['name'],
+              'mime': item['mime'],
+              'path': '/state/attachments/$taskId/${item['name']}',
+            },
+        ];
         final task = {
           'id': taskId,
           'name': _firstLine(asString(params['prompt']) ?? 'New task'),
@@ -1205,6 +1228,7 @@ class FakeHarness {
           'created': DateTime.now().millisecondsSinceEpoch / 1000,
           'updated': DateTime.now().millisecondsSinceEpoch / 1000,
           if (opts['refine'] == true) 'backlog': true,
+          if (attachments.isNotEmpty) 'attachments': attachments,
         };
         tasks[taskId] = task;
         _event('task/changed', [task]);

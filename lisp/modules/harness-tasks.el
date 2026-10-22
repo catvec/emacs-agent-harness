@@ -4366,6 +4366,7 @@ while it waits, do not start it again: the return starts nothing."
   "Forget the task of deleted SESSION-ID, and since when it was blocked."
   (remhash session-id harness-tasks--blocked-at)
   (when-let* ((task (harness-tasks--by-session session-id)))
+    (harness-tasks--forget-attachments (plist-get task :id))
     (harness-tasks--remove (plist-get task :id))))
 
 (defun harness-tasks--remove (id)
@@ -4494,13 +4495,156 @@ Last, the tasks without a title are named."
   (harness-run-soon #'harness-tasks--schedule)
   (harness-run-soon #'harness-tasks--name-untitled))
 
+;;;; Attachments sent as data
+;;
+;; A task's attachments are files of this machine (`:path'), as the
+;; compose box of the Emacs the harness runs in attaches them.  A client
+;; on another device -- the phone app -- has no such file to name: it
+;; sends the bytes, an attachment with its `:data' in base64 and no
+;; `:path'.  `task/submit' and `task/update' keep each as a file under
+;; the state directory, one directory to a task, and the task holds the
+;; ordinary file attachment that names it, so what reads a task's
+;; attachments -- the session's opening message, a board's edit box --
+;; takes no notice, and the bytes never ride in the record or in every
+;; `task/changed'.  Only pictures, of the types a provider takes, and
+;; the bytes must be what the type says: a client is not trusted with a
+;; file name or a path, only with a picture.  The files stay while the
+;; task's session does, whose transcript names them; they go with it
+;; (`harness-tasks--forget-attachments').
+
+(defconst harness-tasks--inline-types
+  '(("image/png" . "png") ("image/jpeg" . "jpg") ("image/gif" . "gif") ("image/webp" . "webp"))
+  "The media types of the files a client may attach to a task as data.
+Each comes with the extension its file gets.  They are the pictures a
+provider takes (`harness-agent--image-mimes').")
+
+(defconst harness-tasks--inline-max-bytes (* 10 1024 1024)
+  "Largest file, in bytes, a client may attach to a task as data.")
+
+(defconst harness-tasks--inline-max-count 8
+  "Most files a client may attach to a task as data, in one request.")
+
+(defun harness-tasks--inline-p (attachment)
+  "Non-nil when ATTACHMENT carries its file as data: a plist with a `:data'."
+  (and (consp attachment) (keywordp (car attachment))
+       (plist-get attachment :data) t))
+
+(defun harness-tasks--sniff-type (bytes)
+  "Return the media type of the picture the unibyte string BYTES holds, or nil.
+Only the types of `harness-tasks--inline-types' are known, by the
+signature that starts each."
+  (cond ((string-prefix-p (unibyte-string #x89 ?P ?N ?G ?\r ?\n #x1a ?\n) bytes) "image/png")
+        ((string-prefix-p (unibyte-string #xff #xd8 #xff) bytes) "image/jpeg")
+        ((or (string-prefix-p "GIF87a" bytes) (string-prefix-p "GIF89a" bytes)) "image/gif")
+        ((and (>= (length bytes) 12) (string-prefix-p "RIFF" bytes)
+              (equal (substring bytes 8 12) "WEBP"))
+         "image/webp")))
+
+(defun harness-tasks--attachment-directory (id)
+  "Return the directory that keeps the pictures task ID was sent as data."
+  (expand-file-name (concat "attachments/" id "/") (harness-tasks--state-directory)))
+
+(defun harness-tasks--file-name (name mime)
+  "Return a file name for the picture called NAME, of the media type MIME.
+Only plain characters, and the extension MIME's type has: what a client
+calls a file says nothing about where it goes."
+  (let* ((base (file-name-sans-extension (file-name-nondirectory (if (stringp name) name ""))))
+         (base (string-trim (replace-regexp-in-string "[^A-Za-z0-9_-]+" "-" base) "-+" "-+")))
+    (concat (if (string-empty-p base) "image" (truncate-string-to-width base 60))
+            "." (cdr (assoc mime harness-tasks--inline-types)))))
+
+(defun harness-tasks--inline-picture (attachment)
+  "Return (BYTES MIME NAME) of ATTACHMENT, a picture sent as data.
+NAME is what the client called it, or nil.  Signal an error naming it
+when its data are no base64, it is too large, or its bytes are no
+picture of a type a task takes, or not the type it says."
+  (let* ((name (let ((n (plist-get attachment :name)))
+                 (and (stringp n) (not (string-empty-p n)) n)))
+         (shown (if name (format "Attachment %s" name) "An attachment sent as data"))
+         (data (plist-get attachment :data))
+         (bytes (and (stringp data)
+                     (condition-case nil (base64-decode-string data) (error nil))))
+         (mime (let ((m (or (plist-get attachment :mime) (plist-get attachment :mimeType))))
+                 (and (stringp m) m)))
+         (sniffed (and bytes (harness-tasks--sniff-type bytes))))
+    (cond ((null bytes) (error "%s is not base64 data" shown))
+          ((> (length bytes) harness-tasks--inline-max-bytes)
+           (error "%s is larger than %s" shown (file-size-human-readable harness-tasks--inline-max-bytes)))
+          ((null sniffed)
+           (error "%s is no picture a task takes (%s)" shown
+                  (mapconcat #'car harness-tasks--inline-types ", ")))
+          ((and mime (not (equal mime sniffed)))
+           (error "%s says it is %s but holds %s" shown mime sniffed))
+          (t (list bytes sniffed name)))))
+
+(defun harness-tasks--unique-file-name (dir name)
+  "Return NAME, or NAME with a number before its extension, as no file of DIR has."
+  (let ((base (file-name-sans-extension name))
+        (extension (file-name-extension name t))
+        (n 1)
+        (candidate name))
+    (while (file-exists-p (expand-file-name candidate dir))
+      (setq n (1+ n)
+            candidate (format "%s-%d%s" base n extension)))
+    candidate))
+
+(defun harness-tasks--keep-inline-attachments (id attachments)
+  "Return ATTACHMENTS, task ID's, with each picture sent as data kept as a file.
+The picture is written under the task's attachment directory, and its
+attachment becomes that of the file: `:path', `:mime', `:name' and
+`:size', with the `:label' the client gave it.  Any other attachment is
+left as it is.  Every picture is checked before one is written
+\(`harness-tasks--inline-picture'), so a request refused leaves nothing
+behind."
+  (let ((attachments (if (vectorp attachments) (append attachments nil) attachments)))
+    (if (not (and (proper-list-p attachments) (cl-some #'harness-tasks--inline-p attachments)))
+        attachments
+      (let ((pictures (mapcar (lambda (a) (and (harness-tasks--inline-p a) (harness-tasks--inline-picture a)))
+                              attachments))
+            (dir (harness-tasks--attachment-directory id))
+            (written nil))
+        (when (> (length (delq nil pictures)) harness-tasks--inline-max-count)
+          (error "A task takes at most %d pictures sent as data" harness-tasks--inline-max-count))
+        (condition-case err
+            (cl-mapcar
+             (lambda (attachment picture)
+               (if (null picture)
+                   attachment
+                 (pcase-let* ((`(,bytes ,mime ,name) picture)
+                              (file (harness-tasks--unique-file-name
+                                     dir (harness-tasks--file-name name mime)))
+                              (path (expand-file-name file dir))
+                              (label (plist-get attachment :label))
+                              (coding-system-for-write 'no-conversion))
+                   (harness-ensure-directory dir)
+                   (write-region bytes nil path nil 'silent)
+                   (push path written)
+                   (append (list :path path :mime mime :name file :size (length bytes))
+                           (and (stringp label) (not (string-empty-p label)) (list :label label))))))
+             attachments pictures)
+          (error (dolist (path written) (ignore-errors (delete-file path)))
+                 (signal (car err) (cdr err))))))))
+
+(defun harness-tasks--forget-attachments (id)
+  "Delete the files task ID's attachments sent as data were kept in.
+For a task that goes with its session: while the session stays, its
+transcript names them."
+  (let ((dir (harness-tasks--attachment-directory id)))
+    (when (file-directory-p dir)
+      (condition-case err (delete-directory dir t)
+        (error (harness-log 'warn "task %s: keeping its attachments: %s"
+                            id (error-message-string err)))))))
+
 ;;;; Methods
 
 (harness-defmethod task/submit (cwd prompt &optional opts)
   "Submit PROMPT as a new task in directory CWD; return the task.
 It starts at once when its project has a slot free, otherwise it waits
 as pending: `harness-tasks-max-running' limits each project on its own.
-OPTS: `:attachments' (ATTACHMENT list), `:model', `:permission-mode',
+OPTS: `:attachments' (ATTACHMENT list: files of this machine, `:path'
+with `:mime', `:name' and `:size', or pictures sent as data, `:data' in
+base64 with `:mime' and `:name', which are kept as files: see
+Attachments sent as data), `:model', `:permission-mode',
 `:thinking', `:non-interactive' (an explicit false turns it off),
 `:supervisor' (t to plan and delegate, an explicit false to work
 hands-on; without it the task takes `harness-supervisor-tasks' when it
@@ -4550,6 +4694,11 @@ session takes it."
                      :state 'pending :created created)))
     (when priority
       (harness-priority-read priority))
+    ;; Pictures sent as data become files, now that nothing else can
+    ;; refuse the task: one refused leaves no file behind.
+    (setq task (plist-put task :attachments
+                          (harness-tasks--keep-inline-attachments
+                           (plist-get task :id) (plist-get task :attachments))))
     (when (plist-member opts :non-interactive)
       (setq task (plist-put task :non-interactive
                             (if (harness-json-true-p (plist-get opts :non-interactive)) t :false))))
@@ -4753,7 +4902,10 @@ model: `:refine-model' and `:refine-thinking' for a brief write-up
 `:plan-work-model' and `:plan-work-thinking' for the work after a
 plan.  That work runs hands-on, whatever `:supervisor' says, unless the
 task was given a setting of its own (the supervisor module's
-`harness-supervisor--task-value')."
+`harness-supervisor--task-value').  `:inline-attachments' lists the
+media types of the files a client that cannot name a file of this
+machine may attach to a task as data (`task/submit'); a harness that
+does not say takes none, and a client must not offer them."
   (let* ((root (and cwd (harness-tasks--project cwd)))
          (model (or harness-tasks-model (harness-tasks--config 'harness-model root)))
          (thinking (or harness-tasks-thinking (harness-tasks--config 'harness-thinking root)))
@@ -4771,6 +4923,7 @@ task was given a setting of its own (the supervisor module's
            :model model
            :thinking thinking
            :worktrees (and root (harness-tasks--git-p root) t)
+           :inline-attachments (mapcar #'car harness-tasks--inline-types)
            :refine-model (or harness-tasks-refine-model model)
            :refine-thinking (or harness-tasks-refine-thinking thinking)
            :plan-model (harness-tasks--plan-model proto)
@@ -5131,11 +5284,12 @@ task's view."
 
 (harness-defmethod task/update (id prompt &optional attachments)
   "Replace the prompt of pending task ID with PROMPT and its ATTACHMENTS.
-A task whose write-up stopped can be written by hand this way; it then
-waits in the backlog like a refined one.  A task named from its prompt
-\(not a backlog task, named from the words it was written up from) is
-named again from the new one, and its session drops the title it took
-so it takes the new one too."
+ATTACHMENTS are as `task/submit' takes them, pictures sent as data
+included.  A task whose write-up stopped can be written by hand this
+way; it then waits in the backlog like a refined one.  A task named
+from its prompt (not a backlog task, named from the words it was
+written up from) is named again from the new one, and its session
+drops the title it took so it takes the new one too."
   (let ((task (harness-tasks--get id)))
     (unless (memq (plist-get task :state) '(pending refining))
       (error "Only tasks that have not started can be edited"))
@@ -5143,7 +5297,8 @@ so it takes the new one too."
       (error "Task %s is being written up; wait for it or stop it" id))
     (when (harness-string-blank-p prompt) (error "A task needs a prompt"))
     (let* ((before (harness-tasks--naming-text task))
-           (view (harness-tasks--set id :prompt (string-trim prompt) :attachments attachments
+           (view (harness-tasks--set id :prompt (string-trim prompt)
+                                     :attachments (harness-tasks--keep-inline-attachments id attachments)
                                      :state 'pending :outcome nil :error nil :duplicate-of nil)))
       (if (equal before (harness-tasks--naming-text view))
           view
@@ -5453,6 +5608,7 @@ up for."
     (if (or (eq state 'pending) (and (eq state 'refining) (not (harness-tasks--turn-p task))))
         (let ((sid (plist-get task :session)))
           (harness-tasks--remove id)
+          (harness-tasks--forget-attachments id)
           (when (and sid (harness-call 'session/exists-p sid))
             (harness-call 'session/delete sid))
           nil)
@@ -5473,6 +5629,9 @@ task's priority and nothing else."
                                   (not (harness-tasks--backlog-p task))))))
     (when (and sid (harness-method-exists-p 'merge/cancel)) (harness-call 'merge/cancel sid))
     (harness-tasks--remove id)
+    ;; The session's transcript names the files of a task's attachments:
+    ;; they stay unless it goes too.
+    (when delete-session (harness-tasks--forget-attachments id))
     (when (and delete-session sid (harness-call 'session/exists-p sid))
       (when (harness-method-exists-p 'agent/cancel) (harness-call 'agent/cancel sid))
       (harness-call 'session/delete sid))

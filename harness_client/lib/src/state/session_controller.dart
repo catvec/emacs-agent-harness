@@ -11,25 +11,7 @@ import '../models/transcript.dart';
 import '../services/harness_api.dart';
 import 'drafts.dart';
 import 'interaction.dart';
-
-class PromptAttachment {
-  const PromptAttachment({
-    required this.name,
-    required this.mimeType,
-    required this.bytes,
-  });
-
-  final String name;
-  final String mimeType;
-  final Uint8List bytes;
-
-  Map<String, Object?> toBlock() => {
-    'type': 'image',
-    'mimeType': mimeType,
-    'data': base64Encode(bytes),
-    '_harness': {'label': name},
-  };
-}
+import 'prompt_attachment.dart';
 
 /// One open conversation.  It listens to the ACP stream for its own session,
 /// keeps the transcript in sync with both standard updates and the harness's

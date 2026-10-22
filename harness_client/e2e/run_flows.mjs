@@ -205,10 +205,31 @@ async function run() {
     await page.keyboard.insertText('Add a small native settings screenshot flow');
     await page.waitForTimeout(300);
     await page.getByRole('button', { name: 'High', exact: true }).click();
+    // Attach two pictures: the photo picker is the browser's file chooser.
+    const [chooser] = await Promise.all([
+      page.waitForEvent('filechooser'),
+      page.getByRole('button', { name: /Attach images/ }).first().click(),
+    ]);
+    await chooser.setFiles([
+      new URL('android-chat.png', OUT).pathname,
+      new URL('android-tasks.png', OUT).pathname,
+    ]);
+    // The pictures are read, and shown, a moment later.
+    await page.getByRole('button', { name: /Add more/ }).waitFor({ timeout: 20000 });
+    await page.waitForTimeout(600);
     await shot(page, 'android-new-task-sheet');
     await page.getByRole('button', { name: 'Submit task', exact: true }).click();
     await page.waitForTimeout(1600);
     await shot(page, 'android-task-created');
+    // The task names the pictures it was sent with.
+    await page
+      .getByRole('button', { name: /Add a small native settings screenshot flow/ })
+      .first()
+      .click();
+    await page.getByText('ATTACHMENTS', { exact: true }).waitFor({ timeout: 8000 });
+    await shot(page, 'android-task-pictures');
+    await clickButton(page, 'Close');
+    await page.waitForTimeout(500);
     await page
       .locator('flt-semantics[role=button]')
       .filter({ hasText: 'Review' })

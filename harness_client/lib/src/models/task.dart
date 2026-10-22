@@ -38,6 +38,7 @@ class HarnessTask {
     this.autoQueue = false,
     this.model,
     this.thinking,
+    this.attachments = const [],
     this.extra = const {},
   });
 
@@ -91,6 +92,10 @@ class HarnessTask {
       autoQueue: asBool(wire['autoQueue'] ?? wire['auto-queue']),
       model: asString(wire['model']),
       thinking: asString(wire['thinking']),
+      attachments: [
+        for (final item in asList(wire['attachments']))
+          if (_attachmentName(item) case final name?) name,
+      ],
       extra: wire,
     );
   }
@@ -128,6 +133,10 @@ class HarnessTask {
   final bool autoQueue;
   final String? model;
   final String? thinking;
+
+  /// The names of the files attached to the task: the pictures it was
+  /// submitted with, say.
+  final List<String> attachments;
   final JsonMap extra;
 
   String get title {
@@ -215,6 +224,9 @@ class HarnessTask {
       autoQueue: newer.autoQueue,
       model: newer.model ?? model,
       thinking: newer.thinking ?? thinking,
+      attachments: newer.attachments.isNotEmpty
+          ? newer.attachments
+          : attachments,
       extra: {...extra, ...newer.extra},
     );
   }
@@ -314,6 +326,7 @@ class TaskSettingsInfo {
     this.nonInteractive = false,
     this.refineModel,
     this.planModel,
+    this.inlineAttachments = const [],
   });
 
   factory TaskSettingsInfo.fromWire(JsonMap wire) => TaskSettingsInfo(
@@ -333,6 +346,12 @@ class TaskSettingsInfo {
     nonInteractive: asBool(wire['nonInteractive'] ?? wire['non-interactive']),
     refineModel: asString(wire['refineModel'] ?? wire['refine-model']),
     planModel: asString(wire['planModel'] ?? wire['plan-model']),
+    inlineAttachments: [
+      for (final type in asList(
+        wire['inlineAttachments'] ?? wire['inline-attachments'],
+      ))
+        if (asString(type) case final mime?) mime,
+    ],
   );
 
   final int? maxRunning;
@@ -345,6 +364,24 @@ class TaskSettingsInfo {
   final bool nonInteractive;
   final String? refineModel;
   final String? planModel;
+
+  /// The media types of the files a task takes sent as data: a client that
+  /// cannot name a file of the harness's machine, a phone, attaches pictures
+  /// that way.  Empty for a harness that does not say, which takes none.
+  final List<String> inlineAttachments;
+
+  bool get takesImages =>
+      inlineAttachments.any((type) => type.startsWith('image/'));
+}
+
+/// What a task's attachment is called: its name, else its file's.
+String? _attachmentName(Object? attachment) {
+  final wire = asMap(attachment);
+  final name = asString(wire['name']);
+  if (name != null && name.isNotEmpty) return name;
+  final path = asString(wire['path']);
+  if (path == null || path.isEmpty) return null;
+  return path.split('/').last;
 }
 
 String? _blankToNull(String? value) =>
