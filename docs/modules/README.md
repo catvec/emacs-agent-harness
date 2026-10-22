@@ -184,7 +184,7 @@ ui-tasks); `(setq harness-enabled-modules t)` loads every module.
 | [ui-media](ui-media.md) |  | [ui](ui.md) | Audio playback and recording, video thumbnails, clipboard images. |
 | [ui-merge](ui-merge.md) |  | [ui](ui.md), [ui-chat](ui-chat.md) | A session's merge queue: which sub-agent branches are queued, merging, in conflict, merged or failed. |
 | [ui-notify](ui-notify.md) | by default | [ui](ui.md) | Mode line notifier with blocked/running/idle counts. |
-| [ui-patch-review](ui-patch-review.md) |  | [ui](ui.md), [ui-report](ui-report.md), [ui-review](ui-review.md) | A task's changes in its report: a file tree, Ediff file by file with the threads of comments in place and the feedback box beside it, approvals; the UI of the review. |
+| [ui-patch-review](ui-patch-review.md) |  | [ui](ui.md), [ui-report](ui-report.md), [ui-review](ui-review.md) | A task's changes where its work is handed in and in its report: a file tree with the threads of comments below it, Ediff file by file with the tree beside it and the feedback box under it, approvals that skip the files done; the UI of the review. |
 | [ui-pending](ui-pending.md) | by default | [ui](ui.md), [ui-compose](ui-compose.md) | Requests a session waits on: panels, answering and the popout. |
 | [ui-pet](ui-pet.md) |  | [ui](ui.md) | The companion pet: its buffer, and the creature and its words in chats, on the board and under the session list. |
 | [ui-popout](ui-popout.md) |  | [ui](ui.md), [ui-compose](ui-compose.md) | Popouts: one item of a session or task in a small window of its own. |
@@ -355,11 +355,12 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `after-change-functions` |  | [ui-compose](ui-compose.md) |
 | `after-load-functions` |  | [ui-quick-search](ui-quick-search.md) |
 | `before-change-functions` |  | [ui-compose](ui-compose.md) |
-| `change-review-changed-functions` | `change-review.el` | [patch-review](patch-review.md), [ui-patch-review](ui-patch-review.md), `change-review-ui.el` |
+| `change-review-changed-functions` | `change-review.el` | [patch-review](patch-review.md), `change-review-ui.el` |
 | `completion-at-point-functions` |  | [ui-compose](ui-compose.md) |
 | `compose-quote-insert-hook` | `compose-quote.el` | [ui-compose](ui-compose.md) |
 | `dbus-event-error-functions` | `harness-notifications-desktop.el` | `harness-notifications-desktop.el` |
 | `ediff-after-quit-hook-internal` |  | [ui-patch-review](ui-patch-review.md) |
+| `ediff-select-hook` |  | [ui-patch-review](ui-patch-review.md) |
 | `emacs-startup-hook` |  | [ui](ui.md) |
 | `harness-acp-agent-capabilities-functions` | [acp](acp.md) | [acp-remote](acp-remote.md) |
 | `harness-acp-auth-methods-functions` | [acp](acp.md) | [acp-remote](acp-remote.md) |
@@ -402,6 +403,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `harness-ui-redraw-hook` | [ui](ui.md) | [ui-acp-remote](ui-acp-remote.md), [ui-chat](ui-chat.md), [ui-config](ui-config.md), [ui-insights](ui-insights.md), [ui-pet](ui-pet.md), [ui-popout](ui-popout.md), [ui-sessions](ui-sessions.md), [ui-slots](ui-slots.md), [ui-tasks](ui-tasks.md), [ui-tree](ui-tree.md), [ui-usage](ui-usage.md), [ui-version](ui-version.md), [ui-worktree](ui-worktree.md) |
 | `harness-ui-report-compose-functions` | [ui-report](ui-report.md) | [ui-review](ui-review.md) |
 | `harness-ui-report-panel-functions` | [ui-report](ui-report.md) | [ui-patch-review](ui-patch-review.md), [ui-review](ui-review.md) |
+| `harness-ui-review-changes-functions` | [ui-review](ui-review.md) | [ui-patch-review](ui-patch-review.md) |
 | `harness-ui-review-pending-functions` | [ui-patch-review](ui-patch-review.md), [ui-review](ui-review.md) | [ui-patch-review](ui-patch-review.md) |
 | `harness-ui-sessions-changed-hook` | [ui](ui.md) | [ui-notify](ui-notify.md), [ui-sessions](ui-sessions.md), [ui-tasks](ui-tasks.md), [ui-worktree](ui-worktree.md) |
 | `harness-ui-sessions-footer-functions` | [ui-sessions](ui-sessions.md) |  |

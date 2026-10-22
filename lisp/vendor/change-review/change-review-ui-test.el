@@ -1169,6 +1169,76 @@ for want of one."
             (should (string-match-p "No threads yet\\." (change-review-ui-test--text))))
         (kill-buffer buffer)))))
 
+(ert-deftest change-review-ui-threads-string-is-the-body-of-the-view ()
+  "A buffer that shows the threads among its own text gets them as a string:
+grouped by file as the view groups them, filtered by status, every line
+starting with the indent, the ids of the threads and comments on the
+text so the commands find them, and a line of its own saying that none
+passes the filter."
+  (change-review-ui-test--drawing
+    (let* ((set (change-review-ui-test--set))
+           (threads (change-review-ui-test--populate set))
+           (open (change-review-ui-threads-string set :filter 'open :width 80))
+           (closed (change-review-ui-threads-string set :filter 'closed :width 80))
+           (all (change-review-ui-threads-string set :filter 'all :width 80 :indent "  ")))
+      ;; Open: the change as a whole and a.el, the closed b.el behind the filter.
+      (should (string-match-p "^▾ The change as a whole +1 thread$" (substring-no-properties open)))
+      (should (string-match-p "^▾ a\\.el +2 threads$" (substring-no-properties open)))
+      (should-not (string-search "b.el" (substring-no-properties open)))
+      (should (string-search "What about a4?" open))
+      (should-not (string-search "Fine." open))
+      (should (string-search "Fine." closed))
+      (should-not (string-search "What about a4?" closed))
+      ;; All: the closed ones count in the header of their file.
+      (should (string-match-p "^  ▾ b\\.el +1 thread · 0 open$" (substring-no-properties all)))
+      (dolist (line (change-review-ui-test--lines all))
+        (should (string-prefix-p "  " line)))
+      ;; The ids, for the commands to find.
+      (let ((pos (string-search "What about a4?" open)))
+        (should (equal (change-review-thread-id (nth 3 threads))
+                       (get-text-property pos 'change-review-thread open)))
+        (should (equal (change-review-comment-id (change-review-thread-root (nth 3 threads)))
+                       (get-text-property pos 'change-review-comment open))))
+      (should (equal "a.el" (get-text-property (string-search "▾ a.el" open) 'change-review-file open)))
+      ;; It is what the view draws: the view only adds its heading.
+      (let ((buffer (save-window-excursion (change-review-open-threads set 'open))))
+        (unwind-protect
+            (should (string-suffix-p (substring-no-properties
+                                      (change-review-ui-threads-string
+                                       set :filter 'open :width (with-current-buffer buffer
+                                                                  (change-review-ui-current-width))))
+                                     (with-current-buffer buffer (change-review-ui-test--text))))
+          (kill-buffer buffer))))
+    ;; No thread passes: a line says so, EMPTY instead when given.
+    (let ((set (change-review-ui-test--set)))
+      (should (equal "No open threads.\n" (substring-no-properties (change-review-ui-threads-string set))))
+      (should (equal "  No threads yet.\n"
+                     (substring-no-properties (change-review-ui-threads-string set :filter 'all :indent "  "))))
+      (should (equal "Nothing.\n"
+                     (substring-no-properties (change-review-ui-threads-string set :empty "Nothing.")))))))
+
+(ert-deftest change-review-ui-threads-heading-has-the-filter-buttons ()
+  "The head of the threads has a button for each filter, the one in force
+marked, how many drafts wait, and its buttons set the filter of the buffer
+they are pressed in and draw it again."
+  (change-review-ui-test--drawing
+    (let* ((set (change-review-ui-test--set))
+           (_ (change-review-ui-test--populate set))
+           (heading (change-review-ui-threads-heading set 'open)))
+      (should (string-suffix-p "\n" heading))
+      (should (string-match-p "\\`Threads  \\[open 3\\] +to review 1 +closed 1 +all 4 +2 drafts not sent\n\\'"
+                              (substring-no-properties heading)))
+      (should (string-match-p "\\`Threads  +open 3 +to review 1 +closed 1 +\\[all 4\\]"
+                              (substring-no-properties (change-review-ui-threads-heading set 'all))))
+      (let (redrawn)
+        (with-temp-buffer
+          (setq change-review-ui--filter 'open
+                change-review-ui--redraw-function (lambda () (setq redrawn change-review-ui--filter)))
+          (insert heading)
+          (push-button (1+ (change-review-ui-test--button heading " closed 1 ")))
+          (should (eq 'closed change-review-ui--filter))
+          (should (eq 'closed redrawn)))))))
+
 (ert-deftest change-review-ui-threads-view-moves-between-comments-and-threads ()
   "n and p move between comments, N and P between threads."
   (change-review-ui-test--threads-view

@@ -38,6 +38,8 @@
 (defvar harness-compose-redraw-function)
 (defvar harness-ui-popout-key)
 (defvar harness-ui-review-minor-mode)
+(defvar harness-ui-review-changes-functions)
+(declare-function harness-ui-review--shown "harness-ui-review")
 (defvar harness-ui-popout--parent)
 (defvar harness-ui-popout--max-height)
 (defvar harness-ui-report-max-height)
@@ -298,6 +300,57 @@ not.  The banner goes as soon as the task is back at work."
                                                          (harness-call 'session/nodes sid))))
                             :content)))
     (and (stringp content) (string-suffix-p text content) content)))
+
+(ert-deftest harness-ui-review-banner-shows-the-changes-others-draw ()
+  "What `harness-ui-review-changes-functions' return goes in the banner of a task
+in review, between the report and the buttons, indented as the banner's text; a
+function that fails says so in a line and the banner stays, [Verify] with it."
+  (harness-ui-review-test-with
+    (let ((chat (harness-ui-review-test--open-session sid)))
+      (harness-ui-review-test--wait-text chat "Ready for review")
+      (let ((harness-ui-review-changes-functions
+             (list (lambda (task)
+                     (and (equal id (plist-get task :id)) "Changes of the task\n  a file\n"))
+                   (lambda (_task) nil)
+                   (lambda (_task) ""))))
+        (with-current-buffer chat (funcall harness-compose-redraw-function))
+        (let ((text (harness-ui-review-test--text chat)))
+          (should (< (string-match "^Evidence" text)
+                     (string-match "^Changes of the task$" text)
+                     (string-match "^  a file$" text)
+                     (string-match "\\[Verify\\]" text))))
+        ;; Drawn with the banner's text: on the review background, indented.
+        (with-current-buffer chat
+          (let ((pos (save-excursion (goto-char (point-min)) (search-forward "Changes of the task") (match-beginning 0))))
+            (should (string-prefix-p "   " (get-text-property pos 'line-prefix)))
+            (should (cl-some (lambda (f) (eq f 'harness-chat-review-face))
+                             (ensure-list (get-text-property pos 'face))))))
+        ;; A function that fails: the banner says so, and stays.
+        (setq harness-ui-review-changes-functions
+              (list (lambda (_task) (error "No git here"))))
+        (with-current-buffer chat (funcall harness-compose-redraw-function))
+        (let ((text (harness-ui-review-test--text chat)))
+          (should (string-search "The changes could not be drawn: No git here" text))
+          (should (string-search "[Verify]  C-c C-v" text))
+          (should (string-search "Ready for review" text))))
+      ;; None: the banner is what it was.
+      (let ((harness-ui-review-changes-functions nil))
+        (with-current-buffer chat (funcall harness-compose-redraw-function))
+        (should-not (string-search "Changes of the task" (harness-ui-review-test--text chat)))
+        (should-not (string-search "could not be drawn" (harness-ui-review-test--text chat)))))))
+
+(ert-deftest harness-ui-review-banner-follows-what-its-changes-are-read-from ()
+  "The banner draws the session's tail again when what its changes are read
+from -- the branch of the task, what it was made from, its project -- changes,
+not for any change of the record."
+  (let* ((task (list :id "t-1" :state "review" :prompt "Fix it" :worktree "/w"
+                     :branch "task/fix" :base "main" :project "/p" :report (list :summary "Done")))
+         (shown (harness-ui-review--shown task)))
+    (should shown)
+    (should (equal shown (harness-ui-review--shown (plist-put (copy-sequence task) :cost 3))))
+    (dolist (key '(:branch :base :project))
+      (should-not (equal shown (harness-ui-review--shown (plist-put (copy-sequence task) key "other")))))
+    (should-not (harness-ui-review--shown (plist-put (copy-sequence task) :state "active")))))
 
 (ert-deftest harness-ui-review-banner-follows-events-from-another-process ()
   "The banner follows a `task/changed' whose session id is a string of its own.

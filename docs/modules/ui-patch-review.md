@@ -2,7 +2,7 @@
 
 # ui-patch-review
 
-A task's changes in its report: a file tree, Ediff file by file with the threads of comments in place and the feedback box beside it, approvals; the UI of the review.
+A task's changes where its work is handed in and in its report: a file tree with the threads of comments below it, Ediff file by file with the tree beside it and the feedback box under it, approvals that skip the files done; the UI of the review.
 
 - **Runs in:** the UI (your Emacs)
 - **Source:** [lisp/ui/harness-ui-patch-review.el](../../lisp/ui/harness-ui-patch-review.el)
@@ -13,7 +13,8 @@ A task's changes in its report: a file tree, Ediff file by file with the threads
 ## About
 
 A task waiting for review is a patch waiting for its reviewer.  This
-module puts the patch in the review, in the task's report (the popout
+module puts the patch in the review: in the review banner of the task's
+session, where its work is handed in, and in its report (the popout
 [Review Changes] opens on the board and in the session), and reviews it
 file by file in Ediff, with the comments made on it kept as threads.
 
@@ -39,11 +40,17 @@ is the adapter that gives that library a task to review, in this Emacs:
                conversation;
   authors      the user, by name; the agent, by session and tool call.
 
-Under the evidence, above the review banner and its box, the report
-shows what the task's branch changes against its merge base with the
-branch it was made from -- what merging it brings in, not what that
-branch did since -- or the diff the reviewer chooses instead (see THE
-DIFF SHOWN), a tree of the directories and their files:
+THE CHANGES, drawn the same on three surfaces: in the review banner of
+the task's session, between the report the agent handed in and
+[Verify], so the work is looked over where it is handed in, with no
+click on [Review Changes] (the banner asks for them through
+`harness-ui-review-changes-functions`); in the report, under the
+evidence, above the review banner and its box; and in the tree beside
+Ediff (below).  What the task's branch changes against its merge base
+with the branch it was made from -- what merging it brings in, not
+what that branch did since -- or the diff the reviewer chooses instead
+(see THE DIFF SHOWN), shows as a tree of the directories and their
+files, and below it the threads:
 
   a file      its status, its name, the lines it adds and deletes,
               a mark once it was looked at in Ediff and a firmer one
@@ -55,31 +62,75 @@ DIFF SHOWN), a tree of the directories and their files:
               Ediff; n and p move between rows; a approves it, A
               approves every file, t shows the files flat instead.
               An approved file need not be looked at again unless the
-              branch changes it.  Under it, its open threads and
-              those to review, a line each, where they are now (see
-              below).  The marks are
-              kept by the harness with the review, each by the
-              file's path and blob (`patch-review/set-viewed`), so
-              they are there after a restart.  V takes every file as
-              viewed but those the branch's newest commit changed,
-              for a review gone through before the marks were kept
-              (`patch-review/assume-viewed`); the report says so
-              when files were taken as viewed and not looked at.
+              branch changes it.  The marks are kept by the harness
+              with the review, each by the file's path and blob
+              (`patch-review/set-viewed`), so they are there after a
+              restart.  V takes every file as viewed but those the
+              branch's newest commit changed, for a review gone
+              through before the marks were kept
+              (`patch-review/assume-viewed`); the heading says so when
+              files were taken as viewed and not looked at.
   directories the files group under the directories that hold them,
               with how many files each holds and the lines they add
-              and delete.
+              and delete, as a file tree shows them.  TAB, RET or a
+              click folds a directory, and a approves its files.
+  threads     a section below the files, in the same buffer -- not a
+              view of its own: the library's drawing of each thread
+              (who wrote each comment, when, which revision it was
+              against, its place in the thread, open or closed), by
+              file, under a heading whose buttons filter them by
+              status.  r replies in a thread, x closes it or opens it
+              again, RET on its header compares the file in Ediff at
+              its line, on a comment shows where it was made, o
+              follows an agent's comment to its conversation, c
+              comments on the change as a whole, f changes the
+              filter.  T goes to the section; where there is none, in
+              Ediff, it shows the tree beside it and goes there.
+
+Reviewing a branch is going through its files, and two settings make
+that go the way a reviewer wants, each a button of the changes with its
+key (s and u), in Ediff's help, in the harness menu, and an option:
+
+  skip approved   (`harness-ui-patch-review-skip-approved`, on): going
+              on from file to file -- n and p on the rows, N and P in
+              Ediff, n at the last difference, the row point lands on
+              when Ediff ends -- steps over the files already
+              approved, and says how many it went over.  RET on one
+              still compares it.
+  auto-approve    (`harness-ui-patch-review-auto-approve`, on): leaving
+              a file in Ediff approves it when the reviewer was at its
+              last difference -- went through what it changes -- and
+              has no draft on it and no open thread they wrote in.  A
+              file with a comment of yours is not settled, one with a
+              thread the agent started and you did not answer is.
+              The approval is the one a makes, kept by the harness.
+
+THE ORDER of the files is the one they show in -- the tree from top to
+bottom, else the diff's -- so the next file is the one on the next row.
+
   Ediff       the file at the merge base against the file on the
-              branch, in the report's frame, the report itself small
-              at the bottom of it with its box (see below).  The
+              branch, in the frame of the report or the session, the
+              report small at the bottom of it with its feedback box
+              (opened for it from the banner, closed with the Ediff),
+              and on the left the TREE of the files, as a file tree
+              shows beside an editor (`harness-ui-patch-review-ediff-tree`,
+              `harness-ui-patch-review-ediff-tree-width`): the
+              directories and files with their marks, the file
+              compared marked and highlighted, the threads under
+              them, in a buffer of its own that Ediff leaves be.  RET
+              or a click on a file there compares it in place of the
+              one under way, TAB folds a directory, q ends Ediff, and
+              t in Ediff hides the tree or shows it again.  The
               control panel keeps Ediff's keys and has more: c
               comments on the current difference, r replies to the
               thread there, TAB folds the threads of the difference
-              (see below), T lists the threads, e goes to the
-              report's box, a approves the file, N and P go on to the
-              next or previous file, q comes back to the report as it
-              was, point on the next file.  n is Ediff's next
-              difference, and at the last one says the next
-              difference is the next file: n again opens it.
+              (see below), T goes to the threads, e goes to the
+              report's box, a approves the file, s and u switch the
+              settings, N and P go on to the next or previous file,
+              q comes back to where Ediff began, point on the next
+              file to review.  n is Ediff's next difference, and at
+              the last one says the next difference is the next file:
+              n again opens it.
   threads     c reads a comment and starts a thread with it, a draft,
               under the line it is about: in the control panel on the
               current difference, in either version Ediff compares on
@@ -87,11 +138,8 @@ DIFF SHOWN), a tree of the directories and their files:
               both versions under its line, drawn by the library as
               its views draw it: who wrote each comment, when, which
               revision it was against, its place in the thread, open
-              or closed; r replies in it, x closes it or opens it
-              again, RET shows where its comments were made, o
-              follows an agent's comment to its conversation.  T, in
-              the report and in Ediff, lists all the threads by file,
-              with a filter on their status; d there comes back to
+              or closed; r, x, RET and o there are as in the threads
+              section.  T goes to the threads; d there comes back to
               Ediff, at the thread's line.
   drafts      A draft is yours to change until the feedback sends it:
               it has an [Edit] button, which edits that draft, and e
@@ -174,7 +222,7 @@ the review keeps while it lasts: a report closed and opened again
 shows it.  Ediff's two versions are named after what they are in the
 diff ("merge base 8d1fb32", "v1 1c9e4a0", "main~3 5be0a77"), and so
 are the old version's comments ("line 5 of v1").  A thread on a file
-the diff shown does not change is among the other threads, with its
+the diff shown does not change stays among the threads, under its
 file, where it is now in the branch's whole change.  What cannot be
 shown -- a revision that is not there, a review before this one of
 which nothing is known -- is said, and the diff shown stays.
@@ -226,27 +274,33 @@ comment on a removed line), with what became of the line since
 revision it was written against; the line it was on is carried through
 the diff from that revision to the branch as it is, so a line that
 moved shows at its new number.  A comment whose revision is no longer
-in the repository is placed by the lines it quotes.  RET on such a
-thread's row in the report compares the file with that line in sight.
-What has no file row -- threads on the change as a whole, on files the
-branch no longer changes -- stays in a block above the files.  Each
-file also says whether it changed since the reviewer's last comment on
-it or stayed the same -- an approved file that changed is approved no
+in the repository is placed by the lines it quotes.  What has no file
+row -- threads on the change as a whole, on files the branch no longer
+changes -- is in the threads too, under its own heading.  Each file
+also says whether it changed since the reviewer's last comment on it
+or stayed the same -- an approved file that changed is approved no
 more.
 
+THE BANNER keeps the reader's place as it draws again (a key that
+approves a file, a thread closed): the tail of a chat is deleted and
+drawn whole, so point goes back to the row, thread or comment it was
+on, and the window shows it on the line it was; a thread that went
+leaves point on the one that took its place.
+
 From a task's session history -- or a board card -- C-c C-d opens the
-review, even after the task left review, when it shows the changes
-without the review banner (`harness-ui-patch-review-mode`).  C-u C-c
-C-d asks which diff to open it at, as d does in the report.
+report with the changes, even after the task left review, when it shows
+them without the review banner (`harness-ui-patch-review-mode`).  C-u
+C-c C-d asks which diff to open it at, as d does in the report.
 
 Git runs here, in the Emacs that shows the UI, in the task's
 repository: the changes show where that is a directory of this
 machine, so not for a harness on another one.
 
 The module draws in the report through the hook the report has for
-panels (`harness-ui-report-panel-functions`), and leaves sending to the
-review's box.  Disabled (`harness-disabled-modules`), it takes its
-part of the report out.
+panels (`harness-ui-report-panel-functions`), in the banner through
+the review's own (`harness-ui-review-changes-functions`), and leaves
+sending to the review's box.  Disabled (`harness-disabled-modules`),
+it takes its part of the report and the banner out.
 
 ## Provides
 
@@ -271,24 +325,35 @@ part of the report out.
 - `harness-ui-patch-review-edit-feedback` — Go to the report's feedback box, to write the words that go with the comments.
 - `harness-ui-patch-review-import-manual` — Make the replies you wrote by hand for this task threads of its review.
 - `harness-ui-patch-review-mouse-ediff` — Compare the file clicked on in EVENT in Ediff.
+- `harness-ui-patch-review-mouse-toggle-directory` — Fold or unfold the directory clicked on in EVENT.
 - `harness-ui-patch-review-next-difference` — Move to the next difference in this Ediff, ARG times.
 - `harness-ui-patch-review-next-file` — Move to the next file of the changes, or the Nth next.
 - `harness-ui-patch-review-open` — Show the changes of the task this buffer shows, in a popout.
 - `harness-ui-patch-review-previous-file` — Move to the previous file of the changes, or the Nth previous.
+- `harness-ui-patch-review-redraw-tree` — Draw the tree beside Ediff again.
 - `harness-ui-patch-review-reply` — Reply to the thread at the current difference, or at point, in Ediff.
 - `harness-ui-patch-review-select-diff` — Choose the diff the report of the changes shows.
-- `harness-ui-patch-review-threads` — List the threads of the review at point by file, with a filter on their status.
+- `harness-ui-patch-review-thread-return` — Do what RET does on a thread of the changes, or on the file it is under.
+- `harness-ui-patch-review-threads` — Go to the threads of the review at point: a section below its files.
+- `harness-ui-patch-review-toggle-auto-approve` — Switch whether a file you looked through and made no comment on is approved.
+- `harness-ui-patch-review-toggle-directory` — Fold the directory of the row at point, or unfold it.
+- `harness-ui-patch-review-toggle-ediff-tree` — Show the tree of the changed files beside Ediff, or hide it.
 - `harness-ui-patch-review-toggle-file-tree` — Show the changed files flat, in the diff's order, or as a tree.
+- `harness-ui-patch-review-toggle-skip-approved` — Switch whether going on from file to file steps over the files already approved.
 - `harness-ui-patch-review-toggle-reviewed` — Mark the thread at the current difference reviewed, or make it wait again.
 - `harness-ui-patch-review-toggle-thread` — Close the thread at the current difference, or at point, or open it again.
 
 ### Options
 
-- `harness-ui-patch-review-closed-threads` — Whether the report lists all the closed threads under their files too.
+- `harness-ui-patch-review-auto-approve` — Whether a file you looked through and made no comment on is approved.
+- `harness-ui-patch-review-closed-threads` — Whether the threads below the files start by showing the closed ones too.
 - `harness-ui-patch-review-ediff-box-height` — How much of the frame's height the report takes beside an Ediff.
+- `harness-ui-patch-review-ediff-tree` — Whether Ediff shows the changed files in a tree beside the two versions.
+- `harness-ui-patch-review-ediff-tree-width` — How many columns wide the tree beside Ediff is, at most.
 - `harness-ui-patch-review-ediff-window-setup` — How Ediff lays out its windows while it compares a task's change.
 - `harness-ui-patch-review-file-tree` — Whether a report shows the changed files as a tree.
 - `harness-ui-patch-review-markdown` — Whether the comments of a review are drawn as Markdown.
+- `harness-ui-patch-review-skip-approved` — Whether going on from file to file steps over the files already approved.
 
 ## Uses
 
@@ -312,11 +377,12 @@ part of the report out.
 
 ### Hooks it adds to
 
-- `change-review-changed-functions` → `harness-ui-patch-review--set-changed`
 - `ediff-after-quit-hook-internal` → `lambda`
+- `ediff-select-hook` → `harness-ui-patch-review--note-difference`
 - `harness-chat-mode-hook` → `harness-ui-patch-review--setup-chat`
 - `harness-ui-event-functions` → `harness-ui-patch-review--on-event`
 - `harness-ui-report-panel-functions` → `harness-ui-patch-review--panel`
+- `harness-ui-review-changes-functions` → `harness-ui-patch-review--banner-panel`
 - `harness-ui-review-pending-functions` → `harness-ui-patch-review--pending-p`
 - `window-size-change-functions` → `harness-ui-patch-review--side-resized`
 

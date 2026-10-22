@@ -3525,6 +3525,11 @@ afterwards."
 (declare-function change-review-ui-flush "change-review-ui")
 (declare-function change-review-set-threads "change-review")
 (declare-function change-review-open-threads "change-review-ui")
+(declare-function change-review-ui-set-filter "change-review-ui")
+(declare-function change-review-ui-show-origin "change-review-ui")
+(declare-function harness-ui-patch-review--approve "harness-ui-patch-review")
+(declare-function harness-ui-patch-review--refresh "harness-ui-patch-review")
+(defvar harness-chat--transcript-end)
 
 (defvar harness-media--review nil
   "The review the review pictures show, once its threads are made.")
@@ -3574,8 +3579,10 @@ Return the report's popout buffer, once it shows its changes."
     (let ((review (harness-media--wait
                    (lambda ()
                      (let ((review (gethash id harness-ui-patch-review--reviews)))
+                       ;; Both files: an earlier picture's session read the
+                       ;; branch before the second commit.
                        (and review (harness-ui-patch-review--r-tip review)
-                            (harness-ui-patch-review--r-files review) review)))
+                            (= 2 (length (harness-ui-patch-review--r-files review))) review)))
                    30 "the review to read the branch")))
       (harness-media--review-threads review id))
     (harness-media--settle 1)
@@ -3659,10 +3666,11 @@ Return the report's popout buffer, once it shows its changes."
       (setq harness-media--review review))))
 
 (defun harness-media-shot-review ()
-  "A task in review, its report at the changes: the files, and under each its open threads.
+  "A task in review, its report at the changes: the files as a tree, the threads below.
 The threads are the library's, kept by the harness: the user's comments,
 the agent's answers, a draft, and the round of feedback from before
-there were threads, closed."
+there were threads, closed.  They are a section under the files, in the
+same buffer."
   (let ((popout (harness-media--review-layout)))
     (with-selected-window (get-buffer-window popout)
       (goto-char (point-min))
@@ -3678,36 +3686,81 @@ there were threads, closed."
     (harness-media--capture "review")))
 
 (defun harness-media-shot-review-threads ()
-  "The threads of that review by file: filtered by status, each message with who, when and its place.
-Where one comment was made shows under it, with the lines of the diff it was
-made on; the agent's answer links to the conversation it came from."
+  "The threads of that review, a section of its report below the files: each message with who, when and its place.
+The filter shows them all, the closed one too; where one comment was made
+shows under it, with the lines of the diff it was made on; the agent's
+answer links to the conversation it came from."
   (let ((popout (harness-media--review-layout)))
-    (ignore popout)
-    (harness-media--reset-layout)
-    (let ((buffer (change-review-open-threads
-                   (harness-ui-patch-review--r-set harness-media--review) 'all)))
-      (delete-other-windows)
-      (with-current-buffer buffer
-        (goto-char (point-min))
-        (search-forward "Is half a second")
-        (call-interactively #'change-review-ui-show-origin)
-        (goto-char (point-min))
-        (search-forward "Half a second is the objective")
-        (forward-line -1)
-        (beginning-of-line))
-      (harness-media--settle 1)
-      (harness-media--fit (harness-media--text-lines (selected-window)) nil 60)
-      (set-window-start nil (point-min))
-      (harness-media--settle 0.5))
+    (with-selected-window (get-buffer-window popout)
+      (change-review-ui-set-filter 'all)
+      (harness-media--settle 0.5)
+      (goto-char (point-min))
+      (search-forward "Is half a second")
+      (call-interactively #'change-review-ui-show-origin)
+      (goto-char (point-min))
+      (re-search-forward "^Threads ")
+      (beginning-of-line))
+    (harness-media--fit-popout-shot 56)
+    (with-selected-window (get-buffer-window popout)
+      (goto-char (point-min))
+      (re-search-forward "^Threads ")
+      (beginning-of-line)
+      (recenter 0))
     (harness-media--capture "review-threads")))
 
+(defun harness-media-shot-review-banner ()
+  "The session of the task in review, its banner showing the changes: the files as a tree, the threads below.
+The work is looked over where it was handed in, with no click on
+[Review Changes]: the tree has the marks of the files already looked at
+and approved, the threads the user's comments and the agent's answers,
+and [Verify] and [Send back] are under them."
+  (harness-media--review-prepare)
+  (harness-media--reset-layout)
+  (set-frame-size nil harness-media-columns harness-media-lines)
+  (harness-media--settle 0.5)
+  (let* ((id (plist-get (plist-get harness-media--world :tasks) :slow))
+         (sid (plist-get (harness-media--task id) :session))
+         (buffer (harness-media--open-chat sid 'full))
+         (review (harness-media--wait
+                  (lambda ()
+                    (let ((review (gethash id harness-ui-patch-review--reviews)))
+                      (and review (harness-ui-patch-review--r-tip review)
+                           (= 2 (length (harness-ui-patch-review--r-files review))) review)))
+                  30 "the banner to read the branch")))
+    (harness-media--review-threads review id)
+    ;; The first file was looked at and approved, the second not.
+    (let ((file (car (harness-ui-patch-review--r-files review))))
+      (harness-ui-patch-review--approve review file t t))
+    (harness-ui-patch-review--refresh review t)
+    (harness-media--settle 1.5)
+    (let ((window (get-buffer-window buffer)))
+      ;; The banner from its changes to the box, in a window as high as that.
+      (with-current-buffer buffer
+        (goto-char harness-chat--transcript-end)
+        (re-search-forward "^Changes (")
+        (beginning-of-line)
+        (let ((lines (count-screen-lines (point) (point-max) nil window)))
+          (set-frame-size nil harness-media-columns (min harness-media-lines (+ 4 lines)))))
+      (harness-media--settle 1)
+      (with-selected-window window
+        (goto-char harness-chat--transcript-end)
+        (re-search-forward "^Changes (")
+        (beginning-of-line)
+        (set-window-start window (point))
+        (goto-char (point-max))))
+    (harness-media--settle 0.5)
+    (harness-media--capture "review-banner")))
+
 (defun harness-media-shot-review-ediff ()
-  "Ediff on a file of that review, the threads under their lines and the box under it.
-The version on the branch shows the threads of acme/app.py at the line
-each is on now, drawn to the width of the window: a closed thread is one
-line, the one the agent closed, and the one the reviewer closed is opened
-to its conversation (TAB); the control panel offers to comment, reply,
-fold a thread and list them."
+  "Ediff on a file of that review: the files as a tree beside it, the threads under their lines, the box under it.
+The tree on the left has the marks of the files and the file compared
+highlighted, the threads below it; the version on the branch shows the
+threads of acme/app.py at the line each is on now, drawn to the width of
+the window: a closed thread is one line, the one the agent closed, and
+the one the reviewer closed is opened to its conversation (TAB); the
+control panel offers to comment, reply, fold a thread and go to the
+threads, and its settings skip the files approved and approve those gone
+through."
   (let ((popout (harness-media--review-layout)))
     (ignore popout)
     (let* ((review harness-media--review)
@@ -3851,6 +3904,7 @@ it puts the report back at the branch against main when it is done."
     ;; threads of its review, which no other picture shows.
     ("review" . harness-media-shot-review)
     ("review-threads" . harness-media-shot-review-threads)
+    ("review-banner" . harness-media-shot-review-banner)
     ("review-ediff" . harness-media-shot-review-ediff)
     ("review-to-review" . harness-media-shot-review-to-review)
     ;; After them: it chooses another diff, and puts the first back.

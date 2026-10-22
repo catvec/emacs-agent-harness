@@ -117,6 +117,13 @@
 ;; region; r, x, o and RET do what they do in the threads view for the
 ;; thread under point.  `change-review-visit' shows a thread in it.
 ;;
+;; THE THREADS AMONG OTHER TEXT.  The body of the threads view is a string
+;; of its own, `change-review-ui-threads-string', and the line that heads
+;; it, with the buttons of the status filter, another,
+;; `change-review-ui-threads-heading': a buffer that shows the threads as
+;; a section of its text, a report or a side panel, draws them with those
+;; and binds the keys of the threads view where they are.
+;;
 ;; The views follow the set: whatever changes it, they draw again
 ;; (`change-review-changed-functions').  Other views of a diff, such as a
 ;; side-by-side comparison, draw the threads under their lines with
@@ -1893,20 +1900,18 @@ The one for CURRENT, the filter in force, is marked instead."
       (change-review--string (change-review-set-id set))
       "change"))
 
-(defun change-review-ui--heading (set)
-  "Return the first lines of the threads view of SET."
-  (let* ((counts (change-review-thread-counts set))
-         (version (change-review-latest-version set))
-         (filter change-review-ui--filter))
+(defun change-review-ui-threads-heading (set &optional filter)
+  "Return the line that heads the threads of SET, ending in a newline.
+It is \"Threads\" and a button for each status filter -- open, closed and
+all, with how many threads each lets through -- the one for FILTER, by
+default `change-review-ui--filter', marked as in force; and how many
+drafts are not sent.  A button sets `change-review-ui--filter' in the
+buffer it is pressed in and draws that view again
+\(`change-review-ui-redraw'), so a buffer that embeds the threads
+\(`change-review-ui-threads-string') keeps both."
+  (let ((counts (change-review-thread-counts set))
+        (filter (or filter change-review-ui--filter)))
     (concat
-     (propertize "Review of " 'face 'change-review-ui-header-face)
-     (propertize (change-review-ui--set-title set) 'face 'change-review-ui-header-face)
-     (if version
-         (propertize (format "   %s of %d" (change-review-version-name version)
-                             (length (change-review-set-versions set)))
-                     'face 'change-review-ui-meta-face)
-       "")
-     "\n"
      (propertize "Threads  " 'face 'change-review-ui-header-face)
      (mapconcat (lambda (spec)
                   (change-review-ui--filter-button set (cdr spec) (car spec) filter))
@@ -1916,7 +1921,21 @@ The one for CURRENT, the filter in force, is marked instead."
                              (if (= 1 (plist-get counts :drafts)) "draft" "drafts"))
                      'face 'change-review-ui-draft-face)
        "")
+     "\n")))
+
+(defun change-review-ui--heading (set)
+  "Return the first lines of the threads view of SET."
+  (let* ((version (change-review-latest-version set)))
+    (concat
+     (propertize "Review of " 'face 'change-review-ui-header-face)
+     (propertize (change-review-ui--set-title set) 'face 'change-review-ui-header-face)
+     (if version
+         (propertize (format "   %s of %d" (change-review-version-name version)
+                             (length (change-review-set-versions set)))
+                     'face 'change-review-ui-meta-face)
+       "")
      "\n"
+     (change-review-ui-threads-heading set change-review-ui--filter)
      (propertize (substitute-command-keys
                   "\\<change-review-threads-mode-map>\
 \\[change-review-ui-next-comment]/\\[change-review-ui-previous-comment] comments  \
@@ -1926,42 +1945,74 @@ The one for CURRENT, the filter in force, is marked instead."
                  'face 'change-review-ui-meta-face)
      "\n\n")))
 
+(cl-defun change-review-ui-threads-string (set &key (filter 'open) details width (indent "") empty)
+  "Return the threads of SET that FILTER lets through, grouped by file, as text.
+This is the body of the threads view, for a buffer that shows it among
+its own text.  The change as a whole comes first, then the files in the
+order of the newest version; under the name of a file, each of its
+threads drawn as `change-review-ui-thread-string' draws it in the
+threads view, a blank line after each.  The text carries the ids of its
+threads and comments, so the commands of this library, such as
+`change-review-ui-reply' and `change-review-ui-toggle-status', find
+the thread or the comment at point in the buffer that shows it.
+
+FILTER is `open', `closed' or `all'.  DETAILS is the list of the ids of
+the comments that also show where they were made.  WIDTH is the width to
+wrap to, by default that of the window showing the current buffer, and
+INDENT starts every line.  EMPTY is the line to say when the filter
+lets no thread through, by default one that says so.  The head of the
+threads, their filter buttons, is `change-review-ui-threads-heading'."
+  (let ((groups (change-review-threads-by-file set filter))
+        (width (or width (change-review-ui-current-width))))
+    (if (null groups)
+        (propertize (concat indent
+                            (or empty (pcase filter
+                                        ('open "No open threads.")
+                                        ('closed "No closed threads.")
+                                        ('unreviewed "Nothing to review.")
+                                        (_ "No threads yet.")))
+                            "\n")
+                    'face 'change-review-ui-meta-face)
+      (mapconcat
+       (lambda (group)
+         (let* ((file (car group)) (threads (cdr group))
+                (open (cl-count-if #'change-review-thread-open-p threads)))
+           (concat
+            (propertize
+             (concat indent
+                     (propertize (if file (concat "▾ " file) "▾ The change as a whole")
+                                 'face 'change-review-ui-file-face)
+                     (propertize (format "   %d %s%s" (length threads)
+                                         (if (= 1 (length threads)) "thread" "threads")
+                                         (if (eq filter 'all) (format " · %d open" open) ""))
+                                 'face 'change-review-ui-meta-face)
+                     "\n")
+             'change-review-file (or file :change))
+            (mapconcat
+             (lambda (thread)
+               (concat (change-review-ui-thread-string
+                        set thread :view 'threads
+                        :placement (change-review-placement set thread)
+                        :details details :width width :indent (concat indent "  "))
+                       "\n"))
+             threads ""))))
+       groups ""))))
+
 (defun change-review-ui--draw-threads ()
   "Draw the threads view in the current buffer."
   (let* ((inhibit-read-only t)
          (set change-review-ui--set)
-         (anchor (change-review-ui--anchor))
-         (groups (change-review-threads-by-file set change-review-ui--filter))
-         (width (change-review-ui-current-width)))
+         (anchor (change-review-ui--anchor)))
     (erase-buffer)
-    (insert (change-review-ui--heading set))
-    (if (null groups)
-        (insert (propertize
-                 (pcase change-review-ui--filter
-                   ('open "No open threads.  f shows the closed ones.\n")
-                   ('closed "No closed threads.  f shows the open ones.\n")
-                   ('unreviewed "Nothing to review: no thread closed by someone else waits for you.  f shows the others.\n")
-                   (_ "No threads yet.  c comments on the change; in the diff view, c comments on a line.\n"))
-                 'face 'change-review-ui-meta-face))
-      (dolist (group groups)
-        (let* ((file (car group)) (threads (cdr group))
-               (open (cl-count-if #'change-review-thread-open-p threads)))
-          (insert (propertize
-                   (concat (propertize (if file (concat "▾ " file) "▾ The change as a whole")
-                                       'face 'change-review-ui-file-face)
-                           (propertize (format "   %d %s%s" (length threads)
-                                               (if (= 1 (length threads)) "thread" "threads")
-                                               (if (eq change-review-ui--filter 'all)
-                                                   (format " · %d open" open) ""))
-                                       'face 'change-review-ui-meta-face)
-                           "\n")
-                   'change-review-file (or file :change)))
-          (dolist (thread threads)
-            (insert (change-review-ui-thread-string
-                     set thread :view 'threads
-                     :placement (change-review-placement set thread)
-                     :details change-review-ui--details :width width :indent "  ")
-                    "\n")))))
+    (insert (change-review-ui--heading set)
+            (change-review-ui-threads-string
+             set :filter change-review-ui--filter :details change-review-ui--details
+             :width (change-review-ui-current-width)
+             :empty (pcase change-review-ui--filter
+                      ('open "No open threads.  f shows the closed ones.")
+                      ('closed "No closed threads.  f shows the open ones.")
+                      ('unreviewed "Nothing to review: no thread closed by someone else waits for you.  f shows the others.")
+                      (_ "No threads yet.  c comments on the change; in the diff view, c comments on a line."))))
     (goto-char (point-min))
     (change-review-ui--goto-anchor anchor)
     (set-buffer-modified-p nil)

@@ -27,6 +27,14 @@
 ;; banner says in a line that nothing was handed in, its last message
 ;; being right above, and has no [Review Changes].
 ;;
+;; What the task changed is not behind a button either.  Under the report
+;; the banner has what `harness-ui-review-changes-functions' draw for the
+;; task, indented as its text: the review module puts the files its
+;; branch changes there, as a tree, and the threads of comments below it,
+;; so the work is looked over where it is handed in and then verified or
+;; sent back.  The banner draws again when what the changes are read from
+;; -- the task's branch, what it was made from, its project -- changes.
+;;
 ;; Under the banner the compose box writes the feedback that sends the
 ;; task back: C-c C-c takes what the box holds to the task's session,
 ;; which works on it again and comes back for review.  The session's box
@@ -86,6 +94,16 @@ same.  The harness adds that to whatever sends the task back.")
 (defun harness-ui-review--pending-p (task)
   "Return non-nil when the review of TASK has something to send with its feedback."
   (and (run-hook-with-args-until-success 'harness-ui-review-pending-functions task) t))
+
+(defvar harness-ui-review-changes-functions nil
+  "Functions that draw the changes of a task under review in its banner.
+Each is called with the TASK, which waits for review, in the chat buffer
+of its session, on every draw of the banner, and returns a string of
+whole lines, or nil for nothing.  The strings go between the report the
+task handed in and the buttons, in order, indented as the banner's text:
+the work is looked over where it is handed in, and verified or sent
+back below.  A function that signals an error says so in a line, and the
+banner stays.")
 
 (defvar harness-ui-review--tasks (make-hash-table :test 'equal)
   "Session id -> the task record of that session, as last heard.")
@@ -256,16 +274,36 @@ down with it."
          (error (propertize (format "The report could not be drawn: %s\n" (error-message-string err))
                             'face 'harness-dim-face)))))))
 
-(defun harness-ui-review--banner (task &optional report in-report)
+(defun harness-ui-review--changes (task)
+  "Return the changes of TASK drawn for its banner, or nil.
+What `harness-ui-review-changes-functions' return, in order, indented
+as the banner's text.  A function that cannot draw them says so, as the
+report does, rather than take the compose box down with it."
+  (let (parts)
+    (run-hook-wrapped
+     'harness-ui-review-changes-functions
+     (lambda (fn)
+       (condition-case err
+           (when-let* ((text (funcall fn task)))
+             (unless (string-empty-p text) (push text parts)))
+         (error (push (propertize (format "The changes could not be drawn: %s\n"
+                                          (error-message-string err))
+                                  'face 'harness-dim-face)
+                      parts)))
+       nil))
+    (and parts (harness-ui-review--indent (apply #'concat (nreverse parts))))))
+
+(defun harness-ui-review--banner (task &optional report in-report changes)
   "Return the banner string for TASK, waiting for review.
 It reads as the board's Ready for review card: the mark, the heading,
 the task's title, and the buttons, with the keys beside them.
 REPORT, what TASK handed in drawn in full (`harness-ui-review--report'),
 goes between the title and the buttons: the work is read before it is
-verified or sent back.  IN-REPORT is non-nil when the banner is drawn
-at the end of TASK's report popout (`harness-ui-report-panel-functions'):
-it leaves [Review Changes] out then, the report being the window it is
-drawn in."
+verified or sent back; CHANGES, what TASK changed
+\(`harness-ui-review--changes'), follows it.  IN-REPORT is non-nil when
+the banner is drawn at the end of TASK's report popout
+\(`harness-ui-report-panel-functions'): it leaves [Review Changes] out
+then, the report being the window it is drawn in."
   (let* ((in-report (or in-report (and (fboundp 'harness-ui-report-task)
                                        (harness-ui-report-task))))
          (title (harness-ui-tasks--title task))
@@ -279,6 +317,7 @@ drawn in."
      "   " (propertize title 'face 'bold 'wrap-prefix "   ")
      "\n"
      (if (harness-string-blank-p report) "" (concat "\n" report "\n"))
+     (if (harness-string-blank-p changes) "" (concat "\n" changes "\n"))
      "   "
      (harness-ui-review--button "[Verify]" #'harness-ui-review-verify verify-help)
      (harness-ui-review--key #'harness-ui-review-verify)
@@ -353,7 +392,9 @@ change the banner does not show -- a task at work moving on, say --
 does not draw the session's tail again under a reader of the report."
   (when (harness-ui-review--reviewing-p task)
     (list (plist-get task :id) (plist-get task :prompt) (plist-get task :worktree)
-          (plist-get task :merged) (plist-get task :report))))
+          (plist-get task :merged) (plist-get task :report)
+          ;; What its changes are read from.
+          (plist-get task :branch) (plist-get task :base) (plist-get task :project))))
 
 (defun harness-ui-review--keys (on)
   "Turn this buffer's review keys on when ON, else off."
@@ -389,7 +430,8 @@ sends the task's session for the feedback that sends it back
     (when (eq harness-chat-send-function #'harness-ui-review--send)
       (kill-local-variable 'harness-chat-send-function))
     (if review
-        (harness-ui-review--face (harness-ui-review--banner task (harness-ui-review--report task)))
+        (harness-ui-review--face (harness-ui-review--banner task (harness-ui-review--report task)
+                                                            nil (harness-ui-review--changes task)))
       ;; Not in review: the box asks for a message again, not feedback.
       (when (equal harness-chat-placeholder harness-ui-review--feedback-hint)
         (kill-local-variable 'harness-chat-placeholder))

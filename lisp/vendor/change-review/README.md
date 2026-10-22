@@ -171,6 +171,17 @@ and another view of the same set show it so; a thread whose status
 changes goes back to what a thread of its new status is at first.
 Where there is no thread on the line, `TAB` is what it was.
 
+**The threads among your own text.** A buffer that shows the threads as a
+part of its own text -- the section of a report, a side panel -- gets the
+body of the threads view as a string, `change-review-ui-threads-string`
+(the threads of a status by file, each drawn as the view draws it, with
+the ids of the threads and comments on the text so that the commands
+above find them), and the line that heads them, the status filter as
+three buttons, `change-review-ui-threads-heading`. The buffer keeps
+`change-review-ui--set`, `change-review-ui--filter` and
+`change-review-ui--redraw-function`, which the buttons set and call, and
+binds the keys of the table above where the text is.
+
 **Your own views.** A side-by-side comparison, or any buffer that shows
 the lines of a file, draws the threads under its lines with
 `change-review-ui-add-thread-overlay` and takes the same keys by turning

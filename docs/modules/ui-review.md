@@ -37,6 +37,14 @@ the harness recorded for it (`harness-tasks--missing-report`): the
 banner says in a line that nothing was handed in, its last message
 being right above, and has no [Review Changes].
 
+What the task changed is not behind a button either.  Under the report
+the banner has what `harness-ui-review-changes-functions` draw for the
+task, indented as its text: the review module puts the files its
+branch changes there, as a tree, and the threads of comments below it,
+so the work is looked over where it is handed in and then verified or
+sent back.  The banner draws again when what the changes are read from
+-- the task's branch, what it was made from, its project -- changes.
+
 Under the banner the compose box writes the feedback that sends the
 task back: C-c C-c takes what the box holds to the task's session,
 which works on it again and comes back for review.  The session's box
@@ -57,6 +65,7 @@ moved it, and its keys with it.
 ### Hooks
 
 - `harness-chat-panel-functions`
+- `harness-ui-review-changes-functions` — Functions that draw the changes of a task under review in its banner.
 - `harness-ui-review-pending-functions` — Functions that say a review has something to send besides the box's words.
 
 ### Commands
