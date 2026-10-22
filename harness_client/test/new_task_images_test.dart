@@ -277,6 +277,11 @@ void main() {
       ),
     );
     expect(said.data, contains('wallpaper.png is larger than 10 MB'));
+    // It is said as an error: in the error colour, not the muted one.
+    final theme = Theme.of(
+      tester.element(find.byKey(const Key('task-attachment-error'))),
+    );
+    expect(said.style?.color, theme.colorScheme.error);
     expect(rig.app.drafts.task.attachments.map((a) => a.name), ['fine.png']);
   });
 

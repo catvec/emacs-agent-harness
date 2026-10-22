@@ -1190,7 +1190,7 @@ class _NewTaskSheetState extends State<_NewTaskSheet> {
               minLines: 4,
               textInputAction: TextInputAction.newline,
             ),
-            _attachmentsRow(theme),
+            _attachmentsRow(),
             const SizedBox(height: 14),
             Text('PRIORITY', style: HarnessText.label(context)),
             const SizedBox(height: 7),
@@ -1252,7 +1252,7 @@ class _NewTaskSheetState extends State<_NewTaskSheet> {
   /// The pictures attached to the task, and the button that attaches more:
   /// only when the harness takes them, which its settings say once they are
   /// read, so the row comes up when they are.
-  Widget _attachmentsRow(ThemeData theme) {
+  Widget _attachmentsRow() {
     final controller = widget.app.tasks;
     if (controller == null) return const SizedBox.shrink();
     return ListenableBuilder(
@@ -1295,9 +1295,8 @@ class _NewTaskSheetState extends State<_NewTaskSheet> {
                 Text(
                   _attachmentError!,
                   key: const Key('task-attachment-error'),
-                  style: theme.textTheme.labelSmall?.copyWith(
-                    color: theme.colorScheme.error,
-                  ),
+                  style: HarnessText.caption(context)
+                      .copyWith(color: Theme.of(context).colorScheme.error),
                 ),
               ],
             ],
@@ -1306,7 +1305,6 @@ class _NewTaskSheetState extends State<_NewTaskSheet> {
       },
     );
   }
-
 }
 
 class _ToggleRow extends StatelessWidget {
