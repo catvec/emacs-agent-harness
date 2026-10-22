@@ -62,11 +62,11 @@ async function connect(page, address) {
   await waitSessions(page);
 }
 
-async function waitSessions(page) {
+async function waitSessions(page, timeout = 20000) {
   await page
     .locator('flt-semantics[role=button]')
     .filter({ hasText: 'Design the merge queue' })
-    .waitFor({ timeout: 20000 });
+    .waitFor({ timeout });
   await page.waitForTimeout(600);
 }
 
@@ -260,6 +260,39 @@ async function run() {
     await page.waitForTimeout(600);
     await shot(page, 'android-signin-waiting');
     await waitSessions(page);
+
+    // The app is opened again (the page is loaded again).  The harness handed
+    // it a session secret and it kept it, so it goes back in by itself:
+    // nothing to tap and nothing to approve, though the mock would take six
+    // seconds to approve.
+    await page.setViewportSize({ width: 412, height: 915 });
+    const reopened = Date.now();
+    await page.reload({ waitUntil: 'networkidle', timeout: 60000 });
+    await waitSessions(page);
+    if (Date.now() - reopened > 5500) {
+      throw new Error('the app took as long as an approval to go back in: it asked again');
+    }
+    if (await page.getByRole('button', { name: 'Connect', exact: true }).count()) {
+      throw new Error('the connection form is up after the app went back in');
+    }
+
+    // Opened again while the harness cannot be reached: it says so, and keeps
+    // trying by itself; when the harness is back it is in, still asking nobody.
+    let away = true;
+    await page.routeWebSocket(/\/acp/, (ws) => {
+      if (away) ws.close({ code: 1006, reason: 'the harness is away' });
+      else ws.connectToServer();
+    });
+    await page.reload({ waitUntil: 'networkidle', timeout: 60000 });
+    // The card's text is a live region, which the page's semantics gives as a
+    // label or as text; its button is the same either way.
+    await page
+      .getByRole('button', { name: 'Use another address' })
+      .waitFor({ timeout: 20000 });
+    await page.waitForTimeout(600);
+    await shot(page, 'android-resuming');
+    away = false;
+    await waitSessions(page, 40000);
     await context.close();
   }
 

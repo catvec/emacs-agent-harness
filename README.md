@@ -4466,7 +4466,13 @@ machine, gets nothing.
 
 **Staying signed in.** A client that says it can keep a session secret
 (the harness's own app) is handed one in the answer to `authenticate`
-and presents it as it connects next time: no question. The app also
+and presents it as it connects next time: no question. The app keeps
+that secret and the harness's address on the device, and goes back in by
+itself whenever it opens (a phone app the system closed, a page loaded
+again): it opens on the sessions, not on a form, and is asked for
+something only when the harness asks, because it ended or lost the
+device's session. A harness that cannot be reached meanwhile is tried
+again until it answers. The app also
 pings the listener every 25 seconds, which the listener answers as
 RFC 6455 asks, so a quiet connection stays open through a mobile
 network or a VPN and a dead one is found within a minute; when the

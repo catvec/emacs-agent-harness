@@ -120,7 +120,7 @@ left to the transport or to each product.
 | [Qwen Code `serve`](https://github.com/QwenLM/qwen-code/issues/4782) (a server) | | | a bearer token on the upgrade; "our trust model is bearer-token, not session-cookie" |
 | Aptove, Runmote, AgentDeck, Chrome ACP, Ferngeist's gateway | iOS, Android, web | their own bridge or relay with their own QR or 8-digit pairing, end-to-end encrypted relays, URLs with embedded tokens: **a product's own protocol, not ACP** | |
 | Editors: Zed, JetBrains, agent-shell, VS Code extensions | | they launch the agent as a subprocess (stdio); nothing remote: "every target client (Zed/Goose/JetBrains) today spawns its ACP agent locally over stdio" (a Qwen Code maintainer, June 2026).  They reach a harness through `scripts/harness-acp-stdio`, which reads the local `acp-token` | |
-| The harness's own app (`harness_client/`) | iOS, Android, macOS, Linux, Windows, web | **The ACP flow**, shown on its connect screen; it opens the provider's page itself | the same `bearer.SECRET` subprotocol; keeps the secret it is handed |
+| The harness's own app (`harness_client/`) | iOS, Android, macOS, Linux, Windows, web | **The ACP flow**, shown on its connect screen; it opens the provider's page itself | the same `bearer.SECRET` subprotocol; keeps the secret it is handed, with the address, and presents it whenever it opens (it goes back in by itself, not through the form) |
 
 Support is uneven even among those that call `authenticate`: some clients only
 handle method ids they know (a [client that calls it only for two ids](https://github.com/get-bb/bb/issues/5706)
@@ -309,7 +309,7 @@ the one thing nothing can save you) and open it.  The client asks how to sign
 in: choose **Approve in Emacs**, check that Emacs shows the code the client
 shows, and press Approve there (`C-c h y`, or the button, or click the `?1` in
 the mode line).  Nothing is typed or copied, and the client is not left.  The
-harness's own app keeps the secret it is handed; ACP UI asks again next time.
+harness's own app keeps the secret it is handed, with the address, and goes back in with it by itself each time it opens, asking again only when the harness turns the device away (the session was revoked or ran out); ACP UI asks again next time.
 
 **A client without one (Agmente), or to skip the question.**  `t` on the page
 makes a token: put it in the client's settings, as above.

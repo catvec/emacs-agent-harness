@@ -124,7 +124,8 @@ class SettingsScreen extends StatelessWidget {
                                 title: 'Disconnect?',
                                 message:
                                     'The conversations stay on the harness. '
-                                    'You can reconnect at any time.',
+                                    'The app will not go back in by itself '
+                                    'until you connect again.',
                                 confirmLabel: 'Disconnect',
                                 cancelLabel: 'Stay',
                               );
@@ -247,7 +248,8 @@ class SettingsScreen extends StatelessWidget {
                     _SettingRow(
                       icon: Icons.key_outlined,
                       title: 'Remember',
-                      subtitle: 'Keep the address and token on this device.',
+                      subtitle:
+                          'Stay signed in: keep the address and session here.',
                       child: HarnessSwitch(
                         value: settings.rememberConnection,
                         onChanged: settings.setRememberConnection,

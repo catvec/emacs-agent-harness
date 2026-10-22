@@ -123,6 +123,12 @@ class AppController extends ChangeNotifier {
   /// What the last attempt to connect again said, when it failed.
   String? reconnectError;
 
+  /// What the last attempt to go back into the harness this device remembers
+  /// said, when it did not work (see [resume]), in words for a person.  It
+  /// stays while the attempts go on, so what the screen says does not blink
+  /// with each one.
+  String? resumeError;
+
   /// The session secret this device is signed in with, to present on the
   /// next connection: the harness replaces it every so often, and the
   /// one in use is the one to keep.
@@ -131,6 +137,8 @@ class AppController extends ChangeNotifier {
   Completer<void>? _reconnectWake;
   bool _foreground = true;
   Completer<void>? _foregroundWake;
+  bool _resumeStarted = false;
+  bool _resuming = false;
 
   /// The way to sign in the user chose, while the harness waits for them
   /// to finish it (an approval in Emacs, a login in the browser).
@@ -171,10 +179,21 @@ class AppController extends ChangeNotifier {
   /// or only out of touch for a while ([isReconnecting]).
   bool get hasSession => isConnected || isReconnecting;
 
+  /// Whether the app is going back into the harness this device remembers,
+  /// by itself, and has not needed anything from the person yet ([resume]).
+  /// The connection screen then says so instead of asking for an address and
+  /// a secret, which the device already holds.
+  bool get resuming =>
+      _resuming &&
+      phase != ConnectionPhase.needsAuth &&
+      phase != ConnectionPhase.connected;
+
   /// Whether the next attempt to connect again waits for its turn, which
   /// [retryNow] brings forward.
   bool get waitingToRetry =>
-      isReconnecting && _reconnectWake != null && !_reconnectWake!.isCompleted;
+      (isReconnecting || resuming) &&
+      _reconnectWake != null &&
+      !_reconnectWake!.isCompleted;
   HarnessCapabilities? get capability => capabilities;
   AcpClient? get client => _client;
   HarnessApi? get harness => api;
@@ -223,8 +242,26 @@ class AppController extends ChangeNotifier {
   /// at [ConnectionPhase.needsAuth], where [signInMethods] are shown to
   /// the user, who picks one for [signIn]: that is how ACP lets a client
   /// sign in.  Once signed in, the secret the harness hands this device is
-  /// kept, and the next connection needs no sign-in at all.
-  Future<void> connect(String address, {String token = ''}) async {
+  /// kept, and the next connection needs no sign-in at all: the app goes
+  /// back in by itself when it opens (see [resume]).
+  Future<void> connect(String address, {String token = ''}) {
+    // A person who connects by hand takes over from the app's own attempts.
+    _stopResuming();
+    return _connect(address, token: token);
+  }
+
+  /// [connect], which [resume] also uses.  [handshake] is how long the harness
+  /// has to answer `initialize`, where waiting for ever is no good (the app
+  /// is going back in by itself, and the person has no button to press).
+  ///
+  /// The first thing it does, before it waits for anything, is take the
+  /// next [_connectionGeneration]: [resume] reads it right after the call to
+  /// know which attempt is its own.
+  Future<void> _connect(
+    String address, {
+    String token = '',
+    Duration? handshake,
+  }) async {
     final generation = ++_connectionGeneration;
     await _teardown(keepPhase: true);
     phase = ConnectionPhase.connecting;
@@ -254,7 +291,15 @@ class AppController extends ChangeNotifier {
       );
       _client = client;
       _subscription = client.notifications.listen(_onNotification);
-      final initialized = await client.initialize(clientTitle: deviceName());
+      final initialized = await client.initialize(
+        clientTitle: deviceName(),
+        timeout: handshake,
+      );
+      if (generation != _connectionGeneration) {
+        // Something else took over while the harness thought about it.
+        await client.close();
+        return;
+      }
       _adopt(client, initialized);
       // The secret the connection was opened with is the one to sign in
       // with, even where the harness replaced it just now.
@@ -273,6 +318,7 @@ class AppController extends ChangeNotifier {
             );
             secret = await _signedIn(client, shown, secret, answer);
           } on AcpException catch (failure) {
+            if (generation != _connectionGeneration) return;
             if (failure.isAuthRequired) {
               phase = ConnectionPhase.needsAuth;
               error = _notAccepted;
@@ -290,18 +336,25 @@ class AppController extends ChangeNotifier {
       }
       await _enter(generation, shown, secret);
     } on AcpException catch (failure) {
+      // An attempt that something else took over from, and that ends in
+      // failure now (its connection was closed under it), must not undo
+      // what the other has done since.
+      if (generation != _connectionGeneration) return;
       if (failure.isAuthRequired) {
         phase = ConnectionPhase.needsAuth;
         error = failure.message;
       } else {
         phase = ConnectionPhase.failed;
         error = failure.message;
+        if (_resuming) resumeError = failure.message;
         await _teardown(keepPhase: true);
       }
       _notify();
     } catch (failure) {
+      if (generation != _connectionGeneration) return;
       phase = ConnectionPhase.failed;
       error = _cleanError(failure, hadSecret: secret.isNotEmpty);
+      if (_resuming) resumeError = _describeFailure(failure);
       await _teardown(keepPhase: true);
       _notify();
     }
@@ -473,6 +526,7 @@ class AppController extends ChangeNotifier {
         // The session may be gone already; either way we leave.
       }
     }
+    _secret = '';
     await settings.clearConnection();
     await disconnect();
   }
@@ -882,8 +936,109 @@ class AppController extends ChangeNotifier {
     }
   }
 
+  /// Leave the harness, as the person asked to.  The device keeps its
+  /// address and secret, so connecting again is a tap, but the app no longer
+  /// goes back in by itself when it opens until it is connected again: they
+  /// chose to be out.
   Future<void> disconnect() async {
     ++_connectionGeneration;
+    _stopResuming();
+    unawaited(settings.setReconnectOnLaunch(false));
+    await _teardown();
+    phase = ConnectionPhase.disconnected;
+    error = null;
+    _notify();
+  }
+
+  // ---------------------------------------------------------------------
+  // A device that remembers its harness.
+  //
+  // A device that signed in keeps the address of its harness and the session
+  // secret the harness gave it (see [SettingsController]).  When the app
+  // opens it goes back in with them by itself, as it does after a lost
+  // connection, and the person is not asked for anything: the harness is the
+  // only one that can ask again, by turning the device away (its session was
+  // ended, or ran out).  Only a device that has nothing remembered, or that
+  // the harness will not take back, is shown the connection form.
+  // ---------------------------------------------------------------------
+
+  /// Go back into the harness this device remembers, as the app opens.
+  /// Where it ends depends on what the harness says:
+  ///
+  ///  * it takes the secret: the app is in ([ConnectionPhase.connected]);
+  ///  * it asks the device to sign in ([ConnectionPhase.needsAuth]): the
+  ///    secret was revoked or ran out, or there is none.  That is a question
+  ///    for the person, so the app stops there (and does not try the secret
+  ///    again until the next launch);
+  ///  * it cannot be reached (the network is not up, the harness is
+  ///    restarting): the app tries again by itself, as it does after a lost
+  ///    connection, until the harness answers or the person takes over
+  ///    ([cancelResume]).  A phone that is put away waits.
+  ///
+  /// Does nothing unless [SettingsController.canResume], and only once per
+  /// run of the app.
+  Future<void> resume() async {
+    if (_disposed ||
+        _resumeStarted ||
+        phase != ConnectionPhase.disconnected ||
+        !settings.canResume) {
+      return;
+    }
+    final remembered = settings.address;
+    final secret = settings.token;
+    try {
+      ConnectionTarget.parse(remembered, web: kIsWeb);
+    } on FormatException {
+      // Not an address (it was damaged, or another build wrote it): there
+      // is nothing to go back to, and the form shows what is kept.
+      return;
+    }
+    _resumeStarted = true;
+    _resuming = true;
+    resumeError = null;
+    _notify();
+    try {
+      var failures = 0;
+      while (true) {
+        final attempt = _connect(
+          remembered,
+          token: secret,
+          handshake: handshakeTimeout,
+        );
+        // The attempt took its generation before it waited for anything.
+        final generation = _connectionGeneration;
+        await attempt;
+        if (!_resumeWanted(generation) || phase != ConnectionPhase.failed) {
+          break;
+        }
+        // Out of reach for now: wait, and try again.
+        failures++;
+        await _untilForeground(() => _resumeWanted(generation));
+        if (!_resumeWanted(generation)) break;
+        await _waitToRetry(failures);
+        if (!_resumeWanted(generation)) break;
+      }
+    } finally {
+      _stopResuming();
+      _notify();
+    }
+  }
+
+  bool _resumeWanted(int generation) =>
+      !_disposed && _resuming && generation == _connectionGeneration;
+
+  void _stopResuming() {
+    _resuming = false;
+    resumeError = null;
+  }
+
+  /// The person does not want the app to go back into the harness it
+  /// remembers (it is the wrong address, or they want to sign in another
+  /// way): stop trying and show the connection form, with what is kept in it.
+  Future<void> cancelResume() async {
+    if (!_resuming) return;
+    ++_connectionGeneration;
+    _stopResuming();
     await _teardown();
     phase = ConnectionPhase.disconnected;
     error = null;
@@ -949,7 +1104,7 @@ class AppController extends ChangeNotifier {
     while (_reconnecting(generation)) {
       // A phone that is put away has no network to try: the attempts wait
       // for it to come back, which is when the person needs the connection.
-      await _untilForeground(generation);
+      await _untilForeground(() => _reconnecting(generation));
       if (!_reconnecting(generation)) return;
       reconnectAttempt++;
       _notify();
@@ -1188,10 +1343,11 @@ class AppController extends ChangeNotifier {
     if (away != null && !away.isCompleted) away.complete();
   }
 
-  /// Wait for the app to be on screen; stop waiting when the reconnecting
-  /// of [generation] is over.
-  Future<void> _untilForeground(int generation) async {
-    while (!_foreground && _reconnecting(generation)) {
+  /// Wait for the app to be on screen; stop waiting when the attempts it
+  /// waits for are no longer [wanted] (the connection is back, or the person
+  /// took over).
+  Future<void> _untilForeground(bool Function() wanted) async {
+    while (!_foreground && wanted()) {
       final wake = _foregroundWake ??= Completer<void>();
       await wake.future;
     }
@@ -1247,7 +1403,7 @@ class AppController extends ChangeNotifier {
   /// app is away, and a request for something real only finds out after
   /// minutes.
   Future<void> checkConnection() async {
-    if (isReconnecting) {
+    if (isReconnecting || resuming) {
       retryNow();
       return;
     }

@@ -20,11 +20,13 @@ not offered.
 
 Signing in happens inside the app, with ACP's own `authenticate`: the harness
 lists how, the user picks "Approve in Emacs", and presses Approve in Emacs after
-comparing the code.
+comparing the code. It happens once: the app keeps the address of the harness
+and the session secret the harness hands it, and goes back in by itself every
+time it opens. It asks again only when the harness does.
 
-| Choosing how to sign in | Waiting for the approval |
-|---|---|
-| ![The harness lists how to sign in](screenshots/android-signin.png) | ![Waiting for approval in Emacs, the code to compare](screenshots/android-signin-waiting.png) |
+| Choosing how to sign in | Waiting for the approval | Opened again, harness out of reach |
+|---|---|---|
+| ![The harness lists how to sign in](screenshots/android-signin.png) | ![Waiting for approval in Emacs, the code to compare](screenshots/android-signin-waiting.png) | ![The app keeps trying to go back in and says why it has not yet](screenshots/android-resuming.png) |
 
 ## What it does
 
@@ -80,6 +82,35 @@ comparing the code.
   `initialize` that it can keep a session secret, and when the harness replaces
   it (every seven days by default) it saves the new one at once, in place of
   the old.
+- **Stays signed in.** What a device needs to get back into its harness is
+  kept on the device: the address, and the session secret (or the token it was
+  given by hand), with *Remember* on, which it is unless the person turns it
+  off. When the app opens (a cold start of a phone app that the system ended
+  in the background, a page that is loaded again) it reads that before the
+  first frame and **goes back in by itself**: no connection form, nothing to
+  tap, and no approval to ask for in Emacs again. The first thing on screen is
+  a quiet "Welcome back" with where it is going, and then the sessions. The
+  person is asked for something only when the harness asks. A harness that
+  no longer knows the secret (it was revoked, or it ran out: 30 days unused,
+  or 90 days after it was issued) leads to the sign-in screen, once, with the
+  reason; the app does not keep offering a secret that was turned down, and
+  it does not throw it away either, in case the harness only said no for now.
+  A harness that **cannot be reached** (no network yet, the harness
+  restarting, a VPN that is not up) is not a reason to ask anything: the card
+  says where the app is going back to and what the last try said ("The
+  harness refused the connection: is it running?"), and the app tries again
+  by itself, at once, then after 1, 2, 4, 8 and every 15 seconds. It waits
+  while the phone is put away and tries at once when it is picked up. *Retry
+  now* does not wait for the timer, and *Use another address* stops and shows
+  the form with the address and secret in it. What the person chose is kept
+  too. Settings → *Disconnect* means the app waits for a tap on *Connect* the
+  next time it opens (it still holds the address and secret, so that is all it
+  takes); *Sign out of this harness* and turning *Remember* off forget them;
+  a new connection turns going back in by itself on again. The saving is done
+  in order and writes what the app holds at that moment, so a secret the
+  harness replaced is never overwritten by an older one that was still on its
+  way to disk, and a connection made while the preference store was still
+  being read is kept, not undone by what the store then says.
 - **Keeps a conversation useful.** Local echo, auto-scroll with a "Latest"
   chip, a collapsible plan strip, a context-window meter, cost per session, and
   image attachments to prompts.
@@ -162,9 +193,10 @@ The Android APK is built with the debug key so it installs directly; it needs
 Android 7 (API 24) or newer. `tool/qr_install.sh` builds and installs it over
 Wi-Fi from the terminal, with no cable (see *Installing on a phone over
 Wi-Fi*). This is a local-network test client: the session secret is kept in
-the app's shared preferences when *Remember* is on, not in a platform
-keychain (*Sign out of this harness* in Settings ends the session on the
-harness and forgets it here), and
+the app's shared preferences when *Remember* is on, which is what lets the
+app go back in by itself when it opens, not in a platform keychain (*Sign out
+of this harness* in Settings ends the session on the harness and forgets it
+here), and
 `ws://` is cleartext. Use it on a trusted network, or a VPN such as Tailscale.
 Cleartext traffic is enabled for `ws://` on a local network, and the `INTERNET`
 permission is declared in the release manifest. iOS and macOS prompts for
@@ -359,7 +391,22 @@ e2e/                  Playwright mobile-emulated flows and screenshots
   the api, and the session, task and usage controllers built on it, to the new
   `AcpClient`) with the backoff above, then reads everything again. It gives
   up only when the harness refuses the device's session secret (`needsAuth`).
-  `DraftStore` keeps unsent text outside the widgets.
+  `DraftStore` keeps unsent text outside the widgets. `resume()` is what the
+  app does when it opens (`HarnessApp` starts it as soon as the settings are
+  read, which `main` does before the first frame, waiting at most a second
+  for a store that does not answer): it connects with the address and secret
+  `SettingsController` kept (`canResume`), through the same `connect` as a tap
+  on the form, and while the harness cannot be reached repeats it with the
+  same backoff (`resuming`, `resumeError`, `cancelResume`). It stops at
+  `needsAuth`, which is a question for the person. A `connect` that was
+  taken over by a newer one (the person asked for another address while the
+  first was still waiting for its harness) ends without touching what the
+  newer one did.
+- `SettingsController` keeps the address and the session secret (shared
+  preferences), `rememberConnection`, and `reconnectOnLaunch`, which says
+  whether the app goes back in by itself next time: a connection makes it
+  true, *Disconnect* makes it false. Its writes of the connection go one
+  after another and write what is held when they run.
 - `WebSocketAcpTransport` pings (`webSocketPingInterval`, 25 s) where
   `dart:io` can, closes a connection whose peer stops answering, and says why
   a connection ended (`AcpClient.closeReason`) in words the banner can show.
@@ -375,9 +422,10 @@ e2e/                  Playwright mobile-emulated flows and screenshots
 
 ```sh
 flutter analyze                    # no issues
-flutter test                       # 90 tests: ACP, capabilities, reducer,
+flutter test                       # 172 tests: ACP, capabilities, reducer,
                                    # connection parsing, boot, widget flows,
-                                   # reconnecting, WebSocket pings
+                                   # reconnecting, going back in on launch,
+                                   # saved settings, WebSocket pings
 python3 tool/test_qr_tools.py      # QR encoder against qrencode, the phone
                                    # installer (pairing, install, build
                                    # freshness, pub cache repair) with a fake
@@ -407,6 +455,19 @@ The widget tests drive the real `AcpClient` against an in-memory ACP server
   was typed, waits while it is in the background, finds a connection that died
   without a word by a probe, puts a message the harness never got back in the
   box (and not one it did), and reconnects in place from Settings
+- a device that signed in before and is opened again (`test/resume_test.dart`,
+  `resume_widget_test.dart`, `settings_controller_test.dart`): it goes back in
+  by itself with the address and secret it kept, over WebSocket and plain TCP,
+  and the harness is asked nothing, the first frame is not the connection
+  form, a secret the harness replaced on the way in is the one kept, one the
+  harness turns down leads to the sign-in once and is not offered again, a
+  harness out of reach is tried again (at once on request, not while the app is
+  away, one that takes the connection and never answers is given up on) and
+  said in words, *Disconnect*, *Sign out* and *Remember* off keep it from going
+  back in, *Use another address* takes over, and an attempt that was taken
+  over does not undo the one that replaced it, even when it fails long after.
+  The saved settings: the flag, `canResume`, overlapping writes that finish out
+  of order, a connection made while the store is still being read
 - real sockets (`test/websocket_transport_test.dart`): a peer that stops
   answering pings is found out and named, an idle connection to one that
   answers stays open, and what the peer said when it closed is reported
@@ -431,8 +492,12 @@ Chromium with iPhone 13 (`390×844 @3x`) and Pixel 7 (`412×915 @2.625x`) device
 metrics, plus a 1280×900 macOS layout. It walks connect, sessions, new session,
 chat, streaming, permission, question with diagrams, the task board, new task,
 review/verify, usage, server capabilities, settings, the macOS split view and
-the plain-ACP fallback, writing a screenshot for each. The screenshots in this
-README are the output.
+the plain-ACP fallback, writing a screenshot for each. It also signs in with an
+approval and loads the page again: the app must be on its sessions at once,
+with no form and no second approval (the mock would take six seconds), and
+again with the harness cut off (the browser's WebSocket is closed by
+Playwright) it must show the reconnecting card and, once the harness is back,
+get in by itself. The screenshots in this README are the output.
 
 | | |
 |---|---|

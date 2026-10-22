@@ -123,11 +123,6 @@ class _ConnectScreenState extends State<ConnectScreen> {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final app = widget.app;
-    final waiting = app.signingInWith != null;
-    final busy =
-        app.phase == ConnectionPhase.connecting ||
-        (app.phase == ConnectionPhase.authenticating && !waiting);
-    final error = _localError ?? app.error;
     return Scaffold(
       backgroundColor: theme.colorScheme.surface,
       body: Stack(
@@ -160,81 +155,10 @@ class _ConnectScreenState extends State<ConnectScreen> {
                         ],
                       ),
                       const SizedBox(height: 38),
-                      Text(
-                        'Your agents,\nwithin reach.',
-                        style: theme.textTheme.displaySmall?.copyWith(
-                          fontSize: 42,
-                          height: 1.02,
-                          fontWeight: FontWeight.w700,
-                          letterSpacing: -1.8,
-                        ),
-                      ),
-                      const SizedBox(height: 14),
-                      Text(
-                        'A native client for the emacs-agent-harness. '
-                        'Watch every step, answer when it needs you, and keep '
-                        'the work moving from your phone or desktop.',
-                        style: theme.textTheme.bodyLarge?.copyWith(
-                          color: theme.colorScheme.onSurfaceVariant,
-                          height: 1.5,
-                        ),
-                      ),
-                      const SizedBox(height: 26),
-                      _ConnectionCard(
-                        address: _address,
-                        token: _token,
-                        addressHint: _addressHint,
-                        obscure: _obscure,
-                        remember: _remember,
-                        busy: busy,
-                        onRemember: (value) => setState(() {
-                          _remember = value;
-                          _rememberTouched = true;
-                        }),
-                        onObscure: () => setState(() => _obscure = !_obscure),
-                        onConnect: busy ? null : _connect,
-                      ),
-                      if (error != null && error.trim().isNotEmpty) ...[
-                        const SizedBox(height: 12),
-                        HarnessErrorBanner(
-                          message: error,
-                          onDismiss: () {
-                            setState(() => _localError = null);
-                            app.clearActionError();
-                          },
-                        ),
-                      ],
-                      if (app.phase == ConnectionPhase.needsAuth ||
-                          waiting) ...[
-                        const SizedBox(height: 14),
-                        _AuthCard(
-                          app: app,
-                          token: _token,
-                          busy: busy,
-                          onUnlock: busy ? null : _unlock,
-                          onSignIn: _signIn,
-                          onCancel: () => widget.app.cancelSignIn(),
-                        ),
-                      ],
-                      if (app.capability != null &&
-                          app.phase != ConnectionPhase.connected) ...[
-                        const SizedBox(height: 14),
-                        _DiscoveryCard(app: app),
-                      ],
-                      const SizedBox(height: 28),
-                      _FeatureTeaser(),
-                      const SizedBox(height: 22),
-                      Center(
-                        child: Text(
-                          'JSON-RPC 2.0 · WebSocket or TCP · your network, your machine',
-                          textAlign: TextAlign.center,
-                          style: theme.textTheme.labelSmall?.copyWith(
-                            color: theme.colorScheme.onSurfaceVariant
-                                .withValues(alpha: 0.7),
-                            letterSpacing: 0.2,
-                          ),
-                        ),
-                      ),
+                      if (app.resuming)
+                        ..._resumeSection(theme)
+                      else
+                        ..._formSection(theme),
                     ],
                   ),
                 ),
@@ -245,6 +169,117 @@ class _ConnectScreenState extends State<ConnectScreen> {
       ),
     );
   }
+
+  /// The form for an address and a secret, and the ways to sign in: for a
+  /// device that has no harness to go back into, or that the harness
+  /// turned away.
+  List<Widget> _formSection(ThemeData theme) {
+    final app = widget.app;
+    final waiting = app.signingInWith != null;
+    final busy =
+        app.phase == ConnectionPhase.connecting ||
+        (app.phase == ConnectionPhase.authenticating && !waiting);
+    final error = _localError ?? app.error;
+    return [
+      Text(
+        'Your agents,\nwithin reach.',
+        style: theme.textTheme.displaySmall?.copyWith(
+          fontSize: 42,
+          height: 1.02,
+          fontWeight: FontWeight.w700,
+          letterSpacing: -1.8,
+        ),
+      ),
+      const SizedBox(height: 14),
+      Text(
+        'A native client for the emacs-agent-harness. '
+        'Watch every step, answer when it needs you, and keep '
+        'the work moving from your phone or desktop.',
+        style: theme.textTheme.bodyLarge?.copyWith(
+          color: theme.colorScheme.onSurfaceVariant,
+          height: 1.5,
+        ),
+      ),
+      const SizedBox(height: 26),
+      _ConnectionCard(
+        address: _address,
+        token: _token,
+        addressHint: _addressHint,
+        obscure: _obscure,
+        remember: _remember,
+        busy: busy,
+        onRemember: (value) => setState(() {
+          _remember = value;
+          _rememberTouched = true;
+        }),
+        onObscure: () => setState(() => _obscure = !_obscure),
+        onConnect: busy ? null : _connect,
+      ),
+      if (error != null && error.trim().isNotEmpty) ...[
+        const SizedBox(height: 12),
+        HarnessErrorBanner(
+          message: error,
+          onDismiss: () {
+            setState(() => _localError = null);
+            app.clearActionError();
+          },
+        ),
+      ],
+      if (app.phase == ConnectionPhase.needsAuth || waiting) ...[
+        const SizedBox(height: 14),
+        _AuthCard(
+          app: app,
+          token: _token,
+          busy: busy,
+          onUnlock: busy ? null : _unlock,
+          onSignIn: _signIn,
+          onCancel: () => widget.app.cancelSignIn(),
+        ),
+      ],
+      if (app.capability != null && app.phase != ConnectionPhase.connected) ...[
+        const SizedBox(height: 14),
+        _DiscoveryCard(app: app),
+      ],
+      const SizedBox(height: 28),
+      _FeatureTeaser(),
+      const SizedBox(height: 22),
+      Center(
+        child: Text(
+          'JSON-RPC 2.0 · WebSocket or TCP · your network, your machine',
+          textAlign: TextAlign.center,
+          style: theme.textTheme.labelSmall?.copyWith(
+            color: theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.7),
+            letterSpacing: 0.2,
+          ),
+        ),
+      ),
+    ];
+  }
+
+  /// A device that remembers its harness: the app goes back in by itself,
+  /// with the session it kept, and the person has nothing to type.
+  List<Widget> _resumeSection(ThemeData theme) => [
+    Text(
+      'Welcome\nback.',
+      style: theme.textTheme.displaySmall?.copyWith(
+        fontSize: 42,
+        height: 1.02,
+        fontWeight: FontWeight.w700,
+        letterSpacing: -1.8,
+      ),
+    ),
+    const SizedBox(height: 14),
+    Text(
+      'This device is signed in. The app is going back into the harness by '
+      'itself, with the session it kept: there is nothing to type.',
+      style: theme.textTheme.bodyLarge?.copyWith(
+        color: theme.colorScheme.onSurfaceVariant,
+        height: 1.5,
+      ),
+    ),
+    const SizedBox(height: 26),
+    _ResumeCard(app: widget.app),
+  ];
 }
 
 class _ConnectionCard extends StatelessWidget {
@@ -372,7 +407,7 @@ class _ConnectionCard extends StatelessWidget {
             children: [
               Expanded(
                 child: Text(
-                  'Kept on this device only. Signing in below needs none.',
+                  'Stay signed in here: reconnect when the app opens.',
                   style: theme.textTheme.bodySmall?.copyWith(
                     color: theme.colorScheme.onSurfaceVariant,
                     height: 1.35,
@@ -416,6 +451,128 @@ class _ConnectionCard extends StatelessWidget {
                     height: 1.4,
                   ),
                 ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// What shows while the app goes back into the harness this device
+/// remembers: where, what the last try said when it did not work, and the two
+/// things a person may want then.  It is not a form: the address and the
+/// secret are known.
+class _ResumeCard extends StatelessWidget {
+  const _ResumeCard({required this.app});
+
+  final AppController app;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final detail = app.resumeError;
+    final where = shortAddress(app.address ?? app.settings.address);
+    return Container(
+      key: const Key('resume-card'),
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surfaceContainerLowest,
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(color: theme.colorScheme.outlineVariant),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(
+              alpha: theme.brightness == Brightness.dark ? 0.22 : 0.05,
+            ),
+            blurRadius: 30,
+            offset: const Offset(0, 12),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Announced when it comes up, to somebody who cannot see it: what
+          // it says is read out as it is written.
+          Semantics(
+            container: true,
+            liveRegion: true,
+            child: Row(
+              children: [
+                const HarnessActivity(radius: 10),
+                const SizedBox(width: 14),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Reconnecting…',
+                        style: theme.textTheme.titleSmall?.copyWith(
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        where,
+                        key: const Key('resume-address'),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: theme.colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+          if (detail != null && detail.isNotEmpty) ...[
+            const SizedBox(height: 14),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Padding(
+                  padding: EdgeInsets.only(top: 1),
+                  child: Icon(
+                    Icons.info_outline_rounded,
+                    size: 15,
+                    color: HarnessColors.amber,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    detail,
+                    key: const Key('resume-detail'),
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: theme.colorScheme.onSurfaceVariant,
+                      height: 1.4,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ],
+          const SizedBox(height: 16),
+          Wrap(
+            spacing: 8,
+            runSpacing: 4,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              if (app.waitingToRetry)
+                HarnessSecondaryButton(
+                  key: const Key('resume-retry'),
+                  label: 'Retry now',
+                  icon: Icons.refresh_rounded,
+                  onPressed: app.retryNow,
+                ),
+              HarnessTextButton(
+                key: const Key('resume-change'),
+                label: 'Use another address',
+                onPressed: app.cancelResume,
               ),
             ],
           ),
@@ -516,7 +673,10 @@ class _AuthCard extends StatelessWidget {
                 children: [
                   HarnessActivity(radius: 8),
                   const SizedBox(width: 10),
-                  Text('Checking the session…', style: theme.textTheme.bodySmall),
+                  Text(
+                    'Checking the session…',
+                    style: theme.textTheme.bodySmall,
+                  ),
                 ],
               ),
             ],

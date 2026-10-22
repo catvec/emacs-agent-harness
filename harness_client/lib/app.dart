@@ -34,6 +34,11 @@ class _HarnessAppState extends State<HarnessApp> with WidgetsBindingObserver {
     _inSession = _app.hasSession;
     _app.addListener(_sessionChanged);
     WidgetsBinding.instance.addObserver(this);
+    // A device that remembers its harness goes back in as the app opens.
+    // With the settings read already (see `main`), that starts before the
+    // first frame, which is then not the form for an address and a secret
+    // that the device holds.
+    if (widget.settings.loaded) unawaited(_app.resume());
     _configure();
   }
 
@@ -82,7 +87,10 @@ class _HarnessAppState extends State<HarnessApp> with WidgetsBindingObserver {
       debugPrint('Harness: could not load local settings: $error');
       return;
     }
-    if (!mounted || !kIsWeb) return;
+    if (!mounted) return;
+    // What the device remembers is known now (a no-op when it began already).
+    unawaited(_app.resume());
+    if (!kIsWeb) return;
     final query = Uri.base.queryParameters;
     final platform = query['platform']?.toLowerCase();
     if (platform == 'cupertino' || platform == 'apple' || platform == 'ios') {
