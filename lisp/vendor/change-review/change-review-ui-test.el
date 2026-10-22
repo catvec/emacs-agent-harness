@@ -417,6 +417,99 @@ words, how many comments, and whether one is a draft."
                                set (car threads) :width 100
                                :placement '(:side new :line 9 :was 3 :status moved)))))))
 
+;;;; The text of a comment
+
+;; A kind of set whose comments are a markup: a line that starts with
+;; "!" is drawn bold without it, one that starts with "~" ends in a
+;; newline of its own whose face reaches the window's edge, and the
+;; width the drawing gave is remembered.
+(cl-defstruct (change-review-ui-test--markup-set (:include change-review-set)) widths)
+
+(cl-defmethod change-review-ui-body-lines ((set change-review-ui-test--markup-set) comment width)
+  (push width (change-review-ui-test--markup-set-widths set))
+  (mapcar (lambda (line)
+            (cond ((string-prefix-p "!" line)
+                   (propertize (substring line 1) 'face 'bold))
+                  ((string-prefix-p "~" line)
+                   (concat (substring line 1) (propertize "\n" 'face 'highlight)))
+                  (t line)))
+          (split-string (change-review-comment-body comment) "\n")))
+
+(cl-defmethod change-review-ui-body-summary ((_set change-review-ui-test--markup-set) comment)
+  (let ((text (string-replace "\n" " " (change-review-comment-body comment))))
+    (if (string-prefix-p "!" text) (propertize (substring text 1) 'face 'bold) text)))
+
+(defun change-review-ui-test--markup-thread (body)
+  "Return (SET . THREAD): a markup set with one thread whose only comment says BODY."
+  (let* ((set (make-change-review-ui-test--markup-set :id "markup" :title "Markup"))
+         (comment (change-review-comment set body :author (change-review-ui-test--author)
+                                         :time change-review-ui-test--now)))
+    (cons set (change-review-find-thread set (change-review-comment-thread comment)))))
+
+(ert-deftest change-review-ui-asks-the-set-for-the-text-of-a-comment ()
+  "A kind of set draws the text of its comments itself: each line it gives is
+put after the bar, keeps its faces and carries its comment; one that
+ends in a newline of its own is not given another; the width it is
+given is what the bar leaves."
+  (change-review-ui-test--drawing
+    (pcase-let* ((`(,set . ,thread) (change-review-ui-test--markup-thread "plain\n!bold\n~extends\nlast"))
+                 (string (change-review-ui-thread-string set thread :width 80 :indent "  "))
+                 (lines (change-review-ui-test--lines string))
+                 (id (change-review-comment-id (change-review-thread-root thread))))
+      ;; The indent, the bar, and the six columns the comment's place in
+      ;; the thread takes: nine columns of the eighty.
+      (should (equal '(71) (change-review-ui-test--markup-set-widths set)))
+      ;; The thread's header, the comment's, then its four lines.
+      (should (= 6 (length lines)))
+      (should (equal '("  ┃      plain" "  ┃      bold" "  ┃      extends" "  ┃      last")
+                     (nthcdr 2 lines)))
+      (let ((pos (string-search "bold" string)))
+        (should (eq 'bold (get-text-property pos 'face string)))
+        (should (eq 'bold (get-text-property (+ pos 3) 'face string)))
+        (should-not (get-text-property (+ pos 4) 'face string)))
+      ;; The newline it brought is the line's end, in its face.
+      (let ((pos (+ (string-search "extends" string) (length "extends"))))
+        (should (equal "\n" (substring-no-properties string pos (1+ pos))))
+        (should (eq 'highlight (get-text-property pos 'face string))))
+      (should-not (string-search "\n\n" (substring-no-properties string)))
+      ;; Every line of the text is its comment's.
+      (dolist (word '("plain" "bold" "extends" "last"))
+        (should (equal id (get-text-property (string-search word string) 'change-review-comment string)))))))
+
+(ert-deftest change-review-ui-asks-the-set-for-the-first-words ()
+  "A thread drawn as a line, or collapsed, is named by what the set says
+its first comment starts with: cut to the room there is, in the meta face
+under the faces it brings."
+  (change-review-ui-test--drawing
+    (pcase-let ((`(,set . ,thread) (change-review-ui-test--markup-thread "!bold words and more")))
+      (dolist (string (list (change-review-ui-thread-line set thread :width 100)
+                            (change-review-ui-thread-string set thread :width 100 :collapsed t :view 'diff)))
+        (should (string-match-p "“bold words and more”" (substring-no-properties string)))
+        ;; Its own face, and the meta face beneath.
+        (should (equal '(bold change-review-ui-meta-face)
+                       (get-text-property (string-search "bold words" string) 'face string)))
+        ;; The quotes are in the meta face alone.
+        (should (eq 'change-review-ui-meta-face
+                    (get-text-property (string-search "“" string) 'face string))))
+      ;; Too little room: cut, with the ellipsis.
+      (let ((narrow (substring-no-properties (change-review-ui-thread-line set thread :width 40))))
+        (should (string-match-p "bold words …”" narrow))
+        (should-not (string-search "and more" narrow))))))
+
+(ert-deftest change-review-ui-draws-the-text-as-typed-for-a-plain-set ()
+  "A plain set draws the lines its author typed, each wrapped, with no markup."
+  (change-review-ui-test--drawing
+    (let* ((set (change-review-ui-test--set))
+           (comment (change-review-comment set "**not bold**\n`not code`\n- not a list"
+                                           :author (change-review-ui-test--author)
+                                           :time change-review-ui-test--now))
+           (thread (change-review-find-thread set (change-review-comment-thread comment))))
+      (should (equal '("**not bold**" "`not code`" "- not a list")
+                     (change-review-ui-body-lines set comment 40)))
+      (should (equal "**not bold** `not code` - not a list" (change-review-ui-body-summary set comment)))
+      (should (member "┃      **not bold**"
+                      (change-review-ui-test--lines (change-review-ui-thread-string set thread :width 80)))))))
+
 ;;;; Fitting a thread to its room
 
 (defun change-review-ui-test--widest (string)
@@ -867,6 +960,26 @@ the files in the order of the newest version."
     (change-review-ui-set-filter 'open)
     (should (eq 'open change-review-ui--filter))))
 
+(ert-deftest change-review-ui-threads-view-is-drawn-to-the-width-of-its-window ()
+  "The view is shown before it is drawn, so even its first drawing wraps the
+text to the width of the window it is shown in, not to eighty columns
+for want of one."
+  (let* ((change-review-ui-width nil)
+         (change-review-ui-sets nil)
+         (set (change-review-ui-test--set)))
+    (change-review-comment set (string-join (make-list 30 "wordy") " ")
+                           :author (change-review-ui-test--author) :time change-review-ui-test--now)
+    (cl-letf (((symbol-function 'window-body-width) (lambda (&rest _) 50)))
+      (let ((buffer (save-window-excursion (change-review-open-threads set 'all))))
+        (unwind-protect
+            (with-current-buffer buffer
+              (let ((words (cl-remove-if-not (lambda (line) (string-search "wordy" line))
+                                             (split-string (change-review-ui-test--text) "\n"))))
+                (should (> (length words) 3))
+                (dolist (line words)
+                  (should (<= (string-width line) 50)))))
+          (kill-buffer buffer))))))
+
 (ert-deftest change-review-ui-threads-view-says-when-there-is-nothing ()
   "A filter that shows nothing says so, and how to see more."
   (change-review-ui-test--drawing
@@ -1073,6 +1186,32 @@ it by the line point is on."
           (forward-line -1)
           (should-not (change-review-ui--overlay-thread-ids)))))))
 
+(ert-deftest change-review-ui-keeps-the-face-of-the-last-newline-under-a-line ()
+  "The buffer's own newline ends the last line of a thread under a line, so a
+face that reaches the edge of the window from the newline of that line is
+a stretch there instead; text whose last newline has no face ends as it did."
+  (change-review-ui-test--drawing
+    (pcase-let ((`(,set . ,thread) (change-review-ui-test--markup-thread "first\n~extends"))
+                (plain (change-review-ui-test--set)))
+      (with-temp-buffer
+        (insert "one\ntwo\n")
+        (setq change-review-ui--set set)
+        (goto-char (point-min))
+        (let* ((text (overlay-get (change-review-ui-add-thread-overlay
+                                   set thread (line-end-position) :view 'diff :width 70)
+                                  'after-string))
+               (last (1- (length text))))
+          (should-not (string-suffix-p "\n" text))
+          (should (string-suffix-p "extends " (substring-no-properties text)))
+          (should (eq 'highlight (get-text-property last 'face text)))
+          (should (equal '(space :align-to right) (get-text-property last 'display text))))
+        (let* ((thread (car (change-review-ui-test--populate plain)))
+               (text (overlay-get (change-review-ui-add-thread-overlay
+                                   plain thread (line-end-position) :view 'diff :width 70)
+                                  'after-string)))
+          (should-not (string-suffix-p "\n" text))
+          (should-not (get-text-property (1- (length text)) 'display text)))))))
+
 (ert-deftest change-review-ui-lines-mode-acts-on-the-thread-under-the-line ()
   "In a buffer that shows threads under its lines, r, x and RET act on the thread there."
   (change-review-ui-test--drawing
@@ -1248,6 +1387,8 @@ that grew under it is not in sight, and leaves the window alone when it is."
 (ert-deftest change-review-ui-diff-view-shows-the-diff-with-threads-under-lines ()
   "The files' diffs are the text; each thread is drawn under the line it is
 about, the change's own at the top."
+  ;; The window a batch Emacs shows the view in is a few lines high.
+  (let ((change-review-ui-max-thread-lines nil))
   (change-review-ui-test--diff-view
     (should (derived-mode-p 'change-review-diff-view-mode))
     (should (derived-mode-p 'diff-mode))
@@ -1281,7 +1422,7 @@ about, the change's own at the top."
       (should-not (string-match-p "· line 3 ·" string)))
     ;; (`format-mode-line' draws nothing in a batch Emacs.)
     (should (string-match-p "3 open, 1 closed, 2 not sent"
-                            (apply #'concat (cl-remove-if-not #'stringp header-line-format))))))
+                            (apply #'concat (cl-remove-if-not #'stringp header-line-format)))))))
 
 (ert-deftest change-review-ui-diff-view-comments-on-a-line ()
   "c on a line of the diff makes a draft thread there, with the lines around it."

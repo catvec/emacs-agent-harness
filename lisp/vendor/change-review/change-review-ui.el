@@ -45,6 +45,14 @@
 ;; whether the thread is open or closed, who closed it and when.  A
 ;; closed thread can be drawn as one line.
 ;;
+;; THE TEXT.  What a comment says is drawn as its author typed it, its
+;; lines wrapped to the width under the bar.  A kind of set whose
+;; comments are written in a markup -- Markdown, say -- draws them as
+;; that markup does by answering `change-review-ui-body-lines' (the
+;; lines of a comment) and `change-review-ui-body-summary' (the first
+;; words of it, where a thread is one line); every view draws the text
+;; through them.
+;;
 ;; FITTING.  A line of the drawing is never wider than the width it is
 ;; drawn to: a header that does not fit says less -- how long ago instead
 ;; of the date, the revision left out, the buttons shortened -- until it
@@ -410,6 +418,51 @@ thread started on, which PLACEMENT remembers."
         ('changed (if line (format "line %s changed since" line) "its line changed since"))
         ('gone "its line is gone")))))
 
+;;;; The text of a comment
+
+(cl-defgeneric change-review-ui-body-lines (set comment width)
+  "Return the text of COMMENT of SET as the lines to draw, WIDTH columns at most.
+A list of strings, which the drawing of a thread puts one by one under
+the comment's header, after its bar.  WIDTH is what the bar leaves.  A
+line may end in a newline of its own, whose face then reaches the edge
+of the window if it says so, a code block's background say; a line
+that does not gets the one the drawing ends it with.  The lines keep
+their text properties, faces and the like.
+
+The method for a plain `change-review-set' draws the text as its author
+typed it: its lines, wrapped at spaces to WIDTH.  A kind of set whose
+comments are written in a markup draws them as that does, and wraps
+what it draws itself.")
+
+(cl-defmethod change-review-ui-body-lines ((_set change-review-set) comment width)
+  (cl-loop for text in (split-string (change-review-comment-body comment) "\n")
+           append (change-review-ui--wrap text width)))
+
+(cl-defgeneric change-review-ui-body-summary (set comment)
+  "Return the text of COMMENT of SET as one line, a string without newline.
+It names a thread in a list, or one drawn collapsed, by the first
+words of its first comment: the drawing cuts the line to the room it
+has, and draws what has no face of its own in the face of the words
+around it.
+
+The method for a plain `change-review-set' joins the lines of the text
+with spaces.")
+
+(cl-defmethod change-review-ui-body-summary ((_set change-review-set) comment)
+  (change-review-ui--summary (change-review-comment-body comment)))
+
+(defun change-review-ui--preview (set comment room)
+  "Return the first words of COMMENT of SET, quoted, in ROOM columns at most.
+The quotes, and the words with no face of their own, are in
+`change-review-ui-meta-face'; a face the words have, bold say, stays
+and adds to it."
+  (let ((meta 'change-review-ui-meta-face)
+        (words (copy-sequence
+                (truncate-string-to-width (change-review-ui-body-summary set comment)
+                                          room nil nil "…"))))
+    (add-face-text-property 0 (length words) meta t words)
+    (concat (propertize "“" 'face meta) words (propertize "”" 'face meta))))
+
 ;;;; Origin
 
 ;; Where a comment was made is not where its thread is now.  The code a
@@ -607,9 +660,9 @@ line does."
                   change-review-ui--comment-header-steps))
          (body-prefix (concat prefix bar (make-string (+ digits 3 2) ?\s)))
          (lines (list header)))
-    (dolist (text (split-string (change-review-comment-body comment) "\n"))
-      (dolist (piece (change-review-ui--wrap text (max 20 (- width (string-width body-prefix)))))
-        (push (concat body-prefix piece) lines)))
+    (dolist (piece (change-review-ui-body-lines
+                    set comment (max 20 (- width (string-width body-prefix)))))
+      (push (concat body-prefix piece) lines))
     (when details
       (dolist (line (change-review-ui-origin-lines set thread comment))
         ;; A line of the diff is a way to its source all along the line.
@@ -620,7 +673,9 @@ line does."
                       line)
               lines)))
     (mapcar (lambda (line)
-              (propertize (concat line "\n") 'change-review-comment (change-review-comment-id comment)))
+              ;; A line of the text may end in a newline of its own.
+              (propertize (if (string-suffix-p "\n" line) line (concat line "\n"))
+                          'change-review-comment (change-review-comment-id comment)))
             (nreverse lines))))
 
 (defconst change-review-ui--header-steps
@@ -748,7 +803,8 @@ left.  FOLD, INDENT, VIEW and PLACEMENT are those of
 `change-review-ui-thread-string'; the words are a button that opens the
 thread when the thread can be folded."
   (let* ((width (min width change-review-ui--collapsed-width))
-         (text (change-review-ui--summary (change-review-comment-body (change-review-thread-root thread))))
+         (rich (change-review-ui-body-summary set (change-review-thread-root thread)))
+         (text (substring-no-properties rich))
          (wanted (min (+ 2 (string-width text)) change-review-ui--quote-room))
          (header (change-review-ui--thread-header set thread view placement indent
                                                   (- width 2 wanted) fold t))
@@ -766,7 +822,11 @@ thread when the thread can be folded."
                              "Show the conversation of this thread (TAB)"
                              (lambda () (change-review-ui-set-fold set thread 'expanded))
                              'change-review-ui-meta-face)
-                          (propertize (concat "“" words "”") 'face 'change-review-ui-meta-face)))
+                          ;; The faces the set gave the words stay, over the meta face.
+                          (let ((shown (copy-sequence (truncate-string-to-width rich room nil nil "…")))
+                                (meta 'change-review-ui-meta-face))
+                            (add-face-text-property 0 (length shown) meta t shown)
+                            (concat (propertize "“" 'face meta) shown (propertize "”" 'face meta)))))
               "")
             "\n")))
 
@@ -790,8 +850,9 @@ where it is, how many comments it has, whether it is open or closed --
 and buttons, then each comment: the bar, the comment's place in the
 thread (\"2/3\", and \"↳ re 1/3\" when it answers another than the one
 before), who wrote it, when, against which revision, whether it is a
-draft, and the text.  A comment whose author is an agent has a button
-to the conversation it came from.
+draft, and the text (`change-review-ui-body-lines': as it was typed,
+unless the kind of set says its comments are a markup).  A comment
+whose author is an agent has a button to the conversation it came from.
 
 No line is wider than WIDTH, by default the room the buffer's window
 has: a line that would be says less -- how long ago for a date, the
@@ -863,10 +924,8 @@ ends in a newline and carries the thread's id."
                        (propertize (change-review-author-label (change-review-comment-author root))
                                    'face (change-review-ui--author-face (change-review-comment-author root)))
                        ": "))
-         (room (max 12 (- width (string-width head) 14)))
-         (text (truncate-string-to-width
-                (change-review-ui--summary (change-review-comment-body root)) room nil nil "…")))
-    (propertize (concat head (propertize (concat "“" text "”") 'face 'change-review-ui-meta-face)
+         (room (max 12 (- width (string-width head) 14))))
+    (propertize (concat head (change-review-ui--preview set root room)
                         (if (> count 1)
                             (propertize (format " · %d comments" count) 'face 'change-review-ui-meta-face)
                           "")
@@ -1038,8 +1097,16 @@ diff other than the ones here draws its threads with this."
     (overlay-put overlay 'change-review-thread (change-review-thread-id thread))
     (if before
         (overlay-put overlay 'before-string text)
-      ;; The buffer's own newline ends the last line.
-      (overlay-put overlay 'after-string (concat "\n" (substring text 0 -1))))
+      ;; The buffer's own newline ends the last line.  A face the text's
+      ;; last newline has, to reach the edge of the window as the
+      ;; background of a code block does, would be lost with it: a stretch
+      ;; to the edge has it instead.
+      (let ((face (and (> (length text) 0) (get-text-property (1- (length text)) 'face text))))
+        (overlay-put overlay 'after-string
+                     (concat "\n" (substring text 0 -1)
+                             (if face
+                                 (propertize " " 'face face 'display '(space :align-to right))
+                               "")))))
     overlay))
 
 (defun change-review-ui-clear-overlays (&optional buffer)
@@ -1696,9 +1763,12 @@ last, else `change-review-ui-default-filter'.  Return the buffer."
         (change-review-threads-mode))
       (setq change-review-ui--set set
             change-review-ui--filter (or filter change-review-ui--filter
-                                         change-review-ui-default-filter))
-      (change-review-ui--draw-threads))
+                                         change-review-ui-default-filter)))
+    ;; Shown before it is drawn: the threads are drawn to the width of
+    ;; their window, not to eighty columns for want of one.
     (pop-to-buffer buffer)
+    (with-current-buffer buffer
+      (change-review-ui--draw-threads))
     buffer))
 
 (defun change-review-ui-set-filter (filter)
@@ -1940,9 +2010,11 @@ Return the buffer."
           (change-review-diff-view-mode))
         (setq change-review-ui--set set
               change-review-ui--version version
-              change-review-ui--filter (or change-review-ui--filter 'all))
-        (change-review-ui--draw-diff))
+              change-review-ui--filter (or change-review-ui--filter 'all)))
+      ;; Shown before it is drawn, as the threads view is.
       (pop-to-buffer buffer)
+      (with-current-buffer buffer
+        (change-review-ui--draw-diff))
       buffer)))
 
 (defun change-review-ui-show-threads ()

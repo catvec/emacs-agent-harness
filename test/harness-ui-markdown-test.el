@@ -17,6 +17,70 @@
     (should (equal "http://x" (get-text-property 27 'harness-url s)))
     (should (memq 'harness-md-strike (harness-md-test-face-at s 29)))))
 
+(defun harness-md-test-faced-parts (string)
+  "Return the parts of STRING that have a face, as plain text, in order."
+  (let ((parts nil) (pos 0))
+    (while (< pos (length string))
+      (let ((next (or (next-single-property-change pos 'face string) (length string))))
+        (when (get-text-property pos 'face string)
+          (push (substring-no-properties string pos next) parts))
+        (setq pos next)))
+    (nreverse parts)))
+
+(ert-deftest harness-md-emphasis-needs-text-against-its-markers ()
+  "Stars and underscores with a blank against them, in arithmetic, C, Python,
+globs and names, stay as they are: none of the text between two of them turns
+into emphasis, and no marker vanishes."
+  (dolist (text '("2 * 3 * 4" "char *p and char *q" "pass *args and **kwargs through"
+                  "all *.el and *.py files" "src/**/*.py is a glob" "a ** b ** c" "a _ b _ c"
+                  "call _private_method here" "see _foo_bar" "x_ y_ z" "snake_case_name"
+                  "*" "**" "_" "__"))
+    (ert-info ((format "%S" text))
+      (let ((s (harness-ui-markdown-inline text)))
+        (should (equal text (substring-no-properties s)))
+        (should-not (harness-md-test-faced-parts s)))))
+  ;; Emphasis with its text against its markers is emphasis.
+  (dolist (case '(("*it* and **bold** and _it_ and __bold__" "it" "bold" "it" "bold")
+                  ("*a* and **a**" "a" "a")
+                  ("a *b c* d, **e f g** and _h i_" "b c" "e f g" "h i")
+                  ("**Fixed:** done, (_it_), _it_." "Fixed:" "it" "it")
+                  ("**bold *and italic* inside**" "bold " "and italic" " inside")
+                  ;; A marker that opens none is the text before the one that does.
+                  ("**a **b**" "b")
+                  ("2 * 3 and *x*" "x")
+                  ;; The character before the marker stays what it was.
+                  ("_*a*" "a")
+                  ("*_a_*" "a")))
+    (ert-info ((format "%S" (car case)))
+      (should (equal (cdr case) (harness-md-test-faced-parts (harness-ui-markdown-inline (car case)))))))
+  (should (equal "_a" (substring-no-properties (harness-ui-markdown-inline "_*a*"))))
+  (should (equal "**a b" (substring-no-properties (harness-ui-markdown-inline "**a **b**")))))
+
+(ert-deftest harness-md-angle-brackets-make-a-link-only-around-a-url ()
+  "Text in angle brackets that is no URL, a type or a placeholder, keeps its brackets."
+  (dolist (text '("List<Foo> and Vec<String>" "a <b> c" "<file.txt> and <x/y>" "1 < 2 > 0" "<>"))
+    (ert-info ((format "%S" text))
+      (let ((s (harness-ui-markdown-inline text)))
+        (should (equal text (substring-no-properties s)))
+        (should-not (cl-some (lambda (i) (get-text-property i 'harness-url s))
+                             (number-sequence 0 (max 0 (1- (length s)))))))))
+  (let ((s (harness-ui-markdown-inline "see <https://x.org/a?b=1> and <mailto:me@x.org>.")))
+    (should (equal "see https://x.org/a?b=1 and mailto:me@x.org." (substring-no-properties s)))
+    (should (equal "https://x.org/a?b=1" (get-text-property (string-search "x.org/a" s) 'harness-url s)))
+    (should (equal "mailto:me@x.org" (get-text-property (string-search "me@" s) 'harness-url s)))))
+
+(ert-deftest harness-md-emphasis-markers-take-time-linear-in-the-text ()
+  "A text full of markers that open nothing is read in time that grows with it.
+Asking the regexp itself for text against the markers searched to the
+end of the text from each marker -- minutes for this one -- where
+asking after it finds the marker's end next to it."
+  (let ((start (float-time)))
+    (dolist (text (list (apply #'concat (make-list 30000 "**a "))
+                        (apply #'concat (make-list 30000 "*a "))
+                        (apply #'concat (make-list 30000 "_a "))))
+      (should (stringp (harness-ui-markdown-render text))))
+    (should (< (- (float-time) start) 20))))
+
 (ert-deftest harness-md-blocks ()
   (let* ((md "# Title\n\nPara one\ncontinues.\n\n- item one\n  wrapped\n- item **two**\n\n1. first\n2. second\n\n> quoted\n> text\n\n```emacs-lisp\n(defun x () 1)\n```\n\n---\n\n| a | b |\n|---|---|\n| 1 | 2 |\n")
          (s (harness-ui-markdown-render md))
@@ -327,6 +391,201 @@ code blocks render the same either way."
     (let ((soft (harness-ui-markdown-render md))
           (hard (let ((harness-ui-markdown-hard-breaks t)) (harness-ui-markdown-render md))))
       (should (equal-including-properties soft hard)))))
+
+;;;; In lines
+
+(defun harness-md-test-lines (markdown width)
+  "Return the lines `harness-ui-markdown-render-lines' makes of MARKDOWN, as plain text."
+  (mapcar #'substring-no-properties (harness-ui-markdown-render-lines markdown width)))
+
+(ert-deftest harness-md-lines-end-in-newlines-within-the-width ()
+  "Every line ends in a newline and none is wider than the width, whatever the block."
+  (let ((md (concat "A paragraph long enough that it has to be wrapped into several lines of text.\n\n"
+                    "- an item long enough that it has to be wrapped too, under its bullet\n"
+                    "  - a nested one, which is also long enough to be wrapped under its bullet\n"
+                    "1. numbered, and long enough to be wrapped under its number as well\n\n"
+                    "> a quote long enough that it has to be wrapped under its bar as well\n\n"
+                    "# A heading long enough that it has to be wrapped like the rest of the text\n\n"
+                    "```sh\nsome-command --with-a-long-option --and-another-long-option --and-more\n```\n\n"
+                    "| a | b |\n|---|---|\n| one | a cell long enough that it has to be wrapped in its column |\n")))
+    (dolist (width '(20 30 40 80))
+      (let ((lines (harness-ui-markdown-render-lines md width)))
+        (should lines)
+        (dolist (line lines)
+          (should (string-suffix-p "\n" line))
+          (should (<= (string-width (string-remove-suffix "\n" line)) width)))))))
+
+(ert-deftest harness-md-lines-indent-what-the-window-would-have ()
+  "A list item wraps under its text, a quote under its bar, code under its margin.
+The properties the renderer leaves for the window to draw them by are
+text in the lines, and no longer properties, which would draw a second
+margin."
+  (let ((lines (harness-md-test-lines
+                (concat "- one item that is long enough to wrap at thirty columns\n"
+                        "  - nested one that is long enough to wrap at thirty columns\n"
+                        "1. numbered item that is long enough to wrap at thirty columns\n\n"
+                        "> quoted words that are long enough to wrap at thirty columns\n\n"
+                        "```\ncode that is longer than thirty columns, so it is cut\n```\n")
+                30)))
+    (should (equal '("• one item that is long enough\n"
+                     "  to wrap at thirty columns\n"
+                     "  • nested one that is long\n"
+                     "    enough to wrap at thirty\n"
+                     "    columns\n"
+                     "1. numbered item that is long\n"
+                     "   enough to wrap at thirty\n"
+                     "   columns\n"
+                     "\n"
+                     "┃ quoted words that are long\n"
+                     "┃ enough to wrap at thirty\n"
+                     "┃ columns\n"
+                     "\n"
+                     ;; The code is cut where its room ends, inside a word,
+                     ;; and both pieces have the block's margin.
+                     "  code that is longer than thi\n"
+                     "  rty columns, so it is cut\n")
+                   lines))))
+
+(ert-deftest harness-md-lines-leave-no-margin-property ()
+  "No line of the rendering holds a `line-prefix' or a `wrap-prefix' any more."
+  (dolist (line (harness-ui-markdown-render-lines
+                 "- item\n  - nested item\n\n> quote\n\n```\ncode\n```\n\ntext" 40))
+    (let ((pos 0))
+      (while (< pos (length line))
+        (should-not (get-text-property pos 'line-prefix line))
+        (should-not (get-text-property pos 'wrap-prefix line))
+        (setq pos (1+ pos))))))
+
+(ert-deftest harness-md-lines-keep-the-faces-and-links ()
+  "Emphasis, inline code and links of the text are in the lines, wrapped or not."
+  (let* ((lines (harness-ui-markdown-render-lines
+                 "A **bold word**, `code`, *italics* and [a link label](https://x.org/a) on a line to wrap" 24))
+         (text (apply #'concat lines)))
+    (should (> (length lines) 2))
+    (should-not (string-match-p "[*`]\\|](" (substring-no-properties text)))
+    (let ((pos (string-search "bold" text)))
+      (should (memq 'bold (harness-md-test-face-at text pos))))
+    (should (memq 'harness-md-code (harness-md-test-face-at text (string-search "code" text))))
+    (should (memq 'italic (harness-md-test-face-at text (string-search "italics" text))))
+    ;; A link broken over two lines is a link in both.
+    (let ((label (string-search "link" text)))
+      (should (equal "https://x.org/a" (get-text-property label 'harness-url text)))
+      (should (equal "https://x.org/a" (get-text-property (string-search "label" text) 'harness-url text))))))
+
+(ert-deftest harness-md-lines-keep-a-code-block-s-background-to-the-edge ()
+  "A code block's newlines keep the face that extends its background, the last one too.
+The renderer trims the newline that ends its text; the last line of
+a block that ends it gets one."
+  (dolist (md '("```\none\ntwo\n```\n\nafter" "```\none\ntwo\n```"))
+    (let* ((lines (harness-ui-markdown-render-lines md 30))
+           (code (cl-remove-if-not (lambda (line) (string-match-p "one\\|two" line)) lines)))
+      (should (= 2 (length code)))
+      (dolist (line code)
+        (let ((newline (1- (length line))))
+          (should (equal "\n" (substring-no-properties line newline)))
+          (should (memq 'harness-md-code-block (harness-md-test-face-at line newline))))))))
+
+(ert-deftest harness-md-lines-cut-code-where-the-room-ends ()
+  "Code keeps its blanks where a line is cut; the rest of the text gives them up."
+  ;; The margin of two columns, then eight of the ten.
+  (should (equal '("  aaaa    \n" "  bbbb\n")
+                 (harness-md-test-lines "```\naaaa    bbbb\n```" 10)))
+  (should (equal '("aaaa\n" "bbbb\n")
+                 (harness-md-test-lines "aaaa      bbbb" 6))))
+
+(ert-deftest harness-md-lines-cut-a-word-wider-than-the-room ()
+  "A word too long for the room is cut inside it, and none of it is lost."
+  (let* ((url "https://example.org/a/very/long/path/that/goes/on/and/on")
+         (lines (harness-md-test-lines url 20)))
+    (should (> (length lines) 2))
+    (dolist (line lines) (should (<= (string-width (string-remove-suffix "\n" line)) 20)))
+    (should (equal url (mapconcat (lambda (line) (string-remove-suffix "\n" line)) lines "")))))
+
+(ert-deftest harness-md-lines-fit-a-table-to-the-width ()
+  "A table is fitted to the width, its columns aligned."
+  (let ((lines (harness-md-test-lines
+                "| name | description |\n|---|---|\n| alpha | a very long description that does not fit in thirty columns |\n" 30)))
+    (should (> (length lines) 3))
+    (dolist (line lines)
+      (should (<= (string-width (string-remove-suffix "\n" line)) 30))
+      (should (string-match-p "│" line)))))
+
+(ert-deftest harness-md-lines-keep-or-join-the-lines-of-a-paragraph ()
+  "The lines of a paragraph join as Markdown says, and stay when the caller says so."
+  (should (equal '("one two\n") (harness-md-test-lines "one\ntwo" 40)))
+  (let ((harness-ui-markdown-hard-breaks t))
+    (should (equal '("one\n" "two\n") (harness-md-test-lines "one\ntwo" 40)))))
+
+(ert-deftest harness-md-lines-of-nothing-are-one-empty-line ()
+  "Empty text, or none, is a line that is empty; a rule is blank, not wider than the width."
+  (should (equal '("\n") (harness-md-test-lines "" 40)))
+  (should (equal '("\n") (harness-md-test-lines nil 40)))
+  (let ((lines (harness-md-test-lines "above\n\n---\n\nbelow" 12)))
+    (should (equal '("above\n" "\n" "            \n" "\n" "below\n") lines))))
+
+(ert-deftest harness-md-lines-of-a-long-text-take-time-linear-in-it ()
+  "A very long word, line of code, or run of words is cut in time that grows with it.
+Cutting each piece off a copy of what was left, instead of walking
+along the text, took the square of its length."
+  (let ((start (float-time)))
+    (dolist (md (list (make-string 500000 ?w)
+                      (concat "```\n" (make-string 300000 ?x) "\n```")
+                      (mapconcat #'identity (make-list 60000 "word") " ")))
+      (let ((lines (harness-ui-markdown-render-lines md 80)))
+        (should (> (length lines) 1000))
+        (dolist (line lines)
+          (should (<= (string-width (string-remove-suffix "\n" line)) 80)))))
+    (should (< (- (float-time) start) 20))))
+
+(ert-deftest harness-md-lines-survive-odd-text ()
+  "Wide characters, tabs, blank-only and very narrow widths all end."
+  (dolist (md '("日本語のコメントはここにあります、とても長い文章です" "a\tb\tc" "   " "\n\n\n"
+                "- \n- x" "> " "```" "| |\n|-|\n| |" "**" "[](" "*" "_"))
+    (dolist (width '(1 5 20))
+      (let ((lines (harness-ui-markdown-render-lines md width)))
+        (should (consp lines))
+        (dolist (line lines) (should (string-suffix-p "\n" line)))))))
+
+;;;; The first words
+
+(ert-deftest harness-md-summary-is-one-line-without-the-markers ()
+  "A summary has the text's faces and none of its markers, in one line."
+  (let ((s (harness-ui-markdown-summary
+            "## A **bold** start\n\n- one\n- two with `code`\n\n```elisp\n(defun x () 1)\n```\n\n> quoted")))
+    (should (not (string-match-p "[\n*`#]" (substring-no-properties s))))
+    (should (string-prefix-p "A bold start • one • two with code (defun x () 1) ┃ quoted"
+                             (substring-no-properties s)))
+    ;; The language a block names is left out.
+    (should-not (string-match-p "elisp" s))
+    (should (memq 'bold (harness-md-test-face-at s (string-search "bold" s))))
+    (should (memq 'harness-md-code (harness-md-test-face-at s (string-search "code" s))))))
+
+(ert-deftest harness-md-summary-draws-a-heading-as-bold ()
+  "A heading's height would make one line of a list taller than the others."
+  (let ((s (harness-ui-markdown-summary "# Big heading\n\ntext")))
+    (should (equal "Big heading text" (substring-no-properties s)))
+    (should (memq 'bold (harness-md-test-face-at s 0)))
+    (dolist (face '(harness-md-heading-1 harness-md-heading-2 harness-md-heading-3 harness-md-heading-4))
+      (should-not (memq face (harness-md-test-face-at s 0))))))
+
+(ert-deftest harness-md-summary-draws-a-link-as-its-label ()
+  "A link in a summary is its label: it does nothing, so it is not drawn as one."
+  (let ((s (harness-ui-markdown-summary "see [the docs](https://x.org/a) and https://y.org now")))
+    (should (equal "see the docs and https://y.org now" (substring-no-properties s)))
+    (dolist (pos (list (string-search "docs" s) (string-search "y.org" s)))
+      (should-not (get-text-property pos 'harness-url s))
+      (should-not (get-text-property pos 'keymap s))
+      (should-not (get-text-property pos 'mouse-face s))
+      (should-not (memq 'link (harness-md-test-face-at s pos))))))
+
+(ert-deftest harness-md-summary-reads-the-start-of-a-long-text ()
+  "A text far longer than any line is read at its start only."
+  (let* ((text (concat "**first** " (make-string 100000 ?x)))
+         (s (harness-ui-markdown-summary text)))
+    (should (string-prefix-p "first xxx" s))
+    (should (<= (length s) (+ 20 harness-ui-markdown--summary-limit)))
+    (should (equal "" (harness-ui-markdown-summary nil)))
+    (should (equal "" (harness-ui-markdown-summary "")))))
 
 (provide 'harness-ui-markdown-test)
 ;;; harness-ui-markdown-test.el ends here

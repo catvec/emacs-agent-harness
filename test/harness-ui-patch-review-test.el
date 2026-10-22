@@ -1077,6 +1077,185 @@ revision, the place in the thread."
                                  (harness-ui-patch-review-test--text control)))
           (call-interactively #'harness-ui-patch-review-ediff-quit))))))
 
+;;;; Comments are Markdown
+
+(defconst harness-ui-patch-review-test--markdown
+  "Why **two**, not `three`?\nSee [the docs](https://example.org/docs).\n"
+  "A comment in Markdown: emphasis, code, a link, and a line break to keep.")
+
+(defconst harness-ui-patch-review-test--answer
+  (concat "Because:\n\n- the loop needs it, and it is long enough to be wrapped at sixty columns\n"
+          "- it is `cheap`\n\n```elisp\n(setq a2 'two)\n```\n\n> quoted words")
+  "An answer in Markdown: a list, a fenced block, a quote.")
+
+(ert-deftest harness-ui-patch-review-draws-comments-as-markdown ()
+  "A comment is drawn as the chat draws a message: its markers gone and its
+faces there, a link a link, a list with bullets, a fenced block under a
+margin, a quote under its bar, every line within the width; and a
+thread named by its first words -- a row of the report, a closed
+thread -- has the words without the markers.  A line break typed stays
+one.  `harness-ui-patch-review-markdown' nil draws it all as it was typed."
+  (harness-ui-patch-review-test-with-repo
+    (let* ((review (harness-ui-patch-review-test--review repo))
+           (set (harness-ui-patch-review--r-set review))
+           (bot (change-review-agent "Claude" :session "sess-9" :tool-call "toolu_7"))
+           (root (harness-ui-patch-review-test--comment-on
+                  review "a.el" '(:new . 2) harness-ui-patch-review-test--markdown))
+           (thread (harness-ui-patch-review-test--thread-of review root))
+           (_answer (change-review-reply set root harness-ui-patch-review-test--answer
+                                         :author bot :sent (float-time)))
+           (string (lambda (&rest args)
+                     (apply #'change-review-ui-thread-string set thread :width 60 args)))
+           (lines (lambda (string) (split-string (substring-no-properties string) "\n" t))))
+      (let* ((drawn (funcall string))
+             (plain (substring-no-properties drawn)))
+        ;; The words, no markers; each typed line break is a line.
+        (should (member "┃      Why two, not three?" (funcall lines drawn)))
+        (should (member "┃      See the docs." (funcall lines drawn)))
+        (should-not (string-match-p "\\*\\*\\|`\\|](\\|```\\|^┃      > " plain))
+        ;; The faces: bold, code; a link with where it goes.
+        (should (memq 'bold (let ((f (get-text-property (string-search "two," drawn) 'face drawn)))
+                              (if (listp f) f (list f)))))
+        (should (memq 'harness-md-code (let ((f (get-text-property (string-search "three" drawn) 'face drawn)))
+                                         (if (listp f) f (list f)))))
+        (should (equal "https://example.org/docs"
+                       (get-text-property (string-search "the docs" drawn) 'harness-url drawn)))
+        ;; The answer: a list with bullets, the long item wrapped under its
+        ;; text, the code in its block under the margin, the quote under its bar.
+        (should (member "┃      • the loop needs it, and it is long enough to be" (funcall lines drawn)))
+        (should (member "┃        wrapped at sixty columns" (funcall lines drawn)))
+        (should (member "┃      • it is cheap" (funcall lines drawn)))
+        (should (member "┃        elisp" (funcall lines drawn)))
+        (should (member "┃        (setq a2 'two)" (funcall lines drawn)))
+        (should (member "┃      ┃ quoted words" (funcall lines drawn)))
+        (let ((code (get-text-property (string-search "(setq a2" drawn) 'face drawn)))
+          (should (memq 'harness-md-code-block (if (listp code) code (list code)))))
+        ;; None of the text is wider than the thread's width.
+        (dolist (line (funcall lines drawn))
+          (when (string-prefix-p "┃      " line)
+            (should (<= (string-width line) 60))))
+        ;; Every line is its comment's, the margins and the wrapped lines too.
+        (should (equal (change-review-comment-id (cadr (change-review-thread-comments thread)))
+                       (get-text-property (string-search "wrapped at" drawn) 'change-review-comment drawn))))
+      ;; Named by its first words.
+      (let ((row (substring-no-properties (change-review-ui-thread-line set thread :width 100)))
+            (closed (substring-no-properties
+                     (change-review-ui-thread-string set thread :width 100 :collapsed t :view 'diff))))
+        (should (string-search "“Why two, not three? See the docs.”" row))
+        (should (string-search "“Why two, not three? See the docs.”" closed)))
+      (should (string-search "“Why two, not three? See the docs.”"
+                             (substring-no-properties
+                              (harness-ui-patch-review--section review (harness-ui-patch-review--counts review)))))
+      ;; Not as Markdown: as it was typed.
+      (let ((harness-ui-patch-review-markdown nil))
+        (let ((plain (substring-no-properties (funcall string))))
+          (should (string-search "Why **two**, not `three`?" plain))
+          (should (string-search "```elisp" plain))
+          (should (string-search "> quoted words" plain)))
+        (should (string-search "“Why **two**, not `three`? See [the docs]"
+                               (substring-no-properties (change-review-ui-thread-line set thread :width 100)))))
+      ;; Editing it is editing the Markdown.
+      (should (equal harness-ui-patch-review-test--markdown (change-review-comment-body root)))
+      ;; A comment the renderer cannot take is drawn as typed: the rest of
+      ;; the review still draws.
+      (cl-letf (((symbol-function 'harness-ui-markdown-render-lines)
+                 (lambda (&rest _) (error "Not renderable")))
+                ((symbol-function 'harness-ui-markdown-summary)
+                 (lambda (&rest _) (error "Not renderable"))))
+        (should (string-search "Why **two**, not `three`?"
+                               (substring-no-properties (funcall string))))
+        (should (string-search "“Why **two**, not `three`? See"
+                               (substring-no-properties (change-review-ui-thread-line set thread :width 100))))))))
+
+(ert-deftest harness-ui-patch-review-links-in-comments-are-the-branchs ()
+  "A link to a file in a comment is relative to where the task worked, its
+worktree, else the repository: the Ediff versions and the threads view are
+in that directory, so that following the link finds the file."
+  (harness-ui-patch-review-test-with-repo
+    (let* ((review (harness-ui-patch-review-test--review repo))
+           (dir (file-name-as-directory (expand-file-name repo)))
+           (tree (file-name-as-directory (harness-test-temp-dir))))
+      ;; No worktree: the repository.
+      (should (equal dir (harness-ui-patch-review--link-directory review)))
+      ;; A worktree: where the agent worked.
+      (setf (harness-ui-patch-review--r-task review)
+            (plist-put (copy-sequence (harness-ui-patch-review--r-task review)) :worktree tree))
+      (should (equal (expand-file-name tree) (harness-ui-patch-review--link-directory review)))
+      ;; One that is gone is not.
+      (setf (harness-ui-patch-review--r-task review)
+            (plist-put (copy-sequence (harness-ui-patch-review--r-task review)) :worktree "/no/such/tree"))
+      (should (equal dir (harness-ui-patch-review--link-directory review)))
+      ;; The versions Ediff compares have it.
+      (let* ((file (harness-ui-patch-review-test--file review "a.el"))
+             (buffer (harness-ui-patch-review--side-buffer review file 'new "(setq a1 1)\n")))
+        (unwind-protect
+            (should (equal dir (buffer-local-value 'default-directory buffer)))
+          (kill-buffer buffer))))))
+
+(ert-deftest harness-ui-patch-review-shows-markdown-in-ediff-and-the-threads-view ()
+  "The threads under the lines of Ediff, and the library's threads view, draw
+a comment's Markdown rendered; the option that turns it off draws them again
+as typed."
+  (harness-ui-patch-review-test-with-task
+    (let* ((popout (harness-ui-patch-review-test--changes board id))
+           (review (gethash id harness-ui-patch-review--reviews))
+           (set (harness-ui-patch-review--r-set review))
+           (two (harness-ui-patch-review-test--comment-on
+                 review "a.el" '(:new . 2) harness-ui-patch-review-test--markdown))
+           (bold-at (lambda (string pos)
+                      (let ((face (get-text-property pos 'face string)))
+                        (memq 'bold (if (listp face) face (list face)))))))
+      (ignore popout two)
+      (harness-ui-patch-review-ediff review 0)
+      (let* ((control (harness-ui-patch-review-test--control review 0))
+             (new (nth 2 (harness-ui-patch-review--ediff-buffers review)))
+             (shown (lambda ()
+                      (with-current-buffer new
+                        (mapconcat (lambda (ov) (or (overlay-get ov 'after-string) ""))
+                                   (overlays-in (point-min) (point-max)) "")))))
+        ;; Ediff: rendered.
+        (let ((drawn (funcall shown)))
+          (should (string-search "Why two, not three?" (substring-no-properties drawn)))
+          (should (string-search "See the docs." (substring-no-properties drawn)))
+          (should-not (string-search "**" drawn))
+          (should (funcall bold-at drawn (string-search "two," drawn))))
+        ;; The threads view: rendered.
+        (with-current-buffer control (call-interactively #'harness-ui-patch-review-threads))
+        (let ((view (cl-find-if (lambda (b) (eq 'change-review-threads-mode (buffer-local-value 'major-mode b)))
+                                (buffer-list))))
+          (should view)
+          ;; A link to a file in a comment is the branch's.
+          (should (equal (file-name-as-directory (expand-file-name repo))
+                         (buffer-local-value 'default-directory view)))
+          (should (equal (file-name-as-directory (expand-file-name repo))
+                         (buffer-local-value 'default-directory new)))
+          (unwind-protect
+              (with-current-buffer view
+                (let ((drawn (buffer-substring (point-min) (point-max))))
+                  (should (string-search "Why two, not three?" (substring-no-properties drawn)))
+                  (should-not (string-search "**" drawn))
+                  (should-not (string-search "](" drawn))
+                  (should (funcall bold-at drawn (string-search "two," drawn)))
+                  ;; Its keys still act on the comment under point, whatever it draws.
+                  (goto-char (+ (point-min) (string-search "not three" drawn)))
+                  (should (equal (change-review-comment-id (change-review-thread-root
+                                                            (harness-ui-patch-review-test--thread-of review two)))
+                                 (change-review-comment-id (change-review-ui--comment-at-point)))))
+                ;; As typed, when Markdown is off.
+                (let ((harness-ui-patch-review-markdown nil))
+                  (change-review-ui-redraw)
+                  (should (string-search "Why **two**, not `three`?"
+                                         (buffer-substring-no-properties (point-min) (point-max))))))
+            (kill-buffer view)))
+        (let ((harness-ui-patch-review-markdown nil))
+          (change-review-ui-refresh set)
+          (change-review-ui-flush)
+          (should (string-search "Why **two**, not `three`?" (substring-no-properties (funcall shown)))))
+        (change-review-ui-refresh set)
+        (change-review-ui-flush)
+        (should-not (string-search "**" (funcall shown)))
+        (with-current-buffer control (call-interactively #'harness-ui-patch-review-ediff-quit))))))
+
 (ert-deftest harness-ui-patch-review-acts-on-threads-in-ediff ()
   "In a version, r replies to the thread under the line at point and x closes
 it or opens it again; in the control panel they act on the thread at the

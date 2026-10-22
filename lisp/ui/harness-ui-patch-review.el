@@ -95,6 +95,14 @@
 ;;               it changes, as it does when the two versions are put
 ;;               side by side.
 ;;
+;; A comment is Markdown (`harness-ui-patch-review-markdown'): the user
+;; writes it in a buffer, an agent in its tool call, and wherever it is
+;; drawn -- the threads view, the threads under the lines of Ediff, a row
+;; of the report -- it shows rendered, as the chat renders a message,
+;; wrapped under its bar; a thread named by its first words has them
+;; without the markers.  What is kept, edited and sent with the feedback
+;; is the Markdown as it was typed.
+;;
 ;; WHERE A COMMENT WAS MADE.  The lines under a comment (RET, or its
 ;; `▸ where') are the diff of the commit it was written against, as it was
 ;; then: the answer to a comment changes the code it is about, and the
@@ -211,6 +219,7 @@
 (require 'harness-util)
 (require 'harness-ui)
 (require 'harness-ui-compose)
+(require 'harness-ui-markdown)
 (require 'harness-ui-popout)
 (require 'harness-ui-report)
 
@@ -312,6 +321,19 @@ The directories group the files they hold, with the lines the files
 under each add and delete; nil shows every file in a flat list, in the
 diff's order.  \\<harness-ui-patch-review--row-map>\\[harness-ui-patch-review-toggle-file-tree]
 switches it for the review at point."
+  :type 'boolean)
+
+(defcustom harness-ui-patch-review-markdown t
+  "Whether the comments of a review are drawn as Markdown.
+The user writes a comment in a buffer and an agent in its tool call,
+and either may use Markdown: emphasis, code and fenced blocks of it,
+lists, quotes, tables, links.  Drawn as Markdown they show rendered,
+as a message does in the chat, in the threads view and under the
+lines of Ediff, and a thread named by its first words -- a row of the
+report, a closed thread -- shows them without the markers.  A line
+break stays one, as in the comments of a code host.  Nil draws what
+was typed, markers and all.  Editing a comment always shows its
+Markdown."
   :type 'boolean)
 
 (defface harness-ui-patch-review-plus-face '((t :inherit diff-indicator-added))
@@ -564,6 +586,49 @@ SIDE is `new' or `old', nil for `new'.  That is the form
            (harness-ui-patch-review--goto
             (or (plist-get placement :side) (change-review-location-side location))
             (or (plist-get placement :line) (change-review-location-line location))))))))))
+
+;; The text of a comment is Markdown (`harness-ui-patch-review-markdown'),
+;; drawn as the chat draws a message: in the threads view, under the
+;; lines of Ediff and in the report's rows alike, as the library draws
+;; every thread through these two.  What a person typed keeps its line
+;; breaks, which the renderer joins unless told not to.
+;;
+;; A comment the renderer cannot take is drawn as it was typed, rather
+;; than as an error that draws none of the review.
+(defmacro harness-ui-patch-review--markdown-or (&rest body)
+  "Return what BODY, which renders Markdown, returns.
+Nil when the option is off or BODY fails: the caller then draws the
+text as it was typed."
+  (declare (indent 0))
+  `(and harness-ui-patch-review-markdown
+        (condition-case err
+            (progn ,@body)
+          (error (harness-log 'warn "patch review: a comment would not render as Markdown: %S" err)
+                 nil))))
+
+(cl-defmethod change-review-ui-body-lines ((_set harness-ui-patch-review--set) comment width)
+  (or (harness-ui-patch-review--markdown-or
+        (let ((harness-ui-markdown-hard-breaks t))
+          (harness-ui-markdown-render-lines (change-review-comment-body comment) width)))
+      (cl-call-next-method)))
+
+(cl-defmethod change-review-ui-body-summary ((_set harness-ui-patch-review--set) comment)
+  (or (harness-ui-patch-review--markdown-or
+        (harness-ui-markdown-summary (change-review-comment-body comment)))
+      (cl-call-next-method)))
+
+(defun harness-ui-patch-review--link-directory (review)
+  "Return the directory a link to a file in a comment of REVIEW is relative to.
+A comment names the files of the branch, the way a message of the
+agent's does in its chat: where the task worked, its worktree, else the
+repository the branch is read in."
+  (let ((worktree (plist-get (harness-ui-patch-review--r-task review) :worktree)))
+    (file-name-as-directory
+     (expand-file-name
+      (if (and (stringp worktree) (not (string-empty-p worktree))
+               (not (file-remote-p worktree)) (file-directory-p worktree))
+          worktree
+        (or (harness-ui-patch-review--r-dir review) default-directory))))))
 
 (cl-defmethod change-review-send ((set harness-ui-patch-review--set))
   (let* ((review (harness-ui-patch-review--set-review set))
@@ -2131,7 +2196,12 @@ shows it in Ediff, D the code as it was when the comment was written."
   (let ((review (or (harness-ui-patch-review--review-here)
                     harness-ui-patch-review--review
                     (user-error "No review here"))))
-    (change-review-open-threads (harness-ui-patch-review--r-set review))))
+    (let ((buffer (change-review-open-threads (harness-ui-patch-review--r-set review))))
+      ;; The links of its comments to files are the branch's.
+      (when (buffer-live-p buffer)
+        (with-current-buffer buffer
+          (setq default-directory (harness-ui-patch-review--link-directory review))))
+      buffer)))
 
 (defun harness-ui-patch-review-toggle-file-tree ()
   "Show the changed files flat, in the diff's order, or as a tree.
@@ -3060,6 +3130,8 @@ they are, as `harness-ui-patch-review--place-from-texts' gives it)."
                   harness-ui-patch-review--index
                   (cl-position file (harness-ui-patch-review--r-files review) :test #'eq)
                   change-review-ui--set (harness-ui-patch-review--r-set review)
+                  ;; The links of a comment to files are the branch's.
+                  default-directory (harness-ui-patch-review--link-directory review)
                   ;; The threads draw again when the set changes.
                   change-review-ui--redraw-function
                   (lambda () (harness-ui-patch-review--decorate review file buffer side nil)))

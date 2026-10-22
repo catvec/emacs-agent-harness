@@ -3602,7 +3602,7 @@ Return the report's popout buffer, once it shows its changes."
                     (harness-ui-patch-review--location
                      (funcall file path) (cons (or side :new) (harness-media--review-line text path)))))
            (threshold (change-review-comment
-                       set "Is half a second the right threshold? The dashboards alert at 400 ms."
+                       set "Is **half a second** the right threshold? The dashboards alert at `400 ms`."
                        :author you :time (harness-media--ago 95) :sent (harness-media--ago 94)
                        :revision first-tip :location (funcall where "acme/timing.py" "SLOW_SECONDS = ")))
            (resolution (change-review-comment
@@ -3610,19 +3610,24 @@ Return the report's popout buffer, once it shows its changes."
                         :author you :time (harness-media--ago 93) :sent (harness-media--ago 92)
                         :revision first-tip :location (funcall where "acme/timing.py" "elapsed \\* 1000"))))
       (change-review-reply set threshold
-                           "Half a second is the objective in docs/slo.md, so I made it a named constant and said in a comment that it is in seconds."
+                           (concat "Half a second is the objective in `docs/slo.md`, so I:\n\n"
+                                   "- made it a named constant, `SLOW_SECONDS`\n"
+                                   "- said in a comment that it is in seconds")
                            :author agent :time (harness-media--ago 50) :sent (harness-media--ago 50))
-      (change-review-reply set threshold "Fine, but please link the document in the comment."
+      (change-review-reply set threshold "Fine, but please **link** the document in the comment."
                            :author you :time (harness-media--ago 3))
-      (change-review-reply set resolution "At a 500 ms threshold whole milliseconds are enough."
+      (change-review-reply set resolution "At a `500 ms` threshold whole milliseconds are enough."
                            :author agent :time (harness-media--ago 50) :sent (harness-media--ago 50))
       (change-review-close set (change-review-comment-thread resolution)
                            :author you :time (harness-media--ago 40))
       (let ((rename (change-review-comment
-                     set "Why rename application? The WSGI server imports it by that name."
+                     set "Why rename `application`? The WSGI server imports it by that name."
                      :author you :time (harness-media--ago 88) :sent (harness-media--ago 87)
                      :revision first-tip :location (funcall where "acme/app.py" "def _application"))))
-        (change-review-reply set rename "It still exists: the last line of the module binds application to the timed one, so imports keep working."
+        (change-review-reply set rename
+                             (concat "It still exists: the last line of the module binds it to the timed one, "
+                                     "so imports keep working:\n\n"
+                                     "```python\napplication = timed(_application)\n```")
                              :author agent :time (harness-media--ago 50) :sent (harness-media--ago 50))
         ;; The answer was enough: closed, which the Ediff picture opens again to read.
         (change-review-close set (change-review-comment-thread rename)
@@ -3716,8 +3721,8 @@ fold a thread and list them."
         (with-selected-window window
           (goto-char (point-min))
           (forward-line (1- (harness-media--review-line "def _application" "acme/app.py")))
-          (recenter 2)))
-      (harness-media--settle 1)
+          (recenter 1)))
+      (harness-media--settle 1.5)
       (harness-media--capture "review-ediff")
       ;; Back to the report, as q gives it.
       (with-current-buffer (plist-get (harness-ui-patch-review--r-ediff review) :control)

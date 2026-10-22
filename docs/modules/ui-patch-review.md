@@ -105,6 +105,14 @@ DIFF SHOWN), a tree of the directories and their files:
               it changes, as it does when the two versions are put
               side by side.
 
+A comment is Markdown (`harness-ui-patch-review-markdown`): the user
+writes it in a buffer, an agent in its tool call, and wherever it is
+drawn -- the threads view, the threads under the lines of Ediff, a row
+of the report -- it shows rendered, as the chat renders a message,
+wrapped under its bar; a thread named by its first words has them
+without the markers.  What is kept, edited and sent with the feedback
+is the Markdown as it was typed.
+
 WHERE A COMMENT WAS MADE.  The lines under a comment (RET, or its
 `▸ where`) are the diff of the commit it was written against, as it was
 then: the answer to a comment changes the code it is about, and the
@@ -250,6 +258,7 @@ part of the report out.
 - `harness-ui-patch-review-ediff-box-height` — How much of the frame's height the report takes beside an Ediff.
 - `harness-ui-patch-review-ediff-window-setup` — How Ediff lays out its windows while it compares a task's change.
 - `harness-ui-patch-review-file-tree` — Whether a report shows the changed files as a tree.
+- `harness-ui-patch-review-markdown` — Whether the comments of a review are drawn as Markdown.
 
 ## Uses
 

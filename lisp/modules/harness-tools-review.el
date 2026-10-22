@@ -118,12 +118,12 @@ That is the task INPUT names, else the task of the calling session."
 
 (harness-define-tool "review_comment"
   :label "Review comment"
-  :description "Answer a thread of the review of your work, or start one. The thread id is given in the feedback after \"[thread ...]\", and review_threads lists them. Write what you did or why you disagree, briefly, in plain text. Close the thread (status closed) once what it raises is done; leave it open when it is not, or when you want the user's answer, and never close a thread you only argued against. Without thread a new thread starts: on the change as a whole, or on file and line of it, to explain something to the user where they will read the diff. The comment records this call, so the user can follow it back to this point of the conversation. With thread and status but no body, only the status changes."
+  :description "Answer a thread of the review of your work, or start one. The thread id is given in the feedback after \"[thread ...]\", and review_threads lists them. Write what you did or why you disagree, briefly, in Markdown: the review draws it rendered, so name code in `backquotes`, put lines of code in a fenced block and steps in a list. Close the thread (status closed) once what it raises is done; leave it open when it is not, or when you want the user's answer, and never close a thread you only argued against. Without thread a new thread starts: on the change as a whole, or on file and line of it, to explain something to the user where they will read the diff. The comment records this call, so the user can follow it back to this point of the conversation. With thread and status but no body, only the status changes."
   :schema '(:type "object"
             :properties (:thread (:type "string"
                                   :description "The id of the thread to answer, or the start of it when unique. Omit to start a new thread.")
                          :body (:type "string"
-                                :description "Your comment, plain text. Optional only when changing a thread's status.")
+                                :description "Your comment, in Markdown. Optional only when changing a thread's status.")
                          :status (:type "string" :enum ("open" "closed")
                                   :description "Set the thread's status after the comment: closed when it is done.")
                          :file (:type "string"

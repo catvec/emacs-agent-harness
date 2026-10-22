@@ -185,9 +185,9 @@ OpenAI-compatible APIs and AWS Bedrock.
 | Answering a reply inline: `C-c >` quotes it, `C-c [` elides what you skip as `[...]`, `M-RET` splits the quote to answer a part | The thread kept: the message the reply answers, and what that answered, nested under the quote |
 
 | ![A task in review, its report at the changes: the files with their open and closed threads, and under each file its open threads, a line each; the drafts waiting to be sent](docs/media/review.png) | ![The threads of that review by file, filtered by status: each comment with who wrote it, when, its version and its place in the thread, one with where it was made and the lines of the diff, the agent's answer linking to its conversation](docs/media/review-threads.png) |
-| A task's changes, and the threads of comments on them | The threads by file: sender, when, content and place in the thread; where a comment was made |
-| ![Ediff on a file of that review: the two versions and the control panel, the threads drawn under their lines in the branch's version -- a closed thread opened to its conversation, another folded to one line -- the report with its box at the bottom](docs/media/review-ediff.png) | ![The same report with the diff chosen since the last review: the Diff line marks it, one file changed since, with its threads, and the threads of the file the diff leaves out among the other threads](docs/media/review-diff.png) |
-| Ediff: the threads under their lines, drawn as the threads view draws them to the width of the window; a closed thread is a line, `TAB` or a click opens it | The diff of your choice: the branch against main, since the last review, or any revisions |
+| A task's changes, and the threads of comments on them | The threads by file: sender, when, content (Markdown, rendered) and place in the thread; where a comment was made |
+| ![Ediff on a file of that review: the two versions and the control panel, the threads drawn under their lines in the branch's version -- a closed thread opened to its conversation, another folded to one line -- the agent's answer with its code block rendered, the report with its box at the bottom](docs/media/review-ediff.png) | ![The same report with the diff chosen since the last review: the Diff line marks it, one file changed since, with its threads, and the threads of the file the diff leaves out among the other threads](docs/media/review-diff.png) |
+| Ediff: the threads under their lines, drawn as the threads view draws them, the comments' Markdown rendered, to the width of the window; a closed thread is a line, `TAB` or a click opens it | The diff of your choice: the branch against main, since the last review, or any revisions |
 
 ## Requirements
 
@@ -3353,7 +3353,13 @@ with), `recap` writes the recaps on the cards,
   changes the code it is about, so a reply shows the code its own commit
   had, not the code the thread started on), and `[Source @ v1]` shows
   that code in Ediff, `[Source @ v2]` the branch as it is, and `e` edits
-  your draft or goes to the box. A closed thread
+  your draft or goes to the box. A comment is
+  Markdown -- yours, typed in the buffer, and the agent's, from its
+  tool call -- and every view draws it rendered, as the chat draws a
+  message: emphasis, `code`, fenced blocks, lists, quotes, tables and
+  links, wrapped under its bar, where a thread is a line (a row of the
+  report, a closed thread) its first words without the markers
+  (`harness-ui-patch-review-markdown`; nil draws what was typed). A closed thread
   is one line under its line (`▸ ✓ t-3f9a · 3 comments · closed 2h ago
   “Why eighteen?…”`): `TAB` on that line -- in Ediff's control panel, on
   the threads of the current difference -- or a click on it opens it to

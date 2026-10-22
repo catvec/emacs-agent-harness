@@ -97,6 +97,15 @@ the comment was written, `[Source @ v2]` in the newest version, and
 `RET` or a click on a line of the diff shows that line of the source.
 `change-review-ui-thread-line` draws the same thread as a row of a list.
 
+The text of a comment is drawn as its author typed it, its lines wrapped
+to the width under the bar. A kind of set whose comments are written in
+a markup, Markdown say, draws them as that markup does: it answers
+`change-review-ui-body-lines` (the lines of a comment, as wide as the
+room under the bar) and `change-review-ui-body-summary` (the first words
+of it, which name a thread drawn collapsed or as a row of a list). Every
+view draws the text through them, so a comment reads the same wherever it
+is shown.
+
 **No line is wider than the room it has.** A thread is drawn to a width,
 by default the columns of the window that shows the buffer, and a line
 that would be wider says less until it fits: a closed thread says how
@@ -314,6 +323,8 @@ own, and the generic functions below decide what it does differently:
 | `change-review-visit` | How a thread, a comment or a location is shown, in a version (by default the newest): by default in the diff view. |
 | `change-review-default-revision` | The revision a comment made now is written against. By default the newest version's; a set whose user can look at the code of another version answers that one. |
 | `change-review-send` | What sending the drafts does: for emailed patches, compose the replies. |
+| `change-review-ui-body-lines` | The lines a comment's text is drawn as, each as wide as the room under the bar: by default the text as typed, wrapped at spaces. A set whose comments are a markup renders it and wraps what it draws; the lines keep their faces, and one may end in a newline of its own. |
+| `change-review-ui-body-summary` | A comment's text as one line, for a thread named by its first words: by default the lines joined with spaces. |
 
 An adapter is therefore a few methods and the way the host's changes
 become versions with files. The Emacs agent harness, for instance,
@@ -322,8 +333,9 @@ commit the branch ends at, keeps the threads in the harness (the
 user's operations go there, the agent's come back as events and are
 performed on the user's copy as they are), shows the files in Ediff with
 the threads drawn under the lines by the library, places the threads
-through git, and sends the drafts along with the feedback that sends the
-task back. None of that is in this directory.
+through git, draws the comments, which are Markdown, rendered, and sends
+the drafts along with the feedback that sends the task back. None of
+that is in this directory.
 
 ## Files
 

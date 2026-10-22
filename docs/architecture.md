@@ -10202,7 +10202,13 @@ scrolling the chat froze Emacs for seconds.  A checkout (`session/head-moved`) m
 another path, so the buffer loads it again rather than leave the
 branch behind on screen.  Markdown is rendered by the built-in renderer in
 `harness-ui-markdown` (headings, emphasis, code spans, fenced code with
-the language's major mode, lists, quotes, links, tables).  Tables are
+the language's major mode, lists, quotes, links, tables).  A caller that
+draws a line at a time, after a margin of its own, has it render in lines
+(`harness-ui-markdown-render-lines`: the hanging indent of a list item,
+the margin of a code block and the bar of a quote are in the text, and
+the lines are wrapped to a width) or as one line, the first words of a
+text with no markers left (`harness-ui-markdown-summary`); the comments
+of a review are drawn so (see `ui-patch-review`).  Tables are
 fitted to the window: a table wider than the chat wraps each cell
 inside its column, so the columns stay aligned, and is drawn again when
 the window's width changes.  The text rendered as Markdown is the
@@ -12843,7 +12849,13 @@ thread (`2/3`), its author (marked "you" or "agent"), the time (exact,
 and relative), the revision it was written against, a "draft" mark, the
 comment it answers when that is not the one above (`↳ re 1/3`), a `▸
 where` button that shows where the comment was made, and for an agent's
-comment `↗ conversation`, then the text.  No line of it is wider than
+comment `↗ conversation`, then the text.  The text is drawn by the kind
+of set: as it was typed, its lines wrapped under the bar, for a plain one,
+and as a markup does where the kind of set says its comments are one --
+`change-review-ui-body-lines` gives the lines of a comment, as wide as
+the room under the bar, with their faces, and
+`change-review-ui-body-summary` its first words, one line, which name a
+thread drawn collapsed or as a row.  No line of it is wider than
 the width it is drawn to (by default the columns of the window that
 shows the buffer, `change-review-ui-current-width`): a header that would
 be says less in steps -- for a closed thread how long ago it was closed
@@ -12951,6 +12963,27 @@ its own subtype (`harness-ui-patch-review--set`):
   a snapshot is looked at, not reviewed: no file of it is marked seen or
   approved, and a comment made in it is written against that commit.
   `change-review-send` goes to the feedback box.
+- A comment is Markdown (`harness-ui-patch-review-markdown`, on): the
+  user writes it in a buffer, an agent in its `review_comment` call, and
+  both use emphasis, `code`, fenced blocks, lists, quotes, tables and
+  links.  `change-review-ui-body-lines` renders it as the chat renders a
+  message (`harness-ui-markdown-render-lines`: wrapped to the room under
+  the bar, a list's hanging indent, a code block's margin and background,
+  a quote's bar in the text, a table fitted to the width) and
+  `change-review-ui-body-summary` gives the words a row, or a thread
+  drawn collapsed, is named by without the markers
+  (`harness-ui-markdown-summary`).  The line breaks of a comment stay, as
+  they do in what the user types in the chat
+  (`harness-ui-markdown-hard-breaks`).  Every view of a thread draws the
+  text through them, the threads view and the threads under the lines of
+  Ediff as much as the report's rows.  A link in a comment is followed
+  by a click, in the threads view by RET too, and a link to a file is
+  relative to where the task worked (`harness-ui-patch-review--link-directory`:
+  its worktree, else the repository); in a row, or a thread drawn
+  collapsed, a link is its label.  The threads are drawn to the width of
+  the window that shows them, Ediff's two versions once Ediff has laid
+  them out.  Editing a draft reads the Markdown as typed; the feedback
+  the agent is sent quotes it as typed too.
 
 The panel is on `harness-ui-report-panel-functions` at depth -10, before
 the review banner, and returns the changes of a task in review that has

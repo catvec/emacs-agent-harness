@@ -152,6 +152,17 @@ or \":12\" suffix names."
         (goto-char (point-min))
         (forward-line (1- line))))))
 
+;; Emphasis, as Markdown has it, has text against its markers: the one
+;; that opens it is not followed by a blank, the one that closes it not
+;; preceded by one, and an underscore does not close it before a letter
+;; or a digit.  Else the marker is a star, an underscore, which technical
+;; text is full of: "2 * 3 * 4", "char *p and char *q", "*args and
+;; **kwargs", "*.el and *.py", "a _ b _ c", "_private_method".  Read
+;; without that rule, the text between two of them turned italic and the
+;; markers vanished.  The regexp finds what could be emphasis, in time
+;; that stays linear whatever the text holds; `harness-ui-markdown--emphasis-p'
+;; says whether it is, and what is not has its first character taken as
+;; text, the rest looked at again.
 (defconst harness-ui-markdown--inline-regexp
   (rx (or (group-n 1 "`" (+? (not "`")) "`")                          ; code
           (group-n 2 "**" (+? nonl) "**")                              ; bold
@@ -160,42 +171,71 @@ or \":12\" suffix names."
           (group-n 5 "[" (+? (not "]")) "](" (+? (not ")")) ")")       ; link
           (group-n 6 (or bol (not (any alnum "*"))) "*" (+? (not (any "*\n"))) "*")  ; italic
           (group-n 7 (or bol (not (any alnum "_"))) "_" (+? (not (any "_\n"))) "_")  ; italic
-          (group-n 8 "<" (+? (any alnum ":/._~?#=&%+-")) ">")          ; autolink
+          ;; An autolink is a URL in angle brackets, so it names a scheme:
+          ;; "List<Foo>" is not one, and its brackets stay.
+          (group-n 8 "<" (any alpha) (* (any alnum "+.-")) ":" (+? (any alnum ":/._~?#=&%+@-")) ">") ; autolink
           (group-n 9 (or "http://" "https://") (+ (any alnum ":/._~?#=&%+-@")))))) ; bare url
+
+(defun harness-ui-markdown--emphasis-p (text inner-start inner-end &optional word-after)
+  "Return non-nil when TEXT from INNER-START to INNER-END is emphasised.
+That is when no blank is against either marker.  With WORD-AFTER, the
+closing marker, an underscore, is at INNER-END too, and no letter or
+digit may follow it: a name with underscores is a name."
+  (and (< inner-start inner-end)
+       (not (memq (aref text inner-start) '(?\s ?\t ?\n)))
+       (not (memq (aref text (1- inner-end)) '(?\s ?\t ?\n)))
+       (or (not word-after)
+           (>= (1+ inner-end) (length text))
+           (not (string-match-p "[[:alnum:]]" (string (aref text (1+ inner-end))))))))
 
 (defun harness-ui-markdown-inline (text)
   "Render inline Markdown in TEXT and return a propertized string."
   (let ((pos 0) (parts nil))
     (while (and (< pos (length text)) (string-match harness-ui-markdown--inline-regexp text pos))
-      (let ((start (match-beginning 0)) (end (match-end 0)) (piece nil))
-        (cond
-         ((match-beginning 1)
-          (setq piece (harness-ui-markdown--add-face (substring text (1+ start) (1- end)) 'harness-md-code)))
-         ((or (match-beginning 2) (match-beginning 3))
-          (setq piece (harness-ui-markdown--add-face
-                       (harness-ui-markdown-inline (substring text (+ start 2) (- end 2))) 'bold)))
-         ((match-beginning 4)
-          (setq piece (harness-ui-markdown--add-face (substring text (+ start 2) (- end 2)) 'harness-md-strike)))
-         ((match-beginning 5)
-          ;; "[LABEL](URL)": LABEL holds no "]", so the first "](" splits it.
-          (let* ((m (substring text start end))
-                 (sep (string-search "](" m)))
-            (setq piece (harness-ui-markdown--link (substring m 1 sep) (substring m (+ sep 2) -1)))))
-         ((or (match-beginning 6) (match-beginning 7))
-          ;; The group may include a leading delimiter character; keep it plain.
-          (let* ((m (substring text start end))
-                 (lead (if (memq (aref m 0) '(?* ?_)) "" (substring m 0 1)))
-                 (inner (substring m (1+ (length lead)) (1- (length m)))))
-            (setq piece (concat lead (harness-ui-markdown--add-face (harness-ui-markdown-inline inner) 'italic)))))
-         ((match-beginning 8)
-          (let ((url (substring text (1+ start) (1- end))))
-            (setq piece (harness-ui-markdown--link url url))))
-         ((match-beginning 9)
-          (let ((url (substring text start end)))
-            (setq piece (harness-ui-markdown--link url url)))))
-        (push (substring text pos start) parts)
-        (push piece parts)
-        (setq pos end)))
+      (let* ((start (match-beginning 0)) (end (match-end 0)) (piece nil)
+             ;; The italic groups may begin with the character before the
+             ;; marker, which stays plain.
+             (lead (cond ((match-beginning 6) (if (eq (aref text start) ?*) 0 1))
+                         ((match-beginning 7) (if (eq (aref text start) ?_) 0 1))
+                         (t 0)))
+             (emphasis (cond ((or (match-beginning 2) (match-beginning 3))
+                              (harness-ui-markdown--emphasis-p text (+ start 2) (- end 2)))
+                             ((or (match-beginning 6) (match-beginning 7))
+                              (harness-ui-markdown--emphasis-p
+                               text (+ start lead 1) (1- end) (and (match-beginning 7) t)))
+                             (t t))))
+        (if (not emphasis)
+            ;; Not emphasis: a star, an underscore, and the text after it is
+            ;; read again.
+            (progn (push (substring text pos (1+ start)) parts)
+                   (setq pos (1+ start)))
+          (cond
+           ((match-beginning 1)
+            (setq piece (harness-ui-markdown--add-face (substring text (1+ start) (1- end)) 'harness-md-code)))
+           ((or (match-beginning 2) (match-beginning 3))
+            (setq piece (harness-ui-markdown--add-face
+                         (harness-ui-markdown-inline (substring text (+ start 2) (- end 2))) 'bold)))
+           ((match-beginning 4)
+            (setq piece (harness-ui-markdown--add-face (substring text (+ start 2) (- end 2)) 'harness-md-strike)))
+           ((match-beginning 5)
+            ;; "[LABEL](URL)": LABEL holds no "]", so the first "](" splits it.
+            (let* ((m (substring text start end))
+                   (sep (string-search "](" m)))
+              (setq piece (harness-ui-markdown--link (substring m 1 sep) (substring m (+ sep 2) -1)))))
+           ((or (match-beginning 6) (match-beginning 7))
+            (setq piece (concat (substring text start (+ start lead))
+                                (harness-ui-markdown--add-face
+                                 (harness-ui-markdown-inline (substring text (+ start lead 1) (1- end)))
+                                 'italic))))
+           ((match-beginning 8)
+            (let ((url (substring text (1+ start) (1- end))))
+              (setq piece (harness-ui-markdown--link url url))))
+           ((match-beginning 9)
+            (let ((url (substring text start end)))
+              (setq piece (harness-ui-markdown--link url url)))))
+          (push (substring text pos start) parts)
+          (push piece parts)
+          (setq pos end))))
     (push (substring text pos) parts)
     (apply #'concat (nreverse parts))))
 
@@ -506,6 +546,184 @@ the harness sends itself, would take the whole rendering down."
 (defun harness-ui-markdown-insert (text)
   "Insert Markdown TEXT rendered at point."
   (insert (harness-ui-markdown-render text)))
+
+;;;; In lines
+
+;; `harness-ui-markdown-render' leaves the wrapping to the window: the
+;; hanging indent of a list item and the margin of a code block are
+;; `wrap-prefix' and `line-prefix' properties, which the display engine
+;; reads where a screen line starts.  A caller that draws a line at a
+;; time -- a bar down the side of a comment, a thread under a line of
+;; code, in an overlay -- starts every line with text of its own, so
+;; those properties do nothing there, and a line longer than the room
+;; wraps to the margin, away from its bar.  `harness-ui-markdown-render-lines'
+;; wraps the lines and indents them in the text instead.
+
+(defun harness-ui-markdown--break (string start room hard)
+  "Cut a piece of ROOM columns at most off STRING, from START.
+Return (END . NEXT): the piece is from START to END, and the next one
+starts at NEXT, which is nil when the piece is the end of STRING.  The
+cut is at the last space the piece can end at, and the blanks it leaves
+are dropped, unless HARD: then it is where ROOM ends, blanks and all,
+as code and tables need.  A word wider than ROOM is cut inside."
+  (let* ((length (length string))
+         (width 0)
+         (i start))
+    (while (and (< i length) (<= (+ width (char-width (aref string i))) room))
+      (cl-incf width (char-width (aref string i)))
+      (cl-incf i))
+    (if (>= i length)
+        (cons length nil)
+      (if hard
+          (let ((cut (max i (1+ start))))
+            (cons cut (and (< cut length) cut)))
+        ;; The first character that is no blank: a cut before it would
+        ;; leave an empty piece.
+        (let* ((lead (let ((p start))
+                       (while (and (< p length) (memq (aref string p) '(?\s ?\t)))
+                         (cl-incf p))
+                       p))
+               (space (if (and (eq (aref string i) ?\s) (> i lead))
+                          i
+                        (cl-position ?\s string :start (min lead i) :end i :from-end t)))
+               (cut (if (and space (> space lead)) space (max i (1+ start))))
+               (end cut)
+               (next cut))
+          (while (and (> end start) (memq (aref string (1- end)) '(?\s ?\t)))
+            (cl-decf end))
+          (while (and (< next length) (memq (aref string next) '(?\s ?\t)))
+            (cl-incf next))
+          (cons end (and (< next length) next)))))))
+
+(defun harness-ui-markdown--wrap-line (line first rest width hard)
+  "Return LINE, rendered text, as the lines it takes in WIDTH columns.
+FIRST goes before the first line, REST before the others.  HARD says
+to cut where the room ends rather than at a space, see
+`harness-ui-markdown--break'.  Neither prefix takes more than half
+the width, and a line is given eight columns at least."
+  (let* ((first-room (max 8 (- width (min (string-width first) (/ width 2)))))
+         (rest-room (max 8 (- width (min (string-width rest) (/ width 2)))))
+         (prefix first)
+         (room first-room)
+         (start 0)
+         (pieces nil))
+    (while start
+      (pcase-let ((`(,end . ,next) (harness-ui-markdown--break line start room hard)))
+        (push (concat prefix (substring line start end)) pieces)
+        (setq start next prefix rest room rest-room)))
+    (nreverse pieces)))
+
+(defun harness-ui-markdown--string-face-p (string pos face)
+  "Non-nil when the text of STRING at POS is drawn in FACE, alone or among others."
+  (let ((faces (get-text-property pos 'face string)))
+    (if (consp faces) (memq face faces) (eq faces face))))
+
+(defun harness-ui-markdown-render-lines (text width)
+  "Render Markdown TEXT as a list of lines, each WIDTH columns at most.
+Each line is a string that ends in a newline, with the faces and
+properties `harness-ui-markdown-render' gives it, for a caller that
+draws a line at a time, after a margin of its own.  What the renderer
+leaves to the window is in the text instead: the hanging indent of a
+list item, the margin of a code block, the bar a block quote's lines
+start with, so a line that does not fit is cut into lines that start
+where the window would have started them.  Code and table lines are cut
+where the room ends, not at a space, and a table is fitted to WIDTH by
+`harness-ui-markdown-table-width'.  A newline a code block gave its
+line keeps its face, whose background reaches the edge of the window.
+Empty TEXT is one empty line.  WIDTH is eight columns at least: what is
+narrower gets eight.
+
+`harness-ui-markdown-hard-breaks' says whether the lines of a paragraph
+join, as in `harness-ui-markdown-render'."
+  (let* ((harness-ui-markdown-table-width width)
+         (rendered (harness-ui-markdown-render text))
+         (end (length rendered))
+         (pos 0)
+         (lines nil))
+    (while (<= pos end)
+      (let* ((eol (or (string-search "\n" rendered pos) end))
+             (line (substring rendered pos eol))
+             (block (get-text-property pos 'harness-md-block rendered))
+             (code (eq block 'code))
+             (first (let ((prefix (get-text-property pos 'line-prefix rendered)))
+                      (if (stringp prefix) prefix "")))
+             (hanging (get-text-property pos 'wrap-prefix rendered))
+             ;; The bars a block quote starts its lines with.
+             (bar-end (let ((p pos))
+                        (while (and (< p eol)
+                                    (harness-ui-markdown--string-face-p rendered p 'harness-md-quote-bar))
+                          (cl-incf p))
+                        p))
+             (rest (cond (code first)
+                         ((stringp hanging) hanging)
+                         ((> bar-end pos) (substring rendered pos bar-end))
+                         (t "")))
+             ;; The renderer trims the newlines it ends with.
+             (newline (cond ((< eol end) (substring rendered eol (1+ eol)))
+                            (code (propertize "\n" 'face 'harness-md-code-block))
+                            (t "\n")))
+             (pieces (if (string-blank-p line)
+                         ;; A rule, or an empty line: no margin on it.
+                         (list (truncate-string-to-width line width))
+                       (harness-ui-markdown--wrap-line
+                        line first rest width (memq block '(code table))))))
+        (dolist (piece pieces)
+          (let ((string (concat piece newline)))
+            ;; The margins are text now: left as properties they would
+            ;; be drawn a second time.
+            (remove-text-properties 0 (length string) '(line-prefix nil wrap-prefix nil) string)
+            (push string lines)))
+        (setq pos (1+ eol))))
+    (nreverse lines)))
+
+(defconst harness-ui-markdown--summary-limit 1000
+  "How much of a text `harness-ui-markdown-summary' reads: the start of it.")
+
+(defun harness-ui-markdown--summary-face (faces)
+  "Return FACES, a `face' property, as a line of a list wants it.
+A heading's face is plain bold: its height would make the line taller
+than the rest.  A link's face goes: in a summary a link is its label."
+  (let ((faces (if (and (consp faces) (not (keywordp (car faces)))) faces (list faces))))
+    (delete-dups
+     (delq 'link
+           (mapcar (lambda (face)
+                     (if (memq face '(harness-md-heading-1 harness-md-heading-2
+                                      harness-md-heading-3 harness-md-heading-4))
+                         'bold
+                       face))
+                   faces)))))
+
+(defun harness-ui-markdown-summary (text)
+  "Return Markdown TEXT as one line, for a list that names items by it.
+The text is rendered, so the line has no markers of the markup in it,
+only its faces, a heading's among them as plain bold; a link is its
+label, which does nothing; the language a code block names is left out,
+and line breaks and runs of blanks become a space each.  Only the start
+of a long text is read: the first words are what a caller cuts the line
+to."
+  (let* ((rendered (harness-ui-markdown-render
+                    (let ((text (or text "")))
+                      (if (> (length text) harness-ui-markdown--summary-limit)
+                          (substring text 0 harness-ui-markdown--summary-limit)
+                        text))))
+         (parts nil)
+         (pos 0))
+    (while (< pos (length rendered))
+      (let ((next (next-single-property-change pos 'face rendered (length rendered)))
+            (faces (get-text-property pos 'face rendered)))
+        (unless (harness-ui-markdown--string-face-p rendered pos 'harness-md-code-lang)
+          (push (if faces
+                    (let ((part (substring rendered pos next)))
+                      (put-text-property 0 (length part) 'face
+                                         (harness-ui-markdown--summary-face faces) part)
+                      part)
+                  (substring rendered pos next))
+                parts))
+        (setq pos next)))
+    (let ((line (string-trim (replace-regexp-in-string "[ \t\n]+" " " (apply #'concat (nreverse parts))))))
+      (remove-text-properties
+       0 (length line) '(harness-url nil keymap nil follow-link nil mouse-face nil help-echo nil) line)
+      line)))
 
 ;;;; Reading rendered text back
 
