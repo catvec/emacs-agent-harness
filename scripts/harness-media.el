@@ -3863,6 +3863,98 @@ it puts the report back at the branch against main when it is done."
     (harness-media--wait (lambda () (harness-media--review-diff-read-p review nil))
                          30 "the branch against main again")
     (harness-media--settle 0.5)))
+;;;; Quoting a comment of the review
+
+(declare-function change-review-ui-mouse-select "change-review-ui")
+(declare-function change-review-ui--overlay-selection "change-review-ui")
+
+(defun harness-media--overlay-xy (window overlay text &optional after)
+  "Return (X . Y), pixels in WINDOW over TEXT of the string OVERLAY shows.
+AFTER counts characters into TEXT.  OVERLAY is a thread drawn under a line
+in WINDOW's buffer; Y is the middle of the row TEXT is on.  The overlay's
+position is the end of the line its text follows, shown after its last
+row, which says where the rows are."
+  (let* ((string (overlay-get overlay 'after-string))
+         (index (+ (or (string-search text string) (error "No %S under the line" text)) (or after 0)))
+         (rows (1+ (cl-count ?\n string)))
+         (row (cl-count ?\n (substring string 0 index)))
+         (start (let ((newline (cl-position ?\n string :end index :from-end t)))
+                  (if newline (1+ newline) 0)))
+         (height (frame-char-height (window-frame window)))
+         (width (frame-char-width (window-frame window)))
+         (last (cdr (posn-x-y (posn-at-point (overlay-start overlay) window)))))
+    (cons (+ (* (- index start) width) (/ width 2))
+          (+ (- last (* (- rows 1 row) height)) (/ height 2)))))
+
+(defun harness-media--drag (window from to)
+  "Press the mouse in WINDOW at FROM, (X . Y) pixels, drag it to TO and let go.
+The events are those the display gives the command a press runs, made here
+for pixels of the frame, so the text the mouse is over is the text a user's
+would be."
+  (let ((start (posn-at-x-y (car from) (cdr from) window))
+        (end (posn-at-x-y (car to) (cdr to) window)))
+    (setq unread-command-events
+          (list (list 'mouse-movement end) (list 'drag-mouse-1 start end)))
+    (let ((this-command 'change-review-ui-mouse-select))
+      (change-review-ui-mouse-select (list 'down-mouse-1 start)))
+    (harness-media--settle 0.3)))
+
+(defun harness-media-shot-review-quote ()
+  "A part of the agent's answer in the review, selected with the mouse and quoted.
+Ediff on acme/app.py, the thread on the renamed function under its line in
+the branch's version.  The mouse is dragged over the end of the agent's
+answer, which a region could not hold, the thread being a string an
+overlay shows: the selection is marked (`review-select').  Then C-c >:
+the reply opens in a buffer of its own with the part quoted, point under
+it, and an answer is typed (`review-quote')."
+  (let ((popout (harness-media--review-layout)))
+    (ignore popout)
+    (let* ((review harness-media--review)
+           (files (harness-ui-patch-review--r-files review))
+           (index (cl-position "acme/app.py" files :key #'change-review-file-path :test #'equal)))
+      (harness-ui-patch-review-ediff review index
+                                     (cons :new (harness-media--review-line "def _application" "acme/app.py")))
+      (harness-media--wait (lambda () (let ((state (harness-ui-patch-review--r-ediff review)))
+                                        (and (buffer-live-p (plist-get state :control))
+                                             (get-buffer-window (plist-get state :control)))))
+                           30 "Ediff to show")
+      (harness-media--settle 1.5)
+      (let* ((state (harness-ui-patch-review--r-ediff review))
+             (version (plist-get state :b))
+             (window (get-buffer-window version))
+             (overlay (with-current-buffer version
+                        (cl-find-if (lambda (o) (and (overlay-get o 'change-review-thread)
+                                                     (string-search "Why rename application"
+                                                                    (or (overlay-get o 'after-string) ""))))
+                                    (overlays-in (point-min) (point-max))))))
+        (unless overlay (error "The thread on the renamed function is not drawn"))
+        ;; The version is given room, from the merge base's window above it,
+        ;; so that the thread is in sight whole with the reply opened under
+        ;; it; and the line the thread is under is at its top.
+        (ignore-errors (window-resize window 8))
+        (with-current-buffer version
+          (goto-char (overlay-start overlay))
+          (set-window-point window (point))
+          (set-window-start window (line-beginning-position 0)))
+        (harness-media--settle 0.5)
+        ;; From where the answer says what the line is, to where it ends.
+        (harness-media--drag window
+                             (harness-media--overlay-xy window overlay "the last line of the module")
+                             (harness-media--overlay-xy window overlay "so imports keep working" 23))
+        (with-current-buffer version
+          (unless (change-review-ui--overlay-selection) (error "The drag selected nothing")))
+        (harness-media--capture "review-select")
+        ;; C-c > from the version, where the mouse selected.
+        (select-window window)
+        (let ((this-command 'change-review-ui-mouse-select))
+          (harness-media--keys "C-c >"))
+        (harness-media--type "Then say so in a comment above the line, so the next reader does not ask.")
+        (harness-media--capture "review-quote")
+        ;; Give the reply up, and Ediff, as the other pictures leave them.
+        (harness-media--keys "C-c C-k")
+        (with-current-buffer (plist-get (harness-ui-patch-review--r-ediff review) :control)
+          (call-interactively #'harness-ui-patch-review-ediff-quit))
+        (harness-media--settle 0.5)))))
 
 (defconst harness-media-shots
   '(("chat" . harness-media-shot-chat)
@@ -3926,7 +4018,9 @@ it puts the report back at the branch against main when it is done."
     ("review-ediff" . harness-media-shot-review-ediff)
     ("review-to-review" . harness-media-shot-review-to-review)
     ;; After them: it chooses another diff, and puts the first back.
-    ("review-diff" . harness-media-shot-review-diff))
+    ("review-diff" . harness-media-shot-review-diff)
+    ;; It takes review-select on the way.
+    ("review-quote" . harness-media-shot-review-quote))
   "Every picture, as (NAME . FUNCTION), in the order they are taken.")
 
 ;;;; Entry point

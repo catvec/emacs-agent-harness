@@ -141,6 +141,17 @@ bottom, else the diff's -- so the next file is the one on the next row.
               or closed; r, x, RET and o there are as in the threads
               section.  T goes to the threads; d there comes back to
               Ediff, at the thread's line.
+  quote reply C-c > replies to a comment with what you highlight of it
+              quoted, as a mail's reply is, point under the quote.  In
+              the threads list it is the region.  In Ediff's versions a
+              comment is drawn under its line and is no text of the
+              buffer, so no region holds any of it: a drag of the mouse
+              over it selects (a double click a word, a triple click a
+              line), the selection shows, and C-c > quotes it; with
+              none it quotes the last comment of the thread there.  In
+              the control panel it quotes what is selected in a version,
+              else the last comment of the thread at the current
+              difference.  The reply is a draft, as r's.
   drafts      A draft is yours to change until the feedback sends it:
               it has an [Edit] button, which edits that draft, and e
               edits one by where point is: under the line in a
@@ -330,6 +341,7 @@ it takes its part of the report and the banner out.
 - `harness-ui-patch-review-next-file` — Move to the next file of the changes, or the Nth next.
 - `harness-ui-patch-review-open` — Show the changes of the task this buffer shows, in a popout.
 - `harness-ui-patch-review-previous-file` — Move to the previous file of the changes, or the Nth previous.
+- `harness-ui-patch-review-quote-reply` — Reply with a quote, from the control panel of an Ediff of a task's change.
 - `harness-ui-patch-review-redraw-tree` — Draw the tree beside Ediff again.
 - `harness-ui-patch-review-reply` — Reply to the thread at the current difference, or at point, in Ediff.
 - `harness-ui-patch-review-select-diff` — Choose the diff the report of the changes shows.

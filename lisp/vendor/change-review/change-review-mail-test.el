@@ -926,6 +926,30 @@ and a block of code are not; no line of a comment starts with \">\"."
                            (substring text (+ 2 (string-search "\n\n" text))))
                          "\n"))))))
 
+(ert-deftest change-review-mail-keeps-a-quote-of-a-comment-as-it-is ()
+  "A comment that quotes the text it answers, as a mail does, is not filled
+into one paragraph: a long line of the quote is cut with the same \">\"s, the
+bare \">\" and the short line stay, and the answer is filled as any text."
+  (let* ((set (change-review-mail-test--set))
+         (words (string-join (make-list 30 "quoted") " "))
+         (comment (change-review-mail-test--add
+                   set "a.el" 'new 1
+                   (concat "> " words "\n>\n> short\n\nAn answer.\n\n> another\nright above its answer")
+                   "@@ -1,1 +1,1 @@\n (setq a1 1)"))
+         (text (change-review-mail-render-comments set (list comment)))
+         (lines (split-string (string-trim-right (substring text (+ 2 (string-search "\n\n" text)))) "\n"))
+         (tail (member "" lines))
+         (quote (butlast lines (length tail)))
+         (cut (butlast quote 2)))
+    (should (cl-every (lambda (line) (<= (length line) change-review-mail-fill-column)) lines))
+    ;; The quote, then the answer, then a quote right above its answer.
+    (should (equal '("" "An answer." "" " > another" "right above its answer") tail))
+    (should (equal '(" >" " > short") (last quote 2)))
+    ;; The long line is cut where the fill column says, each piece a quote line.
+    (should (> (length cut) 2))
+    (should (cl-every (lambda (line) (string-match-p "\\` > quoted\\(?: quoted\\)*\\'" line)) cut))
+    (should (equal words (mapconcat (lambda (line) (string-remove-prefix " > " line)) cut " ")))))
+
 (ert-deftest change-review-mail-writes-a-comment-whose-excerpt-is-broken ()
   "A comment whose excerpt has no hunk header cannot be put under its lines:
 it is written on its file, saying the line."

@@ -131,6 +131,17 @@
 ;;               or closed; r, x, RET and o there are as in the threads
 ;;               section.  T goes to the threads; d there comes back to
 ;;               Ediff, at the thread's line.
+;;   quote reply C-c > replies to a comment with what you highlight of it
+;;               quoted, as a mail's reply is, point under the quote.  In
+;;               the threads list it is the region.  In Ediff's versions a
+;;               comment is drawn under its line and is no text of the
+;;               buffer, so no region holds any of it: a drag of the mouse
+;;               over it selects (a double click a word, a triple click a
+;;               line), the selection shows, and C-c > quotes it; with
+;;               none it quotes the last comment of the thread there.  In
+;;               the control panel it quotes what is selected in a version,
+;;               else the last comment of the thread at the current
+;;               difference.  The reply is a draft, as r's.
 ;;   drafts      A draft is yours to change until the feedback sends it:
 ;;               it has an [Edit] button, which edits that draft, and e
 ;;               edits one by where point is: under the line in a
@@ -349,6 +360,7 @@
 (defvar ediff-whitespace)
 (defvar evil-local-mode)
 (defvar window-restore-killed-buffer-windows)
+(declare-function change-review-ui--overlay-selection "change-review-ui" ())
 (declare-function ediff-buffers "ediff" (buffer-a buffer-b &optional startup-hooks job-name))
 (declare-function ediff-setup-windows-plain "ediff-wind" (buffer-a buffer-b buffer-c control-buffer))
 (declare-function ediff-really-quit "ediff-util" (reverse-default-keep-variants))
@@ -2623,7 +2635,8 @@ goes there.  Without a tree, the library's threads view lists them in a
 buffer of its own (`change-review-open-threads').  FILTER, `open',
 `unreviewed' (the threads the agent closed that you have not reviewed),
 `closed' or `all', is the status to show them by, by default the
-buffer's."
+buffer's.  \\<change-review-threads-mode-map>\\[change-review-ui-quote-reply] there replies with what you selected of a comment
+quoted."
   (interactive)
   (let ((review (or (harness-ui-patch-review--review-here)
                     (user-error "No review here"))))
@@ -3629,6 +3642,32 @@ As a draft, in the thread: it goes with the feedback."
   (pcase-let ((`(,review . ,thread) (harness-ui-patch-review--ediff-thread)))
     (change-review-ui-reply-to-thread (harness-ui-patch-review--r-set review) thread)))
 
+(defun harness-ui-patch-review--selected-version ()
+  "Return the buffer of this Ediff's version with comment text selected, or nil.
+The selection is the mouse's (`change-review-ui-mouse-select')."
+  (let ((state (harness-ui-patch-review--r-ediff (harness-ui-patch-review--current))))
+    (cl-find-if (lambda (buffer)
+                  (and (buffer-live-p buffer)
+                       (with-current-buffer buffer (change-review-ui--overlay-selection))))
+                (list (plist-get state :b) (plist-get state :a)))))
+
+(defun harness-ui-patch-review-quote-reply ()
+  "Reply with a quote, from the control panel of an Ediff of a task's change.
+With text of a comment selected in either version, a reply to that comment
+with the text quoted, as \\<harness-ui-patch-review-lines-mode-map>\\[change-review-ui-quote-reply] does in the version.  Without, the
+reply r makes, to the thread at the current difference, that starts with
+its last comment quoted, as a mail's reply does, point under it.  Either
+way a draft in the thread, which goes with the feedback."
+  (interactive)
+  (if-let* ((version (harness-ui-patch-review--selected-version)))
+      (with-current-buffer version
+        (call-interactively #'change-review-ui-quote-reply))
+    (pcase-let ((`(,review . ,thread) (harness-ui-patch-review--ediff-thread)))
+      (change-review-ui-reply-to-thread
+       (harness-ui-patch-review--r-set review) thread
+       (change-review-ui-quote-string
+        (change-review-comment-body (change-review-thread-last-comment thread)))))))
+
 (defun harness-ui-patch-review-toggle-thread ()
   "Close the thread at the current difference, or at point, or open it again."
   (interactive)
@@ -3961,7 +4000,8 @@ Return a promise of the review."
     (define-key map (kbd "t") #'harness-ui-patch-review-toggle-ediff-tree)
     map)
   "Keys in the two versions Ediff compares: c comments on the line at point.
-Those of the library's threads under a line -- r, x, m, o, RET -- are its.")
+Those of the library's threads under a line -- r, C-c >, x, m, o, RET --
+are its.")
 
 (define-minor-mode harness-ui-patch-review-lines-mode
   "Keys to review one of the two versions Ediff compares.
@@ -3979,7 +4019,12 @@ its own.
 \\[harness-ui-patch-review-threads] goes to the threads, beside the files.
 \\[harness-ui-patch-review-toggle-skip-approved] switches skipping the approved files,
 \\[harness-ui-patch-review-toggle-auto-approve] approving the files you went through,
-\\[harness-ui-patch-review-toggle-ediff-tree] the tree of the files beside Ediff."
+\\[harness-ui-patch-review-toggle-ediff-tree] the tree of the files beside Ediff.
+
+The mouse selects text of the comments, which are no text of the buffer
+\(`change-review-ui-mouse-select'): \\[change-review-ui-quote-reply] replies to a comment with
+what is selected of it quoted, or, with nothing selected, with the last
+comment of the thread under the line quoted."
   :lighter nil :keymap harness-ui-patch-review-lines-mode-map :group 'harness-ui-patch-review)
 
 ;;;;; The threads in the versions
@@ -4359,6 +4404,7 @@ It gets the review's keys and help, and gives the report back as it ends."
     (set-keymap-parent map ediff-mode-map)
     (define-key map "c" #'harness-ui-patch-review-comment)
     (define-key map "r" #'harness-ui-patch-review-reply)
+    (define-key map (kbd "C-c >") #'harness-ui-patch-review-quote-reply)
     (define-key map "x" #'harness-ui-patch-review-toggle-thread)
     ;; Instead of Ediff's wide display, which a review has no use for.
     (define-key map "m" #'harness-ui-patch-review-toggle-reviewed)

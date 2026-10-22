@@ -367,6 +367,37 @@ line saying what the quote is; they are sent once the task is."
           (should (numberp (plist-get comment :sent)))
           (should (eql 0 (plist-get (plist-get comment :meta) :round))))))))
 
+(ert-deftest harness-patch-review-sends-a-reply-that-quotes-as-it-was-written ()
+  "A reply that starts with the part of a comment it answers, quoted as a mail
+quotes (C-c > in the views), reaches the agent as it was written: the quote is
+not filled into the lines around it, a long line of it is cut with the same
+\">\"s, and the answer is under it."
+  (harness-patch-review-test-with
+    (let* ((id (harness-patch-review-test--task))
+           (quoted (concat "the retry loop needs one more than that, because it counts the first "
+                           "try as well as the retries that follow it"))
+           (first (harness-patch-review-test--user-comment
+                   id (concat "Why eighteen? " quoted ".") :location harness-patch-review-test--a18 :sent 10.0)))
+      (harness-patch-review-test--user-comment
+       id (concat "> " quoted "\n>\n> second paragraph\n\nThen say so in a comment.")
+       :thread (car first))
+      (harness-call 'task/reject id "Nearly there.")
+      (let* ((feedback (plist-get (car (plist-get (harness-call 'task/get id) :feedback)) :text))
+             (lines (split-string feedback "\n"))
+             (start (cl-position-if (lambda (line) (string-prefix-p " > the retry loop" line)) lines))
+             (quote (and start (seq-take-while (lambda (line) (string-prefix-p " >" line)) (nthcdr start lines)))))
+        (should start)
+        ;; Each line of the quote is a line of its own, a cut of the long one with its \">\".
+        (should (> (length quote) 3))
+        (should (cl-every (lambda (line) (<= (length line) 72)) quote))
+        (should (equal quoted (mapconcat (lambda (line) (string-remove-prefix " > " line))
+                                         (butlast quote 2) " ")))
+        (should (equal '(" >" " > second paragraph") (last quote 2)))
+        ;; The answer follows, a line apart, and the thread is named after it.
+        (should (equal '("" "Then say so in a comment." "[thread")
+                       (let ((after (nthcdr (+ start (length quote)) lines)))
+                         (list (car after) (cadr after) (substring (caddr after) 0 7)))))))))
+
 (ert-deftest harness-patch-review-sends-the-drafts-alone ()
   "A task is sent back with drafts and no words; with neither, it is refused."
   (harness-patch-review-test-with

@@ -129,6 +129,19 @@
 ;; side-by-side comparison, draw the threads under their lines with
 ;; `change-review-ui-add-thread-overlay' and bind the same commands, in
 ;; `change-review-ui-lines-mode' or in a map of their own.
+;;
+;; QUOTE REPLY (`change-review-ui-quote-reply', C-c > in every view).
+;; Select part of a comment and it starts a reply to the comment with that
+;; part quoted, as a mail's does -- "> " before each line, point under the
+;; quote -- or, with nothing selected, with all of the comment quoted.  The
+;; threads view is text, so its selection is the region.  A thread drawn
+;; under a line is a string an overlay shows, no text of the buffer, so
+;; the region cannot hold any of it: the mouse selects its text instead
+;; (`change-review-ui-mouse-select').  Either way what is selected is read
+;; back as the text of the comment it is of, as it was written, not as it is
+;; drawn, wrapped and under a bar (`change-review-ui--offset-at').  Where
+;; compose-quote is installed, the buffer the reply is read in answers a
+;; quote inline with it: M-RET splits it, C-c [ elides part of it.
 
 ;;; Code:
 
@@ -191,7 +204,11 @@ click on that line, shows all of it.  The threads view has no limit."
 It is called with a prompt, the text to start from and a function to
 call with the text read, which it calls when the user is done and not
 at all when they give up.  The default edits the text in a buffer of
-its own, where \\`C-c C-c' finishes and \\`C-c C-k' gives up."
+its own, where \\`C-c C-c' finishes and \\`C-c C-k' gives up.
+
+A function that takes a fourth argument is given where point starts in
+the text, `end' when that is after it, as it is for a reply that starts
+with a quote, else nil."
   :type 'function)
 
 (defcustom change-review-ui-directory (locate-user-emacs-file "change-review/")
@@ -238,6 +255,10 @@ comparison say, has its set through this, or in `change-review-ui--set'.")
   "The status filter in force.")
 (defface change-review-ui-target-face '((t :inherit bold :extend t))
   "The line a comment was made on, in the lines it quotes.")
+(defface change-review-ui-quote-face '((t :inherit font-lock-comment-face))
+  "The lines of a comment that quote another, those that start with \">\".")
+(defface change-review-ui-selection-face '((t :inherit region))
+  "The text of a comment selected with the mouse in a thread under a line.")
 
 ;;;; State of a view
 
@@ -325,18 +346,28 @@ there is none; the character at the cut is a space or the next one."
              (and space (> space 0) space)))
           (t (max i 1)))))
 
+(defun change-review-ui--wrap-offsets (line width)
+  "Return LINE cut into pieces of WIDTH columns at most, at spaces if it can.
+Each piece comes with where it starts in LINE, as (PIECE . INDEX): what
+the cut leaves out, the spaces it was at, is in none.  A line that fits,
+and the empty one, is a piece of its own."
+  (if (<= (string-width line) width)
+      (list (cons line 0))
+    (let ((pieces nil) (base 0))
+      (while (> (string-width line) width)
+        (let* ((cut (change-review-ui--cut-point line width))
+               (rest (substring line cut))
+               (next (string-trim-left rest)))
+          (push (cons (string-trim-right (substring line 0 cut)) base) pieces)
+          (setq base (+ base cut (- (length rest) (length next)))
+                line next)))
+      (push (cons line base) pieces)
+      (nreverse pieces))))
+
 (defun change-review-ui--wrap (line width)
   "Return LINE cut into pieces of WIDTH columns at most, at spaces if it can.
 A line that fits, and the empty one, is a piece of its own."
-  (if (<= (string-width line) width)
-      (list line)
-    (let (pieces)
-      (while (> (string-width line) width)
-        (let ((cut (change-review-ui--cut-point line width)))
-          (push (string-trim-right (substring line 0 cut)) pieces)
-          (setq line (string-trim-left (substring line cut)))))
-      (push line pieces)
-      (nreverse pieces))))
+  (mapcar #'car (change-review-ui--wrap-offsets line width)))
 
 ;;;; Authors
 
@@ -486,7 +517,12 @@ what it draws itself.")
 
 (cl-defmethod change-review-ui-body-lines ((_set change-review-set) comment width)
   (cl-loop for text in (split-string (change-review-comment-body comment) "\n")
-           append (change-review-ui--wrap text width)))
+           ;; A line that starts with ">" quotes: every piece it wraps to has the face.
+           append (mapcar (lambda (piece)
+                            (if (string-prefix-p ">" text)
+                                (propertize piece 'face 'change-review-ui-quote-face)
+                              piece))
+                          (change-review-ui--wrap text width))))
 
 (cl-defgeneric change-review-ui-body-summary (set comment)
   "Return the text of COMMENT of SET as one line, a string without newline.
@@ -718,7 +754,12 @@ leave out the revision and the marks of who wrote it, `:links' is `full',
 PREFIX starts every line, WIDTH is the width to wrap the text to and the
 header to fit, and DETAILS non-nil adds where the comment was made.  Each
 line ends in a newline, which carries the comment's properties as the
-line does."
+line does.  The lines that hold the comment's text, from after their bar
+to their newline, also say where that is in it: their `change-review-body'
+is the index in the comment's text of the first character they draw,
+which is how a selection of the drawing is read back as the text it is of
+\(`change-review-ui--offset-at').  A line that cannot be placed in the
+text (a markup changed it) has none."
   (let* ((position (change-review-comment-position thread comment))
          (author (change-review-comment-author comment))
          (bar (propertize "┃" 'face (change-review-ui--author-face author)))
@@ -729,10 +770,28 @@ line does."
                     (change-review-ui--comment-header set thread comment prefix bar details options))
                   change-review-ui--comment-header-steps))
          (body-prefix (concat prefix bar (make-string (+ digits 3 2) ?\s)))
-         (lines (list header)))
+         (lines (list header))
+         (start 0))
     (dolist (piece (change-review-ui-body-lines
                     set comment (max 20 (- width (string-width body-prefix)))))
-      (push (concat body-prefix piece) lines))
+      ;; A line of the text is (STRING . WHERE IT STARTS IN THE TEXT), when
+      ;; the drawing can say: the markup a set draws the text with may
+      ;; change what it reads, so a line that is not found in the text,
+      ;; from where the one before ended, has no place in it.
+      (let* ((body (change-review-comment-body comment))
+             (plain (string-trim-right (substring-no-properties piece)))
+             (at (if (string-empty-p (string-trim plain))
+                     ;; A blank line starts after the newline that ends the one before.
+                     (if (and (= start 0) (null (cdr lines)))
+                         (and (or (string-empty-p body) (eq (aref body 0) ?\n)) 0)
+                       (when-let* ((newline (string-search "\n" body start)))
+                         (1+ newline)))
+                   (when-let* ((found (string-search (string-trim-left plain) body start)))
+                     (- found (- (length plain) (length (string-trim-left plain))))))))
+        (when at
+          (setq at (max at 0)
+                start (+ at (length plain))))
+        (push (if at (cons (concat body-prefix piece) at) (concat body-prefix piece)) lines)))
     (when details
       (dolist (line (change-review-ui-origin-lines set thread comment))
         ;; A line of the diff is a way to its source all along the line.
@@ -744,8 +803,13 @@ line does."
               lines)))
     (mapcar (lambda (line)
               ;; A line of the text may end in a newline of its own.
-              (propertize (if (string-suffix-p "\n" line) line (concat line "\n"))
-                          'change-review-comment (change-review-comment-id comment)))
+              (let* ((text (if (consp line) (car line) line))
+                     (string (propertize (if (string-suffix-p "\n" text) text (concat text "\n"))
+                                         'change-review-comment (change-review-comment-id comment))))
+                (when (consp line)
+                  (put-text-property (length body-prefix) (length string)
+                                     'change-review-body (cdr line) string))
+                string))
             (nreverse lines))))
 
 (defconst change-review-ui--header-steps
@@ -1170,7 +1234,11 @@ ARGS are those of `change-review-ui-thread-string', which draws it.  The
 overlay carries the thread's id, so that the commands of this library
 find the thread at point.  With the key :before non-nil in ARGS the
 text goes before POSITION instead, on lines of its own.  A view of a
-diff other than the ones here draws its threads with this."
+diff other than the ones here draws its threads with this.
+
+The text of the comments is the mouse's to select, which a region
+cannot, the thread being no text of the buffer: see
+`change-review-ui-mouse-select'."
   (let* ((before (plist-get args :before))
          (args (cl-loop for (key value) on args by #'cddr
                         unless (eq key :before) append (list key value)))
@@ -1178,18 +1246,9 @@ diff other than the ones here draws its threads with this."
          (overlay (make-overlay position position nil t nil)))
     (overlay-put overlay 'change-review-overlay t)
     (overlay-put overlay 'change-review-thread (change-review-thread-id thread))
-    (if before
-        (overlay-put overlay 'before-string text)
-      ;; The buffer's own newline ends the last line.  A face the text's
-      ;; last newline has, to reach the edge of the window as the
-      ;; background of a code block does, would be lost with it: a stretch
-      ;; to the edge has it instead.
-      (let ((face (and (> (length text) 0) (get-text-property (1- (length text)) 'face text))))
-        (overlay-put overlay 'after-string
-                     (concat "\n" (substring text 0 -1)
-                             (if face
-                                 (propertize " " 'face face 'display '(space :align-to right))
-                               "")))))
+    (overlay-put overlay 'change-review-before before)
+    (overlay-put overlay 'change-review-text (change-review-ui--selectable text))
+    (change-review-ui--show-text overlay)
     overlay))
 
 (defun change-review-ui-clear-overlays (&optional buffer)
@@ -1258,6 +1317,396 @@ the line; with NEED-COMMENT a thread's last comment will not do."
     (when (and need-comment (null comment)) (user-error "No comment here"))
     (list set thread comment)))
 
+;;;; What of a comment's text a selection of the drawing is of
+
+;; A comment is drawn wrapped, under a bar, between the lines of its
+;; header and those that say where it was made, so what is selected of the
+;; drawing -- the region of the threads view, what the mouse dragged over
+;; in a thread under a line of a diff -- is not the text it is of.  The
+;; lines that hold the text know: `change-review-body', from their first
+;; character to their newline, is where in the comment's text that
+;; character is (`change-review-ui--comment-lines').  A place in the
+;; drawing is so a place in the text, and a selection a piece of it as it
+;; was written, with its newlines and the spaces the wrapping left out.
+;; The drawing is a string (a thread under a line is an overlay's) or the
+;; buffer's text (the threads view): OBJECT, nil for the buffer, says which.
+
+(defun change-review-ui--start (object)
+  "Return the first position of OBJECT, a string, or else the current buffer."
+  (if (stringp object) 0 (point-min)))
+
+(defun change-review-ui--end (object)
+  "Return the end of OBJECT, a string, or else the current buffer."
+  (if (stringp object) (length object) (point-max)))
+
+(defun change-review-ui--char (pos &optional object)
+  "Return the character at POS of OBJECT, a string, or else the current buffer."
+  (if (stringp object) (aref object pos) (char-after pos)))
+
+(defun change-review-ui--body-line (pos &optional object)
+  "Return (START FROM TO LENGTH) for the line of a comment's text that POS is on.
+FROM and TO are where, in OBJECT, the characters of the text on that line
+and the newline that ends it are: from FROM up to TO.  START is where in
+the comment's text the first of them is, and LENGTH how many the text has
+on the line.  Nil for a position that is not on such a line: in its bar,
+in the comment's header, or elsewhere."
+  (when-let* ((start (get-text-property pos 'change-review-body object)))
+    (let* ((from (previous-single-property-change (1+ pos) 'change-review-body object
+                                                  (change-review-ui--start object)))
+           (to (next-single-property-change pos 'change-review-body object
+                                            (change-review-ui--end object))))
+      (list start from to
+            (- to from (if (eq (change-review-ui--char (1- to) object) ?\n) 1 0))))))
+
+(defun change-review-ui--clamped-offset (pos &optional object)
+  "Return the offset in a comment's text that the place POS stands for.
+POS is in OBJECT, in the drawing of a comment, and is none of its text.
+A place before the text, the header's, stands for the start of the
+text; one in the bar of a line of the text, for where that line starts;
+one after the text, in the lines that say where it was made, for the end
+of the text."
+  (let* ((comment-start (previous-single-property-change (1+ pos) 'change-review-comment object
+                                                         (change-review-ui--start object)))
+         (comment-end (next-single-property-change pos 'change-review-comment object
+                                                   (change-review-ui--end object)))
+         (first (text-property-not-all comment-start comment-end 'change-review-body nil object))
+         (next (and first (>= pos first)
+                    (text-property-not-all pos comment-end 'change-review-body nil object))))
+    (cond ((or (null first) (< pos first)) 0)
+          ;; In the bar of a line of the text: the line is the next with some.
+          ((and next (cl-loop for i from pos below next
+                              never (eq (change-review-ui--char i object) ?\n)))
+           (car (change-review-ui--body-line next object)))
+          ;; After the text.
+          (t (let ((last pos))
+               (while (and (> last comment-start)
+                           (not (get-text-property last 'change-review-body object)))
+                 (cl-decf last))
+               (pcase-let ((`(,start ,_from ,_to ,length) (change-review-ui--body-line last object)))
+                 (+ start length)))))))
+
+(defun change-review-ui--offset-at (pos &optional object)
+  "Return (COMMENT-ID . OFFSET) for POS of OBJECT, or nil outside a comment.
+OFFSET is where in the comment's text the character at POS is, as the
+drawing says; for a place that is none of its text, the nearest of
+its start and its end (`change-review-ui--clamped-offset').  OBJECT is a
+string, or nil for the current buffer."
+  (when-let* ((id (get-text-property pos 'change-review-comment object)))
+    (cons id (if-let* ((line (change-review-ui--body-line pos object)))
+                 (+ (nth 0 line) (min (- pos (nth 1 line)) (nth 3 line)))
+               (change-review-ui--clamped-offset pos object)))))
+
+(defun change-review-ui--region-parts (beg end)
+  "Return the parts of comments' text that BEG to END of the buffer draws.
+A list of (COMMENT-ID START END) in the order they are drawn, one for each
+comment that has some in it: the text from START to END, offsets in
+the comment's text.  Nothing of a comment's header or of where it was made
+counts, only its text."
+  (let ((pos beg) (parts nil))
+    (while (and (< pos end)
+                (setq pos (text-property-not-all pos end 'change-review-body nil)))
+      (pcase-let* ((`(,start ,from ,to ,length) (change-review-ui--body-line pos))
+                   (id (get-text-property pos 'change-review-comment))
+                   (low (+ start (max 0 (- pos from))))
+                   (high (+ start (min length (- (min end to) from)))))
+        (if (equal id (car (car parts)))
+            (setf (nth 2 (car parts)) high)
+          (push (list id low high) parts))
+        (setq pos to)))
+    (nreverse (cl-remove-if-not (lambda (part) (< (nth 1 part) (nth 2 part))) parts))))
+
+;;;; Quoting
+
+(defun change-review-ui-quote-string (text)
+  "Return TEXT as a Markdown block quote: every line after \"> \".
+Blank lines around TEXT and blanks at the ends of lines are dropped; a
+blank line within TEXT reads \">\", which keeps the quote one block.
+Indentation stays, as code needs."
+  (mapconcat (lambda (line)
+               (let ((line (string-trim-right line)))
+                 (if (string-empty-p line) ">" (concat "> " line))))
+             (split-string (string-trim-left (string-trim-right (substring-no-properties text))
+                                             "\\(?:[ \t]*\n\\)+")
+                           "\n")
+             "\n"))
+
+(defun change-review-ui--quote-only-p (text)
+  "Return non-nil when TEXT is nothing but quotes and blanks.
+Every line of it that is not blank starts with \">\"."
+  (cl-every (lambda (line) (or (string-blank-p line) (string-match-p "\\`[ \t]*>" line)))
+            (split-string text "\n")))
+
+;;;; Selecting the text of a thread drawn under a line
+
+;; A thread under a line of a diff is no text of the buffer, only a string
+;; an overlay shows, so no region holds any of it and a drag of the mouse
+;; over it selects nothing.  The text of its comments has keys of its own
+;; for that (`change-review-ui-text-map'): a drag over it selects a part of
+;; a comment's text, a double click a word and a triple click a line.  The
+;; selection is marked (`change-review-ui-selection-face') and is the
+;; overlay's, its `change-review-selection': (COMMENT-ID START END), offsets
+;; in the comment's text, which `change-review-ui-quote-reply' quotes and
+;; `change-review-ui-copy-selection' copies.  It goes with the next command
+;; that is not the mouse's.
+
+(defvar change-review-ui-text-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map [down-mouse-1] #'change-review-ui-mouse-select)
+    (define-key map [double-down-mouse-1] #'change-review-ui-mouse-select)
+    (define-key map [triple-down-mouse-1] #'change-review-ui-mouse-select)
+    map)
+  "Keys of the text of a comment in a thread drawn under a line.
+The mouse selects it.")
+
+(defun change-review-ui--selectable (text)
+  "Return TEXT, a thread drawn, with the mouse's keys on its comments' text.
+They are those of `change-review-ui-text-map'."
+  (let ((text (copy-sequence text)) (pos 0))
+    (while (and (< pos (length text))
+                (setq pos (text-property-not-all pos (length text) 'change-review-body nil text)))
+      (let ((to (next-single-property-change pos 'change-review-body text (length text))))
+        (add-text-properties pos to (list 'keymap change-review-ui-text-map 'pointer 'text) text)
+        (setq pos to)))
+    text))
+
+(defun change-review-ui--mark-selection (text selection)
+  "Return TEXT, a thread drawn, with SELECTION of a comment's text marked.
+SELECTION is (COMMENT-ID START END), as an overlay keeps it."
+  (pcase-let ((`(,id ,low ,high) selection)
+              (text (copy-sequence text)))
+    (let ((pos 0))
+      (while (and (< pos (length text))
+                  (setq pos (text-property-not-all pos (length text) 'change-review-body nil text)))
+        (pcase-let ((`(,start ,from ,to ,length) (change-review-ui--body-line pos text)))
+          (when (equal id (get-text-property pos 'change-review-comment text))
+            (let ((a (max low start)) (b (min high (+ start length))))
+              (when (< a b)
+                (add-face-text-property (+ from (- a start)) (+ from (- b start))
+                                        'change-review-ui-selection-face nil text))))
+          (setq pos to))))
+    text))
+
+(defun change-review-ui--show-text (overlay)
+  "Put the text of OVERLAY, a thread under a line, in it, a selection marked.
+It is the overlay's `after-string', or its `before-string' for a thread
+that goes before its position.  Every character of the string knows
+the overlay, as `change-review-view': what a mouse position is over is a
+string, and the overlay is how the thread it draws is found."
+  (let* ((text (overlay-get overlay 'change-review-text))
+         (selection (overlay-get overlay 'change-review-selection))
+         (text (if selection
+                   (change-review-ui--mark-selection text selection)
+                 (copy-sequence text))))
+    (put-text-property 0 (length text) 'change-review-view overlay text)
+    (if (overlay-get overlay 'change-review-before)
+        (overlay-put overlay 'before-string text)
+      ;; The buffer's own newline ends the last line.  A face the text's
+      ;; last newline has, to reach the edge of the window as the
+      ;; background of a code block does, would be lost with it: a stretch
+      ;; to the edge has it instead.
+      (let ((face (and (> (length text) 0) (get-text-property (1- (length text)) 'face text))))
+        (overlay-put overlay 'after-string
+                     (concat "\n" (substring text 0 -1)
+                             (if face
+                                 (propertize " " 'face face 'display '(space :align-to right))
+                               "")))))))
+
+(defun change-review-ui--overlay-selection ()
+  "Return what is selected of a thread drawn under a line in this buffer, or nil.
+That is (COMMENT-ID START END): the text from START to END of the comment's."
+  (cl-loop for overlay in (overlays-in (point-min) (point-max))
+           for selection = (overlay-get overlay 'change-review-selection)
+           when selection return selection))
+
+(defun change-review-ui-clear-selection (&optional buffer)
+  "Select nothing of the threads drawn under the lines of BUFFER.
+BUFFER is by default the current one."
+  (with-current-buffer (or buffer (current-buffer))
+    (remove-hook 'post-command-hook #'change-review-ui--drop-selection t)
+    (dolist (overlay (overlays-in (point-min) (point-max)))
+      (when (overlay-get overlay 'change-review-selection)
+        (overlay-put overlay 'change-review-selection nil)
+        (change-review-ui--show-text overlay)))))
+
+(defconst change-review-ui--keeping-commands
+  '(change-review-ui-mouse-select ignore handle-switch-frame
+    scroll-up-command scroll-down-command scroll-other-window
+    scroll-left scroll-right recenter-top-bottom
+    mwheel-scroll pixel-scroll-precision)
+  "The commands that leave a selection of a thread under a line as it is.
+Those that only scroll, the mouse's wheel included.")
+
+(defun change-review-ui--drop-selection ()
+  "Select nothing again, once a command that is not the selection's has run.
+On `post-command-hook' in a buffer that has a selection."
+  (unless (memq this-command change-review-ui--keeping-commands)
+    (change-review-ui-clear-selection)))
+
+(defun change-review-ui--select (overlay id low high)
+  "Select LOW to HIGH of the text of comment ID, in the thread OVERLAY draws.
+Nothing else is selected in the buffer; LOW and HIGH the same select
+nothing."
+  (with-current-buffer (overlay-buffer overlay)
+    (let ((selection (and (< low high) (list id low high))))
+      (dolist (other (overlays-in (point-min) (point-max)))
+        (when (and (not (eq other overlay)) (overlay-get other 'change-review-selection))
+          (overlay-put other 'change-review-selection nil)
+          (change-review-ui--show-text other)))
+      ;; The mouse moves a pixel at a time, a character is many: draw
+      ;; again only for a change.
+      (unless (equal selection (overlay-get overlay 'change-review-selection))
+        (overlay-put overlay 'change-review-selection selection)
+        (change-review-ui--show-text overlay))
+      (if selection
+          (add-hook 'post-command-hook #'change-review-ui--drop-selection nil t)
+        (remove-hook 'post-command-hook #'change-review-ui--drop-selection t)))))
+
+(defun change-review-ui--posn-hit (posn)
+  "Return (OVERLAY COMMENT-ID OFFSET TEXT-P) for what mouse position POSN is over.
+Nil when it is not over a comment.  That is a thread drawn under a line,
+in the text of one of its comments or in what is drawn of the comment
+around it, which stands for the start or the end of the text
+\(`change-review-ui--offset-at'); TEXT-P is non-nil for the text itself."
+  (let ((string (posn-string posn)))
+    (when (and (consp string) (stringp (car string))
+               (<= 0 (cdr string)) (< (cdr string) (length (car string))))
+      (when-let* ((overlay (get-text-property (cdr string) 'change-review-view (car string)))
+                  ((overlayp overlay))
+                  ((overlay-buffer overlay))
+                  (hit (change-review-ui--offset-at (cdr string) (car string))))
+        (list overlay (car hit) (cdr hit)
+              (and (change-review-ui--body-line (cdr string) (car string)) t))))))
+
+(defun change-review-ui--comment-body (overlay id)
+  "Return the text of comment ID, in the set of the buffer OVERLAY is in, or nil."
+  (with-current-buffer (overlay-buffer overlay)
+    (when-let* ((found (change-review-find-comment (change-review-ui--current-set) id)))
+      (change-review-comment-body (cdr found)))))
+
+(defun change-review-ui--row-hit (posn overlay id)
+  "Return the hit of the last character of comment ID on the row of POSN, or nil.
+For a mouse position POSN to the right of the end of a row of the thread
+OVERLAY draws, where it is over nothing: the hit
+\(`change-review-ui--posn-hit') of the last character of the row."
+  (let* ((window (posn-window posn))
+         (xy (posn-x-y posn))
+         (y (cdr xy))
+         (lo 0)
+         (hi (car xy))
+         (same (lambda (hit) (and hit (eq (car hit) overlay) (equal (nth 1 hit) id))))
+         (found (and (window-live-p window) (> hi 0)
+                     (change-review-ui--posn-hit (posn-at-x-y 0 y window)))))
+    (when (and found (funcall same found))
+      ;; The characters of the row go from the left as far as its text
+      ;; does, and nothing after: look for the last, by halves.
+      (while (> (- hi lo) 1)
+        (let* ((mid (/ (+ lo hi) 2))
+               (hit (change-review-ui--posn-hit (posn-at-x-y mid y window))))
+          (if (funcall same hit)
+              (setq lo mid found hit)
+            (setq hi mid))))
+      found)))
+
+(defun change-review-ui--drag-offset (posn overlay id window y)
+  "Return the offset in the text of comment ID that a drag to POSN reaches.
+The drag is in the thread OVERLAY draws, in WINDOW, and began at pixel
+row Y.  Over the text it is the place there; to the right of it, the end of
+its row; above it or under it, the start or the end of the text.  Nil
+when POSN is not in WINDOW."
+  (when (eq (posn-window posn) window)
+    (let ((hit (change-review-ui--posn-hit posn)))
+      (cond
+       ((and hit (eq (car hit) overlay) (equal (nth 1 hit) id)) (nth 2 hit))
+       ((when-let* ((row (change-review-ui--row-hit posn overlay id)))
+          ;; After the last character of the row, not before it.
+          (+ (nth 2 row) (if (nth 3 row) 1 0))))
+       ((and (posn-x-y posn) (< (cdr (posn-x-y posn)) y)) 0)
+       (t (length (or (change-review-ui--comment-body overlay id) "")))))))
+
+(defun change-review-ui--unit (offset count body)
+  "Return (LOW . HIGH), what a click of COUNT at OFFSET of BODY selects.
+Nothing for one click, the word for two and the line for more."
+  (let ((length (length body)))
+    (if (or (= count 1) (>= offset length) (eq (aref body offset) ?\n))
+        (cons offset offset)
+      (if (= count 2)
+          (let* ((char (aref body offset))
+                 (regexp (cond ((string-match-p "[[:alnum:]_]" (string char)) "[[:alnum:]_]")
+                               ((memq char '(?\s ?\t)) "[ \t]")
+                               (t "[^[:alnum:]_ \t\n]")))
+                 (low offset)
+                 (high offset))
+            (while (and (> low 0) (string-match-p regexp (string (aref body (1- low)))))
+              (cl-decf low))
+            (while (and (< high length) (string-match-p regexp (string (aref body high))))
+              (cl-incf high))
+            (cons low high))
+        (cons (let ((newline (cl-position ?\n body :end offset :from-end t)))
+                (if newline (1+ newline) 0))
+              (or (cl-position ?\n body :start offset) length))))))
+
+(defun change-review-ui--set-primary (text)
+  "Make TEXT the primary selection, as an active region is, where there is one."
+  (when (and select-active-regions (fboundp 'gui-set-selection) (display-graphic-p))
+    (ignore-errors (gui-set-selection 'PRIMARY text))))
+
+(defun change-review-ui-mouse-select (event)
+  "Select, with the mouse, text of a comment in a thread drawn under a line.
+Drag over it to select a part, double click for a word, triple click
+for a line.  \\<change-review-ui-lines-mode-map>\\[change-review-ui-quote-reply] then quotes what is selected in a reply to the
+comment.  A click without a drag selects nothing, and makes the thread
+the one the commands of the buffer act on.  The selection goes with the
+next command that is not this one's."
+  (interactive "e")
+  (let* ((start (event-start event))
+         (window (posn-window start))
+         (hit (change-review-ui--posn-hit start)))
+    (if (not (and hit (window-live-p window)))
+        (mouse-drag-region event)
+      (pcase-let* ((`(,overlay ,id ,anchor ,_) hit)
+                   (body (or (change-review-ui--comment-body overlay id) ""))
+                   (unit (change-review-ui--unit anchor (max 1 (event-click-count event)) body))
+                   (y (cdr (posn-x-y start)))
+                   (last nil))
+        (select-window window)
+        (change-review-ui--select overlay id (car unit) (cdr unit))
+        (track-mouse
+          (while (progn (setq last (read-event))
+                        (or (mouse-movement-p last)
+                            (memq (car-safe last) '(switch-frame select-window))))
+            (when (and (mouse-movement-p last) (overlay-buffer overlay))
+              (when-let* ((offset (change-review-ui--drag-offset (event-end last) overlay id window y)))
+                (change-review-ui--select overlay id (min (car unit) offset) (max (cdr unit) offset))))))
+        ;; The release ends it; anything else, a key say, is for the
+        ;; command loop once this command is over.
+        (let ((modifiers (event-modifiers last)))
+          (unless (and (mouse-event-p last) (not (memq 'down modifiers)))
+            (push last unread-command-events)))
+        (when (overlay-buffer overlay)
+          (with-current-buffer (overlay-buffer overlay)
+            (if-let* ((selection (overlay-get overlay 'change-review-selection)))
+                (change-review-ui--set-primary
+                 (substring body (min (nth 1 selection) (length body))
+                            (min (nth 2 selection) (length body))))
+              ;; A click: point where the thread is, and the thread the one
+              ;; the commands act on.
+              (when (eq (current-buffer) (window-buffer window))
+                (goto-char (posn-point start)))
+              (setq change-review-ui--chosen-thread (overlay-get overlay 'change-review-thread)))))))))
+
+(defun change-review-ui-copy-selection ()
+  "Copy what is selected of a comment's text, else do what `kill-ring-save' does.
+The text a thread drawn under a line holds, selected with the mouse
+\(`change-review-ui-mouse-select'), is held by no region."
+  (interactive)
+  (if-let* ((selection (change-review-ui--overlay-selection))
+            (found (change-review-find-comment (change-review-ui--current-set) (car selection))))
+      (let ((body (change-review-comment-body (cdr found))))
+        (kill-new (substring body (min (nth 1 selection) (length body))
+                             (min (nth 2 selection) (length body))))
+        (change-review-ui-clear-selection)
+        (message "Copied what was selected"))
+    (call-interactively #'kill-ring-save)))
 (defun change-review-ui-draft-candidates (threads)
   "Return the drafts of THREADS as (THREAD . COMMENT) each, in the order drawn."
   (cl-loop for thread in threads
@@ -1318,17 +1767,53 @@ default, is what the question says to do with it)."
 
 ;;;; Reading a comment
 
-(defun change-review-ui-read-with-string-edit (prompt initial callback)
+(defvar string-edit-mode-hook)
+
+(declare-function compose-quote-mode "compose-quote" (&optional arg))
+(defvar compose-quote-area-function)
+
+(defun change-review-ui--reading-area ()
+  "Return where the text of a comment is in the buffer it is read in.
+That is after the prompt.  The `compose-quote-area-function' of the
+buffer `string-edit' makes."
+  (list (if (get-text-property (point-min) 'string-edit--prompt)
+            (or (next-single-property-change (point-min) 'string-edit--prompt) (point-max))
+          (point-min))
+        (point-max)))
+
+(defun change-review-ui--prepare-reading (point)
+  "Set up the buffer a comment is being read in, which is current.
+POINT, `end' or nil, says where point starts, after the text to start
+from or before it.  Where the compose-quote library is, the buffer
+answers a quote inline with it: \\`M-RET' splits it, \\`C-c [' elides part of it."
+  (when (eq point 'end)
+    (goto-char (point-max))
+    (dolist (window (get-buffer-window-list nil nil t))
+      (set-window-point window (point))))
+  (when (require 'compose-quote nil t)
+    (setq-local compose-quote-area-function #'change-review-ui--reading-area)
+    (compose-quote-mode 1)))
+
+(defun change-review-ui-read-with-string-edit (prompt initial callback &optional point)
   "Read a comment in a buffer of its own: `change-review-ui-read-function'.
 PROMPT says what for, INITIAL is the text to start from and CALLBACK
-gets the text when the user finishes it with \\`C-c C-c'."
+gets the text when the user finishes it with \\`C-c C-c'.  POINT, `end'
+or nil, says whether point starts after INITIAL or before it."
   (require 'string-edit)
-  (string-edit (concat prompt "  C-c C-c saves it as a draft, C-c C-k cancels")
-               (or initial "") callback :abort-callback #'ignore))
+  (let ((string-edit-mode-hook (cons (lambda () (change-review-ui--prepare-reading point))
+                                     string-edit-mode-hook)))
+    (string-edit (concat prompt "  C-c C-c saves it as a draft, C-c C-k cancels")
+                 (or initial "") callback :abort-callback #'ignore)))
 
-(defun change-review-ui-read (prompt initial callback)
-  "Read a comment as `change-review-ui-read-function' does; see there."
-  (funcall change-review-ui-read-function prompt initial callback))
+(defun change-review-ui-read (prompt initial callback &optional point)
+  "Read a comment as `change-review-ui-read-function' does; see there.
+POINT is `end' to start with point after INITIAL, to answer a quote
+that is its text; the function is given it when it takes a fourth
+argument."
+  (let ((arity (func-arity change-review-ui-read-function)))
+    (if (and point (or (eq (cdr arity) 'many) (>= (cdr arity) 4)))
+        (funcall change-review-ui-read-function prompt initial callback point)
+      (funcall change-review-ui-read-function prompt initial callback))))
 
 (defun change-review-ui--comment-label (set thread comment)
   "Return how to call COMMENT of THREAD in SET in a prompt."
@@ -1342,22 +1827,28 @@ gets the text when the user finishes it with \\`C-c C-c'."
 
 ;;;; Commands on a thread
 
-(defun change-review-ui-reply-to-comment (set thread comment)
+(defun change-review-ui-reply-to-comment (set thread comment &optional quote)
   "Read a reply to COMMENT of THREAD in SET and add it as a draft.
+QUOTE, a string, is a block quote (`change-review-ui-quote-string') the
+reply starts with: the text it answers, as it is in a mail.  Point starts
+under it, and a reply that is nothing but the quote is no reply.
 Answering a thread that waits for the user's review is looking at it:
 the thread is reviewed then."
   (change-review-ui-read
-   (format "Reply to %s:" (change-review-ui--comment-label set thread comment)) ""
+   (format "Reply to %s:" (change-review-ui--comment-label set thread comment))
+   (if quote (concat quote "\n\n") "")
    (lambda (text)
-     (if (string-blank-p text)
+     (if (or (string-blank-p text) (and quote (change-review-ui--quote-only-p text)))
          (message "No reply")
        (change-review-reply set comment (string-trim text))
        (when (change-review-thread-unreviewed-p set thread)
-         (change-review-mark-reviewed set thread))))))
+         (change-review-mark-reviewed set thread))))
+   (and quote 'end)))
 
-(defun change-review-ui-reply-to-thread (set thread)
-  "Read a reply to the last comment of THREAD in SET and add it as a draft."
-  (change-review-ui-reply-to-comment set thread (change-review-thread-last-comment thread)))
+(defun change-review-ui-reply-to-thread (set thread &optional quote)
+  "Read a reply to the last comment of THREAD in SET and add it as a draft.
+QUOTE is as for `change-review-ui-reply-to-comment'."
+  (change-review-ui-reply-to-comment set thread (change-review-thread-last-comment thread) quote))
 
 (defun change-review-ui-reply ()
   "Reply to the comment at point, as a draft.
@@ -1366,6 +1857,69 @@ comment to point at, to the thread's last comment."
   (interactive)
   (pcase-let ((`(,set ,thread ,comment) (change-review-ui--target)))
     (change-review-ui-reply-to-comment set thread comment)))
+
+(defun change-review-ui--selected-parts ()
+  "Return what is selected of comments' text in this buffer, or nil.
+A list of (COMMENT-ID START END), offsets in the comment's text.  That is
+what the mouse selected of a thread drawn under a line
+\(`change-review-ui-mouse-select'), else what the region holds of the
+text drawn in the buffer.  An active region that holds none is an error."
+  (or (when-let* ((selection (change-review-ui--overlay-selection)))
+        (list selection))
+      (when (use-region-p)
+        (or (change-review-ui--region-parts (region-beginning) (region-end))
+            (user-error (substitute-command-keys
+                         "The region holds no text of a comment: \\[keyboard-quit] quotes the comment at point"))))))
+
+(defun change-review-ui--quotation ()
+  "Return (SET THREAD COMMENT QUOTE) for `change-review-ui-quote-reply'.
+It is what that quotes: what is selected of comments' text
+\(`change-review-ui--selected-parts'), else the whole text of the comment
+at point, or of the last comment of the thread there.  COMMENT is the
+comment to reply to, the last one quoted; QUOTE is the quote,
+`change-review-ui-quote-string' of the text, and of each comment's when
+there are several, each under a line that says who wrote it."
+  (let* ((set (change-review-ui--current-set))
+         (parts (change-review-ui--selected-parts))
+         (entries
+          (if parts
+              (cl-loop for (id start end) in parts
+                       for found = (change-review-find-comment set id)
+                       when found
+                       collect (let ((body (change-review-comment-body (cdr found))))
+                                 (list (car found) (cdr found)
+                                       (substring body (min start (length body)) (min end (length body))))))
+            (pcase-let ((`(,_ ,thread ,comment) (change-review-ui--target)))
+              (list (list thread comment (change-review-comment-body comment)))))))
+    (setq entries (cl-remove-if (lambda (entry) (string-blank-p (nth 2 entry))) entries))
+    (unless entries (user-error "Nothing to quote"))
+    (when (cdr (cl-remove-duplicates (mapcar #'car entries) :test #'eq))
+      (user-error "The selection is of more than one thread: select in one, to reply in it"))
+    (let ((last (car (last entries))))
+      (list set (nth 0 last) (nth 1 last)
+            (if (cdr entries)
+                (mapconcat (lambda (entry)
+                             (concat (change-review-author-label (change-review-comment-author (nth 1 entry)))
+                                     " wrote:\n" (change-review-ui-quote-string (nth 2 entry))))
+                           entries "\n\n")
+              (change-review-ui-quote-string (nth 2 (car entries))))))))
+
+(defun change-review-ui-quote-reply ()
+  "Reply to a comment, quoting what is selected of it.
+Select part of a comment's text -- with the region in the threads view,
+with the mouse in a thread drawn under a line of a diff, in Ediff say --
+and this starts a reply to the comment with that part quoted, as a mail
+does: a block quote, \"> \" before each line, and point under it, to answer
+it.  Select text of several comments of a thread and each is quoted,
+under a line that says who wrote it, in a reply to the last.  With
+nothing selected the whole comment is quoted: the one at point, or the
+last of the thread drawn under the line at point.  The reply is a draft,
+as one that \\[change-review-ui-reply] makes is."
+  (interactive)
+  (pcase-let ((`(,set ,thread ,comment ,quote) (change-review-ui--quotation)))
+    (deactivate-mark)
+    (change-review-ui-clear-selection)
+    (change-review-ui-reply-to-comment set thread comment quote)))
 
 (defun change-review-ui-toggle-thread (set thread)
   "Close THREAD of SET if it is open, else open it again."
@@ -1846,6 +2400,7 @@ Point is on a comment; the keys act on it:
 \\[change-review-ui-next-thread] and \\[change-review-ui-previous-thread] between threads.
 \\[change-review-ui-show-origin] shows where the comment was made, hides it again.
 \\[change-review-ui-reply] replies to it, as a draft.
+\\[change-review-ui-quote-reply] replies to it with the text you selected of it quoted, or all of it.
 \\[change-review-ui-toggle-status] closes its thread or opens it again.
 \\[change-review-ui-toggle-reviewed] marks a thread someone else closed reviewed, or makes it wait again;
 \\[change-review-ui-mark-all-reviewed] marks every one that waits.
@@ -2178,6 +2733,8 @@ LINES maps (SIDE . NUMBER) to the end of the line that has it.")
 \\[change-review-ui-comment-at-point] comments on the line at point, or on the region.
 Under a thread:
 \\[change-review-ui-reply] replies to it.
+\\[change-review-ui-quote-reply] replies to it with what you selected of a comment (drag the
+mouse over its text) quoted, or all of the last comment.
 \\[change-review-ui-edit-draft] edits a draft of it (the [Edit] button of a draft does too).
 \\[change-review-ui-toggle-status] closes it or opens it again.
 \\[change-review-ui-toggle-reviewed] marks it reviewed when someone else closed it, or makes it wait again;
@@ -2542,8 +3099,24 @@ The buffer draws them with `change-review-ui-add-thread-overlay' and
 has its change set in `change-review-ui--set' or through
 `change-review-set-function'.
 
+The mouse selects the text of the comments (`change-review-ui-mouse-select'):
+\\<change-review-ui-lines-mode-map>\\[change-review-ui-quote-reply] replies to the comment with what is selected quoted, and
+\\[kill-ring-save] copies it.
+
 \\{change-review-ui-lines-mode-map}"
   :lighter nil :keymap change-review-ui-lines-mode-map :group 'change-review-ui)
+
+;;;; The quote reply's key, and the key that copies
+
+;; Bound here, not in the maps' `defvar's, so that a library loaded again
+;; in a running Emacs gives the maps it has the key as well: a `defvar'
+;; leaves the value a map already has as it is.
+(define-key change-review-threads-mode-map (kbd "C-c >") #'change-review-ui-quote-reply)
+(define-key change-review-diff-view-mode-map (kbd "C-c >") #'change-review-ui-quote-reply)
+(define-key change-review-ui-lines-mode-map (kbd "C-c >") #'change-review-ui-quote-reply)
+;; And what is selected with the mouse is copied by the key that copies.
+(define-key change-review-diff-view-mode-map [remap kill-ring-save] #'change-review-ui-copy-selection)
+(define-key change-review-ui-lines-mode-map [remap kill-ring-save] #'change-review-ui-copy-selection)
 
 (provide 'change-review-ui)
 ;;; change-review-ui.el ends here

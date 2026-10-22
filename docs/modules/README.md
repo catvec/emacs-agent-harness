@@ -418,10 +418,11 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `kill-buffer-hook` |  | [ui-cache](ui-cache.md), [ui-chat](ui-chat.md), [ui-compose](ui-compose.md), [ui-config](ui-config.md), [ui-pet](ui-pet.md), [ui-popout](ui-popout.md) |
 | `kill-emacs-hook` |  | [agent](agent.md), [pet](pet.md), [session](session.md), [tasks](tasks.md), [ui](ui.md) |
 | `message-sent-hook` | `change-review-mail.el` | `change-review-mail.el` |
-| `post-command-hook` |  | [ui-cache-warm](ui-cache-warm.md), [ui-chat](ui-chat.md), [ui-compose](ui-compose.md), `compose-quote.el` |
+| `post-command-hook` |  | [ui-cache-warm](ui-cache-warm.md), [ui-chat](ui-chat.md), [ui-compose](ui-compose.md), `compose-quote.el`, `change-review-ui.el` |
 | `pre-command-hook` |  | [ui-chat](ui-chat.md), [ui-compose](ui-compose.md) |
 | `pre-redisplay-functions` |  | [ui-compose](ui-compose.md), [ui-popout](ui-popout.md) |
 | `project-find-functions` |  | `worktree-assume.el` |
+| `string-edit-mode-hook` | `change-review-ui.el` |  |
 | `tabulated-list-revert-hook` |  | [ui-sessions](ui-sessions.md), [ui-worktree](ui-worktree.md) |
 | `window-buffer-change-functions` |  | [ui-access](ui-access.md), [ui-chat](ui-chat.md), [ui-slots](ui-slots.md), [ui-tasks](ui-tasks.md) |
 | `window-configuration-change-hook` |  | [ui-insights](ui-insights.md), [ui-slots](ui-slots.md), [ui-tree](ui-tree.md), [ui-usage](ui-usage.md) |

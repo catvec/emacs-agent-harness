@@ -25,6 +25,12 @@ bind its commands: the compose box sets compose-quote's
 Its README may say where it comes from. Its tests run with nothing else:
 `emacs -Q --batch -L DIR -l NAME-test.el -f ert-run-tests-batch-and-exit`.
 
+A library may use another of them where it is, and works without it:
+change-review answers a quote inline, in the buffer a reply is read in,
+with compose-quote when `(require 'compose-quote nil t)` finds it, and
+reads the reply the same without. Its tests that need the other skip
+themselves when it is not on their load path.
+
 `harness-vendored-libraries-stand-alone` in `test/harness-core-test.el`
 checks the rule: it reads every `.el` file of every library for the word
 "harness", and runs every `*-test.el` suite in an Emacs with nothing but

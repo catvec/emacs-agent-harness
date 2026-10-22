@@ -192,6 +192,8 @@ OpenAI-compatible APIs and AWS Bedrock.
 | The diff of your choice: the branch against main, since the last review, or any revisions | |
 | ![The threads view on its to-review filter: the two threads the agent closed that the reviewer has not looked at yet, each with the agent's answer, marked to review, with Mark reviewed beside Reopen](docs/media/review-to-review.png) | |
 | What the agent closed since you looked: the filter lists it, with the answers | |
+| ![Ediff on that file: the end of the agent's answer selected with the mouse, marked in the thread drawn under its line in the branch's version](docs/media/review-select.png) | ![The reply C-c > started: in a buffer under the version, the selected part quoted with > before each line, point under it, and the answer typed](docs/media/review-quote.png) |
+| Part of a comment selected with the mouse, in Ediff, where no region holds a comment's text | `C-c >` starts the reply with it quoted, and your answer goes under it |
 
 ## Requirements
 
@@ -762,7 +764,10 @@ These keys are the [compose-quote](lisp/vendor/compose-quote/README.md)
 library's, which the harness vendors in `lisp/vendor/compose-quote`. It
 needs nothing of the harness and works in any Emacs buffer, a mail reply
 too: `(add-hook 'message-mode-hook #'compose-quote-mode)` gives
-`message-mode` the same three keys.
+`message-mode` the same three keys. The comments of a task's review
+answer the same way: `C-c >` on a part of a comment, selected in the
+threads list or in Ediff, starts a reply with it quoted (see *Quote
+reply*, under the review of a task's changes).
 
 The thread keeps its quotes. An answer that quotes nothing of its own is
 quoted with the message it answers nested under it, one `>` level
@@ -3435,6 +3440,25 @@ with), `recap` writes the recaps on the cards,
   is shown where its line is now in the newest version -- `line 44 (was
   42)`, `changed since` -- also across the rounds of a review, and
   each commented file says whether it changed since your last comment.
+
+  **Quote reply.** `C-c >` answers a comment as a mail answers another:
+  it starts a reply, a draft in the thread, with what you selected of the
+  comment quoted (`> ` before each line) and point under the quote, to
+  answer it. Select the part in the threads list with the region. In
+  Ediff a comment is drawn under its line and is no text of the buffer,
+  which no region holds, so the mouse selects it there: drag over the
+  text of a comment (a double click selects a word, a triple click a
+  line); what you select is marked, `C-c >` quotes it and `M-w` copies
+  it. With nothing selected `C-c >` quotes all of the comment at point,
+  or the last comment of the thread under the line; in Ediff's control
+  panel it quotes what is selected in a version, else the last comment of
+  the thread at the current difference. Text
+  of several comments of a thread is quoted comment by comment, each
+  under a line that says who wrote it. In the box the reply is read in,
+  `M-RET` splits the quote to answer a part and `C-c [` elides part of
+  it, as in a session's box; a reply that is only the quote is no
+  reply. The agent reads the quote as you wrote it, with the thread
+  named under the reply.
 
   Your comments are drafts until the task is sent back. Whatever sends
   it back -- the report's box (`C-c C-c`, an empty box too when drafts

@@ -2689,6 +2689,808 @@ wrote the mail; importing the mail again adds nothing."
               (should (string-search "draft" (change-review-ui-test--text)))))
         (when (buffer-live-p buffer) (kill-buffer buffer))))))
 
+;;;; Where a comment's text is
+
+(defconst change-review-ui-test--question
+  (concat "Why does the retry loop wait eighteen seconds? The tests only ever use "
+          "seventeen, and nothing in the docs says why that is.\n\nSecond paragraph of the question.")
+  "A comment whose text wraps, has a blank line and a second paragraph.")
+
+(defun change-review-ui-test--wrapped-set ()
+  "Return (SET THREAD FIRST SECOND): a thread of two comments, the first one's text long.
+The first is the user's, the second the agent's, an answer to it."
+  (let* ((set (change-review-ui-test--set))
+         (rev (change-review-version-id (change-review-latest-version set)))
+         (first (change-review-comment
+                 set change-review-ui-test--question
+                 :author (change-review-ui-test--author) :time (- change-review-ui-test--now 7200)
+                 :revision rev :sent (- change-review-ui-test--now 7000)
+                 :location (change-review-diff-location
+                            (cl-find "a.el" (change-review-version-files (change-review-latest-version set))
+                                     :key #'change-review-file-path :test #'equal)
+                            'new 3)))
+         (second (change-review-reply
+                  set first "Because the loop needs one more than that: it counts the first try as well."
+                  :author (change-review-agent "Claude" :session "sess-1" :tool-call "toolu_9")
+                  :time (- change-review-ui-test--now 3600) :revision rev
+                  :sent (- change-review-ui-test--now 3600))))
+    (list set (change-review-find-thread set (change-review-comment-thread first)) first second)))
+
+(defmacro change-review-ui-test--wrapped-view (&rest body)
+  "Run BODY in the threads view of the set of `change-review-ui-test--wrapped-set'.
+Bind `set', `thread', `first' and `second'."
+  (declare (indent 0))
+  `(change-review-ui-test--drawing
+     (pcase-let* ((`(,set ,thread ,first ,second) (change-review-ui-test--wrapped-set))
+                  (change-review-ui-sets nil)
+                  (buffer (save-window-excursion (change-review-open-threads set 'all))))
+       (ignore set thread first second)
+       (unwind-protect
+           (with-current-buffer buffer ,@body)
+         (kill-buffer buffer)))))
+
+(ert-deftest change-review-ui-wrap-says-where-each-piece-starts ()
+  "A piece comes with where it starts in the line: what the cuts left out,
+the spaces, is in none, and a piece that was cut inside a word follows the
+one before."
+  (should (equal '(("short" . 0)) (change-review-ui--wrap-offsets "short" 20)))
+  (should (equal '(("" . 0)) (change-review-ui--wrap-offsets "" 20)))
+  (should (equal '(("the quick brown" . 0) ("fox jumps over" . 16) ("the lazy dog" . 31))
+                 (change-review-ui--wrap-offsets "the quick brown fox jumps over the lazy dog" 16)))
+  (should (equal '(("abcdefghij" . 0) ("klmnopqrst" . 10) ("uv" . 20))
+                 (change-review-ui--wrap-offsets "abcdefghijklmnopqrstuv" 10)))
+  ;; Spaces at a cut are all left out; the first piece keeps its indentation.
+  (should (equal '(("  indented line" . 0) ("goes on" . 20))
+                 (change-review-ui--wrap-offsets "  indented line     goes on" 16)))
+  (let ((line (string-join (make-list 12 "words") " ")))
+    (dolist (piece (change-review-ui--wrap-offsets line 20))
+      (should (equal (car piece) (substring line (cdr piece) (+ (cdr piece) (length (car piece)))))))))
+
+(ert-deftest change-review-ui-draws-where-the-text-of-a-comment-is ()
+  "The lines that hold a comment's text say where in the text they are, from
+their first character to their newline: nothing else of the drawing does."
+  (change-review-ui-test--drawing
+    (pcase-let* ((`(,set ,thread ,first ,_) (change-review-ui-test--wrapped-set))
+                 (string (change-review-ui-thread-string set thread :width 80 :indent "  "))
+                 (body (change-review-comment-body first))
+                 (pos 0)
+                 (lines nil))
+      (while (setq pos (text-property-not-all pos (length string) 'change-review-body nil string))
+        (pcase-let ((`(,start ,from ,to ,length) (change-review-ui--body-line pos string)))
+          (when (equal (change-review-comment-id first)
+                       (get-text-property pos 'change-review-comment string))
+            (push (list start (substring-no-properties string from (+ from length))) lines))
+          ;; The newline is part of it, the bar before is not.
+          (should (eq ?\n (aref string (1- to))))
+          (should-not (get-text-property (1- from) 'change-review-body string))
+          (setq pos to)))
+      (setq lines (nreverse lines))
+      ;; The text wraps, a blank line and a second paragraph follow.
+      (should (>= (length lines) 4))
+      (should (equal '("" "Second paragraph of the question.") (last (mapcar #'cadr lines) 2)))
+      (dolist (line lines)
+        (should (equal (cadr line) (substring body (car line) (+ (car line) (length (cadr line)))))))
+      ;; What was left out of the drawing is only the spaces at the cuts.
+      (should (equal body (concat (mapconcat (lambda (line) (cadr line)) (cl-subseq lines 0 2) " ")
+                                  "\n\n" (cadr (car (last lines)))))))))
+
+(defun change-review-ui-test--odd-text (seed)
+  "Return a comment's text made at random from SEED: words of every width, blanks and lines."
+  (random (format "change-review-%d" seed))
+  (let ((words '("a" "bb" "ccc" "dddd" "eeeee" "ffffff" "ggggggg" "hhhhhhhh"
+                 "supercalifragilisticexpialidocious-and-more-and-more-and-more-and-more"
+                 "ünïcödé" "日本語のテキスト" "x" "'quoted'" "> q" ">" "\t" "tab\tbed"))
+        (blanks '(" " " " " " "  " "   " "\n" "\n\n" " \n" "\n "))
+        (text ""))
+    (dotimes (_ (+ 1 (random 40)))
+      (setq text (concat text (nth (random (length words)) words) (nth (random (length blanks)) blanks))))
+    text))
+
+(ert-deftest change-review-ui-every-character-drawn-maps-back-to-the-text ()
+  "Whatever a comment says -- indented, with long words, tabs, blank lines, wide
+characters -- and however wide the drawing, each character of its text on the
+drawing is the very character of the text that its place says, and a region over
+all the drawing holds all of the text, bar the blanks."
+  (change-review-ui-test--drawing
+    (let ((checked 0))
+      (dotimes (seed 60)
+        (let* ((body (change-review-ui-test--odd-text seed))
+               (width (+ 30 (random 60)))
+               (set (change-review-ui-test--set))
+               (comment (change-review-comment set body :author (change-review-ui-test--author)
+                                               :time change-review-ui-test--now))
+               (thread (change-review-find-thread set (change-review-comment-thread comment)))
+               (string (change-review-ui-thread-string set thread :width width :indent "  "))
+               (pos 0))
+          (ert-info ((format "seed %d, width %d, text %S" seed width body))
+            (while (and (< pos (length string))
+                        (setq pos (text-property-not-all pos (length string) 'change-review-body nil string)))
+              (pcase-let ((`(,start ,from ,to ,length) (change-review-ui--body-line pos string)))
+                (dotimes (i length)
+                  (cl-incf checked)
+                  (let ((offset (cdr (change-review-ui--offset-at (+ from i) string))))
+                    (should (= offset (+ start i)))
+                    (should (eq (aref string (+ from i)) (aref body offset)))))
+                (setq pos to)))
+            (unless (string-blank-p body)
+              (with-temp-buffer
+                (insert string)
+                (let* ((part (car (change-review-ui--region-parts (point-min) (point-max))))
+                       (squeeze (lambda (text) (string-trim (replace-regexp-in-string "[ \t\n]+" " " text)))))
+                  (should (equal (change-review-comment-id comment) (car part)))
+                  (should (equal (funcall squeeze body)
+                                 (funcall squeeze (substring body (nth 1 part) (nth 2 part)))))))))))
+      ;; A real run, not an empty one.
+      (should (> checked 1000)))))
+
+(ert-deftest change-review-ui-reads-a-place-in-the-drawing-as-a-place-in-the-text ()
+  "A place in the text is the offset of that character; the header and the
+bar stand for the start of the text or of the line, the lines that say where
+the comment was made for its end."
+  (change-review-ui-test--drawing
+    (pcase-let* ((`(,set ,thread ,first ,second) (change-review-ui-test--wrapped-set))
+                 (string (change-review-ui-thread-string
+                          set thread :width 80 :indent "  "
+                          :details (list (change-review-comment-id first))))
+                 (body (change-review-comment-body first))
+                 (id (change-review-comment-id first))
+                 (index (lambda (text) (string-search text string)))
+                 (at (lambda (pos) (change-review-ui--offset-at pos string))))
+      ;; The text itself.
+      (should (equal (cons id (string-search "only ever" body)) (funcall at (funcall index "only ever"))))
+      (should (equal (cons id (string-search "seventeen," body)) (funcall at (funcall index "seventeen,"))))
+      ;; Before the text: the thread's header, the comment's, the bar.
+      (should-not (funcall at 0))
+      (should (equal (cons id 0) (funcall at (funcall index "1/2"))))
+      (should (equal (cons id 0) (funcall at (1- (funcall index "Why does")))))
+      ;; The bar of the second line is where that line starts.
+      (should (equal (cons id (string-search "seventeen," body))
+                     (funcall at (- (funcall index "seventeen,") 3))))
+      ;; Where the comment was made, under the text: its end.
+      (should (equal (cons id (length body)) (funcall at (funcall index "made at"))))
+      ;; The next comment is another's.
+      (should (equal (cons (change-review-comment-id second) 0) (funcall at (funcall index "2/2"))))
+      ;; The newline that ends a line of text is where the line ends.
+      (should (equal (cons id (length "Why does the retry loop wait eighteen seconds? The tests only ever use"))
+                     (funcall at (+ (funcall index "only ever use") (length "only ever use"))))))))
+
+(ert-deftest change-review-ui-faces-the-lines-that-quote ()
+  "A line of a comment that starts with \">\" quotes: it has the quote's face,
+every piece it wraps to, and no other line has it."
+  (change-review-ui-test--drawing
+    (let* ((set (change-review-ui-test--set))
+           (quoted (string-join (make-list 20 "quoted") " "))
+           (comment (change-review-comment set (concat "> " quoted "\n>\nAn answer.")
+                                           :author (change-review-ui-test--author)
+                                           :time change-review-ui-test--now))
+           (thread (change-review-find-thread set (change-review-comment-thread comment)))
+           (string (change-review-ui-thread-string set thread :width 60))
+           (pos 0)
+           (rows nil))
+      (while (setq pos (text-property-not-all pos (length string) 'change-review-body nil string))
+        (pcase-let ((`(,_ ,from ,to ,length) (change-review-ui--body-line pos string)))
+          (push (list (substring-no-properties string from (+ from length))
+                      ;; Whether every character of it has the face.
+                      (null (text-property-not-all from (+ from length) 'face
+                                                   'change-review-ui-quote-face string)))
+                rows)
+          (setq pos to)))
+      (setq rows (nreverse rows))
+      ;; The long line wraps, then the bare ">" and the answer.
+      (should (> (length rows) 3))
+      (should (equal '("An answer." nil) (car (last rows))))
+      (should (equal '(">" t) (car (last (butlast rows)))))
+      (should (cl-every #'cadr (butlast rows)))
+      (should (string-prefix-p "> quoted" (car (car rows)))))))
+
+(ert-deftest change-review-ui-quotes-text-as-markdown ()
+  "Every line is after \"> \", a blank one reads \">\", the blanks around go."
+  (should (equal "> one" (change-review-ui-quote-string "one")))
+  (should (equal "> one\n>\n> two" (change-review-ui-quote-string "\n\none  \n\ntwo\n\n")))
+  (should (equal ">     code\n> more" (change-review-ui-quote-string "    code\nmore")))
+  (should (equal "> > a quote already" (change-review-ui-quote-string "> a quote already")))
+  (should-not (get-text-property 0 'face (change-review-ui-quote-string (propertize "one" 'face 'bold)))))
+
+;;;; Quote reply
+
+(defun change-review-ui-test--region (start-text end-text)
+  "Select, in this buffer, from where START-TEXT starts to where END-TEXT ends."
+  (goto-char (point-min))
+  (search-forward start-text)
+  (set-mark (match-beginning 0))
+  (search-forward end-text)
+  (activate-mark))
+
+(defun change-review-ui-test--reading (&optional answer)
+  "Return a reader function and what it was asked, a cons: (FUNCTION . CALLS).
+FUNCTION answers every call with ANSWER, added to the text it starts from.
+CALLS is a symbol's value, the list (PROMPT INITIAL POINT) of each."
+  (let* ((calls (make-symbol "calls")))
+    (set calls nil)
+    (cons (lambda (prompt initial callback &optional point)
+            (set calls (append (symbol-value calls) (list (list prompt initial point))))
+            (funcall callback (concat initial (or answer ""))))
+          calls)))
+
+(ert-deftest change-review-ui-quote-reply-quotes-what-the-region-holds ()
+  "In the threads view C-c > replies to the comment with what is selected of
+it quoted: its text as it was written, wrapped though it is drawn, with
+nothing of the bar; point starts under the quote."
+  (change-review-ui-test--wrapped-view
+    (let* ((transient-mark-mode t)
+           (reading (change-review-ui-test--reading "Seventeen is a guess."))
+           (body (change-review-comment-body first))
+           (quoted (substring body (string-search "only ever use" body)
+                              (+ (string-search "says why" body) (length "says why")))))
+      (should (eq #'change-review-ui-quote-reply (key-binding (kbd "C-c >"))))
+      (change-review-ui-test--region "only ever use" "says why")
+      (let ((change-review-ui-read-function (car reading)))
+        (call-interactively #'change-review-ui-quote-reply))
+      ;; Asked once, for a reply to the first comment, starting with the quote.
+      (should (= 1 (length (symbol-value (cdr reading)))))
+      (pcase-let ((`(,prompt ,initial ,point) (car (symbol-value (cdr reading)))))
+        (should (string-match-p "\\`Reply to Noah's comment 1/2 on a\\.el:3" prompt))
+        (should (equal (concat "> " quoted "\n\n") initial))
+        (should-not (string-match-p "┃" initial))
+        (should (eq 'end point)))
+      (let ((reply (change-review-thread-last-comment thread)))
+        (should (equal (concat "> " quoted "\n\nSeventeen is a guess.") (change-review-comment-body reply)))
+        (should (equal (change-review-comment-id first) (change-review-comment-reply-to reply)))
+        (should (change-review-comment-draft-p reply)))
+      ;; The region is no longer.
+      (should-not mark-active))))
+
+(ert-deftest change-review-ui-quote-reply-keeps-the-paragraphs-of-a-selection ()
+  "A selection over a blank line is a quote of two paragraphs, one block."
+  (change-review-ui-test--wrapped-view
+    (let ((transient-mark-mode t)
+          (reading (change-review-ui-test--reading "Fine.")))
+      (change-review-ui-test--region "docs says why that is." "Second paragraph")
+      (let ((change-review-ui-read-function (car reading)))
+        (call-interactively #'change-review-ui-quote-reply))
+      (should (equal (cadr (car (symbol-value (cdr reading))))
+                     (concat "> " (substring (change-review-comment-body first)
+                                             (string-search "docs says why" (change-review-comment-body first))
+                                             (string-search "\n\n" (change-review-comment-body first)))
+                             "\n>\n> Second paragraph\n\n"))))))
+
+(ert-deftest change-review-ui-quote-reply-quotes-the-whole-comment-without-a-region ()
+  "Without a selection it quotes all of the comment at point; on the thread's
+header, the last comment of the thread."
+  (change-review-ui-test--wrapped-view
+    ;; Nothing is answered, so the thread stays as it is.
+    (let ((reading (change-review-ui-test--reading)))
+      (let ((change-review-ui-read-function (car reading)))
+        (goto-char (point-min))
+        (search-forward "Because the loop")
+        (call-interactively #'change-review-ui-quote-reply)
+        ;; On the first comment: the whole of its text, both paragraphs.
+        (goto-char (point-min))
+        (search-forward "Why does the retry")
+        (call-interactively #'change-review-ui-quote-reply)
+        ;; On the thread's header: the last comment, the agent's.
+        (goto-char (point-min))
+        (re-search-forward "^  ● ")
+        (call-interactively #'change-review-ui-quote-reply))
+      (should (= 3 (length (symbol-value (cdr reading)))))
+      (should (equal (list (concat (change-review-ui-quote-string (change-review-comment-body second)) "\n\n")
+                           (concat (change-review-ui-quote-string (change-review-comment-body first)) "\n\n")
+                           (concat (change-review-ui-quote-string (change-review-comment-body second)) "\n\n"))
+                     (mapcar #'cadr (symbol-value (cdr reading)))))
+      (should (equal '("Reply to Claude's comment 2/2" "Reply to Noah's comment 1/2"
+                       "Reply to Claude's comment 2/2")
+                     (mapcar (lambda (call) (substring (car call) 0 (string-search " on " (car call))))
+                             (symbol-value (cdr reading)))))
+      (should (= 2 (length (change-review-thread-comments thread)))))))
+
+(ert-deftest change-review-ui-quote-reply-quotes-comments-under-who-wrote-them ()
+  "A selection of the text of several comments quotes each, under a line that
+says who wrote it, in a reply to the last."
+  (change-review-ui-test--wrapped-view
+    (let ((transient-mark-mode t)
+          (reading (change-review-ui-test--reading "Both.")))
+      (change-review-ui-test--region "Second paragraph" "needs one more")
+      (let ((change-review-ui-read-function (car reading)))
+        (call-interactively #'change-review-ui-quote-reply))
+      (should (equal (concat "Noah wrote:\n> Second paragraph of the question.\n\n"
+                             "Claude wrote:\n> Because the loop needs one more\n\n")
+                     (cadr (car (symbol-value (cdr reading))))))
+      (should (string-match-p "\\`Reply to Claude's comment 2/2" (car (car (symbol-value (cdr reading)))))))))
+
+(ert-deftest change-review-ui-quote-reply-replies-in-one-thread-only ()
+  "A selection of the text of two threads quotes in neither: it says so."
+  (change-review-ui-test--drawing
+    (pcase-let* ((`(,set ,thread ,_first ,_second) (change-review-ui-test--wrapped-set))
+                 (other (change-review-comment set "Another thread altogether, further down."
+                                               :author (change-review-ui-test--author)
+                                               :time change-review-ui-test--now))
+                 (change-review-ui-sets nil)
+                 (buffer (save-window-excursion (change-review-open-threads set 'all)))
+                 (reading (change-review-ui-test--reading "No.")))
+      (ignore thread other)
+      (unwind-protect
+          (with-current-buffer buffer
+            (let ((transient-mark-mode t)
+                  (change-review-ui-read-function (car reading)))
+              ;; The change's own thread comes first in the view, then the file's.
+              (change-review-ui-test--region "Another thread" "Why does the retry")
+              (should-error (call-interactively #'change-review-ui-quote-reply) :type 'user-error)
+              (should-not (symbol-value (cdr reading)))))
+        (kill-buffer buffer)))))
+
+(ert-deftest change-review-ui-quote-reply-needs-some-text-of-a-comment ()
+  "A region that holds no text of a comment says so, and no reply starts; so does
+a place that is no comment's."
+  (change-review-ui-test--wrapped-view
+    (let ((transient-mark-mode t)
+          (reading (change-review-ui-test--reading "No.")))
+      (let ((change-review-ui-read-function (car reading)))
+        ;; Only a header.
+        (change-review-ui-test--region "1/2  Noah" "(you)")
+        (should-error (call-interactively #'change-review-ui-quote-reply) :type 'user-error)
+        ;; The words are blank.
+        (deactivate-mark)
+        (goto-char (point-min))
+        (should-error (call-interactively #'change-review-ui-quote-reply) :type 'user-error))
+      (should-not (symbol-value (cdr reading)))
+      (should (= 2 (length (change-review-thread-comments thread)))))))
+
+(ert-deftest change-review-ui-a-quote-alone-is-no-reply ()
+  "A reply that is only the quote it started with answers nothing: no draft."
+  (change-review-ui-test--wrapped-view
+    (let ((count (length (change-review-thread-comments thread)))
+          (reading (change-review-ui-test--reading)))
+      (goto-char (point-min))
+      (search-forward "Because the loop")
+      (let ((change-review-ui-read-function (car reading)))
+        (call-interactively #'change-review-ui-quote-reply)
+        ;; The quote, and an answer under it that is blank.
+        (should (= count (length (change-review-thread-comments thread))))
+        ;; An answer above it is an answer.
+        (setq change-review-ui-read-function
+              (lambda (_prompt initial callback &optional _point)
+                (funcall callback (concat "Agreed.\n\n" initial))))
+        (call-interactively #'change-review-ui-quote-reply))
+      (should (= (1+ count) (length (change-review-thread-comments thread))))
+      (should (string-prefix-p "Agreed.\n\n> Because" (change-review-comment-body
+                                                       (change-review-thread-last-comment thread)))))))
+
+(ert-deftest change-review-ui-reading-a-comment-says-where-point-starts-only-to-readers-that-ask ()
+  "A reader that takes a fourth argument is told where point starts; one that
+takes three is called as before, and the reply that quotes nothing does not
+say where."
+  (change-review-ui-test--wrapped-view
+    (let (told)
+      (goto-char (point-min))
+      (search-forward "Because the loop")
+      (let ((change-review-ui-read-function
+             (lambda (_prompt _initial callback) (push 'three told) (funcall callback ""))))
+        (call-interactively #'change-review-ui-quote-reply))
+      (let ((change-review-ui-read-function
+             (lambda (_prompt _initial callback &optional point)
+               (push (list 'four point) told) (funcall callback ""))))
+        (call-interactively #'change-review-ui-quote-reply)
+        (call-interactively #'change-review-ui-reply))
+      (let ((change-review-ui-read-function
+             (lambda (_prompt _initial callback &rest more)
+               (push (cons 'rest more) told) (funcall callback ""))))
+        (call-interactively #'change-review-ui-quote-reply))
+      (should (equal '(three (four end) (four nil) (rest end)) (nreverse told))))))
+
+(ert-deftest change-review-ui-the-reply-is-read-with-point-under-the-quote ()
+  "The default reader opens the buffer with point after the quote it starts
+with; before the text it starts from when no point is asked for."
+  (change-review-ui-test--drawing
+    (let ((read nil))
+      (unwind-protect
+          (save-window-excursion
+            (change-review-ui-read "Reply:" "> a quote\n\n" #'ignore 'end)
+            (setq read (window-buffer (selected-window)))
+            (with-current-buffer read
+              (should (string-prefix-p "*edit string*" (buffer-name)))
+              (should (= (point) (point-max)))
+              (should (string-suffix-p "> a quote\n\n" (buffer-string)))
+              (should (get-text-property (point-min) 'read-only)))
+            (kill-buffer read)
+            (change-review-ui-read "Reply:" "text\n\n" #'ignore)
+            (setq read (window-buffer (selected-window)))
+            (with-current-buffer read
+              (should (looking-at "text\n\n"))))
+        (when (buffer-live-p read) (kill-buffer read))))))
+
+(ert-deftest change-review-ui-the-reply-answers-a-quote-inline-where-compose-quote-is ()
+  "Where the compose-quote library is on the load path, the buffer a comment is
+read in answers a quote inline: M-RET splits it, C-c [ elides part of it, and
+the prompt above the text is no part of what it works on."
+  (skip-unless (locate-library "compose-quote"))
+  (require 'compose-quote)
+  (change-review-ui-test--drawing
+    (let ((read nil)
+          (compose-quote-inline-hint nil))
+      (unwind-protect
+          (save-window-excursion
+            (change-review-ui-read "Reply:" "> one two three\n>\n> four five six\n\n" #'ignore 'end)
+            (setq read (window-buffer (selected-window)))
+            (with-current-buffer read
+              (should (bound-and-true-p compose-quote-mode))
+              ;; The composition starts under the prompt.
+              (let ((area (funcall compose-quote-area-function)))
+                (should (equal "> one two" (buffer-substring (car area) (+ (car area) 9))))
+                (should (= (cadr area) (point-max))))
+              ;; Point at the end is no quote's, and so has none of its keys.
+              (run-hooks 'post-command-hook)
+              (should-not (key-binding (kbd "M-RET")))
+              ;; In the quote, the keys are there: split it to answer the first part.
+              (goto-char (point-min))
+              (search-forward "one two")
+              (run-hooks 'post-command-hook)
+              (should (eq 'compose-quote-split (key-binding (kbd "M-RET"))))
+              (should (eq 'compose-quote-elide (key-binding (kbd "C-c ["))))
+              (call-interactively #'compose-quote-split)
+              ;; An empty line for the answer, a blank line from each part.
+              (should (string-search "> one two\n\n\n\n> three\n>\n> four" (buffer-string)))))
+        (when (buffer-live-p read) (kill-buffer read))))))
+
+(ert-deftest change-review-ui-offers-quote-reply-in-every-view ()
+  "C-c > is the quote reply in the threads view, the diff view and the buffers
+that show threads under their lines."
+  (should (eq #'change-review-ui-quote-reply (lookup-key change-review-threads-mode-map (kbd "C-c >"))))
+  (should (eq #'change-review-ui-quote-reply (lookup-key change-review-diff-view-mode-map (kbd "C-c >"))))
+  (should (eq #'change-review-ui-quote-reply (lookup-key change-review-ui-lines-mode-map (kbd "C-c >"))))
+  (change-review-ui-test--diff-view
+    (should (eq #'change-review-ui-quote-reply (key-binding (kbd "C-c >"))))))
+
+;;;; Selecting the text of a thread under a line
+
+(defun change-review-ui-test--posn (overlay x y)
+  "Return the mouse position at pixel X, Y over the text of OVERLAY, drawn in a window.
+There is no display here, so the window is laid out in the mind: a column is
+a pixel wide and a row ten pixels high, the first row the one that ends the
+line the thread is under, and the thread's text after it."
+  (let* ((string (overlay-get overlay 'after-string))
+         (rows (let ((start 0) (rows nil))
+                 (while (<= start (length string))
+                   (let ((end (or (string-search "\n" string start) (length string))))
+                     (push (cons start end) rows)
+                     (setq start (1+ end))))
+                 (nreverse rows)))
+         (row (nth (/ y 10) rows))
+         (index (and row (< x (- (cdr row) (car row))) (+ (car row) x)))
+         (pos (overlay-start overlay)))
+    (list (selected-window) pos (cons x y) 0 (and index (cons string index)) pos
+          (cons x (/ y 10)) nil (cons 0 0) (cons 1 10))))
+
+(defun change-review-ui-test--where (overlay text &optional after)
+  "Return (X . Y), the pixel where TEXT starts in what OVERLAY shows; AFTER, how far into it.
+Y is the middle of the row."
+  (let* ((string (overlay-get overlay 'after-string))
+         (index (+ (or (string-search text string) (error "No %S" text)) (or after 0)))
+         (row (cl-count ?\n (substring string 0 index)))
+         (start (let ((newline (cl-position ?\n string :end index :from-end t))) (if newline (1+ newline) 0))))
+    (cons (- index start) (+ (* 10 row) 5))))
+
+(defun change-review-ui-test--drag (overlay from to &optional click-count)
+  "Press the mouse at FROM, (X . Y), move it to TO and release it, over OVERLAY's text.
+Run `change-review-ui-mouse-select' as the command loop would, its events
+read from what the mouse does after the press.  With CLICK-COUNT, a double or
+triple click."
+  (cl-letf (((symbol-function 'posn-at-x-y)
+             (lambda (x y &optional _window _whole) (change-review-ui-test--posn overlay x y))))
+    (let* ((start (change-review-ui-test--posn overlay (car from) (cdr from)))
+           (end (change-review-ui-test--posn overlay (car to) (cdr to)))
+           (count (or click-count 1))
+           (down (append (list (pcase count (1 'down-mouse-1) (2 'double-down-mouse-1) (_ 'triple-down-mouse-1)) start)
+                         (and (> count 1) (list count))))
+           (up (cond ((equal from to) (append (list (pcase count (1 'mouse-1) (2 'double-mouse-1) (_ 'triple-mouse-1)) start)
+                                              (and (> count 1) (list count))))
+                     (t (list 'drag-mouse-1 start end)))))
+      (setq unread-command-events
+            (append (unless (equal from to) (list (list 'mouse-movement end))) (list up)))
+      (let ((this-command 'change-review-ui-mouse-select))
+        (change-review-ui-mouse-select down))
+      (should-not unread-command-events))))
+
+(defun change-review-ui-test--selected (overlay)
+  "Return the text selected of the thread OVERLAY draws, or nil."
+  (when-let* ((selection (overlay-get overlay 'change-review-selection))
+              (found (change-review-find-comment change-review-ui--set (car selection))))
+    (substring (change-review-comment-body (cdr found)) (nth 1 selection) (nth 2 selection))))
+
+(defun change-review-ui-test--marked (overlay)
+  "Return the characters of what OVERLAY shows that have the face of a selection."
+  (let ((string (overlay-get overlay 'after-string)) (marked nil))
+    (dotimes (i (length string))
+      (when (memq 'change-review-ui-selection-face
+                  (ensure-list (get-text-property i 'face string)))
+        (push (aref string i) marked)))
+    (concat (nreverse marked))))
+
+(defmacro change-review-ui-test--under-a-line (&rest body)
+  "Run BODY in a buffer, shown in the selected window, with a thread drawn under a line.
+The thread is that of `change-review-ui-test--wrapped-set'; bind `set',
+`thread', `first', `second' and `overlay'."
+  (declare (indent 0))
+  `(change-review-ui-test--drawing
+     (pcase-let ((`(,set ,thread ,first ,second) (change-review-ui-test--wrapped-set)))
+       (with-temp-buffer
+         (save-window-excursion
+           (set-window-buffer (selected-window) (current-buffer))
+           (insert "one\ntwo\nthree\n")
+           (setq change-review-ui--set set)
+           (change-review-ui-lines-mode 1)
+           (goto-char (point-min))
+           (forward-line 1)
+           (let ((overlay (change-review-ui-add-thread-overlay
+                           set thread (line-end-position) :view 'diff :width 80 :indent "  "))
+                 (transient-mark-mode t))
+             (ignore set thread first second overlay)
+             ,@body))))))
+
+(ert-deftest change-review-ui-the-text-under-a-line-has-the-mouse-to-select-it ()
+  "A thread under a line is a string, and the mouse selects the text of its
+comments: only that text has the keys, and every character of the string
+knows its overlay."
+  (change-review-ui-test--under-a-line
+    (let ((string (overlay-get overlay 'after-string)))
+      (should (eq overlay (get-text-property (1- (length string)) 'change-review-view string)))
+      (should (eq overlay (get-text-property 3 'change-review-view string)))
+      (dolist (text '("only ever" "Because the loop"))
+        (let ((index (string-search text string)))
+          (should (eq change-review-ui-text-map (get-text-property index 'keymap string)))
+          (should (eq #'change-review-ui-mouse-select
+                      (key-binding [down-mouse-1] t nil
+                                   (change-review-ui-test--posn
+                                    overlay (car (change-review-ui-test--where overlay text))
+                                    (cdr (change-review-ui-test--where overlay text))))))))
+      ;; Not the header, nor the bar.
+      (should-not (eq change-review-ui-text-map (get-text-property (string-search "Noah" string) 'keymap string)))
+      (should-not (eq change-review-ui-text-map (get-text-property (string-search "┃" string) 'keymap string)))
+      (should (eq #'mouse-drag-region
+                  (key-binding [down-mouse-1] t nil
+                               (change-review-ui-test--posn
+                                overlay (car (change-review-ui-test--where overlay "Noah"))
+                                (cdr (change-review-ui-test--where overlay "Noah"))))))
+      ;; The buttons still press.
+      (should (eq #'push-button (key-binding [mouse-2] t nil
+                                             (change-review-ui-test--posn
+                                              overlay (car (change-review-ui-test--where overlay "[Reply]"))
+                                              (cdr (change-review-ui-test--where overlay "[Reply]")))))))))
+
+(ert-deftest change-review-ui-a-drag-selects-the-text-of-a-comment ()
+  "Dragging from one place of a comment's text to another selects what is
+between, which is marked in what the overlay shows, across the rows the text
+wraps to, and nothing else is."
+  (change-review-ui-test--under-a-line
+    ;; Within a row: up to the place the mouse is over.
+    (change-review-ui-test--drag overlay (change-review-ui-test--where overlay "only ever")
+                                 (change-review-ui-test--where overlay "only ever" 9))
+    (should (equal "only ever" (change-review-ui-test--selected overlay)))
+    (should (equal "only ever" (change-review-ui-test--marked overlay)))
+    ;; The same backwards.
+    (change-review-ui-test--drag overlay (change-review-ui-test--where overlay "only ever" 9)
+                                 (change-review-ui-test--where overlay "only ever"))
+    (should (equal "only ever" (change-review-ui-test--selected overlay)))
+    ;; Over the wrapped lines, with the space the wrap left out.
+    (change-review-ui-test--drag overlay (change-review-ui-test--where overlay "only ever")
+                                 (change-review-ui-test--where overlay "and nothing" 3))
+    (should (equal "only ever use seventeen, and" (change-review-ui-test--selected overlay)))
+    (should (equal "only ever useseventeen, and" (change-review-ui-test--marked overlay)))
+    ;; Only the comment it began in: the next one's text is no part of it.
+    (change-review-ui-test--drag overlay (change-review-ui-test--where overlay "Second paragraph")
+                                 (change-review-ui-test--where overlay "Because the loop" 7))
+    (should (equal "Second paragraph of the question." (change-review-ui-test--selected overlay)))
+    (should (equal "Second paragraph of the question." (change-review-ui-test--marked overlay)))
+    ;; The text of the string is what it was.
+    (should (equal (substring-no-properties (overlay-get overlay 'change-review-text) 0 -1)
+                   (substring-no-properties (overlay-get overlay 'after-string) 1)))))
+
+(ert-deftest change-review-ui-a-drag-past-the-text-goes-to-where-it-ends ()
+  "To the right of a row of text the selection reaches its end; above the text
+it reaches the start, under it the end."
+  (change-review-ui-test--under-a-line
+    (let ((from (change-review-ui-test--where overlay "only ever")))
+      ;; Far to the right of the row "...only ever use": to its end.
+      (change-review-ui-test--drag overlay from (cons 300 (cdr from)))
+      (should (equal "only ever use" (change-review-ui-test--selected overlay)))
+      ;; Over the header of the comment above, and over the thread's header.
+      (change-review-ui-test--drag overlay from (cons 20 15))
+      (should (equal "Why does the retry loop wait eighteen seconds? The tests " (change-review-ui-test--selected overlay)))
+      (change-review-ui-test--drag overlay from (cons 20 5))
+      (should (equal "Why does the retry loop wait eighteen seconds? The tests " (change-review-ui-test--selected overlay)))
+      ;; Under the text of the comment, among the next comment's.
+      (change-review-ui-test--drag overlay from (change-review-ui-test--where overlay "Because the loop"))
+      (should (equal (substring (change-review-comment-body first) (string-search "only ever" (change-review-comment-body first)))
+                     (change-review-ui-test--selected overlay)))
+      ;; And past the end of the whole string: the same.
+      (change-review-ui-test--drag overlay from (cons 20 1000))
+      (should (equal (substring (change-review-comment-body first) (string-search "only ever" (change-review-comment-body first)))
+                     (change-review-ui-test--selected overlay))))))
+
+(ert-deftest change-review-ui-a-click-selects-nothing-and-chooses-the-thread ()
+  "A click without a drag selects nothing: it puts point on the line the thread
+is under, and makes the thread the one the commands act on."
+  (change-review-ui-test--under-a-line
+    (let ((where (change-review-ui-test--where overlay "only ever")))
+      (change-review-ui-test--drag overlay where (change-review-ui-test--where overlay "Because the loop" 2))
+      (should (change-review-ui-test--selected overlay))
+      (goto-char (point-max))
+      (setq change-review-ui--chosen-thread nil)
+      (change-review-ui-test--drag overlay where where)
+      (should-not (change-review-ui-test--selected overlay))
+      (should-not (overlay-get overlay 'change-review-selection))
+      (should (equal "" (change-review-ui-test--marked overlay)))
+      (should (= (point) (overlay-start overlay)))
+      (should (equal (change-review-thread-id thread) change-review-ui--chosen-thread)))))
+
+(ert-deftest change-review-ui-a-double-click-selects-a-word-and-a-triple-click-a-line ()
+  "A double click selects the word under the mouse, a triple click the line of
+the text; a drag from there goes on from what they selected."
+  (change-review-ui-test--under-a-line
+    (let ((where (change-review-ui-test--where overlay "seventeen," 3)))
+      (change-review-ui-test--drag overlay where where 2)
+      (should (equal "seventeen" (change-review-ui-test--selected overlay)))
+      (should (equal "seventeen" (change-review-ui-test--marked overlay)))
+      ;; Punctuation is a word of its own; a space too.
+      (change-review-ui-test--drag overlay (change-review-ui-test--where overlay "seventeen," 9)
+                                   (change-review-ui-test--where overlay "seventeen," 9) 2)
+      (should (equal "," (change-review-ui-test--selected overlay)))
+      (change-review-ui-test--drag overlay where where 3)
+      (should (equal (car (split-string (change-review-comment-body first) "\n"))
+                     (change-review-ui-test--selected overlay)))
+      (should (equal (concat "Why does the retry loop wait eighteen seconds? The tests only ever use"
+                             "seventeen, and nothing in the docs says why that is.")
+                     (change-review-ui-test--marked overlay)))
+      ;; A drag after a double click goes on by the characters, from the word.
+      (change-review-ui-test--drag overlay where (change-review-ui-test--where overlay "and nothing" 3) 2)
+      (should (equal "seventeen, and" (change-review-ui-test--selected overlay))))))
+
+(ert-deftest change-review-ui-a-selection-goes-with-the-next-command ()
+  "The selection stays through the mouse's own command and scrolling, and goes
+with any other command, its marks with it."
+  (change-review-ui-test--under-a-line
+    (let ((from (change-review-ui-test--where overlay "only ever")))
+      (change-review-ui-test--drag overlay from (change-review-ui-test--where overlay "only ever" 9))
+      (should (memq #'change-review-ui--drop-selection post-command-hook))
+      (dolist (command '(change-review-ui-mouse-select scroll-up-command recenter-top-bottom))
+        (let ((this-command command))
+          (run-hooks 'post-command-hook))
+        (should (equal "only ever" (change-review-ui-test--selected overlay)))
+        (should (equal "only ever" (change-review-ui-test--marked overlay))))
+      (let ((this-command 'next-line))
+        (run-hooks 'post-command-hook))
+      (should-not (change-review-ui-test--selected overlay))
+      (should (equal "" (change-review-ui-test--marked overlay)))
+      (should-not (memq #'change-review-ui--drop-selection post-command-hook)))))
+
+(ert-deftest change-review-ui-one-selection-at-a-time ()
+  "Selecting in one thread selects nothing in another of the buffer."
+  (change-review-ui-test--drawing
+    (pcase-let ((`(,set ,thread ,first ,_) (change-review-ui-test--wrapped-set)))
+      (let ((other (change-review-comment set "Another thread, in the same buffer."
+                                          :author (change-review-ui-test--author) :time change-review-ui-test--now)))
+        (with-temp-buffer
+          (save-window-excursion
+            (set-window-buffer (selected-window) (current-buffer))
+            (insert "one\ntwo\nthree\n")
+            (setq change-review-ui--set set)
+            (let ((one (progn (goto-char (point-min)) (end-of-line)
+                              (change-review-ui-add-thread-overlay set thread (point) :view 'diff :width 80)))
+                  (two (progn (goto-char (point-max))
+                              (change-review-ui-add-thread-overlay
+                               set (change-review-find-thread set (change-review-comment-thread other))
+                               (point) :view 'diff :width 80))))
+              (ignore first)
+              (change-review-ui-test--drag one (change-review-ui-test--where one "only ever")
+                                           (change-review-ui-test--where one "only ever" 4))
+              (should (equal "only" (change-review-ui-test--selected one)))
+              (change-review-ui-test--drag two (change-review-ui-test--where two "Another")
+                                           (change-review-ui-test--where two "Another" 7))
+              (should (equal "Another" (change-review-ui-test--selected two)))
+              (should-not (change-review-ui-test--selected one))
+              (should (equal "" (change-review-ui-test--marked one)))
+              (should (equal '("c" "Another") (list (substring (car (overlay-get two 'change-review-selection)) 0 1)
+                                                    (change-review-ui-test--selected two)))))))))))
+
+(ert-deftest change-review-ui-quote-reply-quotes-what-the-mouse-selected ()
+  "C-c > in a buffer that shows threads under its lines replies to the comment
+with what was selected of it quoted; without a selection, to the last comment of
+the thread under point's line, all of it quoted."
+  (change-review-ui-test--under-a-line
+    (let ((reading (change-review-ui-test--reading)))
+      (let ((change-review-ui-read-function (car reading)))
+        (change-review-ui-test--drag overlay (change-review-ui-test--where overlay "only ever")
+                                     (change-review-ui-test--where overlay "and nothing" 11))
+        (should (eq #'change-review-ui-quote-reply (key-binding (kbd "C-c >"))))
+        (call-interactively #'change-review-ui-quote-reply)
+        ;; It is used up.
+        (should-not (change-review-ui-test--selected overlay))
+        (should (equal "" (change-review-ui-test--marked overlay)))
+        (goto-char (overlay-start overlay))
+        (call-interactively #'change-review-ui-quote-reply)
+        ;; Where no thread is, there is no comment to quote.
+        (forward-line 1)
+        (should-error (call-interactively #'change-review-ui-quote-reply) :type 'user-error))
+      (should (equal (list (concat "> only ever use seventeen, and nothing\n\n")
+                           (concat "> " (change-review-comment-body second) "\n\n"))
+                     (mapcar #'cadr (symbol-value (cdr reading)))))
+      (should (string-match-p "\\`Reply to Noah's comment 1/2" (car (nth 0 (symbol-value (cdr reading))))))
+      (should (string-match-p "\\`Reply to Claude's comment 2/2" (car (nth 1 (symbol-value (cdr reading))))))
+      (should (equal '(end end) (mapcar #'caddr (symbol-value (cdr reading))))))))
+
+(ert-deftest change-review-ui-copies-what-the-mouse-selected ()
+  "The key that copies a region copies the selection of a comment's text, which no
+region holds, and ends it; without one it is what it was."
+  (change-review-ui-test--under-a-line
+    (should (eq #'change-review-ui-copy-selection (key-binding (kbd "M-w"))))
+    (let ((kill-ring nil) (kill-ring-yank-pointer nil))
+      (change-review-ui-test--drag overlay (change-review-ui-test--where overlay "only ever")
+                                   (change-review-ui-test--where overlay "and nothing" 11))
+      (call-interactively (key-binding (kbd "M-w")))
+      (should (equal '("only ever use seventeen, and nothing") kill-ring))
+      (should-not (change-review-ui-test--selected overlay))
+      (should (equal "" (change-review-ui-test--marked overlay)))
+      ;; Nothing selected, no region: the usual complaint, and nothing copied.
+      (should-error (call-interactively (key-binding (kbd "M-w"))))
+      (should (= 1 (length kill-ring)))
+      ;; A region of the buffer's own text is copied as always.
+      (goto-char (point-min))
+      (set-mark (point))
+      (end-of-line)
+      (activate-mark)
+      (call-interactively (key-binding (kbd "M-w")))
+      (should (equal "one" (car kill-ring))))))
+
+(ert-deftest change-review-ui-draws-a-selection-again-only-when-it-changes ()
+  "The mouse moves a pixel at a time, which is a fraction of a character: the
+text is drawn again only when what is selected is not what was."
+  (change-review-ui-test--under-a-line
+    (let ((from (change-review-ui-test--where overlay "only ever")))
+      (change-review-ui-test--drag overlay from (change-review-ui-test--where overlay "only ever" 4))
+      (let ((shown (overlay-get overlay 'after-string))
+            (id (car (overlay-get overlay 'change-review-selection))))
+        (change-review-ui--select overlay id 0 0)
+        (should-not (eq shown (overlay-get overlay 'after-string)))
+        (let ((shown (overlay-get overlay 'after-string)))
+          (change-review-ui--select overlay id 0 0)
+          (should (eq shown (overlay-get overlay 'after-string))))
+        (change-review-ui--select overlay id 5 9)
+        (let ((shown (overlay-get overlay 'after-string)))
+          (change-review-ui--select overlay id 5 9)
+          (should (eq shown (overlay-get overlay 'after-string)))
+          (change-review-ui--select overlay id 5 10)
+          (should-not (eq shown (overlay-get overlay 'after-string))))))))
+
+(ert-deftest change-review-ui-a-selection-nothing-is-under-goes-to-the-default ()
+  "A press that is over nothing of a comment's text is the default press's."
+  (change-review-ui-test--under-a-line
+    (let ((called nil))
+      (cl-letf (((symbol-function 'mouse-drag-region) (lambda (event) (setq called event))))
+        (change-review-ui-mouse-select
+         (list 'down-mouse-1 (change-review-ui-test--posn overlay 500 5))))
+      (should called)
+      (should-not (overlay-get overlay 'change-review-selection)))))
+
+(ert-deftest change-review-ui-the-diff-view-quotes-a-selection ()
+  "In the diff view the threads are under their lines, and C-c > quotes what
+the mouse selected, as it does in any buffer that draws them so."
+  (change-review-ui-test--diff-view
+    (let* ((reading (change-review-ui-test--reading))
+           (overlay (cl-find-if (lambda (o) (and (overlay-get o 'change-review-thread)
+                                                 (string-search "Why 'two?" (or (overlay-get o 'after-string) ""))))
+                                (overlays-in (point-min) (point-max))))
+           (window-buffer (window-buffer (selected-window))))
+      (should overlay)
+      (save-window-excursion
+        (set-window-buffer (selected-window) (current-buffer))
+        (change-review-ui-test--drag overlay (change-review-ui-test--where overlay "Why 'two?")
+                                     (change-review-ui-test--where overlay "Why 'two?" 9))
+        (let ((change-review-ui-read-function (car reading)))
+          (should (eq #'change-review-ui-quote-reply (key-binding (kbd "C-c >"))))
+          (call-interactively #'change-review-ui-quote-reply)))
+      (ignore window-buffer)
+      (should (equal '("> Why 'two?\n\n") (mapcar #'cadr (symbol-value (cdr reading)))))
+      (should (string-match-p "\\`Reply to Noah's comment 1/3" (car (car (symbol-value (cdr reading)))))))))
+
 ;;;; The library compiles
 
 (ert-deftest change-review-ui-compiles-without-a-warning ()

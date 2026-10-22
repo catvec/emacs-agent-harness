@@ -12982,6 +12982,49 @@ as "to review" and counted in its heading; the diff view draws such a
 thread whole where other closed threads are a line; the review of a task
 (below) counts them, lists them and draws them whole in Ediff.
 
+QUOTE REPLY.  C-c > (`change-review-ui-quote-reply`) answers a comment as
+a mail does: a reply, a draft in the thread, that starts with part of the
+comment quoted -- `> ` before each line, as `compose-quote-string` makes a
+quote of the session's box -- point under it.  What is quoted is what is
+selected, read back as the text of the comment and not as it is drawn: the
+drawing wraps the text under a bar between a header and the lines that say
+where it was made, so each line the text is drawn on says where in the
+text it starts (`change-review-body`, from its first character to its
+newline, set by `change-review-ui--comment-lines`), and a place of the
+drawing is a place of the text (`change-review-ui--offset-at`, which gives
+the nearest of the start and the end of the text for a place that is none
+of it).  A selection so reads back as the text between two offsets, with
+its own newlines and the spaces the wrapping left out.  The threads view
+is the buffer's text, so a selection there is the region
+(`change-review-ui--region-parts`, one part for each comment the region
+has text of).  A thread under a line is a string an overlay shows -- the
+overlay's `after-string`, which the library re-draws with the selection
+marked -- and no region holds text of a string, so the text of the comments
+has a `keymap` of its own (`change-review-ui-text-map`) whose
+`down-mouse-1` runs `change-review-ui-mouse-select`: it reads the drag
+from `track-mouse` events, finds what each is over from `posn-string` (the
+string, and the character of it; every character carries its overlay as
+`change-review-view`, so a string drawn again since the event was made is
+still the overlay's), a pointer to the right of a row's text by halves
+over `posn-at-x-y`, above or under the text by the pixel row, and keeps
+the selection in the overlay (`change-review-selection`, the comment's id
+and two offsets in its text).  A double click selects the word and a
+triple click the line; a click without a drag chooses the thread, as
+point on its line does.  The selection goes with the next command that is
+not the mouse's, scrolling aside (`post-command-hook`,
+`change-review-ui--keeping-commands`), and is the primary selection while
+it lasts.  `change-review-ui-copy-selection` is what M-w does with it.  The
+reply is read as every comment is, in `change-review-ui-read-function`,
+which now takes where point starts as a fourth argument when it can
+(`func-arity`), the end for a quote; the default reader sets that up in
+the mode hook of `string-edit` and, where compose-quote is on the load
+path, turns `compose-quote-mode` on in the buffer, the prompt outside its
+composition.  A reply that is nothing but the quote is no reply.  The mail a
+reply goes out in keeps the quote as it was written:
+`change-review-mail--fill-paragraph` keeps the lines that start with `>`
+out of the text it fills and cuts a long one with its prefix, where it
+used to join the quote into the lines around it.
+
 THE ADAPTER.  This module gives a task to the library as a change set of
 its own subtype (`harness-ui-patch-review--set`):
 
@@ -13271,7 +13314,7 @@ configuration to give back.  n is Ediff's next difference, wrapped
 (`harness-ui-patch-review-next-difference`): at the last difference it
 says once that the next difference is the next file, and the same key
 again goes on to it in Ediff -- or says there is no file left to review.
-The control panel's map is a child of Ediff's with c, r, x, m (which takes the place of
+The control panel's map is a child of Ediff's with c, r, C-c >, x, m (which takes the place of
 Ediff's wide-display toggle: it marks the thread at the current
 difference reviewed, one that waits first), T, TAB, e, a, s,
 u, t, n, N, P and q (under evil, `evil-normalize-keymaps` puts it where
@@ -13322,12 +13365,17 @@ library's for its parent) c starts a thread, a draft, on the line at
 point -- on the branch's side it is a line of the branch, on the merge
 base's one of the merge base -- and r, x, o, RET and TAB act on the thread
 under point (TAB is the key of the major mode where no thread is under
-the line); e edits a draft there -- the only one under the line, or the one
+the line); the text of the comments is the mouse's to select
+(`change-review-ui-mouse-select`, see THE ONE DRAWING), and C-c > replies
+to the comment with what is selected quoted, or the last comment of the
+thread under the line quoted when nothing is; e edits a draft there -- the only one under the line, or the one
 chosen of several -- or goes to the box when there is none, and each
 draft has the library's `[Edit]` button.  In the
 control panel c comments on the last line of the current difference (at
 the merge base for a difference that only deletes), r replies to the
-thread there, x closes or opens it, TAB folds the threads the difference
+thread there, C-c > replies with what is selected in a version quoted,
+else with the thread's last comment quoted
+(`harness-ui-patch-review-quote-reply`), x closes or opens it, TAB folds the threads the difference
 spans (`harness-ui-patch-review--difference-threads`: those placed on a
 line it covers, in the version they are in) and T lists all the threads,
 d in that view coming back to Ediff at the thread's line.  The threads are

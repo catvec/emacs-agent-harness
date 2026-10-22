@@ -131,6 +131,7 @@ or all. Point is on a comment, and the keys act on it:
 | `n` `p` / `N` `P` | Move between comments / between threads. |
 | `RET` `TAB` | Show where the comment was made (file, line, revision, the lines of the diff of that revision around it), or hide that again. `RET` on a line of that diff shows the line of the source. |
 | `r` | Reply to the comment, as a draft. |
+| `C-c >` | Reply to the comment with what you selected of it quoted, or all of it: see [Replying with a quote](#replying-with-a-quote). |
 | `x` / `s` | Close the thread or open it again / set its status by name. |
 | `m` / `M` | Mark the thread someone else closed reviewed, or make it wait again / mark every thread that waits. |
 | `d` / `D` | Show the thread in the diff view of the newest version / the code the comment was written on, in the version it was written against (`change-review-visit`). |
@@ -144,7 +145,7 @@ or all. Point is on a comment, and the keys act on it:
 **The diff view**, `change-review-open-diff`, shows the files of a
 version as the unified diff (it is a `diff-mode`, so its own keys work),
 with the threads of each line under it, drawn by the same function. `c`
-comments on the line at point, or the region's lines; `r`, `x`, `m`, `o`, `e`
+comments on the line at point, or the region's lines; `r`, `C-c >`, `x`, `m`, `o`, `e`
 and `RET` act on the thread under point as they do in the threads view
 (for `e`, a draft of it, asking which when several threads under the line
 have one; the `[Edit]` button of a draft names it);
@@ -186,7 +187,8 @@ binds the keys of the table above where the text is.
 the lines of a file, draws the threads under its lines with
 `change-review-ui-add-thread-overlay` and takes the same keys by turning
 on `change-review-ui-lines-mode` (or by using its map as the parent of
-its own). The views follow the set: whatever changes it, they draw
+its own). The text of a comment drawn so is no text of the buffer, so
+the mouse selects it (see below). The views follow the set: whatever changes it, they draw
 again soon (`change-review-changed-functions`, `change-review-ui-refresh`).
 A view that lets its threads be folded passes `:fold` with how the set
 has the thread (`change-review-ui-thread-fold`) and `:max-lines` (what
@@ -206,6 +208,61 @@ comparison is, say -- does the same with the pieces:
 or asks which, and `change-review-ui-edit-comment` reads a new text for
 one and keeps it. Each draft's `[Edit]` button edits that draft, whatever
 point is on.
+
+### Replying with a quote
+
+`C-c >` answers a comment the way a mail answers another: it starts a
+reply to the comment with part of it quoted, a Markdown block quote with
+`> ` before each line, and leaves point under the quote for the answer.
+Select the part first, or select nothing to quote all of the comment (the
+one at point, or the last of the thread drawn under the line at point).
+The reply is a draft, as one `r` starts is, in the thread, answering the
+comment; a reply that is nothing but the quote answers nothing and is
+not kept.
+
+```
+┃ 1/3  Noah (you) · 2026-10-19 21:57 · v1
+┃      Why eighteen?  The tests only ever use 17.
+┃ 2/3  Claude (agent) · 2026-10-19 22:10 · v1
+┃      Because the retry loop needs one more.
+┃ 3/3  Noah (you) · draft
+┃      > needs one more
+┃
+┃      One more than what?
+```
+
+What is selected is read back as the text of the comment, as it was
+written, not as it is drawn wrapped and under a bar: a quote of text that
+runs over two lines of the drawing is one line of the comment, and what
+is drawn around the text -- the header, the bar, the buttons, where the
+comment was made -- is never in it. Text of several comments of a thread
+is quoted comment by comment, each under a line that says who wrote it, in
+a reply to the last; a selection of two threads is refused.
+
+- **In the threads view** the text is the buffer's, so the selection is
+  the region: drag the mouse, or `C-SPC` and move.
+- **Under the lines of a diff** -- in the diff view, in Ediff's two
+  versions or in a view of your own -- the thread is a string an overlay
+  shows. Emacs puts no region in text like that, so the text of the
+  comments has the mouse's keys instead: **drag** over it to select part
+  of a comment, **double click** to select a word and **triple click** a
+  line of it. What is selected is marked and goes with the next command
+  that is not the mouse's; `C-c >` quotes it, `M-w` copies it, and on a
+  display it is the primary selection, to paste with the middle button.
+  A click that does not drag selects nothing: it makes the thread the one
+  the commands act on.
+
+Where the [compose-quote](../compose-quote/README.md) library is installed
+the buffer the reply is read in answers a quote inline as the library's
+users do: `M-RET` splits the quote where point is, to answer the part
+above it, and `C-c [` elides part of it as `[...]`. Nothing depends on it.
+`change-review-ui-read-function` is told where point starts, `end` for a
+reply that quotes, when it takes a fourth argument.
+
+A reply that quotes goes out as it was written: `change-review-mail-render-comments`
+keeps a comment's quoted lines apart from the text around them and cuts a
+long one with its `>`s, where it would fill them into the lines about
+them.
 
 The options of the views are `change-review-ui-time-format`,
 `change-review-ui-relative-times`, `change-review-ui-width`,

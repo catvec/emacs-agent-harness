@@ -782,20 +782,58 @@ The file is read as bytes, so the charsets of its mails are honored."
 
 ;;;; Writing a reply
 
-(defun change-review-mail--fill-paragraph (paragraph)
-  "Return PARAGRAPH, lines of a comment, filled if it needs to be.
+(defconst change-review-mail--quote-prefix-regexp "\\`\\(?:>[ \t]?\\)+"
+  "What starts a line of a comment that quotes: its \">\"s and the blank after.")
+
+(defun change-review-mail--fill-lines (lines)
+  "Return LINES, text of a comment, as one string, filled if it needs to be.
 It is when a line is wider than `change-review-mail-fill-column' and
-the paragraph is no code, every line of it indented."
-  (let ((lines (split-string paragraph "\n")))
+the text is no code, every line of it indented."
+  (let ((text (string-join lines "\n")))
     (if (or (cl-every (lambda (line) (string-match-p "\\`\\(?:    \\|\t\\)" line)) lines)
             (cl-notany (lambda (line) (> (string-width line) change-review-mail-fill-column))
                        lines))
-        paragraph
+        text
       (with-temp-buffer
-        (insert paragraph)
+        (insert text)
         (let ((fill-column change-review-mail-fill-column) (adaptive-fill-mode nil))
           (fill-region (point-min) (point-max)))
         (string-trim-right (buffer-string))))))
+
+(defun change-review-mail--fill-quote-line (line)
+  "Return LINE, a line of a comment that quotes, cut to the fill column if need be.
+Each piece of it starts as the line does, with the same \">\"s."
+  (if (and (> (string-width line) change-review-mail-fill-column)
+           (string-match change-review-mail--quote-prefix-regexp line))
+      (with-temp-buffer
+        (insert line)
+        (let ((fill-column change-review-mail-fill-column)
+              (adaptive-fill-mode nil)
+              (fill-prefix (match-string 0 line)))
+          (fill-region (point-min) (point-max)))
+        (string-trim-right (buffer-string)))
+    line))
+
+(defun change-review-mail--fill-paragraph (paragraph)
+  "Return PARAGRAPH, lines of a comment, filled if it needs to be.
+It is when a line is wider than `change-review-mail-fill-column' and
+the paragraph is no code, every line of it indented.  The lines that
+quote, those that start with \">\", are kept as they are, each cut to
+the fill column on its own if it is too wide, so that a quote is never
+joined to the lines around it or to the quote's own."
+  (let ((runs nil))
+    ;; Runs of lines: (QUOTES . LINES), in reverse.
+    (dolist (line (split-string paragraph "\n"))
+      (let ((quotes (string-prefix-p ">" line)))
+        (if (and runs (eq (car (car runs)) quotes))
+            (push line (cdr (car runs)))
+          (push (cons quotes (list line)) runs))))
+    (mapconcat (lambda (run)
+                 (let ((lines (reverse (cdr run))))
+                   (if (car run)
+                       (mapconcat #'change-review-mail--fill-quote-line lines "\n")
+                     (change-review-mail--fill-lines lines))))
+               (nreverse runs) "\n")))
 
 (defun change-review-mail--comment-text (text)
   "Return TEXT, a comment, as a reply writes it.

@@ -91,6 +91,8 @@ The pictures, by the name `scripts/media.sh` takes:
 | `review-ediff` | Ediff on a file of that review: the files as a tree on the left with the file compared highlighted and the threads under them, the merge base and the branch with the threads drawn under their lines, the control panel offering to comment, reply and go to the threads and to switch its settings, the report with its box at the bottom | `harness-media-shot-review-ediff` |
 | `review-diff` | That report with the diff chosen since the last review: the Diff line marks it, the files are those the work changed since the version before (one, here), and the threads below them, those of the file the diff leaves out too, with their file. Taken after the other review pictures, and it puts the report back at the branch against main | `harness-media-shot-review-diff` |
 | `review-to-review` | The threads of that review on its "to review" filter: the two threads the agent closed that the reviewer has not looked at yet, each with the agent's answer; the thread the reviewer closed themselves is not there | `harness-media-shot-review-to-review` |
+| `review-select` | The same Ediff, the end of the agent's answer on the renamed function selected with the mouse: the thread is a string an overlay shows, which no region holds, so the text of its comments has the mouse's keys and the selection is marked. Taken on the way to `review-quote`, by the same function | `harness-media-shot-review-quote` |
+| `review-quote` | That selection after `C-c >`: the reply opens in a buffer below the version with the selected part quoted, `> ` before each line, point under it, and the answer typed. The reply is given up after the picture | `harness-media-shot-review-quote` |
 
 ## How the pictures are made
 

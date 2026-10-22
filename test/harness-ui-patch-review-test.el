@@ -3924,6 +3924,123 @@ they are drawn again when a window changes its size."
         (ignore thread)
         (with-current-buffer control (call-interactively #'harness-ui-patch-review-ediff-quit))))))
 
+(defun harness-ui-patch-review-test--drag (overlay text from to)
+  "Drag the mouse over TEXT of what OVERLAY shows, from the character FROM to TO.
+Both count from where TEXT starts.  The press, the move and the release are
+those the command loop would give `change-review-ui-mouse-select', over the
+window that shows the overlay's buffer; there is no display to point a mouse at
+here, so the positions are made by hand."
+  (let* ((window (get-buffer-window (overlay-buffer overlay) t))
+         (string (overlay-get overlay 'after-string))
+         (base (or (string-search text string) (error "No %S under the line" text)))
+         (posn (lambda (after)
+                 (list window (overlay-start overlay) (cons after 5) 0
+                       (cons string (+ base after)) (overlay-start overlay)
+                       (cons after 0) nil (cons 0 0) (cons 1 10)))))
+    (should (window-live-p window))
+    (setq unread-command-events
+          (list (list 'mouse-movement (funcall posn to))
+                (list 'drag-mouse-1 (funcall posn from) (funcall posn to))))
+    (let ((this-command 'change-review-ui-mouse-select))
+      (change-review-ui-mouse-select (list 'down-mouse-1 (funcall posn from))))))
+
+(ert-deftest harness-ui-patch-review-quote-replies-to-a-comment-in-ediff ()
+  "A comment under a line of either version Ediff compares is no text of the
+buffer, so the mouse selects it: a drag over its text selects a part, which
+C-c > quotes in a reply to the comment, a draft in its thread, point under
+the quote.  From the control panel C-c > quotes the last comment of the
+thread at the current difference."
+  (harness-ui-patch-review-test-with-task
+    (let* ((popout (harness-ui-patch-review-test--changes board id))
+           (review (gethash id harness-ui-patch-review--reviews))
+           (set (harness-ui-patch-review--r-set review))
+           (bot (change-review-agent "Claude" :session "sess-9" :tool-call "toolu_7"))
+           (two (harness-ui-patch-review-test--comment-on
+                 review "a.el" '(:new . 2) "Why two? The loop only ever uses one."))
+           (answer (change-review-reply
+                    set two "Because the first pass needs a placeholder."
+                    :author bot :sent (float-time)))
+           (thread (harness-ui-patch-review-test--thread-of review two))
+           (calls nil)
+           (reader (lambda (prompt initial callback &optional point)
+                     (push (list prompt initial point) calls)
+                     (funcall callback (concat initial "I see."))))
+           (transient-mark-mode t))
+      (ignore popout)
+      (harness-ui-patch-review-ediff review 0)
+      (let* ((control (harness-ui-patch-review-test--control review 0))
+             (new (nth 2 (harness-ui-patch-review--ediff-buffers review)))
+             (overlay (with-current-buffer new
+                        (cl-find-if (lambda (ov) (equal (overlay-get ov 'change-review-thread)
+                                                        (change-review-thread-id thread)))
+                                    (overlays-in (point-min) (point-max))))))
+        (should overlay)
+        ;; The text of the comments is the mouse's.
+        (should (eq change-review-ui-text-map
+                    (get-text-property (string-search "only ever" (overlay-get overlay 'after-string))
+                                       'keymap (overlay-get overlay 'after-string))))
+        (with-current-buffer new
+          (should (eq #'change-review-ui-quote-reply (key-binding (kbd "C-c >"))))
+          (harness-ui-patch-review-test--drag overlay "only ever uses one" 0 18)
+          (should (equal '("c" "only ever uses one")
+                         (let ((selection (overlay-get overlay 'change-review-selection)))
+                           (list (substring (car selection) 0 1)
+                                 (substring (change-review-comment-body two) (nth 1 selection) (nth 2 selection))))))
+          (goto-char (point-min))
+          (let ((change-review-ui-read-function reader))
+            (call-interactively #'change-review-ui-quote-reply)))
+        (should (equal "> only ever uses one\n\nI see."
+                       (change-review-comment-body (change-review-thread-last-comment thread))))
+        (should (equal (change-review-comment-id two)
+                       (change-review-comment-reply-to (change-review-thread-last-comment thread))))
+        (should (change-review-comment-draft-p (change-review-thread-last-comment thread)))
+        (pcase-let ((`(,prompt ,initial ,point) (car calls)))
+          (should (string-match-p "\\`Reply to Noah's comment 1/2 on a\\.el:2" prompt))
+          (should (equal "> only ever uses one\n\n" initial))
+          (should (eq 'end point)))
+        ;; With nothing selected: the last comment of the thread, whole.
+        (change-review-ui-flush)
+        (with-current-buffer new
+          (goto-char (point-min))
+          (forward-line 1)
+          (let ((change-review-ui-read-function (lambda (_p initial _callback &optional _point)
+                                                  (push initial calls))))
+            (call-interactively #'change-review-ui-quote-reply)))
+        (should (equal "> > only ever uses one\n>\n> I see.\n\n" (car calls)))
+        ;; The control panel quotes the last comment of the thread at the current
+        ;; difference, which is on line 2.
+        (with-current-buffer control
+          (should (equal '(:new . 2) (harness-ui-patch-review--ediff-position)))
+          (should (eq #'harness-ui-patch-review-quote-reply (key-binding (kbd "C-c >"))))
+          (let ((change-review-ui-read-function reader))
+            (call-interactively #'harness-ui-patch-review-quote-reply)))
+        (pcase-let ((`(,prompt ,initial ,point) (car calls)))
+          (should (string-match-p "\\`Reply to Noah's comment 3/3" prompt))
+          (should (equal "> > only ever uses one\n>\n> I see.\n\n" initial))
+          (should (eq 'end point)))
+        (ignore answer)
+        ;; What is selected in a version is what the control panel quotes, as what
+        ;; is marked there is what C-c > quotes.
+        (change-review-ui-flush)
+        (let ((overlay (with-current-buffer new
+                         (cl-find-if (lambda (ov) (equal (overlay-get ov 'change-review-thread)
+                                                         (change-review-thread-id thread)))
+                                     (overlays-in (point-min) (point-max))))))
+          (harness-ui-patch-review-test--drag overlay "Because the first pass" 0 7)
+          (with-current-buffer control
+            (let ((change-review-ui-read-function reader))
+              (call-interactively #'harness-ui-patch-review-quote-reply)))
+          (pcase-let ((`(,prompt ,initial ,point) (car calls)))
+            (should (string-match-p "\\`Reply to Claude's comment 2/" prompt))
+            (should (equal "> Because\n\n" initial))
+            (should (eq 'end point)))
+          (should-not (with-current-buffer new (change-review-ui--overlay-selection))))
+        ;; The second difference has no thread: nothing to quote.
+        (with-current-buffer control
+          (ediff-next-difference)
+          (should-error (call-interactively #'harness-ui-patch-review-quote-reply) :type 'user-error)
+          (call-interactively #'harness-ui-patch-review-ediff-quit))))))
+
 ;;;; Self-contained
 
 (defun harness-ui-patch-review-test--agent-closes (review id sid comment text)
