@@ -5,6 +5,8 @@ import 'package:harness_client/src/acp/acp_message.dart';
 import 'package:harness_client/src/acp/acp_transport.dart';
 import 'package:harness_client/src/acp/connection_target.dart';
 
+import 'tool_showcase.dart';
+
 /// In-memory ACP transport: the client's writes go to [onSend], the harness's
 /// messages arrive on [messages].
 class FakeTransport implements AcpTransport {
@@ -961,6 +963,16 @@ class FakeHarness {
     );
   }
 
+  /// A session that has done some work, as a task's does: tool calls of
+  /// the kinds an agent makes, one that failed, one the permission system
+  /// refused, and the `hand_in` call that ended it, with the report it
+  /// handed in (see `tool_showcase.dart`).  It is not seeded by default, so
+  /// the lists the other tests count stay as they are.
+  void seedToolShowcase() {
+    sessions[toolShowcaseId] = toolShowcaseSession();
+    nodes[toolShowcaseId] = toolShowcaseNodes();
+  }
+
   Map<String, Object?> _node(
     String id,
     String kind,
@@ -1870,7 +1882,7 @@ class FakeHarness {
       case 'tool-call':
         list.add({
           'sessionUpdate': 'tool_call',
-          'toolCallId': node['callId'],
+          'toolCallId': node['callId'] ?? node['call-id'],
           'title': node['title'],
           'kind': 'read',
           'status': 'in_progress',
@@ -1880,8 +1892,10 @@ class FakeHarness {
       case 'tool-result':
         list.add({
           'sessionUpdate': 'tool_call_update',
-          'toolCallId': node['callId'],
-          'status': 'completed',
+          'toolCallId': node['callId'] ?? node['call-id'],
+          'status': asBool(node['isError'] ?? node['is-error'])
+              ? 'failed'
+              : 'completed',
           'rawOutput': node['output'],
           '_harness': harness,
         });

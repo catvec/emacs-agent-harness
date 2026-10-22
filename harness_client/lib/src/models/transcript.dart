@@ -48,6 +48,7 @@ class ToolView {
     this.nodeId,
     this.sender,
     this.attachments = const [],
+    this.meta = const {},
   });
 
   final String callId;
@@ -62,8 +63,20 @@ class ToolView {
   String? sender;
   List<JsonMap> attachments;
 
+  /// What the harness recorded on the call's result besides its output: how
+  /// long it took (`duration`), whether the permission system refused it
+  /// (`denied`), the report a `hand_in` call handed in (`report`).
+  JsonMap meta;
+
   bool get isRunning => status == 'in_progress' || status == 'pending';
   bool get isFailed => status == 'failed' || isError;
+
+  /// The permission system refused the call, so it never ran: what it says
+  /// is the reason, not output.
+  bool get isDenied => asBool(meta['denied']);
+
+  /// How long the call took, in seconds, when the harness timed it.
+  double? get duration => asDouble(meta['duration']);
 
   String get displayTitle {
     final name = title ?? tool;
@@ -519,7 +532,8 @@ class TranscriptState {
               ? 'failed'
               : 'completed'
           ..nodeId = tool.nodeId ?? nodeId
-          ..sender = sender ?? tool.sender;
+          ..sender = sender ?? tool.sender
+          ..meta = meta.isEmpty ? tool.meta : meta;
         if (asList(node['attachments']).isNotEmpty) {
           tool.attachments = asMapList(node['attachments']);
         }

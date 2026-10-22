@@ -241,12 +241,28 @@ void main() {
     expect(find.text('Design the merge queue'), findsOneWidget);
     await tester.tap(find.text('Design the merge queue'));
     await _settle(tester, 6);
+    // A conversation opens on its latest message...
     expect(
-      find.textContaining('The merge queue has three', findRichText: true),
+      find.textContaining('The module is clear', findRichText: true),
       findsOneWidget,
+    );
+    // ...and the rest of it is up the page.
+    await tester.dragUntilVisible(
+      find.textContaining('Give me the tour', findRichText: true),
+      find.byKey(const ValueKey('transcript-list')),
+      const Offset(0, 300),
     );
     expect(
       find.textContaining('Give me the tour', findRichText: true),
+      findsOneWidget,
+    );
+    await tester.dragUntilVisible(
+      find.textContaining('The merge queue has three', findRichText: true),
+      find.byKey(const ValueKey('transcript-list')),
+      const Offset(0, -300),
+    );
+    expect(
+      find.textContaining('The merge queue has three', findRichText: true),
       findsOneWidget,
     );
 

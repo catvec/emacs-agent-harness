@@ -1,6 +1,7 @@
 import '../acp/acp_message.dart';
 import 'project_roots.dart';
 import 'session.dart';
+import 'tool_display.dart';
 
 /// A task on the harness's task board.
 class HarnessTask {
@@ -261,23 +262,23 @@ class TaskReport {
   final bool missing;
   final DateTime? at;
 
-  /// Evidence items rendered as compact lines in the task sheet.
+  /// Evidence items rendered as compact lines in the task sheet.  The
+  /// harness writes each with a `kind` (what it resolved the call's item
+  /// to); a report from before that, or a call's own input, has the one
+  /// of `image`, `video`, `file`, `code`, `note`, `tool_call` it was asked
+  /// for: both read the same (`EvidenceItem`).
   List<String> get evidenceLines => [
-    for (final item in evidence)
-      switch (item.keys.toSet()) {
-        final keys when keys.contains('image') =>
-          'Screenshot: ${asStringOr(item['caption'], asStringOr(item['image'], 'image'))}',
-        final keys when keys.contains('video') =>
-          'Video: ${asStringOr(item['caption'], asStringOr(item['video'], 'video'))}',
-        final keys when keys.contains('file') =>
-          'File: ${asStringOr(item['caption'], asStringOr(item['file'], 'file'))}',
-        final keys when keys.contains('code') =>
-          'Code: ${asStringOr(item['caption'], 'snippet')}',
-        final keys when keys.contains('tool_call') =>
-          'Tool call: ${asStringOr(item['caption'], asStringOr(item['tool_call'], 'evidence'))}',
-        final keys when keys.contains('note') => asStringOr(item['note'], ''),
-        _ => '',
-      },
+    for (final wire in evidence)
+      if (EvidenceItem.fromWire(wire) case final EvidenceItem item)
+        switch (item.kind) {
+          'image' => 'Screenshot: ${item.label}',
+          'video' => 'Video: ${item.label}',
+          'file' => 'File: ${item.label}',
+          'code' =>
+            'Code: ${(item.caption ?? '').trim().isEmpty ? 'snippet' : item.caption!.trim()}',
+          'tool-call' => 'Tool call: ${item.label}',
+          _ => (item.text ?? '').trim(),
+        },
   ]..removeWhere((line) => line.trim().isEmpty);
 }
 

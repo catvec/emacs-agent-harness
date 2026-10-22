@@ -4,7 +4,7 @@
 //
 //   dart run tool/mock_harness_server.dart [--port 4277] [--standard]
 //                                          [--token hs1_SECRET]
-//                                          [--approve-after 3]
+//                                          [--approve-after 3] [--tools]
 //
 // The client connects to ws://127.0.0.1:PORT/acp.  With --token the server
 // behaves like the real harness's listener for other devices: an upgrade that
@@ -13,7 +13,10 @@
 // only `initialize` and `authenticate`.  `initialize` lists "Approve in
 // Emacs", and its `authenticate` is approved --approve-after seconds later
 // (the person at the harness's Emacs, here), with the code on the console;
-// the answer hands a client that keeps secrets that secret.
+// the answer hands a client that keeps secrets that secret.  With --tools
+// there is one more session, "Tidy the tool cards": a task's session that
+// has done some work, with its tool calls of every kind, a failed one, a
+// refused one and the `hand_in` call that handed the work in.
 
 import 'dart:async';
 import 'dart:io';
@@ -24,6 +27,7 @@ Future<void> main(List<String> arguments) async {
   var port = 4277;
   var enhanced = true;
   var approveAfter = 3;
+  var tools = false;
   String? token;
   for (var index = 0; index < arguments.length; index++) {
     final argument = arguments[index];
@@ -35,10 +39,13 @@ Future<void> main(List<String> arguments) async {
       approveAfter = int.parse(arguments[++index]);
     } else if (argument == '--standard') {
       enhanced = false;
+    } else if (argument == '--tools') {
+      tools = true;
     } else if (argument == '--help' || argument == '-h') {
       stdout.writeln(
         'usage: dart run tool/mock_harness_server.dart '
-        '[--port 4277] [--standard] [--token hs1_SECRET] [--approve-after 3]',
+        '[--port 4277] [--standard] [--token hs1_SECRET] [--approve-after 3] '
+        '[--tools]',
       );
       return;
     }
@@ -74,6 +81,7 @@ Future<void> main(List<String> arguments) async {
       issueSecret: token,
       knownSecrets: token == null ? null : {token},
     );
+    if (tools) harness.seedToolShowcase();
     harness.authenticated = token == null || presented;
     harness.writer = socket.add;
     socket.listen(

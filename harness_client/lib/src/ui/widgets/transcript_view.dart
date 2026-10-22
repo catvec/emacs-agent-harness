@@ -1,16 +1,15 @@
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 
 import '../../acp/acp_message.dart';
 import '../../models/transcript.dart';
 import '../adaptive/adaptive_widgets.dart';
-import '../adaptive/layout_widgets.dart';
 import '../adaptive/mark.dart';
 import '../adaptive/platform_style.dart';
 import '../format.dart';
 import '../theme/harness_theme.dart';
 import 'markdown_view.dart';
+import 'tool_card.dart';
 
 class TranscriptView extends StatefulWidget {
   const TranscriptView({
@@ -42,6 +41,9 @@ class _TranscriptViewState extends State<TranscriptView> {
     _scroll.addListener(_onScroll);
     _lastCount = widget.items.length;
     _lastLength = _totalLength();
+    // A conversation opens on its latest message, as one that is read as it
+    // goes does: not on its first, which a long one has far behind it.
+    if (widget.items.isNotEmpty) _jumpToBottom();
   }
 
   @override
@@ -85,7 +87,21 @@ class _TranscriptViewState extends State<TranscriptView> {
         );
       } else {
         _scroll.jumpTo(target);
+        _settleAtBottom();
       }
+    });
+  }
+
+  /// A list lays out what is near the screen, so how long it is stays a
+  /// guess until its end has been laid out: after a jump to the bottom, look
+  /// again, and go on to the end it really has, until it stops moving.
+  void _settleAtBottom([int again = 3]) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_scroll.hasClients) return;
+      final target = _scroll.position.maxScrollExtent;
+      if ((target - _scroll.position.pixels).abs() < 1) return;
+      _scroll.jumpTo(target);
+      if (again > 0) _settleAtBottom(again - 1);
     });
   }
 
@@ -141,6 +157,7 @@ class _TranscriptViewState extends State<TranscriptView> {
     return Stack(
       children: [
         ListView.builder(
+          key: const ValueKey('transcript-list'),
           controller: _scroll,
           physics: const AlwaysScrollableScrollPhysics(
             parent: BouncingScrollPhysics(),
@@ -249,7 +266,9 @@ class TranscriptEntry extends StatelessWidget {
         if (!showThinking) return const SizedBox.shrink();
         return _ThinkingBlock(item: item);
       case TranscriptKind.tool:
-        return _ToolCard(item: item);
+        final tool = item.tool;
+        if (tool == null) return const SizedBox.shrink();
+        return ToolCard(tool: tool);
       case TranscriptKind.hint:
         return _HintLine(text: item.text);
       case TranscriptKind.compaction:
@@ -560,247 +579,6 @@ class _ThinkingBlockState extends State<_ThinkingBlock> {
       ),
     );
   }
-}
-
-class _ToolCard extends StatefulWidget {
-  const _ToolCard({required this.item});
-  final TranscriptItem item;
-
-  @override
-  State<_ToolCard> createState() => _ToolCardState();
-}
-
-class _ToolCardState extends State<_ToolCard> {
-  late bool _open;
-  bool _inputOpen = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _open =
-        widget.item.tool?.isRunning == true ||
-        widget.item.tool?.isFailed == true;
-  }
-
-  @override
-  void didUpdateWidget(_ToolCard oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (widget.item.tool?.isFailed == true) _open = true;
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final tool = widget.item.tool;
-    if (tool == null) return const SizedBox.shrink();
-    final color = tool.isFailed
-        ? theme.colorScheme.error
-        : tool.isRunning
-        ? theme.colorScheme.primary
-        : HarnessColors.moss;
-    final inputText = prettyJson(tool.input);
-    final outputText = tool.output?.trim() ?? '';
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(18, 8, 18, 4),
-      child: Container(
-        decoration: BoxDecoration(
-          color: theme.colorScheme.surfaceContainerLow,
-          borderRadius: BorderRadius.circular(14),
-          border: Border.all(color: theme.colorScheme.outlineVariant),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            HarnessTap(
-              onTap: () => setState(() => _open = !_open),
-              borderRadius: BorderRadius.circular(14),
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(12, 10, 10, 10),
-                child: Row(
-                  children: [
-                    Container(
-                      width: 28,
-                      height: 28,
-                      decoration: BoxDecoration(
-                        color: color.withValues(alpha: 0.12),
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                      child: Icon(_toolIcon(tool.kind), size: 15, color: color),
-                    ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            tool.displayTitle,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: HarnessText.rowTitle(context)
-                                .copyWith(fontSize: 14),
-                          ),
-                          const SizedBox(height: 1),
-                          HarnessMetaLine(
-                            parts: [toolKindIconLabel(tool.kind), tool.sender],
-                            style: HarnessText.caption(context),
-                          ),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    // A call that went well needs no word: a check says it.
-                    // One that did not is said in words, and in red.
-                    if (tool.isRunning)
-                      HarnessActivity(radius: 7, color: color)
-                    else if (tool.isFailed)
-                      HarnessStatusLabel(
-                        label: 'Failed',
-                        color: color,
-                        icon: Icons.error_outline_rounded,
-                      )
-                    else
-                      Icon(
-                        Icons.check_rounded,
-                        size: 17,
-                        color: color.withValues(alpha: 0.85),
-                        semanticLabel: 'Done',
-                      ),
-                    const SizedBox(width: 4),
-                    Icon(
-                      _open
-                          ? Icons.expand_less_rounded
-                          : Icons.expand_more_rounded,
-                      size: 18,
-                      color: theme.colorScheme.onSurfaceVariant,
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            AnimatedCrossFade(
-              firstChild: const SizedBox(width: double.infinity),
-              secondChild: Padding(
-                padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    if (inputText.isNotEmpty) ...[
-                      Row(
-                        children: [
-                          Text('INPUT', style: HarnessText.label(context)),
-                          const Spacer(),
-                          HarnessTextButton(
-                            label: _inputOpen ? 'Less' : 'More',
-                            dense: true,
-                            onPressed: () =>
-                                setState(() => _inputOpen = !_inputOpen),
-                          ),
-                        ],
-                      ),
-                      Container(
-                        constraints: BoxConstraints(
-                          maxHeight: _inputOpen ? 320 : 96,
-                        ),
-                        width: double.infinity,
-                        padding: const EdgeInsets.all(9),
-                        decoration: BoxDecoration(
-                          color: theme.colorScheme.surfaceContainerHigh,
-                          borderRadius: BorderRadius.circular(9),
-                        ),
-                        child: SingleChildScrollView(
-                          child: SelectableText(
-                            inputText,
-                            style: HarnessText.mono(context),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(height: 8),
-                    ],
-                    if (outputText.isNotEmpty) ...[
-                      Row(
-                        children: [
-                          Text('OUTPUT', style: HarnessText.label(context)),
-                          const Spacer(),
-                          HarnessIconButton(
-                            icon: Icons.copy_rounded,
-                            label: 'Copy output',
-                            size: 15,
-                            onPressed: () => Clipboard.setData(
-                              ClipboardData(text: outputText),
-                            ),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 4),
-                      Container(
-                        constraints: const BoxConstraints(maxHeight: 260),
-                        width: double.infinity,
-                        padding: const EdgeInsets.all(9),
-                        decoration: BoxDecoration(
-                          color: tool.isFailed
-                              ? color.withValues(alpha: 0.07)
-                              : theme.colorScheme.surfaceContainerHigh,
-                          borderRadius: BorderRadius.circular(9),
-                          border: tool.isFailed
-                              ? Border.all(color: color.withValues(alpha: 0.25))
-                              : null,
-                        ),
-                        child: SingleChildScrollView(
-                          child: SelectableText(
-                            outputText,
-                            style: HarnessText.mono(context).copyWith(
-                              color: tool.isFailed
-                                  ? color
-                                  : theme.colorScheme.onSurface,
-                            ),
-                          ),
-                        ),
-                      ),
-                    ],
-                    if (tool.attachments.isNotEmpty) ...[
-                      const SizedBox(height: 8),
-                      Wrap(
-                        spacing: 6,
-                        runSpacing: 6,
-                        children: [
-                          for (final attachment in tool.attachments)
-                            HarnessStatusPill(
-                              label: asStringOr(
-                                attachment['name'] ?? attachment['path'],
-                                'attachment',
-                              ),
-                              color: theme.colorScheme.primary,
-                              icon: Icons.attach_file_rounded,
-                            ),
-                        ],
-                      ),
-                    ],
-                  ],
-                ),
-              ),
-              crossFadeState: _open
-                  ? CrossFadeState.showSecond
-                  : CrossFadeState.showFirst,
-              duration: const Duration(milliseconds: 180),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  IconData _toolIcon(String? kind) => switch (kind) {
-    'read' => Icons.description_outlined,
-    'edit' => Icons.edit_outlined,
-    'delete' => Icons.delete_outline_rounded,
-    'move' => Icons.drive_file_move_outline,
-    'search' => Icons.search_rounded,
-    'execute' => Icons.terminal_rounded,
-    'fetch' => Icons.public_rounded,
-    'think' => Icons.psychology_outlined,
-    'meta' => Icons.shield_outlined,
-    _ => Icons.build_outlined,
-  };
 }
 
 class _HintLine extends StatelessWidget {

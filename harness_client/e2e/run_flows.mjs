@@ -138,9 +138,9 @@ async function run() {
     await page.getByText('PERMISSION', { exact: true }).waitFor({ timeout: 15000 });
     await shot(page, 'ios-permission');
     await clickButton(page, 'Allow');
-    await page.waitForTimeout(1400);
-    await shot(page, 'ios-tool-result');
-    await page.waitForTimeout(1200);
+    // What the call that ran gave back is drawn by run_tools.mjs
+    // (`ios-tool-result`), which opens it.
+    await page.waitForTimeout(2600);
 
     await send(page, 'Ask me a question about layouts');
     await page.getByText('Which layout should the tablet session view use?', { exact: true }).waitFor({ timeout: 15000 });

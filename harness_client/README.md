@@ -33,7 +33,18 @@ time it opens. It asks again only when the harness does.
 - **Streams a real conversation.** Markdown answers, streamed thoughts, tool
   calls with their input and output, plans, context-compaction notes, hints and
   the activity of the running turn (waiting, thinking, writing, preparing a
-  tool call, running tools, compacting).
+  tool call, running tools, compacting). A conversation opens on its latest
+  message.
+- **Reads a tool call, not its JSON.** A call is a line until it is opened;
+  opened, it shows the command, the path, the text an edit takes out and puts
+  in as what they are, and what the call said, a screenful at a time, with
+  *Show all* and a page of its own for the whole of it. A call that failed, or
+  that the permission system refused, says so under its title. The call that
+  hands a task's work in shows its report. See [Tool calls](#tool-calls).
+
+  | A command | The report of a hand-in call |
+  |---|---|
+  | ![A bash call opened: the command, and its output cut to a screenful](screenshots/android-tool-call.png) | ![The hand-in call opened: the problem, the summary, how to reproduce, the evidence](screenshots/android-hand-in-phone.png) |
 - **Answers the agent.** Standard ACP permission requests become an inline
   decision card with *Allow*, *Deny*, *Allow for session*, *Always allow* and
   *Always deny*; a path glob can be edited before a lasting answer is given.
@@ -462,8 +473,12 @@ e2e/                  Playwright mobile-emulated flows and screenshots
   a connection ended (`AcpClient.closeReason`) in words the banner can show.
   The harness answers pings with pongs, as RFC 6455 asks.
 - `TranscriptState` turns both standard chunks and full harness nodes into one
-  list, keeping a tool call and its result together, preferring a final node's
-  content over streamed text, and grouping chunks by `_harness.nodeId`.
+  list, keeping a tool call and its result together (with the `meta` of its
+  result: how long it took, whether it was refused, the report a hand-in call
+  handed in), preferring a final node's content over streamed text, and
+  grouping chunks by `_harness.nodeId`. `models/tool_display.dart` is what a
+  person needs to read a call, in plain Dart: clean text, the fields of an
+  input, durations, evidence and `HandInReport`.
 - `HarnessStyle` is the native-feel switch. Widgets choose Material or
   Cupertino controls from it; it follows the real platform and can be
   previewed in Settings or with `?platform=cupertino` on the web.
@@ -481,7 +496,7 @@ pieces in `lib/src/ui/adaptive/layout_widgets.dart`.
 | What a page is about | A **scope bar** under the header: the project (a choice, when there is more than one to choose from) and a short fact at the far end (`Updated just now`). The project is said there once, not on every row. |
 | A way to look at a list | A **tab strip**: one row, starting on the page gutter, a count after each label, a rule under the one that is shown. It scrolls; it never wraps into a block of pills. |
 | A fact about a thing | Text, joined by a middle dot (`HarnessMetaLine`); on a row, the first line has the title and the time at its edge, the second the facts and the cost at its edge, on shared baselines. |
-| A state | A dot and a word (`HarnessStatusLabel`). A tool call that went well is a check mark; one that failed says so, in red. |
+| A state | A dot and a word (`HarnessStatusLabel`). A tool call that went well is a check mark; one that failed says so, in red, one the permission system refused says *Denied*, in amber. |
 | A message to the person | A **notice**, in the flow of the page under its header (`HarnessNotice`): a session that needs an answer, a failed action, a lost connection. |
 | How the next message is handled | Under the message field: the model and the permission mode (a choice each), then how full the context is and what the conversation has cost. |
 | A choice among a few things | A pill, in a sheet (`HarnessPill`), and only there. |
@@ -494,14 +509,43 @@ page of text and cards is no wider than 840 points. `test/layout_test.dart`
 states these rules as geometry: where a notice is, which edges line up, that
 nothing overflows on a 320-point phone, and where there are no pills.
 
+## Tool calls
+
+A call in the transcript is a card: an icon for what kind of call it is, its
+title (`Bash: flutter test`, `Edit file: lib/a.dart`), a line of facts under
+it (`Command · 17 s · 35 lines`: how long a slow call took and how much a long
+one said) and how it ended. Nothing of what is in a card is built until it is
+opened (`ToolCard`, `lib/src/ui/widgets/tool_card.dart`).
+
+| What | How it is shown |
+|---|---|
+| How it ended | Running: a spinner. Went well: a check. Failed: *Failed*, in red, and the line of its output that says what went wrong under its title. Refused by the permission system: *Denied*, in amber, with the reason; it never ran, so it is not a failure. A failed call can be closed like any other. |
+| What it was given | The fields of its input, not JSON (`toolFields`): a command after its prompt, a path or a flag on one line, the text an edit takes out in red and puts in in green, a file's content as it is, prose (a summary, a prompt) as markdown. Line breaks are line breaks, not `\n` in quotes. |
+| What it said | Selectable text, its escape sequences and progress-bar rewrites taken out (`cleanToolText`), with how many lines it is. Long text is cut to a screenful, in the card and not in a box that scrolls inside the page, with *Show all 35 lines* / *Show less*. *(no output)* when it said nothing, *Waiting for the result…* while it runs. Both input and output can be copied. |
+| All of it | *Open full view* (offered when something is cut, and on a report) opens the call on a page of its own (`ToolDetailScreen`): the whole title, every field, the output built a screenful at a time, so that a result of any length opens at once and is copied whole. |
+| The hand-in call | Its report, not its input (`HandInReport`): the problem, the summary as markdown, how to reproduce it, and the evidence, one line each. A note, some code or a call the report quotes opens to what it holds; a picture or a file is on the harness's machine, so it is named, not drawn. *Cannot continue* and *no merge* are said. A hand-in the harness refused shows its error and what was asked for. |
+| Where it is | A card that is opened is brought into view: the last call of a task, the one that hands its work in, grows below the screen, so the page follows it (a card taller than the screen is shown from its top). A card that was opened stays open while the page is scrolled past it. |
+
+The harness writes what the client needs on the call's result node: its
+`output`, `is-error`, and in its `meta` the `duration`, `denied` (the
+permission system refused the call) and, for `hand_in`, the `report` with its
+evidence resolved. A call replayed from `session/nodes` and one that arrives
+as `tool_call` / `tool_call_update` / `_harness/node` end up the same
+`ToolView`.
+
+| | | |
+|---|---|---|
+| ![A task's session: the calls, one that failed and one that was refused](screenshots/android-tool-calls.png) | ![An edit: the text it took out and the text it put in](screenshots/android-tool-edit.png) | ![A result on a page of its own](screenshots/android-tool-output.png) |
+
 ## Testing
 
 ```sh
 flutter analyze                    # no issues
-flutter test                       # 172 tests: ACP, capabilities, reducer,
+flutter test                       # 348 tests: ACP, capabilities, reducer,
                                    # connection parsing, boot, widget flows,
-                                   # layout, reconnecting, going back in on launch,
-                                   # saved settings, WebSocket pings
+                                   # layout, tool calls, reconnecting, going
+                                   # back in on launch, saved settings,
+                                   # WebSocket pings
 python3 tool/test_qr_tools.py      # QR encoder against qrencode, the phone
                                    # installer (pairing, install, build
                                    # freshness, pub cache repair) with a fake
@@ -517,7 +561,19 @@ The widget tests drive the real `AcpClient` against an in-memory ACP server
 - sessions, search and project filter (worktrees fold into their project)
 - the new task sheet's project row against a harness that lists worktrees and
   scratch directories as projects
-- transcript replay, streaming, tool cards, thought blocks and plan
+- transcript replay, streaming, thought blocks and plan
+- tool calls (`test/tool_display_test.dart`, `test/tool_card_test.dart`,
+  `test/tool_flow_test.dart`): a call is closed and builds nothing of its
+  body until it is opened; its input is the text it was, never `\n` in quotes;
+  a long result is cut to a screenful, shown whole on request and read to its
+  last line on a page of its own; a failed call says so, why, and can be
+  closed; a refused one is *Denied*, not *Failed*; the call that hands the
+  work in shows its report, its quoted calls open, and it is seen when opened
+  although it is the last thing below the screen; an opened call stays open
+  when the page is scrolled past it; a conversation opens on its latest
+  message; nothing overflows at 320 points or at one and a half times the
+  text; and the whole path from the harness's nodes (`call-id`, `is-error`, a
+  result's `meta`) to the page
 - permission request and allow, question with a diagram and send
 - creating a session and opening the new-task sheet / submitting a task, with
   pictures (`test/new_task_images_test.dart`: attached, removed, kept in the
@@ -575,7 +631,8 @@ SKIP_BUILD=1 ./e2e/run.sh       # or ./e2e/run.sh to build first
 ```
 
 `e2e/run.sh` starts the preview harness (`tool/mock_harness_server.dart`, one
-with extensions and one plain ACP), serves the E2E web build, and drives
+with extensions, one plain ACP and one, `--tools`, whose session has done some
+work for `e2e/run_tools.mjs`), serves the E2E web build, and drives
 Chromium with iPhone 13 (`390×844 @3x`) and Pixel 7 (`412×915 @2.625x`) device
 metrics, plus a 1280×900 macOS layout. It walks connect, sessions, new session,
 chat, streaming, permission, question with diagrams, the task board, new task,
