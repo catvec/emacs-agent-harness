@@ -1391,6 +1391,106 @@ whole frame, and e says why it cannot go to the box."
             (call-interactively #'harness-ui-patch-review-ediff-quit)))
         (should (equal layout (harness-ui-patch-review-test--layout)))))))
 
+(defun harness-ui-patch-review-test--only-ediff-and-box (review popout)
+  "Check that REVIEW's Ediff has the selected frame but for the report POPOUT.
+The windows are the control panel and the two versions the Ediff
+compares, and the report's own side window, once; that one alone is the
+box Ediff leaves be (`no-delete-other-windows')."
+  (let* ((ediff (harness-ui-patch-review--ediff-buffers review))
+         (windows (window-list nil 'nomini))
+         (report (cl-remove-if-not (lambda (w) (eq popout (window-buffer w))) windows)))
+    (should (= 1 (length report)))
+    (should (eq 'bottom (window-parameter (car report) 'window-side)))
+    (should (window-parameter (car report) 'no-delete-other-windows))
+    (should (= 4 (length windows)))
+    (dolist (buffer ediff)
+      (should (get-buffer-window buffer)))
+    (dolist (window (remq (car report) windows))
+      (should (memq (window-buffer window) ediff))
+      (should-not (window-parameter window 'no-delete-other-windows)))))
+
+(ert-deftest harness-ui-patch-review-next-file-opens-no-second-report ()
+  "N and P, going on from file to file, show the report in its box alone.
+Doom Emacs sets back, at the end of an Ediff (`ediff-quit-hook'), the
+window configuration it saved before Ediff began
+\(`ediff-before-setup-hook'), which undoes what the end of the Ediff under
+way does to the windows.  The configuration `save-window-excursion' sets
+back after that has windows again for the buffers that were killed, and
+Emacs shows in them the first buffer of its list but the current one: the
+report's, used last after the board's.  The first of those windows was taken
+for the report's box and kept by Ediff, so every file after it had the
+report a second time, in the right split.  q gives the frame back as it
+was."
+  (harness-ui-patch-review-test-with-task
+    (let* ((popout (harness-ui-patch-review-test--changes board id))
+           (review (gethash id harness-ui-patch-review--reviews))
+           (layout (harness-ui-patch-review-test--layout))
+           (saved nil)
+           (save (lambda () (setq saved (current-window-configuration))))
+           (restore (lambda () (when (window-configuration-p saved) (set-window-configuration saved))))
+           ;; Emacs shows `other-buffer' of the current buffer in a window it re-creates for
+           ;; a killed buffer: the first of the buffer list but that one.  Have it the
+           ;; report, next to the board in the main window, as the review leaves them.
+           (report-first (lambda (start &rest args)
+                           (dolist (buffer (buffer-list))
+                             (unless (eq buffer popout) (bury-buffer buffer)))
+                           (with-current-buffer board
+                             (apply start args)))))
+      (require 'ediff)
+      (add-hook 'ediff-before-setup-hook save)
+      (add-hook 'ediff-quit-hook restore t)
+      (advice-add 'harness-ui-patch-review--start-ediff :around report-first)
+      (unwind-protect
+          (progn
+            (harness-ui-patch-review-ediff review 0)
+            (let ((control (harness-ui-patch-review-test--control review 0)))
+              (harness-ui-patch-review-test--only-ediff-and-box review popout)
+              ;; N twice, then P: each file in Ediff, the report only in its box.
+              (dolist (step '((1 . harness-ui-patch-review-ediff-next-file)
+                              (2 . harness-ui-patch-review-ediff-next-file)
+                              (1 . harness-ui-patch-review-ediff-previous-file)))
+                (with-current-buffer control (call-interactively (cdr step)))
+                (setq control (harness-ui-patch-review-test--control review (car step)))
+                (harness-ui-patch-review-test--only-ediff-and-box review popout))
+              ;; The box is the report's: the same buffer, one window.
+              (should (eq popout (harness-ui-popout-buffer (list 'report id))))
+              (with-current-buffer control (call-interactively #'harness-ui-patch-review-ediff-quit)))
+            (should-not (harness-ui-patch-review--r-ediff review))
+            (should (equal layout (harness-ui-patch-review-test--layout)))
+            (should (= 1 (length (get-buffer-window-list popout nil (selected-frame)))))
+            (should (eq popout (window-buffer (selected-window)))))
+        (advice-remove 'harness-ui-patch-review--start-ediff report-first)
+        (remove-hook 'ediff-before-setup-hook save)
+        (remove-hook 'ediff-quit-hook restore)))))
+
+(ert-deftest harness-ui-patch-review-keeps-the-reports-own-window-for-its-box ()
+  "The box Ediff leaves be is the report's own side window.  Another window
+showing the report, one a window configuration put back has, is not: it is not
+kept, and one that carries the mark from earlier loses it, so that Ediff's
+layout takes it like any other window."
+  (harness-ui-patch-review-test-with-task
+    (let* ((popout (harness-ui-patch-review-test--changes board id))
+           (review (gethash id harness-ui-patch-review--reviews))
+           (box (get-buffer-window popout t))
+           ;; Before the box in the order of the frame's windows, as a stray in
+           ;; the main window's place is.
+           (stray (split-window (frame-first-window) nil 'right)))
+      (should (eq 'bottom (window-parameter box 'window-side)))
+      (set-window-buffer stray popout)
+      (set-window-parameter stray 'no-delete-other-windows t)
+      ;; Where the review is made, in the main window: the stray comes first.
+      (select-window (frame-first-window))
+      (should (eq stray (get-buffer-window popout (selected-frame))))
+      (should (eq box (harness-ui-patch-review--keep-box review)))
+      (should (window-parameter box 'no-delete-other-windows))
+      (should-not (window-parameter stray 'no-delete-other-windows))
+      ;; Ediff then takes the frame but for the box: the report shows there alone.
+      (harness-ui-patch-review-ediff review 0)
+      (harness-ui-patch-review-test--control review 0)
+      (harness-ui-patch-review-test--only-ediff-and-box review popout)
+      (with-current-buffer (harness-ui-patch-review-test--control review 0)
+        (call-interactively #'harness-ui-patch-review-ediff-quit)))))
+
 (ert-deftest harness-ui-patch-review-feedback-sent-ends-the-ediff ()
   "Sending the feedback while Ediff shows -- the box beside it -- ends the
 Ediff and gives the frame back; a task changing otherwise leaves it be."

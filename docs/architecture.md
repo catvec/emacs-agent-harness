@@ -13006,7 +13006,18 @@ the frame's height).  Before Ediff lays the frame out,
 Ediff's own call too -- honours, and limits the popout: its buffer-local
 height limit (`harness-ui-popout--max-height`) becomes a function
 returning that fraction, the old value kept for q, so that drawing the
-report again does not grow it back to its own share.  Ediff's plain
+report again does not grow it back to its own share.  The window is the
+side window the report shows in (`harness-ui-patch-review--box-window`),
+never another window that shows the same buffer: N and P end the Ediff
+under way within `save-window-excursion`, and when a hook of
+`ediff-quit-hook` sets another window configuration back meanwhile --
+Doom Emacs restores the one it saved before Ediff began -- the
+configuration that returns has windows again for the buffers that were
+killed, each showing the first buffer of the buffer list but the current
+one, which is the report's.  Taking such a window for the box kept it
+through Ediff's own `delete-other-windows`, and every file after had one
+more report in the right split; now it is no box, loses the mark if it
+has it, and Ediff takes it like any other window.  Ediff's plain
 setup puts the versions and the control panel in the main window above
 the side window (`display-buffer-in-direction` bottom is the main
 window's bottom).  The window's point is the box's end, which the

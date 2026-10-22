@@ -1831,20 +1831,42 @@ it."
     (ignore-errors (fit-window-to-buffer window lines harness-ui-popout-min-height))
     (harness-ui-patch-review--scroll-box window)))
 
+(defun harness-ui-patch-review--box-window (popout &optional frames)
+  "Return the window of the report POPOUT that is the box's, or nil.
+It is looked for in the selected frame, or in FRAMES, which is the
+ALL-FRAMES of `get-buffer-window-list': t for every frame.  That is the
+side window the report shows in (`harness-ui-popout--display'), its own.
+A window of any other kind that shows the same buffer is not: a window
+configuration set back puts the buffer that comes first among the
+others in every window it re-creates for one that was killed, and the
+end of an Ediff within `save-window-excursion'
+\(`harness-ui-patch-review--end-ediff') sets one back -- twice, under a
+hook of `ediff-quit-hook' that restores the configuration saved before
+Ediff.  The report is not in those windows to be read, and the box is
+not to be taken for one."
+  (cl-find-if (lambda (window) (window-parameter window 'window-side))
+              (get-buffer-window-list popout nil frames)))
+
 (defun harness-ui-patch-review--keep-box (review)
   "Keep REVIEW's report in the selected frame, for Ediff to leave be.
-Its window is returned: the report's own at the bottom of the frame, or
-one it is shown in now when it was closed; either way it is not one
-Ediff takes (`no-delete-other-windows'), is limited to
+Its window is returned: the report's own at the bottom of the frame
+\(`harness-ui-patch-review--box-window'), or one it is shown in now when
+it was closed; either way it is not one Ediff takes
+\(`no-delete-other-windows'), is limited to
 `harness-ui-patch-review-ediff-box-height' of the frame, and shows the
-end of the feedback box.  Nil when there is no report open with a box,
-or the option is nil."
+end of the feedback box.  The box alone is kept: another window showing
+the report is Ediff's like any other, and loses the mark if it has it
+from earlier.  Nil when there is no report open with a box, or the
+option is nil."
   (let ((popout (harness-ui-patch-review--r-popout review)))
     (when (and harness-ui-patch-review-ediff-box-height (buffer-live-p popout)
                (with-current-buffer popout (harness-compose-live-p)))
-      (let ((window (or (get-buffer-window popout (selected-frame))
+      (let ((window (or (harness-ui-patch-review--box-window popout)
                         (display-buffer-in-side-window popout harness-ui-popout-window-parameters))))
         (when (window-live-p window)
+          (dolist (other (get-buffer-window-list popout nil (window-frame window)))
+            (unless (eq other window)
+              (set-window-parameter other 'no-delete-other-windows nil)))
           (harness-ui-patch-review--limit-box popout)
           (set-window-parameter window 'no-delete-other-windows t)
           (harness-ui-patch-review--fit-box window)
@@ -2209,7 +2231,9 @@ GOTO, (SIDE . LINE), that line is in sight in the version of SIDE."
       ;; In any frame: this runs once git has answered, when the frame
       ;; selected need not be the report's.
       (let* ((popout (harness-ui-patch-review--r-popout review))
-             (window (and (buffer-live-p popout) (get-buffer-window popout t))))
+             (window (and (buffer-live-p popout)
+                          (or (harness-ui-patch-review--box-window popout t)
+                              (get-buffer-window popout t)))))
         (when window
           (select-window window)
           (setq start (with-current-buffer popout (line-number-at-pos (window-start window)))))))
