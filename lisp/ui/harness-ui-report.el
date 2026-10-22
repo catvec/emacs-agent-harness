@@ -60,6 +60,15 @@
 ;; box.  The review module puts the banner a task's session shows there,
 ;; [Verify] and [Send back], with the box taking the feedback, so work
 ;; can be accepted from its report.
+;;
+;; What cannot be drawn does not take the rest down.  A piece of evidence
+;; that fails says so in a line and the others draw; a report that fails
+;; says so and its panels draw; a panel that fails says so and the panels
+;; after it draw -- the review banner's [Verify] and [Send back] come
+;; after the changes, and the work must be acceptable whether or not they
+;; could be read.  The line is short, whatever the error carries
+;; (`harness-error-short-message'): an `args-out-of-range' names the
+;; record it was about whole, and a review holds the task's hand-in.
 
 ;;; Code:
 
@@ -559,44 +568,64 @@ A report recorded for a round that handed none in says so instead
   (setq harness-ui-report--task task)
   (harness-ui-report--insert-report (harness-ui-report--report task) task))
 
+(defun harness-ui-report--insert-failed (what err)
+  "Insert the line that says WHAT could not be drawn, ERR being why.
+Short, whatever ERR carries: an error may hold the very structure it
+was about, a review with the files of a branch and the task's whole
+hand-in in it, and a report that printed that would be one nobody can
+read.  The full report of it is the log's."
+  (harness-log 'warn "report: %s could not be drawn: %s" what (harness-error-short-message err 600))
+  (unless (bolp) (insert "\n"))
+  (insert (propertize (format "%s could not be drawn: %s\n" what (harness-error-short-message err 200))
+                      'face 'harness-tool-error-face)))
+
 (defun harness-ui-report--insert-report (report task)
   "Insert REPORT, TASK's report, as `harness-ui-report--insert' does.
 REPORT is what the task handed in (`:summary', `:problem', `:evidence'),
-or one recorded for a round that handed none in (`:missing')."
+or one recorded for a round that handed none in (`:missing').  What
+cannot be drawn says so in a line and the report goes on: a piece of
+evidence that cannot be drawn leaves the others, and a report that
+cannot be drawn leaves the panels after it, which hold what is done
+with the work -- [Verify] and [Send back]."
   (let ((evidence (append (and report (plist-get report :evidence)) nil)))
-    (cond
-     ((not report)
-      (insert (propertize "This task has not handed a report in.\n" 'face 'harness-dim-face)))
-     ((harness-ui-report-missing-p report)
-      (harness-ui-report--insert-missing report task))
-     (t
-      ;; What must be fixed, first: with many tasks the title alone does
-      ;; not say.  A report from before this field has none and starts
-      ;; with the summary as it always did.
-      (when-let* ((problem (harness-ui-report--text (plist-get report :problem))))
-        (insert (propertize "Problem" 'face 'harness-label-face) "\n\n")
-        (harness-ui-report--insert-markdown problem)
-        (insert "\n"))
-      (when-let* ((reproduction (harness-ui-report--text (plist-get report :reproduction))))
-        (insert (propertize "Reproduction" 'face 'harness-label-face) "\n\n")
-        (harness-ui-report--insert-markdown reproduction)
-        (insert "\n"))
-      (insert (propertize "Handed in" 'face 'harness-label-face)
-              (if-let* ((at (plist-get report :at)))
-                  (propertize (format "  %s" (format-time-string "%Y-%m-%d %H:%M" at)) 'face 'harness-dim-face)
-                "")
-              "\n\n")
-      (let ((summary (plist-get report :summary)))
-        (when (and (stringp summary) (not (string-empty-p summary)))
-          (harness-ui-report--insert-message summary)))
-      (insert "\n" (propertize (format "Evidence (%d)\n" (length evidence)) 'face 'harness-label-face) "\n")
-      (if evidence
-          ;; A blank line between pieces of evidence, so each reads as one
-          ;; with its caption; none after the last.
-          (cl-loop for item in evidence for first = t then nil
-                   do (unless first (insert "\n"))
-                   (harness-ui-report--insert-item item task))
-        (insert (propertize "  none\n" 'face 'harness-dim-face)))))
+    (condition-case err
+        (cond
+         ((not report)
+          (insert (propertize "This task has not handed a report in.\n" 'face 'harness-dim-face)))
+         ((harness-ui-report-missing-p report)
+          (harness-ui-report--insert-missing report task))
+         (t
+          ;; What must be fixed, first: with many tasks the title alone does
+          ;; not say.  A report from before this field has none and starts
+          ;; with the summary as it always did.
+          (when-let* ((problem (harness-ui-report--text (plist-get report :problem))))
+            (insert (propertize "Problem" 'face 'harness-label-face) "\n\n")
+            (harness-ui-report--insert-markdown problem)
+            (insert "\n"))
+          (when-let* ((reproduction (harness-ui-report--text (plist-get report :reproduction))))
+            (insert (propertize "Reproduction" 'face 'harness-label-face) "\n\n")
+            (harness-ui-report--insert-markdown reproduction)
+            (insert "\n"))
+          (insert (propertize "Handed in" 'face 'harness-label-face)
+                  (if-let* ((at (plist-get report :at)))
+                      (propertize (format "  %s" (format-time-string "%Y-%m-%d %H:%M" at)) 'face 'harness-dim-face)
+                    "")
+                  "\n\n")
+          (let ((summary (plist-get report :summary)))
+            (when (and (stringp summary) (not (string-empty-p summary)))
+              (harness-ui-report--insert-message summary)))
+          (insert "\n" (propertize (format "Evidence (%d)\n" (length evidence)) 'face 'harness-label-face) "\n")
+          (if evidence
+              ;; A blank line between pieces of evidence, so each reads as one
+              ;; with its caption; none after the last.
+              (cl-loop for item in evidence for first = t then nil for number from 1
+                       do (unless first (insert "\n"))
+                       (condition-case item-err
+                           (harness-ui-report--insert-item item task)
+                         (error (harness-ui-report--insert-failed
+                                 (format "Evidence %d" number) item-err))))
+            (insert (propertize "  none\n" 'face 'harness-dim-face)))))
+      (error (harness-ui-report--insert-failed "The report" err)))
     ;; A report drawn among a view's own text -- the review banner shows the
     ;; report in the session -- already has its panel there, so the panels
     ;; are the popout's only.
@@ -607,13 +636,19 @@ or one recorded for a round that handed none in (`:missing')."
   "Insert what `harness-ui-report-panel-functions' return for TASK, in order.
 The popout's panels: the hooks are the popout's host, and a report drawn
 as a string among a view's own text (`harness-ui-report-string') leaves
-them out, the view drawing what it wants of them itself."
+them out, the view drawing what it wants of them itself.  A panel that
+fails says so in a line, and the panels after it are drawn all the same:
+the review banner's [Verify] and [Send back] must not go because the
+changes above them could not be read."
   (run-hook-wrapped 'harness-ui-report-panel-functions
                     (lambda (fn)
-                      (when-let* ((text (funcall fn task)))
-                        (unless (string-empty-p text)
-                          (unless (bolp) (insert "\n"))
-                          (insert "\n" text)))
+                      (condition-case err
+                          (when-let* ((text (funcall fn task)))
+                            (unless (string-empty-p text)
+                              (unless (bolp) (insert "\n"))
+                              (insert "\n" text)))
+                        (error (insert "\n")
+                               (harness-ui-report--insert-failed "A part of this report" err)))
                       nil)))
 
 (defun harness-ui-report--compose (task)
@@ -734,18 +769,24 @@ On `harness-chat-tool-body-functions', so an expanded hand_in call in the
 transcript shows the report the review shows, after it left review too.
 Nil for any other call, for a call still running, and for a hand_in
 whose report is not known: the chat then shows the call's input and
-output as usual."
+output as usual.  So it does for one that cannot be drawn, with the
+reason in the log: a block that fails to draw would take the whole
+history of the session with it."
   (when result
-    (let ((node (harness-chat-block-node block)))
-      (when (and (equal (harness-chat--str (plist-get node :kind)) "tool-call")
-                 (equal (harness-chat--str (plist-get node :tool)) "hand_in"))
-        (when-let* ((report (or (plist-get (plist-get result :meta) :report)
-                                (harness-ui-report--from-input (plist-get node :input)))))
-          (let ((task (or (and (fboundp 'harness-ui-review--task)
-                               (harness-ui-review--task harness-ui-session-id))
-                          (list :id (plist-get (plist-get result :meta) :task-id)
-                                :session harness-ui-session-id))))
-            (harness-ui-report--string-for report task)))))))
+    (condition-case err
+        (let ((node (harness-chat-block-node block)))
+          (when (and (equal (harness-chat--str (plist-get node :kind)) "tool-call")
+                     (equal (harness-chat--str (plist-get node :tool)) "hand_in"))
+            (when-let* ((report (or (plist-get (plist-get result :meta) :report)
+                                    (harness-ui-report--from-input (plist-get node :input)))))
+              (let ((task (or (and (fboundp 'harness-ui-review--task)
+                                   (harness-ui-review--task harness-ui-session-id))
+                              (list :id (plist-get (plist-get result :meta) :task-id)
+                                    :session harness-ui-session-id))))
+                (harness-ui-report--string-for report task)))))
+      (error (harness-log 'warn "report: a hand_in call could not be drawn as the report: %s"
+                          (harness-error-short-message err 600))
+             nil))))
 
 ;;;; Module
 

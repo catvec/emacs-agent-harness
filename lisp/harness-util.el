@@ -1498,9 +1498,14 @@ history and in the tree.")
   "Return error DATA with long strings cut to LIMIT characters.
 Lists and vectors are walked, so a string nested in a plist an error
 carries is cut too.  DEPTH bounds the walk; deep data is left as a
-placeholder rather than walked at all."
+placeholder rather than walked at all.  A record -- a `cl-defstruct'
+instance, which an `args-out-of-range' or a `wrong-type-argument' names
+whole -- is no text to print: it becomes the name of its type, as
+\"#<review>\", for a record may hold a task's report, a branch's diff,
+the whole of a session."
   (cond ((> (or depth 0) 4) (if (stringp data) (harness-error--cut data limit) "…"))
         ((stringp data) (harness-error--cut data limit))
+        ((recordp data) (format "#<%s>" (type-of data)))
         ((consp data)
          (let ((items nil) (rest data) (n 0))
            (while (and (consp rest) (< n 20))
@@ -1535,7 +1540,11 @@ body -- a `json-value-p' failure, say -- then reads in one short line in
                      (nth 2 err))
                     ((and (consp err) (symbolp (car err)))
                      (condition-case nil
-                         (error-message-string (cons (car err) (harness-error--short-data (cdr err) limit)))
+                         ;; What is not cut above is printed bounded: data of a
+                         ;; kind the walk does not know would print whole.
+                         (let ((print-length 20) (print-level 6))
+                           (error-message-string
+                            (cons (car err) (harness-error--short-data (cdr err) limit))))
                        (error (harness-error--cut (let ((print-length 20) (print-level 6))
                                                     (format "%S" err))
                                                   limit))))

@@ -2723,25 +2723,198 @@ their own."
         (should (string-match-p "●1 ✎1" (harness-ui-patch-review-test--text tree)))
         (with-current-buffer control (call-interactively #'harness-ui-patch-review-ediff-quit))))))
 
-(ert-deftest harness-ui-patch-review-drops-reviews-an-older-struct-made ()
-  "A reload keeps the reviews, but a struct that gained a slot reads the ones of its
-older definition wrong: they are dropped when the layout changed, kept when it
-did not, and nothing is dropped the first time the module starts."
+(defun harness-ui-patch-review-test--older-review (review)
+  "Return a review as a version before slots were added made it.
+A record with fewer slots than the struct has now, and one that no
+definition of this layout made: the accessors read it wrong, or past its
+end -- `args-out-of-range' -- as they did the one a reload left behind.
+Its slots are those of REVIEW, as far as it goes."
+  (apply #'record 'harness-ui-patch-review--review
+         (cl-loop for i from 1 to 23 collect (aref review i))))
+
+(defun harness-ui-patch-review-test--big-record ()
+  "Return a record that holds a lot, as the review of a task does."
+  (record 'harness-ui-patch-review-test--review
+          (make-string 5000 ?x) (list :report (make-string 5000 ?y))))
+
+(ert-deftest harness-ui-patch-review-drops-the-reviews-an-older-layout-made ()
+  "A reload keeps the reviews, but a struct that gained a slot reads the instance
+of its older definition wrong: one slot for another, or past its end.  A review
+remembers the layout of its structs when it was made, and a load drops every
+review made under another one -- one made by a version that did not remember
+too, which is the first update to a version that does -- and keeps the others.
+A stale review that gets in later is dropped when it is asked for."
   (let ((harness-ui-patch-review--reviews (make-hash-table :test 'equal))
-        (harness-ui-patch-review--layout nil)
-        (layout (mapcar #'car (cdr (cl-struct-slot-info 'harness-ui-patch-review--review)))))
-    (puthash "t-1" 'first harness-ui-patch-review--reviews)
-    (harness-ui-patch-review--drop-stale-reviews)
-    (should (= 1 (hash-table-count harness-ui-patch-review--reviews)))
-    (should (equal layout harness-ui-patch-review--layout))
-    ;; The same layout again: kept.
-    (harness-ui-patch-review--drop-stale-reviews)
-    (should (= 1 (hash-table-count harness-ui-patch-review--reviews)))
-    ;; Another layout, an older definition's: dropped.
-    (setq harness-ui-patch-review--layout (cdr layout))
-    (harness-ui-patch-review--drop-stale-reviews)
-    (should (= 0 (hash-table-count harness-ui-patch-review--reviews)))
-    (should (equal layout harness-ui-patch-review--layout))))
+        (harness-ui-patch-review--made-with (make-hash-table :test 'eq :weakness 'key))
+        (harness-ui-patch-review--dropped nil)
+        (change-review-ui-sets nil))
+    (let* ((current (harness-ui-patch-review--review-for (list :id "t-1" :state "review")))
+           ;; Made before slots were added: shorter than the struct is now.
+           (shorter (harness-ui-patch-review-test--older-review current))
+           ;; Made by a version that kept no layout: as long as now, unremembered.
+           (unremembered (harness-ui-patch-review--review-create :id "t-3"))
+           (set (harness-ui-patch-review--make-set :id "t-2")))
+      (should-not (harness-ui-patch-review--stale-p current))
+      (should (harness-ui-patch-review--stale-p shorter))
+      (should (harness-ui-patch-review--stale-p unremembered))
+      (should (harness-ui-patch-review--stale-p 'not-a-review))
+      ;; The library's views of the old review's set stop pointing at it.
+      (setf (harness-ui-patch-review--set-review set) shorter)
+      (setq change-review-ui-sets (list set))
+      (puthash "t-2" shorter harness-ui-patch-review--reviews)
+      (puthash "t-3" unremembered harness-ui-patch-review--reviews)
+      (should (equal '("t-2" "t-3") (sort (harness-ui-patch-review--drop-stale-reviews) #'string<)))
+      (should (equal '("t-1") (hash-table-keys harness-ui-patch-review--reviews)))
+      (should (eq current (gethash "t-1" harness-ui-patch-review--reviews)))
+      (should (equal '("t-2" "t-3") (sort (copy-sequence harness-ui-patch-review--dropped) #'string<)))
+      (should-not (harness-ui-patch-review--set-review set))
+      ;; Nothing is left to drop, and what is kept stays.
+      (should-not (harness-ui-patch-review--drop-stale-reviews))
+      (should (eq current (harness-ui-patch-review--known "t-1")))
+      ;; An Ediff that began before the update has the old review: the
+      ;; commands of its control panel say so, and the current one works.
+      (with-temp-buffer
+        (setq-local harness-ui-patch-review--review shorter)
+        (should (string-search "began before the harness was updated"
+                               (cadr (should-error (harness-ui-patch-review--current)
+                                                   :type 'user-error))))
+        (setq-local harness-ui-patch-review--review current)
+        (should (eq current (harness-ui-patch-review--current))))
+      ;; One that gets in after the load is dropped as it is asked for, and
+      ;; the review made again is a current one.
+      (puthash "t-4" (harness-ui-patch-review-test--older-review current) harness-ui-patch-review--reviews)
+      (should-not (harness-ui-patch-review--known "t-4"))
+      (should-not (gethash "t-4" harness-ui-patch-review--reviews))
+      (puthash "t-4" (harness-ui-patch-review-test--older-review current) harness-ui-patch-review--reviews)
+      (let ((again (harness-ui-patch-review--review-for (list :id "t-4" :state "review"))))
+        (should-not (harness-ui-patch-review--stale-p again))
+        (should (eq again (gethash "t-4" harness-ui-patch-review--reviews))))
+      ;; Under another layout of the structs -- the review's, or the library's
+      ;; that it holds -- even a review as long as the struct is, is stale; a
+      ;; snapshot of a review is made under the layout of its review.
+      (let ((harness-ui-patch-review--layout (cdr harness-ui-patch-review--layout)))
+        (should (harness-ui-patch-review--stale-p current)))
+      (should-not (harness-ui-patch-review--stale-p current))
+      (let ((snapshot (harness-ui-patch-review--make-snapshot current (list :tip "abc"))))
+        (should-not (harness-ui-patch-review--stale-p snapshot))
+        (should (harness-ui-patch-review--stale-p
+                 (harness-ui-patch-review--make-snapshot unremembered (list :tip "abc"))))))))
+
+(ert-deftest harness-ui-patch-review-layout-covers-what-the-set-holds ()
+  "The layout a review remembers is that of every struct its set holds: a slot the
+library's comment or thread gains makes the reviews of the older layout stale
+as one of the review's own does."
+  (dolist (struct '(harness-ui-patch-review--review harness-ui-patch-review--set
+                    change-review-author change-review-location change-review-comment
+                    change-review-thread change-review-file change-review-version
+                    change-review-set))
+    (should (assq struct harness-ui-patch-review--layout))
+    (should (equal (mapcar #'car (cdr (cl-struct-slot-info struct)))
+                   (cdr (assq struct harness-ui-patch-review--layout))))))
+
+(ert-deftest harness-ui-patch-review-heals-the-report-and-the-banner-after-an-update ()
+  "An update of the harness reloads it with the reviews it holds, and one an older
+layout made is read wrong: the report that showed the changes failed with an
+`args-out-of-range' that printed the whole review, the task's hand-in with it,
+and the review banner with [Verify] and [Send back] went with it.  The new
+definitions drop the review, and the report and the banner, drawn again, make a
+new one: the changes, the threads and the buttons are there."
+  (harness-ui-patch-review-test-with-task
+    (let* ((popout (harness-ui-patch-review-test--changes board id))
+           (chat (harness-ui-patch-review-test--banner board id sid))
+           (review (gethash id harness-ui-patch-review--reviews))
+           (older (harness-ui-patch-review-test--older-review review)))
+      (ignore popout)
+      (should (memq chat (harness-ui-patch-review--r-banners review)))
+      ;; The update: what the table holds is an older version's review.
+      (puthash id older harness-ui-patch-review--reviews)
+      (should (equal (list id) (harness-ui-patch-review--drop-stale-reviews)))
+      (should-not (gethash id harness-ui-patch-review--reviews))
+      ;; The module starts, and draws what showed the review again.
+      (harness-ui-patch-review--redraw-dropped)
+      (should-not harness-ui-patch-review--dropped)
+      (let ((popout (harness-ui-popout-buffer (list 'report id))))
+        (harness-ui-patch-review-test--wait-text popout "^Changes (6)")
+        (harness-ui-patch-review-test--wait-text popout "^    M  a\\.el")
+        (let ((text (harness-ui-patch-review-test--text popout)))
+          (should-not (string-search "Could not draw" text))
+          (should-not (string-search "could not be drawn" text))
+          (should (string-search "[Verify]" text))
+          (should (string-search "[Send back]" text))))
+      (harness-ui-patch-review-test--wait-text chat "^Changes (6)")
+      (let ((tail (harness-ui-patch-review-test--text chat)))
+        (should-not (string-search "could not be drawn" tail))
+        (should (string-search "[Verify]  C-c C-v" tail))
+        (should (string-search "[Review Changes]" tail)))
+      ;; A new review, of this layout, that the surfaces show.
+      (let ((new (gethash id harness-ui-patch-review--reviews)))
+        (should new)
+        (should-not (eq new older))
+        (should-not (harness-ui-patch-review--stale-p new))
+        (should (memq chat (harness-ui-patch-review--r-banners new)))))))
+
+(ert-deftest harness-ui-patch-review-draws-over-a-stale-review-that-got-in ()
+  "A review of an older layout that is in the table when the report draws -- the
+load that should have dropped it did not run, or ran too early -- does not fail
+the report: it is dropped as the report asks for it, and the changes are made
+anew.  The banner of the session and an event about the task too: a listener
+that signalled on it would keep the others from hearing the task's events."
+  (harness-ui-patch-review-test-with-task
+    (let* ((popout (harness-ui-patch-review-test--changes board id))
+           (chat (harness-ui-patch-review-test--banner board id sid))
+           (review (gethash id harness-ui-patch-review--reviews))
+           (task (with-current-buffer board (harness-ui-tasks--find id))))
+      ;; An event about the task finds the review stale and drops it, rather
+      ;; than read it wrong.
+      (puthash id (harness-ui-patch-review-test--older-review review) harness-ui-patch-review--reviews)
+      (harness-ui-patch-review--on-event "task/changed" (list task))
+      (should-not (gethash id harness-ui-patch-review--reviews))
+      ;; The report draws over a stale one.
+      (puthash id (harness-ui-patch-review-test--older-review review) harness-ui-patch-review--reviews)
+      (harness-ui-popout-refresh (list 'report id))
+      (harness-ui-patch-review-test--wait-text popout "^    M  a\\.el")
+      (let ((text (harness-ui-patch-review-test--text popout)))
+        (should-not (string-search "Could not draw" text))
+        (should (string-search "[Verify]" text)))
+      (should-not (harness-ui-patch-review--stale-p (gethash id harness-ui-patch-review--reviews)))
+      ;; And the banner.
+      (puthash id (harness-ui-patch-review-test--older-review
+                   (gethash id harness-ui-patch-review--reviews))
+               harness-ui-patch-review--reviews)
+      (with-current-buffer chat (funcall harness-compose-redraw-function))
+      (harness-ui-patch-review-test--wait-text chat "^Changes (6)")
+      (should-not (string-search "could not be drawn" (harness-ui-patch-review-test--text chat)))
+      (should-not (harness-ui-patch-review--stale-p (gethash id harness-ui-patch-review--reviews))))))
+
+(ert-deftest harness-ui-patch-review-says-short-when-the-changes-fail-and-tries-again ()
+  "Changes that cannot be drawn say so in one short line with a [Try again] -- the
+error may carry the review, the task's whole hand-in with it -- and the report
+goes on, [Verify] and [Send back] with it.  [Try again] makes the review again."
+  (harness-ui-patch-review-test-with-task
+    (harness-ui-patch-review-test--give-branch board id)
+    (let ((fail t))
+      (cl-letf* ((section (symbol-function 'harness-ui-patch-review--section))
+                 ((symbol-function 'harness-ui-patch-review--section)
+                  (lambda (&rest args)
+                    (if fail
+                        (signal 'args-out-of-range (list (harness-ui-patch-review-test--big-record) 33))
+                      (apply section args)))))
+        (let* ((popout (harness-ui-patch-review-test--report board id))
+               (text (harness-ui-patch-review-test--text popout)))
+          (should (string-match-p "^Changes   could not be drawn: Args out of range: \"#<harness-ui-patch-review-test--review>\", 33  \\[Try again\\]$"
+                                  text))
+          (should-not (string-search "xxxxxxxxxx" text))
+          (should (string-search "[Verify]" text))
+          (should (string-search "[Send back]" text))
+          ;; Try again, with what failed fixed: the review is made anew.
+          (setq fail nil)
+          (let ((before (gethash id harness-ui-patch-review--reviews)))
+            (should before)
+            (harness-ui-patch-review-test--push popout "[Try again]")
+            (harness-ui-patch-review-test--wait-text popout "^    M  a\\.el")
+            (should-not (eq before (gethash id harness-ui-patch-review--reviews)))
+            (should-not (string-search "could not be drawn"
+                                       (harness-ui-patch-review-test--text popout)))))))))
 
 (ert-deftest harness-ui-patch-review-wraps-thread-headers-under-their-bar ()
   "The header of a thread and of each comment is a long line with buttons, which

@@ -288,6 +288,22 @@
 ;; on, and the window shows it on the line it was; a thread that went
 ;; leaves point on the one that took its place.
 ;;
+;; AFTER AN UPDATE.  The harness updates by reloading in place, with the
+;; reviews it holds, and a struct that gained a slot reads the review its
+;; older definition made wrong: one slot for another, or past its end,
+;; which signals `args-out-of-range' and, where that was printed, put the
+;; whole review -- the task's hand-in in it -- in the message.  A review
+;; remembers the layout of the structs it is made of when it was made
+;; (`harness-ui-patch-review--layout'), and loading this file drops every
+;; one made under another layout, a version that kept none included
+;; (`harness-ui-patch-review--drop-stale-reviews'); the report and the
+;; banner that showed it are drawn again once the module starts, which
+;; makes the review again, from the threads and the files viewed the
+;; harness keeps and from the branch.  Changes that cannot be drawn for
+;; any other reason say so in one short line with a [Try again] button,
+;; which makes the review again, and the rest of the report -- [Verify]
+;; and [Send back] -- and of the banner is drawn all the same.
+;;
 ;; From a task's session history -- or a board card -- C-c C-d opens the
 ;; report with the changes, even after the task left review, when it shows
 ;; them without the review banner (`harness-ui-patch-review-mode').  C-u
@@ -605,9 +621,15 @@ window has another.")
        (not (harness-json-true-p (plist-get task :archived)))))
 
 (defun harness-ui-patch-review--current ()
-  "Return the review of this Ediff control panel."
-  (or harness-ui-patch-review--review
-      (user-error "Not an Ediff of a task's changes")))
+  "Return the review of this Ediff control panel.
+An Ediff that began before the harness was updated holds a review of
+the older version's layout (`harness-ui-patch-review--stale-p'), which
+reads wrong; it is no review any more, and `ediff-quit' ends it."
+  (let ((review harness-ui-patch-review--review))
+    (cond ((null review) (user-error "Not an Ediff of a task's changes"))
+          ((harness-ui-patch-review--stale-p review)
+           (user-error "This Ediff began before the harness was updated and its review is gone: M-x ediff-quit ends it, and the changes open again from the report"))
+          (t review))))
 
 (defun harness-ui-patch-review--fail (format-string &rest args)
   "Return a promise rejected with the error FORMAT-STRING and ARGS make."
@@ -631,6 +653,91 @@ comment, the drafts sent -- is performed here too
 \(`patch-review/changed').  The files of its versions are read here,
 from the repository."
   review)
+
+;;;; Reviews an older definition made
+
+;; A reload replaces the definitions and keeps what runs, the reviews with
+;; it, and updating the harness is a reload.  A struct that gained a slot
+;; reads the instance its older definition made wrong -- one slot for
+;; another, or past its end, "args out of range" -- and every draw of the
+;; review, every event about its task, runs into it: the report fails to
+;; draw, and a listener that fails keeps the ones after it from hearing
+;; what the task did, the review banner's among them.  So a review keeps
+;; the layout of the structs it is made of as it was made, and a load drops
+;; every review made under another, whichever version it came from: one
+;; made by a version that did not keep this has nothing to say for it, and
+;; goes the same.  What it showed is drawn again from what the harness
+;; keeps -- the threads, the files viewed -- and from the branch.
+
+(defconst harness-ui-patch-review--layout-structs
+  '(harness-ui-patch-review--review harness-ui-patch-review--set
+    change-review-author change-review-location change-review-comment
+    change-review-thread change-review-file change-review-version change-review-set)
+  "The structs a review is made of: its own, its set, and what the set holds.
+The set of a review keeps the threads and the versions of the library,
+so a slot the library's structs gain makes the reviews of the older
+layout as wrong as one of the review's own.")
+
+(defun harness-ui-patch-review--layout-now ()
+  "Return what the structs of a review look like in the definitions loaded.
+A list of (STRUCT SLOT...), the slots in the order they lie."
+  (mapcar (lambda (struct)
+            (cons struct (mapcar #'car (cdr (cl-struct-slot-info struct)))))
+          harness-ui-patch-review--layout-structs))
+
+(defvar harness-ui-patch-review--layout nil
+  "What the structs of a review look like in the definitions now loaded.
+See `harness-ui-patch-review--layout-now'; set as this file loads.")
+(setq harness-ui-patch-review--layout (harness-ui-patch-review--layout-now))
+
+(defvar harness-ui-patch-review--made-with (make-hash-table :test 'eq :weakness 'key)
+  "Review -> `harness-ui-patch-review--layout' as it was when the review was made.
+Beside the review, not in it, so a review of any layout can be asked
+without reading a slot it may not have.")
+
+(defun harness-ui-patch-review--stale-p (review)
+  "Non-nil when REVIEW was made under another layout of its structs than this one.
+Such a review cannot be read with the accessors: they would read it
+wrong, or past its end."
+  (not (and (harness-ui-patch-review--review-p review)
+            (equal (gethash review harness-ui-patch-review--made-with)
+                   harness-ui-patch-review--layout))))
+
+(defvar harness-ui-patch-review--dropped nil
+  "The tasks whose review was dropped for being made under an older layout.
+The module draws what showed them again once it is ready to
+\(`harness-ui-patch-review--redraw-dropped').")
+
+(defun harness-ui-patch-review--discard-stale (id review)
+  "Drop REVIEW of task ID, which an older layout of the structs made.
+Only what can be done without reading it: it leaves the table, and the
+library's views that hold its set stop pointing at it, as they would
+read it wrong.  Its Ediff and the buffers of that, which only a
+review of this layout can end, are left to their own quit."
+  (remhash id harness-ui-patch-review--reviews)
+  (dolist (set change-review-ui-sets)
+    (ignore-errors
+      (when (and (harness-ui-patch-review--set-p set)
+                 (eq (harness-ui-patch-review--set-review set) review))
+        (setf (harness-ui-patch-review--set-review set) nil)))))
+
+(defun harness-ui-patch-review--drop-stale-reviews ()
+  "Drop the reviews an older layout of the structs made; return their task ids.
+Run as the file loads, so no code of this definition meets one."
+  (let (stale)
+    (maphash (lambda (id review)
+               (when (harness-ui-patch-review--stale-p review)
+                 (push (cons id review) stale)))
+             harness-ui-patch-review--reviews)
+    (pcase-dolist (`(,id . ,review) stale)
+      (harness-ui-patch-review--discard-stale id review)
+      (cl-pushnew id harness-ui-patch-review--dropped :test #'equal))
+    (when stale
+      (harness-log 'info "patch review: dropped %d review%s an older layout made, to be made again"
+                   (length stale) (if (cdr stale) "s" "")))
+    (mapcar #'car stale)))
+
+(harness-ui-patch-review--drop-stale-reviews)
 
 (cl-defmethod change-review-dispatch ((set harness-ui-patch-review--set) op)
   (prog1 (change-review-apply set op)
@@ -907,7 +1014,7 @@ come with them."
   "Return non-nil when the review of TASK has drafts to send with its feedback.
 On `harness-ui-review-pending-functions'."
   (when-let* ((review (and (plist-get task :id)
-                           (gethash (plist-get task :id) harness-ui-patch-review--reviews)))
+                           (harness-ui-patch-review--known (plist-get task :id))))
               (set (harness-ui-patch-review--r-set review)))
     (and (change-review-drafts set) t)))
 
@@ -1280,13 +1387,24 @@ nothing changed since.  COMMIT is that of the version, NAME its name
     (and version
          (cons (harness-ui-patch-review--version-tip version) (change-review-version-name version)))))
 
+(defun harness-ui-patch-review--known (id)
+  "Return the review of task ID, or nil when it has none.
+One an older layout of the structs made, which a reload could not drop
+\(`harness-ui-patch-review--drop-stale-reviews'), is dropped here."
+  (let ((review (gethash id harness-ui-patch-review--reviews)))
+    (if (and review (harness-ui-patch-review--stale-p review))
+        (progn (harness-ui-patch-review--discard-stale id review) nil)
+      review)))
+
 (defun harness-ui-patch-review--review-for (task)
   "Return the review of TASK, made now when it has none."
   (let* ((id (plist-get task :id))
-         (review (or (gethash id harness-ui-patch-review--reviews)
-                     (puthash id (harness-ui-patch-review--review-create
-                                  :id id :tree harness-ui-patch-review-file-tree)
-                              harness-ui-patch-review--reviews))))
+         (review (or (harness-ui-patch-review--known id)
+                     (let ((made (harness-ui-patch-review--review-create
+                                  :id id :tree harness-ui-patch-review-file-tree)))
+                       (puthash made harness-ui-patch-review--layout
+                                harness-ui-patch-review--made-with)
+                       (puthash id made harness-ui-patch-review--reviews)))))
     (setf (harness-ui-patch-review--r-task review) task)
     (if-let* ((set (harness-ui-patch-review--r-set review)))
         (setf (change-review-set-title set) (harness-ui-patch-review--title review))
@@ -1996,6 +2114,9 @@ RESULT is that of `harness-ui-patch-review--read-branch'.  The copy is
 REVIEW as the commit RESULT names had it: its files and merge base,
 with no place of any thread yet, no Ediff, no earlier commits."
   (let ((snapshot (copy-sequence review)))
+    ;; Made under the layout its original was.
+    (puthash snapshot (gethash review harness-ui-patch-review--made-with)
+             harness-ui-patch-review--made-with)
     (setf (harness-ui-patch-review--r-snapshot snapshot) (plist-get result :tip)
           (harness-ui-patch-review--r-tip snapshot) (plist-get result :tip)
           (harness-ui-patch-review--r-merge-base snapshot) (plist-get result :merge-base)
@@ -2106,7 +2227,7 @@ Return a promise."
   "Return the report of REVIEW's task, whose box takes the feedback; or signal.
 A report closed meanwhile opens again, out of sight, for its box.  A
 snapshot's is the review's own."
-  (let* ((review (or (gethash (harness-ui-patch-review--r-id review) harness-ui-patch-review--reviews)
+  (let* ((review (or (harness-ui-patch-review--known (harness-ui-patch-review--r-id review))
                      review))
          (task (harness-ui-patch-review--r-task review)))
     (unless (harness-ui-patch-review--reviewing-p task)
@@ -2608,17 +2729,17 @@ In a surface of the changes -- the report, the review banner of a task's
 session, the tree beside Ediff -- from any row of them, and anywhere in
 the report or the session of the task."
   (or (car (harness-ui-patch-review--at-point))
-      (gethash (get-text-property (line-beginning-position) 'harness-ui-patch-review-task)
-               harness-ui-patch-review--reviews)
+      (harness-ui-patch-review--known
+       (get-text-property (line-beginning-position) 'harness-ui-patch-review-task))
       harness-ui-patch-review--review
       (when (derived-mode-p 'harness-ui-popout-mode)
         (when-let* ((task (and (fboundp 'harness-ui-report-task)
                                (harness-ui-report-task))))
-          (gethash (plist-get task :id) harness-ui-patch-review--reviews)))
+          (harness-ui-patch-review--known (plist-get task :id))))
       (when (and (derived-mode-p 'harness-chat-mode) (bound-and-true-p harness-ui-session-id)
                  (fboundp 'harness-ui-review--task))
         (when-let* ((task (harness-ui-review--task harness-ui-session-id)))
-          (gethash (plist-get task :id) harness-ui-patch-review--reviews)))))
+          (harness-ui-patch-review--known (plist-get task :id))))))
 
 (defun harness-ui-patch-review--threads-position ()
   "Return where the threads begin in this buffer, or nil."
@@ -2684,8 +2805,8 @@ In a report showing the changes, from a row or anywhere else in it."
   "Return (REVIEW . PATH) for the directory row at point, or nil."
   (let* ((bol (line-beginning-position))
          (path (get-text-property bol 'harness-ui-patch-review-dir))
-         (review (gethash (get-text-property bol 'harness-ui-patch-review-task)
-                          harness-ui-patch-review--reviews)))
+         (review (harness-ui-patch-review--known
+                  (get-text-property bol 'harness-ui-patch-review-task))))
     (and path review (cons review path))))
 
 (defun harness-ui-patch-review--reveal-file (review index)
@@ -3205,6 +3326,65 @@ the buffer again; a change of the set draws it too
                       'face 'harness-dim-face)
           "\n"))
 
+(defun harness-ui-patch-review--redraw-surfaces (id)
+  "Draw again what shows the changes of task ID: its report and its chats.
+For the surfaces of a review the next draw makes again, as one dropped
+for being stale (`harness-ui-patch-review--known') or one that failed
+to draw."
+  (let ((key (list 'report id)))
+    (when (harness-ui-popout-buffer key)
+      (harness-ui-popout-refresh key)))
+  (when (fboundp 'harness-ui-review--task)
+    (dolist (buffer (buffer-list))
+      (with-current-buffer buffer
+        (when (and (derived-mode-p 'harness-chat-mode)
+                   (bound-and-true-p harness-ui-session-id)
+                   (functionp harness-compose-redraw-function)
+                   (equal id (plist-get (harness-ui-review--task harness-ui-session-id) :id)))
+          (funcall harness-compose-redraw-function))))))
+
+(defun harness-ui-patch-review--try-again (id)
+  "Make the review of task ID again, from the branch and the harness, and draw it.
+What a surface that could not draw the changes offers
+\(`harness-ui-patch-review--draw-failed')."
+  (when-let* ((review (gethash id harness-ui-patch-review--reviews)))
+    ;; A review that failed to draw may be in any state: what cannot be
+    ;; ended in order is dropped as it is.
+    (condition-case nil
+        (harness-ui-patch-review--forget review)
+      (error (remhash id harness-ui-patch-review--reviews))))
+  (harness-ui-patch-review--redraw-surfaces id))
+
+(defun harness-ui-patch-review--draw-failed (task err)
+  "Return the lines shown for the changes of TASK that ERR kept from drawing.
+The error is told short: an error may carry the very review it was
+about, the files of the branch and the task's whole hand-in with it, and
+a surface that printed that would be unreadable.  The harness log has
+the same short message; [Try again] makes the review again, which what
+an older version of the harness left behind may need."
+  (let ((id (plist-get task :id)))
+    (harness-log 'warn "patch review: could not draw the changes of %s: %s"
+                 id (harness-error-short-message err 600))
+    (concat (propertize "Changes" 'face 'harness-label-face) "   "
+            (propertize (format "could not be drawn: %s" (harness-error-short-message err 200))
+                        'face 'harness-tool-error-face)
+            "  "
+            (propertize (buttonize "[Try again]"
+                                   (lambda (_) (harness-ui-patch-review--try-again id))
+                                   nil "Make the review of this task again, from the branch and the harness")
+                        'mouse-face 'highlight)
+            "\n")))
+
+(defmacro harness-ui-patch-review--drawing-safely (task &rest body)
+  "Run BODY, which draws the changes of TASK, and return what it returns.
+An error is no reason for a surface to lose the rest of what it draws --
+the report's [Verify] and [Send back] come after the changes -- so it
+returns the lines that say it instead (`harness-ui-patch-review--draw-failed')."
+  (declare (indent 1))
+  `(condition-case err
+       (progn ,@body)
+     (error (harness-ui-patch-review--draw-failed ,task err))))
+
 (defun harness-ui-patch-review--panel (task)
   "Return the changes of TASK for its report, while TASK waits for review.
 On `harness-ui-report-panel-functions', called in the report popout on
@@ -3212,35 +3392,37 @@ every draw.  Nil for a task with no branch of its own; for one whose
 repository is not on this machine, a line saying so.  A report opened
 afresh reads the branch afresh.  A review opened from a session's
 history for a task no longer waiting for one shows too: its review
-says so (`harness-ui-patch-review--r-show')."
-  (let ((existing (and task (plist-get task :id)
-                       (gethash (plist-get task :id) harness-ui-patch-review--reviews))))
-    (when (and harness-ui-patch-review--active
-               (derived-mode-p 'harness-ui-popout-mode)
-               (or (harness-ui-patch-review--reviewing-p task)
-                   (and existing (harness-ui-patch-review--r-show existing)))
-               (not (harness-string-blank-p (plist-get task :branch))))
-      (if (not (harness-ui-patch-review--repository task))
-          (harness-ui-patch-review--unavailable task)
-        (let* ((review (harness-ui-patch-review--review-for task))
-               (harness-ui-patch-review--drawing t)
-               (popout (current-buffer))
-               (fresh (not (eq (harness-ui-patch-review--r-popout review) popout))))
-          (setf (harness-ui-patch-review--r-popout review) popout)
-          (harness-ui-patch-review--ensure-loaded review fresh)
-          ;; C-c C-d in the report: back to its Ediff, else the review.
-          (unless (bound-and-true-p harness-ui-patch-review-mode)
-            (harness-ui-patch-review-mode 1))
-          ;; Beside an Ediff the report keeps to its share of the frame, even
-          ;; when it was shown again meanwhile; with none, to no share.
-          (if (harness-ui-patch-review--r-ediff review)
-              (harness-ui-patch-review--limit-box (current-buffer))
-            (when harness-ui-patch-review--box-limit
-              (harness-ui-patch-review--unlimit-box (current-buffer))))
-          ;; The commands on a thread find its set here.
-          (harness-ui-patch-review--view
-           review (lambda () (harness-ui-patch-review--refresh-popout review)))
-          (harness-ui-patch-review--section review (harness-ui-patch-review--counts review)))))))
+says so (`harness-ui-patch-review--r-show').  Changes that cannot be
+drawn say so in a line, and the report goes on."
+  (harness-ui-patch-review--drawing-safely task
+    (let ((existing (and task (plist-get task :id)
+                         (harness-ui-patch-review--known (plist-get task :id)))))
+      (when (and harness-ui-patch-review--active
+                 (derived-mode-p 'harness-ui-popout-mode)
+                 (or (harness-ui-patch-review--reviewing-p task)
+                     (and existing (harness-ui-patch-review--r-show existing)))
+                 (not (harness-string-blank-p (plist-get task :branch))))
+        (if (not (harness-ui-patch-review--repository task))
+            (harness-ui-patch-review--unavailable task)
+          (let* ((review (harness-ui-patch-review--review-for task))
+                 (harness-ui-patch-review--drawing t)
+                 (popout (current-buffer))
+                 (fresh (not (eq (harness-ui-patch-review--r-popout review) popout))))
+            (setf (harness-ui-patch-review--r-popout review) popout)
+            (harness-ui-patch-review--ensure-loaded review fresh)
+            ;; C-c C-d in the report: back to its Ediff, else the review.
+            (unless (bound-and-true-p harness-ui-patch-review-mode)
+              (harness-ui-patch-review-mode 1))
+            ;; Beside an Ediff the report keeps to its share of the frame, even
+            ;; when it was shown again meanwhile; with none, to no share.
+            (if (harness-ui-patch-review--r-ediff review)
+                (harness-ui-patch-review--limit-box (current-buffer))
+              (when harness-ui-patch-review--box-limit
+                (harness-ui-patch-review--unlimit-box (current-buffer))))
+            ;; The commands on a thread find its set here.
+            (harness-ui-patch-review--view
+             review (lambda () (harness-ui-patch-review--refresh-popout review)))
+            (harness-ui-patch-review--section review (harness-ui-patch-review--counts review))))))))
 
 (defun harness-ui-patch-review--banner-panel (task)
   "Return the changes of TASK for the review banner of its session.
@@ -3248,20 +3430,22 @@ On `harness-ui-review-changes-functions', called in the chat buffer on
 every draw of its tail while TASK waits for review: the tree and the
 threads, so the work is looked over where it is handed in, without
 opening the report.  Nil for a task with no branch of its own; for one
-whose repository is not on this machine, a line saying so."
-  (when (and harness-ui-patch-review--active
-             (derived-mode-p 'harness-chat-mode)
-             (harness-ui-patch-review--reviewing-p task)
-             (not (harness-string-blank-p (plist-get task :branch))))
-    (if (not (harness-ui-patch-review--repository task))
-        (harness-ui-patch-review--unavailable task)
-      (let ((review (harness-ui-patch-review--review-for task))
-            (harness-ui-patch-review--drawing t))
-        (cl-pushnew (current-buffer) (harness-ui-patch-review--r-banners review))
-        (harness-ui-patch-review--ensure-loaded review)
-        (harness-ui-patch-review--view
-         review (lambda () (harness-ui-patch-review--redraw-chat (current-buffer))))
-        (harness-ui-patch-review--section review (harness-ui-patch-review--counts review))))))
+whose repository is not on this machine, a line saying so.  Changes
+that cannot be drawn say so in a line, and the banner goes on."
+  (harness-ui-patch-review--drawing-safely task
+    (when (and harness-ui-patch-review--active
+               (derived-mode-p 'harness-chat-mode)
+               (harness-ui-patch-review--reviewing-p task)
+               (not (harness-string-blank-p (plist-get task :branch))))
+      (if (not (harness-ui-patch-review--repository task))
+          (harness-ui-patch-review--unavailable task)
+        (let ((review (harness-ui-patch-review--review-for task))
+              (harness-ui-patch-review--drawing t))
+          (cl-pushnew (current-buffer) (harness-ui-patch-review--r-banners review))
+          (harness-ui-patch-review--ensure-loaded review)
+          (harness-ui-patch-review--view
+           review (lambda () (harness-ui-patch-review--redraw-chat (current-buffer))))
+          (harness-ui-patch-review--section review (harness-ui-patch-review--counts review)))))))
 
 ;;;;; Keeping the reader's place in a chat
 
@@ -3407,8 +3591,8 @@ BUFFER is the current buffer by default."
   "Return (REVIEW . INDEX) for the row of a report at point, or nil."
   (let* ((bol (line-beginning-position))
          (index (get-text-property bol 'harness-ui-patch-review-file))
-         (review (gethash (get-text-property bol 'harness-ui-patch-review-task)
-                          harness-ui-patch-review--reviews)))
+         (review (harness-ui-patch-review--known
+                  (get-text-property bol 'harness-ui-patch-review-task))))
     (and index review (cons review index))))
 
 (defun harness-ui-patch-review--goto-row (review index &optional start)
@@ -4759,7 +4943,7 @@ Ediff."
   (pcase event
     ((or "task/changed" "task/review")
      (when-let* ((task (car args))
-                 (review (gethash (plist-get task :id) harness-ui-patch-review--reviews)))
+                 (review (harness-ui-patch-review--known (plist-get task :id))))
        (let* ((before (harness-ui-patch-review--r-task review))
               (sent (and before (> (length (plist-get task :feedback))
                                    (length (plist-get before :feedback))))))
@@ -4780,15 +4964,15 @@ Ediff."
        (when (and (equal event "task/review") (harness-ui-patch-review--surface-live-p review))
          (harness-ui-patch-review--sync-and-load review))))
     ("task/done"
-     (when-let* ((review (gethash (plist-get (car args) :id) harness-ui-patch-review--reviews)))
+     (when-let* ((review (harness-ui-patch-review--known (plist-get (car args) :id))))
        (harness-ui-patch-review--ended review)))
     ("task/deleted"
-     (when-let* ((review (gethash (car args) harness-ui-patch-review--reviews)))
+     (when-let* ((review (harness-ui-patch-review--known (car args))))
        (harness-ui-patch-review--ended review)))
     ;; What the harness did to the threads of a review: an agent's comment,
     ;; the drafts sent, or the user's own operation come back.
     ("patch-review/changed"
-     (when-let* ((review (gethash (car args) harness-ui-patch-review--reviews))
+     (when-let* ((review (harness-ui-patch-review--known (car args)))
                  (op (cadr args)))
        (condition-case err
            (change-review-apply (harness-ui-patch-review--r-set review) op)
@@ -4825,7 +5009,7 @@ point of the board."
 (defun harness-ui-patch-review--ediff-window (task)
   "Return the window of the Ediff of TASK's changes that shows, or nil.
 An Ediff of the code as an earlier commit had it is one."
-  (when-let* ((review (gethash (plist-get task :id) harness-ui-patch-review--reviews)))
+  (when-let* ((review (harness-ui-patch-review--known (plist-get task :id))))
     (cl-some (lambda (view)
                (let ((control (plist-get (harness-ui-patch-review--r-ediff view) :control)))
                  (and (buffer-live-p control) (get-buffer-window control t))))
@@ -4920,20 +5104,20 @@ changes."
 
 ;;;; Module
 
-(defvar harness-ui-patch-review--layout nil
-  "The slots the struct of a review had when the module was last initialised.")
-
-(defun harness-ui-patch-review--drop-stale-reviews ()
-  "Forget the reviews an older definition of their struct made.
-A reload keeps what runs, the reviews with it, but a struct that gained
-a slot reads the objects of its older definition wrong: they are dropped,
-and the review is made again, from what the harness keeps, the next time
-a surface draws the changes."
-  (let ((layout (mapcar #'car (cdr (cl-struct-slot-info 'harness-ui-patch-review--review)))))
-    (unless (equal layout harness-ui-patch-review--layout)
-      (when harness-ui-patch-review--layout
-        (clrhash harness-ui-patch-review--reviews))
-      (setq harness-ui-patch-review--layout layout))))
+(defun harness-ui-patch-review--redraw-dropped ()
+  "Draw again what showed the reviews dropped for being stale.
+A reload drops the reviews an older layout of the structs made as the
+file loads (`harness-ui-patch-review--drop-stale-reviews'), when little
+of the module is there to draw: the report and the banner that showed
+one hold what it drew until now, and are drawn again here, which makes
+the review again."
+  (let ((ids (prog1 harness-ui-patch-review--dropped
+               (setq harness-ui-patch-review--dropped nil))))
+    (dolist (id ids)
+      (condition-case err
+          (harness-ui-patch-review--redraw-surfaces id)
+        (error (harness-log 'warn "patch review: could not draw %s again: %s"
+                            id (harness-error-short-message err)))))))
 
 (defun harness-ui-patch-review--init ()
   "Show the changes of a task in review in its report."
@@ -4949,7 +5133,8 @@ a surface draws the changes."
   (with-eval-after-load 'harness-ui-chat
     (add-hook 'harness-chat-mode-hook #'harness-ui-patch-review--setup-chat))
   (when (fboundp 'harness-chat-mode)
-    (harness-ui-patch-review--setup-existing-buffers)))
+    (harness-ui-patch-review--setup-existing-buffers))
+  (harness-ui-patch-review--redraw-dropped))
 
 (defun harness-ui-patch-review--shutdown ()
   "Take the changes out of the reports again, ending the Ediffs of them."

@@ -71,6 +71,15 @@ box.  The review module puts the banner a task's session shows there,
 [Verify] and [Send back], with the box taking the feedback, so work
 can be accepted from its report.
 
+What cannot be drawn does not take the rest down.  A piece of evidence
+that fails says so in a line and the others draw; a report that fails
+says so and its panels draw; a panel that fails says so and the panels
+after it draw -- the review banner's [Verify] and [Send back] come
+after the changes, and the work must be acceptable whether or not they
+could be read.  The line is short, whatever the error carries
+(`harness-error-short-message`): an `args-out-of-range` names the
+record it was about whole, and a review holds the task's hand-in.
+
 ## Provides
 
 ### Hooks

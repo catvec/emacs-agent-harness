@@ -3376,6 +3376,20 @@ with), `recap` writes the recaps on the cards,
   be shown -- a revision that is not there -- says why and leaves the
   one shown as it is.
 
+  **An update does not break a review you were in the middle of.** The
+  harness updates by reloading in place, with the reviews it holds. A
+  review remembers what the structs it is made of looked like when it
+  was made, and the reload drops every one made under an older
+  layout -- the threads and the files viewed are kept by the harness, not
+  in it -- and draws the report and the banner that showed it again, which
+  makes it again from them and the branch. Changes that cannot be drawn
+  for any other reason say so in one short line with a `[Try again]`
+  button, and the rest is drawn all the same: the report's `[Verify]`
+  and `[Send back]`, and the session's banner and box, are never lost
+  with the changes. A line about an error never holds more than a
+  sentence, whatever the error carries: the review a task's hand-in is
+  in is not printed in it.
+
   The comments are **threads**, and they are a section below the files,
   in the same buffer as the files, not a view of their own: by file, each
   drawn in full, under a heading whose buttons filter them by status (open,

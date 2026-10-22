@@ -238,7 +238,12 @@ only the text between them, and around, is the popout's."
   (let ((start (point)))
     (condition-case err
         (when harness-ui-popout--render (funcall harness-ui-popout--render))
-      (error (insert (propertize (format "Could not draw this: %s\n" (harness-error-message err))
+      ;; Short: an error may carry the structure it was about -- a task's
+      ;; review, its whole hand-in with it -- which is no message to read.
+      (error (harness-log 'warn "popout %s: could not draw: %s" harness-ui-popout-key
+                          (harness-error-short-message err 600))
+             (unless (bolp) (insert "\n"))
+             (insert (propertize (format "Could not draw this: %s\n" (harness-error-short-message err 300))
                                  'face 'harness-tool-error-face))))
     (unless (bolp) (insert "\n"))
     (harness-ui-popout--add-keymap start (point) harness-ui-popout-content-map)

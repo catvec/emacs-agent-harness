@@ -338,7 +338,9 @@ UPDATE is the wire plist; its `:sessionUpdate' names the kind.")
 
 (defvar harness-ui-event-functions nil
   "Functions called with (EVENT ARGS) for every `_harness/event' notification.
-EVENT is a string such as \"agent/turn-ended\".")
+EVENT is a string such as \"agent/turn-ended\".  One that signals an error
+is logged, and the others are called all the same
+\(`harness-ui--run-event-functions').")
 
 (defvar harness-ui-permission-functions nil
   "Functions called with (PARAMS RESPOND) for `session/request_permission'.
@@ -779,12 +781,30 @@ answered by `harness-emacs-endpoint-answer'; everything else is the UI's."
          (harness-ui--store-rate (car args) (cadr args)))
        (when (equal event "usage/live-updated")
          (harness-ui--store-live (car args) (cadr args)))
-       (prog1 (run-hook-with-args 'harness-ui-event-functions event args)
+       (prog1 (harness-ui--run-event-functions event args)
          ;; Every listener has had the chance to tell the deleted
          ;; session was internal: now it can be forgotten.
          (when (equal event "session/deleted")
            (harness-ui--forget-internal (car-safe args))))))
     (_ (when respond (harness-acp-respond-error respond -32601 (format "unhandled %s" method))))))
+
+(defun harness-ui--run-event-functions (event args)
+  "Tell every function of `harness-ui-event-functions' about EVENT with ARGS.
+One that signals is logged and the others are told all the same: a
+plain `run-hook-with-args' would stop at it, and every listener after
+it would miss what happened.  The review banner follows a task by these
+events, so a listener failing on a task's events -- on a review an
+older version left behind, say -- would keep it from learning that the
+task was handed in, and the board, the report and the chats from
+learning anything of it either."
+  (run-hook-wrapped 'harness-ui-event-functions
+                    (lambda (fn)
+                      (condition-case err
+                          (funcall fn event args)
+                        (error (harness-log 'error "ui: %s failed on %s: %s"
+                                            (if (symbolp fn) fn "a listener")
+                                            event (harness-error-short-message err 600))))
+                      nil)))
 
 (defun harness-ui--leave-pending (params respond what)
   "Leave WHAT (a permission or question request PARAMS) pending on its session.

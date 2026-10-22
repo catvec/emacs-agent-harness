@@ -275,7 +275,10 @@ those lists.  Records made before a reload
 keep their layout: a slot added to a struct goes last and is read in a
 way that tolerates records without it (see `harness-acp--client-get`),
 or the module drops its stale records (see
-`harness-provider-claude--drop-stale-entries`).  After a reload the
+`harness-provider-claude--drop-stale-entries`, and
+`harness-ui-patch-review--drop-stale-reviews`, which does not need the
+older version to have kept a record of its layout: see that module's
+section).  After a reload the
 `harness/reloaded` event fires and the UI redraws every session buffer.
 A reload loads the modules selected now (below) but stops none: one no
 longer enabled runs on until a restart, and the reload says so.
@@ -13141,6 +13144,44 @@ set draws every surface through the library's own refresh):
   (a thread closed under the filter that hides closed ones) leaves point
   on the same line, at the start of the thread now there.
 - the tree beside Ediff (below).
+
+AFTER AN UPDATE.  `harness-update` reloads the harness in place, and a
+reload keeps the reviews (`harness-ui-patch-review--reviews`) with
+everything else that runs.  A struct that gained a slot reads the instance
+its older definition made wrong -- the slots after the new one are shifted
+by one, and the last ones lie past the end -- so the report failed with
+`args-out-of-range`, whose message printed the whole review (the task, its
+hand-in, the files with their patches); the panel's failure took the
+panels after it, the review banner with [Verify] and [Send back], out of
+the report; and the module's listener of `task/changed` and `task/review`,
+ahead of the review banner's own in `harness-ui-event-functions`, failed
+on the task's events and kept the banner from hearing the task was handed
+in.  A review therefore remembers, in a weak table beside it
+(`harness-ui-patch-review--made-with`, not in a slot, which a review of
+the older layout does not have), what the structs it is made of -- its
+own, its set, and the library's author, location, comment, thread, file,
+version and set -- looked like when it was made
+(`harness-ui-patch-review--layout`, a list of (STRUCT SLOT...)).  Loading
+the file drops every review made under another layout, one a version that
+kept no layout made too (`harness-ui-patch-review--stale-p`: a review not
+in the table is stale), so the first update to a version that keeps it is
+no exception; the library's views of the dropped review's set stop
+pointing at it, and the tasks are kept for the module's init, which draws
+their report and banner again (`--redraw-dropped`) and with that makes the
+review again from what the harness keeps and the branch.  A stale review
+that gets in anyway is dropped as it is asked for (`--known`, which the
+panels, `--review-for` and the listeners use), and an Ediff that began
+before the update says so and is ended with `M-x ediff-quit`
+(`--current`).  What fails to draw for another reason leaves a line --
+`Changes   could not be drawn: MESSAGE  [Try again]` (`--draw-failed`), the
+message short (`harness-error-short-message`, which prints a record as
+`#<TYPE>`) -- and the draw goes on; [Try again] makes the review again
+(`--try-again`).  The same isolation is in the frame the module draws in:
+`harness-ui-report--insert-report` (a piece of evidence, the report, each
+panel), `harness-chat--insert-panels` (each chat panel, so the compose box
+the tail ends with is always drawn), `harness-ui--run-event-functions`
+(each listener, so one that signals does not keep the others from the
+event) and the popout's `Could not draw this`, all short.
 
 Rows carry a keymap of their own as a text property, which the popout
 puts before its own keys and a chat's text keeps over the buffer's:

@@ -480,5 +480,26 @@ popout's keys type in the box otherwise.  The box's tooltip names the key."
       (should item)
       (should (eq 'harness-compose-panel-key (nth 2 item))))))
 
+(ert-deftest harness-ui-popout-says-short-why-it-could-not-draw ()
+  "A popout whose content cannot be drawn says so in one short line, however much
+the error carries: `args-out-of-range' names the record it was about whole, and
+a task's review holds the task's hand-in, its files and their diffs.  What was
+drawn before the error stays, and the box after it."
+  (harness-ui-popout-test-with
+    (let* ((big (record 'harness-ui-popout-test--review
+                        (make-string 5000 ?x) (list :report (make-string 5000 ?y))))
+           (buffer (harness-ui-popout-show
+                    '(test 2) "A thing"
+                    (lambda () (insert "Drawn\n") (signal 'args-out-of-range (list big 33)))
+                    :compose (lambda () #'ignore)))
+           (text (harness-ui-popout-test--text buffer)))
+      (should (string-prefix-p "Drawn\nCould not draw this: Args out of range: " text))
+      (should (string-search "#<harness-ui-popout-test--review>" text))
+      (should (string-search ", 33" text))
+      ;; The line is short, and so is the popout with its box.
+      (should (< (length text) 400))
+      (should-not (string-search "xxxxxxxxxx" text))
+      (with-current-buffer buffer (should (harness-compose-live-p))))))
+
 (provide 'harness-ui-popout-test)
 ;;; harness-ui-popout-test.el ends here

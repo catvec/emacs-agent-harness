@@ -298,6 +298,22 @@ drawn whole, so point goes back to the row, thread or comment it was
 on, and the window shows it on the line it was; a thread that went
 leaves point on the one that took its place.
 
+AFTER AN UPDATE.  The harness updates by reloading in place, with the
+reviews it holds, and a struct that gained a slot reads the review its
+older definition made wrong: one slot for another, or past its end,
+which signals `args-out-of-range` and, where that was printed, put the
+whole review -- the task's hand-in in it -- in the message.  A review
+remembers the layout of the structs it is made of when it was made
+(`harness-ui-patch-review--layout`), and loading this file drops every
+one made under another layout, a version that kept none included
+(`harness-ui-patch-review--drop-stale-reviews`); the report and the
+banner that showed it are drawn again once the module starts, which
+makes the review again, from the threads and the files viewed the
+harness keeps and from the branch.  Changes that cannot be drawn for
+any other reason say so in one short line with a [Try again] button,
+which makes the review again, and the rest of the report -- [Verify]
+and [Send back] -- and of the banner is drawn all the same.
+
 From a task's session history -- or a board card -- C-c C-d opens the
 report with the changes, even after the task left review, when it shows
 them without the review banner (`harness-ui-patch-review-mode`).  C-u
@@ -351,8 +367,8 @@ it takes its part of the report and the banner out.
 - `harness-ui-patch-review-toggle-directory` — Fold the directory of the row at point, or unfold it.
 - `harness-ui-patch-review-toggle-ediff-tree` — Show the tree of the changed files beside Ediff, or hide it.
 - `harness-ui-patch-review-toggle-file-tree` — Show the changed files flat, in the diff's order, or as a tree.
-- `harness-ui-patch-review-toggle-skip-approved` — Switch whether going on from file to file steps over the files already approved.
 - `harness-ui-patch-review-toggle-reviewed` — Mark the thread at the current difference reviewed, or make it wait again.
+- `harness-ui-patch-review-toggle-skip-approved` — Switch whether going on from file to file steps over the files already approved.
 - `harness-ui-patch-review-toggle-thread` — Close the thread at the current difference, or at point, or open it again.
 
 ### Options

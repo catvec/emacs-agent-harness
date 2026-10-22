@@ -44,6 +44,12 @@ branch changes there, as a tree, and the threads of comments below it,
 so the work is looked over where it is handed in and then verified or
 sent back.  The banner draws again when what the changes are read from
 -- the task's branch, what it was made from, its project -- changes.
+Changes or a report that cannot be drawn say so in one short line --
+whatever the error carries, a review holds the task's hand-in -- and
+the banner stays, its buttons with it; a chat panel that fails leaves
+the others and the compose box (`harness-chat-panel-functions`), and a
+listener of the UI's events that fails leaves the banner hearing its
+task (`harness-ui-event-functions`).
 
 Under the banner the compose box writes the feedback that sends the
 task back: C-c C-c takes what the box holds to the task's session,

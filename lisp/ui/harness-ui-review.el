@@ -34,6 +34,12 @@
 ;; so the work is looked over where it is handed in and then verified or
 ;; sent back.  The banner draws again when what the changes are read from
 ;; -- the task's branch, what it was made from, its project -- changes.
+;; Changes or a report that cannot be drawn say so in one short line --
+;; whatever the error carries, a review holds the task's hand-in -- and
+;; the banner stays, its buttons with it; a chat panel that fails leaves
+;; the others and the compose box (`harness-chat-panel-functions'), and a
+;; listener of the UI's events that fails leaves the banner hearing its
+;; task (`harness-ui-event-functions').
 ;;
 ;; Under the banner the compose box writes the feedback that sends the
 ;; task back: C-c C-c takes what the box holds to the task's session,
@@ -271,7 +277,10 @@ down with it."
          (propertize (concat harness-ui-review--missing-text "\n") 'face 'warning)
        (condition-case err
            (or (harness-ui-report-string task (car (get-buffer-window-list nil nil t))) "")
-         (error (propertize (format "The report could not be drawn: %s\n" (error-message-string err))
+         (error (harness-log 'warn "review: the report could not be drawn: %s"
+                             (harness-error-short-message err 600))
+                (propertize (format "The report could not be drawn: %s\n"
+                                    (harness-error-short-message err 200))
                             'face 'harness-dim-face)))))))
 
 (defun harness-ui-review--changes (task)
@@ -286,8 +295,12 @@ report does, rather than take the compose box down with it."
        (condition-case err
            (when-let* ((text (funcall fn task)))
              (unless (string-empty-p text) (push text parts)))
-         (error (push (propertize (format "The changes could not be drawn: %s\n"
-                                          (error-message-string err))
+         ;; Short: an error may carry the structure it was about, a review
+         ;; with the task's whole hand-in in it, which is no line to read.
+         (error (harness-log 'warn "review: the changes could not be drawn: %s"
+                             (harness-error-short-message err 600))
+                (push (propertize (format "The changes could not be drawn: %s\n"
+                                          (harness-error-short-message err 200))
                                   'face 'harness-dim-face)
                       parts)))
        nil))

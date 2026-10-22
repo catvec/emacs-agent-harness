@@ -39,6 +39,10 @@
 (defvar harness-ui-popout-key)
 (defvar harness-ui-review-minor-mode)
 (defvar harness-ui-review-changes-functions)
+(defvar harness-ui-report-panel-functions)
+(defvar harness-ui-event-functions)
+(defvar harness-chat-panel-functions)
+(declare-function harness-ui--dispatch-ui "harness-ui")
 (declare-function harness-ui-review--shown "harness-ui-review")
 (defvar harness-ui-popout--parent)
 (defvar harness-ui-popout--max-height)
@@ -1045,6 +1049,138 @@ in a line, the message being right above, with no [Review Changes]."
             (should-not (string-search "[Review Changes]" tail))
             (should-not (string-search "Not handed in" tail))
             (should (string-search "[Verify]" tail))))))))
+
+;;;; When a part of the review cannot be drawn
+
+(defun harness-ui-review-test--big-error ()
+  "Return the data of an `args-out-of-range' about a record that holds a lot.
+As the error of a review an older version of the harness left behind is: it
+names the record whole, and the record holds the task's hand-in."
+  (list (record 'harness-ui-review-test--review
+                (make-string 5000 ?x) (list :report (make-string 5000 ?y)))
+        33))
+
+(ert-deftest harness-ui-review-report-keeps-its-banner-when-a-panel-fails ()
+  "A panel of the report that cannot draw says so in one short line -- the error
+may carry the task's whole hand-in -- and the panels after it draw all the same:
+the review banner with [Verify] and [Send back], and the box under it."
+  (harness-ui-review-test-with
+    (let ((harness-ui-report-panel-functions
+           (cons (lambda (_task)
+                   (signal 'args-out-of-range (harness-ui-review-test--big-error)))
+                 harness-ui-report-panel-functions)))
+      (let* ((popout (harness-ui-review-test--report board id))
+             (text (harness-ui-review-test--text popout)))
+        (should (string-search "A part of this report could not be drawn: Args out of range: \"#<harness-ui-review-test--review>\", 33"
+                               text))
+        (should-not (string-search "xxxxxxxxxx" text))
+        ;; The report above the line, the banner under it.
+        (should (< (string-search "Evidence (4)" text) (string-search "could not be drawn" text)))
+        (should (< (string-search "could not be drawn" text) (string-search "Ready for review" text)))
+        (should (string-search "[Verify]" text))
+        (should (string-search "[Send back]" text))
+        (with-current-buffer popout
+          (should (harness-compose-live-p))
+          (should (eq 'harness-ui-review-verify (key-binding (kbd "C-c C-v")))))))))
+
+(ert-deftest harness-ui-review-report-draws-the-rest-when-a-piece-of-evidence-fails ()
+  "A piece of evidence that cannot be drawn says so, short, and the other pieces
+and the banner after them draw."
+  (harness-ui-review-test-with
+    (cl-letf (((symbol-function 'harness-ui-report--insert-image)
+               (lambda (_path) (signal 'args-out-of-range (harness-ui-review-test--big-error)))))
+      (let* ((popout (harness-ui-review-test--report board id))
+             (text (harness-ui-review-test--text popout)))
+        (should (string-search "Evidence 3 could not be drawn: Args out of range: \"#<harness-ui-review-test--review>\", 33"
+                               text))
+        (should-not (string-search "xxxxxxxxxx" text))
+        (should (string-search "a note" text))
+        (should (string-search "(fix-flaky)" text))
+        (should (string-search "[tool call]" text))
+        (should (string-search "[Verify]" text))))))
+
+(defun harness-ui-review-test--report-opened (board id)
+  "Pop out the report of task ID as BOARD's [Review Changes] does; return its buffer.
+Without waiting for the report's own text: for one that cannot draw it."
+  (harness-ui-report-popout (with-current-buffer board (harness-ui-tasks--find id)))
+  (harness-ui-popout-buffer (list 'report id)))
+
+(ert-deftest harness-ui-review-report-keeps-its-banner-when-the-report-fails ()
+  "A report that cannot be drawn at all says so in a line, and the banner that
+accepts or sends the work back is there under it."
+  (harness-ui-review-test-with
+    (cl-letf (((symbol-function 'harness-ui-report--insert-message)
+               (lambda (_text) (error "The summary will not draw"))))
+      (let* ((popout (harness-ui-review-test--report-opened board id))
+             (text (harness-ui-review-test--text popout)))
+        (should (string-search "The report could not be drawn: The summary will not draw" text))
+        (should (string-search "Ready for review" text))
+        (should (string-search "[Verify]" text))
+        (should (string-search "[Send back]" text))))))
+
+(ert-deftest harness-ui-review-banner-says-short-why-the-changes-failed ()
+  "The changes of the banner that cannot be drawn say so in one short line, the
+banner stays on the review background with its buttons, and the compose box
+under it is drawn."
+  (harness-ui-review-test-with
+    (let ((chat (harness-ui-review-test--open-session sid)))
+      (harness-ui-review-test--wait-text chat "Ready for review")
+      (let ((harness-ui-review-changes-functions
+             (list (lambda (_task) (signal 'args-out-of-range (harness-ui-review-test--big-error))))))
+        (with-current-buffer chat (funcall harness-compose-redraw-function))
+        (let ((text (harness-ui-review-test--text chat)))
+          (should (string-search "The changes could not be drawn: Args out of range: \"#<harness-ui-review-test--review>\", 33"
+                                 text))
+          (should-not (string-search "xxxxxxxxxx" text))
+          (should (string-search "[Verify]  C-c C-v" text))
+          (should (string-search "[Send back]  C-c C-x" text)))
+        (with-current-buffer chat
+          (should (harness-compose-live-p))
+          (let ((pos (save-excursion (goto-char (point-min))
+                                     (search-forward "The changes could not be drawn")
+                                     (match-beginning 0))))
+            (should (cl-some (lambda (f) (eq f 'harness-chat-review-face))
+                             (ensure-list (get-text-property pos 'face))))))))))
+
+(ert-deftest harness-ui-review-chat-keeps-its-box-when-a-panel-fails ()
+  "A panel of the session that fails says so in a line, short, and the panels
+after it and the compose box are drawn: the review banner, the box where the
+feedback is typed, do not go with one panel's error."
+  (harness-ui-review-test-with
+    (let ((chat (harness-ui-review-test--open-session sid)))
+      (harness-ui-review-test--wait-text chat "Ready for review")
+      (with-current-buffer chat
+        (let ((harness-chat-panel-functions
+               (cons (lambda () (signal 'args-out-of-range (harness-ui-review-test--big-error)))
+                     harness-chat-panel-functions)))
+          (funcall harness-compose-redraw-function)
+          (let ((tail (harness-ui-review-test--tail chat)))
+            (should (string-search "A panel of this session could not be drawn: Args out of range: \"#<harness-ui-review-test--review>\", 33"
+                                   tail))
+            (should-not (string-search "xxxxxxxxxx" tail))
+            (should (string-search "[Verify]  C-c C-v" tail)))
+          (should (harness-compose-live-p)))))))
+
+(ert-deftest harness-ui-review-banner-hears-the-task-when-another-listener-fails ()
+  "A listener of the UI's events that signals does not keep the others from the
+event: the banner follows its task all the same.  One on a review an older
+version left behind did, and the banner never heard the task was handed in."
+  (harness-ui-review-test-with
+    (let ((chat (harness-ui-review-test--open-session sid))
+          (calls 0))
+      (harness-ui-review-test--wait-text chat "Ready for review")
+      (let ((harness-ui-event-functions
+             (cons (lambda (_event _args)
+                     (cl-incf calls)
+                     (signal 'args-out-of-range (harness-ui-review-test--big-error)))
+                   harness-ui-event-functions))
+            (task (copy-sequence (harness-acp--normalise (harness-call 'task/get id)))))
+        (setq task (plist-put task :state "active"))
+        (setq task (plist-put task :column "active"))
+        ;; The news as the UI's dispatch gets it from the harness.
+        (harness-ui--dispatch-ui "_harness/event" (list :event "task/changed" :args (list task)) nil))
+      (should (= 1 calls))
+      (should-not (string-match-p "Ready for review" (harness-ui-review-test--text chat))))))
 
 ;;;; Evidence files
 

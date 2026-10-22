@@ -3542,7 +3542,9 @@ the tail and returns a string, or nil for nothing.  The strings go
 between the queue and the attachments, in order, read-only and above
 the compose box.  Add to it buffer-locally, with a symbol, so a reload
 redefines it.  The task modules show their review and backlog banners
-this way.")
+this way.  A function that signals an error leaves a line saying so
+where its panel would be, and the others and the box are drawn all the
+same.")
 
 (defvar harness-chat-tool-body-functions nil
   "Functions giving a tool call block a body of their own.
@@ -3557,12 +3559,24 @@ module shows the report a hand_in call handed in this way.")
 Each string gets the panel background, which its own properties may
 override, as the pending panel's do.  A function cannot move point,
 where its panel goes: it may measure text in a window, which takes the
-window's point."
+window's point.  A panel that fails says so in a line, and the panels
+after it and the compose box are drawn all the same: the tail was
+deleted before them, and one panel's error must not leave the session
+without the rest."
   (run-hook-wrapped 'harness-chat-panel-functions
                     (lambda (fn)
-                      (when-let* ((text (save-excursion (funcall fn))))
-                        (unless (string-empty-p text)
-                          (insert (harness-chat--face text 'harness-chat-panel-face))))
+                      (condition-case err
+                          (when-let* ((text (save-excursion (funcall fn))))
+                            (unless (string-empty-p text)
+                              (insert (harness-chat--face text 'harness-chat-panel-face))))
+                        (error
+                         (harness-log 'warn "chat: panel %s could not be drawn: %s"
+                                      (if (symbolp fn) fn "of a closure")
+                                      (harness-error-short-message err 600))
+                         (unless (bolp) (insert "\n"))
+                         (insert (propertize (format " A panel of this session could not be drawn: %s\n"
+                                                     (harness-error-short-message err 200))
+                                             'face 'harness-dim-face))))
                       nil)))
 
 

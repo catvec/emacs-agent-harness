@@ -1768,5 +1768,27 @@ away -- rather than pile up everything sent to it behind it."
       (remove-hook 'harness-log-hook log)
       (when (process-live-p proc) (delete-process proc)))))
 
+(ert-deftest harness-util-error-short-message-names-a-record-by-its-type ()
+  "An error that names a record -- `args-out-of-range' and `wrong-type-argument'
+do, of the struct they were about -- reads short: the record may hold a task's
+hand-in, a branch's files with their diffs, a whole session.  Strings and lists
+of the data are cut as before, and the message is one line at the limit."
+  (let* ((record (record 'harness-test--review (make-string 5000 ?x)
+                         (list :report (make-string 5000 ?y))))
+         (short (harness-error-short-message (list 'args-out-of-range record 33))))
+    (should (equal "Args out of range: \"#<harness-test--review>\", 33" short))
+    (should (equal "Wrong type argument: change-review-set, \"#<harness-test--review>\""
+                   (harness-error-short-message
+                    (list 'wrong-type-argument 'change-review-set record)))))
+  ;; In a list the error carries, at any depth.
+  (let ((short (harness-error-short-message
+                (list 'args-out-of-range (list :review (record 'harness-test--review "x") 1) 2))))
+    (should (string-search "#<harness-test--review>" short)))
+  ;; Whatever it prints is bounded, and cut to the limit.
+  (let ((short (harness-error-short-message
+                (list 'args-out-of-range (make-string 5000 ?z) 1) 80)))
+    (should (<= (length short) 80))
+    (should-not (string-match-p "\n" short))))
+
 (provide 'harness-core-test)
 ;;; harness-core-test.el ends here
