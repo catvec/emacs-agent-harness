@@ -20,6 +20,7 @@ import '../theme/harness_theme.dart';
 import '../widgets/connection_banner.dart';
 import '../widgets/interaction_card.dart';
 import '../widgets/message_composer.dart';
+import '../widgets/quota_widgets.dart';
 import '../widgets/transcript_view.dart';
 
 class SessionScreen extends StatefulWidget {
@@ -562,6 +563,7 @@ class _MetaStrip extends StatelessWidget {
         : s?.status;
     final statusColor = HarnessColors.status(status, theme.brightness);
     final task = _taskForSession(app, s?.id);
+    final spend = app.spendOf(s);
     return Container(
       decoration: BoxDecoration(
         border: Border(
@@ -623,11 +625,16 @@ class _MetaStrip extends StatelessWidget {
               ),
               onTap: null,
             ),
-          if ((usage?.cost ?? 0) > 0)
-            _MetaChip(
-              icon: Icons.payments_outlined,
-              label: formatMoney(usage!.cost),
-              onTap: null,
+          // What it cost, or the plan that pays for it with the plan's quota.
+          if (spend.worthShowing)
+            SpendChip(
+              key: const Key('session-spend'),
+              status: spend,
+              onTap: () => showPlanSheet(
+                context,
+                status: spend,
+                providerLabel: app.providerLabelOf(spend),
+              ),
             ),
           if (task != null)
             _MetaChip(

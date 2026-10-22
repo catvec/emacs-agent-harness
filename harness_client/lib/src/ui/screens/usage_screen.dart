@@ -12,6 +12,7 @@ import '../../state/usage_controller.dart';
 import '../adaptive/adaptive_widgets.dart';
 import '../format.dart';
 import '../theme/harness_theme.dart';
+import '../widgets/quota_widgets.dart';
 
 class UsageScreen extends StatelessWidget {
   const UsageScreen({
@@ -33,6 +34,13 @@ class UsageScreen extends StatelessWidget {
       animation: Listenable.merge([controller, app]),
       builder: (context, _) {
         final overview = controller.overview;
+        final quota = app.quota;
+        final plans = quota?.quotas ?? const [];
+        // Asking again also has the providers ask their plans again.
+        Future<void> reload() => Future.wait([
+          controller.load(project: app.selectedProject),
+          if (quota != null) quota.load(refresh: true),
+        ]);
         return HarnessPage(
           title: 'Usage',
           actions: [
@@ -69,11 +77,11 @@ class UsageScreen extends StatelessWidget {
                 CupertinoIcons.arrow_clockwise,
               ),
               label: 'Refresh usage',
-              onPressed: () => controller.load(project: app.selectedProject),
+              onPressed: reload,
             ),
           ],
           body: RefreshIndicator(
-            onRefresh: () => controller.load(project: app.selectedProject),
+            onRefresh: reload,
             child: ListView(
               physics: const AlwaysScrollableScrollPhysics(),
               padding: const EdgeInsets.fromLTRB(16, 6, 16, 28),
@@ -83,6 +91,21 @@ class UsageScreen extends StatelessWidget {
                 _ScopeLine(app: app, controller: controller),
                 const SizedBox(height: 12),
                 _SpendHero(overview: overview, project: app.selectedProject),
+                // How each provider bills and what is left of its plan,
+                // beside what the plan has covered.
+                if (plans.isNotEmpty) ...[
+                  HarnessSectionHeader(
+                    label: 'Plan',
+                    padding: const EdgeInsets.fromLTRB(2, 22, 2, 8),
+                    trailing: _PlanRefresh(
+                      busy: quota!.loading,
+                      onPressed: () =>
+                          quota.load(refresh: true, showSpinner: true),
+                    ),
+                  ),
+                  for (final plan in plans)
+                    PlanCard(label: quota.labelOf(plan.provider), quota: plan),
+                ],
                 if (overview.live.isNotEmpty) ...[
                   const HarnessSectionHeader(
                     label: 'Live now',
@@ -119,6 +142,17 @@ class UsageScreen extends StatelessWidget {
                     label: 'Budgets',
                     padding: EdgeInsets.fromLTRB(2, 24, 2, 8),
                   ),
+                  if (plans.any((plan) => plan.isPlan))
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(2, 0, 2, 8),
+                      child: Text(
+                        'Budgets count billed cost; calls a plan covers do '
+                        'not spend them.',
+                        style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ),
                   for (final budget in overview.budgets)
                     _BudgetRow(budget: budget),
                 ],
@@ -142,6 +176,52 @@ class UsageScreen extends StatelessWidget {
           ),
         );
       },
+    );
+  }
+}
+
+/// Asks the providers for their plans' quota again.
+class _PlanRefresh extends StatelessWidget {
+  const _PlanRefresh({required this.busy, required this.onPressed});
+
+  final bool busy;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = Theme.of(context).colorScheme.primary;
+    return Semantics(
+      button: true,
+      label: 'Refresh plan quota',
+      excludeSemantics: true,
+      child: SizedBox(
+        height: 24,
+        child: busy
+            ? const Center(child: HarnessActivity(radius: 7))
+            : HarnessTap(
+                key: const Key('plan-refresh'),
+                onTap: onPressed,
+                borderRadius: BorderRadius.circular(8),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 8),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.refresh_rounded, size: 14, color: color),
+                      const SizedBox(width: 4),
+                      Text(
+                        'Refresh',
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                          color: color,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+      ),
     );
   }
 }

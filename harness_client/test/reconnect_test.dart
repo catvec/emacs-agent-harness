@@ -59,6 +59,20 @@ Future<void> _until(bool Function() done, {String? what}) async {
   }
 }
 
+/// The phases the app goes through from now on, one for each change of
+/// phase, starting with the one it is in; [sessionsKept] collects how many
+/// sessions it showed at each notification.  What the app goes on doing in
+/// the background once it has connected (the plan quota arriving, say)
+/// notifies it with the phase as it stands, and is no change.
+List<ConnectionPhase> _recordPhases(AppController app, List<int> sessionsKept) {
+  final phases = <ConnectionPhase>[app.phase];
+  app.addListener(() {
+    if (phases.last != app.phase) phases.add(app.phase);
+    sessionsKept.add(app.sessions.length);
+  });
+  return phases;
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
@@ -68,12 +82,8 @@ void main() {
       final app = rig.app;
       expect(rig.harness.connects, 1);
       expect(app.sessions, hasLength(4));
-      final phases = <ConnectionPhase>[];
       final sessionsKept = <int>[];
-      app.addListener(() {
-        if (phases.isEmpty || phases.last != app.phase) phases.add(app.phase);
-        sessionsKept.add(app.sessions.length);
-      });
+      final phases = _recordPhases(app, sessionsKept);
 
       // The harness refuses the first two attempts, as a harness that is
       // restarting does.
@@ -102,7 +112,11 @@ void main() {
       // Out of touch, never out of the session: the screens were not torn
       // down, nothing went through the connection screen, and the lists
       // were there the whole time.
-      expect(phases, [ConnectionPhase.reconnecting, ConnectionPhase.connected]);
+      expect(phases, [
+        ConnectionPhase.connected,
+        ConnectionPhase.reconnecting,
+        ConnectionPhase.connected,
+      ]);
       expect(sessionsKept, everyElement(4));
       expect(app.sessions, hasLength(4));
     });
@@ -562,19 +576,19 @@ void main() {
     test('is in place: the session is never left', () async {
       final rig = await _rig();
       final app = rig.app;
-      final phases = <ConnectionPhase>[];
       final sessionsKept = <int>[];
-      app.addListener(() {
-        if (phases.isEmpty || phases.last != app.phase) phases.add(app.phase);
-        sessionsKept.add(app.sessions.length);
-      });
+      final phases = _recordPhases(app, sessionsKept);
       app.drafts.setText('session:s1', 'not sent yet');
       await app.reconnect();
       await _until(
         () => app.isConnected && rig.harness.connects == 2,
         what: 'the new connection',
       );
-      expect(phases, [ConnectionPhase.reconnecting, ConnectionPhase.connected]);
+      expect(phases, [
+        ConnectionPhase.connected,
+        ConnectionPhase.reconnecting,
+        ConnectionPhase.connected,
+      ]);
       expect(phases, isNot(contains(ConnectionPhase.disconnected)));
       expect(phases, isNot(contains(ConnectionPhase.connecting)));
       expect(sessionsKept, everyElement(4));

@@ -3,6 +3,7 @@ import 'dart:async';
 import '../acp/acp_client.dart';
 import '../acp/acp_message.dart';
 import '../acp/capabilities.dart';
+import '../models/quota.dart';
 import '../models/server_info.dart';
 import '../models/session.dart';
 import '../models/task.dart';
@@ -398,6 +399,22 @@ class HarnessApi {
 
   Future<List<JsonMap>> budgets() async =>
       asMapList(await extensionRaw('usage/budgets'));
+
+  /// How [provider] bills its calls and, for a plan, how much of its quota
+  /// is used (`provider/quota`).  Null for a provider that says nothing.
+  /// [refresh] has the provider ask its source again first, which can take
+  /// a few seconds; it makes no model call.
+  Future<ProviderQuota?> providerQuota(
+    String provider, {
+    bool refresh = false,
+  }) async {
+    final result = await extensionRaw('provider/quota', {
+      'providerId': provider,
+      'refresh': refresh,
+    }, const Duration(seconds: 30));
+    if (result is! Map || result.isEmpty) return null;
+    return ProviderQuota.fromWire(provider, asMap(result));
+  }
 
   // ---- Projects, providers, server ---------------------------------------
 

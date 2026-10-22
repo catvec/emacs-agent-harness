@@ -94,6 +94,10 @@ class HarnessCapabilities {
   bool get budgets => has('usage/budgets');
   bool get providers => has('provider/list');
   bool get models => has('provider/models');
+
+  /// The plan quota of the providers that report it (`provider/quota`),
+  /// found through the list of providers.
+  bool get quota => has('provider/quota') && has('provider/list');
   bool get projects => has('insights/projects');
   bool get search => has('session/search');
   bool get fork => has('session/fork');
@@ -145,6 +149,11 @@ class HarnessCapabilities {
       'Usage',
       'Spend, tokens, live sessions and budgets',
       usage,
+    ),
+    CapabilityFeature(
+      'Plan quota',
+      'How much of the plan is used, and when it resets',
+      quota,
     ),
     CapabilityFeature(
       'Projects',

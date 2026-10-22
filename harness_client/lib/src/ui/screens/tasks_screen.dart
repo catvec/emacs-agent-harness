@@ -11,6 +11,7 @@ import '../adaptive/adaptive_widgets.dart';
 import '../format.dart';
 import '../theme/harness_theme.dart';
 import '../widgets/connection_banner.dart';
+import '../widgets/quota_widgets.dart';
 
 class TasksScreen extends StatefulWidget {
   const TasksScreen({
@@ -189,6 +190,10 @@ class _TaskHeader extends StatelessWidget {
     final suspended = slots?.suspended ?? false;
     final settings = controller.settings;
     final autoQueue = settings?.backlogMode == 'auto';
+    // What the board's tasks cost, or the plan that pays for them with its
+    // quota, as a session's header says it for the session.  The model new
+    // tasks use names the provider whose account stands for them all.
+    final spend = app.spendOfTasks(controller.tasks, model: settings?.model);
     return Container(
       padding: const EdgeInsets.fromLTRB(16, 6, 16, 10),
       decoration: BoxDecoration(
@@ -225,6 +230,17 @@ class _TaskHeader extends StatelessWidget {
                   if (chosen != null) app.selectProject(chosen);
                 },
               ),
+              if (spend.worthShowing)
+                SpendChip(
+                  key: const Key('tasks-spend'),
+                  status: spend,
+                  dense: false,
+                  onTap: () => showPlanSheet(
+                    context,
+                    status: spend,
+                    providerLabel: app.providerLabelOf(spend),
+                  ),
+                ),
               HarnessPill(
                 label: limit == null
                     ? '$holders working'

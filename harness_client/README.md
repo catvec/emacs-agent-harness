@@ -44,8 +44,27 @@ time it opens. It asks again only when the harness does.
 - **Shows the rest of the harness.** The task board (all seven columns, queue
   state and slot use, backlog mode, submit/start/queue/verify/reject/retry/
   complete/archive), spend, tokens, live sessions, daily spend, per-model and
-  per-project breakdowns, budgets, the model catalogue, harness modules and the
-  full ACP capability report.
+  per-project breakdowns, budgets, the plan quota of the providers that report
+  one, the model catalogue, harness modules and the full ACP capability report.
+- **Shows who pays, and how much of the plan is left.** As the harness's Emacs
+  does in its header lines, a session, the task board and the session list read
+  `$1.20` when calls are billed per token and `Max` when a subscription pays
+  (`$0.40+Max` when some was billed as extra usage), with the plan's session
+  and weekly quota beside it: `Max · 5h 23% · 7d 41%`, each window coloured
+  from 70% full on (amber, orange from 85%, red from 95%), and any other
+  window that fills up joins them. A tap on it says who pays, what the calls
+  came to at API prices, and a meter for every window with when it resets.
+  The Usage view has a **Plan** section: a card for each provider that
+  reports one, with the plan, the account, a meter for each window, the extra
+  usage the plan allows, a warning when its limit is close or reached, and
+  **Refresh**, which has the providers ask their source again. It follows the
+  harness's `provider/quota-updated` events, so the windows fill up on screen
+  as the work uses them. A harness without `provider/quota` still shows the
+  plan its sessions say paid, without the windows.
+
+  | Status | Usage |
+  |---|---|
+  | ![A session's header with its plan quota, and the details a tap opens](screenshots/android-plan-sheet.png) | ![The plan section of the Usage view](screenshots/android-usage.png) |
 - **Treats a project as a main checkout.** A task, and a sub-agent started in
   its worktree, works in a git worktree, which the harness files under the
   worktree itself. The app folds each worktree into the checkout it was made
@@ -320,6 +339,7 @@ The client never assumes a method because the agent calls itself a harness.
 | Live activity | `agent/activity` or `agent/activity-changed` |
 | Task board | `task/list` (actions need `task/start`, `task/verify`, …) |
 | Usage | `usage/totals` or `usage/summary` |
+| Plan quota | `provider/quota` and `provider/list`, which says which providers report one |
 | Question diagrams | `question/image` for images; ASCII comes with the request |
 | Project picker | `insights/projects` (and `project/mains`, to fold worktrees) |
 | Rename, fork, delete | `session/update`, `session/fork`, `session/delete` |
@@ -352,6 +372,15 @@ Everything beyond that is under `_harness/` and is optional.
   `task/toggle-queue`, `task/toggle-backlog-mode`.
 - Usage: `usage/totals`, `usage/summary`, `usage/live-all`, `usage/rates`,
   `usage/budgets`.
+- Plan quota: `provider/list` (a provider's `capabilities.quota` says it
+  reports one), `provider/quota` (`providerId`, and `refresh` to have the
+  provider ask its source again; no model call) and the
+  `provider/quota-updated` event, `[providerId, quota]`. A quota is its
+  `billing` (`api`, `subscription` or `extra-usage`), `plan` and `plan-label`,
+  `auth`, `account`, its `windows` (`name`, `label`, `used` from 0 to 1,
+  `resets` in epoch seconds), `extra` usage, `limit-status`, `using-extra`
+  and `updated`. A session's own `usage.billing` and `usage.plan` say how its
+  calls were paid.
 - Server: `harness/version`, `harness/modules`, `insights/projects`,
   `project/mains`, `provider/list`, `provider/models`, `config/describe`.
 - Questions: `_harness/ask_user` request, `question/pending`,
@@ -369,9 +398,11 @@ the tool name when it rebuilds a transcript from nodes.
 
 ```text
 lib/src/acp/          JSON-RPC peer, WebSocket/TCP transports, capabilities
-lib/src/models/       sessions, transcript reducer, tasks, usage, activity
+lib/src/models/       sessions, transcript reducer, tasks, usage, plan quota,
+                      activity
 lib/src/services/     typed HarnessApi over ACP and _harness
-lib/src/state/        connection, sessions, tasks, usage, interactions
+lib/src/state/        connection, sessions, tasks, usage, plan quota,
+                      interactions
 lib/src/ui/           adaptive widgets, theme, screens and transcript widgets
 tool/                 preview ACP server, real-harness probe, phone installer,
                       pub cache check

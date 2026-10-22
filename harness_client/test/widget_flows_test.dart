@@ -346,8 +346,13 @@ void main() {
           matching: find.byType(ListView),
         )
         .first;
-    await tester.drag(usageList, const Offset(0, -500));
-    await tester.pump(const Duration(milliseconds: 250));
+    await tester.scrollUntilVisible(
+      find.text('MODELS'),
+      300,
+      scrollable: find
+          .descendant(of: usageList, matching: find.byType(Scrollable))
+          .first,
+    );
     expect(find.text('MODELS'), findsOneWidget);
     await tester.tap(find.text('Server'));
     await _settle(tester, 6);

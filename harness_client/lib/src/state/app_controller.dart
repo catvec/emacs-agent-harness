@@ -9,12 +9,14 @@ import '../acp/capabilities.dart';
 import '../acp/acp_transport.dart';
 import '../acp/connection_target.dart';
 import '../models/project_roots.dart';
+import '../models/quota.dart';
 import '../models/server_info.dart';
 import '../models/session.dart';
 import '../models/task.dart';
 import '../services/harness_api.dart';
 import '../services/device_name.dart';
 import '../state/drafts.dart';
+import '../state/quota_controller.dart';
 import '../state/session_controller.dart';
 import '../state/settings_controller.dart';
 import '../state/task_controller.dart';
@@ -151,6 +153,10 @@ class AppController extends ChangeNotifier {
   String? selectedProject;
   TaskController? tasks;
   UsageController? usage;
+
+  /// Each provider's billing and plan quota, for the providers that report
+  /// them; null on a harness that does not offer `provider/quota`.
+  QuotaController? quota;
   ServerOverview? server;
   bool serverLoading = false;
   String? activeSessionId;
@@ -213,11 +219,43 @@ class AppController extends ChangeNotifier {
 
   bool needsAttention(String id) => _sessions[id]?.needsAttention == true;
 
+  /// What [session] cost and who pays for it: the price when its calls are
+  /// billed per token, its plan with the plan's quota when a subscription
+  /// pays (see [SpendStatus]).
+  SpendStatus spendOf(SessionSummary? session) => SpendStatus.of(
+    usage: session?.usage,
+    quota: quota?.forModel(session?.model),
+  );
+
+  /// The same for the sessions of [tasks] taken together.  [model], the one
+  /// new tasks use, names the provider whose account stands for them all;
+  /// else the first session's does.
+  SpendStatus spendOfTasks(Iterable<HarnessTask> tasks, {String? model}) {
+    final sessions = <SessionSummary>[
+      for (final task in tasks)
+        if (task.sessionId case final id?)
+          if (summaryFor(id) case final session?) session,
+    ];
+    return SpendStatus.of(
+      usage: combineUsage(sessions),
+      quota: quota?.forModel(model ?? sessions.firstOrNull?.model),
+      subject: 'These tasks',
+    );
+  }
+
+  /// The name of the provider whose account [spend] reads, as people read
+  /// it ("Claude"); null when no provider's quota applies.
+  String? providerLabelOf(SpendStatus spend) {
+    final provider = spend.quota?.provider;
+    return provider == null ? null : quota?.labelOf(provider);
+  }
+
   int get attentionCount =>
       _sessions.values.where((controller) => controller.needsAttention).length;
 
   bool get hasTasks => capabilities?.tasks == true && tasks != null;
   bool get hasUsage => capabilities?.usage == true && usage != null;
+  bool get hasQuota => capabilities?.quota == true && quota != null;
 
   /// The ways the harness lets this device sign in (ACP's `authMethods`),
   /// but for the session secret, which has a field of its own.
@@ -545,7 +583,24 @@ class AppController extends ChangeNotifier {
       usage = UsageController(api!, roots: () => _roots);
       unawaited(usage!.load(project: selectedProject, showSpinner: false));
     }
+    if (capabilities?.quota == true) {
+      _startQuota(api!);
+      unawaited(quota!.load());
+    }
     unawaited(refreshServer());
+  }
+
+  /// Keep the plan quota of the providers, and show it wherever a screen
+  /// shows what a session costs: a change of it is a change of the app.
+  void _startQuota(HarnessApi service) {
+    quota = QuotaController(service)..addListener(_notify);
+  }
+
+  void _stopQuota() {
+    quota
+      ?..removeListener(_notify)
+      ..dispose();
+    quota = null;
   }
 
   Future<void> refreshSessions({
@@ -833,6 +888,7 @@ class AppController extends ChangeNotifier {
     final args = asList(notification.params['args']);
     tasks?.applyEvent(event, args);
     usage?.applyEvent(event, args);
+    quota?.applyEvent(event, args);
     switch (event) {
       case 'session/created':
       case 'session/deleted':
@@ -848,6 +904,8 @@ class AppController extends ChangeNotifier {
       case 'config/changed':
       case 'provider/models-updated':
         unawaited(refreshServer());
+        // A reloaded harness may have other providers to ask.
+        if (event == 'harness/reloaded') unawaited(quota?.load());
       case 'usage/budgets-changed':
         unawaited(
           usage?.load(project: selectedProject, showSpinner: false) ??
@@ -1294,6 +1352,7 @@ class AppController extends ChangeNotifier {
     if (usage != null) {
       unawaited(usage!.load(project: selectedProject, showSpinner: false));
     }
+    if (quota != null) unawaited(quota!.load());
     unawaited(refreshServer());
     // The open conversation: its transcript, and the requests that were
     // waiting for an answer when the connection went.  The others read
@@ -1312,6 +1371,7 @@ class AppController extends ChangeNotifier {
     if (capabilities?.usage == true && usage == null) {
       usage = UsageController(service);
     }
+    if (capabilities?.quota == true && quota == null) _startQuota(service);
   }
 
   Future<void> _waitToRetry(int failures) {
@@ -1457,6 +1517,7 @@ class AppController extends ChangeNotifier {
     _askedMains.clear();
     tasks = null;
     usage = null;
+    _stopQuota();
     server = null;
     activeSessionId = null;
     serverLoading = false;

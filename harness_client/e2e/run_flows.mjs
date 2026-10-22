@@ -183,6 +183,14 @@ async function run() {
 
     await openSession(page, 'Design the merge queue');
     await shot(page, 'android-chat');
+    // The plan that pays for the session, with its quota, says more when it
+    // is touched: who pays, and a meter for each window.
+    await page.getByRole('button', { name: /Plan: Max/ }).first().click();
+    await page.getByText(/Current session \(5 hours\)/).first().waitFor({ timeout: 8000 });
+    await page.waitForTimeout(500);
+    await shot(page, 'android-plan-sheet');
+    await page.mouse.click(206, 60); // the scrim above the sheet closes it
+    await page.waitForTimeout(700);
     await goBack(page);
 
     await nav(page, 'Tasks');
@@ -223,8 +231,14 @@ async function run() {
 
     await nav(page, 'Usage');
     await shot(page, 'android-usage');
-    await page.mouse.wheel(0, 700);
-    await page.waitForTimeout(500);
+    // The wheel scrolls what the pointer is over, not the corner it was left
+    // in, and a page takes it in small steps: down past the plan to the models.
+    await page.mouse.move(206, 500);
+    for (let step = 0; step < 8; step += 1) {
+      await page.mouse.wheel(0, 600);
+      await page.waitForTimeout(150);
+    }
+    await page.waitForTimeout(700);
     await shot(page, 'android-usage-models');
 
     await nav(page, 'Server');

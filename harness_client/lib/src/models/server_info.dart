@@ -41,18 +41,24 @@ class ProviderInfo {
     required this.label,
     this.doc = '',
     this.models = const [],
+    this.reportsQuota = false,
   });
 
   factory ProviderInfo.fromWire(JsonMap wire) => ProviderInfo(
     id: asStringOr(wire['id'], ''),
     label: asStringOr(wire['label'], asStringOr(wire['id'], '')),
     doc: asStringOr(wire['doc'], ''),
+    reportsQuota: asBool(asMap(wire['capabilities'])['quota']),
   );
 
   final String id;
   final String label;
   final String doc;
   final List<ModelInfo> models;
+
+  /// Whether the provider tells its billing and plan quota
+  /// (`provider/quota`).
+  final bool reportsQuota;
 }
 
 class ModelInfo {

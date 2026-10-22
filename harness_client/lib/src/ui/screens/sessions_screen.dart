@@ -2,12 +2,12 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 
 import '../../models/session.dart';
-import '../../models/usage.dart';
 import '../../state/app_controller.dart';
 import '../adaptive/adaptive_widgets.dart';
 import '../adaptive/platform_style.dart';
 import '../format.dart';
 import '../theme/harness_theme.dart';
+import '../widgets/quota_widgets.dart';
 
 enum _SessionFilter { all, active, needsYou }
 
@@ -490,7 +490,7 @@ class _SessionRow extends StatelessWidget {
     final attention = app.needsAttention(session.id) || live.isBlocked;
     final status = attention ? 'blocked' : live.status;
     final statusColor = HarnessColors.status(status, theme.brightness);
-    final cost = live.usage?.cost ?? 0;
+    final spend = app.spendOf(live);
     final selected =
         app.activeSessionId == session.id &&
         MediaQuery.sizeOf(context).width >= 920;
@@ -582,13 +582,20 @@ class _SessionRow extends StatelessWidget {
                         label: 'Needs you',
                         color: HarnessColors.amber,
                       )
-                    else if (cost > 0)
+                    else if (spend.worthShowing)
+                      // The price, or the plan that pays: "$0.73", "Max".
                       Text(
-                        formatMoney(cost),
+                        spend.text,
+                        key: const Key('session-row-spend'),
                         style: theme.textTheme.labelSmall?.copyWith(
-                          color: theme.colorScheme.onSurfaceVariant.withValues(
-                            alpha: 0.65,
-                          ),
+                          color: spend.planned
+                              ? planAccent(theme)
+                              : theme.colorScheme.onSurfaceVariant.withValues(
+                                  alpha: 0.65,
+                                ),
+                          fontWeight: spend.planned
+                              ? FontWeight.w700
+                              : FontWeight.w500,
                           fontSize: 10,
                         ),
                       )

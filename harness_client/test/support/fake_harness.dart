@@ -76,6 +76,7 @@ class FakeHarness {
     this.oidcUrl,
     this.issueSecret,
     this.projectMains = true,
+    this.quota = true,
     Set<String>? knownSecrets,
   }) : knownSecrets = knownSecrets ?? <String>{} {
     if (enhanced) {
@@ -121,6 +122,7 @@ class FakeHarness {
         if (projectMains) 'project/mains',
         'provider/list',
         'provider/models',
+        if (quota) 'provider/quota',
         'harness/version',
         'harness/modules',
         'config/describe',
@@ -142,6 +144,7 @@ class FakeHarness {
         'usage/budgets-changed',
         'session/status',
         'permission/requested',
+        if (quota) 'provider/quota-updated',
       });
     }
     _seed();
@@ -154,6 +157,21 @@ class FakeHarness {
   /// Whether the harness offers `project/mains`, which says what checkout a
   /// directory is a git worktree of.  An older harness does not.
   final bool projectMains;
+
+  /// Whether the harness offers `provider/quota`: the billing and plan quota
+  /// of the providers that report one.  An older harness does not.
+  final bool quota;
+
+  /// What each provider that reports its quota last said, as
+  /// `provider/quota` answers: Claude on a Max plan, Copilot on a Pro one.
+  /// A provider that says nothing is not in the map.
+  final Map<String, Map<String, Object?>> quotas = {};
+
+  /// How many times a client asked `provider/quota` to ask its source again.
+  int quotaRefreshes = 0;
+
+  /// Make `provider/quota` fail, as a provider whose probe goes wrong does.
+  bool failQuota = false;
 
   /// Where git worktrees that are not in the `.worktrees` of their checkout
   /// are, as a repository's `.git` says it: worktree -> checkout.  An older
@@ -317,13 +335,17 @@ class FakeHarness {
       'lastMessage':
           now.subtract(const Duration(minutes: 12)).millisecondsSinceEpoch /
           1000,
+      // A Max plan pays for the calls: nothing billed per token, what they
+      // come to at API prices as the value the plan covered.
       'usage': {
         'input': 42000,
         'output': 8100,
         'cacheRead': 31000,
         'cacheWrite': 1200,
-        'cost': 0.73,
-        'listCost': 0.73,
+        'cost': 0.0,
+        'listCost': 3.25,
+        'billing': 'subscription',
+        'plan': 'max',
         'context': 52300,
         'lastOutput': 900,
         'turns': 14,
@@ -372,12 +394,15 @@ class FakeHarness {
       'lastMessage':
           now.subtract(const Duration(minutes: 3)).millisecondsSinceEpoch /
           1000,
+      // Past the plan's window: billed as extra usage at API prices.
       'usage': {
         'input': 8800,
         'output': 2100,
         'cacheRead': 6000,
         'cost': 0.12,
-        'listCost': 0.12,
+        'listCost': 1.12,
+        'billing': 'extra-usage',
+        'plan': 'max',
         'context': 11800,
         'lastOutput': 300,
         'turns': 3,
@@ -412,7 +437,7 @@ class FakeHarness {
       'kind': 'fork',
       'project': '/Users/noah/Code/emacs-agent-harness/',
       'cwd': '/Users/noah/Code/emacs-agent-harness/',
-      'model': 'copilot:gpt-5.2-codex',
+      'model': 'claude:claude-haiku-4-5',
       'permissionMode': 'auto',
       'status': 'running',
       'created':
@@ -428,8 +453,10 @@ class FakeHarness {
         'input': 12000,
         'output': 4300,
         'cacheRead': 9000,
-        'cost': 0.18,
+        'cost': 0.0,
         'listCost': 0.18,
+        'billing': 'subscription',
+        'plan': 'max',
         'context': 21000,
         'lastOutput': 500,
         'turns': 5,
@@ -665,6 +692,75 @@ class FakeHarness {
           now.subtract(const Duration(hours: 20)).millisecondsSinceEpoch / 1000,
       'verified': true,
     };
+    if (quota) _seedQuotas(now);
+  }
+
+  /// What the providers that report a plan's quota say: Claude on a Max plan
+  /// with its 5-hour and weekly windows, Copilot on a Pro one with a
+  /// month's premium requests.  DeepSeek bills per token and says nothing.
+  void _seedQuotas(DateTime now) {
+    double at(Duration after) => now.add(after).millisecondsSinceEpoch / 1000;
+    quotas['claude'] = {
+      'billing': 'subscription',
+      'plan': 'max',
+      'plan-label': 'Claude Max',
+      'auth': 'claude.ai',
+      'account': {'email': 'noah@example.com'},
+      'available': true,
+      'windows': [
+        {
+          'name': '5h',
+          'label': 'Current session (5 hours)',
+          'used': 0.23,
+          'resets': at(const Duration(hours: 3, minutes: 12)),
+        },
+        {
+          'name': '7d',
+          'label': 'This week, all models',
+          'used': 0.41,
+          'resets': at(const Duration(days: 3, hours: 5)),
+        },
+        {
+          'name': '7d Fable',
+          'label': 'This week, Fable',
+          'used': 0.18,
+          'resets': at(const Duration(days: 3, hours: 5)),
+        },
+      ],
+      'extra': {
+        'enabled': false,
+        'used': 0.0,
+        'limit': 50.0,
+        'currency': 'USD',
+        'disabled-reason': 'out_of_credits',
+      },
+      'limit-status': 'allowed',
+      'using-extra': false,
+      'updated': at(const Duration(minutes: -4)),
+    };
+    quotas['copilot'] = {
+      'billing': 'subscription',
+      'plan': 'pro',
+      'plan-label': 'GitHub Copilot Pro',
+      'auth': 'github',
+      'available': true,
+      'windows': [
+        {
+          'name': 'premium',
+          'label': 'Premium requests this month (93 of 300)',
+          'used': 0.31,
+          'resets': at(const Duration(days: 9, hours: 2)),
+        },
+      ],
+      'updated': at(const Duration(minutes: -12)),
+    };
+  }
+
+  /// A provider tells a new quota, as it does when a turn used some of its
+  /// plan: it is kept for `provider/quota` and announced to the client.
+  void updateQuota(String provider, Map<String, Object?> next) {
+    quotas[provider] = next;
+    _event('provider/quota-updated', [provider, next]);
   }
 
   /// The checkout the git worktree at [directory] was made from, or
@@ -1322,10 +1418,35 @@ class FakeHarness {
       }
       if (method == '_harness/provider/list') {
         _respond(id, [
-          {'id': 'claude', 'label': 'Claude', 'doc': 'Anthropic'},
-          {'id': 'copilot', 'label': 'GitHub Copilot', 'doc': 'Copilot CLI'},
-          {'id': 'deepseek', 'label': 'DeepSeek', 'doc': 'DeepSeek API'},
+          {
+            'id': 'claude',
+            'label': 'Claude',
+            'doc': 'Anthropic',
+            'capabilities': {'quota': quota, 'billing': quota},
+          },
+          {
+            'id': 'copilot',
+            'label': 'GitHub Copilot',
+            'doc': 'Copilot CLI',
+            'capabilities': {'quota': quota, 'billing': quota},
+          },
+          {
+            'id': 'deepseek',
+            'label': 'DeepSeek',
+            'doc': 'DeepSeek API',
+            'capabilities': {'quota': false},
+          },
         ]);
+        return;
+      }
+      if (method == '_harness/provider/quota') {
+        if (asBool(params['refresh'])) quotaRefreshes++;
+        if (failQuota) {
+          _respondError(id, -32603, 'The quota probe failed.');
+          return;
+        }
+        // A provider that has nothing to say answers nothing.
+        _respond(id, quotas[asString(params['providerId'])]);
         return;
       }
       if (method == '_harness/provider/models') {
