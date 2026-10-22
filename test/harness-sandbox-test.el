@@ -1126,6 +1126,475 @@ was somewhere else."
     (should (string-empty-p (harness-sandbox-test--git wt "status" "--porcelain")))
     (should-not (string-match-p "inside" (harness-sandbox-test--git root "branch" "--list")))))
 
+;;;; Linux capabilities
+
+;; A command in the bwrap sandbox has no capability, and `:capabilities'
+;; gives it some by name.  The registry is what keeps anything else off
+;; bwrap's command line.  The real runs below read only the process's
+;; own /proc/self/status, and ask only for capabilities of the registry.
+
+(defmacro harness-sandbox-test-with-bwrap (&rest body)
+  "Run BODY with bwrap detected, as an ordinary user's would be.
+The detection finds /usr/bin/bwrap, which is neither setuid nor run by
+root whatever this machine has, and the policy is `preferred'; the
+real detection comes back afterwards."
+  (declare (indent 0))
+  `(progn
+     (harness-sandbox-test--setup)
+     (let ((harness-sandbox-policy 'preferred)
+           (harness-sandbox-backend 'auto))
+       (cl-letf (((symbol-function 'harness-sandbox--setuid-p) (lambda (_program) nil))
+                 ((symbol-function 'harness-sandbox--root-p) (lambda () nil)))
+         (unwind-protect
+             (harness-sandbox-test-with-executables '(("bwrap" . "/usr/bin/bwrap"))
+               ,@body)
+           (harness-sandbox-detect))))))
+
+(defun harness-sandbox-test--cap-adds (cmd)
+  "Return the capabilities bwrap command line CMD adds, in order."
+  (cl-loop for (arg next) on (seq-take-while (lambda (a) (not (equal a "--"))) cmd)
+           when (equal arg "--cap-add") collect next))
+
+(defun harness-sandbox-test--log-mark ()
+  "Return where the harness log ends now."
+  (with-current-buffer (get-buffer-create harness-log-buffer-name) (point-max)))
+
+(defun harness-sandbox-test--log-since (mark)
+  "Return the text the harness log gained since MARK, from `harness-sandbox-test--log-mark'."
+  (with-current-buffer (get-buffer-create harness-log-buffer-name)
+    (buffer-substring (min mark (point-max)) (point-max))))
+
+(ert-deftest harness-sandbox-capability-names ()
+  "A capability is named with the case, the dashes and the CAP_ prefix left
+out, and by its name without SYS_; nothing else names one, ALL included, and
+what comes back is the registry's own name."
+  (harness-sandbox-test--setup)
+  (dolist (spelling (list "CAP_SYS_PTRACE" "SYS_PTRACE" "sys_ptrace" "cap-sys-ptrace" "ptrace"
+                          "Ptrace" " cap_sys_ptrace\n" "cap sys ptrace" 'ptrace 'CAP_SYS_PTRACE))
+    (should (equal "CAP_SYS_PTRACE" (harness-sandbox-capability-name spelling)))
+    (should (equal "CAP_SYS_PTRACE" (harness-call 'sandbox/capability-name spelling))))
+  (should (equal "CAP_NET_RAW" (harness-sandbox-capability-name "net-raw")))
+  (should (equal "CAP_NET_BIND_SERVICE" (harness-sandbox-capability-name "NET_BIND_SERVICE")))
+  (should (equal "CAP_CHOWN" (harness-sandbox-capability-name "chown")))
+  (dolist (junk (list "" " " "CAP_" "ALL" "all" "CAP_ALL" "CAP_BOGUS" "raw" "CAP_SYS_PTRACE --bind / /"
+                      "CAP_SYS_PTRACE\n--bind" "cap_sys_ptrace;" "../CAP_SYS_PTRACE" nil :ptrace 5
+                      '("CAP_SYS_PTRACE")))
+    (should-not (harness-sandbox-capability-name junk))
+    (should-not (harness-call 'sandbox/capability-name junk))))
+
+(ert-deftest harness-sandbox-capability-registry ()
+  "The registry holds the kernel's capabilities, each once, with the bit the
+kernel gives it and a one-line doc, and never ALL."
+  (harness-sandbox-test--setup)
+  (let ((names (mapcar #'car harness-sandbox-capabilities)))
+    (should (equal names (delete-dups (copy-sequence names))))
+    (should-not (member "ALL" names))
+    (should-not (member "CAP_ALL" names))
+    (dolist (entry harness-sandbox-capabilities)
+      (should (string-match-p "\\`CAP_[A-Z_]+\\'" (car entry)))
+      (should (string-match-p "[a-z]" (or (plist-get (cdr entry) :doc) "")))
+      (should-not (string-match-p "\n" (plist-get (cdr entry) :doc))))
+    ;; The bits are the kernel's, each used once.
+    (should (equal (number-sequence 0 40)
+                   (sort (mapcar (lambda (entry) (plist-get (cdr entry) :bit)) harness-sandbox-capabilities)
+                         #'<)))
+    (should (= #x80000 (harness-sandbox-capability-mask '("CAP_SYS_PTRACE"))))
+    (should (= #x82000 (harness-sandbox-capability-mask '("ptrace" "net-raw" "bogus"))))
+    (should (= #x1ffffffffff (harness-sandbox-capability-mask names))))
+  ;; Where the kernel's header is, it agrees on every capability both know.
+  (let ((header "/usr/include/linux/capability.h"))
+    (when (file-readable-p header)
+      (with-temp-buffer
+        (insert-file-contents header)
+        (let ((seen 0))
+          (while (re-search-forward "^#define[ \t]+\\(CAP_[A-Z_]+\\)[ \t]+\\([0-9]+\\)[ \t]*\\(?:/\\*.*\\)?$" nil t)
+            (when-let* ((entry (assoc (match-string 1) harness-sandbox-capabilities)))
+              (cl-incf seen)
+              (should (= (string-to-number (match-string 2)) (plist-get (cdr entry) :bit)))))
+          (should (>= seen 30)))))))
+
+(ert-deftest harness-sandbox-grantable-capabilities-option ()
+  "The user's option lists what agents may ask for: the conservative four by
+default, CAP_SYS_ADMIN not among them; names in any spelling are the
+registry's, a name that is none is skipped, and a buffer-local or
+directory-local value does not count."
+  (harness-sandbox-test--setup)
+  (should (equal '("CAP_SYS_PTRACE" "CAP_NET_RAW" "CAP_NET_ADMIN" "CAP_NET_BIND_SERVICE")
+                 (default-value 'harness-sandbox-grantable-capabilities)))
+  (should-not (member "CAP_SYS_ADMIN" (harness-sandbox-grantable)))
+  (should-not (member "ALL" (harness-sandbox-grantable)))
+  (let ((harness-sandbox-grantable-capabilities '("ptrace" "bogus" "CAP_NET_RAW" "cap-sys-ptrace" "ALL" nil))
+        (harness-sandbox--capabilities-reported nil)
+        (mark (harness-sandbox-test--log-mark)))
+    (should (equal '("CAP_SYS_PTRACE" "CAP_NET_RAW") (harness-sandbox-grantable)))
+    (should (string-match-p "\\\"bogus\\\" in harness-sandbox-grantable-capabilities is no capability the harness knows"
+                            (harness-sandbox-test--log-since mark)))
+    ;; Said once.
+    (let ((mark (harness-sandbox-test--log-mark)))
+      (harness-sandbox-grantable)
+      (should-not (string-match-p "bogus" (harness-sandbox-test--log-since mark)))))
+  (let ((harness-sandbox-grantable-capabilities nil))
+    (should-not (harness-sandbox-grantable)))
+  ;; A project's file sets a variable in its buffers, never the global value.
+  (with-temp-buffer
+    (setq-local harness-sandbox-grantable-capabilities '("CAP_SYS_ADMIN" "CAP_SYS_PTRACE"))
+    (should (equal '("CAP_SYS_PTRACE" "CAP_NET_RAW" "CAP_NET_ADMIN" "CAP_NET_BIND_SERVICE")
+                   (harness-sandbox-grantable))))
+  ;; It is no layered setting.
+  (when (boundp 'harness-config-keys)
+    (should-not (memq 'harness-sandbox-grantable-capabilities harness-config-keys))))
+
+(ert-deftest harness-sandbox-bwrap-capability-arguments ()
+  "bwrap is told `--cap-add' for each capability asked for, after the flags
+that make the namespaces and before the command, and only for names of the
+registry the user lets agents ask for; a command that changes nothing gets none."
+  (harness-sandbox-test-with-bwrap
+    (harness-sandbox-test-with-home home
+      (let ((cwd (harness-test-temp-dir))
+            (command '("sh" "-c" "true")))
+        (unwind-protect
+            (let ((wrap (lambda (&rest opts) (apply #'harness-call 'sandbox/wrap cwd command opts))))
+              ;; None unless asked for.
+              (should-not (member "--cap-add" (funcall wrap)))
+              (should-not (member "--cap-add" (funcall wrap :capabilities nil)))
+              ;; One, in a stable place.
+              (let ((cmd (funcall wrap :capabilities '("CAP_SYS_PTRACE"))))
+                (should (equal '("CAP_SYS_PTRACE") (harness-sandbox-test--cap-adds cmd)))
+                (should (< (cl-position "--new-session" cmd :test #'equal)
+                           (cl-position "--cap-add" cmd :test #'equal)
+                           (cl-position "--chdir" cmd :test #'equal)
+                           (cl-position "--" cmd :test #'equal)))
+                (should (harness-sandbox-test--subseq-p '("--cap-add" "CAP_SYS_PTRACE" "--chdir") cmd))
+                (should (equal command (cdr (member "--" cmd))))
+                ;; The rest is as it was.
+                (let ((at (cl-position "--cap-add" cmd :test #'equal)))
+                  (should (equal (funcall wrap) (append (seq-take cmd at) (nthcdr (+ at 2) cmd))))))
+              ;; Several, spelled as they like, once each, in the order asked.
+              (let ((cmd (funcall wrap :network nil :capabilities '("net-raw" "ptrace" "CAP_NET_RAW"))))
+                (should (equal '("CAP_NET_RAW" "CAP_SYS_PTRACE") (harness-sandbox-test--cap-adds cmd)))
+                (should (member "--unshare-net" cmd)))
+              ;; Not a capability of the registry: never on the command line.
+              (dolist (junk '("ALL" "all" "CAP_ALL" "CAP_BOGUS" "x --bind / /" "CAP_SYS_PTRACE\n--bind"))
+                (let ((cmd (funcall wrap :capabilities (list junk))))
+                  (should-not (member "--cap-add" cmd))
+                  (should-not (member junk cmd))))
+              (let ((cmd (funcall wrap :capabilities '("ALL" "CAP_SYS_PTRACE" "--bind"))))
+                (should (equal '("CAP_SYS_PTRACE") (harness-sandbox-test--cap-adds cmd)))
+                (should-not (member "ALL" cmd)))
+              ;; The builder guards its own command line too.
+              (let ((cmd (harness-sandbox--bwrap-command "/usr/bin/bwrap" cwd command
+                                                         :capabilities '("ALL" "x" "ptrace"))))
+                (should (equal '("CAP_SYS_PTRACE") (harness-sandbox-test--cap-adds cmd))))
+              ;; Not one the user lets agents ask for: left out, with a line in the log.
+              (let ((harness-sandbox-grantable-capabilities '("CAP_NET_RAW"))
+                    (mark (harness-sandbox-test--log-mark)))
+                (should-not (member "--cap-add" (funcall wrap :capabilities '("CAP_SYS_PTRACE"))))
+                (should (string-match-p "CAP_SYS_PTRACE.*harness-sandbox-grantable-capabilities does not list it"
+                                        (harness-sandbox-test--log-since mark)))
+                (should (equal '("CAP_NET_RAW")
+                               (harness-sandbox-test--cap-adds
+                                (funcall wrap :capabilities '("CAP_SYS_PTRACE" "CAP_NET_RAW"))))))
+              (let ((harness-sandbox-grantable-capabilities nil))
+                (should-not (member "--cap-add" (funcall wrap :capabilities '("CAP_SYS_PTRACE")))))
+              ;; CAP_SYS_ADMIN is in the registry, and not grantable unless the user says so.
+              (should-not (member "--cap-add" (funcall wrap :capabilities '("CAP_SYS_ADMIN"))))
+              (let ((harness-sandbox-grantable-capabilities '("CAP_SYS_ADMIN")))
+                (should (equal '("CAP_SYS_ADMIN")
+                               (harness-sandbox-test--cap-adds (funcall wrap :capabilities '("sys-admin"))))))
+              ;; A directory-local value does not widen the list.
+              (with-temp-buffer
+                (setq-local harness-sandbox-grantable-capabilities '("CAP_SYS_ADMIN"))
+                (should-not (member "--cap-add" (funcall wrap :capabilities '("CAP_SYS_ADMIN")))))
+              ;; A command that changes nothing gets none, whatever it asks.
+              (let ((cmd (funcall wrap :capabilities '("CAP_SYS_PTRACE") :read-only t)))
+                (should-not (member "--cap-add" cmd))
+                (should (member "--ro-bind" cmd)))
+              (should-not (member "--cap-add"
+                                  (harness-sandbox--bwrap-command "/usr/bin/bwrap" cwd command
+                                                                  :read-only t :capabilities '("CAP_SYS_PTRACE")))))
+          (delete-directory cwd t))))))
+
+(ert-deftest harness-sandbox-capabilities-refused-where-cap-add-is-real ()
+  "bwrap installed setuid, or run by root, keeps no capability of the
+sandbox's own user namespace: asking it for one signals
+`harness-sandbox-unavailable', saying why; asking for none, or a command
+that changes nothing, runs as ever."
+  (harness-sandbox-test-with-bwrap
+    (let ((cwd (harness-test-temp-dir))
+          (command '("sh" "-c" "true")))
+      (unwind-protect
+          (dolist (case '((setuid "harness-sandbox--setuid-p" "setuid root")
+                          (root "harness-sandbox--root-p" "runs as root")))
+            (cl-letf (((symbol-function (intern (nth 1 case))) (lambda (&rest _) t)))
+              (let ((err (should-error (harness-call 'sandbox/wrap cwd command
+                                                     :capabilities '("CAP_SYS_PTRACE"))
+                                       :type 'harness-sandbox-unavailable)))
+                (should (string-match-p (nth 2 case) (harness-error-message err)))
+                (should (string-match-p "CAP_SYS_PTRACE" (harness-error-message err)))
+                (should (string-match-p "drop_access" (harness-error-message err))))
+              (should (member "--ro-bind" (harness-call 'sandbox/wrap cwd command)))
+              (should (member "--ro-bind" (harness-call 'sandbox/wrap cwd command :capabilities nil)))
+              (should-not (member "--cap-add" (harness-call 'sandbox/wrap cwd command :read-only t
+                                                           :capabilities '("CAP_SYS_PTRACE"))))
+              ;; A name that is not passed on gives nothing to refuse.
+              (should-not (member "--cap-add" (harness-call 'sandbox/wrap cwd command
+                                                           :capabilities '("CAP_SYS_ADMIN" "ALL"))))
+              (let ((info (harness-call 'sandbox/capabilities cwd)))
+                (should-not (plist-get info :enforced))
+                (should (eq 'bwrap (plist-get info :backend)))
+                (should (string-match-p (nth 2 case) (plist-get info :why))))))
+        (delete-directory cwd t)))))
+
+(ert-deftest harness-sandbox-setuid-detection-reads-the-mode ()
+  "An executable is setuid when its mode says so."
+  (harness-sandbox-test--setup)
+  (let ((file (make-temp-file "harness-setuid-")))
+    (unwind-protect
+        (progn
+          (set-file-modes file #o755)
+          (should-not (harness-sandbox--setuid-p file))
+          (set-file-modes file #o4755)
+          (should (harness-sandbox--setuid-p file))
+          (set-file-modes file #o2755)
+          (should-not (harness-sandbox--setuid-p file)))
+      (delete-file file))
+    (should-not (harness-sandbox--setuid-p file))
+    (should-not (harness-sandbox--setuid-p nil))))
+
+(ert-deftest harness-sandbox-systemd-and-mxc-give-no-capability ()
+  "systemd-run and MXC cannot give a command a capability: asked to, they
+signal `harness-sandbox-unavailable' and say why; a command that changes
+nothing is given none and runs."
+  (harness-sandbox-test--setup)
+  (let ((cwd (harness-test-temp-dir))
+        (command '("sh" "-c" "true"))
+        (harness-sandbox-policy 'preferred)
+        (harness-sandbox-backend 'auto))
+    (unwind-protect
+        (progn
+          (harness-sandbox-test-with-executables '(("systemd-run" . "/usr/bin/systemd-run"))
+            (should (eq 'systemd (plist-get (harness-call 'sandbox/status) :backend)))
+            (let ((err (should-error (harness-call 'sandbox/wrap cwd command :capabilities '("CAP_SYS_PTRACE"))
+                                     :type 'harness-sandbox-unavailable)))
+              (should (string-match-p "systemd-run" (harness-error-message err)))
+              (should (string-match-p "CAP_SYS_PTRACE" (harness-error-message err))))
+            ;; Even a name it would not pass on: asking is the refusal.
+            (should-error (harness-call 'sandbox/wrap cwd command :capabilities '("ALL"))
+                          :type 'harness-sandbox-unavailable)
+            (should (equal "/usr/bin/systemd-run" (car (harness-call 'sandbox/wrap cwd command))))
+            (should (equal "/usr/bin/systemd-run"
+                           (car (harness-call 'sandbox/wrap cwd command :capabilities nil))))
+            ;; Read-only wins: it is given none, so there is nothing to refuse.
+            (should (equal "/usr/bin/systemd-run"
+                           (car (harness-call 'sandbox/wrap cwd command :read-only t
+                                              :capabilities '("CAP_SYS_PTRACE"))))))
+          (let ((system-type 'darwin)
+                (before (file-expand-wildcards (expand-file-name "harness-sandbox-*" temporary-file-directory))))
+            (harness-sandbox-test-with-executables '(("mxc-exec-mac" . "/opt/mxc/bin/mxc-exec-mac"))
+              (should (eq 'mxc (plist-get (harness-call 'sandbox/status) :backend)))
+              (let ((err (should-error (harness-call 'sandbox/wrap cwd command :capabilities '("CAP_SYS_PTRACE"))
+                                       :type 'harness-sandbox-unavailable)))
+                (should (string-match-p "MXC" (harness-error-message err))))
+              ;; The refusal came before the command's private temporary directory was made.
+              (should-not (cl-set-difference
+                           (file-expand-wildcards (expand-file-name "harness-sandbox-*" temporary-file-directory))
+                           before :test #'equal)))))
+      (harness-sandbox-detect)
+      (delete-directory cwd t))))
+
+(ert-deftest harness-sandbox-capabilities-pass-through-where-unconfined ()
+  "Where a command runs unconfined anyway -- the `off' policy, a remote
+directory, no backend -- it has its user's own rights: it comes back as it
+is, whatever capabilities were asked for."
+  (harness-sandbox-test--setup)
+  (let ((cwd (harness-test-temp-dir))
+        (command '("sh" "-c" "true"))
+        (harness-sandbox-backend 'auto))
+    (unwind-protect
+        (progn
+          (harness-sandbox-test-with-executables '(("bwrap" . "/usr/bin/bwrap"))
+            (let ((harness-sandbox-policy 'off))
+              (should (equal command (harness-call 'sandbox/wrap cwd command :capabilities '("CAP_SYS_PTRACE")))))
+            (let ((harness-sandbox-policy 'required))
+              (should (equal command (harness-call 'sandbox/wrap "/ssh:example.invalid:/tmp/" command
+                                                   :capabilities '("CAP_SYS_PTRACE"))))))
+          (harness-sandbox-test-with-executables nil
+            (let ((harness-sandbox-policy 'preferred))
+              (should (equal command (harness-call 'sandbox/wrap cwd command :capabilities '("CAP_SYS_PTRACE")))))
+            ;; Required still fails closed, capabilities or not.
+            (let ((harness-sandbox-policy 'required))
+              (should-error (harness-call 'sandbox/wrap cwd command :capabilities '("CAP_SYS_PTRACE"))
+                            :type 'harness-sandbox-unavailable))))
+      (harness-sandbox-detect)
+      (delete-directory cwd t))))
+
+(ert-deftest harness-sandbox-capabilities-method-says-what-the-jail-can-do ()
+  "sandbox/capabilities says whether the jail enforces capabilities for a
+directory, what may be asked for, and what each is; and why not when it does not."
+  (harness-sandbox-test-with-bwrap
+    (let ((cwd (harness-test-temp-dir)))
+      (unwind-protect
+          (progn
+            (let ((info (harness-call 'sandbox/capabilities cwd)))
+              (should (eq t (plist-get info :enforced)))
+              (should (eq 'bwrap (plist-get info :backend)))
+              (should-not (plist-get info :why))
+              (should (equal '("CAP_SYS_PTRACE" "CAP_NET_RAW" "CAP_NET_ADMIN" "CAP_NET_BIND_SERVICE")
+                             (plist-get info :grantable)))
+              (should (equal (plist-get info :grantable) (mapcar #'car (plist-get info :docs))))
+              (dolist (cell (plist-get info :docs))
+                (should (stringp (cdr cell)))
+                (should (equal (cdr cell) (harness-sandbox-capability-info (car cell) :doc))))
+              (should (string-match-p "strace" (cdr (assoc "CAP_SYS_PTRACE" (plist-get info :docs)))))
+              ;; The net ones say they count only without the network.
+              (dolist (name '("CAP_NET_RAW" "CAP_NET_ADMIN" "CAP_NET_BIND_SERVICE"))
+                (should (string-match-p "no network" (cdr (assoc name (plist-get info :scopes))))))
+              (should (string-match-p "PID namespace" (cdr (assoc "CAP_SYS_PTRACE" (plist-get info :scopes))))))
+            ;; Grantable names are the registry's, whatever the option spells.
+            (let ((harness-sandbox-grantable-capabilities '("ptrace" "bogus")))
+              (should (equal '("CAP_SYS_PTRACE") (plist-get (harness-call 'sandbox/capabilities cwd) :grantable))))
+            ;; Nothing grantable still enforces: nothing can be asked for.
+            (let ((harness-sandbox-grantable-capabilities nil)
+                  (info nil))
+              (setq info (harness-call 'sandbox/capabilities cwd))
+              (should (plist-get info :enforced))
+              (should-not (plist-get info :grantable)))
+            ;; What stands in the way.
+            (let ((harness-sandbox-policy 'off))
+              (let ((info (harness-call 'sandbox/capabilities cwd)))
+                (should-not (plist-get info :enforced))
+                (should (string-match-p "policy is `off'" (plist-get info :why)))))
+            (let ((info (harness-call 'sandbox/capabilities "/ssh:example.invalid:/tmp/")))
+              (should-not (plist-get info :enforced))
+              (should (string-match-p "another host" (plist-get info :why))))
+            (harness-sandbox-test-with-executables '(("systemd-run" . "/usr/bin/systemd-run"))
+              (let ((info (harness-call 'sandbox/capabilities cwd)))
+                (should-not (plist-get info :enforced))
+                (should (eq 'systemd (plist-get info :backend)))
+                (should (string-match-p "systemd-run" (plist-get info :why)))))
+            (harness-sandbox-test-with-executables nil
+              (let ((info (harness-call 'sandbox/capabilities cwd)))
+                (should-not (plist-get info :enforced))
+                (should (eq 'none (plist-get info :backend)))
+                (should (string-match-p "no sandbox backend" (plist-get info :why)))))
+            (let ((system-type 'darwin))
+              (harness-sandbox-test-with-executables '(("mxc-exec-mac" . "/opt/mxc/bin/mxc-exec-mac"))
+                (let ((info (harness-call 'sandbox/capabilities cwd)))
+                  (should-not (plist-get info :enforced))
+                  (should (string-match-p "MXC" (plist-get info :why)))))))
+        (delete-directory cwd t)))))
+
+(ert-deftest harness-sandbox-grantable-capabilities-follow-the-policy ()
+  "An administrator's policy sets the option like any other: nil switches
+the feature off for every agent, a list narrows or widens it, only
+capabilities of the registry fit its type, and nothing the user, a
+project or an agent sets changes it."
+  (harness-sandbox-test--setup)
+  (let ((cwd (harness-test-temp-dir)))
+    (unwind-protect
+        (progn
+          (harness-test-with-policy '((harness-sandbox-grantable-capabilities))
+            (should (harness-policy-pinned-p 'harness-sandbox-grantable-capabilities))
+            (should-not (harness-sandbox-grantable))
+            (should-not (plist-get (harness-call 'sandbox/capabilities cwd) :grantable))
+            (should-error (setq harness-sandbox-grantable-capabilities '("CAP_SYS_ADMIN")))
+            (should-error (harness-call 'config/set 'harness-sandbox-grantable-capabilities '("CAP_SYS_ADMIN")))
+            (should-not (harness-sandbox-grantable)))
+          (should (harness-sandbox-grantable))
+          (harness-test-with-policy '((harness-sandbox-grantable-capabilities "CAP_SYS_PTRACE"))
+            (should (equal '("CAP_SYS_PTRACE") (harness-sandbox-grantable))))
+          ;; A value the type refuses stops the policy: no spelling of ALL fits.
+          (should-error (harness-test-with-policy '((harness-sandbox-grantable-capabilities "ALL")) nil))
+          (should-error (harness-test-with-policy '((harness-sandbox-grantable-capabilities "ptrace")) nil)))
+      (delete-directory cwd t))))
+
+(defun harness-sandbox-test--capability-sets (cwd &rest opts)
+  "Run `grep' under the real bwrap in CWD with sandbox OPTS; return its CapEff etc.
+The result is an alist of the sets `/proc/self/status' shows the
+command (CapPrm, CapEff, CapBnd and CapAmb) to their values, as
+integers.  Skip the test when bwrap cannot start here."
+  (let* ((cmd (apply #'harness-call 'sandbox/wrap cwd
+                     (list "grep" "-E" "^Cap(Prm|Eff|Bnd|Amb):" "/proc/self/status") opts))
+         (r (harness-await (harness-run-command cmd :cwd cwd :timeout 20))))
+    (when (and (not (eql 0 (plist-get r :exit))) (string-match-p "bwrap:" (plist-get r :stderr)))
+      (ert-skip (format "bwrap cannot start in this environment: %s" (string-trim (plist-get r :stderr)))))
+    (should (eql 0 (plist-get r :exit)))
+    (let (sets)
+      (dolist (line (split-string (plist-get r :stdout) "\n" t))
+        (when (string-match "\\`\\(Cap[A-Za-z]+\\):[ \t]+\\([0-9a-f]+\\)\\'" line)
+          (push (cons (match-string 1 line) (string-to-number (match-string 2 line) 16)) sets)))
+      (should (= 4 (length sets)))
+      sets)))
+
+(defmacro harness-sandbox-test-with-real-bwrap (cwd &rest body)
+  "Run BODY with CWD a fresh directory, under the real bwrap, or skip the test.
+It skips where there is no bwrap, or bwrap would be run by root or is
+setuid, which the sandbox refuses to give capabilities."
+  (declare (indent 1))
+  `(progn
+     (harness-sandbox-test--setup)
+     (skip-unless (executable-find "bwrap"))
+     (harness-sandbox-detect)
+     (skip-unless (eq 'bwrap (plist-get (harness-call 'sandbox/status) :backend)))
+     (let ((,cwd (harness-test-temp-dir))
+           (harness-sandbox-policy 'required)
+           (harness-sandbox-backend 'auto))
+       (unwind-protect
+           (progn
+             (unless (plist-get (harness-call 'sandbox/capabilities ,cwd) :enforced)
+               (ert-skip (plist-get (harness-call 'sandbox/capabilities ,cwd) :why)))
+             ,@body)
+         (delete-directory ,cwd t)))))
+
+(ert-deftest harness-sandbox-bwrap-real-run-capabilities ()
+  "Under the real bwrap a command has no capability, and has exactly the one
+it is given: CapEff shows bit 19 for CAP_SYS_PTRACE and nothing else."
+  (harness-sandbox-test-with-real-bwrap cwd
+    (let ((none (harness-sandbox-test--capability-sets cwd))
+          (one (harness-sandbox-test--capability-sets cwd :capabilities '("CAP_SYS_PTRACE"))))
+      (message "real bwrap: CapEff %016x without a capability, %016x with CAP_SYS_PTRACE (CapBnd %016x)"
+               (cdr (assoc "CapEff" none)) (cdr (assoc "CapEff" one)) (cdr (assoc "CapBnd" one)))
+      (dolist (set '("CapPrm" "CapEff" "CapBnd" "CapAmb"))
+        (should (= 0 (cdr (assoc set none)))))
+      (should (= #x80000 (cdr (assoc "CapEff" one))))
+      (should (= #x80000 (cdr (assoc "CapPrm" one))))
+      (should (= #x80000 (cdr (assoc "CapBnd" one)))))
+    ;; An alias, and two: the bits of both and no other.
+    (let ((two (harness-sandbox-test--capability-sets cwd :capabilities '("ptrace" "net-raw"))))
+      (should (= (harness-sandbox-capability-mask '("CAP_SYS_PTRACE" "CAP_NET_RAW"))
+                 (cdr (assoc "CapEff" two))))
+      (should (= #x82000 (cdr (assoc "CapBnd" two)))))))
+
+(ert-deftest harness-sandbox-bwrap-real-run-capabilities-in-an-offline-sandbox ()
+  "Under the real bwrap a command in a sandbox with no network, which has a
+network namespace of its own, has the network capability it is given: that is
+where it counts."
+  (harness-sandbox-test-with-real-bwrap cwd
+    (let ((sets (harness-sandbox-test--capability-sets cwd :network nil :capabilities '("CAP_NET_RAW"))))
+      (message "real bwrap, no network: CapEff %016x with CAP_NET_RAW" (cdr (assoc "CapEff" sets)))
+      (should (= #x2000 (cdr (assoc "CapEff" sets))))
+      (should (= #x2000 (cdr (assoc "CapBnd" sets)))))
+    (let ((sets (harness-sandbox-test--capability-sets cwd :network nil)))
+      (should (= 0 (cdr (assoc "CapEff" sets)))))))
+
+(ert-deftest harness-sandbox-bwrap-real-run-capabilities-are-not-passed-where-they-must-not-be ()
+  "Under the real bwrap a command that changes nothing has no capability
+even when it is asked for one, and neither has one asked for a capability
+that is not grantable or no capability at all."
+  (harness-sandbox-test-with-real-bwrap cwd
+    (dolist (opts (list (list :read-only t :capabilities '("CAP_SYS_PTRACE"))
+                        (list :read-only t :network nil :capabilities '("CAP_SYS_PTRACE" "CAP_NET_RAW"))
+                        (list :capabilities '("CAP_SYS_ADMIN"))
+                        (list :capabilities '("ALL" "CAP_BOGUS"))))
+      (let ((sets (apply #'harness-sandbox-test--capability-sets cwd opts)))
+        (message "real bwrap: CapEff %016x for %S" (cdr (assoc "CapEff" sets)) opts)
+        (dolist (set '("CapPrm" "CapEff" "CapBnd" "CapAmb"))
+          (should (= 0 (cdr (assoc set sets)))))))
+    ;; No longer grantable: not passed on.
+    (let ((harness-sandbox-grantable-capabilities nil))
+      (should (= 0 (cdr (assoc "CapEff" (harness-sandbox-test--capability-sets
+                                         cwd :capabilities '("CAP_SYS_PTRACE")))))))))
+
 ;;;; MXC, on macOS
 
 ;; Everything here but the last tests runs on any system: the command

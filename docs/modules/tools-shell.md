@@ -51,6 +51,12 @@ Two ways for a model to run things:
   no `sandbox/wrap` method, whatever the policy, or in a remote
   directory.  With no handler the command runs as it always did.
 
+  The filter is also how a session gets the Linux capabilities the user
+  gave its commands: the access module adds `:capabilities` to the
+  options, and the sandbox passes them to bwrap (`--cap-add`); a
+  command in a remote directory that is given some is refused, like
+  any command that needs the sandbox.
+
   Remote (TRAMP) directories run the command on that host,
   unwrapped, as the ssh tool does (tools-ssh): through
   `harness-tools-shell-remote-command`, with bash, or sh on a host
@@ -92,8 +98,8 @@ Two ways for a model to run things:
 
 ### Tools
 
-- `bash` — Run a shell command with bash in the working directory (or a subdirectory). Output is stdout, then stderr if any, then the exit status. Long jobs are killed at timeout seconds (default 120). Prefer read_file, grep, glob and edit_file over cat, grep, find and sed. Commands may run in a sandbox that shows the system directories and only the directories the session may use (the working directory, its temporary directory, the directories granted to it), each at its real path; anything else, the rest of the home directory included, looks missing there, so reach it with the file tools, which ask the user.
-- `elisp` — Evaluate Emacs Lisp with lexical binding in a fresh background Emacs process, never the user's: its working directory is the working directory, its load path has the harness, so a harness library can be required to inspect or drive it, and it is killed at timeout seconds (30 by default). Use it as the Emacs-native alternative to bash for file work, such as a dired-style batch rename; it may run in the same sandbox as bash commands, and sees what they see. Read or drive the user's live Emacs with the emacs_* tools instead. Returns the value of the last form, anything printed to standard-output, and messages logged during evaluation.
+- `bash` — Run a shell command with bash in the working directory (or a subdirectory). Output is stdout, then stderr if any, then the exit status. Long jobs are killed at timeout seconds (default 120). Prefer read_file, grep, glob and edit_file over cat, grep, find and sed. Commands may run in a sandbox that shows the system directories and only the directories the session may use (the working directory, its temporary directory, the directories granted to it), each at its real path; anything else, the rest of the home directory included, looks missing there, so reach it with the file tools, which ask the user. The sandbox gives a command no Linux capability, so strace, gdb -p, ping or a raw socket can answer "Operation not permitted": ask the user for one with request_escalation (attribute capability, value such as CAP_SYS_PTRACE); it counts inside the sandbox only, never on another machine.
+- `elisp` — Evaluate Emacs Lisp with lexical binding in a fresh background Emacs process, never the user's: its working directory is the working directory, its load path has the harness, so a harness library can be required to inspect or drive it, and it is killed at timeout seconds (30 by default). Use it as the Emacs-native alternative to bash for file work, such as a dired-style batch rename; it may run in the same sandbox as bash commands, and sees what they see and has what they have (no Linux capability unless the user gave this session some: request_escalation, attribute capability). Read or drive the user's live Emacs with the emacs_* tools instead. Returns the value of the last form, anything printed to standard-output, and messages logged during evaluation.
 
 ### Filter chains it runs
 

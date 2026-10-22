@@ -2,7 +2,7 @@
 
 # access
 
-What a session may reach, in one place: its access profile (network, writing, tools, read-only and given-up directories), request_escalation, which only the user answers, drop_access, which never asks, and the record of every permission judgement.
+What a session may reach, in one place: its access profile (network, writing, tools, read-only and given-up directories, the Linux capabilities of its commands), request_escalation, which only the user answers, drop_access, which never asks, and the record of every permission judgement.
 
 - **Runs in:** the harness process
 - **Source:** [lisp/modules/harness-access.el](../../lisp/modules/harness-access.el)
@@ -32,6 +32,9 @@ Each session may have an access profile, kept in its record's
   :dropped    directories it gave up: its working directory, its
               worktree, its temporary directory or one of
               `harness-allowed-directories`, for this session only
+  :caps       the Linux capabilities (CAP_SYS_PTRACE...) the user gave
+              its bash and elisp commands: unlike the rest, a grant,
+              not a restriction
 
 A session without one has the access it always had.  The profile is
 held by the harness, not by a prompt:
@@ -47,35 +50,52 @@ held by the harness, not by a prompt:
   user's Emacs, outside any sandbox), and bash and elisp unless the
   sandbox runs them offline (`tools/sandbox-options` `:network nil`);
 - a read-only session is one of `harness-readonly-register`'s: only
-  the reading tools, and bash read-only and offline.
+  the reading tools, and bash read-only and offline;
+- the capabilities go to the sandbox, which the `tools/sandbox-options`
+  filter at 80 tells (`:capabilities`): bwrap, which drops every
+  Linux capability of the commands it runs, keeps those and no other
+  (`--cap-add`), from the next bash or elisp command on.  The jail
+  enforces it, not this module: see "Capabilities" in
+  harness-sandbox.el for what bwrap can and cannot give, and the
+  read-only filter of harness-readonly.el, which takes them off again
+  for a read-only session.
 
 A sub-agent or a fork takes its parent's restrictions with it (the
 network, writing, the tools, the directories given up), so a
 session cannot get around what it gave up by starting another; a
-fork takes its read-only directories too, as it takes its grants.
+fork takes its read-only directories too, as it takes its grants,
+and its capabilities, as it takes its permission mode and its
+non-interactive state.  A fork is a session started by `session/fork`,
+which `spawn_agent` with `fork` uses too; a sub-agent that starts
+afresh, and a BTW, have to ask for the capabilities.
 
 * Escalation and relinquishing
 
 What a session may reach is a sensitive attribute, which only the
 user raises.  An agent asks for more with `request_escalation`: a
 directory (to write, or only to read), the network, writing, a tool
-turned off, a more permissive permission mode, non-interactive mode.
-The stage at 5 decides it as only the user may (as
-`request_directory_access` is): the user is asked, in every mode,
-yolo included, and no rule or judge answers; a non-interactive
-session, whose user is away, is refused at once.  A directory goes
-through the very prompt of `request_directory_access` (perms'
-`harness-perms-decide-dir-request`), the rest through
+turned off, a more permissive permission mode, non-interactive mode,
+a Linux capability for its commands.  The stage at 5 decides it as
+only the user may (as `request_directory_access` is): the user is
+asked, in every mode, yolo included, and no rule or judge answers; a
+non-interactive session, whose user is away, is refused at once.  A
+directory goes through the very prompt of `request_directory_access`
+(perms' `harness-perms-decide-dir-request`), the rest through
 `harness-perms-confirm`.  `request_directory_access` stays, the
-directory form of the same request.
+directory form of the same request.  A capability is asked for only
+where the jail can enforce it: a bwrap sandbox, for a local
+directory, that the user lets agents ask for (see
+`harness-sandbox-grantable-capabilities`), in a session that may
+write.  It counts for the commands the sandbox runs on this machine;
+on another one (an ssh command, a remote session) it changes nothing.
 
 An agent may always take access away from its own session, with
 `drop_access`: nobody is asked, in any mode or session, read-only
 ones included (`harness-readonly-always-tools`).  It gives up a
 directory (or only writing to it), the network, writing, a tool, a
-permission mode (for a less permissive one) or non-interactive mode.
-The user changes the profile from the access view (`access/*`
-methods), without being asked anything.
+permission mode (for a less permissive one), non-interactive mode or
+a capability.  The user changes the profile from the access view
+(`access/*` methods), without being asked anything.
 
 Writing a .dir-locals.el is an escalation too: the file sets the
 harness's own settings for a project -- the directories every session
@@ -103,10 +123,11 @@ is one too.
 for the access view (harness-ui-access.el): the sandbox, the mode,
 the directories, the tools, the rules.  `access/judgements` lists the
 judgements.  `access/set-network`, `access/set-read-only`,
-`access/set-tool`, `access/add-read-dir`, `access/remove-read-dir`,
-`access/drop-dir` and `access/restore-dir` change the profile for the
-user.  `access/changed` (SESSION-ID) says a session's access changed,
-`access/judged` (SESSION-ID RECORD) that a call was judged.
+`access/set-tool`, `access/set-capability`, `access/add-read-dir`,
+`access/remove-read-dir`, `access/drop-dir` and `access/restore-dir`
+change the profile for the user.  `access/changed` (SESSION-ID) says
+a session's access changed, `access/judged` (SESSION-ID RECORD) that
+a call was judged.
 
 ## Provides
 
@@ -118,6 +139,7 @@ user.  `access/changed` (SESSION-ID) says a session's access changed,
 - `access/judgements` (session-id &rest filter) — Return the judgements of SESSION-ID's calls, newest first.
 - `access/remove-read-dir` (session-id dir) — Stop SESSION-ID reading the read-only directory DIR; for the user.
 - `access/restore-dir` (session-id dir) — Give SESSION-ID back the directory DIR it gave up; for the user.
+- `access/set-capability` (session-id name on) — Give SESSION-ID's commands capability NAME when ON is true, else take it away.
 - `access/set-network` (session-id on) — Let SESSION-ID reach the network when ON is true, else not; for the user.
 - `access/set-read-only` (session-id on) — Keep SESSION-ID from writing when ON is true, else let it; for the user.
 - `access/set-tool` (session-id tool on) — Turn TOOL on for SESSION-ID when ON is true, else off; for the user.
@@ -137,6 +159,8 @@ user.  `access/changed` (SESSION-ID) says a session's access changed,
 - `permission/pending` ([perms](perms.md))
 - `permission/revoke-dir` ([perms](perms.md))
 - `permission/rules` ([perms](perms.md))
+- `sandbox/capabilities` ([sandbox](sandbox.md)), when it is loaded
+- `sandbox/capability-name` ([sandbox](sandbox.md)), when it is loaded
 - `sandbox/status` ([sandbox](sandbox.md)), when it is loaded
 - `session/get` ([session](session.md))
 - `session/nodes` ([session](session.md))

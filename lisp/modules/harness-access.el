@@ -22,6 +22,9 @@
 ;;   :dropped    directories it gave up: its working directory, its
 ;;               worktree, its temporary directory or one of
 ;;               `harness-allowed-directories', for this session only
+;;   :caps       the Linux capabilities (CAP_SYS_PTRACE...) the user gave
+;;               its bash and elisp commands: unlike the rest, a grant,
+;;               not a restriction
 ;;
 ;; A session without one has the access it always had.  The profile is
 ;; held by the harness, not by a prompt:
@@ -37,35 +40,52 @@
 ;;   user's Emacs, outside any sandbox), and bash and elisp unless the
 ;;   sandbox runs them offline (`tools/sandbox-options' `:network nil');
 ;; - a read-only session is one of `harness-readonly-register''s: only
-;;   the reading tools, and bash read-only and offline.
+;;   the reading tools, and bash read-only and offline;
+;; - the capabilities go to the sandbox, which the `tools/sandbox-options'
+;;   filter at 80 tells (`:capabilities'): bwrap, which drops every
+;;   Linux capability of the commands it runs, keeps those and no other
+;;   (`--cap-add'), from the next bash or elisp command on.  The jail
+;;   enforces it, not this module: see "Capabilities" in
+;;   harness-sandbox.el for what bwrap can and cannot give, and the
+;;   read-only filter of harness-readonly.el, which takes them off again
+;;   for a read-only session.
 ;;
 ;; A sub-agent or a fork takes its parent's restrictions with it (the
 ;; network, writing, the tools, the directories given up), so a
 ;; session cannot get around what it gave up by starting another; a
-;; fork takes its read-only directories too, as it takes its grants.
+;; fork takes its read-only directories too, as it takes its grants,
+;; and its capabilities, as it takes its permission mode and its
+;; non-interactive state.  A fork is a session started by `session/fork',
+;; which `spawn_agent' with `fork' uses too; a sub-agent that starts
+;; afresh, and a BTW, have to ask for the capabilities.
 ;;
 ;; * Escalation and relinquishing
 ;;
 ;; What a session may reach is a sensitive attribute, which only the
 ;; user raises.  An agent asks for more with `request_escalation': a
 ;; directory (to write, or only to read), the network, writing, a tool
-;; turned off, a more permissive permission mode, non-interactive mode.
-;; The stage at 5 decides it as only the user may (as
-;; `request_directory_access' is): the user is asked, in every mode,
-;; yolo included, and no rule or judge answers; a non-interactive
-;; session, whose user is away, is refused at once.  A directory goes
-;; through the very prompt of `request_directory_access' (perms'
-;; `harness-perms-decide-dir-request'), the rest through
+;; turned off, a more permissive permission mode, non-interactive mode,
+;; a Linux capability for its commands.  The stage at 5 decides it as
+;; only the user may (as `request_directory_access' is): the user is
+;; asked, in every mode, yolo included, and no rule or judge answers; a
+;; non-interactive session, whose user is away, is refused at once.  A
+;; directory goes through the very prompt of `request_directory_access'
+;; (perms' `harness-perms-decide-dir-request'), the rest through
 ;; `harness-perms-confirm'.  `request_directory_access' stays, the
-;; directory form of the same request.
+;; directory form of the same request.  A capability is asked for only
+;; where the jail can enforce it: a bwrap sandbox, for a local
+;; directory, that the user lets agents ask for (see
+;; `harness-sandbox-grantable-capabilities'), in a session that may
+;; write.  It counts for the commands the sandbox runs on this machine;
+;; on another one (an ssh command, a remote session) it changes nothing.
 ;;
 ;; An agent may always take access away from its own session, with
 ;; `drop_access': nobody is asked, in any mode or session, read-only
 ;; ones included (`harness-readonly-always-tools').  It gives up a
 ;; directory (or only writing to it), the network, writing, a tool, a
-;; permission mode (for a less permissive one) or non-interactive mode.
-;; The user changes the profile from the access view (`access/*'
-;; methods), without being asked anything.
+;; permission mode (for a less permissive one), non-interactive mode or
+;; a capability.  The user changes the profile from the access view
+;; (`access/*' methods), without being asked anything.
 ;;
 ;; Writing a .dir-locals.el is an escalation too: the file sets the
 ;; harness's own settings for a project -- the directories every session
@@ -93,10 +113,11 @@
 ;; for the access view (harness-ui-access.el): the sandbox, the mode,
 ;; the directories, the tools, the rules.  `access/judgements' lists the
 ;; judgements.  `access/set-network', `access/set-read-only',
-;; `access/set-tool', `access/add-read-dir', `access/remove-read-dir',
-;; `access/drop-dir' and `access/restore-dir' change the profile for the
-;; user.  `access/changed' (SESSION-ID) says a session's access changed,
-;; `access/judged' (SESSION-ID RECORD) that a call was judged.
+;; `access/set-tool', `access/set-capability', `access/add-read-dir',
+;; `access/remove-read-dir', `access/drop-dir' and `access/restore-dir'
+;; change the profile for the user.  `access/changed' (SESSION-ID) says
+;; a session's access changed, `access/judged' (SESSION-ID RECORD) that
+;; a call was judged.
 
 ;;; Code:
 
@@ -119,10 +140,12 @@
   "Tool through which an agent gives up access, never asking anyone.")
 
 (defconst harness-access-attributes
-  '("directory" "read_directory" "writes" "network" "tool" "permission_mode" "non_interactive")
+  '("directory" "read_directory" "writes" "network" "tool" "permission_mode" "non_interactive"
+    "capability")
   "The attributes `request_escalation' and `drop_access' take.
 `read_directory' is for an escalation only: `drop_access' gives up a
-directory whatever it may do there.")
+directory whatever it may do there.  Every one is raised only by the
+user's answer, and lowered by the agent at once, asking nobody.")
 
 (defconst harness-access-modes '(ask accept-edits auto yolo)
   "The permission modes from the least permissive to the most.
@@ -213,20 +236,30 @@ Case and dashes for underscores do not matter."
   "Return the directories SESSION gave up (see `harness-access-droppable-sources')."
   (harness-access--strings (plist-get (harness-access-profile session) :dropped)))
 
+(defun harness-access-capabilities (session)
+  "Return the Linux capabilities SESSION's profile gives its commands, as names.
+They are canonical names, CAP_SYS_PTRACE and the like, in the order
+they were given."
+  (harness-access--strings (plist-get (harness-access-profile session) :caps)))
+
 (defun harness-access--normalise (profile)
   "Return PROFILE as it is stored: no key without a value, no duplicates.
 The network is stored only when it is off and writing only when it is
-off, so a profile that restricts nothing is nil."
+off, so a profile that restricts nothing is nil.  The capabilities
+are a grant, not a restriction: they are stored when there are any, and
+a profile of them alone is a profile."
   (let ((network (plist-get profile :network))
         (read-only (plist-get profile :read-only))
         (tools (delete-dups (copy-sequence (harness-access--strings (plist-get profile :tools-off)))))
         (read-dirs (delete-dups (copy-sequence (harness-access--strings (plist-get profile :read-dirs)))))
-        (dropped (delete-dups (copy-sequence (harness-access--strings (plist-get profile :dropped))))))
+        (dropped (delete-dups (copy-sequence (harness-access--strings (plist-get profile :dropped)))))
+        (caps (delete-dups (copy-sequence (harness-access--strings (plist-get profile :caps))))))
     (append (and (eq network :false) (list :network :false))
             (and (harness-json-true-p read-only) (list :read-only t))
             (and tools (list :tools-off tools))
             (and read-dirs (list :read-dirs read-dirs))
-            (and dropped (list :dropped dropped)))))
+            (and dropped (list :dropped dropped))
+            (and caps (list :caps caps)))))
 
 (defun harness-access--update (session-id fn &optional hint)
   "Change SESSION-ID's access profile to what FN makes of it; return the new one.
@@ -494,19 +527,160 @@ the catalogue of every tool and keeps NAMES."
                     names))))
 
 (defun harness-access--sandbox-options (options session-id)
-  "Run SESSION-ID's commands offline when its profile says so.
+  "Run SESSION-ID's commands offline, and with capabilities, as its profile says.
 A `tools/sandbox-options' filter at 80: OPTIONS is what the handlers
 before it made.  Options ask for the sandbox, so a command that cannot
-have it fails rather than run online.  Anything going wrong here keeps
-the network off, the safe side."
+have it fails rather than run online.  A session that holds Linux
+capabilities (`harness-access-capabilities') gets `:capabilities' added,
+and only then: an empty key would make a command of a remote session
+refuse to run unconfined.  A read-only session gets none (the read-only
+filter of harness-readonly.el takes them off whoever put them there).
+Anything going wrong here keeps the network off and the capabilities
+away, the safe side."
   (condition-case err
-      (if (harness-access-network-p (harness-call 'session/get session-id))
-          options
-        (harness-plist-merge options (list :network nil)))
+      (let* ((session (harness-call 'session/get session-id))
+             (options (if (harness-access-network-p session)
+                          options
+                        (harness-plist-merge options (list :network nil))))
+             (caps (and (not (harness-access-read-only-p session))
+                        (harness-access-capabilities session))))
+        (if caps
+            (harness-plist-merge options (list :capabilities
+                                               (delete-dups (append (plist-get options :capabilities)
+                                                                    caps))))
+          options))
     (error
-     (harness-log 'error "access: choosing the sandbox options of %s failed, so they are offline: %S"
+     (harness-log 'error "access: choosing the sandbox options of %s failed, so they are offline and without capabilities: %S"
                   session-id err)
-     (harness-plist-merge options (list :network nil)))))
+     (harness-plist-merge (harness-plist-remove options :capabilities) (list :network nil)))))
+
+;;;; Capabilities
+
+;; The user gives a session's commands a Linux capability, or the agent
+;; takes one away; the sandbox enforces it (see "Capabilities" in
+;; harness-sandbox.el).  What this module decides is who may ask for
+;; one, and when: only where the jail can give it, for a name the user
+;; lets agents ask for, in a session that may write.
+
+(defun harness-access--capabilities-info (session)
+  "Return what the jail says of the capabilities of SESSION's commands.
+That is `sandbox/capabilities' for the directory they run in: (:enforced
+BOOL :backend BACKEND :grantable NAMES :docs ((NAME . DOC)…) :scopes
+\((NAME . SCOPE)…) :why TEXT).  Without the sandbox module, or when it
+cannot be asked, nothing is enforced, and `:why' says so."
+  (if (not (harness-method-exists-p 'sandbox/capabilities))
+      (list :enforced nil
+            :why "the sandbox module is not loaded, so nothing confines its commands, and no capability is given or taken away")
+    (condition-case err
+        (harness-call 'sandbox/capabilities (harness-readonly-dir session))
+      (error
+       (harness-log 'warn "access: asking the sandbox about capabilities failed: %S" err)
+       (list :enforced nil
+             :why (format "the sandbox could not be asked what it can give (%s)"
+                          (harness-error-message err)))))))
+
+(defun harness-access--capability-name (value)
+  "Return the canonical name of the capability VALUE names, or nil.
+The sandbox knows them (`sandbox/capability-name'): nil too when it is
+not loaded, or does not know VALUE."
+  (and value
+       (harness-method-exists-p 'sandbox/capability-name)
+       (condition-case nil
+           (harness-call 'sandbox/capability-name value)
+         (error nil))))
+
+(defun harness-access--names-text (names)
+  "Return the NAMES of capabilities as text for a message."
+  (if names (string-join names ", ") "none"))
+
+(defun harness-access--capability-check (session value)
+  "Say whether SESSION's commands may be given the capability VALUE names.
+Return a plist: `:name', the canonical name, and `:info', what the jail
+says (`harness-access--capabilities-info'), when they may; else
+`:reason' and `:hint', why not and what to do instead.  They may when
+VALUE names a capability the user lets agents ask for, the jail gives
+commands in the session's directory capabilities, and the session may
+write: a read-only session's commands get none."
+  (let* ((info (harness-access--capabilities-info session))
+         (listed (plist-get info :grantable))
+         (name (harness-access--capability-name value))
+         (asked-for (format "The user lets agents ask for: %s."
+                            (if listed (harness-access--names-text listed)
+                              "no capability (harness-sandbox-grantable-capabilities is empty)"))))
+    (cond
+     ((null value)
+      (list :reason (format "capability needs value: the capability's name, one of %s"
+                            (harness-access--names-text listed))
+            :hint "Call it again with value set to the capability you need."))
+     ((and (null name) (harness-method-exists-p 'sandbox/capability-name))
+      (list :reason (format "no capability is named %s" value)
+            :hint (format "Check the name. %s" asked-for)))
+     ((and name (plist-member info :grantable) (not (member name listed)))
+      (list :reason (format "%s is not one the user lets an agent ask for" name)
+            :hint (format "Carry on without it. %s" asked-for)))
+     ((not (plist-get info :enforced))
+      (list :reason (format "the sandbox cannot give this session's commands a capability: %s"
+                            (or (plist-get info :why) "it does not enforce them here"))
+            :hint "Carry on without it: a capability changes nothing for a command the sandbox does not run here, such as one on another machine."))
+     ((harness-access-read-only-p session)
+      (list :reason "this session is read-only, and a read-only session's commands get no capability"
+            :hint "Ask for writing first with request_escalation (attribute writes), then for the capability."))
+     ((harness-access--other-read-only session)
+      (list :reason (format "this session is read-only by %s, which no escalation changes, and a read-only session's commands get no capability"
+                            (harness-access--other-read-only session))
+            :hint "Carry on reading; say in your answer what you needed."))
+     (t (list :name name :info info)))))
+
+(defun harness-access--capability-reason (name info)
+  "Return what the prompt says of capability NAME, given INFO, the jail's answer."
+  (let ((doc (cdr (assoc name (plist-get info :docs))))
+        (scope (cdr (assoc name (plist-get info :scopes)))))
+    (format "%s lets a command %s.  The agent's bash and elisp commands run in the bwrap sandbox, which drops every capability; this one is valid inside the sandbox's own namespaces only, not on the host and not on another machine.%s  It applies from the next bash or elisp command on, until the agent or you take it away (the access view, or drop_access)."
+            name (or doc "use it")
+            (if scope (concat "  " scope) ""))))
+
+(defun harness-access-grant-capability (session-id name &optional who)
+  "Give SESSION-ID's commands the Linux capability NAME; return the profile.
+NAME is any spelling of a capability the jail knows.  It is passed to
+the sandbox from the next bash or elisp command on, those already
+running keeping what they have.  WHO, `user' or `agent', is named in
+the transcript's hint.  A capability the session's commands cannot be
+given -- no jail that enforces it, one the user does not let agents ask
+for, a read-only session -- signals a `harness-error' saying why: the
+profile never holds one the sandbox would not pass on."
+  (let* ((session (harness-access--session session-id))
+         (check (harness-access--capability-check session (harness-access--name name)))
+         (canonical (plist-get check :name)))
+    (unless canonical
+      (signal 'harness-error (list (plist-get check :reason))))
+    (harness-access--update session-id
+                            (lambda (p) (plist-put p :caps (append (plist-get p :caps) (list canonical))))
+                            (harness-access--hint who (format "%s given to the session's commands" canonical)))))
+
+(defun harness-access-revoke-capability (session-id name &optional who)
+  "Take capability NAME away from SESSION-ID's commands; return the names taken.
+NAME is any spelling of a capability, or `all'.  Nil when it holds no
+such capability.  WHO, `user' or `agent', is named in the transcript's
+hint.  It never asks the jail anything, and works in every session,
+read-only ones included: giving a capability up is always allowed."
+  (let* ((session (harness-access--session session-id))
+         (held (harness-access-capabilities session))
+         (text (harness-access--name name))
+         (all (and text (equal (downcase text) "all")))
+         (target (if all
+                     held
+                   ;; A name the jail no longer knows is taken away by its text.
+                   (let ((canonical (or (harness-access--capability-name text) text)))
+                     (and canonical (member canonical held) (list canonical))))))
+    (when target
+      (harness-access--update session-id
+                              (lambda (p) (plist-put p :caps (cl-remove-if (lambda (c) (member c target))
+                                                                           (plist-get p :caps))))
+                              (harness-access--hint who (if all
+                                                            "no capability left for the session's commands"
+                                                          (format "%s taken away from the session's commands"
+                                                                  (car target))))))
+    target))
 
 ;;;; The read-only policy
 
@@ -752,7 +926,19 @@ allow that grants nothing when the session has what it asks for."
         ((harness-perms--non-interactive-p session)
          (funcall next (harness-access--nothing attribute nil "this session is non-interactive already")))
         (t (harness-access--confirm request next attribute nil "Turn non-interactive mode on for this session"
-                                    "Nobody is asked anything there until it is turned off again: the auto-mode judge decides what would ask you.")))))))
+                                    "Nobody is asked anything there until it is turned off again: the auto-mode judge decides what would ask you."))))
+      ("capability"
+       (let* ((check (harness-access--capability-check session value))
+              (name (plist-get check :name)))
+         (cond
+          ((null name)
+           (funcall next (harness-access--refuse (plist-get check :reason) (plist-get check :hint))))
+          ((member name (harness-access-capabilities session))
+           (funcall next (harness-access--nothing
+                          attribute name (format "this session's commands have %s already" name))))
+          (t (harness-access--confirm request next attribute name
+                                      (format "Give the agent's commands %s" name)
+                                      (harness-access--capability-reason name (plist-get check :info))))))))))
 
 (defun harness-access--escalation (decision next request)
   "Decide a call of `request_escalation' from the user's answer alone.
@@ -808,17 +994,26 @@ session.  A directory the user granted at the prompt was granted there
          ((equal attribute "non_interactive")
           (harness-call 'session/update sid :non-interactive t)
           (harness-tool-ok "The user turned non-interactive mode on for this session: from now on the auto-mode judge decides what would ask them, and a denied call is to be worked around rather than waited on."))
+         ((equal attribute "capability")
+          (harness-access-grant-capability sid value 'user)
+          (let* ((session (harness-access--session sid))
+                 (name (harness-access--capability-name value))
+                 (scope (cdr (assoc name (plist-get (harness-access--capabilities-info session) :scopes)))))
+            (harness-tool-ok
+             (format "The user gave this session's commands %s. From the next bash or elisp command on they run with %s and with no other capability; commands already running keep what they started with. It holds inside the sandbox's own namespaces only, not on the host and not on another machine, so it changes nothing for ssh or a remote session.%s Take it away with drop_access (attribute capability) when you are done."
+                     name (harness-access--names-text (harness-access-capabilities session))
+                     (if scope (concat " " scope) "")))))
          (t (harness-tool-error (format "Unknown attribute %s" attribute))))
       (error (harness-tool-error (format "Granting %s failed: %s" attribute (harness-error-message err)))))))
 
 (harness-define-tool harness-access-escalation-tool
   :label "Request escalation"
-  :description "Ask the user for more access for this session: a directory to write (attribute directory) or only to read (read_directory), the network back (network), writing back (writes), a tool turned off (tool), a more permissive permission mode (permission_mode: ask, accept-edits, auto or yolo), or non-interactive mode (non_interactive). This is the only way a session's access grows: the user always decides, in every permission mode, and the call waits for the answer; no rule or judge answers it, and a non-interactive session is refused at once. Ask only for what the task needs, and say why. If the user says no, do not ask again. To give access up instead, use drop_access, which never asks."
+  :description "Ask the user for more access for this session: a directory to write (attribute directory) or only to read (read_directory), the network back (network), writing back (writes), a tool turned off (tool), a more permissive permission mode (permission_mode: ask, accept-edits, auto or yolo), non-interactive mode (non_interactive), or a Linux capability for your bash and elisp commands (capability, value such as CAP_SYS_PTRACE to strace or gdb a process of your own; they run in a sandbox that drops every capability, and one counts inside that sandbox only, never on the host or on another machine, so it changes nothing for ssh or a remote session). This is the only way a session's access grows: the user always decides, in every permission mode, and the call waits for the answer; no rule or judge answers it, and a non-interactive session is refused at once. Ask only for what the task needs, and say why. If the user says no, do not ask again. To give access up instead, use drop_access, which never asks."
   :schema '(:type "object"
             :properties (:attribute (:type "string"
-                                     :enum ["directory" "read_directory" "writes" "network" "tool" "permission_mode" "non_interactive"]
+                                     :enum ["directory" "read_directory" "writes" "network" "tool" "permission_mode" "non_interactive" "capability"]
                                      :description "What to ask for.")
-                         :value (:type "string" :description "The directory (absolute or relative to the working directory) for directory and read_directory, the tool's name for tool, the mode for permission_mode; nothing for the others.")
+                         :value (:type "string" :description "The directory (absolute or relative to the working directory) for directory and read_directory, the tool's name for tool, the mode for permission_mode, the capability's name for capability (CAP_SYS_PTRACE, CAP_NET_RAW...); nothing for the others.")
                          :reason (:type "string" :description "Why you need it; shown to the user."))
             :required ("attribute" "reason"))
   :kind 'meta
@@ -877,17 +1072,31 @@ a session may always take access away from itself."
              (if (not (harness-perms--non-interactive-p session))
                  (harness-tool-ok "The session is interactive already: the user is asked.")
                (harness-call 'session/update sid :non-interactive :false)
-               (harness-tool-ok "Non-interactive mode is off for this session: the user is asked again what its permission mode leaves open.")))))
+               (harness-tool-ok "Non-interactive mode is off for this session: the user is asked again what its permission mode leaves open."))))
+          ("capability"
+           (if (null value)
+               (harness-tool-error "Give value: the capability to give up, or all")
+             ;; Nothing here asks the user or the jail: it takes a name out of the profile.
+             (let ((dropped (harness-access-revoke-capability sid value 'agent))
+                   (held (harness-access-capabilities (harness-access--session sid))))
+               (harness-tool-ok
+                (if dropped
+                    (format "%s taken away from this session's commands: from the next bash or elisp command on they run without %s%s (commands already running keep what they started with). %s"
+                            (harness-access--names-text dropped) (if (cdr dropped) "them" "it")
+                            (if held (format ", still with %s" (harness-access--names-text held)) "")
+                            back)
+                  (format "This session's commands hold %s, not %s: there is nothing to give up."
+                          (if held (harness-access--names-text held) "no capability") value)))))))
       (error (harness-tool-error (harness-error-message err))))))
 
 (harness-define-tool harness-access-drop-tool
   :label "Drop access"
-  :description "Give up access this session has, at once and without asking anyone: a directory (attribute directory: a grant, the working directory, the worktree, the temporary directory or a configured directory; keep_read keeps it readable), the network (network), writing (writes: the session becomes read-only), a tool (tool), a permission mode for a less permissive one (permission_mode), or non-interactive mode (non_interactive). Use it when you are done with something or want to be sure you cannot touch it. Sub-agents you start keep what you gave up. Getting it back takes the user's answer to request_escalation."
+  :description "Give up access this session has, at once and without asking anyone: a directory (attribute directory: a grant, the working directory, the worktree, the temporary directory or a configured directory; keep_read keeps it readable), the network (network), writing (writes: the session becomes read-only), a tool (tool), a permission mode for a less permissive one (permission_mode), non-interactive mode (non_interactive), or a Linux capability of your bash and elisp commands (capability: its name, or all). Use it when you are done with something or want to be sure you cannot touch it. Sub-agents you start keep what you gave up. Getting it back takes the user's answer to request_escalation."
   :schema '(:type "object"
             :properties (:attribute (:type "string"
-                                     :enum ["directory" "writes" "network" "tool" "permission_mode" "non_interactive"]
+                                     :enum ["directory" "writes" "network" "tool" "permission_mode" "non_interactive" "capability"]
                                      :description "What to give up.")
-                         :value (:type "string" :description "The directory for directory, the tool's name for tool, the less permissive mode for permission_mode; nothing for the others.")
+                         :value (:type "string" :description "The directory for directory, the tool's name for tool, the less permissive mode for permission_mode, the capability's name (CAP_SYS_PTRACE...) or all for capability; nothing for the others.")
                          :keep_read (:type "boolean" :description "For directory: keep reading it, give up writing it only (default false).")
                          :reason (:type "string" :description "Why, for the record."))
             :required ("attribute"))
@@ -904,9 +1113,12 @@ a session may always take access away from itself."
   "Give SESSION-ID, just created with PLIST, its parent's restrictions.
 A `session/created' subscriber.  A session with a parent -- a sub-agent,
 a fork -- other than a BTW takes the network, writing, the tools and
-the directories its parent gave up; a fork also takes the directories
-its parent may only read, as it takes its grants.  Nothing is copied
-when the parent has no profile."
+the directories its parent gave up; a fork (`:fork-node') also takes
+the directories its parent may only read, as it takes its grants, and
+the Linux capabilities its parent gave its commands, as it takes its
+permission mode and non-interactive state.  A sub-agent that starts
+afresh gets no capability, and neither does a BTW: they have to ask.
+Nothing is copied when the parent has no profile."
   (let ((parent-id (plist-get plist :parent-id)))
     (when (and (stringp parent-id)
                (not (eq (harness-perms--sym (plist-get plist :kind)) 'btw)))
@@ -914,9 +1126,10 @@ when the parent has no profile."
           (when-let* ((parent (ignore-errors (harness-call 'session/get parent-id)))
                       (profile (harness-access-profile parent)))
             (let ((inherited (harness-access--normalise
-                              (append (harness-plist-remove profile :read-dirs)
+                              (append (harness-plist-remove profile :read-dirs :caps)
                                       (and (plist-get plist :fork-node)
-                                           (list :read-dirs (plist-get profile :read-dirs)))))))
+                                           (list :read-dirs (plist-get profile :read-dirs)
+                                                 :caps (plist-get profile :caps)))))))
               (when inherited
                 (harness-access--update session-id
                                         (lambda (own)
@@ -926,8 +1139,11 @@ when the parent has no profile."
                                                 :read-only (or (plist-get own :read-only) (plist-get inherited :read-only))
                                                 :tools-off (append (plist-get own :tools-off) (plist-get inherited :tools-off))
                                                 :read-dirs (append (plist-get own :read-dirs) (plist-get inherited :read-dirs))
-                                                :dropped (append (plist-get own :dropped) (plist-get inherited :dropped))))
-                                        "Access: the restrictions of the session that started this one (set by its parent)."))))
+                                                :dropped (append (plist-get own :dropped) (plist-get inherited :dropped))
+                                                :caps (append (plist-get own :caps) (plist-get inherited :caps))))
+                                        (if (plist-get inherited :caps)
+                                            "Access: the restrictions of the session that forked this one, and the capabilities it gave its commands (set by its parent)."
+                                          "Access: the restrictions of the session that started this one (set by its parent).")))))
         (error (harness-log 'error "access: giving %s its parent's restrictions failed: %S" session-id err))))))
 
 ;;;; Judgements
@@ -1192,6 +1408,34 @@ kept for reading is its read-only entry, with `:given-up' t."
                     entries)
             (mapcar (lambda (d) (list :dir d :source 'dropped :dropped t :revocable nil :read-only nil)) dropped))))
 
+(defun harness-access--describe-capabilities (session)
+  "Return SESSION's capabilities for the access view (`access/describe').
+A plist: `:held', the names its commands are given; `:grantable', the
+names an agent may ask for, with `:docs' (each (:name N :doc D :scope
+S), the scope when it has one of its own); `:enforced', whether the
+jail gives commands in its directory capabilities and drops the rest,
+with `:backend'; and `:why', what stands in the way of raising one now
+\(the jail's reason, a read-only session, nothing grantable), or nil."
+  (let* ((info (harness-access--capabilities-info session))
+         (grantable (plist-get info :grantable))
+         (enforced (and (plist-get info :enforced) t)))
+    (list :held (harness-access-capabilities session)
+          :grantable grantable
+          :docs (mapcar (lambda (cell)
+                          (list :name (car cell) :doc (cdr cell)
+                                :scope (cdr (assoc (car cell) (plist-get info :scopes)))))
+                        (plist-get info :docs))
+          :enforced enforced
+          :backend (plist-get info :backend)
+          :why (cond ((not enforced) (or (plist-get info :why) "the sandbox does not enforce them here"))
+                     ((harness-access-read-only-p session)
+                      "this session is read-only: its commands get no capability until it may write")
+                     ((harness-access--other-read-only session)
+                      (format "this session is read-only by %s: its commands get no capability"
+                              (harness-access--other-read-only session)))
+                     ((null grantable)
+                      "the user lets agents ask for no capability (harness-sandbox-grantable-capabilities is empty)")))))
+
 (defun harness-access-describe (session-id)
   "Return everything about SESSION-ID's access, as `access/describe' does."
   (let* ((session (harness-access--session session-id))
@@ -1212,6 +1456,7 @@ kept for reading is its read-only entry, with `:given-up' t."
           :read-only-profile (harness-access-read-only-p session)
           :read-only-by other-ro
           :profile (harness-access-profile session)
+          :capabilities (harness-access--describe-capabilities session)
           :dirs (harness-access--describe-dirs session-id session)
           :inspect (plist-get rules :inspect)
           :skills (plist-get rules :skills)
@@ -1229,11 +1474,15 @@ A plist: `:session' (id, name, cwd, host, worktree, kind, status),
 commands in its directory run confined -- `:remote'), `:mode' and
 `:mode-pinned', `:non-interactive' and `:non-interactive-pinned',
 `:network', `:corporate', `:read-only' with `:read-only-profile' (its
-own) and `:read-only-by' (another module's policy), `:profile', `:dirs'
-\(`permission/dirs' entries with `:read-only', and the directories it
-gave up with `:dropped'), `:inspect' and `:skills' (directories every
-read may reach), `:tools' (`:on', `:off' entries with `:why',
-`:builtin'), `:never-ask' and `:rules' (`:session', `:always',
+own) and `:read-only-by' (another module's policy), `:profile',
+`:capabilities' (`:held' the Linux capabilities its commands are given,
+`:grantable' those an agent may ask for with `:docs', each (:name :doc
+:scope), `:enforced' whether the jail enforces them here, with
+`:backend', and `:why' what stands in the way of raising one now, or
+nil), `:dirs' (`permission/dirs' entries with `:read-only', and the
+directories it gave up with `:dropped'), `:inspect' and `:skills'
+\(directories every read may reach), `:tools' (`:on', `:off' entries with
+`:why', `:builtin'), `:never-ask' and `:rules' (`:session', `:always',
 `:pinned')."
   (harness-access-describe session-id))
 
@@ -1261,6 +1510,17 @@ the counts and the names over every call of the session."
 (harness-defmethod access/set-tool (session-id tool on)
   "Turn TOOL on for SESSION-ID when ON is true, else off; for the user."
   (harness-access-set-tool session-id tool (harness-json-true-p on) 'user)
+  t)
+
+(harness-defmethod access/set-capability (session-id name on)
+  "Give SESSION-ID's commands capability NAME when ON is true, else take it away.
+For the user.  NAME is a capability's name in any spelling, or `all' to
+take every one away.  Asks nobody: the user is the one who changes the profile.
+Giving one signals a `harness-error' saying why when the jail cannot
+pass it on (see `harness-access-grant-capability')."
+  (if (harness-json-true-p on)
+      (harness-access-grant-capability session-id name 'user)
+    (harness-access-revoke-capability session-id name 'user))
   t)
 
 (harness-defmethod access/add-read-dir (session-id dir)
@@ -1335,7 +1595,7 @@ non-interactive switch, its directories."
   (harness-access--init))
 
 (harness-define-module 'access
-  :doc "What a session may reach, in one place: its access profile (network, writing, tools, read-only and given-up directories), request_escalation, which only the user answers, drop_access, which never asks, and the record of every permission judgement."
+  :doc "What a session may reach, in one place: its access profile (network, writing, tools, read-only and given-up directories, the Linux capabilities of its commands), request_escalation, which only the user answers, drop_access, which never asks, and the record of every permission judgement."
   :requires '(perms session tools readonly)
   :init #'harness-access--init
   :shutdown #'harness-access--shutdown)

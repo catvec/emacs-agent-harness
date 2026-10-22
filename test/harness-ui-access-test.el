@@ -270,6 +270,342 @@ writing and a tool off and on again for the session."
     (harness-ui-access-toggle-tool "test_fetch")
     (harness-ui-access-test-wait-text "test_fetch +turned off" t)))
 
+;;;; The capabilities of its commands
+
+;; The jail's answer is the test's to give, so the row does not depend on
+;; the machine the test runs on: `sandbox/capabilities' is a stand-in
+;; (loading the sandbox module would change the `sandbox none' line the
+;; test above reads).  The core's own tests, in harness-access-test.el,
+;; use the real one.
+
+(defvar harness-ui-access-test--jail nil
+  "What the stand-in for `sandbox/capabilities' answers: a plist, as the jail's.")
+
+(defconst harness-ui-access-test--jail-enforcing
+  '(:enforced t :backend bwrap
+    :grantable ("CAP_SYS_PTRACE" "CAP_NET_RAW" "CAP_NET_ADMIN" "CAP_NET_BIND_SERVICE")
+    :docs (("CAP_SYS_PTRACE" . "trace and inspect any process in the sandbox (strace, gdb)")
+           ("CAP_NET_RAW" . "open raw and packet sockets")
+           ("CAP_NET_ADMIN" . "configure the network")
+           ("CAP_NET_BIND_SERVICE" . "bind sockets to the ports below 1024"))
+    :scopes (("CAP_SYS_PTRACE" . "It reaches the processes of the sandbox's own PID namespace."))
+    :why nil)
+  "The jail of a bwrap sandbox an ordinary user runs.")
+
+(defun harness-ui-access-test--jail (&rest changes)
+  "Return the enforcing jail with CHANGES, a plist, put over it."
+  (let ((jail (copy-sequence harness-ui-access-test--jail-enforcing)))
+    (cl-loop for (key value) on changes by #'cddr do (setq jail (plist-put jail key value)))
+    jail))
+
+(defun harness-ui-access-test--capability-name (value)
+  "Return the capability VALUE names among the few the tests use, else nil."
+  (let* ((key (upcase (replace-regexp-in-string "-" "_" (string-trim (format "%s" value)))))
+         (name (if (string-prefix-p "CAP_" key) key (concat "CAP_" key))))
+    (car (member name '("CAP_SYS_PTRACE" "CAP_NET_RAW" "CAP_NET_ADMIN" "CAP_NET_BIND_SERVICE" "CAP_SYS_ADMIN")))))
+
+(defmacro harness-ui-access-test-with-jail (&rest body)
+  "Run BODY as `harness-ui-access-test-with' does, with a stand-in for the jail.
+`sandbox/capabilities' answers `harness-ui-access-test--jail', at first
+`harness-ui-access-test--jail-enforcing'."
+  (declare (indent 0))
+  `(harness-ui-access-test-with
+     (setq harness-ui-access-test--jail harness-ui-access-test--jail-enforcing)
+     (harness-register-method 'sandbox/capabilities (lambda (_cwd) harness-ui-access-test--jail))
+     (harness-register-method 'sandbox/capability-name #'harness-ui-access-test--capability-name)
+     ,@body))
+
+(defun harness-ui-access-test-flat ()
+  "Return the view's text with every run of white space made one space."
+  (replace-regexp-in-string "[ \t\n]+" " " (harness-ui-access-test-text)))
+
+(defun harness-ui-access-test-wait-flat (regexp &optional absent)
+  "Fetch the view again and wait until its flat text matches REGEXP, or ABSENT."
+  (harness-ui-access-refresh)
+  (harness-test-wait (lambda ()
+                       (let ((found (string-match-p regexp (harness-ui-access-test-flat))))
+                         (if absent (not found) found)))
+                     5 (format "%s %s" (if absent "no" "a") regexp)))
+
+(defun harness-ui-access-test-capabilities-row ()
+  "Return the line of the capabilities row of the view."
+  (goto-char (point-min))
+  (should (re-search-forward "^  capabilities " nil t))
+  (buffer-substring-no-properties (line-beginning-position) (line-end-position)))
+
+(defun harness-ui-access-test-caps (sid)
+  "Return the capabilities SID's commands hold."
+  (harness-access-capabilities (harness-call 'session/get sid)))
+
+(defmacro harness-ui-access-test-choosing (choice &rest body)
+  "Run BODY with `completing-read' answering CHOICE; bind `seen' to what it was asked.
+`seen' is (PROMPT COLLECTION REQUIRE-MATCH ANNOTATE), ANNOTATE the
+annotation function in `completion-extra-properties'.  A CHOICE that is
+a function is called with the collection to choose from it.  It is
+nil afterwards when nothing was asked."
+  (declare (indent 1))
+  `(let ((seen nil))
+     (cl-letf (((symbol-function 'completing-read)
+                (lambda (prompt collection &optional _predicate require-match &rest _)
+                  (setq seen (list prompt collection require-match
+                                   (plist-get completion-extra-properties :annotation-function)))
+                  (if (functionp ,choice) (funcall ,choice collection) ,choice))))
+       ,@body)
+     seen))
+
+(ert-deftest harness-ui-access-capabilities-row-draws-none-and-held ()
+  "The jail has a capabilities row, after writing: none, and every capability
+is dropped, until the session's commands are given some; then it names them,
+with the buttons to give more and take them away, and says what they mean."
+  (harness-ui-access-test-with-jail
+    (harness-ui-access-test-open sid)
+    (should (equal "  capabilities none  every capability is dropped  [Give…]"
+                   (harness-ui-access-test-capabilities-row)))
+    (should-not (string-match-p "\\[Take away…\\]\\|\\[Take all away\\]" (harness-ui-access-test-text)))
+    ;; In the jail: after writing, before the directories.
+    (goto-char (point-min))
+    (let ((writing (progn (re-search-forward "^  writing ") (point)))
+          (row (progn (re-search-forward "^  capabilities ") (point)))
+          (dirs (progn (re-search-forward "^Directories") (point))))
+      (should (< writing row dirs)))
+    ;; The tooltips end with the key.
+    (goto-char (point-min))
+    (search-forward "[Give…]")
+    (should (string-match-p "Linux capability, inside the sandbox only (C)\\'"
+                            (get-text-property (match-beginning 0) 'help-echo)))
+    ;; One given.
+    (harness-call 'access/set-capability sid "CAP_SYS_PTRACE" t)
+    (harness-ui-access-test-wait-flat "capabilities CAP_SYS_PTRACE")
+    (should (equal "  capabilities CAP_SYS_PTRACE  [Give…] [Take away…] [Take all away]"
+                   (harness-ui-access-test-capabilities-row)))
+    (should (string-match-p "its bash and elisp commands run with these and no other capability, inside the sandbox only"
+                            (harness-ui-access-test-flat)))
+    (goto-char (point-min))
+    (re-search-forward "capabilities \\(CAP_SYS_PTRACE\\)")
+    (should (eq 'bold (get-text-property (match-beginning 1) 'face)))
+    (dolist (label '("[Take away…]" "[Take all away]"))
+      (goto-char (point-min))
+      (search-forward label)
+      (should (string-match-p "(C\\(?:, all\\)?)\\'" (get-text-property (match-beginning 0) 'help-echo))))
+    ;; More, in the order they were given; with all of them given there is nothing to give.
+    (harness-call 'access/set-capability sid "CAP_NET_RAW" t)
+    (harness-ui-access-test-wait-flat "capabilities CAP_SYS_PTRACE, CAP_NET_RAW")
+    (harness-call 'access/set-capability sid "CAP_NET_ADMIN" t)
+    (harness-call 'access/set-capability sid "CAP_NET_BIND_SERVICE" t)
+    (harness-ui-access-test-wait-flat "CAP_NET_BIND_SERVICE")
+    (should (equal "  capabilities CAP_SYS_PTRACE, CAP_NET_RAW, CAP_NET_ADMIN, CAP_NET_BIND_SERVICE  [Take away…] [Take all away]"
+                   (harness-ui-access-test-capabilities-row)))
+    ;; Taken away elsewhere, the view follows.
+    (harness-call 'access/set-capability sid "all" :false)
+    (harness-ui-access-test-wait-flat "capabilities none every capability is dropped \\[Give…\\]")
+    (should-not (harness-ui-access-test-caps sid))))
+
+(ert-deftest harness-ui-access-capabilities-row-says-why-none-can-be-raised ()
+  "When no capability can be given -- the jail cannot, the session is read-only,
+the user lets agents ask for none -- the row says why, and offers no [Give…]."
+  (harness-ui-access-test-with-jail
+    (setq harness-ui-access-test--jail
+          (harness-ui-access-test--jail :enforced nil :backend 'systemd
+                                        :why "the sandbox backend is systemd-run, not bwrap"))
+    (harness-ui-access-test-open sid)
+    (should (equal "  capabilities none  every capability is dropped"
+                   (string-trim-right (harness-ui-access-test-capabilities-row))))
+    (should (string-match-p "capabilities none every capability is dropped cannot be raised: the sandbox backend is systemd-run, not bwrap"
+                            (harness-ui-access-test-flat)))
+    (should-not (string-match-p "\\[Give…\\]" (harness-ui-access-test-text)))
+    ;; Where the jail can, a read-only session still cannot.
+    (setq harness-ui-access-test--jail harness-ui-access-test--jail-enforcing)
+    (harness-call 'access/set-read-only sid t)
+    (harness-ui-access-test-wait-flat "cannot be raised: this session is read-only")
+    (should-not (string-match-p "\\[Give…\\]" (harness-ui-access-test-text)))
+    (harness-call 'access/set-read-only sid :false)
+    (harness-ui-access-test-wait-flat "cannot be raised" t)
+    (should (string-match-p "\\[Give…\\]" (harness-ui-access-test-text)))
+    ;; Nothing the user lets agents ask for.
+    (setq harness-ui-access-test--jail (harness-ui-access-test--jail :grantable nil :docs nil))
+    (harness-ui-access-test-wait-flat "cannot be raised: the user lets agents ask for no capability")
+    (should-not (string-match-p "\\[Give…\\]" (harness-ui-access-test-text)))))
+
+(ert-deftest harness-ui-access-capabilities-row-says-when-those-held-are-not-passed ()
+  "A capability the session's commands hold that the sandbox does not pass on
+-- the session is read-only, the jail cannot enforce it, the user no longer
+lets agents ask for it -- is named with the reason, and can be taken away."
+  (harness-ui-access-test-with-jail
+    (harness-call 'access/set-capability sid "CAP_SYS_PTRACE" t)
+    (harness-call 'access/set-capability sid "CAP_NET_RAW" t)
+    (harness-ui-access-test-open sid)
+    (should (string-match-p "capabilities CAP_SYS_PTRACE, CAP_NET_RAW \\[Give…\\] \\[Take away…\\] \\[Take all away\\]"
+                            (harness-ui-access-test-flat)))
+    ;; Read-only: held, and no [Give…].
+    (harness-call 'access/set-read-only sid t)
+    (harness-ui-access-test-wait-flat "held, but a read-only session's commands get none")
+    (should (equal "  capabilities CAP_SYS_PTRACE, CAP_NET_RAW  [Take away…] [Take all away]"
+                   (harness-ui-access-test-capabilities-row)))
+    (should-not (string-match-p "its bash and elisp commands run with these" (harness-ui-access-test-flat)))
+    (harness-call 'access/set-read-only sid :false)
+    (harness-ui-access-test-wait-flat "held, but" t)
+    ;; The jail cannot pass them on.
+    (setq harness-ui-access-test--jail
+          (harness-ui-access-test--jail :enforced nil :backend 'systemd
+                                        :why "the sandbox backend is systemd-run, not bwrap"))
+    (harness-ui-access-test-wait-flat "held, but not passed: the sandbox backend is systemd-run, not bwrap")
+    (should (equal "  capabilities CAP_SYS_PTRACE, CAP_NET_RAW  [Take away…] [Take all away]"
+                   (harness-ui-access-test-capabilities-row)))
+    ;; One the user no longer lets agents ask for.
+    (setq harness-ui-access-test--jail (harness-ui-access-test--jail :grantable '("CAP_NET_RAW")))
+    (harness-ui-access-test-wait-flat "CAP_SYS_PTRACE held, but not passed: the user no longer lets agents ask for it")
+    (should (equal "  capabilities CAP_SYS_PTRACE, CAP_NET_RAW  [Take away…] [Take all away]"
+                   (harness-ui-access-test-capabilities-row)))
+    (should (equal '("CAP_SYS_PTRACE" "CAP_NET_RAW") (harness-ui-access-test-caps sid)))))
+
+(ert-deftest harness-ui-access-capabilities-buttons-change-the-profile ()
+  "[Give…] asks which of those an agent may ask for the commands do not hold,
+each with what it lets them do; [Take away…] which of those held; [Take all
+away] asks nothing; each changes the session at once and the view follows."
+  (harness-ui-access-test-with-jail
+    (harness-ui-access-test-open sid)
+    (let ((messages nil))
+      (cl-letf (((symbol-function 'message)
+                 (lambda (fmt &rest args) (when fmt (push (apply #'format fmt args) messages)))))
+        ;; Give one: the prompt names the four, each annotated, and a name is required.
+        (let ((seen (harness-ui-access-test-choosing "CAP_NET_RAW"
+                      (harness-ui-access-test-push "[Give…]")
+                      (harness-ui-access-test-wait-flat "capabilities CAP_NET_RAW"))))
+          (should (equal "Give the session's commands: " (nth 0 seen)))
+          (should (equal '("CAP_SYS_PTRACE" "CAP_NET_RAW" "CAP_NET_ADMIN" "CAP_NET_BIND_SERVICE") (nth 1 seen)))
+          (should (nth 2 seen))
+          (should (equal "  open raw and packet sockets" (funcall (nth 3 seen) "CAP_NET_RAW")))
+          (should (string-match-p "strace" (funcall (nth 3 seen) "CAP_SYS_PTRACE")))
+          (should (equal "" (funcall (nth 3 seen) "CAP_UNKNOWN"))))
+        (should (equal '("CAP_NET_RAW") (harness-ui-access-test-caps sid)))
+        (harness-test-wait (lambda () (member "CAP_NET_RAW given to the session's commands" messages)) 5 "the message")
+        ;; Give another: the one held is not offered again.
+        (let ((seen (harness-ui-access-test-choosing "CAP_SYS_PTRACE"
+                      (harness-ui-access-test-push "[Give…]")
+                      (harness-ui-access-test-wait-flat "capabilities CAP_NET_RAW, CAP_SYS_PTRACE"))))
+          (should (equal '("CAP_SYS_PTRACE" "CAP_NET_ADMIN" "CAP_NET_BIND_SERVICE") (nth 1 seen))))
+        (should (equal '("CAP_NET_RAW" "CAP_SYS_PTRACE") (harness-ui-access-test-caps sid)))
+        ;; Take one away: the prompt offers those held.
+        (let ((seen (harness-ui-access-test-choosing "CAP_NET_RAW"
+                      (harness-ui-access-test-push "[Take away…]")
+                      (harness-ui-access-test-wait-flat "capabilities CAP_SYS_PTRACE \\["))))
+          (should (equal "Take away: " (nth 0 seen)))
+          (should (equal '("CAP_NET_RAW" "CAP_SYS_PTRACE") (nth 1 seen)))
+          (should (nth 2 seen))
+          (should (equal "  open raw and packet sockets" (funcall (nth 3 seen) "CAP_NET_RAW"))))
+        (should (equal '("CAP_SYS_PTRACE") (harness-ui-access-test-caps sid)))
+        (harness-test-wait (lambda () (member "CAP_NET_RAW taken away from the session's commands" messages)) 5 "the message")
+        ;; Take all away: nothing is asked.
+        (harness-call 'access/set-capability sid "CAP_NET_ADMIN" t)
+        (harness-ui-access-test-wait-flat "capabilities CAP_SYS_PTRACE, CAP_NET_ADMIN")
+        (let ((seen (harness-ui-access-test-choosing (lambda (_) (error "Nothing may be asked"))
+                      (harness-ui-access-test-push "[Take all away]")
+                      (harness-ui-access-test-wait-flat "capabilities none"))))
+          (should-not seen))
+        (should-not (harness-ui-access-test-caps sid))
+        (harness-test-wait (lambda () (member "No capability left for the session's commands" messages)) 5 "the message")))
+    ;; The transcript says who changed it.
+    (let ((hints (delq nil (mapcar (lambda (n) (and (eq (plist-get n :kind) 'hint) (plist-get n :content)))
+                                   (harness-call 'session/nodes sid)))))
+      (should (cl-some (lambda (h) (string-match-p "CAP_NET_RAW given to the session's commands (set by the user)" h)) hints))
+      (should (cl-some (lambda (h) (string-match-p "CAP_NET_RAW taken away from the session's commands (set by the user)" h)) hints))
+      (should (cl-some (lambda (h) (string-match-p "no capability left for the session's commands (set by the user)" h)) hints)))))
+
+(ert-deftest harness-ui-access-capabilities-key-and-menu ()
+  "C gives the session's commands a capability or takes one away, choosing
+among those held (marked), and those an agent may ask for; the harness menu
+lists it; it says why when nothing can be given and nothing is held."
+  (harness-ui-access-test-with-jail
+    (harness-ui-access-test-open sid)
+    (should (eq #'harness-ui-access-toggle-capability (key-binding (kbd "C"))))
+    (should (cl-some (lambda (entry) (and (listp entry) (equal (nth 0 entry) ". C")
+                                          (eq (nth 2 entry) #'harness-ui-access-toggle-capability)))
+                     (cl-loop for group in (cdr (get 'harness-ui-access-mode 'harness-menu-group))
+                              append (append (cdr (append group nil)) nil))))
+    ;; Called from Lisp, it gives, then takes away.
+    (harness-ui-access-toggle-capability "CAP_SYS_PTRACE")
+    (harness-ui-access-test-wait-flat "capabilities CAP_SYS_PTRACE")
+    (harness-ui-access-toggle-capability "CAP_SYS_PTRACE")
+    (harness-ui-access-test-wait-flat "capabilities none")
+    ;; At the keyboard it chooses: the held ones are marked, all is offered with them.
+    (let ((seen (harness-ui-access-test-choosing "CAP_NET_RAW"
+                  (call-interactively #'harness-ui-access-toggle-capability)
+                  (harness-ui-access-test-wait-flat "capabilities CAP_NET_RAW"))))
+      (should (equal "Give or take away: " (nth 0 seen)))
+      (should (equal '("CAP_SYS_PTRACE" "CAP_NET_RAW" "CAP_NET_ADMIN" "CAP_NET_BIND_SERVICE") (nth 1 seen))))
+    (let ((seen (harness-ui-access-test-choosing "CAP_SYS_PTRACE"
+                  (call-interactively #'harness-ui-access-toggle-capability)
+                  (harness-ui-access-test-wait-flat "capabilities CAP_NET_RAW, CAP_SYS_PTRACE"))))
+      (should (equal '("CAP_NET_RAW (held)" "CAP_SYS_PTRACE" "CAP_NET_ADMIN" "CAP_NET_BIND_SERVICE"
+                       "all (take every one away)")
+                     (nth 1 seen)))
+      (should (equal "  open raw and packet sockets" (funcall (nth 3 seen) "CAP_NET_RAW (held)")))
+      (should (equal "" (funcall (nth 3 seen) "all (take every one away)"))))
+    ;; A held one is taken away.
+    (harness-ui-access-test-choosing "CAP_NET_RAW (held)"
+      (call-interactively #'harness-ui-access-toggle-capability)
+      (harness-ui-access-test-wait-flat "capabilities CAP_SYS_PTRACE \\["))
+    (should (equal '("CAP_SYS_PTRACE") (harness-ui-access-test-caps sid)))
+    (harness-ui-access-test-choosing "all (take every one away)"
+      (call-interactively #'harness-ui-access-toggle-capability)
+      (harness-ui-access-test-wait-flat "capabilities none"))
+    (should-not (harness-ui-access-test-caps sid))
+    ;; The commands of the row, asked at the keyboard.
+    (let ((err (progn (setq harness-ui-access-test--jail
+                            (harness-ui-access-test--jail :enforced nil :why "the sandbox backend is systemd-run"))
+                      (harness-ui-access-refresh)
+                      (harness-ui-access-test-wait-flat "cannot be raised")
+                      (should-error (call-interactively #'harness-ui-access-toggle-capability) :type 'user-error))))
+      (should (string-match-p "No capability can be given now: the sandbox backend is systemd-run" (cadr err))))
+    (should-error (call-interactively #'harness-ui-access-grant-capability) :type 'user-error)
+    (let ((err (should-error (call-interactively #'harness-ui-access-revoke-capability) :type 'user-error)))
+      (should (string-match-p "hold no capability" (cadr err))))
+    ;; Everything given: nothing left to give.
+    (setq harness-ui-access-test--jail harness-ui-access-test--jail-enforcing)
+    (dolist (name '("CAP_SYS_PTRACE" "CAP_NET_RAW" "CAP_NET_ADMIN" "CAP_NET_BIND_SERVICE"))
+      (harness-call 'access/set-capability sid name t))
+    (harness-ui-access-test-wait-flat "CAP_NET_BIND_SERVICE")
+    (let ((err (should-error (call-interactively #'harness-ui-access-grant-capability) :type 'user-error)))
+      (should (string-match-p "given already" (cadr err))))))
+
+(ert-deftest harness-ui-access-capabilities-refusal-is-reported ()
+  "A capability the jail would not pass on is refused by the harness, and the
+echo area says why; the session is left as it was."
+  (harness-ui-access-test-with-jail
+    (setq harness-ui-access-test--jail
+          (harness-ui-access-test--jail :enforced nil :backend 'systemd
+                                        :why "the sandbox backend is systemd-run, not bwrap"))
+    (harness-ui-access-test-open sid)
+    (let ((messages nil))
+      (cl-letf (((symbol-function 'message)
+                 (lambda (fmt &rest args) (when fmt (push (apply #'format fmt args) messages)))))
+        (harness-ui-access-set-capability "CAP_NET_RAW" t)
+        (harness-test-wait (lambda () (cl-some (lambda (m) (string-match-p "access/set-capability failed: .*the sandbox cannot give this session's commands a capability: the sandbox backend is systemd-run" m))
+                                               messages))
+                           5 "the refusal"))
+      (should-not (harness-ui-access-test-caps sid)))))
+
+(ert-deftest harness-ui-access-capabilities-row-needs-nothing-from-an-older-harness ()
+  "A harness that does not describe capabilities has no row, and drawing the
+view signals nothing; the commands say so."
+  (harness-ui-access-test-with-jail
+    (harness-ui-access-test-open sid)
+    (should (string-match-p "^  capabilities " (harness-ui-access-test-text)))
+    (dolist (capabilities '(:absent nil))
+      (setq harness-ui-access--describe
+            (if (eq capabilities :absent)
+                (harness-plist-remove harness-ui-access--describe :capabilities)
+              (plist-put (copy-sequence harness-ui-access--describe) :capabilities nil)))
+      (harness-ui-access--render)
+      (should-not (string-match-p "capabilities" (harness-ui-access-test-text)))
+      (should (string-match-p "^  writing +on" (harness-ui-access-test-text)))
+      (should (string-match-p "^Directories" (harness-ui-access-test-text)))
+      (let ((err (should-error (call-interactively #'harness-ui-access-toggle-capability) :type 'user-error)))
+        (should (string-match-p "does not say what capabilities" (cadr err)))))
+    ;; The row comes back with the next fetch.
+    (harness-ui-access-refresh)
+    (harness-test-wait (lambda () (string-match-p "^  capabilities " (harness-ui-access-test-text))) 5 "the row")))
+
 ;;;; Rules
 
 (ert-deftest harness-ui-access-rules-say-which-host-they-hold-for ()

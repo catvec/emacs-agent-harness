@@ -1066,7 +1066,9 @@ key names what this tool does change; nothing changes."
                       ("directory" "/tmp" "session_move")
                       ("cwd" "/tmp" "session_move")
                       ("working_directory" "/tmp" "session_move")
-                      ("host" "box" "session_move")))
+                      ("host" "box" "session_move")
+                      ("capabilities" ("CAP_SYS_PTRACE") "request_escalation (attribute capability)")
+                      ("capability" "CAP_SYS_PTRACE" "drop_access (attribute capability)")))
         (should (string-match-p (nth 2 case)
                                 (funcall refuse (list :action "set"
                                                       (intern (concat ":" (car case))) (nth 1 case))))))

@@ -2692,9 +2692,11 @@ args are the REQUEST `(:session SESSION :tool NAME :input PLIST :kind KIND
 :paths (…))`.  Chain (priority): 4 access gate (the access module: a
 tool turned off for the session, or one that would reach the network in
 a session that gave it up, is denied for good, `drop_access` is allowed
-for good, and a write to a `.dir-locals.el` asks the user; see access),
-5 dir-request, 5 escalation (the access module: `request_escalation`,
-decided only by the user, as `request_directory_access` is), 6
+for good (whatever it gives up, a Linux capability of the commands
+included), and a write to a `.dir-locals.el` asks the user; see
+access), 5 dir-request, 5 escalation (the access module:
+`request_escalation`, decided only by the user, as
+`request_directory_access` is, a capability included), 6
 away-request, 6
 session-move (the session tools: the user confirms every
 `session_move`), 7 sandbox-guard, 8 supervisor (the supervisor module,
@@ -3461,12 +3463,18 @@ half `ui-access`, the access view).
 
 - The access profile is the session's ext `:access`, a plist of
   `:network` (`:false`: no network), `:read-only` (t: no writing),
-  `:tools-off` (names), `:read-dirs` (directories it may only read) and
+  `:tools-off` (names), `:read-dirs` (directories it may only read),
   `:dropped` (directories it gave up: its cwd, worktree, temporary
   directory or one of `harness-allowed-directories`, for this session
-  only).  No profile is the access a session always had.  Every change
-  goes through `session/set-ext` with a hint in the transcript ("Access:
-  … (given up by the agent | set by the user)") and emits
+  only) and `:caps` (the canonical names of the Linux capabilities, such
+  as `CAP_SYS_PTRACE`, the user gave its bash and elisp commands, in the
+  order given).  `:caps` is a grant where the others restrict:
+  `harness-access--normalise` stores it only when it has names (once
+  each), and a profile of it alone is a profile -- the stages that
+  return early for a session without one still pass its calls and its
+  tools on.  No profile is the access a session always had.  Every
+  change goes through `session/set-ext` with a hint in the transcript
+  ("Access: … (given up by the agent | set by the user)") and emits
   `access/changed SESSION-ID`.
 - It is held by the harness, not a prompt: the `permission/dir-entries`
   filter (50) takes the dropped directories out and adds the read-only
@@ -3479,10 +3487,19 @@ half `ui-access`, the access view).
   gate at 4 refuses for good a call to a tool the profile takes away,
   whatever the tool list the model still has, and fails closed.
   `drop_access` stays in every tool list, read-only sessions' included
-  (`harness-readonly-always-tools`).
+  (`harness-readonly-always-tools`).  The capabilities go to the jail:
+  the same `tools/sandbox-options` filter (80) adds `:capabilities`
+  (the `:caps`) to the options of the session's bash and elisp
+  commands, and only when it holds some and its profile does not make
+  it read-only -- never an empty key, which would make a command in a
+  remote directory refuse to run unconfined -- and the readonly module's
+  filter (90) takes `:capabilities` off the options of a read-only
+  session's commands, whoever put it there.  Enforcing them is the
+  sandbox's (see sandbox); when this filter fails the commands run
+  offline and with none.
 - `request_escalation` (`attribute` one of directory, read_directory,
-  writes, network, tool, permission_mode, non_interactive; `value`;
-  `reason`) asks the user for more.  Its stage at 5 makes every
+  writes, network, tool, permission_mode, non_interactive, capability;
+  `value`; `reason`) asks the user for more.  Its stage at 5 makes every
   decision final, so no mode, rule or judge sees it: a directory goes
   through the prompt of `request_directory_access`
   (`harness-perms-decide-dir-request`), the rest through
@@ -3492,6 +3509,35 @@ half `ui-access`, the access view).
   session's -- is allowed at once and says so; what a policy pins (the
   mode, non-interactive mode) or a deny rule covers is refused.  The
   handler grants what the user allowed.
+- The attribute `capability` (`value` a capability's name, in any
+  spelling `sandbox/capability-name` knows) is checked first
+  (`harness-access--capability-check`), and refused at once, with a
+  hint, when: there is no value; no capability has that name; the user
+  does not let agents ask for it (`sandbox/capabilities` `:grantable`,
+  see sandbox; the hint lists what they may); the jail does not enforce
+  capabilities for the session's directory (`:enforced` nil, and its
+  `:why` -- bwrap is not the backend, the directory is remote, the
+  sandbox policy is `off`, bwrap is setuid or run by root -- or the
+  sandbox module is not loaded, which counts as not enforced); the
+  session is read-only by its own profile (it must ask for writing
+  first) or by another module's policy (`harness-access--other-read-only`,
+  which no escalation changes).  A session that holds the capability
+  already is allowed at once and granted nothing.  Otherwise the user is
+  asked through `harness-access--confirm`, as for the other attributes:
+  "Give the agent's commands CAP_SYS_PTRACE", the reason saying what the
+  capability lets a command do (the registry's doc), that the commands
+  run in the bwrap sandbox, which drops every capability, that this one
+  is valid inside the sandbox's own namespaces only (not on the host, not
+  on another machine), any scope note of its own, and that it applies
+  from the next bash or elisp command on, until the agent or the user
+  takes it away, then the agent's own reason.  The handler gives it with
+  `harness-access-grant-capability`, which makes the same checks again
+  and signals a `harness-error` saying why when one fails, so a request
+  the user approved by hand after a refusal (`rerun_approved`) grants
+  nothing the jail or the list would not.  The result tells the agent
+  that from the next command on its commands run with the capabilities
+  the session holds and no other, and that commands already running
+  keep what they started with.
 - `drop_access` (`attribute`, `value`, `keep_read` for a directory,
   `reason`) gives access up and is allowed by the gate at 4, final, in
   every mode and session.  A directory granted to the session or the
@@ -3500,7 +3546,12 @@ half `ui-access`, the access view).
   tool output directory cannot be given up, nor a directory inside
   another entry (the result says which).  A permission mode is
   dropped only to a less permissive one, and non-interactive mode only
-  turned off.
+  turned off.  With `capability` the `value` is a capability's name
+  (any spelling) or `all`: the name is taken out of `:caps`
+  (`harness-access-revoke-capability`).  Nothing asks anyone, the jail
+  included, so it works in a read-only session and where the jail
+  cannot enforce capabilities; a capability not held is nothing to give
+  up, and the result says what is held.
 - A write to `.dir-locals.el` or `.dir-locals-2.el`
   (`harness-access-settings-files`), which sets the harness's own
   settings for a project, asks the user at the gate through
@@ -3509,8 +3560,13 @@ half `ui-access`, the access view).
   of its text, not a boundary).
 - A session created with a `:parent-id` other than a BTW (a sub-agent,
   a fork) takes its parent's network, writing, tools
-  off and dropped directories; a fork its read-only directories too.
-  Task sessions have no parent and keep their own access.
+  off and dropped directories; a fork its read-only directories and its
+  `:caps` too, as `session/fork` copies the parent's directory grants,
+  permission mode and non-interactive state.  A fork is a session with a
+  `:fork-node`: one made by `session/fork`, which `spawn_agent` with
+  `fork` uses too.  A sub-agent that starts afresh and a BTW get no
+  capability: they ask.  Task sessions have no parent and keep their own
+  access.
 - Judgements: every `permission/decided` is recorded per session in
   memory (`harness-access--judged`, the newest 300) as `(:call-id :tool
   :behavior :by :reason :hint :at)` and emitted as `access/judged
@@ -3520,9 +3576,17 @@ half `ui-access`, the access view).
 - `access/describe SESSION-ID` → `(:session :sandbox (:backend
   :available :policy :confined :remote :module) :mode :mode-pinned
   :non-interactive :non-interactive-pinned :network :corporate
-  :read-only :read-only-profile :read-only-by :profile :dirs :inspect
+  :read-only :read-only-profile :read-only-by :profile :capabilities
+  (:held :grantable :docs :enforced :backend :why) :dirs :inspect
   :skills :tools (:on :off :builtin) :never-ask :rules (:session :always
-  :pinned))`.  `:dirs` are `permission/dirs` entries with `:read-only`,
+  :pinned))`.  `:capabilities` says what the session's commands hold
+  (`:held`, canonical names), which an agent may ask for (`:grantable`,
+  with `:docs`, a list of `(:name :doc :scope)` plists, `:scope` the
+  capability's own scope note, nil for most), whether the jail enforces
+  capabilities for the session's directory (`:enforced`, with the
+  `:backend`) and `:why`, nil when one can be raised now, else why not:
+  the jail's reason, a read-only session, or nothing grantable.
+  `:dirs` are `permission/dirs` entries with `:read-only`,
   `:given-up` on a read-only entry whose directory was given up, and
   `(:dir :source dropped :dropped t)` for the rest given up; `:off`
   entries are `(:name :why :profile :elsewhere)`, `:elsewhere` for a
@@ -3537,11 +3601,17 @@ half `ui-access`, the access view).
   NODE)`; a call waiting for the user is an `ask` item with its
   `:pending-id`.
 - `access/set-network SESSION-ID ON`, `access/set-read-only SESSION-ID
-  ON`, `access/set-tool SESSION-ID TOOL ON`, `access/add-read-dir
-  SESSION-ID DIR`, `access/remove-read-dir SESSION-ID DIR`,
+  ON`, `access/set-tool SESSION-ID TOOL ON`, `access/set-capability
+  SESSION-ID NAME ON`, `access/add-read-dir SESSION-ID DIR`,
+  `access/remove-read-dir SESSION-ID DIR`,
   `access/drop-dir SESSION-ID DIR &optional KEEP-READ` and
   `access/restore-dir SESSION-ID DIR` change the profile for the user,
-  asking nothing.
+  asking nothing.  `access/set-capability` gives the session's commands
+  the capability NAME, or takes it away (`all`: every one); giving one
+  makes the checks a request does -- the jail enforces it, the user lets
+  agents ask for it, the session may write -- and signals a
+  `harness-error` saying why when one fails, so the profile never holds
+  a capability the sandbox would not pass on.
 
 ### decisions
 
@@ -3588,7 +3658,7 @@ decisions.
 
 ### sandbox
 
-- `sandbox/wrap CWD COMMAND-LIST &optional (:network t :writable (…) :readable (…) :read-only nil :scratch (…))` →
+- `sandbox/wrap CWD COMMAND-LIST &optional (:network t :writable (…) :readable (…) :read-only nil :scratch (…) :capabilities (…))` →
   command list (bwrap / systemd-run / mxc-exec-mac / plain).
   `sandbox/status` → `(:backend bwrap|systemd|mxc|none :available (…)
   :policy …)`.  `harness-sandbox-detect` looks for bwrap and
@@ -3611,6 +3681,98 @@ decisions.
   policy, in a remote CWD or with no backend, `sandbox/wrap` signals
   `harness-sandbox-unavailable` instead of returning COMMAND.
   `sandbox/confined-p CWD` says beforehand whether it can be had.
+- `:capabilities` names the Linux capabilities the command is given
+  (`(:capabilities ("CAP_SYS_PTRACE"))`), none by default: bwrap drops
+  every one.  Run by an ordinary user, bwrap makes a user namespace of
+  its own, and `--cap-add NAME` keeps NAME there: a capability of that
+  namespace, which counts for the sandbox's processes, mounts, IPC
+  objects and hostname and, with `:network nil`, for its network
+  namespace -- and for nothing the host owns: with the network on the
+  sandbox shares the host's network namespace, so the `CAP_NET_*` change
+  nothing there, and no capability reaches a command on another
+  machine, which the sandbox does not run.  `sandbox/wrap` applies these
+  rules, in this order:
+  - `:read-only` wins: a command that changes nothing is given none,
+    whatever is asked, and no capability can make it fail.
+  - A command that runs unconfined anyway -- the `off` policy, a remote
+    CWD, no backend where the policy allows it -- has its user's own
+    rights and comes back as it is, with a line in the debug log.
+  - bwrap: each name must be in the registry and listed in
+    `harness-sandbox-grantable-capabilities` when the command is
+    wrapped.  One that is not is left out with a line in the log, so a
+    capability held and no longer grantable is silently not passed on:
+    the command runs with fewer.  Each name left becomes one `--cap-add
+    NAME`, once, in the order asked, after `--new-session` and before
+    `--chdir`.  `harness-sandbox--bwrap-command` is the last guard of its
+    command line: it passes only registry names, and none with
+    `:read-only`.  When there is a name to pass and `--cap-add` would
+    be no capability of the sandbox's own namespace, `sandbox/wrap`
+    signals `harness-sandbox-unavailable`: the executable is setuid
+    (`file-modes` has the setuid bit: an old bwrap installed setuid
+    root, where `--cap-add` hands out real capabilities of the host), or
+    Emacs runs as root (bwrap then makes no user namespace unless asked
+    and starts from all the capabilities of its caller, which every
+    command keeps, so nothing is dropped to raise or lower and
+    `--cap-add` would be real).  Those two cases are refused rather
+    than made uniform with `--unshare-user`, which has not been verified
+    for a setuid bwrap.
+  - systemd-run (a `--user` unit can only lower its own capabilities)
+    and MXC (Seatbelt has none) signal `harness-sandbox-unavailable`
+    for any `:capabilities`, before MXC makes the command's private
+    `$TMPDIR`: the command does not run without what was asked for.
+    Each refusal says why and points to `drop_access` (attribute
+    capability, value all), which lets the session's commands run again.
+- The registry `harness-sandbox-capabilities` lists the 41 Linux
+  capabilities the harness knows, the kernel's, each `(NAME :bit BIT
+  :doc DOC [:scope SCOPE])`: NAME the canonical name (`CAP_SYS_PTRACE`),
+  BIT its number in the kernel's capability sets (the bit `CapEff` in
+  /proc/PID/status shows; `harness-sandbox-capability-mask` gives the
+  mask of some names), DOC one line of what it lets a command do, and
+  SCOPE, when there is more to say than that every capability counts
+  inside the sandbox's own namespaces only: the network ones count only
+  without the network, `CAP_SYS_PTRACE` reaches the PID namespace of the
+  sandbox, `CAP_SYS_ADMIN` can undo the read-only mounts.  It is the
+  injection guard of bwrap's argument vector: only a name in it ever
+  reaches the command line, and `ALL` is not in it.
+  `harness-sandbox-capability-name VALUE` (method
+  `sandbox/capability-name`) gives the canonical name of a string or a
+  symbol, or nil: case, dashes and spaces do not matter, the `CAP_`
+  prefix is optional, and a name may leave out `SYS_`, so
+  `CAP_SYS_PTRACE`, `SYS_PTRACE`, `sys_ptrace`, `cap-sys-ptrace` and
+  `ptrace` are one; anything else is nil, `ALL` and what holds more than
+  a name included.
+- `harness-sandbox-grantable-capabilities` lists the names an agent may
+  ask for.  It is a plain option of the `harness` group (advanced on the
+  settings page) of the user, or of an administrator's policy -- not a
+  layered key, so a project's `.dir-locals.el` cannot widen what the
+  agents jailed in it may ask for: the harness reads its default value
+  only (`harness-sandbox-grantable`), never a buffer-local one, and the
+  option is `:risky`.  Its entries are read in any spelling; one that is
+  no capability is reported once and skipped.  The default is
+  conservative: `CAP_SYS_PTRACE` (trace and inspect any process of the
+  sandbox, and lift Yama's descendants-only rule), `CAP_NET_RAW`,
+  `CAP_NET_ADMIN` and `CAP_NET_BIND_SERVICE`, the last three effective
+  only for a session without the network, in the sandbox's own empty
+  network namespace.  `CAP_SYS_ADMIN` is left out on purpose: it lets a
+  command mount, remount and join namespaces inside the sandbox, which
+  can undo the read-only mounts the jail relies on (a read-only
+  session's, the protected git hooks and config of a worktree, the
+  skills directories); a user can add it, or any capability of the
+  registry, at their own risk.  `ALL` is never grantable.  Nil switches
+  the feature off, a corporate policy's way: nothing can be asked for,
+  and one held is no longer passed on.
+- `sandbox/capabilities CWD` → `(:enforced BOOL :backend SYM :grantable
+  (NAME…) :docs ((NAME . DOC)…) :scopes ((NAME . SCOPE)…) :why TEXT)`:
+  what the jail does for commands run in CWD.  `:enforced` is non-nil
+  only when the backend is bwrap, CWD is local, the sandbox policy is
+  not `off`, and `--cap-add` is a capability of the sandbox's own
+  namespace (bwrap neither setuid nor run by root); `:why` says what
+  stands in the way when it is not.  `:grantable` are the canonical names
+  of the option that are capabilities the harness knows, `:docs` one
+  line for each, `:scopes` the scope notes of those that have one.
+  Nothing grantable still enforces: nothing can be asked for.  Whether a
+  session may be given one is for the access module, which treats a
+  missing sandbox module as not enforced.
 - `:scratch` lists directories the caller made for the one command and
   deletes after it, which the command writes even when it is
   `:read-only`: the elisp tool's background Emacs leaves its result in
@@ -7383,8 +7545,10 @@ such a session nothing else; a `permission/decide` stage at 8, before
 the jail, the mode and the judge, denies for good a call to anything
 else and fails closed (a call it cannot check is denied); and
 `tools/sandbox-options` at 90 runs its commands read-only and offline
-(`harness-readonly-sandbox-options`), bash being offered only where the
-sandbox confines the directory.  `harness-readonly-system-prompt` puts
+(`harness-readonly-sandbox-options`) and takes off the `:capabilities`
+an earlier filter added (the access module's, for a session the user
+gave some), bash being offered only where the sandbox confines the
+directory.  `harness-readonly-system-prompt` puts
 a policy's own section in place of the tools agent's planning section
 (`harness-tools-agent-planning-section`), or at the end without one;
 `harness-readonly-budget-point-p N BUDGET` says when to nudge a turn
@@ -7935,8 +8099,8 @@ TRAMP prefixes come from the session host):
 | `emacs_messages` | Emacs messages | count | read (needs no approval: `harness-perms--inspection-tools`) |
 | `ask_user` | Question | question, options (strings, or `{label, diagram}` / `{label, image}` objects: every option has a diagram or none does), allow_free_text | meta (answered with `question/answer SID PID ANSWER`, the files attached to the answer going to the model with it; event `question/asked`; the harness asks its own questions the same way, with no tool call, through `question/ask`) |
 | `request_directory_access` | Request access | path, reason | meta (perms module; decided only by the user's answer to a directory prompt, in every mode) |
-| `request_escalation` | Request escalation | attribute (directory, read_directory, writes, network, tool, permission_mode, non_interactive), value, reason | meta (access module; decided only by the user's answer, in every mode, yolo included; refused at once in a non-interactive session; see access) |
-| `drop_access` | Drop access | attribute (directory, writes, network, tool, permission_mode, non_interactive), value, keep_read (a directory: give up writing only), reason | meta (access module; always allowed, never asks, in every mode and session, read-only ones included) |
+| `request_escalation` | Request escalation | attribute (directory, read_directory, writes, network, tool, permission_mode, non_interactive, capability), value (the directory, tool, mode or Linux capability: `CAP_SYS_PTRACE`, `CAP_NET_RAW`...), reason | meta (access module; decided only by the user's answer, in every mode, yolo included; refused at once in a non-interactive session; a capability is refused at once, with a hint, where the jail cannot enforce it, for a name the user does not let agents ask for, or in a read-only session; see access) |
+| `drop_access` | Drop access | attribute (directory, writes, network, tool, permission_mode, non_interactive, capability), value (the directory, tool, less permissive mode, or Linux capability: a name or `all`), keep_read (a directory: give up writing only), reason | meta (access module; always allowed, never asks, in every mode and session, read-only ones included) |
 | `rerun_approved` | Rerun approved call | handle | meta (perms module; runs the denied call the user approved by hand with `permission/approve-denied`, exactly as it was denied and with no permission check (`tools/execute-approved`); a handle the user has not approved, one this session does not know, and one already rerun are refused) |
 | `session_info` | Session info | — | read (needs no approval: `harness-perms--inspection-tools`) |
 | `plan` | Plan | plan | meta |
@@ -7949,7 +8113,7 @@ TRAMP prefixes come from the session host):
 | `session_history` | Session history | query, regexp, node_id, before, limit, max_chars, kinds, all | read (this session's own conversation from before its last compaction or handoff; needs no approval: `harness-perms--inspection-tools`) |
 | `session_send` | Message session | session_id, message, mode (send/queue), wait | meta |
 | `session_control` | Control session | session_id, action (cancel/resume/close/rename/answer), name, question_id, answer | meta (answer refuses the harness's cold-cache question, left to the user) |
-| `session_settings` | Session settings | action (read/set), session_id (default: this session), model, thinking (a level, or default for the model's own), context_window_limit (tokens: a number or "200k", or model/none for the model's own window), budget (USD, or none to remove it), budget_hard (a hard budget stops the next turn once spent) | meta (weighed per call, `harness-perms--call-kind`: a read is a read, a set asks in ask mode and is judged, as `session_send` is; the read shows the permission mode and non-interactive state, and the tool refuses them, allowed directories, the working directory and the host, naming `set_non_interactive`, `request_escalation`, `request_directory_access`, `drop_access` or `session_move`) |
+| `session_settings` | Session settings | action (read/set), session_id (default: this session), model, thinking (a level, or default for the model's own), context_window_limit (tokens: a number or "200k", or model/none for the model's own window), budget (USD, or none to remove it), budget_hard (a hard budget stops the next turn once spent) | meta (weighed per call, `harness-perms--call-kind`: a read is a read, a set asks in ask mode and is judged, as `session_send` is; the read shows the permission mode and non-interactive state, and the tool refuses them, allowed directories, the Linux capabilities of the session's commands, the working directory and the host, naming `set_non_interactive`, `request_escalation` (attribute `capability` for a capability), `request_directory_access`, `drop_access` or `session_move`) |
 | `session_move` | Move session | directory, session_id (default: this session), keep_old_directory, reason | meta (the user confirms every call, in every mode; see perms, Confirmations, and `session/move`) |
 | `set_non_interactive` | Non-interactive mode | enabled, session_id (default: this session) or all (every current session and task of every project), reason | meta (perms module's away-request stage: turning it on is decided only by the user's answer, in every mode, and denied at once in a non-interactive session; turning it off is allowed at once) |
 | `set_priority` | Set priority | priority (low/medium/high), session_id (default: this session) or all (every current session and task of every project) | meta (a priority is the session's, and every input here is a session id; a task's priority is set through its session) |
@@ -8174,10 +8338,11 @@ through the sync filter `tools/sandbox-options`, run before each command
 -- the `elisp` tool's background Emacs included -- with the value nil
 and the session id as its argument.  A handler returns
 the plist it was given with its own `sandbox/wrap` options set over it,
-such as `(:read-only t :network nil)`, so a later handler's options win
-over an earlier one's; a value that is no plist of options signals an
-error, so that a faulty handler cannot let a command run with fewer
-restrictions than it meant.  The options go to `sandbox/wrap` with the
+such as `(:read-only t :network nil)` or, from the access module for a
+session the user gave some, `(:capabilities ("CAP_SYS_PTRACE"))`, so a
+later handler's options win over an earlier one's; a value that is no
+plist of options signals an error, so that a faulty handler cannot let a
+command run with fewer restrictions than it meant.  The options go to `sandbox/wrap` with the
 directories the session may use; the handler's own `:writable` and
 `:readable` join those lists, and with `:read-only` every one of them goes
 as `:readable` and none as `:writable`, so the command looks at what its
@@ -8592,8 +8757,10 @@ and any other limit is one set for the session -- the same reading the
 UI's `harness-ui-context-cap-name` gives), the budget, and the
 permission mode and non-interactive state, which it does not change: a
 call naming the permission mode, non-interactive mode, allowed
-directories, the working directory or the host is refused, and the
-refusal names `set_non_interactive`, `request_escalation` or
+directories, the Linux capabilities of the session's commands
+(`capabilities` or `capability`), the working directory or the host is
+refused, and the refusal names `set_non_interactive`,
+`request_escalation` (attribute `capability` for a capability) or
 `request_directory_access` (to ask the user for more), `drop_access`
 (to give some up) or `session_move`.  A set is applied through `session/update` with
 `:silent t` (its own hint would say less), and `harness-session-check-policy`

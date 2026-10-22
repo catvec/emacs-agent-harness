@@ -47,12 +47,14 @@ OpenAI-compatible APIs and AWS Bedrock.
   sandbox for tool processes (bubblewrap or `systemd-run` on GNU/Linux,
   MXC's `mxc-exec-mac` on macOS). One view per session (`C-c h j`)
   shows its whole jail -- the sandbox backend, the mode, the network,
-  the directories it may write, only read or gave up, the tools it is
-  offered -- and changes it in place, beside a filterable list of how
-  each of its calls was judged, by whom, under which handle. An agent
-  asks you for more with `request_escalation`, which only you can
-  grant, and gives access up with `drop_access`, which never needs to
-  ask (see [A session's access](#a-sessions-access)).
+  the Linux capabilities of its commands, the directories it may write,
+  only read or gave up, the tools it is offered -- and changes it in
+  place, beside a filterable list of how each of its calls was judged,
+  by whom, under which handle. An agent asks you for more with
+  `request_escalation` (a directory, the network, a tool, a Linux
+  capability for its commands...), which only you can grant, and gives
+  access up with `drop_access`, which never needs to ask (see [A
+  session's access](#a-sessions-access)).
 - **Polite with your machine.** The tools that start processes (`bash`,
   `elisp`, `ssh`, and those of plugins, such as the harness
   repository's `open_harness`) hold a slot per machine -- one per
@@ -153,7 +155,7 @@ OpenAI-compatible APIs and AWS Bedrock.
 | A permission request, answered in the chat | A question from the agent, answered with a digit |
 | ![A call the harness denied, with an [Approve] button under it and the handle the denial named](docs/media/chat-denied.png) | ![That call after the user approved it: marked user-approved, the agent's rerun under it with what the command printed](docs/media/chat-denied-approved.png) |
 | A denied call: the harness blocked it, [Approve] lets it run anyway | Approved: the agent reruns the call exactly as it was denied |
-| ![The access view of a session: its sandbox, bwrap, its mode and the network it gave up, the directories it may write, only read or gave up, the tools it is offered and those turned off, its rules and the request waiting on you](docs/media/access.png) | ![The judgements of that session's calls in its access view: each call drawn as the chat draws it, under what was decided, by whom and its handle, the two the access settings refused with [Approve]](docs/media/access-judgements.png) |
+| ![The access view of a session: its sandbox, bwrap, its mode and the network it gave up, the Linux capability its commands were given, the directories it may write, only read or gave up, the tools it is offered and those turned off, its rules and the request waiting on you](docs/media/access.png) | ![The judgements of that session's calls in its access view: each call drawn as the chat draws it, under what was decided, by whom and its handle, the two the access settings refused with [Approve]](docs/media/access-judgements.png) |
 | A session's access: its jail, directories, tools and rules, changed in place | How each of its calls was judged, by whom and under which handle, filterable |
 | ![The task board with tasks needing input, in review, merging, in progress, in the backlog and completed, each fact in its column](docs/media/tasks.png) | ![The conversation tree of a session, its fork and a BTW](docs/media/tree.png) |
 | The task board: each task has a session and a worktree | The conversation tree of a session, a fork and a BTW |
@@ -198,7 +200,7 @@ Optional dependencies:
 
 | Dependency | Used for |
 |---|---|
-| `bwrap` (bubblewrap) | Kernel sandbox for tool processes |
+| `bwrap` (bubblewrap) | Kernel sandbox for tool processes, and the Linux capabilities you may give them |
 | `mxc-exec-mac` (MXC, macOS 15+) | Kernel sandbox for tool processes on macOS |
 | `rg` (ripgrep) | Faster file search |
 | GitHub Copilot CLI 1.0 or later (`copilot`) | Models of a GitHub Copilot plan |
@@ -518,7 +520,7 @@ default), or nil for nowhere.
 | `C-c h I` | `harness-set-non-interactive-all` | Turn non-interactive mode on or off for every current session and task of every project |
 | `C-c h V` | `harness-toggle-supervisor` | Toggle supervisor mode: a session that supervises plans and leaves the changes to workers on cheaper models, a hands-on one may change files itself (see [Supervisor mode](#supervisor-mode)) |
 | menu `V` | `harness-set-supervisor-all` | In the `C-c h ?` menu, turn supervisor mode on or off for every current session and task of every project (see [Supervisor mode](#supervisor-mode)) |
-| `C-c h j` | `harness-access` | Show a session's access: its jail (sandbox, mode, network, writing), directories, tools and rules, changed in place, and how each of its calls was judged (see [A session's access](#a-sessions-access)) |
+| `C-c h j` | `harness-access` | Show a session's access: its jail (sandbox, mode, network, writing, capabilities), directories, tools and rules, changed in place, and how each of its calls was judged (see [A session's access](#a-sessions-access)) |
 | `C-c h d` | `harness-directories` | The same view, at the directories the session may access |
 | `C-c h W` | `harness-move-session` | Move a session to another working directory, and with it to that directory's project (see [Moving a session](#moving-a-session-to-another-directory)) |
 | `M` | `harness-ui-sessions-move` | In the session list, move the session at point to another directory |
@@ -965,7 +967,11 @@ tools. `~` is your home directory there as well, emptied, so
 `~/.emacs.d/x` names the same file inside as outside, and only what the
 session may use shows in it. The `elisp` tool's background Emacs runs
 in the same sandbox and sees the same directories, plus the harness's
-own Lisp (`harness.el` and `lisp/`), read-only, so it can load it.
+own Lisp (`harness.el` and `lisp/`), read-only, so it can load it. A
+command in the bubblewrap sandbox has no Linux capability either, since
+bubblewrap drops every one; you can give a session's commands one when
+the task needs it (see [A session's access](#a-sessions-access)), and
+it counts inside the sandbox only.
 
 On macOS the sandbox is MXC's `mxc-exec-mac` (macOS 15 or later; set
 `harness-sandbox-mxc-program` when it is not on your `PATH`), which
@@ -1396,12 +1402,18 @@ the top:
   `systemd-run` or MXC), the backends available and the sandbox policy,
   whether its commands here run confined; its permission mode and
   whether it is interactive, each with a button to change it; whether
-  it may reach the network, and whether it may write at all. Turning
-  the network off takes the web tools, `ssh` and `emacs_eval` (which
-  runs in your Emacs, outside any sandbox) from the session and runs
-  its `bash` and `elisp` offline; where no sandbox can confine them,
-  they go too. Read-only leaves the reading tools and a read-only,
-  offline `bash`.
+  it may reach the network, whether it may write at all, and the Linux
+  capabilities its commands run with, none unless you gave them some
+  (bubblewrap drops every one). Turning the network off takes the web
+  tools, `ssh` and `emacs_eval` (which runs in your Emacs, outside any
+  sandbox) from the session and runs its `bash` and `elisp` offline;
+  where no sandbox can confine them, they go too. Read-only leaves the
+  reading tools and a read-only, offline `bash`, which gets no
+  capability. The capabilities row names the ones held, or says why
+  none can be given (the sandbox is not bubblewrap, the session is
+  read-only...), and has buttons to give one of those you let agents
+  ask for, each with what it lets a command do, to take one away and
+  to take them all away; `C` gives or takes one away from the keyboard.
 - **Directories**: each one the session may write (`rw`), only read
   (`ro`) or gave up (`--`), with where it comes from -- the working
   directory, the worktree, the temporary directory, every session's
@@ -1434,7 +1446,7 @@ the top:
   the handle or the call (`s`); `c` clears the filter. The judgement is
   written into the call's result too, so the list survives a restart.
 
-![The access view of a session kept to a jail: its sandbox, bwrap, its mode and the network it gave up, the directories it may write, only read or gave up, the tools it is offered and those turned off, its rules and the request waiting on you](docs/media/access.png)
+![The access view of a session kept to a jail: its sandbox, bwrap, its mode and the network it gave up, the Linux capability its commands were given (CAP_SYS_PTRACE, to trace its test run) with the buttons to give one or take one away, the directories it may write, only read or gave up, the tools it is offered and those turned off, its rules and the request waiting on you](docs/media/access.png)
 
 What you change there takes effect at once, and the session's
 transcript says so. The view follows the session as it goes: a grant
@@ -1445,31 +1457,78 @@ and `?` lists the keys.
 An agent changes its session's access with two tools. Giving access up
 is always allowed: `drop_access` gives up a directory (or only writing
 to it, `keep_read`), the network, writing, a tool, the permission mode
-for a less permissive one, or non-interactive mode, and nobody is asked,
-in any mode, in a read-only session too. Asking for more is the other
-way round: `request_escalation` asks for a directory to write or only
-to read, the network, writing, a tool turned off, a more permissive
-permission mode or non-interactive mode, and only you can grant it. You
-are asked in every mode, YOLO included, no rule or judge answers for
-you, and a non-interactive session, whose user is away, is refused at
-once. `request_directory_access` stays, the directory form of the same
+for a less permissive one, non-interactive mode, or a Linux capability
+of its commands (one by name, or `all`), and nobody is asked, in any
+mode, in a read-only session too. Asking for more is the other way
+round: `request_escalation` asks for a directory to write or only to
+read, the network, writing, a tool turned off, a more permissive
+permission mode, non-interactive mode or a Linux capability for its
+commands, and only you can grant it. You are asked in every mode, YOLO
+included, no rule or judge answers for you, and a non-interactive
+session, whose user is away, is refused at once.
+`request_directory_access` stays, the directory form of the same
 request. These are the only ways an agent changes its own access:
-`session_settings` refuses the permission mode, non-interactive mode
-and directories, and names the tool that has each.
+`session_settings` refuses the permission mode, non-interactive mode,
+directories and capabilities, and names the tool that has each.
+
+A command in the bubblewrap sandbox runs with no Linux capability at
+all: bubblewrap drops every one. An agent that needs one asks for it by
+name, `request_escalation` with attribute `capability` and a value such
+as `CAP_SYS_PTRACE` (to trace with `strace` or `gdb` a process of the
+sandbox that is not its command's own child) or `CAP_NET_RAW`,
+`CAP_NET_ADMIN` and `CAP_NET_BIND_SERVICE` (raw sockets, network
+configuration, ports below 1024); `ptrace` and `sys_ptrace` name the
+first as well. The prompt says what the capability lets a command do and
+where it counts, and only your yes grants it. The session's `bash`
+commands and the `elisp` tool's background Emacs then run with it
+(`--cap-add`) from the next command on, until the agent gives it up or
+you take it away in the access view; a command already running keeps
+what it started with. A read-only session's commands get none, and such
+a session is told to ask for writing first.
+
+What agents may ask for is `harness-sandbox-grantable-capabilities`, an
+option of yours: `CAP_SYS_PTRACE`, `CAP_NET_RAW`, `CAP_NET_ADMIN` and
+`CAP_NET_BIND_SERVICE` by default. `CAP_SYS_ADMIN` is left out on
+purpose: it lets a command mount, remount and join namespaces inside the
+sandbox, which can undo the read-only mounts the jail relies on (a
+read-only session's, a worktree's protected git hooks and config, the
+skills directories). Add it, or any other capability the harness knows,
+at your own risk. Set the option to nil, or have a [policy](#policy)
+set it, and nothing can be asked for. It is not a per-project setting:
+a project's `.dir-locals.el` cannot widen what the agents jailed in it
+may ask for.
+
+A capability is one of the sandbox's own user namespace. It counts for
+the processes of the sandbox and, in a session without the network, for
+the sandbox's own empty network namespace; with the network on the
+sandbox shares the machine's, which it does not own, so the three
+network capabilities change nothing then. It gives no right over the
+machine outside the sandbox, and none on another machine: a command that
+runs on a remote host (an `ssh` call, a session in a remote directory)
+is not run by the sandbox, so a capability held here changes nothing for
+it. What such a command needs is an ordinary `ssh` or `kubectl` call,
+which the permission chain judges like any other. Only bubblewrap can
+give a capability: with `systemd-run` or MXC, with the sandbox policy
+`off`, with no sandbox, or in a remote directory, a request is refused
+at once, saying why. Nor is bubblewrap used for it when it is installed
+setuid or run by root, where its capabilities would be the machine's
+own, not the sandbox's.
 
 A session cannot get around what it gave up by starting another: a
 sub-agent or a fork takes its parent's restrictions with it (the
 network, writing, the tools turned off, the directories given up), and
-a fork its read-only directories too. Writing a `.dir-locals.el` (or
-`.dir-locals-2.el`) asks you too, in every mode, as an escalation does,
-since that file sets the harness's own settings for a project: the
-directories every session there may reach, the sandbox policy, the
-permission mode. For a file tool that holds; for a shell command it is a
-reading of the command's text, not a boundary. The tools that hand work
-to sessions that are not its children -- `session_send` to another
-session, `task_submit` for a task -- have that work done with those
-sessions' own access, so turn them off for a session that must stay
-inside its own.
+a fork its read-only directories too, and the Linux capabilities of its
+commands, as it takes its grants and its permission mode; a sub-agent
+started afresh and a BTW have to ask for those. Writing a
+`.dir-locals.el` (or `.dir-locals-2.el`) asks you too, in every mode, as
+an escalation does, since that file sets the harness's own settings for
+a project: the directories every session there may reach, the sandbox
+policy, the permission mode. For a file tool that holds; for a shell
+command it is a reading of the command's text, not a boundary. The
+tools that hand work to sessions that are not its children --
+`session_send` to another session, `task_submit` for a task -- have that
+work done with those sessions' own access, so turn them off for a
+session that must stay inside its own.
 
 ### Moving a session to another directory
 
@@ -2278,7 +2337,10 @@ cancelled, with the sub-agents it started, and the session hears of it
 as it hears of any cancelled sub-agent, adding why in parentheses.
 
 `fork=true` forks the session, so the child shares the conversation and
-its cached prefix; a fresh child starts with the prompt alone.
+its cached prefix; a fresh child starts with the prompt alone. A fork
+takes its parent's directory grants and the Linux capabilities of its
+commands along, a fresh child only its parent's restrictions (see [A
+session's access](#a-sessions-access)).
 `worktree=true` gives the child a git worktree and branch of its own, so
 several children can change files at once; each branch merges back into
 the parent's working directory through the merge queue, one at a time.
@@ -4285,9 +4347,10 @@ window and the limit that caps it — with what set the limit: the
 sub-agent cap (`harness-subagent-context-limit`), the task cap
 (`harness-tasks-context-limit`), or a limit set for the session — the
 budget, and the permission mode and non-interactive state. It cannot
-change those last two, nor allowed directories, the working directory or
-the host: a call naming one of them is refused, and the refusal names
-the tool that has it (`set_non_interactive`, `request_escalation` or
+change those last two, nor allowed directories, the Linux capabilities
+of its commands, the working directory or the host: a call naming one
+of them is refused, and the refusal names the tool that has it
+(`set_non_interactive`, `request_escalation` or
 `request_directory_access` to ask you for more, `drop_access` to give
 access up, or `session_move`; see [A session's
 access](#a-sessions-access)).
@@ -4459,7 +4522,9 @@ such settings locked, and says where the policy is.
 
 Sessions keep the model, permission mode and thinking level a policy
 fixes. A policy on the permission rules or the allowed directories
-removes the "Always" answers from prompts. `harness-allowed-models`,
+removes the "Always" answers from prompts. A policy that sets
+`harness-sandbox-grantable-capabilities` to nil leaves agents no Linux
+capability to ask you for. `harness-allowed-models`,
 which anyone can set, keeps the harness to some models and refuses
 requests for others.
 

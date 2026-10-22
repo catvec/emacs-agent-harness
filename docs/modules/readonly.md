@@ -34,8 +34,10 @@ session a policy governs has
 - bash only when the sandbox can confine commands in its directory
   (`sandbox/confined-p`), and then read-only and offline: the
   `tools/sandbox-options` filter at 90 makes every command run with
-  every directory read-only and no network.  Without the sandbox a
-  read-only session has no bash at all.
+  every directory read-only, no network and no Linux capability (it
+  takes off the `:capabilities` an earlier filter added, and the
+  sandbox gives a `:read-only` command none anyway).  Without the
+  sandbox a read-only session has no bash at all.
 
 A policy is a function of a session plist.  It returns nil for a
 session it does not govern, and for one it does a plist:

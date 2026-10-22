@@ -24,8 +24,10 @@
 ;; - bash only when the sandbox can confine commands in its directory
 ;;   (`sandbox/confined-p'), and then read-only and offline: the
 ;;   `tools/sandbox-options' filter at 90 makes every command run with
-;;   every directory read-only and no network.  Without the sandbox a
-;;   read-only session has no bash at all.
+;;   every directory read-only, no network and no Linux capability (it
+;;   takes off the `:capabilities' an earlier filter added, and the
+;;   sandbox gives a `:read-only' command none anyway).  Without the
+;;   sandbox a read-only session has no bash at all.
 ;;
 ;; A policy is a function of a session plist.  It returns nil for a
 ;; session it does not govern, and for one it does a plist:
@@ -223,19 +225,24 @@ nothing."
 A `tools/sandbox-options' filter at 90: OPTIONS is what the handlers
 before this one made, SESSION-ID the session about to run a command.
 Options ask for the sandbox, so a command that cannot have it fails with
-an error rather than run unconfined.  A handler that signals is skipped,
-which would leave bash writable, so when anything goes wrong here --
-a policy that signals, a session nobody knows -- the answer is
+an error rather than run unconfined.  A command that changes nothing
+is given no Linux capability either: the `:capabilities' an earlier
+handler added (the access module's, for a session the user gave some)
+are taken off, whoever put them there.  A handler that signals is
+skipped, which would leave bash writable, so when anything goes wrong
+here -- a policy that signals, a session nobody knows -- the answer is
 read-only all the same."
   (condition-case err
       (if (harness-readonly-policy (harness-call 'session/get session-id))
-          (harness-plist-merge options harness-readonly-sandbox-options)
+          (harness-plist-merge (harness-plist-remove options :capabilities)
+                               harness-readonly-sandbox-options)
         options)
     (error
      (harness-log 'error "readonly: choosing the sandbox options of %s failed, so they are read-only: %S"
                   session-id err)
      (condition-case nil
-         (harness-plist-merge options harness-readonly-sandbox-options)
+         (harness-plist-merge (harness-plist-remove options :capabilities)
+                              harness-readonly-sandbox-options)
        (error (copy-sequence harness-readonly-sandbox-options))))))
 
 ;;;; The system prompt

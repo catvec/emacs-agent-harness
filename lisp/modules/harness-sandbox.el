@@ -100,9 +100,26 @@
 ;; inside the sandbox: `git worktree prune' takes every other worktree
 ;; of the repository for deleted and drops its registration.
 ;; `sandbox/check-command' finds those in a shell command line so the
-;; permission layer can refuse them (see "Git worktree commands" below).
+;; permission layer can refuse them (see "Capabilities" and "Git
+;; worktree commands" below).
+;;
+;; Linux capabilities: a command in the bwrap sandbox has none at all,
+;; bwrap drops every one.  `:capabilities' gives it some, by name: one
+;; `--cap-add' each, which in an unprivileged bwrap is a capability of
+;; the sandbox's own user namespace -- over its processes, its mounts
+;; and, with `:network nil', its empty network namespace -- and never
+;; one over the host, its files as their owner or another machine.  The
+;; names come from a registry of the capabilities the harness knows
+;; (`harness-sandbox-capabilities'), so nothing else ever reaches
+;; bwrap's command line, and only those that
+;; `harness-sandbox-grantable-capabilities' lists are passed on.  A
+;; `:read-only' command is given none.  bwrap alone can: systemd-run
+;; and MXC signal `harness-sandbox-unavailable' for `:capabilities',
+;; and so does bwrap when `--cap-add' would hand out real capabilities
+;; of the host, being setuid or run by root.  See "Capabilities" below.
 ;;
 ;; Methods: `sandbox/wrap', `sandbox/status', `sandbox/confined-p',
+;; `sandbox/capabilities', `sandbox/capability-name',
 ;; `sandbox/check-command'.
 
 ;;; Code:
@@ -228,6 +245,302 @@ bwrap and systemd-run."
            (ignore-errors (harness-call 'config/get 'harness-sandbox-policy cwd)))
       (and (boundp 'harness-sandbox-policy) harness-sandbox-policy)
       'preferred))
+
+;;;; Capabilities
+
+;; bwrap drops every Linux capability of the commands it runs, and
+;; `--cap-add NAME' keeps the one it names.  Run by an ordinary user it
+;; first makes a user namespace of its own, so a capability it keeps is
+;; one of that namespace: it counts for the processes, the mounts, the
+;; IPC objects and the hostname of the sandbox, and for its network
+;; namespace when there is one (`:network nil'); it counts for nothing
+;; the host owns, such as the host's network namespace, which a sandbox
+;; with the network shares.  Run by root, or installed setuid, bwrap
+;; does otherwise (see `harness-sandbox--cap-add-unsafe-why'), so then
+;; the harness does not use it to grant any.
+
+(defconst harness-sandbox-capabilities
+  '(("CAP_CHOWN" :bit 0
+     :doc "change the owner and group of files")
+    ("CAP_DAC_OVERRIDE" :bit 1
+     :doc "read, write and run files whatever their permissions say")
+    ("CAP_DAC_READ_SEARCH" :bit 2
+     :doc "read files and list directories whatever their permissions say")
+    ("CAP_FOWNER" :bit 3
+     :doc "act as the owner of any file: change its mode, times and attributes")
+    ("CAP_FSETID" :bit 4
+     :doc "keep the setuid and setgid bits of a file that is changed")
+    ("CAP_KILL" :bit 5
+     :doc "send signals to processes of any user")
+    ("CAP_SETGID" :bit 6
+     :doc "change the process's group ids and write its group id map")
+    ("CAP_SETUID" :bit 7
+     :doc "change the process's user ids and write its user id map")
+    ("CAP_SETPCAP" :bit 8
+     :doc "change the capabilities of the process")
+    ("CAP_LINUX_IMMUTABLE" :bit 9
+     :doc "set the immutable and append-only attributes of files")
+    ("CAP_NET_BIND_SERVICE" :bit 10
+     :doc "bind sockets to the ports below 1024"
+     :scope "Only effective when the session has no network: the sandbox then has an empty network namespace of its own, which this capability covers. With the network on the sandbox shares the host's network namespace, which it does not own, so this changes nothing there.")
+    ("CAP_NET_BROADCAST" :bit 11
+     :doc "send broadcasts and listen to multicast groups"
+     :scope "Only effective when the session has no network: the sandbox then has an empty network namespace of its own, which this capability covers. With the network on the sandbox shares the host's network namespace, which it does not own, so this changes nothing there.")
+    ("CAP_NET_ADMIN" :bit 12
+     :doc "configure the network: interfaces, addresses, routes and firewall rules"
+     :scope "Only effective when the session has no network: the sandbox then has an empty network namespace of its own, which this capability covers. With the network on the sandbox shares the host's network namespace, which it does not own, so this changes nothing there.")
+    ("CAP_NET_RAW" :bit 13
+     :doc "open raw and packet sockets: ping, tcpdump, packet crafting"
+     :scope "Only effective when the session has no network: the sandbox then has an empty network namespace of its own, which this capability covers. With the network on the sandbox shares the host's network namespace, which it does not own, so this changes nothing there.")
+    ("CAP_IPC_LOCK" :bit 14
+     :doc "lock memory beyond the usual limit")
+    ("CAP_IPC_OWNER" :bit 15
+     :doc "skip the permission checks of System V IPC objects")
+    ("CAP_SYS_MODULE" :bit 16
+     :doc "load and unload kernel modules"
+     :scope "Kernel modules belong to the host, which a user namespace does not own: the kernel refuses this one there.")
+    ("CAP_SYS_RAWIO" :bit 17
+     :doc "reach I/O ports and raw device memory"
+     :scope "I/O ports and device memory belong to the host, which a user namespace does not own: the kernel refuses this one there.")
+    ("CAP_SYS_CHROOT" :bit 18
+     :doc "change the root directory with chroot")
+    ("CAP_SYS_PTRACE" :bit 19
+     :doc "trace and inspect any process in the sandbox (strace, gdb, /proc/PID/mem); it also lifts Yama's rule that a process may only trace its own descendants"
+     :scope "It reaches the processes of the sandbox's own PID namespace, which the sandbox owns: never the harness, nor any other process of the host.")
+    ("CAP_SYS_PACCT" :bit 20
+     :doc "switch process accounting on and off")
+    ("CAP_SYS_ADMIN" :bit 21
+     :doc "mount, remount and join namespaces, and much else: the broadest capability"
+     :scope "Inside the sandbox it can mount, remount and join namespaces, which can undo the read-only mounts the jail relies on: a read-only session's, a worktree's protected git hooks and config, the skills directories.")
+    ("CAP_SYS_BOOT" :bit 22
+     :doc "reboot and load another kernel")
+    ("CAP_SYS_NICE" :bit 23
+     :doc "raise priorities and set real-time scheduling or CPU affinity of any process")
+    ("CAP_SYS_RESOURCE" :bit 24
+     :doc "go past resource limits and quotas")
+    ("CAP_SYS_TIME" :bit 25
+     :doc "set the system clock"
+     :scope "The clock belongs to the host, which a user namespace does not own: the kernel refuses this one there.")
+    ("CAP_SYS_TTY_CONFIG" :bit 26
+     :doc "configure virtual terminals")
+    ("CAP_MKNOD" :bit 27
+     :doc "create device files")
+    ("CAP_LEASE" :bit 28
+     :doc "take leases on files of other users")
+    ("CAP_AUDIT_WRITE" :bit 29
+     :doc "write records to the kernel audit log")
+    ("CAP_AUDIT_CONTROL" :bit 30
+     :doc "configure kernel auditing")
+    ("CAP_SETFCAP" :bit 31
+     :doc "set file capabilities")
+    ("CAP_MAC_OVERRIDE" :bit 32
+     :doc "override mandatory access control (SELinux, AppArmor, Smack)")
+    ("CAP_MAC_ADMIN" :bit 33
+     :doc "configure mandatory access control")
+    ("CAP_SYSLOG" :bit 34
+     :doc "read and configure the kernel log")
+    ("CAP_WAKE_ALARM" :bit 35
+     :doc "set timers that wake the system")
+    ("CAP_BLOCK_SUSPEND" :bit 36
+     :doc "block the system from suspending")
+    ("CAP_AUDIT_READ" :bit 37
+     :doc "read the kernel audit log")
+    ("CAP_PERFMON" :bit 38
+     :doc "use performance monitoring and tracing: perf, eBPF tracing")
+    ("CAP_BPF" :bit 39
+     :doc "load BPF programs and use BPF maps")
+    ("CAP_CHECKPOINT_RESTORE" :bit 40
+     :doc "checkpoint and restore processes"))
+  "The Linux capabilities the harness knows, from the kernel's list.
+Each is (NAME :bit BIT :doc DOC [:scope SCOPE]): NAME the canonical
+name, BIT its number in the kernel's capability sets (the bit that
+`CapEff' in /proc/PID/status shows), DOC what it lets a command do, in
+one line, and SCOPE, when there is more to say than that every one
+counts inside the sandbox's own namespaces only, never on the host,
+over files as their owner, or on another machine: where this one
+counts, or what it can undo (`harness-sandbox-capability-scope').
+
+This registry is what keeps anything but a capability's name off
+bwrap's command line: only a name in it is ever passed on.  `ALL' is
+not in it, and so can never be passed.  It says what exists, not what
+an agent may ask for: that is `harness-sandbox-grantable-capabilities'.")
+
+(defcustom harness-sandbox-grantable-capabilities
+  '("CAP_SYS_PTRACE" "CAP_NET_RAW" "CAP_NET_ADMIN" "CAP_NET_BIND_SERVICE")
+  "The Linux capabilities an agent may ask the user to give its commands.
+An agent asks with request_escalation (attribute capability), and only
+your answer grants it; a capability granted is passed to bwrap
+\(`--cap-add') for the agent's bash and elisp commands.  A name that is
+not listed here cannot even be asked for, and one granted earlier and
+no longer listed is no longer passed on.  The names are those of
+`harness-sandbox-capabilities'; `ALL' is never grantable.
+
+The default is conservative.  Each capability counts inside the
+sandbox's own user namespace only, never on the host:
+- CAP_SYS_PTRACE traces and inspects any process of the sandbox
+  (strace, gdb, /proc/PID/mem) and lifts Yama's rule that a process
+  may only trace its own descendants.
+- CAP_NET_RAW, CAP_NET_ADMIN and CAP_NET_BIND_SERVICE (raw sockets,
+  network configuration, low ports) are effective only for a session
+  without the network, in the sandbox's own empty network namespace;
+  with the network on, the sandbox shares the host's, which it does
+  not own, and they change nothing there.
+
+CAP_SYS_ADMIN is left out on purpose.  It lets a command mount,
+remount and join namespaces inside the sandbox, which can undo the
+read-only mounts the jail relies on: a read-only session's, the
+protected git hooks and config of a worktree, the skills directories.
+Add it, or any other capability of the registry, at your own risk.
+
+Set this to nil to switch the feature off, for a corporate policy
+say: nothing can be asked for then.  This is a plain option of yours
+or your administrator's (the policy file may set it), not a layered
+one: a project's .dir-locals.el cannot widen what the agents jailed in
+it may ask for, and the harness reads only its global value."
+  :type `(set ,@(mapcar (lambda (entry)
+                          (list 'const :tag (format "%s: %s" (car entry) (plist-get (cdr entry) :doc))
+                                (car entry)))
+                        harness-sandbox-capabilities))
+  :risky t
+  :group 'harness)
+
+(defvar harness-sandbox--capabilities-reported nil
+  "Entries of `harness-sandbox-grantable-capabilities' reported as unknown.")
+
+(defun harness-sandbox-capability-name (value)
+  "Return the canonical name of the capability VALUE names, or nil.
+VALUE is a string or a symbol.  Case, dashes, spaces and the `CAP_'
+prefix do not matter -- CAP_SYS_PTRACE, SYS_PTRACE, sys_ptrace and
+cap-sys-ptrace are one -- and a name a registry entry has with SYS_
+before it may leave that out: `ptrace'.  Nothing else matches, `ALL'
+included; what comes back is always a name of the registry, never VALUE
+itself, whatever it holds."
+  (let* ((text (cond ((stringp value) value)
+                     ((and value (symbolp value) (not (keywordp value))) (symbol-name value))))
+         (key (and text (upcase (replace-regexp-in-string "[-[:space:]]+" "_" (string-trim text))))))
+    (when (and key (not (string-empty-p key)))
+      (let ((bare (string-remove-prefix "CAP_" key)))
+        (cl-some (lambda (prefix)
+                   (let ((name (concat prefix bare)))
+                     (and (assoc name harness-sandbox-capabilities) name)))
+                 '("CAP_" "CAP_SYS_"))))))
+
+(defun harness-sandbox-capability-info (name key)
+  "Return KEY (`:bit', `:doc' or `:scope') of the capability NAME, or nil.
+NAME is any spelling `harness-sandbox-capability-name' knows."
+  (when-let* ((canonical (harness-sandbox-capability-name name)))
+    (plist-get (cdr (assoc canonical harness-sandbox-capabilities)) key)))
+
+(defun harness-sandbox-capability-scope (name)
+  "Return the note on where the capability NAME counts, if it has one, else nil.
+That is its registry entry's `:scope': what there is to say besides
+that it counts inside the sandbox's own namespaces only."
+  (harness-sandbox-capability-info name :scope))
+
+(defun harness-sandbox-capability-mask (names)
+  "Return the bits of the capabilities NAMES, as `CapEff' prints them in hex."
+  (let ((mask 0))
+    (dolist (name names mask)
+      (when-let* ((bit (harness-sandbox-capability-info name :bit)))
+        (setq mask (logior mask (ash 1 bit)))))))
+
+(defun harness-sandbox-grantable ()
+  "Return the capabilities an agent may ask for, as canonical names.
+They are the registry's entries among `harness-sandbox-grantable-capabilities'
+\(in any spelling), in that order.  Only the option's global value
+counts, never a buffer-local or directory-local one: a project's file
+must not widen what the agents jailed in it may ask for.  An entry that
+is no capability is reported once and skipped."
+  (let ((value (default-value 'harness-sandbox-grantable-capabilities))
+        names)
+    (dolist (item (and (proper-list-p value) value))
+      (if-let* ((name (harness-sandbox-capability-name item)))
+          (cl-pushnew name names :test #'equal)
+        (unless (member item harness-sandbox--capabilities-reported)
+          (push item harness-sandbox--capabilities-reported)
+          (harness-log 'warn "sandbox: %S in harness-sandbox-grantable-capabilities is no capability the harness knows, so it is skipped"
+                       item))))
+    (nreverse names)))
+
+(defun harness-sandbox--setuid-p (program)
+  "Non-nil when the executable PROGRAM has the setuid bit."
+  (let ((modes (and (stringp program) (ignore-errors (file-modes program)))))
+    (and modes (/= 0 (logand modes #o4000)))))
+
+(defun harness-sandbox--root-p ()
+  "Non-nil when this Emacs, and so bwrap, runs as root."
+  (eql 0 (user-real-uid)))
+
+(defun harness-sandbox--cap-add-unsafe-why (program)
+  "Return why `--cap-add' of bwrap's PROGRAM is no namespace capability, or nil.
+An unprivileged bwrap makes a user namespace of its own, and what it
+keeps is a capability of that.  An old bwrap installed setuid root does
+not, and `--cap-add' then hands the command a capability over the
+whole host.  A bwrap run by root makes no user namespace unless asked,
+and starts from all the capabilities of its caller, so a command keeps
+every one of them: nothing is dropped there to lower, nor to raise."
+  (cond
+   ((harness-sandbox--setuid-p program)
+    (format "%s is setuid root, where --cap-add would hand out real capabilities of the host, not ones of the sandbox's own user namespace"
+            program))
+   ((harness-sandbox--root-p)
+    "this Emacs runs as root, so bwrap makes no user namespace of its own and keeps every capability of its caller for the commands it runs: there is none to raise or lower, and --cap-add would be real")))
+
+(defun harness-sandbox--capabilities-why (cwd)
+  "Return why the jail cannot give commands in CWD capabilities, else nil.
+Only bwrap can, for a local CWD, with a sandbox policy other than
+`off', and not when `--cap-add' would be no namespace capability."
+  (let ((policy (harness-sandbox--policy cwd)))
+    (cond
+     ((and cwd (harness-file-remote-p cwd))
+      "its commands run on another host, where the sandbox does not reach")
+     ((eq policy 'off)
+      "the sandbox policy is `off': its commands run unconfined, with your own rights")
+     ((eq harness-sandbox--backend 'bwrap)
+      (harness-sandbox--cap-add-unsafe-why (alist-get 'bwrap harness-sandbox--programs)))
+     ((eq harness-sandbox--backend 'systemd)
+      "the sandbox backend is systemd-run, not bwrap, and a systemd --user unit cannot be given a capability: it can only lower its own")
+     ((eq harness-sandbox--backend 'mxc)
+      "the sandbox backend is MXC, not bwrap, and macOS's Seatbelt has no Linux capabilities")
+     (t (format "no sandbox backend can confine its commands (%s), and only bwrap can give a command a capability"
+                (harness-sandbox--missing-programs))))))
+
+(defun harness-sandbox--refuse-capabilities (command capabilities why)
+  "Signal `harness-sandbox-unavailable': COMMAND cannot be given CAPABILITIES.
+WHY says what stands in the way.  It is the caller's to give them up:
+the command does not run without what was asked for."
+  (harness-log 'error "sandbox: cannot give %s to %S: %s"
+               (string-join (mapcar (lambda (c) (format "%s" c)) capabilities) ", ") (car command) why)
+  (signal 'harness-sandbox-unavailable
+          (list (format "this command was to run with the Linux capabilities %s, which the sandbox cannot give it: %s. Give them up with drop_access (attribute capability, value all) to run commands without them"
+                        (string-join (mapcar (lambda (c) (format "%s" c)) capabilities) ", ") why))))
+
+(defun harness-sandbox--bwrap-capabilities (command requested program)
+  "Return the names among REQUESTED that bwrap's PROGRAM may add to COMMAND.
+They are canonical names.  Each must be a capability of the registry
+and listed in `harness-sandbox-grantable-capabilities': one that is
+not is left out with a line in the log, so a capability that is no
+longer grantable is no longer passed on, and the command runs with
+fewer.  When there is one left and `--cap-add' would be no namespace
+capability, signal `harness-sandbox-unavailable'
+\(`harness-sandbox--cap-add-unsafe-why')."
+  (let ((grantable (harness-sandbox-grantable))
+        granted)
+    (dolist (item requested)
+      (let ((name (harness-sandbox-capability-name item)))
+        (cond
+         ((null name)
+          (harness-log 'warn "sandbox: not giving %S to %S: it is no capability the harness knows"
+                       item (car command)))
+         ((not (member name grantable))
+          (harness-log 'warn "sandbox: not giving %s to %S: harness-sandbox-grantable-capabilities does not list it"
+                       name (car command)))
+         (t (cl-pushnew name granted :test #'equal)))))
+    (setq granted (nreverse granted))
+    (when-let* ((_ granted)
+                (why (harness-sandbox--cap-add-unsafe-why program)))
+      (harness-sandbox--refuse-capabilities command granted why))
+    granted))
 
 ;;;; Argument construction
 
@@ -466,7 +779,7 @@ writable, as for `harness-sandbox--bwrap-git-args'."
                        collect (format "--setenv=%s=%s" var value))))))
 
 (cl-defun harness-sandbox--bwrap-command (program cwd command &key (network t) writable readable read-only
-                                                   scratch)
+                                                   scratch capabilities)
   "Build the bwrap command line running COMMAND in CWD.
 PROGRAM is the bwrap executable.  NETWORK nil unshares the network
 namespace; WRITABLE and READABLE list extra directories or files to
@@ -475,6 +788,14 @@ CWD, the git directories and every WRITABLE entry with `--ro-bind', so
 that the command writes nothing but the sandbox's private /tmp and the
 SCRATCH directories, which are bound with `--bind' after everything
 else (see `harness-sandbox--scratch-mounts').
+
+CAPABILITIES, names of `harness-sandbox-capabilities', each get a
+`--cap-add' after the flags that make the namespaces, and before the
+command: bwrap drops every other capability.  This only builds the
+command line, and is the last guard of it: a name the registry does not
+know is left out, whatever it holds, and so is every one with READ-ONLY.
+Whether the capability may be granted at all is for `sandbox/wrap'
+\(`harness-sandbox--bwrap-capabilities').
 
 $HOME keeps its path: an empty tmpfs covers the home directory, so
 ~/x names the same path inside as outside and shows only what is
@@ -511,8 +832,12 @@ under it too."
      (cl-loop for (source . dest) in (harness-sandbox--scratch-mounts scratch cwd)
               append (list "--bind" source dest))
      (list "--unshare-pid" "--unshare-ipc" "--unshare-uts"
-           "--die-with-parent" "--new-session"
-           "--chdir" cwd
+           "--die-with-parent" "--new-session")
+     ;; Only the registry's own names, none for a command that changes nothing.
+     (unless read-only
+       (cl-loop for name in (delete-dups (delq nil (mapcar #'harness-sandbox-capability-name capabilities)))
+                append (list "--cap-add" name)))
+     (list "--chdir" cwd
            "--setenv" "HARNESS_SANDBOX" "bwrap")
      (and private (list "--setenv" "HOME" private))
      (unless network (list "--unshare-net"))
@@ -759,17 +1084,35 @@ unchanged.  Signals `harness-sandbox-unavailable' when the policy is
 `required' and no backend exists.  A `:read-only' command fails closed
 instead of running unconfined: it signals `harness-sandbox-unavailable'
 too for the `off' policy, for a remote CWD and for no backend, whatever
-the policy."
-  (let ((policy (harness-sandbox--policy cwd))
-        (network (if (plist-member opts :network) (plist-get opts :network) t))
-        (writable (plist-get opts :writable))
-        (readable (plist-get opts :readable))
-        (read-only (harness-json-true-p (plist-get opts :read-only)))
-        (scratch (plist-get opts :scratch)))
+the policy.
+
+`:capabilities' names the Linux capabilities COMMAND is given, none by
+default (see \"Capabilities\" in the commentary).  bwrap adds each with
+`--cap-add' provided it is in `harness-sandbox-capabilities' and listed
+in `harness-sandbox-grantable-capabilities' when COMMAND is wrapped;
+one that is not is left out, with a line in the log.  A `:read-only'
+command gets none, whatever is asked.  systemd-run and MXC cannot give
+any: with names to give they signal `harness-sandbox-unavailable', as
+bwrap does when `--cap-add' would be no capability of the sandbox's own
+user namespace (setuid, or run by root).  Where COMMAND runs
+unconfined anyway -- the `off' policy, a remote CWD, no backend -- it
+has its user's own rights, and is returned as it is, with a line in
+the debug log."
+  (let* ((policy (harness-sandbox--policy cwd))
+         (network (if (plist-member opts :network) (plist-get opts :network) t))
+         (writable (plist-get opts :writable))
+         (readable (plist-get opts :readable))
+         (read-only (harness-json-true-p (plist-get opts :read-only)))
+         (scratch (plist-get opts :scratch))
+         ;; A command that changes nothing is given no capability.
+         (capabilities (and (not read-only) (plist-get opts :capabilities))))
     (cond
      ((and read-only (eq policy 'off))
       (harness-sandbox--refuse-read-only command "the sandbox policy is `off'"))
-     ((eq policy 'off) command)
+     ((eq policy 'off)
+      (when capabilities
+        (harness-log 'debug "sandbox: policy off, so %S runs unconfined, with its user's own capabilities" (car command)))
+      command)
      ((file-remote-p cwd)
       (when read-only
         (harness-sandbox--refuse-read-only
@@ -777,14 +1120,25 @@ the policy."
       (harness-log 'debug "sandbox: remote cwd %s runs unconfined" cwd)
       command)
      ((eq harness-sandbox--backend 'bwrap)
-      (harness-sandbox--bwrap-command (alist-get 'bwrap harness-sandbox--programs) cwd command
-                                      :network network :writable writable :readable readable
-                                      :read-only read-only :scratch scratch))
+      (let ((program (alist-get 'bwrap harness-sandbox--programs)))
+        (harness-sandbox--bwrap-command program cwd command
+                                        :network network :writable writable :readable readable
+                                        :read-only read-only :scratch scratch
+                                        :capabilities (and capabilities
+                                                           (harness-sandbox--bwrap-capabilities
+                                                            command capabilities program)))))
      ((eq harness-sandbox--backend 'systemd)
+      (when capabilities
+        (harness-sandbox--refuse-capabilities
+         command capabilities
+         "systemd-run --user cannot give a unit a capability, it can only lower its own"))
       (harness-sandbox--systemd-command (alist-get 'systemd harness-sandbox--programs) cwd command
                                         :network network :writable writable :readable readable
                                         :read-only read-only :scratch scratch))
      ((eq harness-sandbox--backend 'mxc)
+      (when capabilities
+        (harness-sandbox--refuse-capabilities
+         command capabilities "MXC confines with macOS's Seatbelt, which has no Linux capabilities"))
       ;; The command's own $TMPDIR, private as bwrap's /tmp is: MXC
       ;; shows no shared temporary directory.
       (let ((tmp (with-file-modes #o700 (make-temp-file "harness-sandbox-" t))))
@@ -805,6 +1159,8 @@ the policy."
                             (harness-sandbox--missing-programs)))))
      (t
       (harness-log 'warn "sandbox: no backend available; running %S unconfined" (car command))
+      (when capabilities
+        (harness-log 'debug "sandbox: no backend, so %S runs with its user's own capabilities" (car command)))
       command))))
 
 (harness-defmethod sandbox/status ()
@@ -812,6 +1168,39 @@ the policy."
   (list :backend (or harness-sandbox--backend 'none)
         :available harness-sandbox--available
         :policy (harness-sandbox--policy nil)))
+
+(harness-defmethod sandbox/capabilities (cwd)
+  "Say what the jail does about the Linux capabilities of commands run in CWD.
+Return (:enforced BOOL :backend BACKEND :grantable (NAME…) :docs
+\((NAME . DOC)…) :scopes ((NAME . SCOPE)…) :why TEXT).  `:enforced' is
+non-nil when the jail can give such a command a capability and drops
+every other: the backend is bwrap, CWD is local, the sandbox policy is
+not `off', and `--cap-add' is a capability of the sandbox's own user
+namespace (bwrap is neither setuid nor run by root).  `:why' says what
+stands in the way when it is not.  `:grantable' are the canonical
+names of `harness-sandbox-grantable-capabilities' that are
+capabilities the harness knows, `:docs' says in a line what each lets a
+command do and `:scopes' what there is to say on top of that it counts
+inside the sandbox's own namespaces only, for those that have it.
+Whether a session may be given one is for the access module, which
+asks the user."
+  (let* ((why (harness-sandbox--capabilities-why cwd))
+         (grantable (harness-sandbox-grantable)))
+    (list :enforced (and (null why) t)
+          :backend (or harness-sandbox--backend 'none)
+          :grantable grantable
+          :docs (mapcar (lambda (name) (cons name (harness-sandbox-capability-info name :doc))) grantable)
+          :scopes (cl-loop for name in grantable
+                           for scope = (harness-sandbox-capability-scope name)
+                           when scope collect (cons name scope))
+          :why why)))
+
+(harness-defmethod sandbox/capability-name (value)
+  "Return the canonical name of the Linux capability VALUE names, or nil.
+Case, dashes and the `CAP_' prefix do not matter, and `ptrace' is
+CAP_SYS_PTRACE; see `harness-sandbox-capability-name'.  Nil for a name
+the harness does not know, `ALL' included."
+  (harness-sandbox-capability-name value))
 
 (harness-defmethod sandbox/confined-p (cwd)
   "Non-nil when commands run in CWD are confined by a sandbox backend.

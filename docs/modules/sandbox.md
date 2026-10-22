@@ -109,15 +109,34 @@ Seeing only its own directory makes some git commands destructive
 inside the sandbox: `git worktree prune` takes every other worktree
 of the repository for deleted and drops its registration.
 `sandbox/check-command` finds those in a shell command line so the
-permission layer can refuse them (see "Git worktree commands" below).
+permission layer can refuse them (see "Capabilities" and "Git
+worktree commands" below).
+
+Linux capabilities: a command in the bwrap sandbox has none at all,
+bwrap drops every one.  `:capabilities` gives it some, by name: one
+`--cap-add` each, which in an unprivileged bwrap is a capability of
+the sandbox's own user namespace -- over its processes, its mounts
+and, with `:network nil`, its empty network namespace -- and never
+one over the host, its files as their owner or another machine.  The
+names come from a registry of the capabilities the harness knows
+(`harness-sandbox-capabilities`), so nothing else ever reaches
+bwrap's command line, and only those that
+`harness-sandbox-grantable-capabilities` lists are passed on.  A
+`:read-only` command is given none.  bwrap alone can: systemd-run
+and MXC signal `harness-sandbox-unavailable` for `:capabilities`,
+and so does bwrap when `--cap-add` would hand out real capabilities
+of the host, being setuid or run by root.  See "Capabilities" below.
 
 Methods: `sandbox/wrap`, `sandbox/status`, `sandbox/confined-p`,
+`sandbox/capabilities`, `sandbox/capability-name`,
 `sandbox/check-command`.
 
 ## Provides
 
 ### Methods
 
+- `sandbox/capabilities` (cwd) — Say what the jail does about the Linux capabilities of commands run in CWD.
+- `sandbox/capability-name` (value) — Return the canonical name of the Linux capability VALUE names, or nil.
 - `sandbox/check-command` (cwd command &optional own) — Return why the shell COMMAND must not run in the sandbox at CWD, or nil.
 - `sandbox/confined-p` (cwd) — Non-nil when commands run in CWD are confined by a sandbox backend.
 - `sandbox/status` — Return (:backend BACKEND :available (BACKENDS…) :policy POLICY).
@@ -127,6 +146,7 @@ Methods: `sandbox/wrap`, `sandbox/status`, `sandbox/confined-p`,
 
 - `harness-sandbox-backend` — Which sandbox backend to use.
 - `harness-sandbox-extra-read-only-dirs` — Additional directories bound read-only into every sandbox.
+- `harness-sandbox-grantable-capabilities` — The Linux capabilities an agent may ask the user to give its commands.
 - `harness-sandbox-mxc-program` — Name or absolute path of MXC's macOS executor, mxc-exec-mac.
 
 ## Uses

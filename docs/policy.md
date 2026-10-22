@@ -235,6 +235,13 @@ not used, and the BTW keeps its session's model.
   (bubblewrap or `systemd-run` on GNU/Linux; on macOS the backend is
   MXC's `mxc-exec-mac`), as before, and now also when the sandbox module
   is not loaded, where a command used to run unconfined.
+- **Linux capabilities** (`harness-sandbox-grantable-capabilities`).
+  The capabilities an agent may ask the user to give its commands, bwrap
+  dropping every one otherwise.  A policy that sets it to nil switches
+  the feature off for every agent: nothing can be asked for, and none
+  given earlier is passed on.  Set to a list, it is the whole list,
+  and the user adds none.  The harness reads only this global value, so
+  no project's `.dir-locals.el` changes it.
 
 ### Providers and models
 

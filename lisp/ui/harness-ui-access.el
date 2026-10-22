@@ -8,7 +8,10 @@
 ;; - Jail: the sandbox its commands run in -- the backend, the ones
 ;;   this machine has, the policy, whether commands in its directory
 ;;   are confined -- its permission mode, whether it is interactive,
-;;   the network and writing.
+;;   the network, writing and the Linux capabilities of its commands:
+;;   the sandbox drops every one, and you give it some (`C'), by name,
+;;   or take them away; why none can be given when none can (the
+;;   backend is not bwrap, the session is read-only) is said there.
 ;; - Directories: those it may write, those it may only read and those
 ;;   it gave up, each with where it comes from and what can be done
 ;;   with it: give it up or keep it for reading only, revoke a grant,
@@ -413,9 +416,108 @@ Each line after the first starts with INDENT."
            (t (harness-ui-access--button (if own-ro "[Allow writing]" "[Make read-only]")
                                          (lambda () (harness-ui-access-set-read-only (not own-ro)))
                                          "Let the session write, where its directories allow, or not (w)"))))
+    (harness-ui-access--insert-capabilities d)
     (when (harness-ui-access--true-p (plist-get d :corporate))
       (harness-ui-access--row "corporate" (propertize "on: no tools of kind net but web search, no ssh"
                                                       'face 'harness-dim-face)))))
+
+(defun harness-ui-access--capability-names (names)
+  "Return NAMES, capability names from the harness, as a list of strings."
+  (delq nil (mapcar #'harness-ui-access--str (and (listp names) names))))
+
+(defun harness-ui-access--capability-doc (capabilities name)
+  "Return what capability NAME lets a command do, from CAPABILITIES, or nil.
+CAPABILITIES is the `:capabilities' of `access/describe'."
+  (plist-get (cl-find name (plist-get capabilities :docs)
+                      :key (lambda (entry) (plist-get entry :name)) :test #'equal)
+             :doc))
+
+(defun harness-ui-access--capabilities ()
+  "Return the capabilities this buffer's description gives, or signal.
+A harness that does not say (an older one) cannot be asked for any."
+  (or (plist-get harness-ui-access--describe :capabilities)
+      (user-error "This harness does not say what capabilities the session's commands may have")))
+
+(defun harness-ui-access--capabilities-held (capabilities)
+  "Return the names of the capabilities CAPABILITIES says the commands hold."
+  (harness-ui-access--capability-names (plist-get capabilities :held)))
+
+(defun harness-ui-access--capabilities-offer (capabilities)
+  "Return the capabilities CAPABILITIES lets an agent ask for and does not hold."
+  (let ((held (harness-ui-access--capabilities-held capabilities)))
+    (seq-remove (lambda (name) (member name held))
+                (harness-ui-access--capability-names (plist-get capabilities :grantable)))))
+
+(defun harness-ui-access--insert-note (text)
+  "Insert TEXT, dim, under the value of a jail row, wrapped to the view's width."
+  (let ((indent (make-string 15 ?\s))
+        (start (point)))
+    (insert indent)
+    (harness-ui-access--wrap
+     (mapcar (lambda (word) (propertize word 'face 'harness-dim-face)) (split-string text " " t))
+     (harness-ui-access--width) indent " ")
+    ;; The wrapping leaves a space after the last word of each line.
+    (let ((end (copy-marker (point))))
+      (save-excursion
+        (goto-char start)
+        (while (re-search-forward " +$" end t)
+          (replace-match "")))
+      (set-marker end nil))))
+
+(defun harness-ui-access--capabilities-note (d held)
+  "Return what to say under the capabilities row of the session D, or nil.
+D is its `access/describe'; HELD are the capabilities its commands
+hold.  It says why none can be raised, or that those held are not
+passed to the commands, and when they are, what they mean."
+  (let* ((c (plist-get d :capabilities))
+         (why (harness-ui-access--str (plist-get c :why)))
+         (enforced (harness-ui-access--true-p (plist-get c :enforced)))
+         (read-only (harness-ui-access--true-p (plist-get d :read-only)))
+         (grantable (harness-ui-access--capability-names (plist-get c :grantable)))
+         (unlisted (seq-remove (lambda (name) (member name grantable)) held)))
+    (cond
+     ((and held read-only)
+      "held, but a read-only session's commands get none")
+     ((and held (not enforced))
+      (format "held, but not passed: %s" (or why "the sandbox does not enforce them here")))
+     ((and held unlisted)
+      (format "%s held, but not passed: the user no longer lets agents ask for %s"
+              (string-join unlisted ", ") (if (cdr unlisted) "them" "it")))
+     (held
+      "its bash and elisp commands run with these and no other capability, inside the sandbox only")
+     (why (format "cannot be raised: %s" why)))))
+
+(defun harness-ui-access--insert-capabilities (d)
+  "Insert the capabilities row of the jail of the session described as D.
+The sandbox drops every Linux capability of the commands it runs; this
+row says which the user gave the session's commands, and has buttons to
+give one and take them away.  Nothing is drawn when D has no
+`:capabilities': a harness that does not say cannot be asked."
+  (when-let* ((c (plist-get d :capabilities))
+              ((consp c)))
+    (let* ((held (harness-ui-access--capabilities-held c))
+           (offer (harness-ui-access--capabilities-offer c))
+           (why (harness-ui-access--str (plist-get c :why))))
+      (harness-ui-access--row
+       "capabilities"
+       (if held
+           (propertize (string-join held ", ") 'face 'bold)
+         (concat (propertize "none" 'face 'bold)
+                 (propertize "  every capability is dropped" 'face 'harness-dim-face)))
+       (and offer (not why)
+            (harness-ui-access--button
+             "[Give…]" (lambda () (call-interactively #'harness-ui-access-grant-capability))
+             "Give the session's commands a Linux capability, inside the sandbox only (C)"))
+       (and held
+            (harness-ui-access--button
+             "[Take away…]" (lambda () (call-interactively #'harness-ui-access-revoke-capability))
+             "Take one capability away from the session's commands (C)"))
+       (and held
+            (harness-ui-access--button
+             "[Take all away]" (lambda () (harness-ui-access-set-capability "all" nil))
+             "Take every capability away from the session's commands (C, all)")))
+      (when-let* ((note (harness-ui-access--capabilities-note d held)))
+        (harness-ui-access--insert-note note)))))
 
 ;;;; Drawing: directories
 
@@ -925,6 +1027,82 @@ EXPANDED are the ids of the calls to draw unfolded."
           (t (user-error "%s is off: %s; this view turns on only the tools turned off for the session"
                          tool (plist-get off :why))))))
 
+(defun harness-ui-access-set-capability (name on)
+  "Give the session's commands the capability NAME when ON, else take it away.
+This buffer's session is the one.  NAME is `all' to take every one
+away.  It takes effect at once, from the next bash or elisp command on;
+the harness refuses to give one the sandbox would not pass on, and the
+echo area says so."
+  (harness-ui-call "_harness/access/set-capability"
+                   (list :session-id (harness-ui-access--session) :name name :on (if on t :false))
+                   (harness-ui-access--after
+                    (cond ((equal name "all") "No capability left for the session's commands")
+                          (on (format "%s given to the session's commands" name))
+                          (t (format "%s taken away from the session's commands" name))))))
+
+(defun harness-ui-access--read-capability (prompt candidates)
+  "Read one of CANDIDATES with PROMPT, each shown with what it lets a command do.
+A candidate starts with a capability's name, which the annotation looks
+up in this buffer's description."
+  (let* ((capabilities (plist-get harness-ui-access--describe :capabilities))
+         (completion-extra-properties
+          (list :annotation-function
+                (lambda (candidate)
+                  (let ((doc (harness-ui-access--capability-doc
+                              capabilities (car (split-string candidate " ")))))
+                    (if doc (concat "  " doc) ""))))))
+    (completing-read prompt candidates nil t)))
+
+(defun harness-ui-access-grant-capability (name)
+  "Give this buffer's session's commands the Linux capability NAME.
+Interactively choose among those an agent may ask for that they do not
+hold yet, each with what it lets a command do.  Nothing is asked of
+anyone else: you change the session's profile here, and the sandbox
+passes it to its bash and elisp commands from the next one on, where it
+can (bwrap, for a session that may write)."
+  (interactive
+   (let* ((c (harness-ui-access--capabilities))
+          (why (harness-ui-access--str (plist-get c :why)))
+          (offer (harness-ui-access--capabilities-offer c)))
+     (when why (user-error "No capability can be given now: %s" why))
+     (unless offer (user-error "Every capability an agent may ask for is given already"))
+     (list (harness-ui-access--read-capability "Give the session's commands: " offer))))
+  (harness-ui-access-set-capability name t))
+
+(defun harness-ui-access-revoke-capability (name)
+  "Take the capability NAME away from this buffer's session's commands.
+NAME is `all' to take every one away.  Interactively choose one of those
+the commands hold."
+  (interactive
+   (let ((held (harness-ui-access--capabilities-held (harness-ui-access--capabilities))))
+     (unless held (user-error "The session's commands hold no capability"))
+     (list (harness-ui-access--read-capability "Take away: " held))))
+  (harness-ui-access-set-capability name nil))
+
+(defun harness-ui-access-toggle-capability (name)
+  "Give the session's commands the capability NAME, or take it away when held.
+This buffer's session is the one.  Interactively choose among the
+capabilities they hold, marked, which are taken away, and those an agent
+may ask for, which are given, each with what it lets a command do;
+`all' takes every one away.  Where none can be given -- the sandbox
+cannot pass them on, the session is read-only -- only those held are
+offered."
+  (interactive
+   (let* ((c (harness-ui-access--capabilities))
+          (why (harness-ui-access--str (plist-get c :why)))
+          (held (harness-ui-access--capabilities-held c))
+          (table (append (mapcar (lambda (capability) (cons (concat capability " (held)") capability)) held)
+                         (and (null why) (mapcar (lambda (capability) (cons capability capability))
+                                                 (harness-ui-access--capabilities-offer c)))
+                         (and held (list (cons "all (take every one away)" "all"))))))
+     (when (and why (null held)) (user-error "No capability can be given now: %s" why))
+     (list (cdr (assoc (harness-ui-access--read-capability "Give or take away: " (mapcar #'car table))
+                       table)))))
+  (harness-ui-access-set-capability
+   name (not (or (equal name "all")
+                 (member name (harness-ui-access--capabilities-held
+                               (plist-get harness-ui-access--describe :capabilities)))))))
+
 (defun harness-ui-access--dir-at-point ()
   "Return the directory entry at point, or signal."
   (or (get-text-property (point) 'harness-ui-access-dir)
@@ -1171,15 +1349,16 @@ given up for this session alone, after you confirm."
     (define-key map (kbd "N") #'harness-ui-access-toggle-network)
     (define-key map (kbd "w") #'harness-ui-access-toggle-writing)
     (define-key map (kbd "T") #'harness-ui-access-toggle-tool)
+    (define-key map (kbd "C") #'harness-ui-access-toggle-capability)
     (define-key map (kbd "?") #'harness-menu)
     map)
   "Keymap of `harness-ui-access-mode'.")
 
 (define-derived-mode harness-ui-access-mode special-mode "Access"
   "Major mode of a session's access view (`harness-access').
-It lists the session's sandbox, permission mode, directories, tools,
-rules, the requests it waits on and the judgements of its calls, and
-changes them.
+It lists the session's sandbox, permission mode, network, writing, the
+Linux capabilities of its commands, directories, tools, rules, the
+requests it waits on and the judgements of its calls, and changes them.
 
 \\{harness-ui-access-mode-map}"
   (setq truncate-lines t)
@@ -1194,7 +1373,8 @@ changes them.
         (". i" "Interactive or not" harness-ui-access-toggle-interaction)
         (". N" "Network on or off" harness-ui-access-toggle-network)
         (". w" "Writing on or off" harness-ui-access-toggle-writing)
-        (". T" "A tool on or off" harness-ui-access-toggle-tool)]
+        (". T" "A tool on or off" harness-ui-access-toggle-tool)
+        (". C" "Capability give or take away" harness-ui-access-toggle-capability)]
        ["Directories"
         (". a" "Allow a directory" harness-ui-access-allow-dir)
         (". r" "Allow reading a directory" harness-ui-access-allow-read-dir)

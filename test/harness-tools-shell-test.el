@@ -640,6 +640,51 @@ for sandbox options does not run; without them it runs on the host."
             (should-not (file-exists-p marker))
             (should-not wrapped)))))))
 
+(ert-deftest harness-tools-shell-bash-and-elisp-give-the-sandbox-the-capabilities ()
+  "A handler of `tools/sandbox-options' that names Linux capabilities has
+them reach `sandbox/wrap' for a bash command and for the elisp tool's
+background Emacs alike; a command no handler asks anything of is wrapped
+without the key."
+  (harness-tools-shell-test--setup)
+  (let ((seen nil))
+    (harness-tools-shell-test-with-methods
+        (list (cons 'sandbox/wrap (lambda (cwd command &rest opts) (push (cons cwd opts) seen) command)))
+      (harness-tools-shell-test-in-dir
+        (harness-tools-shell-test--as "s1" "bash" :command "true")
+        (should-not (plist-member (cdar seen) :capabilities))
+        (harness-tools-shell-test-with-options
+            (list (cons 10 (lambda (options _sid)
+                             (plist-put (copy-sequence options) :capabilities '("CAP_SYS_PTRACE")))))
+          (setq seen nil)
+          (should (equal "exit 0" (plist-get (harness-tools-shell-test--as "s1" "bash" :command "true") :content)))
+          (should (equal '(("CAP_SYS_PTRACE")) (mapcar (lambda (s) (plist-get (cdr s) :capabilities)) seen)))
+          (setq seen nil)
+          (let ((r (harness-tools-shell-test--as "s1" "elisp" :code "(+ 1 2)")))
+            (should-not (plist-get r :is-error))
+            (should (string-match-p "3" (plist-get r :content))))
+          (should (equal '(("CAP_SYS_PTRACE")) (mapcar (lambda (s) (plist-get (cdr s) :capabilities)) seen))))))))
+
+(ert-deftest harness-tools-shell-bash-capabilities-refuse-a-remote-directory ()
+  "A command on another host is not given a capability of this machine's
+sandbox: asking for one refuses it, naming the option, rather than running
+it with fewer than it was told it has."
+  (harness-tools-shell-test--setup)
+  (harness-tools-shell-test--enable-mock-tramp)
+  (harness-tools-shell-test-in-dir
+    (let* ((remote (concat "/mock::" (directory-file-name root) "/"))
+           (marker (expand-file-name "ran" root))
+           (command (format "touch %s; echo leaked" (shell-quote-argument marker))))
+      (harness-tools-shell-test-with-methods
+          (list (cons 'sandbox/wrap (lambda (_cwd command &rest _opts) command)))
+        (harness-tools-shell-test-with-options
+            (list (cons 10 (lambda (options _sid)
+                             (plist-put (copy-sequence options) :capabilities '("CAP_SYS_PTRACE")))))
+          (let ((r (harness-tools-shell-test--as "s1" "bash" :command command :cwd remote)))
+            (should (plist-get r :is-error))
+            (should (string-search "another host" (plist-get r :content)))
+            (should (string-search "(:capabilities (\"CAP_SYS_PTRACE\"))" (plist-get r :content)))
+            (should-not (file-exists-p marker))))))))
+
 (ert-deftest harness-tools-shell-bwrap-read-only-session ()
   "Under the real bwrap a command of a session whose handler asks for
 :read-only reads the working directory and the session's temporary

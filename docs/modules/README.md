@@ -86,7 +86,7 @@ ui-tasks); `(setq harness-enabled-modules t)` loads every module.
 
 | Module | Loaded | Requires | What it is |
 |---|---|---|---|
-| [access](access.md) | by default | [perms](perms.md), [session](session.md), [tools](tools.md), [readonly](readonly.md) | What a session may reach, in one place: its access profile (network, writing, tools, read-only and given-up directories), request_escalation, which only the user answers, drop_access, which never asks, and the record of every permission judgement. |
+| [access](access.md) | by default | [perms](perms.md), [session](session.md), [tools](tools.md), [readonly](readonly.md) | What a session may reach, in one place: its access profile (network, writing, tools, read-only and given-up directories, the Linux capabilities of its commands), request_escalation, which only the user answers, drop_access, which never asks, and the record of every permission judgement. |
 | [acp](acp.md) | by default |  | Agent Client Protocol: local and TCP transports, server and client. |
 | [acp-remote](acp-remote.md) |  | [acp](acp.md) | ACP for phones and other devices on the network: WebSocket, sign-in by approval in Emacs or OpenID Connect, session secrets. |
 | [agent](agent.md) | by default | [session](session.md), [provider](provider.md), [tools](tools.md) | The turn loop: prompt, stream, run tools, steer, queue. |

@@ -19,7 +19,10 @@ session may reach, in one place, and changes it:
 - Jail: the sandbox its commands run in -- the backend, the ones
   this machine has, the policy, whether commands in its directory
   are confined -- its permission mode, whether it is interactive,
-  the network and writing.
+  the network, writing and the Linux capabilities of its commands:
+  the sandbox drops every one, and you give it some (`C`), by name,
+  or take them away; why none can be given when none can (the
+  backend is not bwrap, the session is read-only) is said there.
 - Directories: those it may write, those it may only read and those
   it gave up, each with where it comes from and what can be done
   with it: give it up or keep it for reading only, revoke a grant,
@@ -60,6 +63,7 @@ grants, prompts, judgements and changes to its access redraw it.
 - `harness-ui-access-filter-clear` — Show every judgement.
 - `harness-ui-access-filter-text` — Show the judgements whose tool, reason, handle or call title has TEXT.
 - `harness-ui-access-filter-tool` — Show the judgements of calls of TOOL; empty for all.
+- `harness-ui-access-grant-capability` — Give this buffer's session's commands the Linux capability NAME.
 - `harness-ui-access-move` — Move this buffer's session to the working directory DIRECTORY.
 - `harness-ui-access-next-call` — Move to the Nth next judged call.
 - `harness-ui-access-next-section` — Move to the Nth next section.
@@ -67,10 +71,12 @@ grants, prompts, judgements and changes to its access redraw it.
 - `harness-ui-access-previous-section` — Move to the Nth previous section.
 - `harness-ui-access-refresh` — Fetch what BUFFER's session may reach, and its judgements, and draw them.
 - `harness-ui-access-restore-at-point` — Give the session back the directory at point, which it gave up.
+- `harness-ui-access-revoke-capability` — Take the capability NAME away from this buffer's session's commands.
 - `harness-ui-access-set-mode` — Choose the permission mode of this buffer's session.
 - `harness-ui-access-set-network` — Let this buffer's session reach the network when ON, else not.
 - `harness-ui-access-take-away` — Take the directory at point away from the session, as its first button does.
 - `harness-ui-access-toggle` — Fold or unfold the call at point, or move to the next button.
+- `harness-ui-access-toggle-capability` — Give the session's commands the capability NAME, or take it away when held.
 - `harness-ui-access-toggle-interaction` — Turn non-interactive mode on or off for this buffer's session.
 - `harness-ui-access-toggle-network` — Turn the network of this buffer's session on or off.
 - `harness-ui-access-toggle-tool` — Turn TOOL off for this buffer's session, or on again when it is off.
@@ -91,6 +97,7 @@ grants, prompts, judgements and changes to its access redraw it.
 - `access/judgements` ([access](access.md))
 - `access/remove-read-dir` ([access](access.md))
 - `access/restore-dir` ([access](access.md))
+- `access/set-capability` ([access](access.md))
 - `access/set-network` ([access](access.md))
 - `access/set-read-only` ([access](access.md))
 - `access/set-tool` ([access](access.md))

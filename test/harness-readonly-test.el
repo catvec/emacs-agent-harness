@@ -196,6 +196,35 @@ The value t is a policy that adds todo_write; any other plist is the policy."
       (harness-readonly-register 'broken (lambda (_s) (error "Broken")))
       (should (plist-get (harness-run-filter 'tools/sandbox-options nil free) :read-only)))))
 
+(ert-deftest harness-readonly-sandbox-options-take-capabilities-off ()
+  "A governed session's commands are given no Linux capability, whichever
+handler before the filter asked for some; the other options stay."
+  (harness-readonly-test-with
+    (let ((sid (harness-readonly-test-session t))
+          (free (harness-readonly-test-session)))
+      (let ((options (harness-readonly--sandbox-options '(:capabilities ("CAP_SYS_PTRACE") :network t :writable ("/x/"))
+                                                        sid)))
+        (should-not (plist-member options :capabilities))
+        (should (eq t (plist-get options :read-only)))
+        (should (plist-member options :network))
+        (should-not (plist-get options :network))
+        (should (equal '("/x/") (plist-get options :writable))))
+      ;; Through the filter chain, from a handler before it.
+      (let ((give (lambda (options _session-id) (plist-put (copy-sequence options) :capabilities '("CAP_SYS_PTRACE")))))
+        (harness-add-filter 'tools/sandbox-options give 50)
+        (unwind-protect
+            (progn
+              (should (equal '(:read-only t :network nil) (harness-run-filter 'tools/sandbox-options nil sid)))
+              ;; A session nobody governs keeps them.
+              (should (equal '(:capabilities ("CAP_SYS_PTRACE")) (harness-run-filter 'tools/sandbox-options nil free)))
+              ;; Fails closed: a session nobody knows, and a policy that breaks.
+              (should (equal '(:read-only t :network nil)
+                             (harness-readonly--sandbox-options '(:capabilities ("CAP_SYS_PTRACE")) "no-such-session")))
+              (harness-readonly-register 'broken (lambda (_s) (error "Broken")))
+              (should-not (plist-member (harness-readonly--sandbox-options '(:capabilities ("CAP_SYS_PTRACE")) free)
+                                        :capabilities)))
+          (harness-remove-filter 'tools/sandbox-options give))))))
+
 (ert-deftest harness-readonly-writes-are-refused-through-the-whole-tool-call ()
   "A governed session's write_file is refused with the reason, and writes nothing."
   (harness-readonly-test-with

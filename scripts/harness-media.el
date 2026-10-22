@@ -2281,7 +2281,7 @@ handle linking the two."
 ;;;; The access view
 
 (defconst harness-media--access-prompt
-  "Audit how API keys are checked, offline: read acme/auth.py and the key rotation notes in ~/src/acme-ops, then run the auth tests."
+  "Audit how API keys are checked, offline: read acme/auth.py and the key rotation notes in ~/src/acme-ops, then run the auth tests under strace to see which files they open."
   "What the access picture's session is asked.")
 
 (defconst harness-media--rotation-notes "# Rotating API keys
@@ -2300,7 +2300,8 @@ handle linking the two."
   "The turn of the access picture's session: an audit kept to its jail.
 It gives the network up itself (`drop_access'), reads the project and
 the ops notes it may only read, is refused the web it gave up and the
-sub-agents the user turned off, and waits for the user on the test run."
+sub-agents the user turned off, and waits for the user on the test run,
+which it traces with the capability the user gave its commands."
   (list
    (harness-media--think "An audit of the key checks needs nothing from the network, so I give it up first: what I read cannot leave this machine.")
    (harness-media--tool "drop_access" :attribute "network" :reason "an audit of the key checks needs no network")
@@ -2311,14 +2312,17 @@ sub-agents the user turned off, and waits for the user on the test run."
    (harness-media--say "The key check compares with `==`. A sub-agent could time it while I read on.")
    (harness-media--tool "spawn_agent" :prompt "Time acme/auth.py's key check for keys that differ early and late."
                         :name "time the key check")
-   (harness-media--say "Sub-agents are off for this session, so I run the auth tests myself.")
-   (harness-media--tool "bash" :command "python3 -m unittest tests.test_auth")))
+   (harness-media--say "Sub-agents are off for this session, so I run the auth tests myself, traced.")
+   (harness-media--tool "bash" :command "strace -f -e trace=openat python3 -m unittest tests.test_auth")))
 
 (defun harness-media--access-session ()
   "Make the access picture's session, set up as a jail, and run its turn.
-The user lets it read the ops notes, not write them, and turns its
-sub-agents off, as the view's buttons do; the turn stops on the test
-run, waiting for the user.  Return the session's id."
+The user lets it read the ops notes, not write them, turns its
+sub-agents off and gives its commands the capability to trace
+processes (CAP_SYS_PTRACE), as the view's buttons do; the turn stops on
+the test run, waiting for the user.  Where the sandbox cannot pass a
+capability on, the capability is left out and the view says none.
+Return the session's id."
   (let ((id (harness-media--new-session :name "Audit the API key checks"
                                         :model "claude:claude-sonnet-5"
                                         :permission-mode 'ask))
@@ -2327,6 +2331,10 @@ run, waiting for the user.  Return the session's id."
     (with-temp-file (expand-file-name "rotation.md" ops) (insert harness-media--rotation-notes))
     (harness-call 'access/add-read-dir id ops)
     (harness-call 'access/set-tool id "spawn_agent" :false)
+    ;; What the jail cannot enforce (no bwrap here, a macOS) is no error of the picture.
+    (condition-case err
+        (harness-call 'access/set-capability id "CAP_SYS_PTRACE" t)
+      (error (message "media: no capability for the access picture: %s" (harness-error-message err))))
     ;; Idle too: where no sandbox confines bash, the network given up
     ;; takes it away, and the turn ends refused instead of waiting.
     (harness-media--prompt id harness-media--access-prompt '(blocked idle))
@@ -2373,7 +2381,8 @@ machine's shows.  Only those directories are taken for others:
 
 (defun harness-media-shot-access ()
   "The access view of a session kept to a jail, from the top.
-The sandbox and mode, the directories (the ops notes read-only), the
+The sandbox and mode, the network the agent gave up, the capability the
+user gave its commands, the directories (the ops notes read-only), the
 tools (the web gone with the network the agent gave up, sub-agents
 turned off by the user), the rules and the request waiting on the user."
   (harness-media--access-shot "access" nil))
@@ -3840,6 +3849,9 @@ The work starts once Emacs has finished starting up."
               harness-media-only (split-string (or (getenv "HARNESS_MEDIA_SHOTS") "") "[ ,]+" t)
               harness-media-project (expand-file-name "~/src/acme-api/"))
         (unless (display-graphic-p) (error "The pictures need a graphical display"))
+        ;; Nobody moves the pointer, so what happens to lie under it must
+        ;; not light up in a picture as if hovered.
+        (setq mouse-highlight nil)
         (dolist (name harness-media-only)
           (unless (assoc name harness-media-shots) (error "No picture is called %s" name)))
         (make-directory harness-media-output t)
