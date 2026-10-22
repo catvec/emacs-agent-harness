@@ -12843,7 +12843,28 @@ thread (`2/3`), its author (marked "you" or "agent"), the time (exact,
 and relative), the revision it was written against, a "draft" mark, the
 comment it answers when that is not the one above (`↳ re 1/3`), a `▸
 where` button that shows where the comment was made, and for an agent's
-comment `↗ conversation`, then the text. `change-review-ui-thread-line`
+comment `↗ conversation`, then the text.  No line of it is wider than
+the width it is drawn to (by default the columns of the window that
+shows the buffer, `change-review-ui-current-width`): a header that would
+be says less in steps -- for a closed thread how long ago it was closed
+for the date, and who closed it only if it was not the user; then who
+alone; then neither; the count of comments; the buttons.  For a comment
+the date for how long ago, the revision, the words of its links, the
+time, the marks -- and is cut only when it has given everything up.  Under a line of a diff a thread
+also folds (`:fold`): a closed thread is one line, `▸ ✓ 3f9a1c · 3 comments
+· closed 2h ago  “Why eighteen?…”`, no wider than 100 columns and the first
+words of what its root says rather than of what that quotes
+(`change-review-ui--summary`); `TAB` or a click opens it to its conversation
+(`▾`), and one that is taller than the window has room for
+(`change-review-ui-max-thread-lines`) is cut with `… 8 more lines`, which
+`TAB` or a click draws in full.  How a thread is folded is the set's:
+`change-review-ui-thread-fold` reads it from a weak table, keyed by the
+set and the thread's id with the status it had when it was folded, so a
+view drawn again, another view and the Ediff of the next file keep it, and
+a thread whose status changed is what its status makes it at first.  The
+drawing notes which threads it cut (`change-review-ui--trimmed`): `TAB`
+goes one line, conversation, all of it when it did, one line again.
+`change-review-ui-thread-line`
 is the same thread as one row of a list.  The report's rows, the threads
 view (`change-review-open-threads`, which lists every thread by file,
 filtered by status with f and F) and the threads under the lines of
@@ -12956,7 +12977,7 @@ configuration to give back.  n is Ediff's next difference, wrapped
 (`harness-ui-patch-review-next-difference`): at the last difference it
 says once that the next difference is the next file, and the same key
 again goes on to it in Ediff.  The control panel's map is a child of
-Ediff's with c, r, x, T, e, a, n, N, P and q (under evil,
+Ediff's with c, r, x, T, TAB, e, a, n, N, P and q (under evil,
 `evil-normalize-keymaps` puts it where evil-collection made Ediff's map
 overriding) and a brief help of its own
 (`ediff-brief-help-message-function`); quitting goes through
@@ -12974,12 +12995,26 @@ where it was ("line 44 (was 42)") or that its line changed since.  In
 either version (`harness-ui-patch-review-lines-mode`, whose map has the
 library's for its parent) c starts a thread, a draft, on the line at
 point -- on the branch's side it is a line of the branch, on the merge
-base's one of the merge base -- and r, x, o and RET act on the thread
-under point; e edits the draft there, or goes to the box.  In the
+base's one of the merge base -- and r, x, o, RET and TAB act on the thread
+under point (TAB is the key of the major mode where no thread is under
+the line); e edits the draft there, or goes to the box.  In the
 control panel c comments on the last line of the current difference (at
 the merge base for a difference that only deletes), r replies to the
-thread there, x closes or opens it and T lists all the threads, d in
-that view coming back to Ediff at the thread's line.  A comment is read
+thread there, x closes or opens it, TAB folds the threads the difference
+spans (`harness-ui-patch-review--difference-threads`: those placed on a
+line it covers, in the version they are in) and T lists all the threads,
+d in that view coming back to Ediff at the thread's line.  The threads are
+drawn to the room the window that shows the version has: the width of its
+lines and its height, which limits a thread
+(`change-review-ui-current-size`).  A version is built before Ediff has
+windows to show it in, so the review draws the threads again once Ediff
+laid the frame out (`harness-ui-patch-review--redraw-sides`), and a
+buffer-local `window-size-change-functions` hook
+(`harness-ui-patch-review--side-resized`), which redisplay runs when a
+window is added or changes its size -- a split toggled with `|`, the box
+growing as a long message is typed in it -- only sets a debounced timer;
+the timer compares the size the threads were drawn to with the window's
+and draws them again when they differ.  A comment is read
 in a buffer of its own (`change-review-ui-read-function`; C-c C-c keeps
 it as a draft), and the excerpt it records is the change it ends and at
 most `change-review-diff-context-lines` lines before it, not from the

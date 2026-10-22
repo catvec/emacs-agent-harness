@@ -56,6 +56,7 @@
 (declare-function harness-ui-tasks--find "harness-ui-tasks")
 (declare-function harness-ui-report-popout "harness-ui-report")
 (declare-function harness-acp--drop-client "harness-acp")
+(declare-function ediff-toggle-split "ediff-util" ())
 
 ;;;; A repository with a task's branch
 
@@ -1111,8 +1112,8 @@ current difference; e edits your draft there.  The threads draw again."
           (call-interactively #'change-review-ui-toggle-status))
         (should-not (change-review-thread-open-p thread))
         (change-review-ui-flush)
-        ;; Closed, it is a line.
-        (should (string-search "closed by" (funcall shown)))
+        ;; Closed, it is a line, and its triangle points right.
+        (should (string-match-p "▸ ✓ [^ ]+ · 2 comments · closed just now" (funcall shown)))
         (should-not (string-search "2/2" (funcall shown)))
         ;; From the control panel: on the current difference, line 2.
         (with-current-buffer control
@@ -1549,6 +1550,190 @@ thread of its own there, of the branch's line or of the merge base's."
                            (overlays-in (point-min) (point-max)))))
         (with-current-buffer control
           (harness-ui-patch-review-ediff-quit))))))
+
+;;;; The threads in Ediff: folded, and to the room the windows have
+
+(defun harness-ui-patch-review-test--drawn (buffer)
+  "Return the threads drawn in the version BUFFER: an alist of (LINE . TEXT).
+The text has no properties and starts with the newline that puts it under
+its line."
+  (with-current-buffer buffer
+    (sort (cl-loop for ov in (overlays-in (point-min) (point-max))
+                   for text = (or (overlay-get ov 'after-string) (overlay-get ov 'before-string))
+                   when (and text (overlay-get ov 'change-review-thread))
+                   collect (cons (line-number-at-pos (overlay-start ov)) (substring-no-properties text)))
+          (lambda (a b) (< (car a) (car b))))))
+
+(defun harness-ui-patch-review-test--widest (text)
+  "Return the width of the widest line of TEXT."
+  (apply #'max 0 (mapcar #'string-width (split-string text "\n"))))
+
+(ert-deftest harness-ui-patch-review-folds-threads-in-ediff ()
+  "A closed thread is one line in the version Ediff shows, its triangle pointing
+right, and TAB under it opens it to its conversation and folds it again: from the
+version, on the line at point, and from the control panel, for the threads of
+the current difference.  What was folded stays when the next file comes and the
+first comes back."
+  (harness-ui-patch-review-test-with-task
+    (let* ((popout (harness-ui-patch-review-test--changes board id))
+           (review (gethash id harness-ui-patch-review--reviews))
+           (set (harness-ui-patch-review--r-set review))
+           (two (harness-ui-patch-review-test--comment-on review "a.el" '(:new . 2) "Why two?"))
+           (_eighteen (harness-ui-patch-review-test--comment-on review "a.el" '(:new . 18) "Why eighteen?"))
+           (thread (harness-ui-patch-review-test--thread-of review two))
+           (inhibit-message t))
+      (ignore popout)
+      (change-review-reply set two "Because two reads better." :author (change-review-user "Noah" "noah@example.org")
+                           :time (float-time))
+      (change-review-close set thread)
+      (harness-ui-patch-review-ediff review 0)
+      (let* ((control (harness-ui-patch-review-test--control review 0))
+             (new (nth 2 (harness-ui-patch-review--ediff-buffers review)))
+             (text (lambda (line) (cdr (assq line (harness-ui-patch-review-test--drawn new))))))
+        ;; The closed thread is a line; the open one is in its conversation.
+        (should (string-match-p "\n▸ ✓ [^ ]+ · 2 comments · closed.*“Why two\\?”\\'" (funcall text 2)))
+        (should (= 2 (length (split-string (funcall text 2) "\n"))))
+        (should (string-match-p "\n▾ ● [^ ]+ · 1 comment · open " (funcall text 18)))
+        (should (string-search "1/1  Noah" (funcall text 18)))
+        ;; In the version, TAB on the line of the thread.
+        (with-current-buffer new
+          (goto-char (point-min))
+          (forward-line 1)
+          (should (eq #'change-review-ui-cycle-fold (key-binding (kbd "TAB"))))
+          (call-interactively #'change-review-ui-cycle-fold))
+        (change-review-ui-flush)
+        (should (eq 'expanded (change-review-ui-thread-fold set thread)))
+        (should (string-match-p "\n▾ ✓ [^ ]+ · 2 comments · closed .*\n  ┃ 1/2  Noah.*\n  ┃      Why two\\?\n  ┃ 2/2  Noah.*\n  ┃      Because two reads better\\."
+                                (funcall text 2)))
+        (with-current-buffer new
+          (call-interactively #'change-review-ui-cycle-fold))
+        (change-review-ui-flush)
+        (should (eq 'collapsed (change-review-ui-thread-fold set thread)))
+        (should (string-prefix-p "\n▸ ✓ " (funcall text 2)))
+        ;; From the control panel: the current difference is line 2, where the thread is.
+        (with-current-buffer control
+          (should (eq #'harness-ui-patch-review-cycle-fold (key-binding (kbd "TAB"))))
+          (should (string-search "[Fold thread] TAB" (harness-ui-patch-review-test--text control)))
+          (should (= 0 ediff-current-difference))
+          (call-interactively #'harness-ui-patch-review-cycle-fold))
+        (change-review-ui-flush)
+        (should (eq 'expanded (change-review-ui-thread-fold set thread)))
+        (should (string-prefix-p "\n▾ ✓ " (funcall text 2)))
+        ;; The second difference has the open thread: it goes to one line, and back.
+        (with-current-buffer control
+          (ediff-next-difference)
+          (call-interactively #'harness-ui-patch-review-cycle-fold))
+        (change-review-ui-flush)
+        (should (string-prefix-p "\n▸ ● " (funcall text 18)))
+        (should (string-prefix-p "\n▾ ✓ " (funcall text 2)))
+        (with-current-buffer control
+          (call-interactively #'harness-ui-patch-review-cycle-fold))
+        (change-review-ui-flush)
+        (should (string-prefix-p "\n▾ ● " (funcall text 18)))
+        ;; Folded on the next file, and still so when the first comes back.
+        (with-current-buffer control
+          (call-interactively #'harness-ui-patch-review-ediff-next-file))
+        (let ((control-2 (harness-ui-patch-review-test--control review 1)))
+          (with-current-buffer control-2
+            ;; b.el has no thread: there is none to fold.
+            (should-error (call-interactively #'harness-ui-patch-review-cycle-fold) :type 'user-error)
+            (call-interactively #'harness-ui-patch-review-ediff-previous-file)))
+        (harness-ui-patch-review-test--control review 0)
+        (let ((again (nth 2 (harness-ui-patch-review--ediff-buffers review))))
+          (should-not (eq again new))
+          (should (string-prefix-p "\n▾ ✓ " (cdr (assq 2 (harness-ui-patch-review-test--drawn again))))))
+        (with-current-buffer (harness-ui-patch-review-test--control review 0)
+          (call-interactively #'harness-ui-patch-review-ediff-quit))))))
+
+(ert-deftest harness-ui-patch-review-folds-the-threads-of-a-deletion ()
+  "The control panel's TAB folds the threads of the merge base's lines a
+difference removes, those of the branch's it adds: a thread is in the
+difference if it is placed on a line the difference spans, on its side."
+  (harness-ui-patch-review-test-with-task
+    (let* ((popout (harness-ui-patch-review-test--changes board id))
+           (review (gethash id harness-ui-patch-review--reviews))
+           (set (harness-ui-patch-review--r-set review))
+           (b3 (harness-ui-patch-review-test--comment-on review "b.el" '(:old . 3) "Who used b3?"))
+           (thread (harness-ui-patch-review-test--thread-of review b3))
+           (inhibit-message t))
+      (ignore popout)
+      (change-review-close set thread)
+      (harness-ui-patch-review-ediff review 1)
+      (let* ((control (harness-ui-patch-review-test--control review 1))
+             (old (nth 1 (harness-ui-patch-review--ediff-buffers review))))
+        (with-current-buffer control
+          ;; b.el is deleted: the one difference spans all five lines of the old, none of the new.
+          (should (equal '(:old (1 . 5) :new nil) (harness-ui-patch-review--difference-ranges)))
+          (should (equal (list thread) (harness-ui-patch-review--difference-threads
+                                        review (harness-ui-patch-review-test--file review "b.el")))))
+        (should (string-prefix-p "\n▸ ✓ " (cdr (assq 3 (harness-ui-patch-review-test--drawn old)))))
+        (with-current-buffer control
+          (call-interactively #'harness-ui-patch-review-cycle-fold))
+        (change-review-ui-flush)
+        (should (string-prefix-p "\n▾ ✓ " (cdr (assq 3 (harness-ui-patch-review-test--drawn old)))))
+        (with-current-buffer control (call-interactively #'harness-ui-patch-review-ediff-quit))))))
+
+(ert-deftest harness-ui-patch-review-draws-threads-to-the-windows-of-ediff ()
+  "The threads in the versions fit the windows that show them: no line is
+wider, whether Ediff lays them out one over the other or side by side; and
+they are drawn again when a window changes its size."
+  (harness-ui-patch-review-test-with-task
+    (let* ((popout (harness-ui-patch-review-test--changes board id))
+           (review (gethash id harness-ui-patch-review--reviews))
+           (set (harness-ui-patch-review--r-set review))
+           (comment (harness-ui-patch-review-test--comment-on
+                     review "a.el" '(:new . 2)
+                     (string-join (make-list 12 "A question that goes on and on and on") " ")))
+           (thread (harness-ui-patch-review-test--thread-of review comment))
+           (fits (lambda (buffer)
+                   ;; Every thread drawn in BUFFER is narrower than its window.
+                   (let ((columns (window-max-chars-per-line (get-buffer-window buffer)))
+                         (drawn (harness-ui-patch-review-test--drawn buffer)))
+                     (should drawn)
+                     (dolist (entry drawn)
+                       (should (<= (harness-ui-patch-review-test--widest (cdr entry)) columns)))
+                     columns)))
+           (inhibit-message t))
+      (ignore popout set)
+      (harness-ui-patch-review-ediff review 0)
+      (let* ((control (harness-ui-patch-review-test--control review 0))
+             (new (nth 2 (harness-ui-patch-review--ediff-buffers review)))
+             (stacked (funcall fits new)))
+        ;; Drawn to the window, not to the 80 columns a buffer no window shows gets.
+        (should (equal (change-review-ui-current-size)
+                       (with-current-buffer new (change-review-ui-current-size))))
+        (should (equal (with-current-buffer new (change-review-ui-current-size))
+                       (buffer-local-value 'harness-ui-patch-review--drawn-size new)))
+        ;; Side by side: the windows are half as wide, and the thread is drawn again.
+        (with-current-buffer control
+          (ediff-toggle-split))
+        (should (< (window-max-chars-per-line (get-buffer-window new)) stacked))
+        (should-not (equal (buffer-local-value 'harness-ui-patch-review--drawn-size new)
+                           (with-current-buffer new (change-review-ui-current-size))))
+        (with-current-buffer new (harness-ui-patch-review--side-resized (get-buffer-window new)))
+        (harness-test-wait (lambda ()
+                             (equal (buffer-local-value 'harness-ui-patch-review--drawn-size new)
+                                    (with-current-buffer new (change-review-ui-current-size))))
+                           5 "the thread to be drawn again for the narrower window")
+        (should (< (funcall fits new) stacked))
+        ;; Nothing to draw again once it is as wide as the window.
+        (with-current-buffer new
+          (let (drawn)
+            (setq-local change-review-ui--redraw-function (lambda () (setq drawn t)))
+            (harness-ui-patch-review--redraw-side new)
+            (should-not drawn)
+            (setq-local change-review-ui--redraw-function
+                        (lambda () (harness-ui-patch-review--decorate
+                                    review (harness-ui-patch-review-test--file review "a.el") new 'new nil)))))
+        ;; The thread is cut where it is taller than the window.
+        (with-current-buffer new
+          (let ((change-review-ui-max-thread-lines 4))
+            (funcall change-review-ui--redraw-function)
+            (should (string-match-p "┃      … [0-9]+ more lines\\'"
+                                    (cdr (assq 2 (harness-ui-patch-review-test--drawn new)))))
+            (should (<= (length (split-string (cdr (assq 2 (harness-ui-patch-review-test--drawn new))) "\n")) 5))))
+        (ignore thread)
+        (with-current-buffer control (call-interactively #'harness-ui-patch-review-ediff-quit))))))
 
 ;;;; Self-contained
 

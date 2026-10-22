@@ -84,6 +84,16 @@ the one above (`↳ re 1/3`), a `▸ where` button that shows where it was
 made, and for an agent's comment `↗ conversation`, then its text.
 `change-review-ui-thread-line` draws the same thread as a row of a list.
 
+**No line is wider than the room it has.** A thread is drawn to a width,
+by default the columns of the window that shows the buffer, and a line
+that would be wider says less until it fits: a closed thread says how
+long ago instead of the date and drops who closed it unless it was
+someone else, a comment's header gives up the date for how long ago, then
+the revision, the words of its links, the time and the "(you)" and
+"(agent)" marks, and the header of a thread the count of its comments and
+at last its buttons. So a thread in a narrow window, a side-by-side
+comparison say, does not wrap.
+
 **The threads view**, `change-review-open-threads`, lists all the
 threads of a set, grouped by file, with a filter on their status
 (`change-review-ui-default-filter`). Point is on a comment, and the keys
@@ -105,12 +115,30 @@ act on it:
 
 **The diff view**, `change-review-open-diff`, shows the files of a
 version as the unified diff (it is a `diff-mode`, so its own keys work),
-with the threads of each line under it, drawn by the same function. A
-closed thread draws as one line unless `change-review-ui-collapse-closed-in-diff`
-says not. `c` comments on the line at point, or the region's lines; `r`,
-`x`, `o`, `e` and `RET` act on the thread under point as they do in the
-threads view; `C-c C-n` and `C-c C-p` move between threads, `C-c C-t`
-lists them, `C-c C-f` changes which show.
+with the threads of each line under it, drawn by the same function. `c`
+comments on the line at point, or the region's lines; `r`, `x`, `o`, `e`
+and `RET` act on the thread under point as they do in the threads view;
+`C-c C-n` and `C-c C-p` move between threads, `C-c C-t` lists them,
+`C-c C-f` changes which show.
+
+**Folding.** Under a line a thread can be folded, to keep the lines of
+the file in sight. A closed thread is **one line** at first (unless
+`change-review-ui-collapse-closed-in-diff` says not): a triangle `▸`, its
+mark and short id, how long ago it was closed, and the first words of
+what it says (of what was said, not of what it quotes: a comment that
+opens with `> ` lines is summed up by those that follow). `TAB` on the
+line it is under, a click on its triangle or on its words, or `RET`
+opens it to its **conversation**, the triangle `▾`; a thread open to
+begin with can be folded to one line the same way. A thread that is
+longer than the window has room for (`change-review-ui-max-thread-lines`:
+what the window shows, a number, or nil) is cut, with how many lines more
+there are in a line of its own, `… 8 more lines`: `TAB` again, or a
+click on it, shows **all** of it, and one more `TAB` folds it to a line.
+Where several threads are under a line they are folded together, as the
+first goes. What was folded is kept with the set, so a view drawn again
+and another view of the same set show it so; a thread whose status
+changes goes back to what a thread of its new status is at first.
+Where there is no thread on the line, `TAB` is what it was.
 
 **Your own views.** A side-by-side comparison, or any buffer that shows
 the lines of a file, draws the threads under its lines with
@@ -118,10 +146,19 @@ the lines of a file, draws the threads under its lines with
 on `change-review-ui-lines-mode` (or by using its map as the parent of
 its own). The views follow the set: whatever changes it, they draw
 again soon (`change-review-changed-functions`, `change-review-ui-refresh`).
+A view that lets its threads be folded passes `:fold` with how the set
+has the thread (`change-review-ui-thread-fold`) and `:max-lines` (what
+`change-review-ui-current-max-lines` says), and a `:width` to fit
+(`change-review-ui-current-width`); `change-review-ui-current-size` is
+both, which a view that follows its window compares with the size it drew
+at, to draw again when the window gives the threads another.
+`change-review-ui-set-fold` and `change-review-ui-cycle-folds` fold a
+thread from code.
 
 The options of the views are `change-review-ui-time-format`,
 `change-review-ui-relative-times`, `change-review-ui-width`,
 `change-review-ui-default-filter`, `change-review-ui-collapse-closed-in-diff`,
+`change-review-ui-max-thread-lines`,
 `change-review-ui-read-function` (a comment is read in a `string-edit`
 buffer by default; `C-c C-c` keeps it as a draft) and
 `change-review-ui-directory`.

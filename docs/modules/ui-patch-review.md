@@ -69,7 +69,8 @@ branch did since -- a tree of the directories and their files:
               at the bottom of it with its box (see below).  The
               control panel keeps Ediff's keys and has more: c
               comments on the current difference, r replies to the
-              thread there, T lists the threads, e goes to the
+              thread there, TAB folds the threads of the difference
+              (see below), T lists the threads, e goes to the
               report's box, a approves the file, N and P go on to the
               next or previous file, q comes back to the report as it
               was, point on the next file.  n is Ediff's next
@@ -88,6 +89,20 @@ branch did since -- a tree of the directories and their files:
               the report and in Ediff, lists all the threads by file,
               with a filter on their status; d there comes back to
               Ediff, at the thread's line.
+  folds       A closed thread is one line under its line, the
+              first words of what it says, no wider than the window
+              shows; so is any thread folded.  TAB on its line (in
+              the control panel: on the threads of the current
+              difference), or a click on its triangle or its words,
+              opens it to its conversation, ▸ becoming ▾; a thread
+              longer than the window has room for is cut, saying
+              how many lines more there are, and TAB again shows all
+              of it, then one more folds it to a line.  What was folded
+              is kept for the review, so it stays so when the next file
+              comes and the first comes back.  The threads are drawn to
+              the width of the window that shows them, and again when
+              it changes, as it does when the two versions are put
+              side by side.
 
 Replies you wrote by hand before there were threads -- under a quote of
 the agent's words, in a round of feedback or typed in its session while it
@@ -153,6 +168,7 @@ part of the report out.
 - `harness-ui-patch-review-assume-viewed` — Take every file as viewed but those the branch's newest commit changed.
 - `harness-ui-patch-review-comment` — Comment on the current difference with TEXT.
 - `harness-ui-patch-review-comment-line` — Comment on the line at point in the version Ediff shows.
+- `harness-ui-patch-review-cycle-fold` — Fold the threads of the current difference: one line, conversation, all.
 - `harness-ui-patch-review-ediff` — Compare the file of the row at point in Ediff, merge base and branch.
 - `harness-ui-patch-review-ediff-next-file` — On to the next file of the task's changes, in Ediff.
 - `harness-ui-patch-review-ediff-previous-file` — On to the previous file of the task's changes, in Ediff.
@@ -205,4 +221,5 @@ part of the report out.
 - `harness-ui-event-functions` → `harness-ui-patch-review--on-event`
 - `harness-ui-report-panel-functions` → `harness-ui-patch-review--panel`
 - `harness-ui-review-pending-functions` → `harness-ui-patch-review--pending-p`
+- `window-size-change-functions` → `harness-ui-patch-review--side-resized`
 

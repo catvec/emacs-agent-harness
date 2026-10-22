@@ -59,7 +59,8 @@
 ;;               at the bottom of it with its box (see below).  The
 ;;               control panel keeps Ediff's keys and has more: c
 ;;               comments on the current difference, r replies to the
-;;               thread there, T lists the threads, e goes to the
+;;               thread there, TAB folds the threads of the difference
+;;               (see below), T lists the threads, e goes to the
 ;;               report's box, a approves the file, N and P go on to the
 ;;               next or previous file, q comes back to the report as it
 ;;               was, point on the next file.  n is Ediff's next
@@ -78,6 +79,20 @@
 ;;               the report and in Ediff, lists all the threads by file,
 ;;               with a filter on their status; d there comes back to
 ;;               Ediff, at the thread's line.
+;;   folds       A closed thread is one line under its line, the
+;;               first words of what it says, no wider than the window
+;;               shows; so is any thread folded.  TAB on its line (in
+;;               the control panel: on the threads of the current
+;;               difference), or a click on its triangle or its words,
+;;               opens it to its conversation, ▸ becoming ▾; a thread
+;;               longer than the window has room for is cut, saying
+;;               how many lines more there are, and TAB again shows all
+;;               of it, then one more folds it to a line.  What was folded
+;;               is kept for the review, so it stays so when the next file
+;;               comes and the first comes back.  The threads are drawn to
+;;               the width of the window that shows them, and again when
+;;               it changes, as it does when the two versions are put
+;;               side by side.
 ;;
 ;; Replies you wrote by hand before there were threads -- under a quote of
 ;; the agent's words, in a round of feedback or typed in its session while it
@@ -313,6 +328,12 @@ next file instead of staying there.")
 (defvar-local harness-ui-patch-review--box-limit nil
   "In a report shown beside an Ediff, the height limit it had before: (LIMIT).
 Nil while the report is not limited.")
+
+(defvar-local harness-ui-patch-review--drawn-size nil
+  "In a version Ediff compares, what its threads were drawn to.
+\(WIDTH . MAX-LINES), the window's room at the last drawing
+\(`change-review-ui-current-size'); the drawing is made again when the
+window has another.")
 
 (defvar harness-ui-patch-review--active nil
   "Non-nil while the module is on: reports show the changes.")
@@ -1643,7 +1664,7 @@ It also says how many threads the review has, open and closed."
                             'face 'harness-dim-face))))))
 
 (defconst harness-ui-patch-review--hint
-  "RET or a click compares a file in Ediff, n and p move between them, a approves it, A approves all, V takes the files the newest commit did not change as viewed, t shows a tree or a flat list, T lists the threads by file.  In Ediff c comments on a difference -- in either version, on the line at point -- as a thread of its own, r replies to a thread and x closes it or opens it again, and e goes to the box below (C-c C-d comes back to Ediff); n at the last difference offers the next file, N and P go on to the next or previous file, q comes back here."
+  "RET or a click compares a file in Ediff, n and p move between them, a approves it, A approves all, V takes the files the newest commit did not change as viewed, t shows a tree or a flat list, T lists the threads by file.  In Ediff c comments on a difference -- in either version, on the line at point -- as a thread of its own, r replies to a thread, x closes it or opens it again and TAB folds it to a line or opens a closed one to its conversation, and e goes to the box below (C-c C-d comes back to Ediff); n at the last difference offers the next file, N and P go on to the next or previous file, q comes back here."
   "What the report says under the changes.")
 
 (defun harness-ui-patch-review--section (review counts)
@@ -1939,6 +1960,53 @@ As a draft, in the thread: it goes with the feedback."
   (pcase-let ((`(,review . ,thread) (harness-ui-patch-review--ediff-thread)))
     (change-review-ui-toggle-thread (harness-ui-patch-review--r-set review) thread)))
 
+(defun harness-ui-patch-review--difference-ranges ()
+  "Return the lines the current difference of this Ediff spans, per side.
+A plist of `:old' and `:new', each (FIRST . LAST) lines of that version, nil
+for a side the difference has no lines on, a deletion's branch side."
+  (let ((n ediff-current-difference))
+    (when (and (integerp n) (>= n 0) (< n ediff-number-of-differences))
+      (let ((range (lambda (type buffer)
+                     (let ((beg (ediff-get-diff-posn type 'beg n))
+                           (end (ediff-get-diff-posn type 'end n)))
+                       (when (< beg end)
+                         (with-current-buffer buffer
+                           (cons (line-number-at-pos beg t) (line-number-at-pos (1- end) t))))))))
+        (list :old (funcall range 'A ediff-buffer-A)
+              :new (funcall range 'B ediff-buffer-B))))))
+
+(defun harness-ui-patch-review--difference-threads (review file)
+  "Return the threads about FILE of REVIEW placed in the current difference.
+All of them, on any line it spans, in either version: those the
+difference shows."
+  (let ((ranges (harness-ui-patch-review--difference-ranges))
+        (set (harness-ui-patch-review--r-set review)))
+    (cl-remove-if-not
+     (lambda (thread)
+       (let* ((placement (change-review-placement set thread))
+              (line (plist-get placement :line))
+              (range (plist-get ranges (if (eq (plist-get placement :side) 'old) :old :new))))
+         (and (integerp line) range (<= (car range) line (cdr range)))))
+     (harness-ui-patch-review--file-threads review file))))
+
+(defun harness-ui-patch-review-cycle-fold ()
+  "Fold the threads of the current difference: one line, conversation, all.
+In the control panel of an Ediff of a task's change.  A closed thread
+is one line at first; this shows its conversation, then all of it where
+the window had no room for all of it, then one line again, for every
+thread the difference shows, the first deciding.  In a version, TAB does
+this for the threads under the line at point, and clicking the triangle
+or the words of a thread does it for that thread."
+  (interactive)
+  (let* ((review (harness-ui-patch-review--current))
+         (file (or (and (integerp harness-ui-patch-review--index)
+                        (nth harness-ui-patch-review--index (harness-ui-patch-review--r-files review)))
+                   (user-error "No file here")))
+         (threads (harness-ui-patch-review--difference-threads review file)))
+    (unless threads
+      (user-error "No thread at this difference; TAB in a version folds the one under its line"))
+    (change-review-ui-cycle-folds (harness-ui-patch-review--r-set review) threads)))
+
 (defun harness-ui-patch-review-edit-comment ()
   "Edit your draft in the thread at point in Ediff; else go to the feedback box.
 In a version, the draft in the thread under the line at point; in the
@@ -2038,7 +2106,8 @@ Those of the library's threads under a line -- r, x, o, RET -- are its.")
 \\[harness-ui-patch-review-comment-line] comments on the line at point, as a thread of its own.
 \\[change-review-ui-reply] replies to the thread under it.
 \\[change-review-ui-toggle-status] closes it or opens it again.
-\\[change-review-ui-return] shows where its comments were made.
+\\[change-review-ui-cycle-fold] folds it: one line, its conversation, all of it.
+\\[change-review-ui-return] opens it if it is one line, else shows where its comments were made.
 \\[harness-ui-patch-review-approve-ediff] approves the file.
 \\[harness-ui-patch-review-edit-comment] edits your draft there, or goes to the feedback box.
 \\[harness-ui-patch-review-threads] lists the threads."
@@ -2054,11 +2123,18 @@ base's for a comment on a removed line); a thread on the file as a
 whole, or whose line is gone, at the top of the branch's version.
 PLACED says where each thread is, an alist of its id to its place
 \(`harness-ui-patch-review--place-from-texts'), for those the report has
-not placed yet."
+not placed yet.  No line is wider than the window shows, and a thread is
+no taller than it has room for (`change-review-ui-current-size'): the
+window's size at this drawing is kept, for a window that changes it
+\(`harness-ui-patch-review--side-resized').  A closed thread is a line,
+which TAB or a click opens to its conversation, as the library's fold
+says (`change-review-ui-thread-fold')."
   (with-current-buffer buffer
-    (let ((inhibit-read-only t)
-          (set (harness-ui-patch-review--r-set review))
-          (width (change-review-ui-current-width)))
+    (let* ((inhibit-read-only t)
+           (set (harness-ui-patch-review--r-set review))
+           (size (change-review-ui-current-size))
+           (width (car size)))
+      (setq harness-ui-patch-review--drawn-size size)
       (change-review-ui-clear-overlays)
       (save-excursion
         (dolist (thread (harness-ui-patch-review--file-threads review file))
@@ -2071,11 +2147,8 @@ not placed yet."
                  (on (or (plist-get placement :side) (change-review-location-side location) 'new))
                  (args (list :view 'diff :placement placement :width width :indent "  "
                              :details change-review-ui--details
-                             :collapsed (and (not (change-review-thread-open-p thread))
-                                             (not (cl-some (lambda (c)
-                                                             (member (change-review-comment-id c)
-                                                                     change-review-ui--details))
-                                                           (change-review-thread-comments thread)))))))
+                             :fold (change-review-ui-thread-fold set thread)
+                             :max-lines (cdr size))))
             (cond
              ((and line (eq on side))
               (goto-char (point-min))
@@ -2096,6 +2169,29 @@ not placed yet."
         (forward-line (1- line))
         (set-window-point window (point)))
       (with-selected-window window (recenter)))))
+
+(defun harness-ui-patch-review--redraw-side (buffer)
+  "Draw the threads of the version BUFFER again, when its window's room changed."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (when (and (functionp change-review-ui--redraw-function)
+                 (not (equal harness-ui-patch-review--drawn-size (change-review-ui-current-size))))
+        (funcall change-review-ui--redraw-function)))))
+
+(defun harness-ui-patch-review--side-resized (&optional _window)
+  "Draw the threads of this version again soon, if its window has another room.
+On `window-size-change-functions', buffer-locally in a version Ediff
+compares: the window is new, or changed its size.  Redisplay runs it, so
+all it does is set a timer, which finds out whether the room changed
+\(`harness-ui-patch-review--redraw-side') once the size has settled."
+  (harness-debounce (list 'harness-ui-patch-review-side (current-buffer)) 0.1
+                    #'harness-ui-patch-review--redraw-side (current-buffer)))
+
+(defun harness-ui-patch-review--redraw-sides (review)
+  "Draw the threads in the two versions of REVIEW's Ediff to their room, now."
+  (let ((ediff (harness-ui-patch-review--r-ediff review)))
+    (dolist (buffer (list (plist-get ediff :a) (plist-get ediff :b)))
+      (harness-ui-patch-review--redraw-side buffer))))
 
 (defun harness-ui-patch-review--side-buffer (review file side text &optional placed)
   "Return a buffer of TEXT, FILE's version on SIDE, `old' or `new', for Ediff.
@@ -2128,6 +2224,10 @@ they are, as `harness-ui-patch-review--place-from-texts' gives it)."
                   ;; The threads draw again when the set changes.
                   change-review-ui--redraw-function
                   (lambda () (harness-ui-patch-review--decorate review file buffer side nil)))
+      ;; The threads are drawn to the room the window has: when it gets
+      ;; another -- Ediff lays the frame out, a split is toggled, the box
+      ;; grows -- they are drawn again.
+      (add-hook 'window-size-change-functions #'harness-ui-patch-review--side-resized nil t)
       (harness-ui-patch-review-lines-mode 1)
       (harness-ui-patch-review--decorate review file buffer side placed)
       (set-buffer-modified-p nil)
@@ -2187,7 +2287,8 @@ many were compared already (`harness-ui-patch-review--ediff-progress')."
                        "   " (harness-ui-patch-review--help-button "[Threads]" #'harness-ui-patch-review-threads "T")
                        "   " (harness-ui-patch-review--help-button "[Feedback box]" #'harness-ui-patch-review-edit-comment "e")
                        "   " (harness-ui-patch-review--help-button "[Approve]" #'harness-ui-patch-review-approve-ediff "a")))
-         (elsewhere (concat (harness-ui-patch-review--help-button "[Next file]" #'harness-ui-patch-review-ediff-next-file "N")
+         (elsewhere (concat (harness-ui-patch-review--help-button "[Fold thread]" #'harness-ui-patch-review-cycle-fold "TAB")
+                            "   " (harness-ui-patch-review--help-button "[Next file]" #'harness-ui-patch-review-ediff-next-file "N")
                             "   " (harness-ui-patch-review--help-button "[Previous file]" #'harness-ui-patch-review-ediff-previous-file "P")
                             "   " (harness-ui-patch-review--help-button "[Back to the report]" #'harness-ui-patch-review-ediff-quit "q")
                             "   " (propertize "? Ediff's keys" 'face 'harness-dim-face)))
@@ -2263,7 +2364,9 @@ GOTO, (SIDE . LINE), that line is in sight in the version of SIDE."
                                                      ediff-window-setup-function))
                     (ediff-brief-help-message-function #'harness-ui-patch-review--ediff-help))
                 (ediff-buffers a b (list (lambda () (harness-ui-patch-review--ediff-startup review index)))))
-              ;; Ediff laid the rest of the frame out: the box ends the report in the window.
+              ;; Ediff laid the rest of the frame out: the threads are drawn to
+              ;; the windows they are in, and the box ends the report in its window.
+              (harness-ui-patch-review--redraw-sides review)
               (harness-ui-patch-review--scroll-box box)
               (when goto (harness-ui-patch-review--show-line review goto)))
           (error
@@ -2283,6 +2386,7 @@ It gets the review's keys and help, and gives the report back as it ends."
     (define-key map "r" #'harness-ui-patch-review-reply)
     (define-key map "x" #'harness-ui-patch-review-toggle-thread)
     (define-key map "T" #'harness-ui-patch-review-threads)
+    (define-key map (kbd "TAB") #'harness-ui-patch-review-cycle-fold)
     (define-key map "e" #'harness-ui-patch-review-edit-comment)
     (define-key map "a" #'harness-ui-patch-review-approve-ediff)
     (define-key map "n" #'harness-ui-patch-review-next-difference)

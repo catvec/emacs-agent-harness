@@ -3517,6 +3517,8 @@ afterwards."
 (declare-function change-review-comment "change-review")
 (declare-function change-review-reply "change-review")
 (declare-function change-review-close "change-review")
+(declare-function change-review-ui-set-fold "change-review-ui")
+(declare-function change-review-ui-flush "change-review-ui")
 (declare-function change-review-set-threads "change-review")
 (declare-function change-review-open-threads "change-review-ui")
 
@@ -3617,7 +3619,19 @@ Return the report's popout buffer, once it shows its changes."
                      :author you :time (harness-media--ago 88) :sent (harness-media--ago 87)
                      :revision first-tip :location (funcall where "acme/app.py" "def _application"))))
         (change-review-reply set rename "It still exists: the last line of the module binds application to the timed one, so imports keep working."
-                             :author agent :time (harness-media--ago 50) :sent (harness-media--ago 50)))
+                             :author agent :time (harness-media--ago 50) :sent (harness-media--ago 50))
+        ;; The answer was enough: closed, which the Ediff picture opens again to read.
+        (change-review-close set (change-review-comment-thread rename)
+                             :author you :time (harness-media--ago 45)))
+      ;; Closed by the agent, the thread the Ediff picture leaves as one line.
+      (let ((auth (change-review-comment
+                   set "Is the authentication inside the time that is logged? A slow key lookup would count."
+                   :author you :time (harness-media--ago 86) :sent (harness-media--ago 85)
+                   :revision first-tip :location (funcall where "acme/app.py" "key = authenticate"))))
+        (change-review-reply set auth "Yes, on purpose: the middleware wraps the whole application, so a slow lookup is what the log shows."
+                             :author agent :time (harness-media--ago 50) :sent (harness-media--ago 50))
+        (change-review-close set (change-review-comment-thread auth)
+                             :author agent :time (harness-media--ago 49)))
       (change-review-comment set "Should the health check be timed too? A slow probe would fill the log."
                              :author you :time (harness-media--ago 2)
                              :location (funcall where "acme/app.py" "application = timed"))
@@ -3670,19 +3684,36 @@ made on; the agent's answer links to the conversation it came from."
 (defun harness-media-shot-review-ediff ()
   "Ediff on a file of that review, the threads under their lines and the box under it.
 The version on the branch shows the threads of acme/app.py at the line
-each is on now; the control panel offers to comment, reply and list them."
+each is on now, drawn to the width of the window: a closed thread is one
+line, the one the agent closed, and the one the reviewer closed is opened
+to its conversation (TAB); the control panel offers to comment, reply,
+fold a thread and list them."
   (let ((popout (harness-media--review-layout)))
     (ignore popout)
     (let* ((review harness-media--review)
            (files (harness-ui-patch-review--r-files review))
-           (index (cl-position "acme/app.py" files :key #'change-review-file-path :test #'equal)))
+           (index (cl-position "acme/app.py" files :key #'change-review-file-path :test #'equal))
+           (set (harness-ui-patch-review--r-set review))
+           (rename (cl-find-if (lambda (thread)
+                                 (string-search "Why rename application"
+                                                (change-review-comment-body (change-review-thread-root thread))))
+                               (change-review-set-threads set))))
       (harness-ui-patch-review-ediff review index
                                      (cons :new (harness-media--review-line "def _application" "acme/app.py")))
       (harness-media--wait (lambda () (let ((state (harness-ui-patch-review--r-ediff review)))
                                         (and (buffer-live-p (plist-get state :control))
                                              (get-buffer-window (plist-get state :control)))))
                            30 "Ediff to show")
-      (harness-media--settle 1.5)
+      (harness-media--settle 1)
+      ;; Closed threads are one line; the reviewer opens the one to read.
+      (change-review-ui-set-fold set rename 'expanded)
+      (change-review-ui-flush)
+      (let ((window (get-buffer-window (plist-get (harness-ui-patch-review--r-ediff review) :b))))
+        (with-selected-window window
+          (goto-char (point-min))
+          (forward-line (1- (harness-media--review-line "def _application" "acme/app.py")))
+          (recenter 2)))
+      (harness-media--settle 1)
       (harness-media--capture "review-ediff")
       ;; Back to the report, as q gives it.
       (with-current-buffer (plist-get (harness-ui-patch-review--r-ediff review) :control)

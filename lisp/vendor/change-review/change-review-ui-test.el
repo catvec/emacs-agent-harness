@@ -234,11 +234,12 @@ whether it is a draft, and where it is in the thread."
         (should (equal ids (reverse seen)))))))
 
 (ert-deftest change-review-ui-draws-a-closed-thread-and-who-closed-it ()
-  "A closed thread says closed, by whom and when, and can be one line."
+  "A closed thread says closed, by whom and when, and can be one line.
+All of that takes 92 columns; in less it says less (see the tests of fitting)."
   (change-review-ui-test--drawing
     (let* ((set (change-review-ui-test--set))
            (thread (nth 1 (change-review-ui-test--populate set)))
-           (lines (change-review-ui-test--lines (change-review-ui-thread-string set thread :width 90))))
+           (lines (change-review-ui-test--lines (change-review-ui-thread-string set thread :width 100))))
       (should (string-match-p "\\`✓ [^ ]+ · line 2 · 1 comment · closed by Claude, 2026-10-14 17:16 +\\[Reply\\] \\[Reopen\\] \\[Diff\\]\\'"
                               (car lines)))
       (should (= 3 (length lines)))
@@ -356,6 +357,397 @@ words, how many comments, and whether one is a draft."
                               (change-review-ui-thread-line
                                set (car threads) :width 100
                                :placement '(:side new :line 9 :was 3 :status moved)))))))
+
+;;;; Fitting a thread to its room
+
+(defun change-review-ui-test--widest (string)
+  "Return the width of the widest line of STRING."
+  (apply #'max 0 (mapcar #'string-width (change-review-ui-test--lines string))))
+
+(defun change-review-ui-test--thread-kinds (set threads)
+  "Return threads of SET to draw, as (NAME . THREAD): every kind there is.
+THREADS are those `change-review-ui-test--populate' made.  Added: one a
+user of another name closed, one an agent answered, and one whose place moved."
+  (let* ((agent (change-review-agent "A Claude with a long name (Fable 5.1)" :session "s-1" :tool-call "t-1"))
+         (stranger (change-review-make-author :kind 'other :name "Bob Reviewer" :email "bob@example.org"))
+         (long (change-review-comment
+                set (concat "Is this right? "
+                            (string-join (make-list 30 "A long question that goes on and on") " "))
+                :author (change-review-ui-test--author) :time change-review-ui-test--now
+                :revision "2222222222222222222222222222222222222222"))
+         (by-bob (change-review-comment
+                  set "Looks wrong to me." :author stranger :time change-review-ui-test--now
+                  :revision "2222222222222222222222222222222222222222")))
+    (change-review-reply set long "Yes: the retry loop needs one more." :author agent
+                         :time change-review-ui-test--now :sent change-review-ui-test--now)
+    (change-review-close set (change-review-comment-thread by-bob) :author stranger
+                         :time (- change-review-ui-test--now 90000))
+    (list (cons 'open (nth 0 threads)) (cons 'closed-by-agent (nth 1 threads))
+          (cons 'change (nth 2 threads)) (cons 'draft (nth 3 threads))
+          (cons 'long (change-review-find-thread set (change-review-comment-thread long)))
+          (cons 'closed-by-stranger (change-review-find-thread set (change-review-comment-thread by-bob))))))
+
+(ert-deftest change-review-ui-never-draws-a-line-wider-than-its-width ()
+  "However little room it has, a thread is drawn to it: no line of any
+kind of thread, in any view or fold, is wider than the width, down to the
+least there is, 40 columns."
+  (change-review-ui-test--drawing
+    (let* ((set (change-review-ui-test--set))
+           (kinds (change-review-ui-test--thread-kinds set (change-review-ui-test--populate set))))
+      (dolist (relative '(nil t))
+        (let ((change-review-ui-relative-times relative))
+          (dolist (width '(40 45 53 60 80 100 120 160))
+            (dolist (kind kinds)
+              (dolist (view '(threads diff))
+                (dolist (fold '(nil collapsed expanded full))
+                  (dolist (indent '("" "  " "    "))
+                    (let ((string (change-review-ui-thread-string
+                                   set (cdr kind) :view view :width width :indent indent
+                                   :fold fold :max-lines 12
+                                   :placement '(:side new :line 9 :was 3 :status moved))))
+                      (ert-info ((format "%s %s %s fold %s indent %S relative %s" (car kind) view width fold
+                                         indent relative))
+                        (should (<= (change-review-ui-test--widest string) width))))))))))))))
+
+(ert-deftest change-review-ui-says-less-of-a-closed-thread-in-less-room ()
+  "What a closed thread was closed by and when goes from all of it, to how
+long ago, to who, to nothing; the count of comments and the buttons go last."
+  (change-review-ui-test--drawing
+    (cl-letf (((symbol-function 'float-time) (lambda (&rest _) change-review-ui-test--now))
+              (change-review-ui-relative-times t))
+      (let* ((set (change-review-ui-test--set))
+             (thread (nth 1 (change-review-ui-test--populate set)))
+             (header (lambda (width)
+                       (car (change-review-ui-test--lines
+                             (change-review-ui-thread-string set thread :view 'diff :width width))))))
+        ;; The thread was closed by an agent, so it says so as long as it can.
+        (should (string-suffix-p "· closed by Claude, 2026-10-14 17:16 (30m ago)   [Reply] [Reopen]"
+                                 (funcall header 120)))
+        (should (string-suffix-p "· closed by Claude, 30m ago   [Reply] [Reopen]" (funcall header 70)))
+        (should (string-suffix-p "· 1 comment · closed by Claude   [Reply] [Reopen]" (funcall header 60)))
+        (should (string-suffix-p "· 1 comment · closed   [Reply] [Reopen]" (funcall header 50)))
+        (should (string-match-p "\\`✓ [^ ]+ · closed   \\[Reply\\] \\[Reopen\\]\\'" (funcall header 45)))
+        (should (string-match-p "\\`✓ [^ ]+ · closed\\'" (funcall header 25)))))))
+
+(ert-deftest change-review-ui-says-who-closed-a-thread-unless-it-was-you ()
+  "A shortened status leaves out that the user closed the thread, not that
+someone else did."
+  (change-review-ui-test--drawing
+    (cl-letf (((symbol-function 'float-time) (lambda (&rest _) change-review-ui-test--now))
+              (change-review-ui-relative-times t))
+      (let* ((set (change-review-ui-test--set))
+             (threads (change-review-ui-test--populate set))
+             (mine (nth 3 threads))
+             (theirs (nth 1 threads))
+             (status (lambda (thread &optional brief)
+                       (substring-no-properties (change-review-ui--status-text set thread brief)))))
+        (change-review-close set mine :author (change-review-ui-test--author)
+                             :time (- change-review-ui-test--now 7200))
+        (should (equal "closed by Noah (you), 2026-10-14 15:46 (2h ago)" (funcall status mine)))
+        (should (equal "closed 2h ago" (funcall status mine 'short)))
+        (should (equal "closed" (funcall status mine 'who)))
+        (should (equal "closed" (funcall status mine 'bare)))
+        (should (equal "closed by Claude, 2026-10-14 17:16 (30m ago)" (funcall status theirs)))
+        (should (equal "closed by Claude, 30m ago" (funcall status theirs 'short)))
+        (should (equal "closed by Claude" (funcall status theirs 'who)))
+        (should (equal "closed" (funcall status theirs 'bare)))
+        ;; Where times are not relative, a shortened status keeps the date.
+        (let ((change-review-ui-relative-times nil))
+          (should (equal "closed by Claude, 2026-10-14 17:16" (funcall status theirs 'short))))))))
+
+(ert-deftest change-review-ui-shortens-the-header-of-a-comment-in-less-room ()
+  "A comment's header leaves out the date for how long ago, the revision,
+the words of its links, the time and the marks, in that order."
+  (change-review-ui-test--drawing
+    (cl-letf (((symbol-function 'float-time) (lambda (&rest _) change-review-ui-test--now))
+              (change-review-ui-relative-times t))
+      (let* ((set (change-review-ui-test--set))
+             (thread (car (change-review-ui-test--populate set)))
+             (header (lambda (width)
+                       (cl-find-if (lambda (line) (string-prefix-p "┃ 2/3" line))
+                                   (change-review-ui-test--lines
+                                    (change-review-ui-thread-string set thread :width width))))))
+        (should (equal "┃ 2/3  Claude (agent) · 2026-10-14 16:46 (1h ago) · second  ↗ conversation  ▸ where"
+                       (funcall header 100)))
+        (should (equal "┃ 2/3  Claude (agent) · 1h ago · second  ↗ conversation  ▸ where" (funcall header 70)))
+        (should (equal "┃ 2/3  Claude (agent) · 1h ago  ↗ conversation  ▸ where" (funcall header 55)))
+        (should (equal "┃ 2/3  Claude (agent) · 1h ago  ↗  ▸" (funcall header 50)))
+        (should (equal "┃ 2/3  Claude (agent)  ↗  ▸" (funcall header 30)))
+        (should (equal "┃ 2/3  Claude  ↗  ▸" (funcall header 20)))
+        ;; The words of a comment's answer, and its draft mark, stay.
+        (let ((third (cl-find-if (lambda (line) (string-prefix-p "┃ 3/3" line))
+                                 (change-review-ui-test--lines
+                                  (change-review-ui-thread-string set thread :width 50)))))
+          (should (string-match-p "draft · ↳ re 1/3" third)))))))
+
+(ert-deftest change-review-ui-draws-a-thread-at-the-width-of-the-window ()
+  "A thread is drawn to the columns of the window its buffer is in, and
+to 80 where no window shows it; the width is never under 40 or over 160."
+  (let ((change-review-ui-width nil)
+        (buffer (generate-new-buffer " *change-review-width*")))
+    (unwind-protect
+        (save-window-excursion
+          (with-current-buffer buffer
+            (should (= 80 (change-review-ui-current-width))))
+          (delete-other-windows)
+          (let ((window (split-window nil 30 'right)))
+            (set-window-buffer window buffer)
+            (with-current-buffer buffer
+              (should (= (max 40 (min 160 (window-max-chars-per-line window)))
+                         (change-review-ui-current-width)))
+              (should (< (change-review-ui-current-width) 80))
+              (should (= (change-review-ui-current-width) (car (change-review-ui-current-size))))
+              ;; A window of fewer columns than a thread can be drawn to.
+              (should (= 40 (let ((change-review-ui-width 20)) (change-review-ui-current-width))))
+              (should (= 160 (let ((change-review-ui-width 300)) (change-review-ui-current-width)))))))
+      (kill-buffer buffer))))
+
+(ert-deftest change-review-ui-limits-a-thread-to-what-the-window-shows ()
+  "The most lines a thread takes is a number, the window's less four, or nothing."
+  (let ((change-review-ui-width 80)
+        (buffer (generate-new-buffer " *change-review-lines*")))
+    (unwind-protect
+        (save-window-excursion
+          (delete-other-windows)
+          (switch-to-buffer buffer)
+          (with-current-buffer buffer
+            (let ((change-review-ui-max-thread-lines 15))
+              (should (= 15 (change-review-ui-current-max-lines)))
+              (should (equal '(80 . 15) (change-review-ui-current-size))))
+            (let ((change-review-ui-max-thread-lines 1))
+              (should (= 3 (change-review-ui-current-max-lines))))
+            (let ((change-review-ui-max-thread-lines nil))
+              (should-not (change-review-ui-current-max-lines)))
+            (let ((change-review-ui-max-thread-lines 'window))
+              (should (= (max 6 (- (window-body-height) 4)) (change-review-ui-current-max-lines))))))
+      (kill-buffer buffer))
+    ;; Where no window shows the buffer, a thread may take twenty.
+    (with-temp-buffer
+      (let ((change-review-ui-max-thread-lines 'window))
+        (should (= 20 (change-review-ui-current-max-lines)))))))
+
+;;;; Folding a thread
+
+(ert-deftest change-review-ui-folds-closed-threads-at-first ()
+  "A closed thread is one line before anyone folds it, any other is in full:
+unless the option says a closed one is too."
+  (change-review-ui-test--drawing
+    (let* ((set (change-review-ui-test--set))
+           (threads (change-review-ui-test--populate set)))
+      (should (eq 'expanded (change-review-ui-thread-fold set (nth 0 threads))))
+      (should (eq 'collapsed (change-review-ui-thread-fold set (nth 1 threads))))
+      (let ((change-review-ui-collapse-closed-in-diff nil))
+        (should (eq 'expanded (change-review-ui-thread-fold set (nth 1 threads))))))))
+
+(ert-deftest change-review-ui-remembers-how-a-thread-was-folded ()
+  "What was chosen stays, for the set, while the thread keeps its status;
+a thread whose status changed is drawn as one of that status again."
+  (change-review-ui-test--drawing
+    (let* ((set (change-review-ui-test--set))
+           (other (change-review-ui-test--set))
+           (threads (change-review-ui-test--populate set))
+           (open (nth 0 threads))
+           (closed (nth 1 threads)))
+      (change-review-ui-set-fold set closed 'expanded)
+      (change-review-ui-set-fold set open 'collapsed)
+      (should (eq 'expanded (change-review-ui-thread-fold set closed)))
+      (should (eq 'collapsed (change-review-ui-thread-fold set open)))
+      ;; Another set has its own.
+      (should (eq 'collapsed (change-review-ui-thread-fold other closed)))
+      (should (eq 'expanded (change-review-ui-thread-fold other open)))
+      ;; Reopened, the closed thread is a thread of an open one's kind again; closed,
+      ;; the open one is one line.
+      (change-review-reopen set closed)
+      (should (eq 'expanded (change-review-ui-thread-fold set closed)))
+      (change-review-close set open)
+      (should (eq 'collapsed (change-review-ui-thread-fold set open)))
+      (should-error (change-review-ui-set-fold set open 'folded) :type 'change-review-error))))
+
+(ert-deftest change-review-ui-goes-through-the-folds-in-turn ()
+  "One line, then the conversation, then all of it -- where something was
+left out of the conversation -- then one line; several threads follow the first."
+  (change-review-ui-test--drawing
+    (let* ((set (change-review-ui-test--set))
+           (threads (change-review-ui-test--populate set))
+           (closed (nth 1 threads))
+           (open (nth 0 threads))
+           (message-log nil))
+      (cl-letf (((symbol-function 'message) (lambda (&rest args) (push (apply #'format args) message-log))))
+        (should (eq 'collapsed (change-review-ui-thread-fold set closed)))
+        (should (eq 'expanded (change-review-ui-cycle-folds set (list closed))))
+        (should (equal (format "Thread %s: the conversation" (change-review-ui-thread-short-id set closed))
+                       (car message-log)))
+        ;; Nothing was left out: the next is one line.
+        (change-review-ui-thread-string set closed :width 80 :fold 'expanded :max-lines 10)
+        (should (eq 'collapsed (change-review-ui-cycle-folds set (list closed))))
+        (should (equal (format "Thread %s: one line" (change-review-ui-thread-short-id set closed))
+                       (car message-log)))
+        ;; Something was: all of it comes before one line.
+        (should (= 8 (length (change-review-ui-test--lines
+                              (change-review-ui-thread-string set open :width 80)))))
+        (change-review-ui-thread-string set open :width 80 :fold 'expanded :max-lines 5)
+        (should (eq 'full (change-review-ui-cycle-folds set (list open))))
+        (should (string-suffix-p ": all of it" (car message-log)))
+        (should (eq 'collapsed (change-review-ui-cycle-folds set (list open))))
+        (should (eq 'expanded (change-review-ui-cycle-folds set (list open))))
+        ;; Two threads follow the first: an open one in its conversation
+        ;; goes to one line, and takes the closed one with it, one line already.
+        (change-review-ui-thread-string set open :width 80 :fold 'expanded :max-lines 20)
+        (should (eq 'collapsed (change-review-ui-cycle-folds set (list open closed))))
+        (should (eq 'collapsed (change-review-ui-thread-fold set open)))
+        (should (eq 'collapsed (change-review-ui-thread-fold set closed)))
+        (should (string-suffix-p "2 threads: one line" (car message-log)))
+        (should (eq 'expanded (change-review-ui-cycle-folds set (list closed open))))
+        (should (eq 'expanded (change-review-ui-thread-fold set open)))
+        (should-not (change-review-ui-cycle-folds set nil))))))
+
+(ert-deftest change-review-ui-draws-a-folded-thread-with-a-triangle-that-opens-it ()
+  "A thread that can be folded starts with a triangle, which is a button:
+pointing right on a thread of one line, down on one that is open to its
+conversation.  Clicking it, or the words of a thread of one line, folds it."
+  (change-review-ui-test--drawing
+    (let* ((set (change-review-ui-test--set))
+           (thread (nth 1 (change-review-ui-test--populate set)))
+           (line (lambda (fold &rest keys)
+                   (apply #'change-review-ui-thread-string set thread :view 'diff :width 90 :indent "  "
+                          :fold fold keys))))
+      ;; One line: the triangle takes the place of the indent.
+      (let ((one (funcall line 'collapsed)))
+        (should (= 1 (length (change-review-ui-test--lines one))))
+        (should (string-match-p "\\`▸ ✓ [^ ]+ · 1 comment · closed by Claude, 2026-10-14 17:16   \\[Reply\\] \\[Reopen\\]  “Fine\\.”\n\\'"
+                                (substring-no-properties one)))
+        (change-review-ui-test--press one "▸")
+        (should (eq 'expanded (change-review-ui-thread-fold set thread)))
+        (change-review-ui-set-fold set thread 'collapsed)
+        ;; The words are a button too.
+        (change-review-ui-test--press one "“Fine.”")
+        (should (eq 'expanded (change-review-ui-thread-fold set thread))))
+      ;; Open to its conversation: the triangle points down, the rest as ever.
+      (let ((open (funcall line 'expanded)))
+        (should (string-prefix-p "▾ ✓ " (substring-no-properties open)))
+        (should (equal "  ┃ 1/1  Noah" (substring (nth 1 (change-review-ui-test--lines open)) 0 13)))
+        (change-review-ui-test--press open "▾")
+        (should (eq 'collapsed (change-review-ui-thread-fold set thread))))
+      ;; A thread that cannot be folded has no triangle, and its words no button.
+      (should (string-prefix-p "  ✓ " (substring-no-properties (funcall line nil))))
+      (let ((plain (funcall line nil :collapsed t)))
+        (should (string-match-p "“Fine\\.”\n\\'" (substring-no-properties plain)))
+        (should-not (change-review-ui-test--button plain "“Fine.”"))))))
+
+(ert-deftest change-review-ui-cuts-a-thread-that-is-longer-than-the-room-it-has ()
+  "A thread longer than MAX-LINES is cut, and says how many lines more there
+are, in a button that shows them all: the fold `full'.  Where the thread
+shows where its comments were made, it is not cut."
+  (change-review-ui-test--drawing
+    (let* ((set (change-review-ui-test--set))
+           (comment (change-review-comment
+                     set (mapconcat (lambda (n) (format "Line %d of a long comment." n))
+                                    (number-sequence 1 20) "\n")
+                     :author (change-review-ui-test--author) :time change-review-ui-test--now))
+           (thread (change-review-find-thread set (change-review-comment-thread comment)))
+           (draw (lambda (fold &rest keys)
+                   (apply #'change-review-ui-thread-string set thread :view 'diff :width 80
+                          :fold fold :max-lines 8 keys))))
+      ;; Eight lines: the header, the comment's, five of its text, and the one that says more.
+      (let ((lines (change-review-ui-test--lines (funcall draw 'expanded))))
+        (should (= 8 (length lines)))
+        (should (equal "┃      Line 5 of a long comment." (nth 6 lines)))
+        (should (equal "┃      … 15 more lines" (nth 7 lines))))
+      (should (change-review-ui--trimmed-p set thread))
+      (change-review-ui-test--press (funcall draw 'expanded) "… 15 more lines")
+      (should (eq 'full (change-review-ui-thread-fold set thread)))
+      ;; All of it, and nothing says more.
+      (let ((lines (change-review-ui-test--lines (funcall draw 'full))))
+        (should (= 22 (length lines)))
+        (should-not (cl-some (lambda (line) (string-search "more line" line)) lines)))
+      (should-not (change-review-ui--trimmed-p set thread))
+      ;; The threads view's drawing, which cannot be folded, leaves that note alone.
+      (funcall draw 'expanded)
+      (should (change-review-ui--trimmed-p set thread))
+      (change-review-ui-thread-string set thread :width 80)
+      (should (change-review-ui--trimmed-p set thread))
+      ;; Not cut where there is room, or where no limit is given, or when
+      ;; the comment's details show: it was asked for.
+      (should (= 22 (length (change-review-ui-test--lines
+                             (change-review-ui-thread-string set thread :view 'diff :width 80
+                                                             :fold 'expanded :max-lines 30)))))
+      (should (= 22 (length (change-review-ui-test--lines
+                             (change-review-ui-thread-string set thread :view 'diff :width 80 :fold 'expanded)))))
+      (should (> (length (change-review-ui-test--lines
+                          (funcall draw 'expanded :details (list (change-review-comment-id comment)))))
+                 22))
+      ;; The threads view, with no fold, has no limit either.
+      (should (= 22 (length (change-review-ui-test--lines
+                             (change-review-ui-thread-string set thread :width 80 :max-lines 8))))))))
+
+(ert-deftest change-review-ui-quotes-what-was-said-not-what-it-answered ()
+  "The words that stand for a comment in one line are its own, not the
+lines it quotes: a comment imported from a reply opens with the quote."
+  (should (equal "Why that?" (change-review-ui--summary "> What the agent said.\n\nWhy that?")))
+  (should (equal "One two three" (change-review-ui--summary "One\ntwo\n\n  three")))
+  (should (equal "> all quote > of it" (change-review-ui--summary "> all quote\n> of it")))
+  (should (equal "Yes. Sure." (change-review-ui--summary "> quote\nYes.\n> more\nSure.")))
+  ;; Only `> ' quotes, as a reply to patches has them; `>=' is not one.
+  (should (equal ">= 5 is wrong See above" (change-review-ui--summary ">= 5 is wrong\nSee above")))
+  (should (equal "Reply" (change-review-ui--summary ">> older\n> old\n>\nReply"))))
+
+(ert-deftest change-review-ui-draws-a-thread-of-quotes-as-one-line-with-its-answer ()
+  "A thread one line long says what was answered, not only what it quoted,
+and a thread in a list does too."
+  (change-review-ui-test--drawing
+    (let* ((set (change-review-ui-test--set))
+           (comment (change-review-comment
+                     set "> I changed the middleware so every request is timed.\n\nWhy the 401s too?"
+                     :author (change-review-ui-test--author) :time change-review-ui-test--now))
+           (thread (change-review-find-thread set (change-review-comment-thread comment))))
+      (should (string-suffix-p "“Why the 401s too?”"
+                               (car (change-review-ui-test--lines
+                                     (change-review-ui-thread-string set thread :view 'diff :width 90
+                                                                     :collapsed t)))))
+      (should (string-match-p "“Why the 401s too\\?”"
+                              (change-review-ui-thread-line set thread :width 90))))))
+
+(ert-deftest change-review-ui-gives-a-thread-of-one-line-the-room-it-wants-for-its-words ()
+  "The header of a thread of one line leaves out what it can to leave its
+words thirty columns, or the room they need; no line is wider than a hundred."
+  (change-review-ui-test--drawing
+    (cl-letf (((symbol-function 'float-time) (lambda (&rest _) change-review-ui-test--now))
+              (change-review-ui-relative-times t))
+      (let* ((set (change-review-ui-test--set))
+             (comment (change-review-comment
+                       set (string-join (make-list 20 "These are the words of the root") " ")
+                       :author (change-review-ui-test--author) :time change-review-ui-test--now))
+             (thread (change-review-find-thread set (change-review-comment-thread comment)))
+             (one (lambda (width)
+                    (car (change-review-ui-test--lines
+                          (change-review-ui-thread-string set thread :view 'diff :width width
+                                                          :fold 'collapsed))))))
+        (change-review-close set thread :author (change-review-ui-test--author)
+                             :time (- change-review-ui-test--now 120))
+        ;; Room for the buttons as well as the words.
+        (should (string-match-p "\\`▸ ✓ [^ ]+ · 1 comment · closed 2m ago   \\[Reply\\] \\[Reopen\\]  “These are the words of the r…”\\'"
+                                (funcall one 90)))
+        ;; Not for the buttons: the words have what they want.
+        (should (string-match-p "\\`▸ ✓ [^ ]+ · 1 comment · closed 2m ago  “These are the words of the …”\\'"
+                                (funcall one 70)))
+        ;; Not for the count of comments either.
+        (should (string-match-p "\\`▸ ✓ [^ ]+ · closed 2m ago  “These are the words of the ro…”\\'"
+                                (funcall one 60)))
+        ;; The least a header says, and the words what is left.
+        (should (string-match-p "\\`▸ ✓ [^ ]+ · closed  “These are the words of the…”\\'" (funcall one 50)))
+        (should (string-match-p "\\`▸ ✓ [^ ]+ · closed  “These are the wo…”\\'" (funcall one 40)))
+        ;; In a wide window the line is a hundred columns at most.
+        (should (= 100 (string-width (funcall one 160))))
+        (dolist (width '(40 50 60 70 90 100 160))
+          (should (<= (string-width (funcall one width)) (min width 100))))
+        ;; Words that need less than they want leave the rest of the line empty.
+        (let* ((short (change-review-comment
+                       set "Fine." :author (change-review-ui-test--author) :time change-review-ui-test--now))
+               (thread (change-review-find-thread set (change-review-comment-thread short))))
+          (should (string-match-p "· 1 comment · open   \\[Reply\\] \\[Close\\]  “Fine\\.”\\'"
+                                  (car (change-review-ui-test--lines
+                                        (change-review-ui-thread-string set thread :view 'diff :width 80
+                                                                        :fold 'collapsed))))))))))
 
 ;;;; The threads view
 
@@ -495,8 +887,9 @@ again, s sets the status by name; the view follows the set."
     (search-forward "Because the retry loop")
     (change-review-ui-toggle-status)
     (should-not (change-review-thread-open-p (car threads)))
-    (change-review-ui-flush)
-    (should (string-match-p "closed by Noah (you)" (change-review-ui-test--text)))
+    (let ((change-review-ui-width 120))
+      (change-review-ui-flush)
+      (should (string-match-p "closed by Noah (you)" (change-review-ui-test--text))))
     ;; The thread is still where it was: point is on the same comment.
     (should (string-match-p "Because the retry loop" (buffer-substring (line-beginning-position) (line-end-position))))
     (change-review-ui-toggle-status)
@@ -642,6 +1035,135 @@ it by the line point is on."
         (forward-line 1)
         (should-error (call-interactively #'change-review-ui-reply) :type 'user-error)))))
 
+(ert-deftest change-review-ui-lines-mode-folds-the-thread-under-the-line ()
+  "TAB on a line with a thread folds it: one line, its conversation; on a
+line with none it is what it was without the library's keys."
+  (change-review-ui-test--drawing
+    (let* ((set (change-review-ui-test--set))
+           (threads (change-review-ui-test--populate set))
+           (closed (nth 1 threads))
+           (open (nth 3 threads))
+           (change-review-ui-read-function (lambda (_prompt _initial callback) (funcall callback "x")))
+           (other nil))
+      (with-temp-buffer
+        (insert "one\ntwo\nthree\n")
+        (setq change-review-ui--set set)
+        (change-review-ui-lines-mode 1)
+        (let ((draw (lambda ()
+                      (change-review-ui-clear-overlays)
+                      (goto-char (point-min))
+                      (change-review-ui-add-thread-overlay
+                       set closed (line-end-position) :view 'diff :width 70 :indent "  "
+                       :fold (change-review-ui-thread-fold set closed))
+                      (forward-line 1)
+                      (change-review-ui-add-thread-overlay
+                       set open (line-end-position) :view 'diff :width 70 :indent "  "
+                       :fold (change-review-ui-thread-fold set open)
+                       :max-lines (change-review-ui-current-max-lines))))
+              (drawn (lambda (line)
+                       (save-excursion
+                         (goto-char (point-min))
+                         (forward-line (1- line))
+                         (substring-no-properties
+                          (overlay-get (car (cl-remove-if-not (lambda (o) (overlay-get o 'after-string))
+                                                              (overlays-in (line-beginning-position)
+                                                                           (1+ (line-end-position)))))
+                                       'after-string))))))
+          (should (eq #'change-review-ui-cycle-fold (key-binding (kbd "TAB"))))
+          (funcall draw)
+          (should (= 1 (length (change-review-ui-test--lines (funcall drawn 1)))))
+          (goto-char (point-min))
+          (let ((inhibit-message t))
+            (call-interactively #'change-review-ui-cycle-fold))
+          (should (eq 'expanded (change-review-ui-thread-fold set closed)))
+          (funcall draw)
+          (should (string-match-p "1/1  Noah" (funcall drawn 1)))
+          (goto-char (point-min))
+          (let ((inhibit-message t))
+            (call-interactively #'change-review-ui-cycle-fold))
+          (should (eq 'collapsed (change-review-ui-thread-fold set closed)))
+          ;; The open thread on the second line is its own.
+          (goto-char (point-min))
+          (forward-line 1)
+          (should (eq 'expanded (change-review-ui-thread-fold set open)))
+          (let ((inhibit-message t))
+            (call-interactively #'change-review-ui-cycle-fold))
+          (should (eq 'collapsed (change-review-ui-thread-fold set open)))
+          ;; On the third line, with no thread: the key of the major mode, if any.
+          (forward-line 1)
+          (cl-letf (((symbol-function 'change-review-ui--other-command) (lambda (&rest _) nil)))
+            (should-error (call-interactively #'change-review-ui-cycle-fold) :type 'user-error))
+          (use-local-map (let ((map (make-sparse-keymap)))
+                           (define-key map (kbd "TAB") (lambda () (interactive) (setq other 'major-mode-tab)))
+                           map))
+          (call-interactively #'change-review-ui-cycle-fold)
+          (should (eq 'major-mode-tab other))
+          ;; The global key too, when the major mode has none.
+          (use-local-map nil)
+          (setq other nil)
+          (cl-letf (((symbol-function 'indent-for-tab-command) (lambda (&rest _) (interactive) (setq other 'global-tab))))
+            (call-interactively #'change-review-ui-cycle-fold))
+          (should (eq 'global-tab other)))))))
+
+(ert-deftest change-review-ui-lines-mode-folds-all-the-threads-under-a-line-together ()
+  "Two threads under one line are folded as the first, the chosen one, goes."
+  (change-review-ui-test--drawing
+    (let* ((set (change-review-ui-test--set))
+           (threads (change-review-ui-test--populate set))
+           (open (nth 3 threads))
+           (closed (nth 1 threads)))
+      (with-temp-buffer
+        (insert "one\n")
+        (setq change-review-ui--set set)
+        (goto-char (point-min))
+        (dolist (thread (list open closed))
+          (change-review-ui-add-thread-overlay set thread (line-end-position) :view 'diff :width 70
+                                               :fold (change-review-ui-thread-fold set thread)))
+        (should (= 2 (length (change-review-ui--threads-here set))))
+        (should (memq open (change-review-ui--threads-here set)))
+        (should (memq closed (change-review-ui--threads-here set)))
+        (setq change-review-ui--chosen-thread (change-review-thread-id closed))
+        (should (eq closed (car (change-review-ui--threads-here set))))
+        (setq change-review-ui--chosen-thread (change-review-thread-id open))
+        (should (eq open (car (change-review-ui--threads-here set))))
+        (setq change-review-ui--chosen-thread (change-review-thread-id closed))
+        ;; The closed one is the first: its next fold, the conversation, is both's.
+        (let ((inhibit-message t))
+          (call-interactively #'change-review-ui-cycle-fold))
+        (should (eq 'expanded (change-review-ui-thread-fold set closed)))
+        (should (eq 'expanded (change-review-ui-thread-fold set open)))))))
+
+(ert-deftest change-review-ui-scrolls-to-show-what-a-fold-grew ()
+  "TAB shows the line second from the top of its window when the thread
+that grew under it is not in sight, and leaves the window alone when it is."
+  (change-review-ui-test--drawing
+    (let* ((set (change-review-ui-test--set))
+           (closed (nth 1 (change-review-ui-test--populate set)))
+           (recentered nil)
+           (visible nil)
+           (buffer (generate-new-buffer " *change-review-reveal*")))
+      (unwind-protect
+          (save-window-excursion
+            (delete-other-windows)
+            (switch-to-buffer buffer)
+            (with-current-buffer buffer
+              (insert "one\ntwo\nthree\n")
+              (setq change-review-ui--set set)
+              (change-review-ui-lines-mode 1)
+              (goto-char (point-min))
+              (change-review-ui-add-thread-overlay set closed (line-end-position) :view 'diff :width 70
+                                                   :fold 'collapsed)
+              (cl-letf (((symbol-function 'pos-visible-in-window-p) (lambda (&rest _) visible))
+                        ((symbol-function 'recenter) (lambda (&rest args) (setq recentered args)))
+                        ((symbol-function 'message) #'ignore))
+                (setq visible nil)
+                (call-interactively #'change-review-ui-cycle-fold)
+                (should (equal '(1) recentered))
+                (setq recentered nil visible t)
+                (call-interactively #'change-review-ui-cycle-fold)
+                (should-not recentered))))
+        (kill-buffer buffer)))))
+
 ;;;; The diff view
 
 (defmacro change-review-ui-test--diff-view (&rest body)
@@ -769,15 +1291,23 @@ about, the change's own at the top."
                                                                         (string-match-p "a4" (overlay-get o 'after-string))))
                                                        (overlays-in (point-min) (point-max)))
                                            'after-string)))
-      ;; RET opens its comments' details, and the thread is no longer one line.
-      (change-review-ui-test--goto "^ (setq a4 4)")
-      (end-of-line)
-      (call-interactively #'change-review-ui-return)
-      (change-review-ui-flush)
-      (should (string-match-p "made at a\\.el:4"
-                              (overlay-get (cl-find-if (lambda (o) (overlay-get o 'after-string))
-                                                       (overlays-in (line-beginning-position) (1+ (line-end-position))))
-                                           'after-string))))))
+      ;; RET opens it to its conversation, and once it is open, RET opens
+      ;; its comments' details.
+      (let ((drawn (lambda ()
+                     (overlay-get (cl-find-if (lambda (o) (overlay-get o 'after-string))
+                                              (overlays-in (line-beginning-position)
+                                                           (1+ (line-end-position))))
+                                  'after-string))))
+        (change-review-ui-test--goto "^ (setq a4 4)")
+        (end-of-line)
+        (call-interactively #'change-review-ui-return)
+        (change-review-ui-flush)
+        (should (string-match-p "1/2  Noah (you)" (funcall drawn)))
+        (should (string-match-p "2/2  Noah (you)" (funcall drawn)))
+        (should-not (string-match-p "made at a\\.el:4" (funcall drawn)))
+        (call-interactively #'change-review-ui-return)
+        (change-review-ui-flush)
+        (should (string-match-p "made at a\\.el:4" (funcall drawn)))))))
 
 (ert-deftest change-review-ui-diff-view-moves-between-threads ()
   "C-c C-n and C-c C-p move between the lines that have a thread."
@@ -878,6 +1408,105 @@ one whose line is gone, under the first line of its file."
         (should (derived-mode-p 'change-review-diff-view-mode))
         (should (string-match-p "setq b2 'two" (buffer-substring (line-beginning-position) (line-end-position)))))
       (when (buffer-live-p diff) (kill-buffer diff)))))
+
+(ert-deftest change-review-ui-diff-view-folds-threads ()
+  "A closed thread is one line in the diff view, its triangle pointing right;
+TAB on its line opens it to its conversation and again folds it; with no
+thread on the line TAB is what it is without the library's keys."
+  (change-review-ui-test--diff-view
+    (let ((drawn (lambda (regexp)
+                   (change-review-ui-test--goto regexp)
+                   (substring-no-properties
+                    (or (overlay-get (cl-find-if (lambda (o) (overlay-get o 'after-string))
+                                                 (overlays-in (line-beginning-position)
+                                                              (1+ (line-end-position))))
+                                     'after-string)
+                        "")))))
+      (should (eq #'change-review-ui-cycle-fold (key-binding (kbd "TAB"))))
+      (should (string-match-p "\n  ▸ ✓ [^ ]+ · 1 comment · closed .*“Fine\\.”\\'" (funcall drawn "^\\+(setq b2 'two)")))
+      (should (string-match-p "\n  ▾ ● [^ ]+ · 1 comment · open " (funcall drawn "^ (setq a4 4)")))
+      (let ((inhibit-message t))
+        (change-review-ui-test--goto "^\\+(setq b2 'two)")
+        (end-of-line)
+        (call-interactively #'change-review-ui-cycle-fold)
+        (change-review-ui-flush)
+        (should (string-match-p "\n  ▾ ✓ [^ ]+ · 1 comment · closed by Claude.*\n    ┃ 1/1  Noah (you)"
+                                (funcall drawn "^\\+(setq b2 'two)")))
+        (end-of-line)
+        (call-interactively #'change-review-ui-cycle-fold)
+        (change-review-ui-flush)
+        (should (string-match-p "\n  ▸ ✓ " (funcall drawn "^\\+(setq b2 'two)")))
+        ;; On a line with no thread: what TAB does without the library's keys.
+        (goto-char (point-min))
+        (let (ran)
+          (cl-letf (((symbol-function 'indent-for-tab-command)
+                     (lambda (&rest _) (interactive) (setq ran t))))
+            (call-interactively #'change-review-ui-cycle-fold))
+          (should ran))))))
+
+(ert-deftest change-review-ui-diff-view-draws-closed-threads-in-full-when-asked ()
+  "The option that says closed threads are not one line makes them as open ones."
+  (let ((change-review-ui-collapse-closed-in-diff nil))
+    (change-review-ui-test--diff-view
+      (let ((text (overlay-get (cl-find-if (lambda (o) (and (overlay-get o 'after-string)
+                                                            (string-match-p "Fine\\." (overlay-get o 'after-string))))
+                                           (overlays-in (point-min) (point-max)))
+                               'after-string)))
+        (should (string-match-p "▾ ✓ " (substring-no-properties text)))
+        (should (string-match-p "1/1  Noah" (substring-no-properties text)))))))
+
+(ert-deftest change-review-ui-diff-view-keeps-the-folds-when-it-draws-again ()
+  "What was folded stays so when the view is drawn again: after another
+thread was answered, say."
+  (change-review-ui-test--diff-view
+    (change-review-ui-set-fold set (nth 1 threads) 'expanded)
+    (change-review-ui-set-fold set (nth 3 threads) 'collapsed)
+    (change-review-ui-flush)
+    (let ((texts (mapcar (lambda (o) (substring-no-properties (overlay-get o 'after-string)))
+                         (cl-remove-if-not (lambda (o) (overlay-get o 'after-string))
+                                           (overlays-in (point-min) (point-max))))))
+      (should (cl-some (lambda (text) (string-match-p "▾ ✓ .*\n.*1/1  Noah" text)) texts))
+      (should (cl-some (lambda (text) (string-match-p "▸ ● .*“What about a4\\?”" text)) texts)))
+    (change-review-comment set "Another thread" :author (change-review-ui-test--author)
+                           :location (change-review-diff-location
+                                      (car (change-review-version-files (change-review-latest-version set)))
+                                      'new 5))
+    (change-review-ui-flush)
+    (should (cl-some (lambda (o) (string-match-p "▸ ● .*“What about a4\\?”"
+                                                 (substring-no-properties (or (overlay-get o 'after-string) ""))))
+                     (overlays-in (point-min) (point-max))))))
+
+(ert-deftest change-review-ui-diff-view-cuts-a-thread-longer-than-the-window ()
+  "A thread longer than the room the option gives is cut, with a line that
+says how much, and TAB shows all of it."
+  (let ((change-review-ui-max-thread-lines 7))
+    (change-review-ui-test--diff-view
+      (let ((comment (change-review-comment
+                      set (mapconcat (lambda (n) (format "Line %d of a long comment." n))
+                                     (number-sequence 1 12) "\n")
+                      :author (change-review-ui-test--author) :time change-review-ui-test--now
+                      :location (change-review-diff-location
+                                 (car (change-review-version-files (change-review-latest-version set)))
+                                 'new 6))))
+        (change-review-ui-flush)
+        (let ((drawn (lambda ()
+                       (substring-no-properties
+                        (overlay-get (cl-find-if (lambda (o) (string-match-p "long comment"
+                                                                              (or (overlay-get o 'after-string) "")))
+                                                 (overlays-in (point-min) (point-max)))
+                                     'after-string)))))
+          ;; The header, the comment's, four of its lines and the one that says more.
+          (should (string-match-p "Line 4 of a long comment\\.\n    ┃      … 8 more lines\\'" (funcall drawn)))
+          (should-not (string-match-p "Line 5 of" (funcall drawn)))
+          (change-review-ui-test--goto "^ (setq a6 6)")
+          (end-of-line)
+          (should (equal (list (change-review-comment-thread comment))
+                         (mapcar #'change-review-thread-id (change-review-ui--threads-here set))))
+          (let ((inhibit-message t))
+            (call-interactively #'change-review-ui-cycle-fold))
+          (change-review-ui-flush)
+          (should (string-match-p "Line 12 of a long comment\\.\\'" (funcall drawn)))
+          (should-not (string-match-p "more lines" (funcall drawn))))))))
 
 ;;;; Emailed patches
 

@@ -45,6 +45,20 @@
 ;; whether the thread is open or closed, who closed it and when.  A
 ;; closed thread can be drawn as one line.
 ;;
+;; FITTING.  A line of the drawing is never wider than the width it is
+;; drawn to: a header that does not fit says less -- how long ago instead
+;; of the date, the revision left out, the buttons shortened -- until it
+;; does, so a thread in a narrow window does not wrap.
+;;
+;; FOLDING.  A thread under a line of a diff, where the room is the
+;; window's, folds.  A closed thread is one line, with the first words of
+;; what it says, and TAB on its line, a click on its triangle or on the
+;; words opens it to its conversation.  One that is longer than the window
+;; has room for is cut after the lines it has, and TAB again, or a click
+;; on "… more lines", shows all of it; one more TAB folds any thread to a
+;; line.  What was folded is kept with the set, so it stays so when the
+;; view is drawn again.
+;;
 ;; THE THREADS VIEW (`change-review-open-threads').  All the threads of a
 ;; change set, grouped by file, with a filter on their status: open,
 ;; closed or all.  Point is on a comment, and the keys act on it: RET
@@ -71,6 +85,7 @@
 
 (require 'cl-lib)
 (require 'subr-x)
+(require 'seq)
 (require 'button)
 (require 'diff-mode)
 (require 'pulse)
@@ -101,8 +116,22 @@ Long lines of a comment are wrapped to it, under the comment's bar."
   :type '(choice (const open) (const closed) (const all)))
 
 (defcustom change-review-ui-collapse-closed-in-diff t
-  "Whether the diff view draws a closed thread as one line."
+  "Whether a closed thread is drawn as one line, until it is opened.
+In the diff view, and in any other view of the lines of a file, a
+comparison in Ediff say.  \\`TAB' on the line opens it to its conversation,
+and folds any thread to one line."
   :type 'boolean)
+
+(defcustom change-review-ui-max-thread-lines 'window
+  "The most lines a thread takes under a line of a diff.
+A number; `window' for what the window shows, its height less a few
+lines, so the line the thread is under stays in sight; nil for no limit.
+A thread that is longer is cut after the lines it has room for, with how
+many more there are in a line of its own: \\`TAB' on the thread, or a
+click on that line, shows all of it.  The threads view has no limit."
+  :type '(choice (const :tag "What the window shows" window)
+                 (const :tag "No limit" nil)
+                 natnum))
 
 (defcustom change-review-ui-read-function #'change-review-ui-read-with-string-edit
   "The function that reads the text of a comment.
@@ -148,6 +177,8 @@ comparison say, has its set through this, or in `change-review-ui--set'.")
   "The name of a file in the threads view.")
 (defface change-review-ui-button-face '((t :inherit button))
   "The buttons of a thread.")
+(defface change-review-ui-fold-face '((t :inherit (shadow bold)))
+  "The triangle that folds a thread, and the words that show the rest of it.")
 (defface change-review-ui-filter-face '((t :inherit (bold highlight)))
   "The status filter in force.")
 (defface change-review-ui-target-face '((t :inherit bold :extend t))
@@ -194,12 +225,35 @@ comparison say, has its set through this, or in `change-review-ui--set'.")
                  (change-review-ui-ago time)))
         (t (format-time-string change-review-ui-time-format time))))
 
+(defun change-review-ui--window ()
+  "Return a window that shows the current buffer, in any frame, or nil."
+  (get-buffer-window (current-buffer) t))
+
 (defun change-review-ui-current-width ()
-  "Return the width to draw a thread to."
-  (let ((window (get-buffer-window (current-buffer))))
+  "Return the width to draw a thread to.
+That is `change-review-ui-width' when it is set, else the columns a line
+of the window that shows the buffer has -- less the one a continuation
+takes in a terminal -- else 80; never under 40 or over 160."
+  (let ((window (change-review-ui--window)))
     (max 40 (min 160 (or change-review-ui-width
-                         (and window (window-body-width window))
+                         (and window (window-max-chars-per-line window))
                          80)))))
+
+(defun change-review-ui-current-max-lines ()
+  "Return the most lines a thread takes in this buffer, or nil for no limit.
+That is `change-review-ui-max-thread-lines': a number, or for `window'
+the height of the window that shows the buffer less four lines (20 when
+none does), never under six."
+  (let ((limit change-review-ui-max-thread-lines))
+    (cond ((natnump limit) (max 3 limit))
+          ((eq limit 'window)
+           (let ((window (change-review-ui--window)))
+             (if window (max 6 (- (window-body-height window) 4)) 20))))))
+
+(defun change-review-ui-current-size ()
+  "Return what a thread is drawn to here, as (WIDTH . MAX-LINES).
+A view that follows its window compares it with the size it drew at."
+  (cons (change-review-ui-current-width) (change-review-ui-current-max-lines)))
 
 (defun change-review-ui--cut-point (line width)
   "Return where to cut LINE, longer than WIDTH columns, to fit WIDTH.
@@ -254,11 +308,37 @@ A line that fits, and the empty one, is a piece of its own."
 
 ;;;; Buttons
 
+(defun change-review-ui--link (label help function face)
+  "Return LABEL in FACE as a button that calls FUNCTION, with HELP as its tooltip."
+  (propertize (buttonize label (lambda (_) (funcall function)) nil help)
+              'face face
+              'mouse-face 'highlight))
+
 (defun change-review-ui--button (label help function)
   "Return LABEL as a button that calls FUNCTION, with HELP as its tooltip."
-  (propertize (buttonize label (lambda (_) (funcall function)) nil help)
-              'face 'change-review-ui-button-face
-              'mouse-face 'highlight))
+  (change-review-ui--link label help function 'change-review-ui-button-face))
+
+;;;; Fitting a line to its width
+
+(defun change-review-ui--opt (options key default)
+  "Return the value of KEY in the plist OPTIONS, DEFAULT when it has none."
+  (if (plist-member options key) (plist-get options key) default))
+
+(defun change-review-ui--fit (width build steps &optional keep)
+  "Return the first line BUILD draws that is at most WIDTH columns wide.
+BUILD is called with a plist of options, nil at first; each of STEPS, a
+plist of one option, is added to it in turn, the newest winning, while the
+line is too wide.  So the steps say what to give up, the first the least
+missed.  A line that is wider still when they are all taken is cut,
+unless KEEP is non-nil: the caller sees that it did not fit."
+  (let* ((options nil)
+         (line (funcall build options)))
+    (while (and (> (string-width line) width) steps)
+      (setq options (append (pop steps) options)
+            line (funcall build options)))
+    (if (and (not keep) (> (string-width line) width))
+        (truncate-string-to-width line (max 1 width) nil nil "…")
+      line)))
 
 ;;;; Placement
 
@@ -317,20 +397,30 @@ is \"the file\", one on the change \"the change\"."
 
 ;;;; Drawing a thread
 
-(defun change-review-ui--status-text (set thread)
-  "Return the status of THREAD in SET for its header: open, or closed and by whom."
+(defun change-review-ui--status-text (set thread &optional brief)
+  "Return the status of THREAD in SET for its header: open, or closed and by whom.
+BRIEF says less of a closed thread, for a header short of room: `short'
+gives how long ago it was closed for the date, and says who closed it
+only when it was not the user; `who' leaves out when; `bare' says
+closed and no more."
   (if (change-review-thread-open-p thread)
       (propertize "open" 'face 'change-review-ui-open-face)
     (let* ((entry (car (last (cl-remove-if-not (lambda (e) (eq (plist-get e :status) 'closed))
                                                (change-review-thread-history thread)))))
-           (by (and entry (plist-get entry :author)))
-           (time (and entry (plist-get entry :time))))
-      (propertize (concat "closed"
-                          (if by (concat " by " (change-review-author-label by)
-                                         (if (change-review-ui--you-p set by) " (you)" ""))
-                            "")
-                          (if time (concat ", " (change-review-ui--time time)) ""))
-                  'face 'change-review-ui-closed-face))))
+           (closer (and entry (plist-get entry :author)))
+           (you (and closer (change-review-ui--you-p set closer)))
+           (by (and closer (or (null brief) (and (memq brief '(short who)) (not you))) closer))
+           (time (and entry (memq brief '(nil short)) (plist-get entry :time)))
+           (who (and by (concat " by " (change-review-author-label by) (if you " (you)" ""))))
+           (since (and time (if (and brief change-review-ui-relative-times)
+                                (change-review-ui-ago time)
+                              (change-review-ui--time time)))))
+      (apply #'propertize
+             (concat "closed" who
+                     (and (stringp since) (not (string-empty-p since))
+                          (concat (if who ", " " ") since)))
+             'face 'change-review-ui-closed-face
+             (and time (list 'help-echo (change-review-ui--time time)))))))
 
 (defun change-review-ui-thread-short-id (set thread)
   "Return the id of THREAD as short as it can be and still be its own in SET."
@@ -342,15 +432,24 @@ is \"the file\", one on the change \"the change\"."
              return prefix
              finally return id)))
 
-(defun change-review-ui--comment-lines (set thread comment prefix width details)
-  "Return the lines that draw COMMENT of THREAD in SET, a string each.
-PREFIX starts every line, WIDTH is the width to wrap the text to, and
-DETAILS non-nil adds where the comment was made.  Each line ends in a
-newline, which carries the comment's properties as the line does."
+(defconst change-review-ui--comment-header-steps
+  '((:time ago) (:revision nil) (:links short) (:time none) (:marks nil) (:links none))
+  "What the header of a comment gives up, the first the least missed.
+Each step is added to the options `change-review-ui--comment-header'
+draws with, while the line is wider than the room it has: the date goes
+for how long ago, then the revision, the words of the links, the time,
+the \"(you)\" and \"(agent)\", and last the links.")
+
+(defun change-review-ui--comment-header (set thread comment prefix bar details options)
+  "Return the first line of COMMENT of THREAD in SET, without its newline.
+PREFIX and BAR start it; DETAILS non-nil says where the comment was made
+is shown.  OPTIONS are those of `change-review-ui--comment-header-steps':
+`:time' is `full', `ago' or `none', `:revision' and `:marks' are nil to
+leave out the revision and the marks of who wrote it, `:links' is `full',
+`short' or `none'."
   (let* ((position (change-review-comment-position thread comment))
          (total (cdr position))
          (author (change-review-comment-author comment))
-         (bar (propertize "┃" 'face (change-review-ui--author-face author)))
          (digits (length (number-to-string total)))
          (index (propertize (format (format "%%%dd/%%d" digits) (car position) total)
                             'face 'change-review-ui-position-face))
@@ -361,16 +460,28 @@ newline, which carries the comment's properties as the line does."
          (answer (and parent (not (eq parent previous))
                       (propertize (format "↳ re %d/%d" (car parent-position) total)
                                   'face 'change-review-ui-meta-face)))
-         (revision (change-review-comment-revision comment))
+         (revision (and (change-review-ui--opt options :revision t)
+                        (change-review-comment-revision comment)))
          (agent (eq (and author (change-review-author-kind author)) 'agent))
+         (time (change-review-comment-time comment))
+         (time-mode (change-review-ui--opt options :time 'full))
+         (links-mode (change-review-ui--opt options :links 'full))
+         (full-time (and (numberp time) (change-review-ui--time time)))
          (header
           (mapconcat
            #'identity
            (delq nil
-                 (list (concat index "  " (change-review-ui--author-string set author))
-                       (and (change-review-comment-time comment)
-                            (propertize (change-review-ui--time (change-review-comment-time comment))
-                                        'face 'change-review-ui-meta-face))
+                 (list (concat index "  "
+                               (if (change-review-ui--opt options :marks t)
+                                   (change-review-ui--author-string set author)
+                                 (propertize (change-review-author-label author)
+                                             'face (change-review-ui--author-face author))))
+                       (and full-time (not (eq time-mode 'none))
+                            (if (and (eq time-mode 'ago) change-review-ui-relative-times)
+                                (propertize (change-review-ui-ago time)
+                                            'face 'change-review-ui-meta-face
+                                            'help-echo full-time)
+                              (propertize full-time 'face 'change-review-ui-meta-face)))
                        (and revision
                             (propertize (change-review-revision-name set revision)
                                         'face 'change-review-ui-meta-face
@@ -382,21 +493,40 @@ newline, which carries the comment's properties as the line does."
                             (propertize "edited" 'face 'change-review-ui-meta-face))
                        answer))
            (propertize " · " 'face 'change-review-ui-meta-face)))
-         (links (concat
-                 (if (and agent (or (change-review-author-session author)
-                                    (change-review-author-tool-call author)))
-                     (concat "  " (change-review-ui--button
-                                   "↗ conversation"
-                                   "Show the point of the conversation this comment came from"
-                                   (lambda () (change-review-follow-author set author))))
-                   "")
-                 "  " (change-review-ui--button
-                       (if details "▾ where" "▸ where")
-                       "Show where this comment was made"
-                       (lambda () (change-review-ui-toggle-details comment)))))
+         (short (eq links-mode 'short))
+         (links (if (eq links-mode 'none)
+                    ""
+                  (concat
+                   (if (and agent (or (change-review-author-session author)
+                                      (change-review-author-tool-call author)))
+                       (concat "  " (change-review-ui--button
+                                     (if short "↗" "↗ conversation")
+                                     "Show the point of the conversation this comment came from"
+                                     (lambda () (change-review-follow-author set author))))
+                     "")
+                   "  " (change-review-ui--button
+                         (concat (if details "▾" "▸") (if short "" " where"))
+                         "Show where this comment was made"
+                         (lambda () (change-review-ui-toggle-details comment)))))))
+    (propertize (concat prefix bar " " header links) 'change-review-comment-start t)))
+
+(defun change-review-ui--comment-lines (set thread comment prefix width details)
+  "Return the lines that draw COMMENT of THREAD in SET, a string each.
+PREFIX starts every line, WIDTH is the width to wrap the text to and the
+header to fit, and DETAILS non-nil adds where the comment was made.  Each
+line ends in a newline, which carries the comment's properties as the
+line does."
+  (let* ((position (change-review-comment-position thread comment))
+         (author (change-review-comment-author comment))
+         (bar (propertize "┃" 'face (change-review-ui--author-face author)))
+         (digits (length (number-to-string (cdr position))))
+         (header (change-review-ui--fit
+                  width
+                  (lambda (options)
+                    (change-review-ui--comment-header set thread comment prefix bar details options))
+                  change-review-ui--comment-header-steps))
          (body-prefix (concat prefix bar (make-string (+ digits 3 2) ?\s)))
-         (lines (list (propertize (concat prefix bar " " header links)
-                                  'change-review-comment-start t))))
+         (lines (list header)))
     (dolist (text (split-string (change-review-comment-body comment) "\n"))
       (dolist (piece (change-review-ui--wrap text (max 20 (- width (string-width body-prefix)))))
         (push (concat body-prefix piece) lines)))
@@ -407,13 +537,60 @@ newline, which carries the comment's properties as the line does."
               (propertize (concat line "\n") 'change-review-comment (change-review-comment-id comment)))
             (nreverse lines))))
 
-(defun change-review-ui--thread-header (set thread view placement prefix)
+(defconst change-review-ui--header-steps
+  '((:status short) (:note nil) (:status who) (:status bare) (:count nil) (:buttons nil))
+  "What the header of a thread gives up, the first the least missed.
+Each step is added to the options `change-review-ui--thread-header' draws
+with, while the line is wider than the room it has: when a closed thread
+was closed gives the date for how long ago, the place the thread moved to
+goes, then when it was closed, then who closed it, the count of comments
+and last the buttons.")
+
+(defconst change-review-ui--collapsed-header-steps
+  '((:status short) (:buttons nil) (:note nil) (:count nil) (:status who) (:status bare))
+  "What the header of a thread drawn as one line gives up.
+As `change-review-ui--header-steps', but the buttons go as soon as the
+status is short, and the count of comments before when it was closed: the
+words of the thread are worth more there.")
+
+(defconst change-review-ui--quote-room 30
+  "How many columns a thread drawn as one line wants for its first words.")
+
+(defconst change-review-ui--collapsed-width 100
+  "The widest a thread drawn as one line is, in a window that has more room.
+It is a summary to run an eye down, not to read across a whole screen.")
+
+(defun change-review-ui--fold-gutter (prefix marker)
+  "Return PREFIX with MARKER, a string one column wide, in its last two columns.
+A space follows it, so the line goes on where it did without the marker.
+PREFIX is spaces; one that is shorter than two columns is followed by
+the marker and the space."
+  (if (string-suffix-p "  " prefix)
+      (concat (substring prefix 0 -2) marker " ")
+    (concat prefix marker " ")))
+
+(defun change-review-ui--fold-marker (set thread fold)
+  "Return the triangle that folds THREAD of SET, drawn with FOLD, a button."
+  (let ((collapsed (eq fold 'collapsed)))
+    (change-review-ui--link
+     (if collapsed "▸" "▾")
+     (if collapsed "Show the conversation of this thread (TAB)" "Fold this thread to one line (TAB)")
+     (lambda () (change-review-ui-set-fold set thread (if collapsed 'expanded 'collapsed)))
+     'change-review-ui-fold-face)))
+
+(defun change-review-ui--build-thread-header (set thread view placement prefix fold options)
   "Return the first line of THREAD in SET, drawn for VIEW, after PREFIX.
-VIEW is `threads' or `diff'; PLACEMENT says where the thread is now."
+VIEW is `threads' or `diff'; PLACEMENT says where the thread is now.
+FOLD, non-nil when the thread can be folded, puts the triangle that does
+it where the last two columns of PREFIX are.  OPTIONS are those of
+`change-review-ui--header-steps': `:status' is nil for all of it, `short',
+`who' or `bare'; `:note', `:count' and `:buttons' are nil to leave out
+where the thread is, how many comments it has and the buttons."
   (let* ((open (change-review-thread-open-p thread))
          (location (change-review-thread-location thread))
-         (where (and (not (eq view 'diff)) (change-review-ui--where-text location placement)))
-         (note (and (eq view 'diff) (change-review-ui--placement-note placement)))
+         (placed (change-review-ui--opt options :note t))
+         (where (and placed (not (eq view 'diff)) (change-review-ui--where-text location placement)))
+         (note (and placed (eq view 'diff) (change-review-ui--placement-note placement)))
          (count (length (change-review-thread-comments thread)))
          (parts (delq nil
                       (list (propertize (change-review-ui-thread-short-id set thread)
@@ -421,32 +598,105 @@ VIEW is `threads' or `diff'; PLACEMENT says where the thread is now."
                                         'help-echo (format "Thread %s" (change-review-thread-id thread)))
                             where
                             (and note (propertize note 'face 'change-review-ui-meta-face))
-                            (format "%d %s" count (if (= count 1) "comment" "comments"))
-                            (change-review-ui--status-text set thread))))
-         (buttons (concat
-                   (change-review-ui--button "[Reply]" "Reply to this thread"
-                                             (lambda () (change-review-ui-reply-to-thread set thread)))
-                   " "
-                   (change-review-ui--button (if open "[Close]" "[Reopen]")
-                                             (if open "Close this thread: it is done"
-                                               "Open this thread again")
-                                             (lambda () (change-review-ui-toggle-thread set thread)))
-                   (if (eq view 'diff)
-                       ""
-                     (concat " " (change-review-ui--button
-                                  "[Diff]" "Show this thread in the diff view"
-                                  (lambda () (change-review-visit set thread))))))))
-    (propertize (concat prefix
+                            (and (change-review-ui--opt options :count t)
+                                 (format "%d %s" count (if (= count 1) "comment" "comments")))
+                            (change-review-ui--status-text set thread (plist-get options :status)))))
+         (buttons (and (change-review-ui--opt options :buttons t)
+                       (concat
+                        (change-review-ui--button "[Reply]" "Reply to this thread"
+                                                  (lambda () (change-review-ui-reply-to-thread set thread)))
+                        " "
+                        (change-review-ui--button (if open "[Close]" "[Reopen]")
+                                                  (if open "Close this thread: it is done"
+                                                    "Open this thread again")
+                                                  (lambda () (change-review-ui-toggle-thread set thread)))
+                        (if (eq view 'diff)
+                            ""
+                          (concat " " (change-review-ui--button
+                                       "[Diff]" "Show this thread in the diff view"
+                                       (lambda () (change-review-visit set thread)))))))))
+    (propertize (concat (if fold
+                            (change-review-ui--fold-gutter prefix (change-review-ui--fold-marker set thread fold))
+                          prefix)
                         (propertize (if open "●" "✓")
                                     'face (if open 'change-review-ui-open-face
                                             'change-review-ui-closed-face))
                         " " (mapconcat #'identity parts
                                        (propertize " · " 'face 'change-review-ui-meta-face))
-                        "   " buttons)
+                        (if buttons (concat "   " buttons) ""))
                 'change-review-thread-start t)))
 
+(defun change-review-ui--thread-header (set thread view placement prefix width &optional fold keep)
+  "Return the first line of THREAD in SET, drawn for VIEW, after PREFIX.
+It is at most WIDTH columns wide: when it would not be, it says less
+\(`change-review-ui--header-steps').  VIEW is `threads' or `diff';
+PLACEMENT says where the thread is now.  FOLD is how the thread is
+folded when it can be folded (`change-review-ui-thread-fold'), nil when
+not.  With KEEP a line that does not fit when it says the least is
+returned as it is, not cut."
+  (change-review-ui--fit
+   width
+   (lambda (options)
+     (change-review-ui--build-thread-header set thread view placement prefix fold options))
+   (if (eq fold 'collapsed) change-review-ui--collapsed-header-steps change-review-ui--header-steps)
+   keep))
+
+(defun change-review-ui--summary (body)
+  "Return the words of BODY, a comment's text, that stand for it in one line.
+Its lines that are not a quote (`> ', as a reply to patches quotes) joined
+by spaces; a text that is all quote, all of it.  A comment imported from
+a reply to patches opens with what it answers, which says less of it than
+the answer does."
+  (let* ((lines (split-string body "\n" t "[ \t]+"))
+         (own (cl-remove-if (lambda (line) (string-match-p "\\`>+\\(?:[ \t]\\|\\'\\)" line)) lines)))
+    (string-join (or own lines) " ")))
+
+(defun change-review-ui--collapsed-line (set thread view placement indent width fold)
+  "Return THREAD of SET as one line: the header, then the first words of its root.
+The line is at most WIDTH columns wide, and no wider than
+`change-review-ui--collapsed-width'.  The header gives up what it can
+\(`change-review-ui--collapsed-header-steps') to leave the words
+`change-review-ui--quote-room' columns, or what they need if that is
+less; when it has given up all it can, the words are the room that is
+left.  FOLD, INDENT, VIEW and PLACEMENT are those of
+`change-review-ui-thread-string'; the words are a button that opens the
+thread when the thread can be folded."
+  (let* ((width (min width change-review-ui--collapsed-width))
+         (text (change-review-ui--summary (change-review-comment-body (change-review-thread-root thread))))
+         (wanted (min (+ 2 (string-width text)) change-review-ui--quote-room))
+         (header (change-review-ui--thread-header set thread view placement indent
+                                                  (- width 2 wanted) fold t))
+         (room (- width (string-width header) 2 2))
+         (words (and (>= room 3) (truncate-string-to-width text room nil nil "…"))))
+    (concat (if (> (string-width header) (- width 2 3))
+                ;; Not even the least of a header leaves room for words.
+                (truncate-string-to-width header width nil nil "…")
+              header)
+            (if words
+                (concat "  "
+                        (if fold
+                            (change-review-ui--link
+                             (concat "“" words "”")
+                             "Show the conversation of this thread (TAB)"
+                             (lambda () (change-review-ui-set-fold set thread 'expanded))
+                             'change-review-ui-meta-face)
+                          (propertize (concat "“" words "”") 'face 'change-review-ui-meta-face)))
+              "")
+            "\n")))
+
+(defun change-review-ui--more-row (set thread indent count)
+  "Return the line that says COUNT more lines of THREAD of SET are not drawn.
+INDENT starts it; its words are a button that draws all of the thread."
+  (concat indent (propertize "┃" 'face 'change-review-ui-meta-face) "      "
+          (change-review-ui--link
+           (format "… %d more %s" count (if (= count 1) "line" "lines"))
+           "Show all of this thread (TAB)"
+           (lambda () (change-review-ui-set-fold set thread 'full))
+           'change-review-ui-fold-face)
+          "\n"))
+
 (cl-defun change-review-ui-thread-string (set thread &key (view 'threads) placement
-                                              collapsed details width (indent ""))
+                                              collapsed details width (indent "") fold max-lines)
   "Return THREAD of SET drawn as text, each line ending in a newline.
 This is the one drawing of a thread, in the threads view and in the
 diff view.  It has a header line -- the thread's mark and short id,
@@ -457,33 +707,52 @@ before), who wrote it, when, against which revision, whether it is a
 draft, and the text.  A comment whose author is an agent has a button
 to the conversation it came from.
 
+No line is wider than WIDTH, by default the room the buffer's window
+has: a line that would be says less -- how long ago for a date, the
+revision left out, shorter buttons -- until it fits.  INDENT starts
+every line.
+
 VIEW is `threads' or `diff': the diff view leaves out the line the
 thread is about, since it is under it.  PLACEMENT is where the thread is
 now (`change-review-placement'); a thread that moved says so.  COLLAPSED
 draws only the header and the first words of the root.  DETAILS is a
 list of comment ids, or t for all, that also show where they were made.
-WIDTH is the width to wrap to, INDENT starts every line."
+
+FOLD, for a view that lets the thread be folded (`change-review-ui-thread-fold'
+says how it is), is `collapsed', `expanded' or `full': the header then
+starts with a triangle, a button that folds it, and the first words of a
+collapsed thread open it when clicked.  MAX-LINES, with FOLD `expanded',
+is the most lines the thread takes, the header and the comments: the
+rest is cut, and a line says how many there are, a button that draws all
+of it.  A thread whose DETAILS show is not cut."
   (let* ((width (or width (change-review-ui-current-width)))
-         (header (change-review-ui--thread-header set thread view placement indent))
+         (collapsed (or collapsed (eq fold 'collapsed)))
+         (fold (and fold (if collapsed 'collapsed fold)))
+         (comments (change-review-thread-comments thread))
+         (limit (and max-lines (eq fold 'expanded)
+                     (not (or (eq details t)
+                              (cl-some (lambda (comment) (member (change-review-comment-id comment) details))
+                                       comments)))
+                     (max 3 max-lines)))
          (lines
           (if collapsed
-              (list (concat header "  "
-                            (propertize
-                             (concat "“" (truncate-string-to-width
-                                          (string-replace
-                                           "\n" " "
-                                           (change-review-comment-body
-                                            (change-review-thread-root thread)))
-                                          (max 10 (- width 50)) nil nil "…")
-                                     "”")
-                             'face 'change-review-ui-meta-face)
-                            "\n"))
-            (cons (concat header "\n")
-                  (cl-loop for comment in (change-review-thread-comments thread)
-                           append (change-review-ui--comment-lines
-                                   set thread comment indent width
-                                   (or (eq details t)
-                                       (member (change-review-comment-id comment) details))))))))
+              (list (change-review-ui--collapsed-line set thread view placement indent width fold))
+            (let ((all (cons (concat (change-review-ui--thread-header set thread view placement indent
+                                                                       width fold)
+                                     "\n")
+                             (cl-loop for comment in comments
+                                      append (change-review-ui--comment-lines
+                                              set thread comment indent width
+                                              (or (eq details t)
+                                                  (member (change-review-comment-id comment) details)))))))
+              ;; A drawing that cannot be folded -- the threads view's -- says nothing of it.
+              (when fold
+                (change-review-ui--note-trimmed set thread (and limit (> (length all) limit))))
+              (if (and limit (> (length all) limit))
+                  (append (seq-take all (1- limit))
+                          (list (change-review-ui--more-row set thread indent
+                                                            (- (length all) (1- limit)))))
+                all)))))
     (propertize (apply #'concat lines)
                 'change-review-thread (change-review-thread-id thread))))
 
@@ -510,7 +779,7 @@ ends in a newline and carries the thread's id."
                        ": "))
          (room (max 12 (- width (string-width head) 14)))
          (text (truncate-string-to-width
-                (string-replace "\n" " " (change-review-comment-body root)) room nil nil "…")))
+                (change-review-ui--summary (change-review-comment-body root)) room nil nil "…")))
     (propertize (concat head (propertize (concat "“" text "”") 'face 'change-review-ui-meta-face)
                         (if (> count 1)
                             (propertize (format " · %d comments" count) 'face 'change-review-ui-meta-face)
@@ -774,6 +1043,131 @@ comment to point at, to the thread's last comment."
        (if (string-blank-p text)
            (message "No comment")
          (change-review-comment set (string-trim text)))))))
+
+;;;; Folding a thread
+
+(defvar change-review-ui--folds (make-hash-table :test 'eq :weakness 'key)
+  "How threads were folded: change set -> a table of thread id -> (STATUS . FOLD).
+FOLD is `collapsed', `expanded' or `full'.  STATUS is the thread's when
+it was folded: a thread whose status changed since is drawn as a thread
+of that status is, again.")
+
+(defvar change-review-ui--trimmed (make-hash-table :test 'eq :weakness 'key)
+  "Change set -> a table of the ids of the threads the last drawing cut short.")
+
+(defun change-review-ui--note-trimmed (set thread trimmed)
+  "Note that the last drawing of THREAD of SET was TRIMMED, cut short, or was not."
+  (let ((table (or (gethash set change-review-ui--trimmed)
+                   (puthash set (make-hash-table :test 'equal) change-review-ui--trimmed))))
+    (if trimmed
+        (puthash (change-review-thread-id thread) t table)
+      (remhash (change-review-thread-id thread) table))))
+
+(defun change-review-ui--trimmed-p (set thread)
+  "Return non-nil when the last drawing of THREAD of SET cut it short."
+  (let ((table (gethash set change-review-ui--trimmed)))
+    (and table (gethash (change-review-thread-id thread) table))))
+
+(defun change-review-ui-default-fold (thread)
+  "Return how THREAD is folded before anyone folded it.
+A closed thread is `collapsed', one line, unless
+`change-review-ui-collapse-closed-in-diff' says not; any other is `expanded'."
+  (if (and change-review-ui-collapse-closed-in-diff (not (change-review-thread-open-p thread)))
+      'collapsed
+    'expanded))
+
+(defun change-review-ui-thread-fold (set thread)
+  "Return how THREAD of SET is folded: `collapsed', `expanded' or `full'.
+A collapsed thread is drawn as one line, an expanded one in full but
+for what does not fit the window (`change-review-ui-max-thread-lines'),
+a full one in full.  What the user chose
+\(`change-review-ui-set-fold') holds while the thread keeps its status."
+  (let* ((table (gethash set change-review-ui--folds))
+         (entry (and table (gethash (change-review-thread-id thread) table))))
+    (if (and entry (eq (car entry) (change-review-thread-status thread)))
+        (cdr entry)
+      (change-review-ui-default-fold thread))))
+
+(defun change-review-ui-set-fold (set thread fold)
+  "Fold THREAD of SET to FOLD, `collapsed', `expanded' or `full'.
+The views of SET are drawn again."
+  (unless (memq fold '(collapsed expanded full))
+    (signal 'change-review-error (list (format "Not a way to fold a thread: %S" fold))))
+  (let ((table (or (gethash set change-review-ui--folds)
+                   (puthash set (make-hash-table :test 'equal) change-review-ui--folds))))
+    (puthash (change-review-thread-id thread) (cons (change-review-thread-status thread) fold) table))
+  (change-review-ui-refresh set))
+
+(defun change-review-ui-next-fold (set thread)
+  "Return the fold THREAD of SET goes to next.
+One line, then its conversation, then all of it when the drawing of the
+conversation left something out, then one line again."
+  (pcase (change-review-ui-thread-fold set thread)
+    ('collapsed 'expanded)
+    ('expanded (if (change-review-ui--trimmed-p set thread) 'full 'collapsed))
+    (_ 'collapsed)))
+
+(defun change-review-ui-cycle-folds (set threads)
+  "Fold THREADS of SET, all as the first goes next (`change-review-ui-next-fold').
+Say what they are now, and return that."
+  (when threads
+    (let ((next (change-review-ui-next-fold set (car threads))))
+      (dolist (thread threads) (change-review-ui-set-fold set thread next))
+      (message "%s: %s"
+               (if (cdr threads)
+                   (format "%d threads" (length threads))
+                 (format "Thread %s" (change-review-ui-thread-short-id set (car threads))))
+               (pcase next
+                 ('collapsed "one line")
+                 ('expanded "the conversation")
+                 (_ "all of it")))
+      next)))
+
+(defun change-review-ui--threads-here (set)
+  "Return the threads of SET drawn under the line at point, the chosen one first."
+  (let ((chosen (change-review-ui--thread-at-point))
+        (threads (cl-loop for id in (change-review-ui--overlay-thread-ids)
+                          for thread = (change-review-find-thread set id)
+                          when thread collect thread)))
+    (if chosen (cons chosen (remq chosen threads)) threads)))
+
+(defun change-review-ui--other-command (keys self)
+  "Return the command KEYS run in this buffer but for SELF, or nil.
+The first of the active keymaps, in the order the keys are looked up in,
+that binds KEYS to a command that is not SELF: the other minor modes',
+the major mode's, the global one."
+  (cl-loop for map in (current-active-maps t)
+           for binding = (lookup-key map keys)
+           when (and (commandp binding) (not (eq binding self)))
+           return binding))
+
+(defun change-review-ui--reveal-line ()
+  "Scroll the window of this buffer, if need be, to show what is under this line.
+The threads drawn under the line at point, that is: when the next line is
+not in sight, the window shows the line at point second from its top."
+  (when-let* ((window (get-buffer-window (current-buffer))))
+    (let ((next (save-excursion (forward-line 1) (point))))
+      (unless (eq t (pos-visible-in-window-p next window))
+        (with-selected-window window (recenter 1))))))
+
+(defun change-review-ui-cycle-fold ()
+  "Fold the thread under the line at point: one line, its conversation, all of it.
+A closed thread is one line at first, and so can any thread be: this
+shows its conversation, and, when there was more than the window has room
+for (`change-review-ui-max-thread-lines'), all of it, and then makes it
+one line again.  The window scrolls if what grew is out of sight.
+Several threads under a line follow the first.  On a line with none this
+is what TAB is without this library's keys."
+  (interactive)
+  (let* ((set (change-review-ui--current-set))
+         (threads (change-review-ui--threads-here set)))
+    (if threads
+        (progn (change-review-ui-cycle-folds set threads)
+               (change-review-ui-flush)
+               (change-review-ui--reveal-line))
+      (if-let* ((command (change-review-ui--other-command (kbd "TAB") #'change-review-ui-cycle-fold)))
+          (call-interactively command)
+        (user-error "No thread under this line")))))
 
 ;;;; Showing where a comment was made
 
@@ -1160,23 +1554,27 @@ Return non-nil when there was one."
   "In the diff view, where each file is: a list of (FILE START END LINES).
 LINES maps (SIDE . NUMBER) to the end of the line that has it.")
 
-(defvar change-review-diff-view-mode-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "c") #'change-review-ui-comment-at-point)
-    (define-key map (kbd "r") #'change-review-ui-reply)
-    (define-key map (kbd "x") #'change-review-ui-toggle-status)
-    (define-key map (kbd "o") #'change-review-ui-follow-author)
-    (define-key map (kbd "e") #'change-review-ui-edit-draft)
-    (define-key map (kbd "RET") #'change-review-ui-return)
-    (define-key map (kbd "T") #'change-review-ui-show-threads)
-    (define-key map (kbd "C-c C-n") #'change-review-ui-next-thread)
-    (define-key map (kbd "C-c C-p") #'change-review-ui-previous-thread)
-    (define-key map (kbd "C-c C-t") #'change-review-ui-show-threads)
-    (define-key map (kbd "C-c C-f") #'change-review-ui-cycle-filter)
-    (define-key map (kbd "C-c C-c") #'change-review-ui-send)
-    (define-key map (kbd "C-c C-i") #'change-review-ui-import-reply)
-    map)
+(defvar change-review-diff-view-mode-map (make-sparse-keymap)
   "Keys of the diff view, beside those of `diff-mode'.")
+
+;; Filled at top level, not in the `defvar', so that loading the file
+;; again, as an Emacs that runs on does after an update, gives the map
+;; the keys the new version has.
+(let ((map change-review-diff-view-mode-map))
+  (define-key map (kbd "c") #'change-review-ui-comment-at-point)
+  (define-key map (kbd "r") #'change-review-ui-reply)
+  (define-key map (kbd "x") #'change-review-ui-toggle-status)
+  (define-key map (kbd "o") #'change-review-ui-follow-author)
+  (define-key map (kbd "e") #'change-review-ui-edit-draft)
+  (define-key map (kbd "RET") #'change-review-ui-return)
+  (define-key map (kbd "TAB") #'change-review-ui-cycle-fold)
+  (define-key map (kbd "T") #'change-review-ui-show-threads)
+  (define-key map (kbd "C-c C-n") #'change-review-ui-next-thread)
+  (define-key map (kbd "C-c C-p") #'change-review-ui-previous-thread)
+  (define-key map (kbd "C-c C-t") #'change-review-ui-show-threads)
+  (define-key map (kbd "C-c C-f") #'change-review-ui-cycle-filter)
+  (define-key map (kbd "C-c C-c") #'change-review-ui-send)
+  (define-key map (kbd "C-c C-i") #'change-review-ui-import-reply))
 
 (define-derived-mode change-review-diff-view-mode diff-mode "Review-Diff"
   "A version of a change as the unified diff, with its threads under the lines.
@@ -1186,7 +1584,8 @@ LINES maps (SIDE . NUMBER) to the end of the line that has it.")
 Under a thread:
 \\[change-review-ui-reply] replies to it.
 \\[change-review-ui-toggle-status] closes it or opens it again.
-\\[change-review-ui-return] shows where its comments were made.
+\\[change-review-ui-return] opens it if it is one line, else shows where its comments were made.
+\\[change-review-ui-cycle-fold] folds it: one line, its conversation, all of it.
 \\[change-review-ui-follow-author] follows an agent's comment to its conversation.
 \\[change-review-ui-next-thread] and \\[change-review-ui-previous-thread] move between threads.
 \\[change-review-ui-show-threads] lists them by file.
@@ -1224,11 +1623,6 @@ A hash table of (SIDE . NUMBER) to the end of the line."
                       (equal path (change-review-file-old-path file)))))
               change-review-ui--index))
 
-(defun change-review-ui--collapsed-p (thread)
-  "Return non-nil when the diff view draws THREAD as one line."
-  (and change-review-ui-collapse-closed-in-diff
-       (not (change-review-thread-open-p thread))))
-
 (defun change-review-ui--decorate-diff ()
   "Draw the threads that have a place in the diff view, under their lines.
 Those about the change as a whole go before the first file; those about
@@ -1238,6 +1632,7 @@ the first file too, saying so."
   (let* ((set change-review-ui--set)
          (version change-review-ui--version)
          (width (change-review-ui-current-width))
+         (max-lines (change-review-ui-current-max-lines))
          (loose nil))
     (change-review-ui-clear-overlays)
     (dolist (thread (change-review-threads set (if (eq change-review-ui--filter 'all) nil
@@ -1249,10 +1644,8 @@ the first file too, saying so."
                              (change-review-placement set thread version)))
              (args (list :view 'diff :placement placement :width width
                          :details change-review-ui--details
-                         :collapsed (and (change-review-ui--collapsed-p thread)
-                                         (not (cl-some (lambda (c) (member (change-review-comment-id c)
-                                                                           change-review-ui--details))
-                                                       (change-review-thread-comments thread))))
+                         :fold (change-review-ui-thread-fold set thread)
+                         :max-lines max-lines
                          :indent "    ")))
         (cond
          ((null location) (push (cons thread args) loose))
@@ -1342,10 +1735,16 @@ Return the buffer."
   (change-review-open-threads (change-review-ui--current-set)))
 
 (defun change-review-ui-return ()
-  "Under a thread, show where its comments were made; else do what RET does."
+  "Under a thread, open it if it is one line, else show where it was made.
+Where its comments were made, that is.  Elsewhere RET is what it is in
+`diff-mode'."
   (interactive)
   (if (change-review-ui--overlay-thread-ids)
-      (change-review-ui-show-origin)
+      (let ((set (change-review-ui--current-set))
+            (thread (change-review-ui--thread-at-point)))
+        (if (and thread (eq (change-review-ui-thread-fold set thread) 'collapsed))
+            (change-review-ui-set-fold set thread 'expanded)
+          (change-review-ui-show-origin)))
     (call-interactively (lookup-key diff-mode-map (kbd "RET")))))
 
 (defun change-review-ui--next-thread-overlay (direction)
@@ -1510,15 +1909,17 @@ the thread it answers; importing it again adds nothing."
 
 ;;;; Other views of a diff
 
-(defvar change-review-ui-lines-mode-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "r") #'change-review-ui-reply)
-    (define-key map (kbd "x") #'change-review-ui-toggle-status)
-    (define-key map (kbd "o") #'change-review-ui-follow-author)
-    (define-key map (kbd "e") #'change-review-ui-edit-draft)
-    (define-key map (kbd "RET") #'change-review-ui-return)
-    map)
+(defvar change-review-ui-lines-mode-map (make-sparse-keymap)
   "Keys of a buffer that shows threads under its lines.")
+
+;; Filled at top level, as the diff view's is.
+(let ((map change-review-ui-lines-mode-map))
+  (define-key map (kbd "r") #'change-review-ui-reply)
+  (define-key map (kbd "x") #'change-review-ui-toggle-status)
+  (define-key map (kbd "o") #'change-review-ui-follow-author)
+  (define-key map (kbd "e") #'change-review-ui-edit-draft)
+  (define-key map (kbd "RET") #'change-review-ui-return)
+  (define-key map (kbd "TAB") #'change-review-ui-cycle-fold))
 
 (define-minor-mode change-review-ui-lines-mode
   "Keys for the threads drawn under the lines of this buffer.

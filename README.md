@@ -186,8 +186,8 @@ OpenAI-compatible APIs and AWS Bedrock.
 
 | ![A task in review, its report at the changes: the files with their open and closed threads, and under each file its open threads, a line each; the drafts waiting to be sent](docs/media/review.png) | ![The threads of that review by file, filtered by status: each comment with who wrote it, when, its version and its place in the thread, one with where it was made and the lines of the diff, the agent's answer linking to its conversation](docs/media/review-threads.png) |
 | A task's changes, and the threads of comments on them | The threads by file: sender, when, content and place in the thread; where a comment was made |
-| ![Ediff on a file of that review: the two versions and the control panel, the threads drawn under their lines in the branch's version, the report with its box at the bottom](docs/media/review-ediff.png) | |
-| Ediff: the threads under their lines, drawn as the threads view draws them | |
+| ![Ediff on a file of that review: the two versions and the control panel, the threads drawn under their lines in the branch's version -- a closed thread opened to its conversation, another folded to one line -- the report with its box at the bottom](docs/media/review-ediff.png) | |
+| Ediff: the threads under their lines, drawn as the threads view draws them to the width of the window; a closed thread is a line, `TAB` or a click opens it to its conversation | |
 
 ## Requirements
 
@@ -3332,7 +3332,15 @@ with), `recap` writes the recaps on the cards,
   in the thread under the line, `x` closes it -- closed is the good
   ending: the point made, the change made -- or opens it again, `RET`
   shows where each comment was made, with the lines of the diff it was
-  made on, and `e` edits your draft or goes to the box. `T`, in the
+  made on, and `e` edits your draft or goes to the box. A closed thread
+  is one line under its line (`▸ ✓ t-3f9a · 3 comments · closed 2h ago
+  “Why eighteen?…”`): `TAB` on that line -- in Ediff's control panel, on
+  the threads of the current difference -- or a click on it opens it to
+  its conversation (`▾`), and `TAB` folds any thread to a line again.
+  A thread longer than the window has room for is cut, saying how many
+  lines more there are (`… 8 more lines`); `TAB` or a click shows all of
+  it. Threads are drawn to the width of the window that shows them, so
+  with the two versions side by side nothing wraps. `T`, in the
   report and in Ediff (or `[Threads]`), lists all the threads by file in
   a view of their own: filtered by status (`f`: open, closed, all),
   `n` and `p` between comments, `N` and `P` between threads, `r` to

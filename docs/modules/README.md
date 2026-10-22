@@ -366,6 +366,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `harness-acp-authenticate-functions` | [acp](acp.md) | [acp-remote](acp-remote.md) |
 | `harness-acp-authorize-functions` | [acp](acp.md) | [acp-remote](acp-remote.md) |
 | `harness-acp-initialize-extras-functions` | [acp](acp.md) | [acp-remote](acp-remote.md) |
+| `harness-acp-initialized-functions` | [acp](acp.md) |  |
 | `harness-acp-received-hook` | [acp](acp.md) | [ui-chat](ui-chat.md) |
 | `harness-chat-header-end-functions` | [ui-cache-warm](ui-cache-warm.md), [ui-chat](ui-chat.md) | [ui-cache-warm](ui-cache-warm.md), [ui-version](ui-version.md) |
 | `harness-chat-header-functions` | [ui-btw](ui-btw.md), [ui-chat](ui-chat.md), [ui-priority](ui-priority.md), [ui-supervisor](ui-supervisor.md) | [ui-btw](ui-btw.md), [ui-priority](ui-priority.md), [ui-supervisor](ui-supervisor.md) |
@@ -422,5 +423,5 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `window-buffer-change-functions` |  | [ui-access](ui-access.md), [ui-chat](ui-chat.md), [ui-slots](ui-slots.md), [ui-tasks](ui-tasks.md) |
 | `window-configuration-change-hook` |  | [ui-insights](ui-insights.md), [ui-slots](ui-slots.md), [ui-tree](ui-tree.md), [ui-usage](ui-usage.md) |
 | `window-scroll-functions` |  | [ui-chat](ui-chat.md) |
-| `window-size-change-functions` |  | [ui-chat](ui-chat.md), [ui-compose](ui-compose.md), [ui-pet](ui-pet.md), [ui-tasks](ui-tasks.md) |
+| `window-size-change-functions` |  | [ui-chat](ui-chat.md), [ui-compose](ui-compose.md), [ui-patch-review](ui-patch-review.md), [ui-pet](ui-pet.md), [ui-tasks](ui-tasks.md) |
 
