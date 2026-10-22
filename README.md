@@ -504,6 +504,7 @@ default), or nil for nowhere.
 | `C-c h b` | `harness-btw` | Open a BTW side conversation (`C-u`: on a model of your choice) |
 | `C-c h k` | `harness-cancel-turn` | Cancel the running turn |
 | `C-c h C` | `harness-compact` | Compact the conversation: choose a summary, a brief summary, a transcript file, a fresh start or a cut of its older context, each with what it costs; a session running a turn is asked to interrupt it or queue the compaction |
+| `C-c h K` | `harness-cache-keep-warm` | Keep the session's prompt cache warm for a period you give (`30m`, `1h30m`, `off`), though nothing says you are around yet; see [Keeping the cache warm](#keeping-the-cache-warm) |
 | `C-c h D` | `harness-delete-session` | Delete the current session |
 | `C-c h m` | `harness-set-model` | Choose the model |
 | `C-c h M` | `harness-set-model-all` | Choose a model and switch every current session and task of every project to it |
@@ -689,7 +690,7 @@ so `C-c .` is how you aim a key at a panel from there (see
 | `C-c C-q` | Queue the message for the next turn |
 | `RET` | Insert a newline |
 | `@` | Complete a file to attach: part of a name finds a project file in any subdirectory, a path (`/`, `~/`, `./`, `../`) any file. The file's `@path` stays in the text as a chip you can click; one typed out in full attaches its file when the message is sent. `@task:` completes a task of the project the same way |
-| `/` | Complete a skill, or `/compact` |
+| `/` | Complete a skill, `/compact`, or `/warm` (`/warm 30m`, `/warm off`) |
 | `C-c C-a` | Attach a file found the same way, by part of a name or by path (`C-u C-c C-a` browses the file system), or a task as `task:ID` |
 | `C-c .` then a key | Press that key on the panel above the box: a question's digit, a permission's `y` or `n`. With a numeric argument, on the Nth panel up. `C-g` quits |
 | `M-<` / `M->` | Go to the top or the bottom of the compose box. Pressed again, from outside the box or with a prefix argument, they go to those of the buffer |
@@ -1660,6 +1661,117 @@ the question whatever the clock of the cache says. The question reads
 "a redaction dropped this session's provider conversation at HH:MM, so
 no prompt cache holds it", and compares no cached price, as there is
 none to be had.
+
+### Keeping the cache warm
+
+A provider's prompt cache lasts a few minutes after the request that last
+read it (Claude's five, or one hour), and every request that reads it
+keeps it that long again. A pause longer than that -- reading a long
+answer, thinking, typing a long reply, a phone call -- makes your next
+message pay for the whole conversation again, uncached. The `cache-warm`
+module (`:features cache-warm`, which brings the `cache` watcher and its
+UI, `ui-cache-warm`) keeps the cache from lapsing while you are around:
+a few seconds before it would, the harness sends the conversation once
+more, which reads the cache and starts its lifetime over. It costs a
+tenth of what sending the context uncached would, nothing of it appears in
+the transcript (only what it cost, in the session's usage), and it goes
+on, one refresh a cache lifetime, until you have been gone for a while.
+
+"Around" means you sent a message or answered a question, typed in the
+session's message box, or ran any command in its chat (the chat tells the
+harness, at most every twenty seconds). After that the cache is kept warm
+for a period that follows from how long the cache lasts, so a provider
+that keeps it 37 minutes or an hour and a half is handled like a
+five-minute or an hour's:
+
+| Cache lasts | Refresh comes | You count as active | Kept warm after that | In all |
+|---|---|---|---|---|
+| 5 minutes | 10 seconds before it lapses | 1 minute | 5 minutes | 6 minutes |
+| 37 minutes | 60 seconds before | about 7 minutes | about 12 minutes | about 20 minutes |
+| 1 hour | 60 seconds before | 12 minutes | 20 minutes | 32 minutes |
+| 1½ hours | 60 seconds before | 18 minutes | 30 minutes | 48 minutes |
+
+(The refresh comes T/30 before the lapse, at least 10 seconds and at most
+a minute, so that a retry or a slow answer still lands in time; you count
+as active for a fifth of T; the cache is kept warm a third of T more, at
+least five minutes.) While it is on, a flame and a coarse countdown to the
+end of the period show in the chat's header line, `🔥 12m`; hovering it
+says why and until when, when the next refresh is, how many were made and
+what a refresh costs against sending everything again.
+
+A turn that waits on a long tool call, a smoke test, say, lets the cache
+lapse as surely as a user who is away, so its cache is kept warm too,
+whoever is around: the request of the turn's latest step is sent again,
+which reads the cache that step wrote. This is done for providers that
+are sent the whole conversation at every request (Bedrock, OpenAI,
+DeepSeek); Claude Code holds the conversation in a process that is busy
+with the turn, so it is kept warm while the session waits for you, in
+that process: a short message is sent to it (it stays in the
+conversation Claude Code holds, two short messages a refresh).
+
+It is never kept warm for longer than it pays. A refresh reads the context
+at the cache-read price; once the refreshes since the session's last
+request would cost as much as sending the conversation again, uncached,
+the cache is left to lapse, a note says so, and the next request of the
+conversation's own starts the count afresh: 12 refreshes for Claude's
+cache (about an hour of a five-minute cache), two for one that reads at
+half price. A three-hour smoke test is therefore not kept warm for three
+hours. A refresh that fails is tried again; one that does not read the
+cache (the provider wrote it instead) stops keeping that session warm, with
+a note.
+
+Say you know you will be back and nothing has noticed yet: `/warm 30m` in
+the message box (or `K` under the harness prefix, the menu entry "Keep
+cache warm", or a click on the flame) sets a period of your own, `30m`,
+`1h30m`, `90` (minutes) or `off` to take it away. The echo area says until
+when, about how many refreshes that is and what they cost against sending
+it all again, or why nothing is kept warm. Turn it off altogether with
+`harness-cache-warm` (**Prompt cache** on the settings page).
+
+### Compacting just before the cache lapses
+
+A conversation whose cache is about to lapse, and whose user is gone, is
+going to be sent again whole and uncached by whoever writes to it next --
+or compacted first, with the user waiting, when the cold-cache question is
+on. With the `cache-compact` module (`:features cache-compact`) it is
+compacted a few seconds before the cache lapses instead, while the context
+is still hot in it: what a summarising model reads of the conversation it
+reads from the cache, a tenth of the uncached price, and the next message
+finds a small conversation and no wait.
+
+It compacts as you saved for a cold cache: the choice an "always" answer to
+the cold-cache question made the default (`harness-cowboy-default`, a brief
+summary unless you chose otherwise). "Carry on" and "ignore" are your word
+that the conversation goes on as it is, so those leave it alone. It is the
+compaction the cold-cache question would have had made, unasked, when your
+next message arrived, only sooner and cheaper, so it never takes that
+question from you: where you are asked what goes first (`harness-cowboy-ask`
+on, the default, in a session that waits for you) the conversation is left as
+it is until you answer "always" and a choice, which turns asking off; a
+session that never waits for you (a non-interactive task) is compacted
+either way. It acts only when you are not around (a cache that is being kept
+warm is left to that), the session waits for you with nothing running, it is
+not a seed (its context is shared with the sessions forked from it), and the
+context holds at least `harness-cache-precompact-min-context` tokens (30000;
+small conversations cost little to send again and lose detail when
+summarised). A message that arrives while it runs waits for it and goes with
+the compacted conversation.
+
+A note follows the compaction:
+
+```
+ Prompt cache about to lapse at 00:08: compacted into a brief summary, while it was still cached, so the next message sends that instead of ~84.0k tokens uncached  [Turn off]
+ decided by: Always compacting into a brief summary first when the prompt cache is cold, without asking  [Undo]
+```
+
+`[Turn off]` stops compacting before the cache lapses
+(`harness-cache-precompact`), and the note then offers `[Turn on]`, from any
+session, as `[Undo]` and `[Redo]` flip a lasting permission answer; the text
+of the note stays, since the compaction it tells of happened. When the saved
+option is an "always" answer, the note names it too, with its own `[Undo]`
+and `[Redo]`: the choice of what goes first can be changed from the note. A
+compaction made this way says so in its header: "context compacted into a
+brief summary, before the prompt cache lapsed".
 
 ### Searching sessions
 
@@ -4445,13 +4557,13 @@ with it.
 
 | Area | Core | Enabled by you |
 |---|---|---|
-| Sessions | `config` `project` `store` `session` `agent` `compaction` `retry` `priority` `usage` `naming` | `cowboy` `handoff` `fallback` `seed` `supervisor` `insights` `pet` `version` `decisions` `session-search` `cost-compare` `commit-msg` |
+| Sessions | `config` `project` `store` `session` `agent` `compaction` `retry` `priority` `usage` `naming` | `cowboy` `cache` `cache-warm` `cache-compact` `handoff` `fallback` `seed` `supervisor` `insights` `pet` `version` `decisions` `session-search` `cost-compare` `commit-msg` |
 | Tasks and git | `worktree` | `tasks` `tasks-notify` `tasks-search` `recap` `merge` `patch-review` |
 | Safety | `perms` `sandbox` `access` `readonly` | `tool-slots` `tool-slots-load` `secrets` `redact` `judge` |
 | Providers | `provider` `provider-claude` | `provider-copilot` `provider-openai` `provider-deepseek` `provider-bedrock` `provider-demo` |
 | Tools | `tools` `tools-fs` `tools-shell` `tools-emacs` `tools-question` `tools-plan` `tools-todo` `tools-session-info` `tools-agent` | `tools-ssh` `tools-web` `tools-sessions` `tools-notify` `tools-handin` `tools-review` `tools-emacs-eval` `tools-dev` `tools-events` `tools-compact` `skills` |
 | Connections | `acp` | `acp-remote` `notifications` |
-| User interface | `ui` `ui-chat` `ui-compose` `ui-pending` `ui-sessions` `ui-notify` `ui-config` `ui-usage` `ui-priority` `ui-worktree` `ui-access` | `ui-btw` `ui-tree` `ui-compact` `ui-cache` `ui-review` `ui-report` `ui-patch-review` `ui-popout` `ui-media` `ui-qr` `ui-acp-remote` `ui-handoff` |
+| User interface | `ui` `ui-chat` `ui-compose` `ui-pending` `ui-sessions` `ui-notify` `ui-config` `ui-usage` `ui-priority` `ui-worktree` `ui-access` | `ui-btw` `ui-tree` `ui-compact` `ui-cache` `ui-cache-warm` `ui-review` `ui-report` `ui-patch-review` `ui-popout` `ui-media` `ui-qr` `ui-acp-remote` `ui-handoff` |
 
 [docs/modules](docs/modules/README.md) has a page for each module,
 generated from its source by `scripts/module-docs.sh`: what it is, what

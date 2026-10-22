@@ -1828,6 +1828,95 @@ cut, as the retry module and the fallback do."
           ;; What the failure wrote stays, so the user can see what happened.
           (should (cl-remove-if-not (lambda (n) (eq (plist-get n :kind) 'hint)) nodes)))))))
 
+
+;;;; The request of a step
+
+(declare-function harness-agent-step-request "harness-agent" (session-id state on-event))
+(declare-function harness-agent-last-request "harness-agent" (session-id))
+
+(ert-deftest harness-agent-step-request-is-what-a-step-sends ()
+  "`harness-agent-step-request' is the one place a step's request is made: what
+the provider is sent is what it returns, with the listener the step gave it,
+and whatever else has to send something that starts like a step -- keeping a
+prompt cache warm -- gets the same model, system prompt, tools, thinking
+level and conversation.  Making one changes nothing."
+  (harness-agent-test-with
+    (let* ((sent nil)
+           (id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir) :model "plain:m"
+                                        :thinking "high")
+                          :id)))
+      (harness-define-provider
+       'plain :label "Plain"
+       :complete (lambda (request)
+                   (push request sent)
+                   (let ((on-event (plist-get request :on-event)))
+                     (harness-run-soon (lambda ()
+                                         (funcall on-event '(:type text :delta "ok"))
+                                         (funcall on-event '(:type done :stop-reason end-turn)))))
+                   (list :cancel #'ignore)))
+      (harness-call 'session/append id '(:kind user :content "earlier"))
+      (harness-call 'session/append id '(:kind assistant :content "answered"))
+      (let ((nodes (length (harness-call 'session/nodes id)))
+            (made (harness-agent-step-request id nil #'ignore)))
+        (should (= nodes (length (harness-call 'session/nodes id))))
+        (should (equal "plain:m" (plist-get made :model)))
+        (should (equal "high" (plist-get made :thinking)))
+        (should (equal id (plist-get (plist-get made :session) :id)))
+        (should (string-match-p "Working directory" (plist-get made :system)))
+        (should (equal '(user assistant) (mapcar (lambda (m) (plist-get m :role)) (plist-get made :messages))))
+        (should (functionp (plist-get made :on-event)))
+        (should-not (plist-get made :provider-state))
+        (should (equal '(:conv "c1") (plist-get (harness-agent-step-request id '(:conv "c1") #'ignore)
+                                                :provider-state)))
+        ;; The step sends the same.
+        (should (eq 'end-turn (plist-get (harness-await (harness-call 'agent/prompt id "and now")) :stop-reason)))
+        (let ((step (car (last sent))))
+          (should (equal (plist-get made :system) (plist-get step :system)))
+          (should (equal (plist-get made :tools) (plist-get step :tools)))
+          (should (equal (plist-get made :thinking) (plist-get step :thinking)))
+          (should (equal (plist-get made :model) (plist-get step :model)))
+          (should (equal (plist-get made :messages) (butlast (plist-get step :messages) 1))))))))
+
+(ert-deftest harness-agent-keeps-the-request-of-the-latest-step-while-the-turn-runs ()
+  "The request of the latest step -- without its listener -- is there while the
+turn runs, for whatever has to read the cache that step wrote while a tool
+holds the turn up, and it is gone with the turn."
+  (harness-agent-test-with
+    (let* ((finish nil)
+           (steps 0)
+           (id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir) :model "plain:m") :id)))
+      (harness-define-provider
+       'plain :label "Plain"
+       :complete (lambda (request)
+                   (ignore request)
+                   (let ((on-event (plist-get request :on-event))
+                         (step (cl-incf steps)))
+                     (harness-run-soon
+                      (lambda ()
+                        (dolist (ev (if (= step 1)
+                                        '((:type tool-call :id "t1" :name "slow" :input (:what "x"))
+                                          (:type done :stop-reason tool-use))
+                                      '((:type text :delta "ok") (:type done :stop-reason end-turn))))
+                          (funcall on-event ev)))))
+                   (list :cancel #'ignore)))
+      (harness-define-tool "slow" :label "Slow" :description "slow" :kind 'exec
+                           :handler (lambda (_input _ctx)
+                                      (harness-with-promise (resolve reject)
+                                        (ignore reject)
+                                        (setq finish (lambda () (funcall resolve "done"))))))
+      (should-not (harness-agent-last-request id))
+      (let ((turn (harness-call 'agent/prompt id "run it")))
+        (harness-test-wait (lambda () finish) 5 "the tool to run")
+        (let ((request (harness-agent-last-request id)))
+          (should request)
+          (should-not (plist-member request :on-event))
+          (should (equal "plain:m" (plist-get request :model)))
+          (should (equal "run it"
+                         (plist-get (car (plist-get (car (last (plist-get request :messages))) :content)) :text))))
+        (funcall finish)
+        (harness-test-await turn 10))
+      (should-not (harness-agent-last-request id)))))
+
 (provide 'harness-agent-test)
 (provide 'harness-agent-test)
 ;;; harness-agent-test.el ends here

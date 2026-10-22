@@ -8,7 +8,7 @@ Summarise the transcript when it nears the context window; queue or interrupt on
 - **Source:** [lisp/modules/harness-compaction.el](../../lisp/modules/harness-compaction.el)
 - **Loaded:** by default
 - **Requires:** [session](session.md), [provider](provider.md), [agent](agent.md)
-- **Required by:** [cowboy](cowboy.md), [tools-compact](tools-compact.md)
+- **Required by:** [cache-compact](cache-compact.md), [cowboy](cowboy.md), [tools-compact](tools-compact.md)
 
 ## About
 
@@ -107,6 +107,7 @@ the token count progressively.
 
 - `compaction/compact` (session-id &optional opts) — Compact the transcript of SESSION-ID; return a promise.
 - `compaction/estimate` (session-id) — Say what compacting SESSION-ID costs, kind by kind, and what carrying on does.
+- `compaction/resend-cost` (session-id) — Say what sending SESSION-ID's context costs, read from the cache and not.
 - `compaction/status` (session-id) — Describe how full the context of SESSION-ID is.
 
 ### Events

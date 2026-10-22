@@ -8,7 +8,7 @@ Warns above a session's compose box once its prompt cache has expired or been dr
 - **Source:** [lisp/ui/harness-ui-cache.el](../../lisp/ui/harness-ui-cache.el)
 - **Loaded:** when enabled (see `harness-enable-modules`)
 - **Requires:** [ui](ui.md), [ui-chat](ui-chat.md)
-- **Brings along:** [ui-compact](ui-compact.md) (its file requires it)
+- **Brings along:** [cache](cache.md) (the rest of it), [ui-compact](ui-compact.md) (its file requires it)
 
 ## About
 

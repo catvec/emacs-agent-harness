@@ -81,6 +81,7 @@ a few times a second at most.
 
 ### Methods
 
+- `usage/budget-block` (session-id) — Return why a hard budget forbids another request in SESSION-ID, or nil.
 - `usage/budget-status` (id &rest opts) — Return the status of budget ID (or of a BUDGET plist passed as ID).
 - `usage/budgets` — Return every explicit budget plist.
 - `usage/fetch-api-cost` (&rest opts) — Fetch what Anthropic billed the organisation this period, without blocking.

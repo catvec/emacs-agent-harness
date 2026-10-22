@@ -8,6 +8,7 @@ Ask what goes first when a message meets a session whose prompt cache went cold.
 - **Source:** [lisp/modules/harness-cowboy.el](../../lisp/modules/harness-cowboy.el)
 - **Loaded:** when enabled (see `harness-enable-modules`)
 - **Requires:** [session](session.md), [agent](agent.md), [compaction](compaction.md)
+- **Required by:** [cache-compact](cache-compact.md)
 - **Brings along:** [ui-cowboy](ui-cowboy.md) (its UI)
 
 ## About
@@ -108,6 +109,7 @@ opens its hint with the caller's reason in place of the clock.
 
 - `cowboy/asking` (session-id) — Return the id of the cold-cache question SESSION-ID waits on, or nil.
 - `cowboy/compact` (session-id &rest opts) — Compact SESSION-ID, unasked, before its first turn; promise the choice.
+- `cowboy/default` (&optional session-id) — Return what goes first, unasked, when a session's prompt cache is cold.
 
 ### Events
 

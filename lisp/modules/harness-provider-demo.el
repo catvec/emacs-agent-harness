@@ -180,7 +180,9 @@ user wrote."
 
 (defun harness-provider-demo--script (request)
   "Return the events the demo plays for REQUEST.
-`harness-provider-demo-script-override' wins when set.  Otherwise the
+`harness-provider-demo-script-override' wins when set.  A request that
+only keeps the prompt cache warm (`:cache-refresh') is answered \"ok\",
+having read the conversation from the cache.  Otherwise the
 system prompt picks a script for a request to name a session, write a
 task up, plan one, search a task board, name the companion pet, give
 it its lines, write the Insights report or judge how a session starts;
@@ -191,6 +193,15 @@ else the last user message picks one (see the Commentary)."
      ((functionp harness-provider-demo-script-override)
       (funcall harness-provider-demo-script-override request))
      (harness-provider-demo-script-override harness-provider-demo-script-override)
+     ;; A request that only keeps the prompt cache warm (harness-cache-warm.el):
+     ;; the demo reads the whole conversation back from its cache, as a provider
+     ;; that caches it would.
+     ((plist-get request :cache-refresh)
+      (let ((context (plist-get (plist-get (plist-get request :session) :usage) :context)))
+        `((:type text :delta "ok")
+          (:type usage :input 12 :output 2 :cache-read ,(if (and (numberp context) (> context 0)) context 1000)
+                 :cache-write 0 :cost 0.0001)
+          (:type done :stop-reason end-turn))))
      ((string-prefix-p "You write short titles" (or (plist-get request :system) ""))
       (harness-provider-demo--title request))
      ((string-match-p "^## Task planning" (or (plist-get request :system) ""))

@@ -319,11 +319,15 @@ names the harness tools whose stand-ins to turn on.")
 
 (defconst harness-provider-claude-capabilities
   '(:hosted-loop t :fork t :resume t :vision t :thinking t :quota t
-    :compaction hosted :cost-reported t :billing t :cache-status t
+    :compaction hosted :cost-reported t :billing t :cache-status t :cache-refresh t
     :builtin-tools ("web_search"))
   "Capabilities of every Claude Code model.
 `:builtin-tools' names the harness tools of
-`harness-provider-claude-builtin-tools'.")
+`harness-provider-claude-builtin-tools'.  `:cache-refresh' says a
+request that sends the conversation again, flagged `:cache-refresh',
+reads the prompt cache the conversation's last request wrote and keeps
+it alive, in the CLI process that holds the conversation
+\(`harness-provider-claude--refresh-refusal'); see harness-cache-warm.el.")
 
 (defun harness-provider-claude--set-tiers (symbol value)
   "Set SYMBOL to VALUE, and the tiers of the Claude provider with it.
@@ -2203,37 +2207,48 @@ gets the turn's message again, after the transcript."
       (puthash session-id (harness-provider-claude--make-session :id session-id)
                harness-provider-claude--sessions)))
 
-(defun harness-provider-claude--ensure-process (entry request)
-  "Make sure ENTRY has a live process suitable for REQUEST, spawning if needed.
-Return `live' when the running process serves REQUEST, else how the
-one started for it opens its conversation: `fresh', `resume' or
-`fork'.  The running process serves REQUEST when it was started with
-the settings REQUEST needs (`harness-provider-claude--spawn-key') and
-is in the CLI session REQUEST asks for: the one its session's record
-names -- none, when that record's state was dropped, which starts a new
-CLI session -- or, for a request without a session record (the
-permission judge, tests), the one the entry last held.  A state marked
-`:fork-pending' always gets a new process, which forks the CLI session
-it names, cut at its `:resume-at' when it has one."
+(defun harness-provider-claude--process-plan (entry request)
+  "Return what ENTRY's process does for REQUEST: (SERVES RESUME FORK).
+SERVES is non-nil when the running process serves REQUEST as it is: it
+was started with the settings REQUEST needs
+\(`harness-provider-claude--spawn-key') and is in the CLI session
+REQUEST asks for, which is the one its provider state names.  A request
+that brings its session's record stays there, and no other: one whose
+record's state was dropped, because the session went on with another
+provider, starts a new CLI session rather than carry on a stale one.
+Without a session record (the permission judge, provider tests) the
+entry's own session serves.  RESUME is that CLI session, nil for a new
+one, and FORK non-nil when the state is marked `:fork-pending', which
+always gets a new process."
   (let* ((state (plist-get request :provider-state))
          (session (plist-get request :session))
          (recorded (plist-member session :provider-state))
          (key (harness-provider-claude--spawn-key request))
-         (proc (harness-provider-claude-session-process entry))
-         (live (process-live-p proc))
+         (live (process-live-p (harness-provider-claude-session-process entry)))
          (have (harness-provider-claude-session-cli-session-id entry))
-         ;; The CLI session the request asks for: the one its provider state
-         ;; names.  A request that brings its session's record stays there, and
-         ;; no other: one whose record's state was dropped, because the session
-         ;; went on with another provider, starts a new CLI session rather than
-         ;; carry on a stale one.  Without a session record (the permission
-         ;; judge, provider tests) the entry's own session serves.
          (stated (plist-get state :cli-session-id))
          (want (cond (stated stated) (recorded nil) (t have)))
          (fork (and stated (harness-json-true-p (plist-get state :fork-pending)))))
-    (if (and live (not fork)
-             (equal key (harness-provider-claude-session-spawn-key entry))
-             (equal want have))
+    (list (and live (not fork)
+               (equal key (harness-provider-claude-session-spawn-key entry))
+               (equal want have)
+               t)
+          want fork)))
+
+(defun harness-provider-claude--ensure-process (entry request)
+  "Make sure ENTRY has a live process suitable for REQUEST, spawning if needed.
+Return `live' when the running process serves REQUEST, else how the
+one started for it opens its conversation: `fresh', `resume' or
+`fork'.  Whether the running process serves REQUEST is
+`harness-provider-claude--process-plan''s.  A state marked
+`:fork-pending' always gets a new process, which forks the CLI session
+it names, cut at its `:resume-at' when it has one."
+  (let* ((state (plist-get request :provider-state))
+         (plan (harness-provider-claude--process-plan entry request))
+         (want (nth 1 plan))
+         (fork (nth 2 plan))
+         (live (process-live-p (harness-provider-claude-session-process entry))))
+    (if (car plan)
         'live
       (let ((resume want))
         (when live
@@ -3115,14 +3130,42 @@ It runs with `harness-provider-claude--ephemeral-environment', in
       (error (harness-provider-claude--end-ephemeral key)
              (signal (car err) (cdr err))))))
 
+(defun harness-provider-claude--refresh-refusal (request)
+  "Return why REQUEST, a prompt cache refresh, must not run now, or nil.
+A refresh reads the session's conversation again to keep the prompt cache
+of it warm (harness-cache-warm.el).  The cache is the one the CLI
+process that holds the conversation wrote: a new process builds its own
+system prompt and reads none of it, and a request sent while a turn
+runs would supersede that turn.  So a refresh runs only in the live
+process that serves the session's conversation as it is, with no turn
+under way; any other must not run, and costs nothing for being refused."
+  (let* ((session (plist-get request :session))
+         (entry (gethash (or (plist-get session :id) "default") harness-provider-claude--sessions)))
+    (cond ((harness-provider-claude--side-request-p request)
+           "the request is not the session's own conversation")
+          ((null entry) "no CLI process holds the conversation")
+          ((harness-provider-claude-session-active entry) "a turn is running")
+          ((not (car (harness-provider-claude--process-plan entry request)))
+           "the CLI process was not started for this conversation as it is"))))
+
 (defun harness-provider-claude--start (request)
   "Start REQUEST, the provider's `:complete'; return a handle with `:cancel'.
 A one-off request (`:ephemeral') runs in a CLI process of its own
 \(`harness-provider-claude--complete-ephemeral'), any other in its
-session's (`harness-provider-claude--complete')."
-  (if (harness-json-true-p (plist-get request :ephemeral))
-      (harness-provider-claude--complete-ephemeral request)
-    (harness-provider-claude--complete request)))
+session's (`harness-provider-claude--complete').  A prompt cache refresh
+\(`:cache-refresh') is refused unless the session's process serves it
+as it is (`harness-provider-claude--refresh-refusal'): the request ends
+with an error, and nothing is started."
+  (let ((refusal (and (harness-json-true-p (plist-get request :cache-refresh))
+                      (harness-provider-claude--refresh-refusal request))))
+    (cond
+     (refusal
+      (funcall (or (plist-get request :on-event) #'ignore)
+               (list :type 'done :stop-reason 'error :error (format "Cache refresh refused: %s" refusal)))
+      (list :cancel #'ignore))
+     ((harness-json-true-p (plist-get request :ephemeral))
+      (harness-provider-claude--complete-ephemeral request))
+     (t (harness-provider-claude--complete request)))))
 
 (defun harness-provider-claude-close (session-id)
   "Shut down the CLI process serving SESSION-ID, if any."

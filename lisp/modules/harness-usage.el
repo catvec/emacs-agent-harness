@@ -1708,6 +1708,16 @@ Return the reason a hard budget blocks a new turn or the next step, or nil."
                                        label (round (* 100 fraction)) spent amount))))))
     reason))
 
+(harness-defmethod usage/budget-block (session-id)
+  "Return why a hard budget forbids another request in SESSION-ID, or nil.
+That is the reason the `agent/before-turn' gate gives for refusing a
+turn: a hard budget that covers the session -- its own, its project's,
+one for everything -- is spent.  The budgets are looked at as the gate
+looks at them, so a soft one warns when it crosses its threshold and a
+request that is not a turn, such as keeping the session's prompt cache
+warm (harness-cache-warm.el), is held to the same limits."
+  (harness-usage--check (harness-call 'session/get session-id)))
+
 (defun harness-usage--gate (value next session)
   "`agent/before-turn' and `agent/step' handler: stop when a hard budget is spent.
 The `agent/before-turn' gate refuses a new turn; the `agent/step' gate

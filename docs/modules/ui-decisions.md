@@ -30,7 +30,10 @@ every session that shows one (harness-ui-chat.el).
 
 A decision offers one button, which says what a click does:
 [Undo] while it is done, [Redo] while it is undone, nothing once it
-ended (`harness-ui-decision-button`).  The buttons run
+ended (`harness-ui-decision-button`).  A decision that is a switch
+says so in its words: the compaction before a prompt cache lapses
+(kind `precompact`) is [Turn off] while it is on and [Turn on] once it
+was turned off (`harness-ui-decision-labels`).  The buttons run
 `harness-decision-undo` and `harness-decision-redo`, which M-x also
 offers: they ask which decision, of those that can move that way,
 newest first, so a decision can be moved even where no note of it is

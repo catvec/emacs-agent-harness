@@ -20,7 +20,10 @@
 ;;
 ;; A decision offers one button, which says what a click does:
 ;; [Undo] while it is done, [Redo] while it is undone, nothing once it
-;; ended (`harness-ui-decision-button').  The buttons run
+;; ended (`harness-ui-decision-button').  A decision that is a switch
+;; says so in its words: the compaction before a prompt cache lapses
+;; (kind `precompact') is [Turn off] while it is on and [Turn on] once it
+;; was turned off (`harness-ui-decision-labels').  The buttons run
 ;; `harness-decision-undo' and `harness-decision-redo', which M-x also
 ;; offers: they ask which decision, of those that can move that way,
 ;; newest first, so a decision can be moved even where no note of it is
@@ -168,6 +171,48 @@ undone, newest first."
 
 ;;;; The button
 
+(defvar harness-ui-decision-labels
+  '((precompact :undo "[Turn off]" :redo "[Turn on]" :strike nil))
+  "How the notes of a lasting decision read, by the decision's kind.
+Each entry is (KIND . PROPS), PROPS a plist: `:undo' and `:redo' are the
+labels of the button that undoes a decision of KIND and of the one that
+redoes it, [Undo] and [Redo] by default; `:strike' says whether a note's
+text is struck through once the decision was undone, t by default.
+
+A decision that is a switch reads as one: compacting a conversation
+before its prompt cache lapses (kind `precompact') is [Turn off] while it
+is on and [Turn on] once it was turned off.  Its notes record a
+compaction that happened, which turning the switch off does not take
+back, so their text stays as it was and only the button flips.  A kind
+with no entry reads [Undo] and [Redo], and its notes strike their text
+through while it is undone.")
+
+(defun harness-ui-decision--reading (id)
+  "Return how the notes of decision ID read, from `harness-ui-decision-labels'.
+That is the plist of the entry of the decision's kind.  Nil when the UI
+has not heard of the decision or its kind has no entry, which then
+read as every decision does."
+  (let* ((kind (plist-get (harness-ui-decision id) :kind))
+         (kind (if (stringp kind) (intern kind) kind)))
+    (and kind (cdr (assq kind harness-ui-decision-labels)))))
+
+(defun harness-ui-decision-label (id way)
+  "Return the label of the WAY button of decision ID, WAY `undo' or `redo'.
+It is what `harness-ui-decision-labels' says of the decision's kind,
+else \"[Undo]\" or \"[Redo]\", which is also what a decision the UI has
+not heard of reads."
+  (let ((reading (harness-ui-decision--reading id)))
+    (if (eq way 'undo)
+        (or (plist-get reading :undo) "[Undo]")
+      (or (plist-get reading :redo) "[Redo]"))))
+
+(defun harness-ui-decision-strikes-p (id)
+  "Non-nil when the notes of decision ID strike their text once it is undone.
+That is the case for every kind but those `harness-ui-decision-labels'
+says `:strike nil' of, and for a decision the UI has not heard of."
+  (let ((reading (harness-ui-decision--reading id)))
+    (if (plist-member reading :strike) (and (plist-get reading :strike) t) t)))
+
 (defun harness-ui-decision-help (id way)
   "Return what the WAY button of decision ID says it does, WAY `undo' or `redo'."
   (pcase (cons (plist-get (harness-ui-decision id) :kind) way)
@@ -175,6 +220,8 @@ undone, newest first."
     ('(permission . redo) "Record this answer again")
     ('(cowboy . undo) "Ask again when the prompt cache is cold")
     ('(cowboy . redo) "Make this the default again, without asking")
+    ('(precompact . undo) "Stop compacting conversations just before their prompt cache lapses")
+    ('(precompact . redo) "Compact conversations just before their prompt cache lapses again")
     (`(,_ . undo) "Take this decision back")
     (_ "Make this decision again")))
 
@@ -182,14 +229,18 @@ undone, newest first."
   "Return the button decision ID offers in STATE, or nil when it offers none.
 It is [Undo] while STATE is `done', which runs `harness-decision-undo',
 and [Redo] while it is `undone', which runs `harness-decision-redo'; an
-ended decision offers nothing.  STATE is the decision's, or what a note
-says of it when the cache does not know it.  HELP is the tooltip, by
-default `harness-ui-decision-help'.  A click or RET runs it, in any
-buffer (`harness-ui-action-button')."
+ended decision offers nothing.  A decision of a kind that reads as a
+switch says so instead (`harness-ui-decision-label'): [Turn off] and
+\[Turn on].  STATE is the decision's, or what a note says of it when the
+cache does not know it.  HELP is the tooltip, by default
+`harness-ui-decision-help'.  A click or RET runs it, in any buffer
+\(`harness-ui-action-button')."
   (pcase state
-    ('done (harness-ui-action-button "[Undo]" (lambda () (harness-decision-undo id))
+    ('done (harness-ui-action-button (harness-ui-decision-label id 'undo)
+                                     (lambda () (harness-decision-undo id))
                                      :help (or help (harness-ui-decision-help id 'undo))))
-    ('undone (harness-ui-action-button "[Redo]" (lambda () (harness-decision-redo id))
+    ('undone (harness-ui-action-button (harness-ui-decision-label id 'redo)
+                                       (lambda () (harness-decision-redo id))
                                        :help (or help (harness-ui-decision-help id 'redo))))))
 
 ;;;; The module

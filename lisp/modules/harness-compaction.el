@@ -420,6 +420,26 @@ uncached (`harness-compaction--uncached-key')."
   (harness-compaction--cost model (list (if cached :cache-read (harness-compaction--uncached-key model))
                                         tokens)))
 
+(harness-defmethod compaction/resend-cost (session-id)
+  "Say what sending SESSION-ID's context costs, read from the cache and not.
+The answer is (:context N :model MODEL :cached USD :uncached USD), at
+list prices (`usage/price', so a time-of-day price applies): what the
+next request costs to send N tokens of context from the model's prompt
+cache, and what it costs when nothing is cached -- the higher of the
+cache-write and the input price, as `compaction/estimate' prices a
+summary that reads it all.  A price is nil where the catalogue has none.
+N is the last request's context, else an estimate of the transcript's.
+Keeping a cache warm (harness-cache-warm.el) weighs the one against the
+other."
+  (let* ((session (harness-call 'session/get session-id))
+         (model (plist-get session :model))
+         (context (let ((c (plist-get (plist-get session :usage) :context)))
+                    (if (and (numberp c) (> c 0)) c
+                      (harness-compaction--messages-tokens (harness-call 'session/messages session-id))))))
+    (list :context context :model model
+          :cached (harness-compaction--resend model context t)
+          :uncached (harness-compaction--resend model context nil))))
+
 (defun harness-compaction--warm-p (session)
   "Non-nil while SESSION's prompt cache lasts for its own model.
 See `session/get''s `:cache'."

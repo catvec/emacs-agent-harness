@@ -8,7 +8,7 @@ Provider contract, registry and model catalogue.
 - **Source:** [lisp/modules/harness-provider.el](../../lisp/modules/harness-provider.el)
 - **Loaded:** by default
 - **Requires:** nothing
-- **Required by:** [agent](agent.md), [compaction](compaction.md), [cost-compare](cost-compare.md), [fallback](fallback.md), [handoff](handoff.md), [naming](naming.md), [pet](pet.md), [provider-bedrock](provider-bedrock.md), [provider-claude](provider-claude.md), [provider-copilot](provider-copilot.md), [provider-deepseek](provider-deepseek.md), [provider-demo](provider-demo.md), [provider-openai](provider-openai.md), [recap](recap.md), [tasks-search](tasks-search.md), [usage](usage.md)
+- **Required by:** [agent](agent.md), [cache-warm](cache-warm.md), [compaction](compaction.md), [cost-compare](cost-compare.md), [fallback](fallback.md), [handoff](handoff.md), [naming](naming.md), [pet](pet.md), [provider-bedrock](provider-bedrock.md), [provider-claude](provider-claude.md), [provider-copilot](provider-copilot.md), [provider-deepseek](provider-deepseek.md), [provider-demo](provider-demo.md), [provider-openai](provider-openai.md), [recap](recap.md), [tasks-search](tasks-search.md), [usage](usage.md)
 
 ## About
 

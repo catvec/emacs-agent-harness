@@ -748,7 +748,11 @@ each time the session is described, like `:context-window`: `:ttl` from
 the configured one), `:expires` = `:at` + `:ttl` and `:model` the
 stamp's model.  Past `:expires` the next request sends the whole
 context again at the uncached rate, which the chat warns about above
-the compose box (`ui-cache`, see "Chat buffer").
+the compose box (`ui-cache`, see "Chat buffer").  A few seconds before
+that moment the `cache` module says so (`cache/pre-expire`, see
+"cache"), for whoever can use a cache that is still hot: to read it
+once more, which restarts its lifetime ("cache-warm"), or to compact the
+conversation in it ("cache-compact").
 
 A cache serves the model that wrote it, no other.  A session switched
 to another model keeps reporting the old model's cache, `:model` telling
@@ -1683,7 +1687,12 @@ catalogue), `:builtin-tools` (a list of the harness tools the provider
 has a tool of its own for, which it can run in their place: Claude Code
 and Copilot list `"web_search"`; see `tools/builtin`), `:cache-ttl N`
 (the seconds the provider keeps a prompt cache after its last use,
-when it is not `harness-cache-ttl`: DeepSeek declares 10800).
+when it is not `harness-cache-ttl`: DeepSeek declares 10800),
+`:cache-refresh` (a hosted loop's: a message sent to its process with
+`:cache-refresh t` in the request only keeps the cache of the
+conversation alive, and the provider refuses it when it could not run in
+the process that holds the conversation as it is -- Claude Code declares
+it; see "cache-warm").
 
 Prompt cache lifetime: `provider/cache-ttl MODEL-ID &optional
 REPORTED` (`harness-provider-cache-ttl`) says how many seconds MODEL-ID's
@@ -3348,8 +3357,10 @@ half `ui-access`, the access view).
 Lasting decisions: answers that hold beyond their moment, kept with
 their undo and redo, the harness's rather than a session's, so any
 session can move one.  A lasting permission answer (kind `permission`,
-see perms) and an "always" answer to the cold-cache question (kind
-`cowboy`) are decisions.
+see perms), an "always" answer to the cold-cache question (kind
+`cowboy`) and the switch of compacting a conversation just before its
+prompt cache lapses (kind `precompact`, see cache-compact) are
+decisions.
 
 - A decision is `(:id "d-…" :kind KIND :text TEXT :record RECORD
   :session SID :node NODE-ID :at FLOAT :state STATE :result TEXT
@@ -3535,6 +3546,19 @@ see perms) and an "always" answer to the cold-cache question (kind
 
 ### agent
 
+- `harness-agent-step-request SESSION-ID STATE ON-EVENT` (a function,
+  not a method: its result holds closures and the whole conversation) →
+  the request the next step of the session sends: `(:model :session
+  :system :messages :tools :builtin-tools :thinking :provider-state
+  :on-event)`, STATE the provider state the step carries.  The one place
+  a step's request is made: the turn calls it for every step, and what
+  has to send something that starts like a step does too -- a provider's
+  prompt cache reads a request only as far as it starts like the one that
+  wrote it (see cache-warm).  Making one changes nothing.
+  `harness-agent-last-request SESSION-ID` is the request of the latest
+  step of the session's running turn, without its `:on-event`, nil when
+  no turn runs: the step after a tool call starts as it ended, so sending
+  it again reads the cache it wrote.
 - `agent/prompt SESSION-ID BLOCKS &optional OPTS` → promise of
   `(:stop-reason …)`.  Idle session: starts a turn.  Running session:
   steering — the message is queued and injected at the next step boundary
@@ -3774,6 +3798,10 @@ see perms) and an "always" answer to the cold-cache question (kind
   The harness's own model calls, recorded as internal sessions (see
   "session" and "provider"), reach it the same way: the cost of each is
   one row, under its session's project.
+- `usage/budget-block SESSION-ID` → the reason a hard budget forbids another
+  request in the session -- the one the `agent/before-turn` gate gives --
+  or nil.  A request that is no turn, such as keeping a prompt cache warm
+  (cache-warm), asks it before it spends.
 - `usage/summary &key group-by since until project session model billing` → rows
   `(:key :input :output :cache-read :cache-write :cost :list-cost :calls)`;
   group-by `project|model|day|hour|session|billing` (billing keys "api",
@@ -4356,6 +4384,12 @@ and tools.
   `:dropped` (how many nodes each) and `:kept-tokens` and
   `:dropped-tokens`, with `:after` the note plus what is kept, and
   `:dropped` 0 when nothing can be cut (`:after` is then the context).
+- `compaction/resend-cost SESSION-ID` → `(:context N :model MODEL
+  :cached USD :uncached USD)`: what sending the context costs read from
+  the model's prompt cache and not (the dearer of cache write and input),
+  at list prices, nil where the catalogue has none -- the two numbers of
+  `compaction/estimate`'s carrying on, without the rest of it.  Keeping a
+  cache warm weighs one against the other (cache-warm).
 - Settings (section "Compaction"): `harness-compaction-kind`, the kind
   automatic compaction makes (`summary`; any of the kinds, `truncate`
   included), and `harness-compaction-brief-model`.
@@ -4470,8 +4504,161 @@ as it is, all of the conversation uncached, without a decision.
   session with no cache could not give (for example "No prompt cache on
   MODEL holds the supervisor's conversation").  The hint ends "the
   default for a session no warm cache holds (harness-cowboy-default)".
+- `cowboy/default [SESSION-ID]` → `(:choice CHOICE :ask BOOL :asks BOOL
+  :decision ID)`: the compaction option the user saved for a cold cache --
+  `harness-cowboy-default` (never `hold`), whether the question is asked
+  at all (`harness-cowboy-ask`), whether a message that met SESSION-ID's
+  cold cache would be asked about (`:asks`: asking is on and the session
+  waits for the user, which a non-interactive one never does; without a
+  session it is `:ask`) and the "always" answer's decision that set them
+  while it still holds (`harness-cowboy--live-decision`), nil otherwise.
+  What acts for the user where a cold cache is concerned, and only where
+  nobody would be asked, takes the choice from here (cache-compact).
 - Settings (section "Cold cache"): `harness-cowboy-ask`,
   `harness-cowboy-default`, `harness-cowboy-min-context`.
+
+### cache, cache-warm, cache-compact
+
+A provider's prompt cache lapses some minutes after the request that
+last read it, and what is in it is then sent again at the uncached price.
+Two things are worth doing with a cache that is about to lapse while the
+context is still hot in it, and neither should watch the clock itself:
+the `cache` module does, and says when (`cache/pre-expire`); `cache-warm`
+reads the cache once more, which restarts its lifetime, for as long as
+that pays; `cache-compact` compacts the conversation in it, as the user
+saved for a cold cache, once nobody is around to need it warm and where
+nobody would be asked what goes first.
+
+**cache** (harness-cache.el) -- the watcher, and whether the user is around.
+
+- One timer per session whose `:cache` (see "Session") will lapse, set
+  for LEAD seconds before it and set again on every `session/changed`
+  from the `:cache` as it is then: a request that read the cache moves the
+  moment, a compaction, a redaction, a switch of model, a deleted session
+  take the timer away.  Nothing polls.  `cache/pre-expire SESSION-ID INFO`
+  comes once for each moment a cache lapses, INFO `(:expires :ttl :lead
+  :at :model :context :status :running)`; never for a cache that lapsed
+  already or has under `harness-cache--too-late` (2) seconds left, so a
+  machine that slept through the moment says nothing when it wakes.
+  `cache/watching SID` → `(:fire-at :expires :lead)` or nil.
+- Handlers that would act on the same cache claim it: `cache/claim SID BY`
+  → non-nil if it is BY's (the first wins), `cache/claimed SID` → BY or
+  nil.  A claim is good for the moment it was made for; the request that
+  reads the cache ends it.  Handlers run by priority: cache-warm 40,
+  cache-compact 60.
+- The periods are formulas of the cache's lifetime T (`cache/periods
+  TTL` → `(:ttl :lead :active :grace :warm)`), so a 37-minute or an
+  hour-and-a-half cache behaves as a five-minute or an hour's: LEAD =
+  T/30 bounded to 10..60 seconds and to half of T (10 s at five minutes,
+  60 s at an hour); ACTIVE = T/5 (1 minute, 12 minutes); GRACE = T/3 but
+  not under 5 minutes (5, 20); WARM = ACTIVE + GRACE (6, 32 minutes; 19 for
+  37, 48 for 90).
+- The user is around for the WARM period after a sign of life: a message
+  they send (the sync filter `agent/message`; not another session's, the
+  harness's, or the queue's), the answer to a question (`question/answered`),
+  and `cache/active SID &optional SECONDS` from a client -- the chat reports
+  typing and any command in the session's buffer, twenty seconds apart at
+  most.  SECONDS above 0 is a period the user asks for, whatever happens
+  (they know they will be back), a day at most; 0 takes it away and is no
+  sign of life.  `cache/presence SID` → `(:session-id :around t :until
+  :active-at :manual-until)` or nil; the event `cache/presence-changed SID
+  PRESENCE` (nil once they are not) announces every change, and a timer
+  closes the period.  Nothing of this is kept across a restart.
+
+**cache-warm** (harness-cache-warm.el) -- keeping the cache alive.
+
+- Handles `cache/pre-expire` at priority 40.  It reads the cache once more
+  when `harness-cache-warm` is on and the user is around, or the turn
+  waits on a tool call (`agent/activity` phase `tool`, a long test run
+  say: the step after the tool will send the whole conversation, whoever
+  is around), and the session has a cache, can be asked to, was not stopped
+  and is not capped, no refresh is under way and no hard budget forbids
+  it (`usage/budget-block`); it claims the cache first.
+- What is sent: for a session that waits for the user, the request the
+  agent's next step would send (`harness-agent-step-request`: model,
+  system prompt, tools, thinking, conversation) with one short message at
+  the end (`harness-cache-warm-message`) and `:max-tokens` 16, flagged
+  `:cache-refresh t`; for a turn that waits on a tool call, the request of
+  its latest step (`harness-agent-last-request`) again, so that it reads
+  the very cache that step wrote.  Providers that are sent the whole
+  conversation at every request (Bedrock, OpenAI, DeepSeek) can be asked
+  both; a hosted loop only when it declares `:cache-refresh`, holds the
+  session's conversation and no turn runs: the message is then sent in
+  the process that holds it (the Claude provider refuses a refresh that
+  could not run in the live process serving the conversation as it is --
+  no process, a turn under way, other settings, a forked state), and the
+  conversation it holds keeps the two short messages.  Nothing is written
+  into the transcript; a user message that comes while one is under way
+  waits for it (an `agent/before-turn` gate at priority 1, thirty seconds
+  at most); a tool call the model answers with is cancelled.
+- The result: the usage of the request is recorded in the session
+  (`session/usage-add` with `:cache-at` the time it was sent and the
+  lifetime the provider reported or the cache had, no `:context`), so the
+  cache is stamped anew and the watcher sets itself for the lapse after
+  it: the chain goes on by itself.  A refresh that does not read at least
+  half the context from the cache, or whose provider reports no usage, stops
+  keeping that session warm (the state's `:blocked`, a hint, until the user
+  asks for a period, or the model changes).  A failed one is tried again
+  every 3 seconds while the cache lasts, three times, and said once.
+- Never worth more than sending the conversation again: at most as many
+  refreshes between two requests of the conversation's own as cost less than
+  sending the context uncached (`compaction/resend-cost`: a refresh reads at
+  the cache-read price; 12 for Claude's, 2 at half price, none where the cache
+  reads as dear as the input; 12 where the catalogue has no price).  The
+  count starts afresh with the next `session/usage` record that reports a
+  request (the module's own do not).  At the cap the cache is left to lapse,
+  the state's `:blocked` and a hint say so, once.  The end of the warm period
+  the state shows (`:until`) is the earlier of the user's and the cap's.
+- `cache/warm SID` → `(:session-id :warming :until :manual-until :active-at
+  :next :refreshes :max-refreshes :refresh-cost :resend-cost :tool :ttl
+  :expires :supported :blocked)`, nil when there is no period; `:warming`
+  says the cache is being kept alive now.  `cache/warm-list` → the states in
+  effect.  `cache/keep-warm SID SECONDS` → the state: the period the user
+  asks for (`cache/active` with the seconds, and a try again where it was
+  stopped).  Event `cache/warm-changed SID STATE` (nil once over), announced
+  when `:warming`, `:manual-until`, the counts, `:blocked` change or the end
+  of the period moves by 30 seconds; ACP forwards it and clients call the
+  methods as `_harness/cache/…`.
+- Setting: `harness-cache-warm` (on).
+
+**cache-compact** (harness-cache-compact.el) -- compacting before the lapse.
+
+- Handles `cache/pre-expire` at priority 60, when the cache is not claimed
+  (the user is not around, so cache-warm did not take it) and
+  `harness-cache-precompact` is on; the session is idle and not a seed (its
+  context is shared), with no compaction, question, turn or outstanding
+  work (`agent/outstanding`); its context (the last request's) is at least
+  `harness-cache-precompact-min-context` (30000) and
+  `harness-cowboy-min-context`; the user's saved option (`cowboy/default`,
+  which this module requires: with no cowboy module there is none) is a
+  compaction -- carry-on and ignore leave the conversation as it is; and
+  nobody would be asked: the compaction is what the cold-cache gate does,
+  unasked, to the message that comes later, so a session whose user is
+  asked what goes first (`:asks`: asking on, the session waits for them) is
+  left alone and its question stays theirs.  Answering "always" (which
+  turns asking off) or a session that never waits for the user
+  (non-interactive) is where it acts.  It claims the cache, then calls
+  `compaction/compact` with the
+  option's kind (`:idle t`, `:meta (:precompact (:choice KIND :expires T))`:
+  the chat says "before the prompt cache lapsed") -- from a hot cache a
+  summary reads at the cache price -- and holds a user message that comes
+  meanwhile (an `agent/before-turn` gate at priority 11) until it is done.
+  A failure is logged and left to the compaction's own hint.
+- The note that follows (a hint, "Prompt cache about to lapse at HH:MM:
+  compacted into a brief summary, while it was still cached, so the next
+  message sends that instead of ~84.0k tokens uncached") tells of a lasting
+  decision of the kind `precompact` (`:meta :decision`), `done` while the
+  feature is on: [Turn off] undoes it (`harness-cache-precompact` set
+  false and saved through `config/set`), [Turn on] redoes it, from any
+  session, while the setting holds what the other move left; otherwise it
+  ends `changed`.  The one decision serves every note while it holds (the
+  newest `done` one whose settings after it are the settings now, else a new
+  one is kept).  The note also names, as `:decided-by`, the "always"
+  decision that made the saved option the default, with its own undo and
+  redo, when there is one.  The event `cache/compacted SID KIND NODE` follows.
+- Settings: `harness-cache-precompact` (on),
+  `harness-cache-precompact-min-context` (30000); section "Prompt cache"
+  of the settings page with `harness-cache-warm`.
 
 ### handoff
 
@@ -8885,7 +9072,7 @@ Extension methods: any bus method whose name starts with `session/`,
 `project/`, `task/`, `plugins/`, `search/`, `notification/`, `sandbox/status`, `harness/api`,
 `harness/modules`, `harness/version`, `harness/reload`, `harness/call`, `acp/remote-`,
 `pet/`, `version/`, `insights/`, `supervisor/`, `seed/`, `priority/`,
-`secrets/`, `commit-msg/`, `patch-review/`, `tool-slots/` (`harness-acp-extension-prefixes`), or with one of
+`secrets/`, `commit-msg/`, `patch-review/`, `tool-slots/`, `cache/` (`harness-acp-extension-prefixes`), or with one of
 `harness-acp-extra-method-prefixes`, which modules of the user's own
 and projects' plugins add to (see Modules of your own; the harness
 repository's plugin adds `harness-dev/`), is callable as `_harness/NAME` with a
@@ -8958,8 +9145,9 @@ on a session changed, each change of a plan's step included),
 session's stores, or out of the stores at all), `patch-review/changed`
 (an operation changed the threads of a task's review) and
 `tool-slots/changed` (the slots this machine allows changed, or the load
-watch ended); see session, supervisor, redact, patch-review and
-tool-slots-load.
+watch ended) and `cache/warm-changed` (the state of a session's warm
+period changed); see session, supervisor, redact, patch-review,
+tool-slots-load and cache-warm.
 
 Harness → UI requests for chores any client may do go through the bus
 method `client/request METHOD PARAMS` → promise of the first client's
@@ -9743,7 +9931,17 @@ tool block, above the fold).  A permission note whose decision the
 cache lacks follows its `:permission` `:undo`; another kind shows no
 button until the cache hears of it.  Every chat redraws the blocks of a
 decision that changed (`harness-chat--on-decision`), so a move made in
-one session shows in all.
+one session shows in all.  A decision that is a switch reads as one
+(`harness-ui-decision-labels`, kind -> `(:undo LABEL :redo LABEL
+:strike BOOL)`, read by `harness-ui-decision-label` and
+`harness-ui-decision-strikes-p`): the kind `precompact` (compacting
+before the prompt cache lapses, see cache-compact) is `[Turn off]` while
+it is on and `[Turn on]` once turned off, and its note, which records a
+compaction that happened, keeps its text unstruck when the switch is
+off, only the button flipping; every other kind keeps `[Undo]`, `[Redo]`
+and the strike-through.  A compaction node whose `:meta` has `:precompact`
+says in its header "before the prompt cache lapsed" (the cowboy's says
+"the prompt cache being cold").
 Prompt cache warning (`harness-ui-cache`, module `ui-cache`): once the
 session's `:cache :expires` has passed while it is idle or closed, a
 panel above the box says so ("Prompt cache expired at
@@ -9819,6 +10017,35 @@ module compacts before a message shows as running with the activity
 `compacting` meanwhile, so the panel offers nothing then either.  A
 session blocked on an answer is in the middle of a turn, so it shows
 no panel at all.
+Cache warming (`harness-ui-cache-warm`, module `ui-cache-warm`): while a
+session's cache is being kept alive (`cache/warm`, see cache-warm), its
+chat's header line shows a flame (`harness-icon-flame`, `icons/flame.svg`,
+the fire emoji as the terminal fallback) and a coarse countdown to the end
+of the warming period -- `12m`, `1h20m`, `<1m` -- in `harness-chat-warm-face`,
+dim in the last minute, through `harness-chat-header-end-functions` at
+priority 15 (the spend goes before it in a narrow window, the rest after).
+The state comes as `cache/warm-changed` events and `_harness/cache/warm-list`
+on connect and after a reload (`harness-ui-cache-warm-state`,
+`harness-ui-cache-warm-functions`); one 15-second timer redraws the
+countdowns while any shows and stops when none does, so nothing polls the
+harness.  It shows while the turn waits on a tool call too (`:tool`), and
+dim, "off", for a period the user set while the harness is blocked
+(`:blocked`: it would cost about what sending the conversation again does,
+or a refresh did not read the cache), the reason in its tooltip.  The
+tooltip says why the cache is warm, until when, the next refresh, how many
+were made and what a refresh costs against sending it all again.  Every
+chat buffer reports the user active through a `post-command-hook` -- any
+command run while the buffer is in the selected window, typing in the box
+included -- as `_harness/cache/active`, at most every 20 seconds; a
+harness without the module answers method-not-found and the UI stops
+reporting until it connects again, saying nothing.  `harness-cache-keep-warm`
+(`K` under the harness prefix and in the menu, `/warm DURATION` in the
+box, a click on the flame) asks for a period of the user's own with
+completion over 15m, 30m, 1h, 2h and off (`harness-ui-cache-warm-parse-duration`
+reads `30m`, `1h30m`, `1,5h`, `90` as minutes, `off`), at most 24 hours, calls
+`cache/keep-warm`, and says in the echo area until when, about how many
+refreshes (at most the harness's `:max-refreshes`) and what they cost
+against sending everything again, or why nothing is kept warm.
 Tools go by their labels everywhere: a tool block's header shows the
 label in `harness-tool-title-face` and what the call is about after it
 in `harness-tool-subject-face` (the faces stand in for the colon of the
@@ -12068,7 +12295,10 @@ when no chat buffer shows; see "Switching model or provider"), the
 prompt cache warning of a session (`harness-ui-cache`: the chat panel
 that says the cache lapsed and what the next message re-sends, drawn
 by a timer at the moment it lapses, with buttons that compact the
-conversation first; see "Chat buffer"), the cold-cache question
+conversation first; see "Chat buffer"), cache warming
+(`harness-ui-cache-warm`: the flame and countdown in the chat's header
+while the cache is kept warm, the user's activity reported to the
+harness, `/warm`; see "Chat buffer"), the cold-cache question
 (`harness-ui-cowboy`: the panel that asks what goes first when a
 message meets a cold cache, through `harness-ui-pending-panel-functions`;
 see "Chat buffer"), compacting by hand

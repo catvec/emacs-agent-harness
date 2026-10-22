@@ -220,6 +220,19 @@ Kept beside the turn records, so a reload keeps the turns working.")
 Counted against `harness-agent--max-stop-continues'.  Kept beside the
 turn records, as the retries are, so a reload keeps the turns working.")
 
+(defvar harness-agent--last-requests (make-hash-table :test 'equal)
+  "Session id -> the request of the latest step of its running turn.
+Without its `:on-event'.  The step that follows a tool call starts with
+what this request ended with, so sending this one again reads the
+prompt cache the tool's wait is letting lapse (harness-cache-warm.el).
+Kept while the turn runs and dropped when it ends, beside the turn
+records, as the activity tables are.")
+
+(defun harness-agent-last-request (session-id)
+  "Return the request of the latest step of SESSION-ID's running turn, or nil.
+Nothing but the request: no `:on-event'.  The caller must not change it."
+  (gethash session-id harness-agent--last-requests))
+
 (defvar harness-agent--open-nodes (make-hash-table :test 'equal)
   "Session id -> the text or thinking node its turn wrote last, until a tool call.
 A provider `checkpoint' event without a call id belongs to that node.
@@ -1060,6 +1073,32 @@ the state."
       (harness-call 'session/set-provider-state sid nil))
     usable))
 
+(defun harness-agent-step-request (session-id state on-event)
+  "Return the request the next step of SESSION-ID sends to its model.
+STATE is the provider state the step carries (`harness-agent--provider-state')
+and ON-EVENT listens to the provider's events.  The session record is
+read now, after STATE was settled, so that it holds the state the
+request carries.  This is the one place the request of a step is made:
+the turn calls it for every step, and so does whatever has to send
+something that starts like a step -- the same model, system prompt,
+tools, thinking level and conversation -- so that a provider's prompt
+cache, which reads a request only as far as it starts like the one that
+wrote it, serves both (see harness-cache-warm.el).  Nothing is changed
+by making it."
+  (let* ((session (harness-call 'session/get session-id))
+         (model (plist-get session :model)))
+    (list :model model
+          :session session
+          :system (harness-agent--system-prompt session)
+          :messages (harness-agent--request-messages session)
+          :tools (if (harness-method-exists-p 'tools/list) (harness-call 'tools/list session-id) nil)
+          ;; Tools the provider runs itself, in place of these.
+          :builtin-tools (and (harness-method-exists-p 'tools/builtin)
+                              (harness-call 'tools/builtin session-id))
+          :thinking (plist-get session :thinking)
+          :provider-state state
+          :on-event on-event)))
+
 (defun harness-agent--step (turn)
   "Call the provider once for TURN."
   (let ((sid (harness-agent-turn-session-id turn)))
@@ -1078,21 +1117,10 @@ the state."
             (harness-agent-turn-stop-reason turn) nil (harness-agent-turn-error turn) nil)
       (let* ((model (plist-get (harness-call 'session/get sid) :model))
              (state (harness-agent--provider-state sid model))
-             ;; Read after the state above was settled, so the request's
-             ;; session record holds the state the request carries.
-             (session (harness-call 'session/get sid))
-             (request (list :model model
-                            :session session
-                            :system (harness-agent--system-prompt session)
-                            :messages (harness-agent--request-messages session)
-                            :tools (if (harness-method-exists-p 'tools/list) (harness-call 'tools/list sid) nil)
-                            ;; Tools the provider runs itself, in place of these.
-                            :builtin-tools (and (harness-method-exists-p 'tools/builtin)
-                                                (harness-call 'tools/builtin sid))
-                            :thinking (plist-get session :thinking)
-                            :provider-state state
-                            :on-event (lambda (ev) (harness-agent--on-event turn ev model)))))
+             (request (harness-agent-step-request
+                       sid state (lambda (ev) (harness-agent--on-event turn ev model)))))
         (puthash sid model harness-agent--step-models)
+        (puthash sid (harness-plist-remove request :on-event) harness-agent--last-requests)
         (harness-emit 'agent/step-started sid (harness-agent-turn-steps turn))
         (harness-agent--update-activity sid '(:phase waiting))
         (setf (harness-agent-turn-handle turn) (harness-call 'provider/complete request)))))))
@@ -1931,6 +1959,7 @@ messages next."
         (harness-agent--close-builtins turn reason))
       (remhash sid harness-agent--turns)
       (remhash sid harness-agent--step-models)
+      (remhash sid harness-agent--last-requests)
       (remhash sid harness-agent--failures)
       (remhash sid harness-agent--retries)
       (remhash sid harness-agent--stop-continues)

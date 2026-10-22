@@ -959,6 +959,29 @@ then `agent/turn-ended'); the message is kept."
   "Return the id of the cold-cache question SESSION-ID waits on, or nil."
   (plist-get (gethash session-id harness-cowboy--asking) :pid))
 
+(harness-defmethod cowboy/default (&optional session-id)
+  "Return what goes first, unasked, when a session's prompt cache is cold.
+That is the compaction option the user saved: (:choice CHOICE :ask BOOL
+:asks BOOL :decision ID).  CHOICE is `harness-cowboy-default', a symbol of
+`harness-cowboy-choices' but `hold' -- `brief', unless they chose
+otherwise --, ASK whether the question is asked at all
+\(`harness-cowboy-ask'), ASKS whether a message that meets the cold cache
+of SESSION-ID would be asked about -- asking is on and the session waits
+for the user, which a non-interactive one never does; without SESSION-ID
+it is ASK -- and ID the lasting decision (see \"decisions\") that set
+the two, when an \"always\" answer still in force did, else nil.  Whatever
+acts on the user's behalf where a cold cache is concerned, without
+asking -- compacting a conversation just before its cache lapses
+\(harness-cache-compact.el) -- takes this choice where nobody would be
+asked, and names the decision on its note, so that the note offers its
+undo and redo."
+  (let ((session (and session-id (harness-call 'session/exists-p session-id)
+                      (harness-call 'session/get session-id))))
+    (list :choice (harness-cowboy--default)
+          :ask (if harness-cowboy-ask t :false)
+          :asks (if (if session (harness-cowboy--asks-p session) harness-cowboy-ask) t :false)
+          :decision (ignore-errors (harness-cowboy--live-decision)))))
+
 (defun harness-cowboy--init ()
   "Hook the cold-cache gate into the turn loop (idempotent)."
   ;; After the fallback and a handoff (10), which may change the model

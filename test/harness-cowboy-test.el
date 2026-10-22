@@ -568,6 +568,52 @@ the old default, redo stops asking again, and undo works once more."
         (harness-cowboy-test--answer sid "carry on")
         (harness-test-await p 10)))))
 
+(ert-deftest harness-cowboy-default-method-says-what-goes-first-unasked ()
+  "`cowboy/default' is the compaction option the user saved: the choice, whether
+the question is asked at all, and the \"always\" answer's decision that set
+them while it still holds.  Whatever acts for the user where a cold cache is
+concerned, without asking, takes it from there."
+  (harness-cowboy-test-with-decisions
+    (let ((option (harness-call 'cowboy/default)))
+      (should (eq 'brief (plist-get option :choice)))
+      (should (eq t (plist-get option :ask)))
+      (should (eq t (plist-get option :asks)))
+      (should-not (plist-get option :decision)))
+    (let* ((sid (harness-cowboy-test-session))
+           (hint (harness-cowboy-test--always sid "always start afresh"))
+           (id (harness-node-decision hint))
+           (option (harness-call 'cowboy/default)))
+      (should (eq 'fresh (plist-get option :choice)))
+      (should (eq :false (plist-get option :ask)))
+      (should (eq :false (plist-get option :asks)))
+      (should (equal id (plist-get option :decision)))
+      ;; Undone, it is the old default again, with no answer behind it.
+      (harness-call 'decision/undo id)
+      (let ((option (harness-call 'cowboy/default)))
+        (should (eq 'brief (plist-get option :choice)))
+        (should (eq t (plist-get option :ask)))
+        (should-not (plist-get option :decision))))
+    ;; A default that is no compaction is still the user's.
+    (let ((harness-cowboy-default 'carry-on))
+      (should (eq 'carry-on (plist-get (harness-call 'cowboy/default) :choice))))))
+
+(ert-deftest harness-cowboy-default-method-says-whether-a-session-is-asked ()
+  "Given a session, `cowboy/default' says whether a message to it that met a
+cold cache would be asked about: when asking is on and the session waits for
+the user, not when asking is off, nor in one that never waits for them.  A
+session that is gone is asked about as asking is."
+  (harness-cowboy-test-with-decisions
+    (let ((waits (harness-cowboy-test-session))
+          (never (harness-cowboy-test-session :non-interactive t)))
+      (should (eq t (plist-get (harness-call 'cowboy/default waits) :asks)))
+      (should (eq :false (plist-get (harness-call 'cowboy/default never) :asks)))
+      ;; Asking itself is on for both; only the second is not asked.
+      (should (eq t (plist-get (harness-call 'cowboy/default never) :ask)))
+      (should (eq t (plist-get (harness-call 'cowboy/default "no-such-session") :asks)))
+      (let ((harness-cowboy-ask nil))
+        (should (eq :false (plist-get (harness-call 'cowboy/default waits) :asks)))
+        (should (eq :false (plist-get (harness-call 'cowboy/default "no-such-session") :asks)))))))
+
 (ert-deftest harness-cowboy-a-default-taken-unasked-names-the-always-answer ()
   "Where the default an \"always\" answer set goes first unasked -- another
 session, asking off; one that never waits for you; a cold start -- the

@@ -469,6 +469,21 @@ lower."
         (should (eq 'blocked (plist-get (harness-await (harness-call 'agent/prompt other "hello")) :stop-reason)))
         (should (= 0 (plist-get (harness-call 'usage/totals :session other) :calls)))))))
 
+(ert-deftest harness-usage-budget-block-says-why-a-request-would-be-refused ()
+  "`usage/budget-block' is the reason the turn gate gives: nil while the budgets
+hold, the reason once a hard one is spent.  A request that is no turn -- one
+that keeps a prompt cache warm -- asks it."
+  (harness-usage-test-with
+    (let ((id (harness-usage-test-session :budget '(:amount 0.0005 :hard t))))
+      (should-not (harness-call 'usage/budget-block id))
+      (harness-await (harness-call 'agent/prompt id "hello"))
+      (should (string-match-p "\\`Budget session exhausted: spent \\$0\\.0008 of \\$0\\.0005"
+                              (harness-call 'usage/budget-block id)))
+      ;; A soft budget never blocks.
+      (let ((soft (harness-usage-test-session :budget '(:amount 0.0005))))
+        (harness-await (harness-call 'agent/prompt soft "hello"))
+        (should-not (harness-call 'usage/budget-block soft))))))
+
 (defvar harness-budget)
 
 (ert-deftest harness-usage-hard-budget-stops-a-running-turn ()

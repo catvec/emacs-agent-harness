@@ -277,6 +277,80 @@ caller says it; a click or RET moves that decision."
             (harness-ui-action-push)
             (should (equal '("_harness/decision/redo" (:id "d-c")) (car sent)))))))))
 
+(declare-function harness-ui-decision-label "harness-ui-decisions" (id way))
+(declare-function harness-ui-decision-strikes-p "harness-ui-decisions" (id))
+(defvar harness-ui-decision-labels)
+
+(ert-deftest harness-ui-decisions-a-switch-reads-as-one ()
+  "The decision to compact before the prompt cache lapses is a switch: its
+button says [Turn off] while it is on and [Turn on] once it was turned
+off, with a tooltip that says what a click does.  Every other kind keeps
+[Undo] and [Redo], and so does a decision the UI has not heard of; only
+a switch's notes keep their text when it is off."
+  (harness-ui-decisions-test-with
+    (let ((sent nil)
+          (text "Compacting a conversation just before its prompt cache lapses, while it is still cached"))
+      (dolist (d (list (list :id "d-on" :kind "precompact" :state "done" :text text)
+                       (list :id "d-off" :kind "precompact" :state "undone" :text text)
+                       (list :id "d-end" :kind "precompact" :state "changed" :text text)
+                       '(:id "d-p" :kind "permission" :state "done" :text "Always allowing every bash call, in every session")
+                       '(:id "d-c" :kind "cowboy" :state "undone" :text "Always starting afresh when the prompt cache is cold")))
+        (harness-ui-decisions-store d))
+      (let ((off (harness-ui-decision-button "d-on" 'done))
+            (on (harness-ui-decision-button "d-off" 'undone)))
+        (should (equal "[Turn off]" off))
+        (should (eq 'button (get-text-property 0 'face off)))
+        (should (equal "Stop compacting conversations just before their prompt cache lapses"
+                       (get-text-property 0 'help-echo off)))
+        (should (equal "[Turn on]" on))
+        (should (equal "Compact conversations just before their prompt cache lapses again"
+                       (get-text-property 0 'help-echo on)))
+        (should (equal "Mine" (get-text-property 0 'help-echo (harness-ui-decision-button "d-on" 'done "Mine"))))
+        ;; Ended: nothing, as for any decision.
+        (should-not (harness-ui-decision-button "d-end" 'changed))
+        (should-not (harness-ui-decision-button "d-end" 'gone))
+        ;; A click moves that decision, as it does any.
+        (cl-letf (((symbol-function 'harness-ui-call)
+                   (lambda (method params _callback &optional _on-error)
+                     (push (list method params) sent))))
+          (with-temp-buffer
+            (insert off " " on)
+            (goto-char (point-min))
+            (harness-ui-action-push)
+            (should (equal '("_harness/decision/undo" (:id "d-on")) (car sent)))
+            (goto-char (1- (point-max)))
+            (harness-ui-action-push)
+            (should (equal '("_harness/decision/redo" (:id "d-off")) (car sent))))))
+      ;; The words of the others.
+      (should (equal "[Undo]" (harness-ui-decision-button "d-p" 'done)))
+      (should (equal "[Redo]" (harness-ui-decision-button "d-c" 'undone)))
+      (should (equal "[Undo]" (harness-ui-decision-button "d-nowhere" 'done)))
+      (should (equal "[Redo]" (harness-ui-decision-button "d-nowhere" 'undone)))
+      (should (equal '("[Turn off]" "[Turn on]" "[Undo]" "[Redo]" "[Undo]" "[Redo]")
+                     (list (harness-ui-decision-label "d-on" 'undo) (harness-ui-decision-label "d-on" 'redo)
+                           (harness-ui-decision-label "d-p" 'undo) (harness-ui-decision-label "d-c" 'redo)
+                           (harness-ui-decision-label nil 'undo) (harness-ui-decision-label "d-nowhere" 'redo))))
+      ;; Only a switch's notes keep their text while it is off.
+      (should-not (harness-ui-decision-strikes-p "d-on"))
+      (should-not (harness-ui-decision-strikes-p "d-off"))
+      (should (harness-ui-decision-strikes-p "d-p"))
+      (should (harness-ui-decision-strikes-p "d-c"))
+      (should (harness-ui-decision-strikes-p "d-nowhere"))
+      (should (harness-ui-decision-strikes-p nil))
+      ;; The table says it, so a kind of another module can read as a switch too.
+      (let ((harness-ui-decision-labels '((cowboy :undo "[Ask again]" :redo "[Stop asking]" :strike nil)
+                                          (permission :undo "[Revoke]"))))
+        (should (equal "[Ask again]" (harness-ui-decision-label "d-c" 'undo)))
+        (should (equal "[Stop asking]" (harness-ui-decision-label "d-c" 'redo)))
+        (should-not (harness-ui-decision-strikes-p "d-c"))
+        ;; A key left out reads as usual.
+        (should (equal "[Revoke]" (harness-ui-decision-label "d-p" 'undo)))
+        (should (equal "[Redo]" (harness-ui-decision-label "d-p" 'redo)))
+        (should (harness-ui-decision-strikes-p "d-p"))
+        ;; The precompact entry is gone from this table: it reads as any decision.
+        (should (equal "[Undo]" (harness-ui-decision-label "d-on" 'undo)))
+        (should (harness-ui-decision-strikes-p "d-on"))))))
+
 (ert-deftest harness-ui-decisions-module-starts-and-stops ()
   "The module fetches the cache at once when the UI is connected already.
 Stopped, it follows nothing more and empties the cache, which the views

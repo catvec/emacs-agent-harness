@@ -3999,6 +3999,129 @@ never heard of adds no line."
       (harness-test-wait (lambda () (harness-ui-chat-test-find buf2 "    Followed an old rule\n")) 5 "the note")
       (should-not (harness-ui-chat-test-find buf2 "decided by" (harness-ui-chat-test-find buf2 "Followed an old rule"))))))
 
+(defvar harness-ui-chat-test--switch 'on
+  "The switch the chat tests' kind `precompact' turns: `on' or `off'.")
+
+(defun harness-ui-chat-test--turn (_decision to)
+  "Turn the chat tests' switch TO `off' or `on', as the kind's undo or redo does.
+Only while it holds what the other move left: else the decision ends `changed'."
+  (if (eq harness-ui-chat-test--switch (if (eq to 'off) 'on 'off))
+      (progn (setq harness-ui-chat-test--switch to)
+             (list (if (eq to 'off) 'undone 'done)))
+    (list 'changed)))
+
+(ert-deftest harness-ui-chat-a-switch-note-flips-its-button-and-keeps-its-text ()
+  "The note of a compaction made before the prompt cache lapsed tells of a
+switch: [Turn off], then [Turn on], then [Turn off] again.  It records
+something that happened, so its text is never struck through, while the
+`decided by:' line under it -- the saved option the compaction used, a
+decision of another kind -- offers [Undo] and strikes its text as ever,
+and the two follow their own decisions."
+  (harness-ui-chat-test-with-decisions
+    (setq harness-ui-chat-test--switch 'on)
+    (harness-decisions-define-kind
+     'precompact
+     :undo (lambda (d) (harness-ui-chat-test--turn d 'off))
+     :redo (lambda (d) (harness-ui-chat-test--turn d 'on)))
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid))
+           (saved (plist-get (harness-call 'decision/record 'test sid "Always testing"
+                                           '(:before before :after after))
+                             :id))
+           (text "Compacting a conversation just before its prompt cache lapses, while it is still cached")
+           (id (plist-get (harness-call 'decision/record 'precompact sid text
+                                        '(:before (:enabled :false) :after (:enabled t)))
+                          :id))
+           (note "    Prompt cache lapsing at 14:05: compacted into a brief summary first")
+           (line (lambda (switch decided-by)
+                   (concat note "  " switch "\n    decided by: Always testing  " decided-by "\n"))))
+      (harness-call 'session/append sid (list :kind 'hint :content (string-trim note)
+                                              :meta (list :decision id :decided-by saved)))
+      (harness-test-wait (lambda () (harness-ui-chat-test-find buf (funcall line "[Turn off]" "[Undo]")))
+                         5 "the note with both buttons")
+      (with-current-buffer buf
+        (let ((pos (harness-ui-chat-test-find buf "first  [Turn off]")))
+          (should (harness-ui-chat-test-face-at (- pos 2) 'button))
+          (should (equal "Stop compacting conversations just before their prompt cache lapses"
+                         (get-text-property (- pos 2) 'help-echo)))
+          (should-not (harness-ui-chat-test--struck-p (- pos 12))))
+        ;; The other button is the saved option's own.
+        (let ((pos (harness-ui-chat-test-find buf "decided by: Always testing  [Undo]")))
+          (should (equal "Take this decision back" (get-text-property (- pos 2) 'help-echo)))))
+      ;; Turned off: the button flips, the text stays as it was.
+      (should (member (concat "Undone: no longer " (downcase (substring text 0 1)) (substring text 1))
+                      (harness-ui-chat-test--click buf "first  [Turn off]")))
+      (should (eq 'off harness-ui-chat-test--switch))
+      (harness-test-wait (lambda () (harness-ui-chat-test-find buf (funcall line "[Turn on]" "[Undo]")))
+                         5 "the note offering to turn it on")
+      (with-current-buffer buf
+        (let ((pos (harness-ui-chat-test-find buf "first  [Turn on]")))
+          (should (equal "Compact conversations just before their prompt cache lapses again"
+                         (get-text-property (- pos 2) 'help-echo)))
+          (should-not (harness-ui-chat-test--struck-p (- pos 12)))
+          (should-not (harness-ui-chat-test--struck-p (- pos 40))))
+        (should-not (harness-ui-chat-test-find buf "[Turn off]")))
+      ;; The saved option is undone on its own line: struck, [Redo]; the switch is not touched.
+      (harness-ui-chat-test--click buf "decided by: Always testing  [Undo]")
+      (harness-test-wait (lambda () (harness-ui-chat-test-find buf (funcall line "[Turn on]" "[Redo]")))
+                         5 "the saved option's line offering its redo")
+      (should (eq 'off harness-ui-chat-test--switch))
+      (with-current-buffer buf
+        (let ((pos (harness-ui-chat-test-find buf "decided by: Always testing")))
+          (should (harness-ui-chat-test--struck-p (1- pos)))
+          (should-not (harness-ui-chat-test--struck-p (- pos 30)))))
+      ;; Turned on again: [Turn off], never struck.
+      (should (member (concat "Redone: " (downcase (substring text 0 1)) (substring text 1))
+                      (harness-ui-chat-test--click buf "first  [Turn on]")))
+      (should (eq 'on harness-ui-chat-test--switch))
+      (harness-test-wait (lambda () (harness-ui-chat-test-find buf (funcall line "[Turn off]" "[Redo]")))
+                         5 "the note offering to turn it off again")
+      (with-current-buffer buf
+        (should-not (harness-ui-chat-test--struck-p (- (harness-ui-chat-test-find buf "first  [Turn off]") 12))))
+      ;; Changed by hand since: the switch's note says so and offers nothing more.
+      (setq harness-ui-chat-test--switch 'other)
+      (should (member "Not undone: it was changed since, so it stays as it is"
+                      (harness-ui-chat-test--click buf "first  [Turn off]")))
+      (harness-test-wait (lambda () (harness-ui-chat-test-find
+                                     buf (concat note "\n    Not undone: it was changed since, so it stays as it is\n")))
+                         5 "the note saying how it ended")
+      (should-not (harness-ui-chat-test-find buf "[Turn off]"))
+      (should-not (harness-ui-chat-test-find buf "[Turn on]")))))
+
+(ert-deftest harness-ui-chat-compaction-says-when-it-was-made-before-the-cache-lapsed ()
+  "A compaction made while the prompt cache still held the conversation, just
+before it lapsed, says so in its header, as one made because a message met
+a cold cache does.  Every other compaction reads as it did."
+  (harness-ui-chat-test-with
+    (let ((sid (harness-ui-chat-test-session)))
+      (harness-call 'session/append sid '(:kind user :content "fix the parser"))
+      (harness-call 'session/append sid
+                    (list :kind 'compaction :content "The parser needs fixing."
+                          :meta (list :compaction "transcript" :file "/tmp/parser.md"
+                                      :precompact (list :choice "transcript" :by "precompact"))))
+      (harness-call 'session/append sid
+                    (list :kind 'compaction :content "Still the parser."
+                          :meta (list :compaction "brief" :model "demo:scripted"
+                                      :precompact (list :choice "brief"))))
+      (harness-call 'session/append sid
+                    (list :kind 'compaction :content "Cold."
+                          :meta (list :compaction "fresh" :cowboy (list :choice "fresh" :by "default"))))
+      (harness-call 'session/append sid
+                    (list :kind 'compaction :content "Plain." :meta (list :compaction "summary")))
+      (let ((buf (harness-ui-chat-test-open sid))
+            (scripted (harness-ui-model-label "demo:scripted")))
+        (should (harness-ui-chat-test-find
+                 buf "context compacted into a transcript file, before the prompt cache lapsed (4 words)"))
+        (should (harness-ui-chat-test-find
+                 buf (format "context compacted into a brief summary by %s, before the prompt cache lapsed (3 words)"
+                             scripted)))
+        (should (harness-ui-chat-test-find
+                 buf "context compacted to start afresh, the prompt cache being cold (1 words)"))
+        (should (harness-ui-chat-test-find buf "context compacted (1 words)"))
+        (with-current-buffer buf
+          (should (= 2 (how-many "before the prompt cache lapsed" (point-min) (point-max))))
+          (should (= 1 (how-many "the prompt cache being cold" (point-min) (point-max)))))))))
+
 (ert-deftest harness-ui-chat-tool-result-names-its-decision ()
   "A call a lasting decision's rule refused names the decision, above the fold.
 The line follows the decision: [Undo], then [Redo] with the text struck

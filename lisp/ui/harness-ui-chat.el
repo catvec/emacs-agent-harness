@@ -70,6 +70,8 @@
 (declare-function harness-ui-media-render-attachment "harness-ui-media" (attachment))
 (declare-function harness-ui-decision "harness-ui-decisions" (id))
 (declare-function harness-ui-decision-help "harness-ui-decisions" (id way))
+(declare-function harness-ui-decision-label "harness-ui-decisions" (id way))
+(declare-function harness-ui-decision-strikes-p "harness-ui-decisions" (id))
 (declare-function harness-ui-decisions-store "harness-ui-decisions" (decision))
 (declare-function harness-decision-undo "harness-ui-decisions" (id))
 (declare-function harness-decision-redo "harness-ui-decisions" (id))
@@ -1894,7 +1896,12 @@ carries the two things to do about the choice as buttons."
     (harness-chat--margin
      (propertize
       (concat (propertize "    " 'face 'harness-hint-face)
-              (propertize text 'face (if (eq state 'undone) 'harness-chat-undone-face 'harness-hint-face))
+              (propertize text 'face (if (and (eq state 'undone)
+                                              ;; A switch's note records what happened: its
+                                              ;; text stays, only the button flips.
+                                              (or (not id) (harness-chat--decision-strikes-p id)))
+                                         'harness-chat-undone-face
+                                       'harness-hint-face))
               (cond
                (judged (concat "  " (harness-chat--supervisor-buttons node judged)))
                (id (harness-chat--decision-tail id decision state record "    " 'harness-hint-face))
@@ -1988,14 +1995,34 @@ decision's kind says (`harness-ui-decision-help')."
           ((eq way 'undo) "Take this decision back")
           (t "Make this decision again"))))
 
+(defun harness-chat--decision-label (id way)
+  "Return the label of the WAY button of decision ID, WAY `undo' or `redo'.
+It is [Undo] or [Redo], unless the decision's kind reads otherwise: a
+switch says [Turn off] and [Turn on] (`harness-ui-decision-labels').  A
+UI without its decisions module reads every decision the usual way."
+  (cond ((fboundp 'harness-ui-decision-label) (harness-ui-decision-label id way))
+        ((eq way 'undo) "[Undo]")
+        (t "[Redo]")))
+
+(defun harness-chat--decision-strikes-p (id)
+  "Non-nil when notes of decision ID strike their text through while it is undone.
+Every decision's do, but for those of a kind that says otherwise: the
+note of a compaction made before the prompt cache lapsed records
+something that happened, which turning the switch off takes back
+nothing of (`harness-ui-decision-strikes-p')."
+  (or (not (fboundp 'harness-ui-decision-strikes-p)) (harness-ui-decision-strikes-p id)))
+
 (defun harness-chat--decision-button (id state help)
   "Return the button of decision ID in STATE, or \"\".
-It is [Undo] while STATE is `done' and [Redo] while it is `undone',
-HELP its tooltip; a click moves the decision that way
-\(`harness-chat--move-decision')."
+It is [Undo] while STATE is `done' and [Redo] while it is `undone' --
+[Turn off] and [Turn on] for a decision that is a switch
+\(`harness-chat--decision-label') -- HELP its tooltip; a click moves
+the decision that way (`harness-chat--move-decision')."
   (pcase state
-    ('done (harness-chat--button "[Undo]" (lambda () (harness-chat--move-decision id 'undo)) :help help))
-    ('undone (harness-chat--button "[Redo]" (lambda () (harness-chat--move-decision id 'redo)) :help help))
+    ('done (harness-chat--button (harness-chat--decision-label id 'undo)
+                                 (lambda () (harness-chat--move-decision id 'undo)) :help help))
+    ('undone (harness-chat--button (harness-chat--decision-label id 'redo)
+                                   (lambda () (harness-chat--move-decision id 'redo)) :help help))
     (_ "")))
 
 (defun harness-chat--move-decision (id way)
@@ -2035,7 +2062,10 @@ of the decision."
     (if (not (and state (stringp text) (not (string-blank-p text))))
         ""
       (concat (propertize (concat indent "decided by: ") 'face face)
-              (propertize (string-trim text) 'face (if (eq state 'undone) (harness-chat--struck face) face))
+              (propertize (string-trim text)
+                          'face (if (and (eq state 'undone) (harness-chat--decision-strikes-p id))
+                                    (harness-chat--struck face)
+                                  face))
               (harness-chat--decision-tail id decision state nil indent face)
               (propertize "\n" 'face face)))))
 
@@ -2112,7 +2142,9 @@ says what kind of compaction it was (`harness-node-compaction-kind'): a
 brief summary names the model that wrote it, a transcript file offers
 to open the file, a fresh start says so, and a cut old context says the
 oldest of it went.  One made because a message met a cold prompt cache
-\(harness-cowboy.el) says that too."
+\(harness-cowboy.el) says that too, and one made while the prompt cache
+still held the conversation, just before it lapsed
+\(harness-cache-compact.el, its `:meta' `:precompact'), says that."
   (let* ((id (harness-chat-block-id block))
          (node (harness-chat-block-node block))
          (content (or (plist-get node :content) ""))
@@ -2136,9 +2168,11 @@ oldest of it went.  One made because a message met a cold prompt cache
                                               ((equal kind "fresh") " to start afresh")
                                               ((equal kind "truncate") " by cutting its oldest context away")
                                               (t ""))
-                                             (if (consp (plist-get meta :cowboy))
-                                                 ", the prompt cache being cold"
-                                               "")
+                                             (cond ((consp (plist-get meta :cowboy))
+                                                    ", the prompt cache being cold")
+                                                   ((consp (plist-get meta :precompact))
+                                                    ", before the prompt cache lapsed")
+                                                   (t ""))
                                              (harness-chat--words content))
                                      'face 'harness-summary-face)
                          (if (and (stringp file) (not (string-empty-p file)))

@@ -2900,6 +2900,118 @@ what a user would see."
     (should (eq 'auth (plist-get done :error-kind)))
     (harness-provider-claude-close "auth1")))
 
+;;;; A request that only keeps the prompt cache warm
+
+(declare-function harness-agent-step-request "harness-agent" (session-id state on-event))
+
+(defun harness-provider-claude-test--refresh-request (sid &rest extra)
+  "Return a cache refresh for session SID, a message sent in its live process.
+It is made as harness-cache-warm.el makes one: the request the agent's
+next step would send, but for a short message in place of the
+conversation, and flagged as a refresh; EXTRA changes it."
+  (let* ((session (harness-call 'session/get sid))
+         (step (harness-agent-step-request sid (plist-get session :provider-state) #'ignore)))
+    (harness-plist-merge
+     (append (harness-plist-remove step :messages :on-event)
+             (list :messages '((:role user :content ((:type "text" :text "keep the cache warm"))))
+                   :cache-refresh t :max-tokens 16))
+     extra)))
+
+(ert-deftest harness-provider-claude-cache-refresh-runs-in-the-live-process ()
+  "A refresh is a message sent in the process that holds the conversation: the
+same process, the same CLI session, the cache that process wrote; the
+conversation it holds has the short message in it afterwards."
+  (harness-provider-claude-test-with-store
+    (let* ((sid (plist-get (harness-call 'session/create :cwd cwd :model "claude:claude-fable-5-1") :id))
+           (_ (harness-provider-claude-test--turn sid "hi"))
+           (entry (gethash sid harness-provider-claude--sessions))
+           (proc (harness-provider-claude-session-process entry))
+           (cli (harness-provider-claude-test--cli-id sid))
+           (argv-file (harness-provider-claude-test--argv-file))
+           (process-environment (cons (concat "HARNESS_FAKE_CLAUDE_ARGV=" argv-file) process-environment))
+           (events (car (harness-provider-claude-test--run
+                         (harness-provider-claude-test--refresh-request sid)))))
+      (should (eq 'end-turn (plist-get (harness-provider-claude-test--find events 'done) :stop-reason)))
+      (should (harness-provider-claude-test--find events 'usage))
+      ;; No new process: nothing was spawned, the one it had answered.
+      (should (zerop (or (harness-file-size argv-file) 0)))
+      (should (eq proc (harness-provider-claude-session-process (gethash sid harness-provider-claude--sessions))))
+      (should (process-live-p proc))
+      (should (equal cli (harness-provider-claude-test--cli-id sid)))
+      ;; The conversation the process holds has the message in it.
+      (harness-provider-claude-test--turn sid "recall")
+      (should (equal "I remember: hi | keep the cache warm | recall"
+                     (harness-provider-claude-test--reply sid))))))
+
+(ert-deftest harness-provider-claude-cache-refresh-is-refused-without-a-process ()
+  "No process holds the conversation: a new one would build a system prompt of
+its own and read none of the cache, so nothing is started."
+  (harness-provider-claude-test-with-store
+    (let* ((sid (plist-get (harness-call 'session/create :cwd cwd :model "claude:claude-fable-5-1") :id))
+           (argv-file (harness-provider-claude-test--argv-file))
+           (process-environment (cons (concat "HARNESS_FAKE_CLAUDE_ARGV=" argv-file) process-environment))
+           (events (car (harness-provider-claude-test--run
+                         (harness-provider-claude-test--refresh-request sid)))))
+      (let ((done (harness-provider-claude-test--find events 'done)))
+        (should (eq 'error (plist-get done :stop-reason)))
+        (should (string-match-p "Cache refresh refused: no CLI process holds the conversation"
+                                (plist-get done :error))))
+      (should-not (gethash sid harness-provider-claude--sessions))
+      (should (zerop (or (harness-file-size argv-file) 0))))))
+
+(ert-deftest harness-provider-claude-cache-refresh-never-supersedes-a-turn ()
+  "A refresh sent while a turn runs is refused: it would end that turn."
+  (harness-provider-claude-test-with-store
+    (let* ((sid (plist-get (harness-call 'session/create :cwd cwd :model "claude:claude-fable-5-1") :id))
+           (_ (harness-provider-claude-test--turn sid "hi"))
+           (entry (gethash sid harness-provider-claude--sessions)))
+      (setf (cl-struct-slot-value 'harness-provider-claude-session 'active entry) t)
+      (unwind-protect
+          (let* ((events (car (harness-provider-claude-test--run
+                               (harness-provider-claude-test--refresh-request sid))))
+                 (done (harness-provider-claude-test--find events 'done)))
+            (should (eq 'error (plist-get done :stop-reason)))
+            (should (string-match-p "a turn is running" (plist-get done :error)))
+            ;; The turn it would have ended is still there.
+            (should (harness-provider-claude-session-active entry)))
+        (setf (cl-struct-slot-value 'harness-provider-claude-session 'active entry) nil)))))
+
+(ert-deftest harness-provider-claude-cache-refresh-is-refused-when-the-process-was-started-otherwise ()
+  "A process started with other settings than the request needs would be
+restarted, and the cache is the old process's: the refresh is refused, and
+the process is left as it is."
+  (harness-provider-claude-test-with-store
+    (let* ((sid (plist-get (harness-call 'session/create :cwd cwd :model "claude:claude-fable-5-1") :id))
+           (_ (harness-provider-claude-test--turn sid "hi"))
+           (proc (harness-provider-claude-session-process (gethash sid harness-provider-claude--sessions)))
+           (events (car (harness-provider-claude-test--run
+                         (harness-provider-claude-test--refresh-request sid :system "Another system prompt"))))
+           (done (harness-provider-claude-test--find events 'done)))
+      (should (eq 'error (plist-get done :stop-reason)))
+      (should (string-match-p "not started for this conversation as it is" (plist-get done :error)))
+      (should (eq proc (harness-provider-claude-session-process (gethash sid harness-provider-claude--sessions))))
+      (should (process-live-p proc)))))
+
+(ert-deftest harness-provider-claude-cache-refresh-is-not-a-side-request ()
+  "A forked state makes a request a side one, in a process of its own, which
+holds none of the session's cache: it is refused as a refresh."
+  (harness-provider-claude-test-with-store
+    (let* ((sid (plist-get (harness-call 'session/create :cwd cwd :model "claude:claude-fable-5-1") :id))
+           (_ (harness-provider-claude-test--turn sid "hi"))
+           (session (harness-call 'session/get sid))
+           (state (harness-test-await (harness-call 'provider/fork (plist-get session :model)
+                                                    (plist-get session :provider-state))))
+           (events (car (harness-provider-claude-test--run
+                         (harness-provider-claude-test--refresh-request sid :provider-state state))))
+           (done (harness-provider-claude-test--find events 'done)))
+      (should (eq 'error (plist-get done :stop-reason)))
+      (should (string-match-p "not the session's own conversation" (plist-get done :error))))))
+
+(ert-deftest harness-provider-claude-says-a-cache-refresh-can-be-sent ()
+  "The provider's capabilities say a message sent to it can keep the cache warm."
+  (harness-provider-claude-test--setup)
+  (should (eq t (plist-get (harness-call 'provider/capabilities "claude:claude-fable-5-1") :cache-refresh))))
+
 ;;;; Integration
 
 (ert-deftest harness-provider-claude-integration-real-cli ()

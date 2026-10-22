@@ -686,6 +686,35 @@ truncation cost nothing."
         (should-not (plist-get (cadr (plist-get e :kinds)) :cost))
         (should (eql 0.0 (plist-get (nth 2 (plist-get e :kinds)) :cost)))))))
 
+(ert-deftest harness-compaction-resend-cost-prices-the-context-both-ways ()
+  "`compaction/resend-cost' says what sending the context costs read from the
+cache and not: the numbers `compaction/estimate' carries on with, without the
+rest of the estimate.  The uncached price is the dearer of cache write and
+input.  A model the catalogue does not price has none."
+  (harness-compaction-test-with
+    (harness-compaction-test-tiered-provider)
+    (let* ((id (harness-compaction-test-long-session))
+           (near (lambda (a b) (< (abs (- a b)) 1e-9))))
+      (harness-call 'session/update id :model "tiered:big" :silent t)
+      (harness-call 'session/usage-add id '(:input 10 :output 10 :cache-read 100000 :context 100000 :cache-at 1000.0))
+      (let ((cost (harness-call 'compaction/resend-cost id))
+            (estimate (harness-call 'compaction/estimate id)))
+        (should (= 100000 (plist-get cost :context)))
+        (should (equal "tiered:big" (plist-get cost :model)))
+        (should (funcall near 0.1 (plist-get cost :cached)))
+        (should (funcall near 1.25 (plist-get cost :uncached)))
+        (should (funcall near (plist-get estimate :carry-on-cached) (plist-get cost :cached)))
+        (should (funcall near (plist-get estimate :carry-on) (plist-get cost :uncached)))))
+    (harness-define-provider 'unpriced
+      :models (lambda () (harness-resolved (list (list :name "m" :context-window 100000))))
+      :complete #'ignore)
+    (let ((id (harness-compaction-test-long-session)))
+      (harness-call 'session/update id :model "unpriced:m" :silent t)
+      (let ((cost (harness-call 'compaction/resend-cost id)))
+        (should (> (plist-get cost :context) 0))
+        (should-not (plist-get cost :cached))
+        (should-not (plist-get cost :uncached))))))
+
 (ert-deftest harness-compaction-brief-reads-the-narrative ()
   "A `sample' context sends the whole narrative: every message, no elision.
 The summary reads all of the conversation's turns and user messages,
