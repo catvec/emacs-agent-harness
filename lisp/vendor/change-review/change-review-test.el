@@ -422,6 +422,22 @@ threads in the order of their lines."
     (should (equal '("b.el") (mapcar #'car (change-review-threads-by-file set 'closed))))
     (should (equal '(:open 4 :closed 1 :drafts 5 :comments 5) (change-review-thread-counts set)))))
 
+(ert-deftest change-review-threads-on-one-line-come-in-the-order-they-were-started ()
+  "A thread added late with an early time -- one imported from before --
+is listed where its time puts it, not last; the lines still come first."
+  (let* ((set (change-review-test--set))
+         (alice (change-review-user "Alice"))
+         (at (lambda (line) (change-review-make-location :file "a.el" :line line))))
+    (dolist (spec '(("whole, 5" 5 nil) ("whole, 9" 9 nil) ("line 3, 8" 8 3) ("line 3, 2" 2 3) ("whole, 7" 7 nil)))
+      (pcase-let ((`(,body ,time ,line) spec))
+        (change-review-comment set body :author alice :time time
+                               :location (and line (funcall at line)))))
+    (let ((groups (change-review-threads-by-file set))
+          (bodies (lambda (threads)
+                    (mapcar (lambda (th) (change-review-comment-body (change-review-thread-root th))) threads))))
+      (should (equal '("whole, 5" "whole, 7" "whole, 9") (funcall bodies (cdr (assoc nil groups)))))
+      (should (equal '("line 3, 2" "line 3, 8") (funcall bodies (cdr (assoc "a.el" groups))))))))
+
 (ert-deftest change-review-a-set-with-no-version-groups-by-name ()
   "Without a version to order the files by, they come in the order of their names."
   (let ((set (change-review-make-set)))

@@ -53,7 +53,14 @@ branch did since -- a tree of the directories and their files:
               approves every file, t shows the files flat instead.
               An approved file need not be looked at again unless the
               branch changes it.  Under it, its open threads, a line
-              each, where they are now (see below).
+              each, where they are now (see below).  The marks are
+              kept by the harness with the review, each by the
+              file's path and blob (`patch-review/set-viewed`), so
+              they are there after a restart.  V takes every file as
+              viewed but those the branch's newest commit changed,
+              for a review gone through before the marks were kept
+              (`patch-review/assume-viewed`); the report says so
+              when files were taken as viewed and not looked at.
   directories the files group under the directories that hold them,
               with how many files each holds and the lines they add
               and delete.
@@ -81,6 +88,12 @@ branch did since -- a tree of the directories and their files:
               the report and in Ediff, lists all the threads by file,
               with a filter on their status; d there comes back to
               Ediff, at the thread's line.
+
+Replies you wrote by hand before there were threads -- under a quote of
+the agent's words, in a round of feedback or typed in its session while it
+worked -- are threads too, closed, each with the quote it answered:
+`harness-ui-patch-review-import-manual` (M-x, in a task's report, session
+or card) makes them from what the harness kept (`patch-review/import-manual`).
 
 The drafts go with the feedback.  Whatever sends the task back --
 the report's box, a message typed in its session, another client --
@@ -137,6 +150,7 @@ part of the report out.
 - `harness-ui-patch-review-approve` — Approve the file of the row at point, or stop approving it.
 - `harness-ui-patch-review-approve-all` — Approve every file of the review at point.
 - `harness-ui-patch-review-approve-ediff` — Approve the file compared in this Ediff, or stop approving it.
+- `harness-ui-patch-review-assume-viewed` — Take every file as viewed but those the branch's newest commit changed.
 - `harness-ui-patch-review-comment` — Comment on the current difference with TEXT.
 - `harness-ui-patch-review-comment-line` — Comment on the line at point in the version Ediff shows.
 - `harness-ui-patch-review-ediff` — Compare the file of the row at point in Ediff, merge base and branch.
@@ -145,6 +159,7 @@ part of the report out.
 - `harness-ui-patch-review-ediff-quit` — Back to the task's report, the windows as they were, without asking.
 - `harness-ui-patch-review-edit-comment` — Edit your draft in the thread at point in Ediff; else go to the feedback box.
 - `harness-ui-patch-review-edit-feedback` — Go to the report's feedback box, to write the words that go with the comments.
+- `harness-ui-patch-review-import-manual` — Make the replies you wrote by hand for this task threads of its review.
 - `harness-ui-patch-review-mouse-ediff` — Compare the file clicked on in EVENT in Ediff.
 - `harness-ui-patch-review-next-difference` — Move to the next difference in this Ediff, ARG times.
 - `harness-ui-patch-review-next-file` — Move to the next file of the changes, or the Nth next.
@@ -167,7 +182,11 @@ part of the report out.
 ### Methods it calls
 
 - `patch-review/apply` ([patch-review](patch-review.md))
+- `patch-review/assume-viewed` ([patch-review](patch-review.md))
 - `patch-review/get` ([patch-review](patch-review.md))
+- `patch-review/import-manual` ([patch-review](patch-review.md))
+- `patch-review/set-viewed` ([patch-review](patch-review.md))
+- `patch-review/viewed` ([patch-review](patch-review.md))
 - `task/for-session` ([tasks](tasks.md))
 
 ### Events it hears over ACP

@@ -7,8 +7,9 @@
 ;; task's threads kept in the state directory, the operations a UI sends
 ;; performed once and announced, the version a hand-in makes, the drafts
 ;; that go with the feedback that sends the task back, the rounds of
-;; feedback from before threads existed, and review_comment and
-;; review_threads.  The repositories are throwaway ones, whose commits are
+;; feedback from before threads existed and the words the user wrote by
+;; hand outside them, the files the reviewer has viewed, and review_comment
+;; and review_threads.  The repositories are throwaway ones, whose commits are
 ;; never signed.
 
 ;;; Code:
@@ -34,6 +35,7 @@
 (defvar harness-acp--server-enabled)
 (defvar harness-acp--clients)
 (defvar harness-acp-token)
+(defvar harness-tasks--reject-message)
 (declare-function harness-tasks--set "harness-tasks")
 (declare-function harness-acp--drop-client "harness-acp")
 
@@ -400,6 +402,260 @@ from where each was."
           (clrhash harness-patch-review--sets)
           (should (equal ids (mapcar (lambda (th) (plist-get th :id))
                                      (plist-get (harness-call 'patch-review/get id) :threads)))))))))
+
+(defconst harness-patch-review-test--inline-round
+  "> The proxy image is pinned and live.
+> It cost about 7 seconds.
+
+silence
+
+---
+
+> Second, the migration [...]
+
+Let's ship it without that."
+  "A round written inline, under quotes of the agent's words, parted by a rule.")
+
+(ert-deftest harness-patch-review-keeps-the-quote-an-inline-reply-answers ()
+  "A reply written under a quote of the agent's words keeps the quote above
+its text, so it can be read; a rule typed between two replies is no
+comment, and the replies after it keep the places they had."
+  (harness-patch-review-test-with
+    (let ((id (harness-patch-review-test--task)))
+      (harness-tasks--set id :feedback (list (list :text harness-patch-review-test--inline-round :at 1000.0)))
+      (let* ((threads (plist-get (harness-call 'patch-review/get id) :threads))
+             (bodies (mapcar (lambda (th) (plist-get (car (plist-get th :comments)) :body)) threads)))
+        (should (equal '("> The proxy image is pinned and live.\n> It cost about 7 seconds.\n\nsilence"
+                         "> Second, the migration [...]\n\nLet's ship it without that.")
+                       bodies))
+        (should (cl-every (lambda (th) (equal "closed" (plist-get th :status))) threads))
+        ;; The place of a comment in its round names it: the rule took the
+        ;; place the second reply would have had without it.
+        (should (equal (change-review-stable-id "t" id 0 0) (plist-get (nth 0 threads) :id)))
+        (should (equal (change-review-stable-id "t" id 0 2) (plist-get (nth 1 threads) :id)))
+        ;; A set made with the quotes has none to put back.
+        (should (equal '(:added 0 :edited 0 :threads nil) (harness-call 'patch-review/import-manual id)))))))
+
+(defun harness-patch-review-test--import-old-style (id comments)
+  "Add COMMENTS, (K BODY), of round 0 of task ID's review as an early import did.
+They have the plain text of the reply, no quote above it."
+  (pcase-dolist (`(,k ,body) comments)
+    (let ((thread (change-review-stable-id "t" id 0 k)))
+      (harness-call 'patch-review/apply id
+                    (list :op "add-comment" :thread thread
+                          :comment (list :id (change-review-stable-id "c" id 0 k) :thread thread
+                                         :body body :time 1000.0 :sent 1000.0
+                                         :author '(:kind "user" :name "Noah")
+                                         :meta '(:round 0 :imported t)))))))
+
+(ert-deftest harness-patch-review-puts-the-quote-back-on-an-earlier-import ()
+  "A comment imported without its quote gets it; one the user edited since,
+or that no import made, is left alone; asking again changes nothing."
+  (harness-patch-review-test-with
+    (let ((id (harness-patch-review-test--task)))
+      ;; The review as it was when the import left the quotes out: made
+      ;; before the rounds were there to import, then given their comments.
+      (harness-call 'patch-review/get id)
+      (harness-patch-review-test--import-old-style
+       id '((0 "silence") (2 "Let's ship it without that.")))
+      (harness-tasks--set id :feedback (list (list :text harness-patch-review-test--inline-round :at 1000.0)))
+      (let ((untouched (harness-patch-review-test--user-comment id "A comment of its own")))
+        (harness-call 'patch-review/apply id (list :op "edit-comment"
+                                                  :comment (change-review-stable-id "c" id 0 2)
+                                                  :body "Let's ship it, edited." :time 2000.0))
+        (let ((result (harness-call 'patch-review/import-manual id)))
+          (should (equal 1 (plist-get result :edited)))
+          (should (equal 0 (plist-get result :added))))
+        (let* ((comments (mapcar (lambda (th) (car (plist-get th :comments)))
+                                 (plist-get (harness-call 'patch-review/get id) :threads))))
+          (should (equal "> The proxy image is pinned and live.\n> It cost about 7 seconds.\n\nsilence"
+                         (plist-get (nth 0 comments) :body)))
+          (should (numberp (plist-get (nth 0 comments) :edited)))
+          (should (equal "Let's ship it, edited." (plist-get (nth 1 comments) :body)))
+          (should (equal "A comment of its own" (plist-get (nth 2 comments) :body)))
+          (should (equal (car untouched) (plist-get (nth 2 comments) :thread))))
+        ;; Announced, to perform on every UI's copy.
+        (should (cl-find "edit-comment" events :key (lambda (e) (format "%s" (plist-get (cadr e) :op))) :test #'equal))
+        ;; Again: nothing to do.
+        (let ((result (harness-call 'patch-review/import-manual id)))
+          (should (equal '(:added 0 :edited 0 :threads nil) result)))))))
+
+(defun harness-patch-review-test--type (id text &rest keys)
+  "Append a message TEXT the user typed to the session of task ID; return its node.
+KEYS: :ts, :meta."
+  (harness-call 'session/append (plist-get (harness-call 'task/get id) :session)
+                (list :kind 'user :content text
+                      :ts (or (plist-get keys :ts) (float-time))
+                      :meta (plist-get keys :meta))))
+
+(ert-deftest harness-patch-review-imports-the-replies-typed-in-the-session ()
+  "A reply the user typed to the agent while it worked, under a quote of
+what it said, is a closed thread of the review, written when it was typed;
+what the harness or another session sent, a round, the prompt and words
+that answer no quote are not."
+  (harness-patch-review-test-with
+    (let ((id (harness-patch-review-test--task)))
+      (let* ((typed (harness-patch-review-test--type
+                     id "> - Requests/limits on every service? No.\n\nis there some more elegant way?\nlike an admission webhook"
+                     :ts 3000.5 :meta '(:steering t))))
+        ;; Not comments: the harness's own words, another agent's, a round, plain steering.
+        (harness-patch-review-test--type id "> quoted\n\nsystem says" :meta '(:from (:kind system :source "non-interactive mode")))
+        (harness-patch-review-test--type id "> quoted\n\nanother agent says"
+                                         :meta '(:from (:kind session :id "s-2" :name "Other")))
+        (harness-patch-review-test--type id (concat harness-tasks--reject-message "\n\n> quoted\n\nsent back"))
+        (harness-patch-review-test--type id "Also handle the other case." :meta '(:steering t))
+        (let ((result (harness-call 'patch-review/import-manual id)))
+          (should (equal 1 (plist-get result :added)))
+          (should (equal 0 (plist-get result :edited))))
+        (let* ((threads (plist-get (harness-call 'patch-review/get id) :threads))
+               (thread (car threads))
+               (comment (car (plist-get thread :comments))))
+          (should (= 1 (length threads)))
+          (should (equal "closed" (plist-get thread :status)))
+          (should (equal "> - Requests/limits on every service? No.\n\nis there some more elegant way?\nlike an admission webhook"
+                         (plist-get comment :body)))
+          (should (equal 3000.5 (plist-get comment :time)))
+          (should (equal 3000.5 (plist-get comment :sent)))
+          (should (equal "user" (plist-get (plist-get comment :author) :kind)))
+          (should-not (plist-get comment :location))
+          (should (equal (list :imported t :manual t :node (plist-get typed :id)) (plist-get comment :meta))))
+        ;; Announced like any change to the threads.
+        (should (equal '("add-comment" "set-status")
+                       (mapcar (lambda (e) (format "%s" (plist-get (cadr e) :op))) (reverse events))))
+        ;; Again, after a restart: the same thread, once.
+        (clrhash harness-patch-review--sets)
+        (should (equal '(:added 0 :edited 0 :threads nil) (harness-call 'patch-review/import-manual id)))
+        (should (= 1 (length (plist-get (harness-call 'patch-review/get id) :threads))))))))
+
+(ert-deftest harness-patch-review-leaves-a-session-without-replies-alone ()
+  "A task whose session has no reply of the kind, or none at all, imports nothing."
+  (harness-patch-review-test-with
+    (let ((id (harness-patch-review-test--task)))
+      (should (equal '(:added 0 :edited 0 :threads nil) (harness-call 'patch-review/import-manual id)))
+      (harness-tasks--set id :session "no-such-session")
+      (should (equal '(:added 0 :edited 0 :threads nil) (harness-call 'patch-review/import-manual id)))
+      (should-error (harness-call 'patch-review/import-manual "t-nope") :type 'harness-error))))
+
+;;;; The files viewed
+
+(defun harness-patch-review-test--commit (repo files message)
+  "Write FILES, (NAME TEXT), in REPO, commit them as MESSAGE; return the commit.
+Only FILES: the state directory is the repository too, and holds more."
+  (pcase-dolist (`(,name ,text) files)
+    (with-temp-file (expand-file-name name repo) (insert text)))
+  (apply #'harness-patch-review-test--git repo "add" "--" (mapcar #'car files))
+  (harness-patch-review-test--git repo "commit" "-q" "-m" message)
+  (harness-patch-review-test--git repo "rev-parse" "HEAD"))
+
+(defun harness-patch-review-test--paths (files)
+  "Return the paths of FILES, as the review keeps files viewed."
+  (mapcar (lambda (file) (plist-get file :path)) files))
+
+(defmacro harness-patch-review-test-with-commits (&rest body)
+  "Run BODY in a task whose branch has three commits; bind `id', `first', `second', `third'.
+`first' fixes a.el, `second' adds b.el and c.el, `third' changes c.el.
+The newest version is recorded, so the review has its tip."
+  (declare (indent 0))
+  `(harness-patch-review-test-with
+     (let* ((id (harness-patch-review-test--task))
+            (first (harness-patch-review-test--git repo "rev-parse" "task/fix"))
+            (second (harness-patch-review-test--commit
+                     repo '(("b.el" "(setq b 1)\n") ("c.el" "(setq c 1)\n")) "Add b and c"))
+            (third (harness-patch-review-test--commit repo '(("c.el" "(setq c 2)\n")) "Change c")))
+       (ignore id first second third)
+       ,@body)))
+
+(ert-deftest harness-patch-review-takes-the-files-before-the-newest-commit-as-viewed ()
+  "Every file of the newest version is viewed but those its newest commit
+changed; each is kept by its path and the blob it has on the branch."
+  (harness-patch-review-test-with-commits
+    (harness-test-await (harness-patch-review--record-version (harness-call 'task/get id)))
+    (should-not (harness-call 'store/load (format "patch-review-viewed/%s.json" id)))
+    (let ((result (harness-test-await (harness-call-async 'patch-review/assume-viewed id))))
+      (should (equal third (plist-get result :tip)))
+      (should (equal second (plist-get result :revision)))
+      (should (equal 2 (plist-get result :seen)))
+      (should (equal 1 (plist-get result :unviewed))))
+    (let* ((data (harness-test-await (harness-call-async 'patch-review/viewed id)))
+           (seen (plist-get data :seen)))
+      (should (equal '("a.el" "b.el") (harness-patch-review-test--paths seen)))
+      (should (equal (harness-patch-review-test--git repo "rev-parse" "task/fix:b.el")
+                     (plist-get (cadr seen) :blob)))
+      (should-not (plist-get data :approved))
+      (should (equal second (plist-get (plist-get data :assumed) :revision)))
+      (should (equal third (plist-get (plist-get data :assumed) :tip))))
+    ;; Kept in the state directory, for the next time.
+    (should (harness-call 'store/load (format "patch-review-viewed/%s.json" id)))
+    ;; From any commit of the branch on: the first one's changes are all but a.el's.
+    (let ((result (harness-test-await (harness-call-async 'patch-review/assume-viewed id (substring first 0 7)))))
+      (should (equal first (plist-get result :revision)))
+      (should (equal 1 (plist-get result :seen)))
+      (should (equal 2 (plist-get result :unviewed))))
+    (should (equal '("a.el") (harness-patch-review-test--paths
+                              (plist-get (harness-test-await (harness-call-async 'patch-review/viewed id)) :seen))))
+    ;; A commit the branch does not have is said so.
+    (let ((err (should-error (harness-test-await (harness-call-async 'patch-review/assume-viewed id "no-such-commit"))
+                             :type 'error)))
+      (should (string-search "no-such-commit" (error-message-string err))))))
+
+(ert-deftest harness-patch-review-keeps-the-files-the-reviewer-marks ()
+  "Marking a file viewed or approved is kept; approving views it, and a
+file no longer viewed is no longer approved; marking twice marks once."
+  (harness-patch-review-test-with-commits
+    (harness-test-await (harness-patch-review--record-version (harness-call 'task/get id)))
+    (let* ((blob (lambda (path) (harness-patch-review-test--git repo "rev-parse" (concat "task/fix:" path))))
+           (file (lambda (path) (list :path path :blob (funcall blob path))))
+           (mark (lambda (kind files on)
+                   (harness-test-await (harness-call-async 'patch-review/set-viewed id kind files on))))
+           (state (lambda () (harness-test-await (harness-call-async 'patch-review/viewed id)))))
+      (should (equal '(:seen 0 :approved 0) (list :seen (length (plist-get (funcall state) :seen))
+                                                  :approved (length (plist-get (funcall state) :approved)))))
+      (should (equal '(:seen 2 :approved 0)
+                     (funcall mark "seen" (list (funcall file "c.el") (funcall file "a.el")) t)))
+      (should (equal '(:seen 2 :approved 0) (funcall mark "seen" (list (funcall file "c.el")) t)))
+      (should (equal '(:seen 3 :approved 1) (funcall mark "approved" (list (funcall file "b.el")) t)))
+      (should (equal '("c.el" "a.el" "b.el") (harness-patch-review-test--paths (plist-get (funcall state) :seen))))
+      (should (equal '("b.el") (harness-patch-review-test--paths (plist-get (funcall state) :approved))))
+      ;; Not viewed any more: not approved either.
+      (should (equal '(:seen 2 :approved 0) (funcall mark "seen" (list (funcall file "b.el")) :false)))
+      (should (equal '(:seen 2 :approved 0) (funcall mark "approved" (list (funcall file "a.el")) :false)))
+      ;; A file the branch deleted has no blob, and is kept by its path.
+      (funcall mark "seen" (list (list :path "gone.el")) t)
+      (should (equal '(:path "gone.el") (car (last (plist-get (funcall state) :seen)))))
+      ;; A restart reads them from the state directory; the approved stay with an assumption.
+      (funcall mark "approved" (list (funcall file "a.el")) t)
+      (harness-test-await (harness-call-async 'patch-review/assume-viewed id))
+      (should (equal '("a.el") (harness-patch-review-test--paths (plist-get (funcall state) :approved))))
+      (should-error (harness-call 'patch-review/set-viewed id "looked" nil t) :type 'harness-error))))
+
+(ert-deftest harness-patch-review-takes-no-file-as-viewed-on-its-own ()
+  "A review whose earlier rounds were imported, and name a commit the
+reviewer saw the branch at, still has no file viewed until it is asked for:
+what the reviewer saw is theirs to say, and asking for the marks keeps nothing."
+  (harness-patch-review-test-with-commits
+    (let ((name (format "patch-review-viewed/%s.json" id)))
+      (harness-tasks--set id :feedback
+                          (list (list :text (format "Why b? (at %s)" (substring second 0 7)) :at 1000.0)))
+      (harness-test-await (harness-patch-review--record-version (harness-call 'task/get id)))
+      (should (< 0 (length (change-review-set-threads (harness-patch-review--set-for id t)))))
+      (let ((data (harness-test-await (harness-call-async 'patch-review/viewed id))))
+        (should-not (plist-get data :seen))
+        (should-not (plist-get data :approved))
+        (should-not (plist-get data :assumed)))
+      (should-not (harness-call 'store/load name)))))
+
+(ert-deftest harness-patch-review-says-when-the-repository-is-not-here ()
+  "A task whose repository is on another machine cannot have files taken as
+viewed, and says why; its marks are still kept."
+  (harness-patch-review-test-with-commits
+    (harness-test-await (harness-patch-review--record-version (harness-call 'task/get id)))
+    (harness-tasks--set id :project "/no/such/dir" :worktree nil)
+    (let ((err (should-error (harness-test-await (harness-call-async 'patch-review/assume-viewed id)) :type 'error)))
+      (should (string-search "not on this machine" (error-message-string err))))
+    (should-not (plist-get (harness-test-await (harness-call-async 'patch-review/viewed id)) :seen))
+    (should (equal '(:seen 1 :approved 0)
+                   (harness-test-await (harness-call-async 'patch-review/set-viewed id "seen"
+                                                           (list (list :path "a.el" :blob "abc")) t))))))
 
 ;;;; What the agent reads and writes
 

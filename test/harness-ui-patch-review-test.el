@@ -485,7 +485,8 @@ without touching the windows."
         (should-not (gethash id harness-ui-patch-review--reviews)))
       ;; Out of sight, the Ediff ends without touching the windows.
       (setq popout (harness-ui-patch-review-test--report board id))
-      (harness-ui-patch-review-test--wait-text popout "^    M  a\\.el")
+      ;; a.el was seen in the first Ediff, and the harness kept it so.
+      (harness-ui-patch-review-test--wait-text popout "^  ✓ M  a\\.el")
       (setq review (gethash id harness-ui-patch-review--reviews))
       (harness-ui-patch-review-ediff review 2)
       (harness-ui-patch-review-test--control review 2)
@@ -546,6 +547,125 @@ A file the branch changes again is not approved, so it is reviewed again."
       (should-not (harness-ui-patch-review--approved-p review a))
       (should-not (string-match-p "approved"
                                   (harness-ui-patch-review--section review nil))))))
+
+(defun harness-ui-patch-review-test--viewed (id)
+  "Return the files the harness keeps viewed in task ID's review: (SEEN APPROVED) paths."
+  (let ((data (harness-test-await (harness-call-async 'patch-review/viewed id))))
+    (list (mapcar (lambda (file) (plist-get file :path)) (plist-get data :seen))
+          (mapcar (lambda (file) (plist-get file :path)) (plist-get data :approved)))))
+
+(ert-deftest harness-ui-patch-review-keeps-the-files-viewed-with-the-harness ()
+  "A file seen, or approved, is kept by the harness by its path and blob: a
+report opened again shows the marks, un-approving takes the mark off there
+too, and a file the branch changes meanwhile is not viewed any more."
+  (harness-ui-patch-review-test-with-task
+    (let* ((popout (harness-ui-patch-review-test--changes board id))
+           (review (gethash id harness-ui-patch-review--reviews))
+           (a (harness-ui-patch-review-test--file review "a.el"))
+           (b (harness-ui-patch-review-test--file review "b.el"))
+           (d (harness-ui-patch-review-test--file review "d.el")))
+      (should (equal '(nil nil) (harness-ui-patch-review-test--viewed id)))
+      (harness-ui-patch-review--mark-seen review a)
+      (harness-ui-patch-review--approve review b t)
+      (harness-ui-patch-review--mark-seen review d)
+      (harness-test-wait (lambda () (equal '(("a.el" "b.el" "d.el") ("b.el")) (harness-ui-patch-review-test--viewed id)))
+                         5 "the harness to keep the marks")
+      ;; By path and blob: a file the branch deleted has no blob.
+      (let ((seen (plist-get (harness-test-await (harness-call-async 'patch-review/viewed id)) :seen)))
+        (should (equal (change-review-file-new-blob a) (plist-get (car seen) :blob)))
+        (should-not (plist-member (cadr seen) :blob)))
+      ;; Marking a file seen again sends nothing: it is, already.
+      (cl-letf (((symbol-function 'harness-ui-call)
+                 (lambda (&rest _) (ert-fail "a mark that is there was sent again"))))
+        (harness-ui-patch-review--mark-seen review a))
+      ;; The report opened again, the first forgotten, shows what was kept.
+      (with-current-buffer popout (setq-local harness-ui-popout--discard t))
+      (kill-buffer popout)
+      (harness-ui-patch-review--forget review)
+      (setq popout (harness-ui-patch-review-test--report board id))
+      (harness-ui-patch-review-test--wait-text popout "^  ✓ M  a\\.el")
+      (harness-ui-patch-review-test--wait-text popout "^  ✔ D  b\\.el")
+      (harness-ui-patch-review-test--wait-text popout "3 of 6 files viewed, 3 left, 1 approved")
+      (setq review (gethash id harness-ui-patch-review--reviews))
+      ;; Un-approving is kept too; the file stays viewed.
+      (harness-ui-patch-review--approve review (harness-ui-patch-review-test--file review "b.el") nil)
+      (harness-test-wait (lambda () (equal '(("a.el" "b.el" "d.el") nil) (harness-ui-patch-review-test--viewed id)))
+                         5 "the harness to keep the approval taken off")
+      ;; The branch changes a.el: it is another file now, not viewed.
+      (harness-ui-patch-review-test--advance repo)
+      (harness-test-await (harness-ui-patch-review--load review))
+      (should-not (harness-ui-patch-review--seen-p review (harness-ui-patch-review-test--file review "a.el")))
+      (should (harness-ui-patch-review--seen-p review (harness-ui-patch-review-test--file review "d.el")))
+      (should (string-match-p "2 of 6 files viewed, 4 left" (harness-ui-patch-review-test--text popout))))))
+
+(ert-deftest harness-ui-patch-review-takes-the-files-before-the-newest-commit-as-viewed ()
+  "V takes every file as viewed but those the branch's newest commit changed,
+asks first, and says in the report that the files were taken as viewed;
+the harness keeps them."
+  (harness-ui-patch-review-test-with-task
+    (harness-ui-patch-review-test--give-branch board id)
+    (harness-ui-patch-review-test--advance repo)
+    (let* ((popout (harness-ui-patch-review-test--report board id))
+           (before-newest (harness-ui-patch-review-test--git repo "rev-parse" "task/fix~1")))
+      (harness-ui-patch-review-test--wait-text popout "^    M  a\\.el")
+      (with-current-buffer popout
+        (goto-char (harness-ui-patch-review--row-start id 0))
+        (should (eq #'harness-ui-patch-review-assume-viewed (key-binding "V")))
+        ;; Declined: nothing happens.
+        (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) nil)))
+          (call-interactively (key-binding "V")))
+        (should (equal '(nil nil) (harness-ui-patch-review-test--viewed id)))
+        (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) t)))
+          (call-interactively (key-binding "V"))))
+      (harness-ui-patch-review-test--wait-text popout "5 of 6 files viewed, 1 left")
+      (let ((text (harness-ui-patch-review-test--text popout)))
+        (should (string-search (format "unchanged since %s taken as viewed" (substring before-newest 0 7)) text))
+        ;; a.el, the newest commit's, is left to view; the others are viewed.
+        (should (string-match-p "^    M  a\\.el" text))
+        (should (string-match-p "^  ✓ D  b\\.el" text))
+        (should (string-match-p "^  ✓ R  c\\.el → d\\.el" text)))
+      (should (equal '(("b.el" "d.el" "docs/é.txt" "img.bin" "new.el") nil)
+                     (harness-ui-patch-review-test--viewed id)))
+      ;; Looking at the one left changes the count, and is kept.  The report
+      ;; draws again when Ediff ends; here nothing does it but the test.
+      (let ((review (gethash id harness-ui-patch-review--reviews)))
+        (harness-ui-patch-review--mark-seen review (harness-ui-patch-review-test--file review "a.el"))
+        (harness-ui-patch-review--refresh review)
+        (harness-ui-patch-review-test--wait-text popout "6 of 6 files viewed, 0 left"))
+      (harness-test-wait (lambda () (member "a.el" (car (harness-ui-patch-review-test--viewed id))))
+                         5 "the harness to keep the file looked at"))))
+
+(ert-deftest harness-ui-patch-review-imports-the-replies-written-by-hand ()
+  "A reply typed in the task's session under a quote of the agent's words
+becomes a closed thread of the review, with its quote; the review open on
+the task shows it as the harness announces it, and asking again adds none."
+  (harness-ui-patch-review-test-with-task
+    (let* ((popout (harness-ui-patch-review-test--changes board id))
+           (review (gethash id harness-ui-patch-review--reviews))
+           (set (harness-ui-patch-review--r-set review))
+           (said (lambda ()
+                   (cl-find-if (lambda (thread)
+                                 (string-search "Why that?" (change-review-comment-body (change-review-thread-root thread))))
+                               (change-review-set-threads set)))))
+      (harness-call 'session/append sid (list :kind 'user :ts 4000.0 :meta '(:steering t)
+                                              :content "> What the agent said.\n\nWhy that?"))
+      (should-not (funcall said))
+      (with-current-buffer popout
+        (call-interactively #'harness-ui-patch-review-import-manual))
+      (harness-test-wait (lambda () (funcall said)) 5 "the imported thread to reach the review")
+      (let ((thread (funcall said)))
+        (should (eq 'closed (change-review-thread-status thread)))
+        (should (equal "> What the agent said.\n\nWhy that?"
+                       (change-review-comment-body (change-review-thread-root thread))))
+        (should (equal 4000.0 (change-review-comment-time (change-review-thread-root thread)))))
+      (let ((before (length (change-review-set-threads set))))
+        (with-current-buffer popout
+          (call-interactively #'harness-ui-patch-review-import-manual))
+        (harness-test-wait (lambda () (eq 0 (plist-get (harness-call 'patch-review/import-manual id) :added))) 5 "asking again")
+        (should (= before (length (change-review-set-threads set)))))
+      ;; Where there is no task, it says so.
+      (with-temp-buffer
+        (should-error (call-interactively #'harness-ui-patch-review-import-manual) :type 'user-error)))))
 
 (defun harness-ui-patch-review-test--comment (text)
   "Comment on the current difference of the selected Ediff panel with TEXT."

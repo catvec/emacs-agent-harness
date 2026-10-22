@@ -562,7 +562,9 @@ The result is an alist of (FILE . THREADS).  FILE is a path, or nil for
 the threads about the change as a whole, which come first; the paths
 follow the order of the files of the newest version, those it does not
 have after them by name.  THREADS are in the order of their lines, then
-of their start.  STATUS limits the threads as for `change-review-threads'."
+of the time they were started (`change-review-thread-time'), a thread
+added later of an earlier time -- one imported -- where it belongs.
+STATUS limits the threads as for `change-review-threads'."
   (let* ((threads (change-review-threads set status))
          (order (when-let* ((version (change-review-latest-version set)))
                   (mapcar #'change-review-file-path (change-review-version-files version))))
@@ -576,8 +578,13 @@ of their start.  STATUS limits the threads as for `change-review-threads'."
     (setq groups (nreverse groups))
     (dolist (group groups)
       (setcdr group (cl-stable-sort (cdr group)
-                                    (lambda (a b) (< (or (change-review-thread-line a) 0)
-                                                     (or (change-review-thread-line b) 0))))))
+                                    (lambda (a b)
+                                      (let ((line-a (or (change-review-thread-line a) 0))
+                                            (line-b (or (change-review-thread-line b) 0)))
+                                        (if (/= line-a line-b)
+                                            (< line-a line-b)
+                                          (< (or (change-review-thread-time a) 0)
+                                             (or (change-review-thread-time b) 0))))))))
     (let ((rank (lambda (file)
                   (cond ((null file) -1)
                         ((cl-position file order :test #'equal))

@@ -7027,7 +7027,54 @@ task's agent two tools.  The module needs `store`, `tasks` and
   comment under it) becomes a CLOSED thread: by the user, at the
   round's time, against the commit the round names (`(at SHA)`), with
   ids that follow from the task, the round and the comment's place in
-  it, so that reading the rounds again adds nothing.
+  it, so that reading the rounds again adds nothing.  A reply written
+  inline, under a quote of the agent's own words (the compose box's
+  `C-c >`), keeps the quote above its text as a block quote
+  (`harness-patch-review--reply-text`, from the `:prose` the reply
+  format returns): "silence" says nothing without the line it answers.
+  A paragraph that is only a rule (`---`, `***`, `___`, `===`), typed to
+  part two comments, is no comment, and the comments after it keep the
+  places they had.
+- The words by hand.  `patch-review/import-manual TASK-ID` → `(:added N
+  :edited M :threads IDS)`.  Not every reply made it into a round: one
+  the user typed in the task's session while the agent worked (a
+  steering message, which quotes what the agent said and answers it)
+  was never feedback.  The method reads the session's user nodes
+  (`session/nodes`) that the user typed -- no `:from` in the node's
+  `:meta` (`harness-node-sender`), not the task's prompt, not a round
+  (`harness-tasks--reject-message` and the other two openings) -- and
+  makes each reply under a quote a closed thread, written by the user at
+  the node's time, with the `:meta` `:imported`, `:manual` and `:node`;
+  a message with no quote to answer is steering, no comment.  It also
+  puts the quote back on the comments of the rounds that an earlier
+  import left out, as an `edit-comment` operation, only where the comment
+  still has the plain text it was imported with and was never edited.
+  The ids follow from the task, the message and the comment's place in
+  it, so asking again changes nothing; each change is performed as a
+  UI's operation is and announced in `patch-review/changed`.  It is
+  asked for, not done on its own: the words of a session are not all
+  comments.
+- The files viewed.  The files the reviewer compared in Ediff and those
+  approved are kept in `patch-review-viewed/TASK-ID.json`: `:seen` and
+  `:approved`, lists of `(:path PATH :blob BLOB)` -- the blob the file
+  has on the branch, none for a file it deletes, so a file the branch
+  changes again is not viewed -- and `:assumed` when files were taken as
+  viewed and not looked at (`:revision`, `:tip`, `:time`).
+  `patch-review/viewed TASK-ID` → the record (`:seen`, `:approved` and
+  `:assumed`, empty when nothing was marked); `patch-review/set-viewed
+  TASK-ID KIND FILES ON` marks FILES `seen` or `approved`, or takes the
+  mark off (approving views the file too, and a file no longer viewed is
+  no longer approved) → `(:seen N :approved M)`;
+  `patch-review/assume-viewed TASK-ID &optional REVISION` takes every
+  file of the newest version as viewed but those changed from REVISION
+  on (default: the commit before the version's tip, so the newest
+  commit's files are the ones left to view), replacing the files viewed
+  so far and keeping the approvals, from `git diff --raw -z` of the
+  merge base against the tip and of REVISION against the tip → a
+  promise of `(:seen N :unviewed M :revision COMMIT :tip COMMIT)`.  It
+  is asked for, never done on its own: what the reviewer saw is theirs
+  to say, so a review with no record has no file viewed, whatever its
+  imported rounds name.
 - `patch-review/get TASK-ID` → the set as plain data (versions without
   files, threads), made if it was not; `patch-review/apply TASK-ID OP` →
   `(:changed BOOL)`, performing OP, an operation of the library
@@ -12439,7 +12486,16 @@ their names, the directories and files of a directory by name.  t on a
 row shows them flat instead, every path whole, in the diff's order.  A
 file's mark says whether it was compared in Ediff, by its path and its
 blob on the branch, and whether it was approved -- by the same key, so a
-file the branch changed again is neither and is reviewed anew.  a
+file the branch changed again is neither and is reviewed anew.  The marks
+are the harness's to keep (`patch-review/viewed`, read when the review is
+synced and added to the marks made meanwhile, `patch-review/set-viewed`,
+sent as a mark is made, once for the files of `A`), so they are there
+after a restart; V (`harness-ui-patch-review-assume-viewed`) asks the
+harness to take every file as viewed but those the newest commit changed
+-- with a prefix argument, from a commit asked for -- after a question,
+and replaces the marks with the answer; the heading says that files were
+taken as viewed and not looked at ("unchanged since 7ec4f03 taken as
+viewed").  a
 approves the file at point, A every file; the heading counts those
 viewed and those approved, the threads ("3 open, 2 closed", with the
 key that lists them, T) and the drafts that wait for the feedback.  A
@@ -12548,8 +12604,12 @@ feedback as text.  The harness reads those rounds once, when it first
 makes the task's set, and turns each comment the reply format finds in
 them into a closed thread with an id that follows from where it was
 (see `patch-review`), so what an earlier reviewer said shows in the same
-views as what they say now, closed.  The words typed with a later round
-are kept as a sent thread on the change as a whole.
+views as what they say now, closed; a reply made under a quote of the
+agent's words has the quote above it, and the replies typed in the
+session outside a round come with `patch-review/import-manual`
+(`harness-ui-patch-review-import-manual`, M-x in a task's report, session
+or card, asks for it).  The words typed with a later round are kept as a
+sent thread on the change as a whole.
 
 OTHER SETS.  The library is not tied to a task.
 `change-review-open-threads` opens the threads view of any set,

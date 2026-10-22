@@ -44,7 +44,27 @@
 ;; THE EARLIER ROUNDS.  A task sent back before there were threads kept
 ;; its feedback as text.  The first time a task's set is made, the
 ;; comments quoted in those rounds become closed threads of the set, with
-;; ids that follow from where they were, so that they are made once.
+;; ids that follow from where they were, so that they are made once.  A
+;; reply written inline, under a quote of the agent's own words (the
+;; compose box's `C-c >'), keeps that quote above its text: "silence"
+;; says nothing without the line it answers.
+;;
+;; THE WORDS BY HAND.  Not every reply made it into a round.  One typed in
+;; the session while the agent was at work -- steering, quoting what the
+;; agent said and answering it -- was never feedback, so no round holds
+;; it.  `patch-review/import-manual' reads such replies from the task's
+;; session and makes them closed threads too, and gives the replies of the
+;; rounds the quote an earlier import left out.  It is asked for, never
+;; done on its own: the words of a session are not all comments.
+;;
+;; THE FILES VIEWED.  Which files the reviewer has looked at, and which
+;; they approved, are kept with the review (patch-review-viewed/TASK.json),
+;; each by its path and the blob it was seen at, so a file the branch
+;; changes again is not viewed.  `patch-review/assume-viewed' takes every
+;; file as viewed but those a commit changed -- the newest, by default --
+;; for a review the reviewer went through before the marks were kept.  It
+;; is asked for, never done on its own: what the reviewer saw is theirs
+;; to say.
 
 ;;; Code:
 
@@ -142,48 +162,170 @@ CALL-ID is the tool call that made the comment, if any."
 
 ;;;; The earlier rounds
 
+(defvar harness-tasks--reject-message)
+(defvar harness-tasks--sent-back-message)
+(defvar harness-tasks--aside-message)
+
+(defun harness-patch-review--rule-p (text)
+  "Return non-nil when TEXT is only a rule: three or more of \"-\", \"*\", \"_\" or \"=\".
+Typed between two comments to part them, it is none of the two."
+  (and (stringp text)
+       (string-match-p "\\`\\(?:-\\{3,\\}\\|\\*\\{3,\\}\\|_\\{3,\\}\\|=\\{3,\\}\\)\\'"
+                       (string-trim text))))
+
+(defun harness-patch-review--quoted (lines)
+  "Return LINES, the text of a quote, as a block quote: each line after \"> \"."
+  (mapconcat (lambda (line) (if (string-blank-p line) ">" (concat "> " line))) lines "\n"))
+
+(defun harness-patch-review--trim-blank (lines)
+  "Return LINES without the blank lines at either end."
+  (while (and lines (string-blank-p (car lines))) (setq lines (cdr lines)))
+  (setq lines (reverse lines))
+  (while (and lines (string-blank-p (car lines))) (setq lines (cdr lines)))
+  (nreverse lines))
+
+(defun harness-patch-review--reply-text (block)
+  "Return what BLOCK, a comment read from a reply, says, with the quote it answers.
+BLOCK is one of `change-review-mail-parse-reply''s.  Its quoted lines
+that are no diff -- the agent's words the reply answers inline -- go
+above the text as a block quote; a comment under a quoted diff has the
+diff in its location instead."
+  (let ((prose (harness-patch-review--trim-blank (plist-get block :prose)))
+        (body (plist-get block :body)))
+    (if prose
+        (concat (harness-patch-review--quoted prose) "\n\n" body)
+      body)))
+
+(cl-defun harness-patch-review--reply-ops (set key text at &key split meta quoted-only)
+  "Return the operations that make the comments of the reply TEXT threads of SET.
+They are closed threads.  KEY says where TEXT is from, a round's index
+or a message's name: the ids follow from SET, KEY and the place of the
+comment in TEXT, so what SET has already is not made again.  The
+comments were written by the user at AT, against the commit TEXT names
+when it does.  SPLIT makes a paragraph of a reply a comment of its own,
+as the rounds did; META is the plist each comment keeps; with
+QUOTED-ONLY only a comment that answers a quote of the agent's words
+counts, the others are no comments.
+
+A comment SET has already from an earlier import, still with the plain text
+it was imported with and never edited, comes back as an `edit-comment'
+operation when the reply puts a quote above it: the quote an earlier
+import left out."
+  (let ((id (change-review-set-id set))
+        (author (harness-patch-review--user))
+        (tip (change-review-mail-parse-tip text))
+        ops)
+    (cl-loop
+     for block in (change-review-mail-parse-reply text :split split)
+     for k from 0
+     for plain = (plist-get block :body)
+     for thread = (change-review-stable-id "t" id key k)
+     for comment-id = (change-review-stable-id "c" id key k)
+     for body = (harness-patch-review--reply-text block)
+     for path = (plist-get block :path)
+     for have = (cdr (change-review-find-comment set comment-id))
+     unless (or (harness-patch-review--rule-p plain)
+                (and quoted-only (equal body plain)))
+     do (cond
+         ((null have)
+          (push (list :op 'add-comment :thread thread
+                      :comment (change-review-comment-to-data
+                                (change-review-make-comment
+                                 :id comment-id :thread thread :author author
+                                 :body body :time at :sent at :revision tip
+                                 :location (and path
+                                                (change-review-make-location
+                                                 :file path :old-file (plist-get block :old-path)
+                                                 :side (or (plist-get block :side) 'new)
+                                                 :line (plist-get block :line)
+                                                 :end-line (plist-get block :end-line)
+                                                 :excerpt (plist-get block :excerpt)))
+                                 :meta (copy-sequence meta))))
+                ops)
+          (push (list :op 'set-status :thread thread :status "closed"
+                      :id (change-review-stable-id "s" id key k) :time at
+                      :author (change-review-author-to-data author) :revision tip)
+                ops))
+         ((and (not (equal body plain))
+               (equal (change-review-comment-body have) plain)
+               (plist-get (change-review-comment-meta have) :imported)
+               (null (change-review-comment-edited have)))
+          (push (list :op 'edit-comment :comment comment-id :body body :time (float-time))
+                ops))))
+    (nreverse ops)))
+
+(defun harness-patch-review--round-ops (set task)
+  "Return the operations that make TASK's rounds of feedback threads of SET.
+See `harness-patch-review--reply-ops'."
+  (cl-loop
+   for round in (plist-get task :feedback)
+   for index from 0
+   append (harness-patch-review--reply-ops
+           set index (let ((text (plist-get round :text))) (if (stringp text) text ""))
+           (plist-get round :at)
+           :split t :meta (list :round index :imported t))))
+
 (defun harness-patch-review--import-rounds (set task)
   "Make the comments quoted in TASK's rounds of feedback closed threads of SET.
 The rounds were kept as text before threads existed.  Each comment the
 reply format finds in one is a thread of its own, written by the user at
 the time the round was sent, closed, against the commit the round names
-when it does.  The ids follow from the task, the round and the place of
-the comment in it, so a round imported twice adds nothing."
-  (let ((id (change-review-set-id set))
-        (author (harness-patch-review--user)))
-    (cl-loop
-     for round in (plist-get task :feedback)
-     for index from 0
-     for text = (let ((text (plist-get round :text))) (if (stringp text) text ""))
-     for at = (plist-get round :at)
-     for tip = (change-review-mail-parse-tip text)
-     do (cl-loop
-         for block in (change-review-mail-parse-reply text :split t)
-         for k from 0
-         for thread = (change-review-stable-id "t" id index k)
-         for path = (plist-get block :path)
-         do (change-review-apply
-             set (list :op 'add-comment :thread thread
-                       :comment (change-review-comment-to-data
-                                 (change-review-make-comment
-                                  :id (change-review-stable-id "c" id index k)
-                                  :thread thread :author author
-                                  :body (plist-get block :body)
-                                  :time at :sent at :revision tip
-                                  :location (and path
-                                                 (change-review-make-location
-                                                  :file path :old-file (plist-get block :old-path)
-                                                  :side (or (plist-get block :side) 'new)
-                                                  :line (plist-get block :line)
-                                                  :end-line (plist-get block :end-line)
-                                                  :excerpt (plist-get block :excerpt)))
-                                  :meta (list :round index :imported t))))
-             t)
-         (change-review-apply
-          set (list :op 'set-status :thread thread :status "closed"
-                    :id (change-review-stable-id "s" id index k) :time at
-                    :author (change-review-author-to-data author) :revision tip)
-          t)))))
+when it does.  A comment that answers a quote of the agent's words keeps
+the quote above its text.  The ids follow from the task, the round and the
+place of the comment in it, so a round imported twice adds nothing."
+  (dolist (op (harness-patch-review--round-ops set task))
+    (change-review-apply set op t)))
+
+;;;; The words by hand
+
+(defun harness-patch-review--typed-nodes (task)
+  "Return the messages the user typed in the session of TASK that are no round.
+Nodes of the session's transcript, oldest first: the user's own, not the
+harness's or another session's agent's, and not the task's prompt.  What
+a round of feedback opens with (`harness-tasks--reject-message') marks the
+rounds, which the task keeps by themselves."
+  (let ((session (plist-get task :session))
+        (prompt (string-trim (let ((prompt (plist-get task :prompt))) (if (stringp prompt) prompt ""))))
+        (headers (delq nil (list (and (boundp 'harness-tasks--reject-message) harness-tasks--reject-message)
+                                 (and (boundp 'harness-tasks--sent-back-message) harness-tasks--sent-back-message)
+                                 (and (boundp 'harness-tasks--aside-message) harness-tasks--aside-message)))))
+    (when (and (stringp session) (harness-method-exists-p 'session/nodes))
+      (cl-remove-if-not
+       (lambda (node)
+         (let ((text (plist-get node :content)))
+           (and (member (plist-get node :kind) '(user "user"))
+                (null (harness-node-sender node))
+                (stringp text)
+                (not (string-blank-p text))
+                (not (equal (string-trim text) prompt))
+                (not (cl-some (lambda (header) (string-prefix-p header text)) headers)))))
+       (condition-case nil (harness-call 'session/nodes session) (error nil))))))
+
+(defun harness-patch-review--manual-ops (set task)
+  "Return the operations that make TASK's words by hand closed threads of SET.
+Two kinds of words: the replies under a quote of the agent's own words in
+a round of feedback, whole -- an import that left the quote out gets it
+now -- and the replies of that kind in the messages the user typed in the
+session that were no round (`harness-patch-review--typed-nodes'), which
+no round holds.  Each is a closed thread; what SET has is not made again."
+  (append
+   (harness-patch-review--round-ops set task)
+   (cl-loop
+    for node in (harness-patch-review--typed-nodes task)
+    append (harness-patch-review--reply-ops
+            set (format "message %s" (plist-get node :id)) (plist-get node :content)
+            (plist-get node :ts)
+            :quoted-only t
+            :meta (list :imported t :manual t :node (plist-get node :id))))))
+
+(defun harness-patch-review--perform (set ops)
+  "Perform OPS on SET as the operations of a UI are; return those that changed it.
+Each is kept and announced (`patch-review/changed')."
+  (let (done)
+    (dolist (op ops)
+      (when (change-review-dispatch set op)
+        (push op done)))
+    (nreverse done)))
 
 (defun harness-patch-review--set-for (id &optional create)
   "Return the set of task ID, read from the store; with CREATE, made if none.
@@ -282,6 +424,148 @@ when the task has no branch of its own or its repository is not here."
   (when (and (plist-get task :id) (harness-patch-review--repository task))
     (harness-patch-review--record-version task)))
 
+;;;; The files viewed
+
+(defun harness-patch-review--viewed-name (id)
+  "Return the name of the document that keeps the files viewed in task ID's review."
+  (format "patch-review-viewed/%s.json" (replace-regexp-in-string "[^A-Za-z0-9._-]" "_" id)))
+
+(defun harness-patch-review--viewed-entries (value)
+  "Return VALUE, files as the store keeps them, as (:path PATH [:blob BLOB]).
+What is no file, or has no path, is left out; a file the branch deletes
+has no blob."
+  (cl-loop for entry in (append value nil)
+           for path = (and (consp entry) (plist-get entry :path))
+           for blob = (and (consp entry) (plist-get entry :blob))
+           when (and (stringp path) (not (string-empty-p path)))
+           collect (if (and (stringp blob) (not (string-empty-p blob)))
+                       (list :path path :blob blob)
+                     (list :path path))))
+
+(defun harness-patch-review--viewed-key (entry)
+  "Return what names the file ENTRY stands for: its path and its blob."
+  (cons (plist-get entry :path) (plist-get entry :blob)))
+
+(defun harness-patch-review--viewed-change (entries files on)
+  "Return ENTRIES with FILES added, or taken away when ON is nil.
+Each of them is (:path PATH [:blob BLOB]); the order of ENTRIES is kept,
+the files added come after."
+  (let ((keys (make-hash-table :test 'equal))
+        (files (harness-patch-review--viewed-entries files)))
+    (if on
+        (progn (dolist (entry entries) (puthash (harness-patch-review--viewed-key entry) t keys))
+               (append entries
+                       (cl-remove-if (lambda (entry)
+                                       (let ((key (harness-patch-review--viewed-key entry)))
+                                         (prog1 (gethash key keys) (puthash key t keys))))
+                                     files)))
+      (dolist (entry files) (puthash (harness-patch-review--viewed-key entry) t keys))
+      (cl-remove-if (lambda (entry) (gethash (harness-patch-review--viewed-key entry) keys)) entries))))
+
+(defun harness-patch-review--viewed-data (id)
+  "Return the files viewed in task ID's review, as kept: nil when none were.
+A plist of :seen and :approved, lists of (:path PATH [:blob BLOB]), and
+:assumed, what `harness-patch-review--assume' recorded, if it did."
+  (when-let* ((data (and (harness-method-exists-p 'store/load)
+                         (harness-call 'store/load (harness-patch-review--viewed-name id)))))
+    (list :seen (harness-patch-review--viewed-entries (plist-get data :seen))
+          :approved (harness-patch-review--viewed-entries (plist-get data :approved))
+          :assumed (plist-get data :assumed))))
+
+(defun harness-patch-review--viewed-save (id data)
+  "Keep DATA for task ID's review, as `harness-patch-review--viewed-data' has it."
+  (when (harness-method-exists-p 'store/save)
+    (harness-call 'store/save (harness-patch-review--viewed-name id)
+                  (append (list :format 1 :task id
+                                :seen (harness-json-array (plist-get data :seen))
+                                :approved (harness-json-array (plist-get data :approved)))
+                          (and (plist-get data :assumed) (list :assumed (plist-get data :assumed)))))))
+
+(defun harness-patch-review--raw-files (raw)
+  "Return the files RAW, what `git diff --raw -z' wrote, names, in order.
+Each is (:path PATH :blob BLOB): the path the file has after the change
+\(a renamed file's new one) and its blob there, nil for a deleted file."
+  (let ((fields (split-string raw "\0" t))
+        files)
+    (while fields
+      (let ((head (pop fields)))
+        (when (string-match "\\`:[0-7]+ [0-7]+ [0-9a-f]+ \\([0-9a-f]+\\) \\([A-Z]\\)" head)
+          (let* ((blob (match-string 1 head))
+                 (status (match-string 2 head))
+                 (first (pop fields))
+                 (second (and (member status '("R" "C")) (pop fields))))
+            (push (list :path (or second first)
+                        :blob (and (not (string-match-p "\\`0+\\'" blob)) blob))
+                  files)))))
+    (nreverse files)))
+
+(defun harness-patch-review--assume (task-id revision)
+  "Return a promise of the files task TASK-ID's review takes as viewed.
+They are all of its newest version's but those changed from REVISION on.
+REVISION is a commit of the task's branch, by default the one before its
+newest version's tip: every file of the version is viewed but those the
+branch changed since, that is, from REVISION on.  The files already
+viewed are replaced by these, and the files approved stay.  The promise
+resolves to (:seen N :unviewed M :revision COMMIT :tip COMMIT)."
+  (let* ((task (harness-patch-review--task task-id))
+         (dir (harness-patch-review--repository task))
+         (set (and dir (harness-patch-review--set-for task-id t)))
+         (version (and set (change-review-latest-version set)))
+         (branch (plist-get task :branch)))
+    (harness-then
+     (cond
+      ((null dir)
+       (harness-rejected (list 'error "The repository of this task is not on this machine")))
+      ((and version (change-review-version-tip version))
+       (harness-resolved (change-review-version-tip version)))
+      ((harness-string-blank-p branch)
+       (harness-rejected (list 'error "The task has no branch of its own")))
+      (t (harness-patch-review--git dir "rev-parse" "--verify" "--quiet" (concat branch "^{commit}"))))
+     (lambda (tip)
+       (harness-then
+        (harness-all (list (harness-patch-review--merge-base dir (plist-get task :base) tip)
+                           (let ((name (or revision (concat tip "^"))))
+                             (harness-catch
+                              (harness-patch-review--git dir "rev-parse" "--verify" "--quiet"
+                                                         (concat name "^{commit}"))
+                              (lambda (_)
+                                (harness-rejected
+                                 (list 'error (format "There is no commit %s in the repository of the task" name))))))))
+        (lambda (found)
+          (let ((merge-base (nth 0 found))
+                (since (nth 1 found)))
+            (cond
+             ((null merge-base)
+              (harness-rejected (list 'error "The branch has no commit in common with its base")))
+             (t
+              (harness-then
+               (harness-all
+                (list (harness-patch-review--git dir "diff" "--raw" "-z" "-M" "--no-abbrev" merge-base tip)
+                      (harness-patch-review--git dir "diff" "--raw" "-z" "--no-abbrev" "--no-renames" since tip)))
+               (lambda (outputs)
+                 (let* ((files (harness-patch-review--raw-files (nth 0 outputs)))
+                        (changed (make-hash-table :test 'equal))
+                        (viewed (progn
+                                  (dolist (file (harness-patch-review--raw-files (nth 1 outputs)))
+                                    (puthash (plist-get file :path) t changed))
+                                  (harness-patch-review--viewed-entries
+                                   (cl-remove-if (lambda (file) (gethash (plist-get file :path) changed))
+                                                 files)))))
+                   (harness-patch-review--viewed-save
+                    task-id
+                    (list :seen viewed
+                          :approved (plist-get (harness-patch-review--viewed-data task-id) :approved)
+                          :assumed (list :revision since :tip tip :time (float-time))))
+                   (list :seen (length viewed) :unviewed (- (length files) (length viewed))
+                         :revision since :tip tip)))))))))))))
+
+(defun harness-patch-review--viewed (task-id)
+  "Return the files viewed in task TASK-ID's review: what was kept, else none.
+A plist of :seen and :approved, lists of (:path PATH [:blob BLOB]), and
+:assumed when files were taken as viewed and not looked at."
+  (or (harness-patch-review--viewed-data task-id)
+      (list :seen nil :approved nil)))
+
 ;;;; Methods
 
 (harness-defmethod patch-review/get (task-id)
@@ -369,6 +653,71 @@ the threads there are when `:thread' names none."
       (list :thread (change-review-thread-id thread)
             :status (symbol-name (change-review-thread-status thread))
             :comment (and comment (change-review-comment-to-data comment))))))
+
+(harness-defmethod patch-review/import-manual (task-id)
+  "Make the user's words by hand in task TASK-ID's session threads of its review.
+Replies written inline, under a quote of the agent's own words, that no
+thread holds yet: the ones in the task's rounds of feedback, whole -- a
+quote an earlier import left out is put back -- and the ones the user
+typed in its session that were no round, such as an answer to the agent
+while it worked.  They are closed threads, written by the user when they
+were typed; what the review has is not made again, so this can be asked
+for twice.  Return (:added N :edited M :threads IDS): the comments
+added, the comments given their quote, the threads made."
+  (let* ((task (harness-patch-review--task task-id))
+         (set (harness-patch-review--set-for task-id t))
+         (done (harness-patch-review--perform set (harness-patch-review--manual-ops set task)))
+         (added (cl-remove-if-not (lambda (op) (eq (plist-get op :op) 'add-comment)) done)))
+    (list :added (length added)
+          :edited (length (cl-remove-if-not (lambda (op) (eq (plist-get op :op) 'edit-comment)) done))
+          :threads (mapcar (lambda (op) (plist-get op :thread)) added))))
+
+(harness-defmethod patch-review/viewed (task-id)
+  "Return the files viewed, and approved, in task TASK-ID's review.
+\(:seen FILES :approved FILES :assumed WHY).  FILES are (:path PATH :blob
+BLOB), the blob the file has on the branch, none for a file it deletes: a
+file the branch changes again is a file not viewed.  WHY, when there is
+one, says the files were taken as viewed and not looked at
+\(`patch-review/assume-viewed'): (:revision COMMIT :tip COMMIT :time TIME)."
+  (harness-patch-review--task task-id)
+  (harness-patch-review--viewed task-id))
+
+(harness-defmethod patch-review/set-viewed (task-id kind files on)
+  "Mark FILES viewed in task TASK-ID's review, or approved, or take the mark off.
+KIND is \"seen\" or \"approved\"; FILES are (:path PATH :blob BLOB), as
+`patch-review/viewed' gives them; ON is true to mark them, false to
+take the mark off.  Approving a file views it too, and a file no longer
+viewed is no longer approved.  Return (:seen N :approved M), how many
+files each mark holds."
+  (harness-patch-review--task task-id)
+  (let* ((kind (pcase (format "%s" kind)
+                 ("seen" 'seen)
+                 ("approved" 'approved)
+                 (_ (signal 'harness-error (list "A mark is \"seen\" or \"approved\"")))))
+         (on (harness-json-true-p on))
+         (data (harness-patch-review--viewed task-id))
+         (seen (plist-get data :seen))
+         (approved (plist-get data :approved)))
+    (pcase kind
+      ('seen (setq seen (harness-patch-review--viewed-change seen files on))
+             (unless on (setq approved (harness-patch-review--viewed-change approved files nil))))
+      ('approved (setq approved (harness-patch-review--viewed-change approved files on))
+                 (when on (setq seen (harness-patch-review--viewed-change seen files t)))))
+    (harness-patch-review--viewed-save
+     task-id (list :seen seen :approved approved :assumed (plist-get data :assumed)))
+    (list :seen (length seen) :approved (length approved))))
+
+(harness-defmethod patch-review/assume-viewed (task-id &optional revision)
+  "Take every file of task TASK-ID's review as viewed, but those changed lately.
+Those changed from REVISION on stay to view.  REVISION is a commit of the
+branch, by default the one before the newest version's tip: only the files
+the newest commit changed are left to view.  For a review the reviewer
+went through before the marks were kept.  The files viewed so far are
+replaced; the files approved stay.
+Return a promise of (:seen N :unviewed M :revision COMMIT :tip COMMIT)."
+  (harness-patch-review--task task-id)
+  (harness-patch-review--assume task-id
+                                (and (stringp revision) (not (string-blank-p revision)) revision)))
 
 ;;;; The drafts go with the feedback
 

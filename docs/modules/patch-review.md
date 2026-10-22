@@ -54,17 +54,41 @@ it in turn, once they agree.
 THE EARLIER ROUNDS.  A task sent back before there were threads kept
 its feedback as text.  The first time a task's set is made, the
 comments quoted in those rounds become closed threads of the set, with
-ids that follow from where they were, so that they are made once.
+ids that follow from where they were, so that they are made once.  A
+reply written inline, under a quote of the agent's own words (the
+compose box's `C-c >`), keeps that quote above its text: "silence"
+says nothing without the line it answers.
+
+THE WORDS BY HAND.  Not every reply made it into a round.  One typed in
+the session while the agent was at work -- steering, quoting what the
+agent said and answering it -- was never feedback, so no round holds
+it.  `patch-review/import-manual` reads such replies from the task's
+session and makes them closed threads too, and gives the replies of the
+rounds the quote an earlier import left out.  It is asked for, never
+done on its own: the words of a session are not all comments.
+
+THE FILES VIEWED.  Which files the reviewer has looked at, and which
+they approved, are kept with the review (patch-review-viewed/TASK.json),
+each by its path and the blob it was seen at, so a file the branch
+changes again is not viewed.  `patch-review/assume-viewed` takes every
+file as viewed but those a commit changed -- the newest, by default --
+for a review the reviewer went through before the marks were kept.  It
+is asked for, never done on its own: what the reviewer saw is theirs
+to say.
 
 ## Provides
 
 ### Methods
 
 - `patch-review/apply` (task-id op) — Perform OP, an operation of change-review, on the review of task TASK-ID.
+- `patch-review/assume-viewed` (task-id &optional revision) — Take every file of task TASK-ID's review as viewed, but those changed lately.
 - `patch-review/comment` (task-id body &rest opts) — Add the agent's comment BODY to the review of task TASK-ID.
 - `patch-review/drafts` (task-id) — Return the draft comments of task TASK-ID's review, those not sent yet, as data.
 - `patch-review/get` (task-id) — Return the review of task TASK-ID as plain data: its versions and threads.
+- `patch-review/import-manual` (task-id) — Make the user's words by hand in task TASK-ID's session threads of its review.
+- `patch-review/set-viewed` (task-id kind files on) — Mark FILES viewed in task TASK-ID's review, or approved, or take the mark off.
 - `patch-review/threads-text` (task-id &optional status) — Return the threads of task TASK-ID's review as text for its agent.
+- `patch-review/viewed` (task-id) — Return the files viewed, and approved, in task TASK-ID's review.
 
 ### Events
 
@@ -79,6 +103,7 @@ ids that follow from where they were, so that they are made once.
 ### Methods it calls
 
 - `session/get` ([session](session.md)), when it is loaded
+- `session/nodes` ([session](session.md)), when it is loaded
 - `store/load` ([store](store.md))
 - `store/save` ([store](store.md))
 - `task/get` ([tasks](tasks.md))

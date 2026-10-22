@@ -3230,7 +3230,11 @@ with), `recap` writes the recaps on the cards,
   with its status, what changed (`+3 −1`), a check mark once you looked
   at it, a firmer one once you approved it (`a`; `A` approves them all:
   a file the branch changes again is reviewed anew), and how many
-  threads of comments it has, open and closed. Each open thread is a
+  threads of comments it has, open and closed. The marks are kept with
+  the review, so they survive a restart; `V` takes every file as viewed
+  but those the branch's newest commit changed, for a review you went
+  through before the marks were kept (the heading says when files were
+  taken as viewed, not looked at). Each open thread is a
   line under its file. `RET` on a file, or a click, compares it in
   Ediff, the merge base against the branch, in the report's frame, the
   report itself staying at the bottom of it, small, with its feedback
@@ -3261,7 +3265,12 @@ with), `recap` writes the recaps on the cards,
   conversation. The agent answers with its own tools, `review_threads`
   and `review_comment`, which record its session and the call, and
   closes a thread when what it raised is done; you close it once you
-  agree. A comment keeps the revision it was written against, and a thread
+  agree. Replies you wrote by hand before there were threads -- under a
+  quote of the agent's words, in a round of feedback or typed in its
+  session while it worked -- are threads too, closed, each with the
+  quote it answered; `M-x harness-ui-patch-review-import-manual`, in a
+  task's report, session or card, makes the ones the review lacks.
+  A comment keeps the revision it was written against, and a thread
   is shown where its line is now in the newest version -- `line 44 (was
   42)`, `changed since` -- also across the rounds of a review, and
   each commented file says whether it changed since your last comment.

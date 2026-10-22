@@ -43,7 +43,14 @@
 ;;               approves every file, t shows the files flat instead.
 ;;               An approved file need not be looked at again unless the
 ;;               branch changes it.  Under it, its open threads, a line
-;;               each, where they are now (see below).
+;;               each, where they are now (see below).  The marks are
+;;               kept by the harness with the review, each by the
+;;               file's path and blob (`patch-review/set-viewed'), so
+;;               they are there after a restart.  V takes every file as
+;;               viewed but those the branch's newest commit changed,
+;;               for a review gone through before the marks were kept
+;;               (`patch-review/assume-viewed'); the report says so
+;;               when files were taken as viewed and not looked at.
 ;;   directories the files group under the directories that hold them,
 ;;               with how many files each holds and the lines they add
 ;;               and delete.
@@ -71,6 +78,12 @@
 ;;               the report and in Ediff, lists all the threads by file,
 ;;               with a filter on their status; d there comes back to
 ;;               Ediff, at the thread's line.
+;;
+;; Replies you wrote by hand before there were threads -- under a quote of
+;; the agent's words, in a round of feedback or typed in its session while it
+;; worked -- are threads too, closed, each with the quote it answered:
+;; `harness-ui-patch-review-import-manual' (M-x, in a task's report, session
+;; or card) makes them from what the harness kept (`patch-review/import-manual').
 ;;
 ;; The drafts go with the feedback.  Whatever sends the task back --
 ;; the report's box, a message typed in its session, another client --
@@ -254,7 +267,10 @@ the newest being the branch at TIP, with FILES, and the threads of
 comments, which the harness keeps; SYNCED is non-nil once they were
 fetched from it.  SEEN holds the files seen in Ediff, APPROVED those
 the reviewer accepted, both by `harness-ui-patch-review--seen-key' -- a
-file the branch changes again is neither.  PLACEMENTS says where each
+file the branch changes again is neither -- and both kept by the harness
+\(`harness-ui-patch-review--load-viewed'); ASSUMED, when the harness took
+files as viewed without their being looked at, says which commit and why,
+as `patch-review/viewed' gives it.  PLACEMENTS says where each
 thread is now, in the newest version of its file, by the thread's id:
 the line it is on there and whether the line moved, changed or stayed
 \(`change-review-diff-place'); PLACING is the reading of the files that
@@ -273,7 +289,7 @@ went, done or deleted, while its Ediff showed."
   id task dir branch base merge-base tip files
   (seen (make-hash-table :test 'equal))
   (approved (make-hash-table :test 'equal))
-  set synced
+  assumed set synced
   (placements (make-hash-table :test 'equal))
   placing
   (since (make-hash-table :test 'equal))
@@ -457,12 +473,46 @@ if it has none yet, the version is made here."
                 :title (harness-ui-patch-review--title review)
                 :files files)))))))
 
+(defun harness-ui-patch-review--viewed-keys (entries)
+  "Return the seen keys of ENTRIES, files as the harness keeps them viewed."
+  (cl-loop for entry in (append entries nil)
+           when (and (consp entry) (stringp (plist-get entry :path)))
+           collect (cons (plist-get entry :path)
+                         (let ((blob (plist-get entry :blob))) (and (stringp blob) blob)))))
+
+(defun harness-ui-patch-review--load-viewed (review &optional replace)
+  "Fetch the files viewed in REVIEW's task from the harness, and show them.
+The harness keeps the files seen in Ediff and those approved, and says
+when it took files as viewed without their being looked at
+\(`harness-ui-patch-review-assume-viewed').  They add to the marks made
+meanwhile, unless REPLACE: then they are the marks."
+  (let ((id (harness-ui-patch-review--r-id review)))
+    (when id
+      (harness-ui-call
+       "_harness/patch-review/viewed" (list :task-id id)
+       (lambda (data)
+         (when (eq review (gethash id harness-ui-patch-review--reviews))
+           (when replace
+             (clrhash (harness-ui-patch-review--r-seen review))
+             (clrhash (harness-ui-patch-review--r-approved review)))
+           (dolist (key (harness-ui-patch-review--viewed-keys (plist-get data :seen)))
+             (puthash key t (harness-ui-patch-review--r-seen review)))
+           (dolist (key (harness-ui-patch-review--viewed-keys (plist-get data :approved)))
+             (puthash key t (harness-ui-patch-review--r-approved review)))
+           (setf (harness-ui-patch-review--r-assumed review)
+                 (let ((assumed (plist-get data :assumed))) (and (consp assumed) assumed)))
+           (harness-ui-patch-review--refresh review)))
+       (lambda (err)
+         (message "Could not read the files viewed from the harness: %s" (harness-error-message err)))))))
+
 (defun harness-ui-patch-review--sync (review)
   "Fetch REVIEW's threads and versions from the harness, and show them.
 The harness keeps them, and made the set of a task whose earlier rounds
-of feedback were text when it was first asked for it."
+of feedback were text when it was first asked for it.  The files viewed
+come with them."
   (let ((set (harness-ui-patch-review--r-set review))
         (id (harness-ui-patch-review--r-id review)))
+    (harness-ui-patch-review--load-viewed review)
     (harness-ui-call
      "_harness/patch-review/get" (list :task-id id)
      (lambda (data)
@@ -790,10 +840,35 @@ A file the branch changed again since it was seen is not seen."
   "Non-nil when FILE of REVIEW was seen in Ediff."
   (gethash (harness-ui-patch-review--seen-key file) (harness-ui-patch-review--r-seen review)))
 
+(defun harness-ui-patch-review--viewed-entry (file)
+  "Return FILE as the harness keeps a file viewed: its path and its blob.
+A file the branch deletes has no blob."
+  (let ((blob (change-review-file-new-blob file)))
+    (append (list :path (change-review-file-path file))
+            (and blob (list :blob blob)))))
+
+(defun harness-ui-patch-review--keep-viewed (review kind files on)
+  "Have the harness keep FILES of REVIEW marked KIND, \"seen\" or \"approved\".
+The mark comes off instead when ON is nil.  The harness keeps them with
+the review, so that they are there after a restart; a failure only says so."
+  (when (and files (harness-ui-patch-review--r-id review))
+    (harness-ui-call "_harness/patch-review/set-viewed"
+                     (list :task-id (harness-ui-patch-review--r-id review) :kind kind
+                           :files (mapcar #'harness-ui-patch-review--viewed-entry files)
+                           :on (if on t :false))
+                     #'ignore
+                     (lambda (err)
+                       (message "Could not keep the files viewed with the harness: %s"
+                                (harness-error-message err))))))
+
 (defun harness-ui-patch-review--mark-seen (review file)
-  "Mark FILE of REVIEW seen."
+  "Mark FILE of REVIEW seen, and have the harness keep it so."
   (when file
-    (puthash (harness-ui-patch-review--seen-key file) t (harness-ui-patch-review--r-seen review))))
+    (let ((key (harness-ui-patch-review--seen-key file))
+          (table (harness-ui-patch-review--r-seen review)))
+      (unless (gethash key table)
+        (puthash key t table)
+        (harness-ui-patch-review--keep-viewed review "seen" (list file) t)))))
 
 (defun harness-ui-patch-review--approved-p (review file)
   "Non-nil when FILE of REVIEW was approved by the reviewer.
@@ -801,15 +876,18 @@ An approved file the branch changed again is not approved."
   (gethash (harness-ui-patch-review--seen-key file)
            (harness-ui-patch-review--r-approved review)))
 
-(defun harness-ui-patch-review--approve (review file &optional approved)
+(defun harness-ui-patch-review--approve (review file &optional approved quiet)
   "Mark FILE of REVIEW approved, or not when APPROVED is nil.
-Approving a file marks it seen too: it is reviewed and accepted."
+Approving a file marks it seen too: it is reviewed and accepted.  The
+harness keeps the mark, unless QUIET: the caller does, for many files."
   (when file
     (let ((key (harness-ui-patch-review--seen-key file)))
       (if approved
           (progn (puthash key t (harness-ui-patch-review--r-approved review))
-                 (harness-ui-patch-review--mark-seen review file))
-        (remhash key (harness-ui-patch-review--r-approved review))))))
+                 (puthash key t (harness-ui-patch-review--r-seen review)))
+        (remhash key (harness-ui-patch-review--r-approved review)))
+      (unless quiet
+        (harness-ui-patch-review--keep-viewed review "approved" (list file) approved)))))
 
 (defun harness-ui-patch-review-approve ()
   "Approve the file of the row at point, or stop approving it.
@@ -832,10 +910,64 @@ A file the branch changes again loses its approval with the change."
   (let* ((review (or (harness-ui-patch-review--review-here)
                      (user-error "No changes here to approve")))
          (files (harness-ui-patch-review--r-files review)))
-    (dolist (file files) (harness-ui-patch-review--approve review file t))
+    (dolist (file files) (harness-ui-patch-review--approve review file t t))
+    (harness-ui-patch-review--keep-viewed review "approved" files t)
     (harness-ui-patch-review--refresh review)
     (message "Approved all %s"
              (harness-ui-patch-review--plural (length files) "file"))))
+
+(defun harness-ui-patch-review-assume-viewed (&optional revision)
+  "Take every file as viewed but those the branch's newest commit changed.
+For a review you went through before the files you looked at were kept:
+what the newest commit left alone you saw already, so only the files it
+changed are left to view.  The files viewed so far are replaced (those
+approved stay), and the harness keeps the result.  With a prefix
+argument, ask for the commit to count from instead of the one before
+the newest: the files changed from it on are left to view."
+  (interactive (list (and current-prefix-arg (read-string "Files changed from commit: "))))
+  (let* ((review (or (harness-ui-patch-review--review-here)
+                     (user-error "No changes here to take as viewed")))
+         (revision (and (stringp revision) (not (string-blank-p revision)) (string-trim revision))))
+    (unless (harness-ui-patch-review--r-tip review)
+      (user-error "The branch is not read yet"))
+    (when (y-or-n-p (format "Take every file as viewed but those %s changed?  The files viewed so far are replaced "
+                            (if revision (format "commit %s on" revision) "the newest commit")))
+      (harness-ui-call
+       "_harness/patch-review/assume-viewed"
+       (append (list :task-id (harness-ui-patch-review--r-id review))
+               (and revision (list :revision revision)))
+       (lambda (result)
+         (harness-ui-patch-review--load-viewed review t)
+         (message "%s taken as viewed; %d left to view, those changed from %s on"
+                  (harness-ui-patch-review--plural (or (plist-get result :seen) 0) "file")
+                  (or (plist-get result :unviewed) 0)
+                  (harness-ui-patch-review--short (plist-get result :revision))))
+       (lambda (err)
+         (message "Could not take the files as viewed: %s" (harness-error-message err)))))))
+
+(defun harness-ui-patch-review-import-manual ()
+  "Make the replies you wrote by hand for this task threads of its review.
+Replies under a quote of the agent's own words -- in a round of
+feedback, or typed in its session while it worked -- that the review does
+not hold yet become closed threads, each with the quote it answered, and
+a reply kept without its quote gets it (`patch-review/import-manual').
+Asking again changes nothing.  In the report of a task, in its session
+or on its card on the board."
+  (interactive)
+  (let* ((review (harness-ui-patch-review--review-here))
+         (task (or (and review (harness-ui-patch-review--r-task review))
+                   (harness-ui-patch-review--task-here)))
+         (id (plist-get task :id)))
+    (unless id (user-error "No task here to import replies for"))
+    (harness-ui-call
+     "_harness/patch-review/import-manual" (list :task-id id)
+     (lambda (result)
+       (message "Replies by hand in %s: %s made, %d given the quote they answered"
+                (harness-ui-task-title task)
+                (harness-ui-patch-review--plural (or (plist-get result :added) 0) "thread")
+                (or (plist-get result :edited) 0)))
+     (lambda (err)
+       (message "Could not import the replies: %s" (harness-error-message err))))))
 
 (defun harness-ui-patch-review--ediff-buffers (review)
   "Return the buffers of REVIEW's Ediff: its control panel and its two versions."
@@ -1079,6 +1211,7 @@ A report closed meanwhile opens again, out of sight, for its box."
   (define-key map (kbd "p") #'harness-ui-patch-review-previous-file)
   (define-key map (kbd "a") #'harness-ui-patch-review-approve)
   (define-key map (kbd "A") #'harness-ui-patch-review-approve-all)
+  (define-key map (kbd "V") #'harness-ui-patch-review-assume-viewed)
   (define-key map (kbd "t") #'harness-ui-patch-review-toggle-file-tree)
   (define-key map (kbd "T") #'harness-ui-patch-review-threads)
   (define-key map (kbd "r") #'change-review-ui-reply)
@@ -1159,12 +1292,15 @@ changes, under a heading; the open ones, unless
 `harness-ui-patch-review-closed-threads' says."
   (let* ((files (harness-ui-patch-review--r-files review))
          (set (harness-ui-patch-review--r-set review))
-         (others (cl-remove-if
-                  (lambda (thread)
-                    (or (cl-some (lambda (file) (harness-ui-patch-review--thread-file-p thread file)) files)
-                        (and (not harness-ui-patch-review-closed-threads)
-                             (not (change-review-thread-open-p thread)))))
-                  (change-review-set-threads set))))
+         (others (cl-stable-sort
+                  (cl-remove-if
+                   (lambda (thread)
+                     (or (cl-some (lambda (file) (harness-ui-patch-review--thread-file-p thread file)) files)
+                         (and (not harness-ui-patch-review-closed-threads)
+                              (not (change-review-thread-open-p thread)))))
+                   (change-review-set-threads set))
+                  ;; In the order they were started, one imported late where it belongs.
+                  #'< :key (lambda (thread) (or (change-review-thread-time thread) 0)))))
     (when others
       (concat
        (propertize "Other threads" 'face 'harness-label-face)
@@ -1419,14 +1555,19 @@ In a report showing the changes, from a row or anywhere else in it."
 
 (defun harness-ui-patch-review--viewed-text (review)
   "Return how much of REVIEW is reviewed: \"N of M files viewed, K left\".
-N is how many files were compared in Ediff (`harness-ui-patch-review--seen-p')."
+N is how many files were compared in Ediff (`harness-ui-patch-review--seen-p'),
+or taken as viewed, which the text says when the harness did."
   (let* ((files (harness-ui-patch-review--r-files review))
          (seen (cl-count-if (lambda (file) (harness-ui-patch-review--seen-p review file)) files))
-         (approved (cl-count-if (lambda (file) (harness-ui-patch-review--approved-p review file)) files)))
-    (format "%d of %s viewed, %d left%s"
+         (approved (cl-count-if (lambda (file) (harness-ui-patch-review--approved-p review file)) files))
+         (assumed (plist-get (harness-ui-patch-review--r-assumed review) :revision)))
+    (format "%d of %s viewed, %d left%s%s"
             seen (harness-ui-patch-review--plural (length files) "file")
             (- (length files) seen)
-            (if (> approved 0) (format ", %d approved" approved) ""))))
+            (if (> approved 0) (format ", %d approved" approved) "")
+            (if assumed
+                (format ", unchanged since %s taken as viewed" (harness-ui-patch-review--short assumed))
+              ""))))
 
 (defun harness-ui-patch-review--heading (review)
   "Return the first line of REVIEW's changes: what is compared, how much changed.
@@ -1442,7 +1583,7 @@ It also says how many threads the review has, open and closed."
      (if (null files) ""
        (concat "   " (propertize (harness-ui-patch-review--viewed-text review)
                                  'face 'harness-dim-face
-                                 'help-echo "The files you have compared in Ediff, those approved, and those left")))
+                                 'help-echo "The files you have compared in Ediff, those approved, and those left; V takes the files the newest commit did not change as viewed")))
      (if (not tip) ""
        (concat
         "   " (propertize (harness-ui-patch-review--r-branch review) 'face 'bold)
@@ -1502,7 +1643,7 @@ It also says how many threads the review has, open and closed."
                             'face 'harness-dim-face))))))
 
 (defconst harness-ui-patch-review--hint
-  "RET or a click compares a file in Ediff, n and p move between them, a approves it, A approves all, t shows a tree or a flat list, T lists the threads by file.  In Ediff c comments on a difference -- in either version, on the line at point -- as a thread of its own, r replies to a thread and x closes it or opens it again, and e goes to the box below (C-c C-d comes back to Ediff); n at the last difference offers the next file, N and P go on to the next or previous file, q comes back here."
+  "RET or a click compares a file in Ediff, n and p move between them, a approves it, A approves all, V takes the files the newest commit did not change as viewed, t shows a tree or a flat list, T lists the threads by file.  In Ediff c comments on a difference -- in either version, on the line at point -- as a thread of its own, r replies to a thread and x closes it or opens it again, and e goes to the box below (C-c C-d comes back to Ediff); n at the last difference offers the next file, N and P go on to the next or previous file, q comes back here."
   "What the report says under the changes.")
 
 (defun harness-ui-patch-review--section (review counts)
