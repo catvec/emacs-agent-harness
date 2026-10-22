@@ -1303,17 +1303,29 @@ Future<T?> showHarnessMenu<T>({
                     ?.copyWith(fontWeight: FontWeight.w700),
               ),
             ),
-          for (final item in items)
-            ListTile(
-              leading: item.icon == null ? null : Icon(item.icon),
-              title: Text(
-                item.label,
-                style: item.destructive
-                    ? TextStyle(color: Theme.of(sheetContext).colorScheme.error)
-                    : null,
-              ),
-              onTap: () => Navigator.of(sheetContext).pop(item.value),
+          // A bottom sheet holds a part of the screen, and a long list (every
+          // project, every model) does not fit it: it scrolls inside it,
+          // where what did not fit was cut off, and out of reach.
+          Flexible(
+            child: ListView(
+              shrinkWrap: true,
+              children: [
+                for (final item in items)
+                  ListTile(
+                    leading: item.icon == null ? null : Icon(item.icon),
+                    title: Text(
+                      item.label,
+                      style: item.destructive
+                          ? TextStyle(
+                              color: Theme.of(sheetContext).colorScheme.error,
+                            )
+                          : null,
+                    ),
+                    onTap: () => Navigator.of(sheetContext).pop(item.value),
+                  ),
+              ],
             ),
+          ),
           const SizedBox(height: 8),
         ],
       ),

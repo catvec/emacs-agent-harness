@@ -63,8 +63,7 @@ class _TasksScreenState extends State<TasksScreen> {
                 CupertinoIcons.arrow_clockwise,
               ),
               label: 'Refresh tasks',
-              onPressed: () =>
-                  controller.load(project: widget.app.selectedProject),
+              onPressed: () => controller.reload(),
             ),
             HarnessIconButton(
               icon: adaptiveIcon(
@@ -86,8 +85,7 @@ class _TasksScreenState extends State<TasksScreen> {
               if (controller.error != null)
                 HarnessErrorBanner(
                   message: controller.error!,
-                  onDismiss: () =>
-                      controller.load(project: widget.app.selectedProject),
+                  onDismiss: () => controller.reload(),
                 ),
               if (controller.loading && controller.tasks.isEmpty)
                 const Expanded(
@@ -153,7 +151,14 @@ class _TasksScreenState extends State<TasksScreen> {
     );
     if (created != null && mounted) {
       setState(() => _column = created.columnName);
-      controller.load(project: widget.app.selectedProject);
+      // A task made for another project than the one the board is narrowed
+      // to is not on that board: the board shows every project, where it is.
+      final narrowed = controller.project;
+      if (narrowed != null && widget.app.projectOfTask(created) != narrowed) {
+        controller.load();
+      } else {
+        controller.reload();
+      }
     }
   }
 
@@ -191,6 +196,9 @@ class _TaskHeader extends StatelessWidget {
   Widget build(BuildContext context) {
     final wide = MediaQuery.sizeOf(context).width >= 920;
     final choose = app.projects.length > 1;
+    // The board opens on every project; a project narrows it.  A queue is a
+    // project's, so its line is the narrowed board's.
+    final scoped = controller.project != null;
     // What the board's tasks cost, or the plan that pays for them with its
     // quota.  The model new tasks use names the provider whose account
     // stands for them all.
@@ -212,15 +220,14 @@ class _TaskHeader extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           HarnessScopeBar(
-            label: app.selectedProject == null
-                ? 'All projects'
-                : projectName(app.selectedProject),
+            label: scoped ? projectName(controller.project) : 'All projects',
             onTap: choose
                 ? () async {
                     final chosen = await showHarnessMenu<String>(
                       context: context,
                       title: 'Task project',
                       items: [
+                        const HarnessMenuItem(value: '', label: 'All projects'),
                         for (final project in app.projects)
                           HarnessMenuItem(
                             value: project,
@@ -229,7 +236,11 @@ class _TaskHeader extends StatelessWidget {
                           ),
                       ],
                     );
-                    if (chosen != null) app.selectProject(chosen);
+                    if (chosen != null) {
+                      unawaited(
+                        controller.load(project: chosen.isEmpty ? null : chosen),
+                      );
+                    }
                   }
                 : null,
             trailing: spend.worthShowing
@@ -244,7 +255,19 @@ class _TaskHeader extends StatelessWidget {
                   )
                 : null,
           ),
-          _QueueLine(controller: controller, wide: wide),
+          if (scoped)
+            _QueueLine(controller: controller, wide: wide)
+          else
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 8),
+              child: Text(
+                'The tasks of every project. Pick a project to pause its '
+                'queue or change how its backlog starts.',
+                style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ),
           const SizedBox(height: HarnessSpace.sm),
         ],
       ),
@@ -504,8 +527,7 @@ class _TaskBoard extends StatelessWidget {
           child: selected == null
               ? const SizedBox.shrink()
               : RefreshIndicator(
-                  onRefresh: () =>
-                      controller.load(project: app.selectedProject),
+                  onRefresh: () => controller.reload(),
                   child: ListView(
                     physics: const AlwaysScrollableScrollPhysics(),
                     padding: const EdgeInsets.fromLTRB(
@@ -985,10 +1007,11 @@ class _NewTaskSheetState extends State<_NewTaskSheet> {
     final draft = _draft;
     final resumed = !draft.isEmpty;
     _prompt = TextEditingController(text: draft.prompt);
-    _cwd = TextEditingController(
-      text: resumed ? draft.cwd : widget.app.selectedProject ?? '',
-    );
-    _project = resumed ? draft.project : widget.app.selectedProject;
+    // It starts in the project the board is narrowed to, else the one of the
+    // latest work.
+    final start = widget.app.tasks?.project ?? widget.app.selectedProject;
+    _cwd = TextEditingController(text: resumed ? draft.cwd : start ?? '');
+    _project = resumed ? draft.project : start;
     if (resumed) {
       _priority = draft.priority;
       _refine = draft.refine;

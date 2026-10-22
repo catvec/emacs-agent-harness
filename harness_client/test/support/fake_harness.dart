@@ -250,6 +250,10 @@ class FakeHarness {
   /// Whether `authenticate` waits for somebody.
   bool get waitingForApproval => _waiting != null && !_waiting!.isCompleted;
 
+  /// What `insights/projects` answers, when a test wants a harness with other
+  /// projects than the two it has.
+  List<String>? projectList;
+
   /// Make `session/list` fail, as a harness that goes wrong after it let the
   /// client in does.
   bool failSessionList = false;
@@ -809,8 +813,11 @@ class FakeHarness {
   /// the directories its tasks and its sessions in scratch directories work
   /// in besides.
   List<String> listedProjects() => <String>{
-    '/Users/noah/Code/emacs-agent-harness/',
-    '/Users/noah/Code/other-project/',
+    ...?projectList,
+    if (projectList == null) ...[
+      '/Users/noah/Code/emacs-agent-harness/',
+      '/Users/noah/Code/other-project/',
+    ],
     if (!tidyProjects) ..._untidyProjects(),
   }.toList()..sort();
 
@@ -899,6 +906,49 @@ class FakeHarness {
       'updated':
           now.subtract(const Duration(days: 9)).millisecondsSinceEpoch / 1000,
       'verified': true,
+    };
+  }
+
+  /// The board of a project other than the one the harness is mostly used
+  /// for: a task at work and one to review, in `other-project`, whose
+  /// sessions are not in the seed.  A harness has the work of every project
+  /// it is used for, and a client that shows one project's must not hide
+  /// the rest.
+  void seedOtherProjectTasks() {
+    final now = DateTime.now();
+    tasks['task-7'] = {
+      'id': 'task-7',
+      'name': 'Deploy the docs site',
+      'prompt': 'Publish the docs to the cluster.',
+      'state': 'active',
+      'column': 'active',
+      'priority': 'medium',
+      'project': '/Users/noah/Code/other-project/',
+      'cwd': '/Users/noah/Code/other-project/.worktrees/task-docs-site/',
+      'branch': 'task/docs-site',
+      'worktree': '/Users/noah/Code/other-project/.worktrees/task-docs-site/',
+      'created':
+          now.subtract(const Duration(minutes: 45)).millisecondsSinceEpoch /
+          1000,
+      'updated':
+          now.subtract(const Duration(minutes: 1)).millisecondsSinceEpoch /
+          1000,
+    };
+    tasks['task-8'] = {
+      'id': 'task-8',
+      'name': 'Trim the cluster alerts',
+      'prompt': 'Silence the alerts nobody acts on.',
+      'state': 'review',
+      'column': 'review',
+      'priority': 'low',
+      'project': '/Users/noah/Code/other-project/',
+      'cwd': '/Users/noah/Code/other-project/.worktrees/task-alerts/',
+      'branch': 'task/alerts',
+      'created':
+          now.subtract(const Duration(hours: 2)).millisecondsSinceEpoch / 1000,
+      'updated':
+          now.subtract(const Duration(minutes: 20)).millisecondsSinceEpoch /
+          1000,
     };
   }
 
@@ -1276,7 +1326,13 @@ class FakeHarness {
         return;
       }
       if (method == '_harness/task/list') {
-        _respond(id, enhanced ? tasks.values.toList() : const <Object?>[]);
+        // As the harness answers it: the tasks of one project when it is
+        // given a `cwd`, every task of every project without.
+        final cwd = asString(params['cwd']);
+        final listed = tasks.values.where(
+          (task) => cwd == null || cwd.isEmpty || task['project'] == cwd,
+        );
+        _respond(id, enhanced ? listed.toList() : const <Object?>[]);
         return;
       }
       if (method == '_harness/task/get') {
@@ -1569,7 +1625,7 @@ class FakeHarness {
       }
       if (method == '_harness/insights/projects') {
         _respond(id, listedProjects());
-        return;
+       return;
       }
       if (method == '_harness/provider/list') {
         _respond(id, [

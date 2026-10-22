@@ -151,7 +151,16 @@ class AppController extends ChangeNotifier {
   /// of their tasks belong to rather than being projects themselves, and
   /// the scratch directories of its agents are no project's at all.
   List<String> projects = const [];
+
+  /// The project the Usage view is narrowed to, and the one a new session or
+  /// task starts in: null for every project.  The app opens on the project
+  /// of the latest work, and a choice, every project included, stays until
+  /// another is made ([selectProject]).  The task board is not narrowed by
+  /// it: it opens on every project and has its own scope
+  /// ([TaskController.project]), so that the work of the projects a person
+  /// did not open the app on is not out of sight.
   String? selectedProject;
+  bool _projectChosen = false;
   TaskController? tasks;
   UsageController? usage;
 
@@ -165,6 +174,12 @@ class AppController extends ChangeNotifier {
   final Map<String, SessionController> _sessions =
       <String, SessionController>{};
   final Map<String, String> _sessionSignatures = <String, String>{};
+
+  /// The sessions the harness keeps as records of its own model calls (the
+  /// permission judge, a recap, a name): they come and go with every call it
+  /// makes, a few a minute, and are no conversation, so what is said of them
+  /// is no reason to read all the sessions again (see [_onNotification]).
+  final Set<String> _internalSessions = <String>{};
   StreamSubscription<AcpNotification>? _subscription;
   StreamSubscription<String>? _degradedSubscription;
   Timer? _sessionRefresh;
@@ -578,7 +593,7 @@ class AppController extends ChangeNotifier {
   void _scheduleInitialLoads() {
     if (capabilities?.tasks == true) {
       tasks = TaskController(api!);
-      unawaited(tasks!.load(project: selectedProject, showSpinner: false));
+      unawaited(tasks!.load(showSpinner: false));
     }
     if (capabilities?.usage == true) {
       usage = UsageController(api!, roots: () => _roots);
@@ -672,6 +687,12 @@ class AppController extends ChangeNotifier {
           pages++;
         } while (cursor != null && cursor.isNotEmpty && pages < 10);
       }
+      _internalSessions
+        ..clear()
+        ..addAll([
+          for (final session in loaded)
+            if (session.kind == 'internal') session.id,
+        ]);
       loaded =
           loaded
               .where(
@@ -683,9 +704,7 @@ class AppController extends ChangeNotifier {
               .toList()
             ..sort(_sortByTouched);
       sessions = loaded;
-      if (selectedProject == null || !projects.contains(selectedProject)) {
-        selectedProject = _defaultProject();
-      }
+      _keepSelectedProject();
       _notify();
       if (defaultNonInteractive == null && canSetNonInteractiveEverywhere) {
         unawaited(loadNonInteractiveDefault());
@@ -774,10 +793,20 @@ class AppController extends ChangeNotifier {
     }
     _roots = ProjectRoots(resolved: _resolvedMains);
     projects = _roots.projectsOf(directories);
-    if (selectedProject == null || !projects.contains(selectedProject)) {
+    _keepSelectedProject();
+    _notify();
+  }
+
+  /// Open on the project of the latest work, until a person chooses.  What
+  /// they chose stays, every project included, as long as it is listed: a
+  /// refresh, which the harness's events bring every few seconds, must not
+  /// turn it back into the project of the latest work.
+  void _keepSelectedProject() {
+    final chosen = selectedProject;
+    final gone = chosen != null && !projects.contains(chosen);
+    if (gone || (chosen == null && !_projectChosen)) {
       selectedProject = _defaultProject();
     }
-    _notify();
   }
 
   String? _defaultProject() {
@@ -792,8 +821,8 @@ class AppController extends ChangeNotifier {
 
   void selectProject(String? project) {
     selectedProject = project;
+    _projectChosen = true;
     _notify();
-    if (tasks != null) unawaited(tasks!.load(project: project));
     if (usage != null) unawaited(usage!.load(project: project));
     unawaited(refreshServer());
   }
@@ -947,7 +976,9 @@ class AppController extends ChangeNotifier {
       case 'session/status':
       case 'agent/turn-started':
       case 'agent/turn-ended':
-        _scheduleSessionRefresh();
+        // The sessions are a few megabytes: not read again for a record of
+        // a model call, which the harness makes and ends every few seconds.
+        if (!_isInternalSessionEvent(event, args)) _scheduleSessionRefresh();
       case 'task/changed':
       case 'task/review':
       case 'task/done':
@@ -964,6 +995,28 @@ class AppController extends ChangeNotifier {
               Future.value(),
         );
     }
+  }
+
+  /// Whether [event], a session event with [args] (its session's id, and for
+  /// `session/created` and `session/deleted` the session), is about an
+  /// internal session.  A session nothing is known of is not taken for one:
+  /// only what is certain is skipped.
+  bool _isInternalSessionEvent(String event, List<Object?> args) {
+    final id = args.isEmpty ? null : asString(args.first);
+    if (id == null || id.isEmpty) return false;
+    final session = args.length > 1
+        ? asMap(args[1])
+        : const <String, Object?>{};
+    final internal =
+        asString(session['kind']) == 'internal' ||
+        _internalSessions.contains(id);
+    if (!internal) return false;
+    if (event == 'session/deleted') {
+      _internalSessions.remove(id);
+    } else {
+      _internalSessions.add(id);
+    }
+    return true;
   }
 
   void _scheduleSessionRefresh() {
@@ -1399,7 +1452,7 @@ class AppController extends ChangeNotifier {
     if (generation != _connectionGeneration || !isConnected) return;
     await refreshProjects();
     if (tasks != null) {
-      unawaited(tasks!.load(project: selectedProject, showSpinner: false));
+      unawaited(tasks!.reload(showSpinner: false));
     }
     if (usage != null) {
       unawaited(usage!.load(project: selectedProject, showSpinner: false));
@@ -1561,9 +1614,11 @@ class AppController extends ChangeNotifier {
     }
     _sessions.clear();
     _sessionSignatures.clear();
+    _internalSessions.clear();
     sessions = const [];
     projects = const [];
     selectedProject = null;
+    _projectChosen = false;
     _roots = const ProjectRoots.empty();
     _resolvedMains.clear();
     _askedMains.clear();

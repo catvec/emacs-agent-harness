@@ -94,7 +94,20 @@ time it opens. It asks again only when the harness does.
   `PROJECT-worktrees/BRANCH` one the harness made worktrees in first, and a
   scratch directory is none. What the harness names as another project, or as
   none, wins over the path.
-- **Detects extensions per feature.** `initialize` is read for standard ACP
+- **Opens the task board on every project.** The board shows the tasks of
+  all the projects the harness works in, each card saying whose it is, so
+  that what is running in a project nobody opened the app on is not out of
+  sight. The project pill narrows it to one (and back); only then does the
+  board show that project's queue, which is the project's alone, and a task
+  made for another project than the narrowed board's widens it to every
+  project, where the task is. A choice of
+  "All projects" in a project menu stays: the events of the harness, which
+  refresh the app every few seconds, do not turn it back. Every project
+  menu, like every other menu, scrolls, so that no project in a long list is
+  out of reach. The app does not read all the sessions again when the harness
+  makes or ends a record of a model call of its own (an `internal` session),
+  which it does every few seconds.
+ **Detects extensions per feature.** `initialize` is read for standard ACP
   capabilities and for the harness's `_harness.methods` and `_harness.events`.
   Each screen asks for the exact methods it needs. A missing method turns off
   that one view or action at runtime; a plain ACP agent gets a small "Standard
@@ -559,6 +572,11 @@ The widget tests drive the real `AcpClient` against an in-memory ACP server
   panel, pairing links (`POST /pair` against a fake HTTP client), connection
   links with a token, refused codes, and plain TCP's second `initialize`
 - sessions, search and project filter (worktrees fold into their project)
+- the task board on every project, narrowed to one and widened again, and a
+  project menu too long for its sheet, scrolled to its last project
+  (`test/task_scope_test.dart`, `task_board_widget_test.dart`); the sessions
+  that internal sessions do not make the app read again
+  (`test/session_events_test.dart`)
 - the new task sheet's project row against a harness that lists worktrees and
   scratch directories as projects
 - transcript replay, streaming, thought blocks and plan
@@ -574,7 +592,7 @@ The widget tests drive the real `AcpClient` against an in-memory ACP server
   message; nothing overflows at 320 points or at one and a half times the
   text; and the whole path from the harness's nodes (`call-id`, `is-error`, a
   result's `meta`) to the page
-- permission request and allow, question with a diagram and send
+ permission request and allow, question with a diagram and send
 - creating a session and opening the new-task sheet / submitting a task, with
   pictures (`test/new_task_images_test.dart`: attached, removed, kept in the
   draft, limited to four, refused by type and size, hidden from a harness that
