@@ -191,6 +191,10 @@ class _SessionScreenState extends State<SessionScreen> {
     if (chosen != null) await _controller.setMode(chosen);
   }
 
+  Future<void> _toggleInteractive() => _controller.setNonInteractive(
+        _controller.summary?.nonInteractive != true,
+      );
+
   Future<void> _choosePriority() async {
     final chosen = await showHarnessMenu<String>(
       context: context,
@@ -258,6 +262,16 @@ class _SessionScreenState extends State<SessionScreen> {
                   label: 'Priority',
                   icon: Icons.sort_rounded,
                 ),
+              if (caps?.setNonInteractive == true)
+                HarnessMenuItem(
+                  value: 'interactive',
+                  label: _controller.summary?.nonInteractive == true
+                      ? 'Make interactive'
+                      : 'Make non-interactive',
+                  icon: _controller.summary?.nonInteractive == true
+                      ? Icons.touch_app_outlined
+                      : Icons.hourglass_disabled_rounded,
+                ),
               const HarnessMenuItem(
                 value: 'model',
                 label: 'Change model',
@@ -290,6 +304,8 @@ class _SessionScreenState extends State<SessionScreen> {
               await _chooseModel();
             case 'mode':
               await _chooseMode();
+            case 'interactive':
+              await _toggleInteractive();
             case 'delete':
               await _delete();
           }
@@ -420,8 +436,7 @@ class _SessionScreenState extends State<SessionScreen> {
         if (controller.currentInteraction != null)
           ConstrainedBox(
             constraints: BoxConstraints(
-              maxHeight:
-                  MediaQuery.sizeOf(context).height *
+              maxHeight: MediaQuery.sizeOf(context).height *
                   (controller.currentInteraction!.isQuestion ? 0.64 : 0.46),
             ),
             child: InteractionCard(controller: controller),
@@ -442,6 +457,7 @@ class _SessionScreenState extends State<SessionScreen> {
             summary: summary,
             onModel: _chooseModel,
             onMode: _chooseMode,
+            onInteractive: _toggleInteractive,
           ),
           // What is typed outlives this screen: see DraftStore.
           drafts: _app.drafts,
@@ -592,12 +608,14 @@ class _SessionFooter extends StatelessWidget {
     required this.summary,
     required this.onModel,
     required this.onMode,
+    required this.onInteractive,
   });
 
   final AppController app;
   final SessionSummary? summary;
   final VoidCallback onModel;
   final VoidCallback onMode;
+  final VoidCallback onInteractive;
 
   @override
   Widget build(BuildContext context) {
@@ -635,12 +653,27 @@ class _SessionFooter extends StatelessWidget {
                       onTap: app.capability?.setMode == true ? onMode : null,
                     ),
                   ),
+                  // Only while it is on: the footer has no room for a third
+                  // picker that mostly says "Interactive".  The menu turns it
+                  // on, this turns it off.
+                  if (s?.nonInteractive == true)
+                    Flexible(
+                      flex: 3,
+                      child: HarnessPicker(
+                        key: const Key('session-interactive'),
+                        icon: Icons.hourglass_disabled_rounded,
+                        label: 'Non-interactive',
+                        color: HarnessColors.amber,
+                        onTap: onInteractive,
+                      ),
+                    ),
                 ],
               ),
             ),
             // The figures are never more than half the row: where they do
             // not fit in that, they shrink rather than crowd the pickers.
-            if ((window != null && window > 0) || (spend.worthShowing && !narrow))
+            if ((window != null && window > 0) ||
+                (spend.worthShowing && !narrow))
               ConstrainedBox(
                 constraints: BoxConstraints(
                   maxWidth: constraints.maxWidth * (narrow ? 0.4 : 0.5),
@@ -855,16 +888,18 @@ class _PlanStrip extends StatelessWidget {
                               entry.isDone
                                   ? Icons.check_circle_rounded
                                   : entry.isActive
-                                  ? Icons.radio_button_checked_rounded
-                                  : Icons.radio_button_unchecked_rounded,
+                                      ? Icons.radio_button_checked_rounded
+                                      : Icons.radio_button_unchecked_rounded,
                               size: 19,
                               color: entry.isDone
                                   ? HarnessColors.moss
                                   : entry.isActive
-                                  ? Theme.of(sheetContext).colorScheme.primary
-                                  : Theme.of(sheetContext)
-                                        .colorScheme
-                                        .onSurfaceVariant,
+                                      ? Theme.of(sheetContext)
+                                          .colorScheme
+                                          .primary
+                                      : Theme.of(sheetContext)
+                                          .colorScheme
+                                          .onSurfaceVariant,
                             ),
                             const SizedBox(width: 10),
                             Expanded(
@@ -878,8 +913,8 @@ class _PlanStrip extends StatelessWidget {
                                       : null,
                                   color: entry.isDone
                                       ? Theme.of(sheetContext)
-                                            .colorScheme
-                                            .onSurfaceVariant
+                                          .colorScheme
+                                          .onSurfaceVariant
                                       : null,
                                 ),
                               ),
@@ -936,14 +971,13 @@ class _ActivityBarState extends State<_ActivityBar> {
     final activity = widget.activity;
     final label =
         widget.waiting && (activity == null || activity.phase == 'checking')
-        ? 'Waiting for your answer'
-        : activity?.label ?? (widget.running ? 'Working' : '');
+            ? 'Waiting for your answer'
+            : activity?.label ?? (widget.running ? 'Working' : '');
     if (label.isEmpty) return const SizedBox.shrink();
     final since = activity?.since;
     final elapsed = since == null ? null : DateTime.now().difference(since);
-    final color = widget.waiting
-        ? HarnessColors.amber
-        : theme.colorScheme.primary;
+    final color =
+        widget.waiting ? HarnessColors.amber : theme.colorScheme.primary;
     return Container(
       padding: const EdgeInsets.fromLTRB(
         HarnessSpace.gutter,

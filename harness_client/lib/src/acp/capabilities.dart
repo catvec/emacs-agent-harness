@@ -110,6 +110,8 @@ class HarnessCapabilities {
   bool get setMode => has('session/set_mode');
   bool get setModel => has('session/set_model');
   bool get priority => has('priority/set');
+  bool get setNonInteractive => has('session/update');
+  bool get setAllNonInteractive => has('session/set-all');
 
   /// How many enhanced methods the agent offers, for the discovery chip.
   int get extensionCount => methods.length;

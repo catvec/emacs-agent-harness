@@ -253,6 +253,49 @@ class HarnessApi {
     {'id': sessionId, if (name != null) 'name': name},
   );
 
+  /// Turns non-interactive mode on or off for one session.
+  Future<JsonMap> setNonInteractive(String sessionId, bool on) =>
+      extension('session/update', {'id': sessionId, 'non-interactive': on});
+
+  /// Turns non-interactive mode on or off for every current session and task,
+  /// and makes it the default for new ones.
+  Future<void> setNonInteractiveEverywhere(bool on) async {
+    await extension('session/set-all', {
+      'settings': {'non-interactive': on},
+      'filter': {'active': true, 'tasks': true},
+    });
+    if (can('task/set-all')) {
+      try {
+        await extension('task/set-all', {
+          'settings': {'non-interactive': on},
+        });
+      } on AcpException {
+        // Without task mode there are sessions only.
+      }
+    }
+    if (can('config/set')) {
+      await extension('config/set', {
+        'key': 'harness-non-interactive',
+        'value': on ? 't' : 'nil',
+        'printed': true,
+        'scope': 'global',
+      });
+    }
+  }
+
+  /// Whether new sessions start non-interactive, or null when unknown.
+  Future<bool?> defaultNonInteractive(String cwd) async {
+    if (!can('config/describe')) return null;
+    final described = await configDescribe(cwd);
+    for (final setting in asMapList(described['settings'])) {
+      if (asString(setting['key']) == 'harness-non-interactive') {
+        final value = asString(setting['value']);
+        return value == null ? null : value != 'nil';
+      }
+    }
+    return null;
+  }
+
   Future<void> deleteSession(String sessionId) =>
       extension('session/delete', {'id': sessionId});
 

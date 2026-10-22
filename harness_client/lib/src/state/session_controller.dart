@@ -284,6 +284,21 @@ class SessionController extends ChangeNotifier {
     }
   }
 
+  Future<void> setNonInteractive(bool on) async {
+    try {
+      final updated = await api.setNonInteractive(sessionId, on);
+      summary = SessionSummary.fromWire(
+        updated,
+      ).merge(summary ?? SessionSummary(id: sessionId));
+      // A JSON false may be left out of the reply: say what was asked.
+      summary = summary!.withNonInteractive(on);
+      _notify();
+    } on AcpException catch (failure) {
+      error = _friendlyError(failure);
+      _notify();
+    }
+  }
+
   Future<void> setModel(String model) async {
     try {
       await api.setModel(sessionId, model);

@@ -604,6 +604,50 @@ class AppController extends ChangeNotifier {
     quota = null;
   }
 
+  /// Whether new conversations start non-interactive; null until known.
+  bool? defaultNonInteractive;
+  bool updatingNonInteractive = false;
+
+  bool get canSetNonInteractiveEverywhere =>
+      capabilities?.setAllNonInteractive == true;
+
+  /// Reads the harness's default for non-interactive mode, if it tells.
+  Future<void> loadNonInteractiveDefault() async {
+    final service = api;
+    if (service == null) return;
+    final cwd = sessions.isNotEmpty ? sessions.first.cwd : null;
+    try {
+      final value = await service.defaultNonInteractive(cwd ?? '/');
+      if (value != null && value != defaultNonInteractive) {
+        defaultNonInteractive = value;
+        _notify();
+      }
+    } catch (_) {
+      // The switch is then shown from the conversations themselves.
+    }
+  }
+
+  /// Switches every conversation, and the default for new ones.
+  Future<void> setNonInteractiveEverywhere(bool on) async {
+    final service = api;
+    if (service == null || updatingNonInteractive) return;
+    updatingNonInteractive = true;
+    _notify();
+    try {
+      await service.setNonInteractiveEverywhere(on);
+      defaultNonInteractive = on;
+      for (final controller in _sessions.values) {
+        unawaited(controller.refreshInfo());
+      }
+    } on AcpException catch (failure) {
+      error = failure.message;
+    } finally {
+      updatingNonInteractive = false;
+      _notify();
+    }
+    await refreshSessions();
+  }
+
   Future<void> refreshSessions({
     bool throwOnAuth = false,
     bool showSpinner = false,
@@ -643,6 +687,9 @@ class AppController extends ChangeNotifier {
         selectedProject = _defaultProject();
       }
       _notify();
+      if (defaultNonInteractive == null && canSetNonInteractiveEverywhere) {
+        unawaited(loadNonInteractiveDefault());
+      }
     } on AcpException catch (failure) {
       if (failure.isAuthRequired) {
         phase = ConnectionPhase.needsAuth;

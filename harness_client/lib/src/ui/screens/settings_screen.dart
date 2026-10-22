@@ -281,6 +281,30 @@ class SettingsScreen extends StatelessWidget {
                   ],
                 ),
               ),
+              if (app.canSetNonInteractiveEverywhere) ...[
+                const HarnessSectionHeader(label: 'Conversations'),
+                HarnessCard(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: HarnessSpace.lg,
+                    vertical: HarnessSpace.sm,
+                  ),
+                  child: _SettingRow(
+                    icon: Icons.hourglass_disabled_rounded,
+                    title: 'Non-interactive',
+                    subtitle:
+                        'Every conversation and task runs without waiting '
+                        'for you, and new ones start that way. Each '
+                        'conversation can still be switched on its own.',
+                    trailing: HarnessSwitch(
+                      key: const Key('settings-non-interactive'),
+                      value: app.defaultNonInteractive ?? false,
+                      onChanged: app.updatingNonInteractive
+                          ? null
+                          : app.setNonInteractiveEverywhere,
+                    ),
+                  ),
+                ),
+              ],
               const HarnessSectionHeader(label: 'About'),
               HarnessCard(
                 child: Column(

@@ -130,12 +130,43 @@ class SessionSummary {
     return parts.isEmpty ? source : parts.last;
   }
 
+  /// Whether the agent runs without ever waiting for the user: the harness's
+  /// auto-mode judge answers what would ask, and a denial sends it elsewhere.
+  bool get nonInteractive => asBool(
+        extra['non-interactive'] ?? extra['nonInteractive'],
+      );
+
   bool get isActive => status == 'running' || status == 'blocked';
   bool get isBlocked => status == 'blocked';
   bool get isRunning => status == 'running';
   bool get isInactive => status == 'inactive';
 
   DateTime? get touchedAt => lastMessageAt ?? updatedAt;
+
+  SessionSummary withNonInteractive(bool on) => SessionSummary(
+        id: id,
+        title: title,
+        cwd: cwd,
+        project: project,
+        model: model,
+        kind: kind,
+        status: status,
+        parentId: parentId,
+        updatedAt: updatedAt,
+        createdAt: createdAt,
+        lastMessageAt: lastMessageAt,
+        usage: usage,
+        contextWindow: contextWindow,
+        permissionMode: permissionMode,
+        todos: todos,
+        pending: pending,
+        queue: queue,
+        worktree: worktree,
+        head: head,
+        plan: plan,
+        virtual: virtual,
+        extra: {...extra, 'non-interactive': on, 'nonInteractive': on},
+      );
 
   SessionSummary merge(SessionSummary newer) {
     if (newer.id != id) return this;
