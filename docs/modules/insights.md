@@ -54,7 +54,11 @@ counts only the nodes a session wrote itself (a fork's log repeats
 its parent's path, with the parent's `:session`) and reports
 figures, not transcripts.  A session belongs to the main checkout of
 its project, worked out as the usage dashboard works it out
-(`harness-files-owning-checkout`).
+(`harness-files-owning-checkout`), and a session in a scratch
+directory, a sub-agent's working directory in its parent's temporary
+directory, to its parent's project (`harness-project-main`): the
+harness says so for the sessions it hands the child, which has the
+files only.
 
 `insights/narrative` writes the words.  The figures, and the names
 and first requests of the sessions, go to a cheap model of the user's

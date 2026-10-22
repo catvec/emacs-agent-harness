@@ -349,6 +349,54 @@ usage and decisions, and the worktree's own report is the project's."
                                         :cost)))
           (should (= 2 (plist-get (plist-get all :permissions) :decisions))))))))
 
+(ert-deftest harness-insights-projects-are-main-checkouts-only ()
+  "A task made from inside a worktree and a sub-agent working in a scratch
+directory of its parent's are no projects: the list has the checkouts their
+work counts for, and a project's report counts that work."
+  (harness-insights-test-with
+    (let* ((base (file-truename (harness-test-temp-dir)))
+           (root (file-name-as-directory (expand-file-name "repo" base)))
+           (wt (file-name-as-directory (expand-file-name ".worktrees/task-a" root)))
+           (other (file-name-as-directory (expand-file-name (harness-test-temp-dir))))
+           (owner-id "6f2c1a90-0001-4000-8000-000000000001")
+           (scratch (file-name-as-directory
+                     (expand-file-name (format "harness-1000/%s/q13b-1" owner-id) base)))
+           (orphan (file-name-as-directory
+                    (expand-file-name "harness-1000/6f2c1a90-0002-4000-8000-000000000002/wt/core" base)))
+           (since (harness-insights-test-since)))
+      (make-directory root t)
+      (harness-insights-test--git root "init" "-q" "-b" "main")
+      (harness-insights-test--git root "-c" "user.name=t" "-c" "user.email=t@example.invalid" "-c" "commit.gpgsign=false"
+                                  "commit" "-q" "--allow-empty" "-m" "initial")
+      (harness-insights-test--git root "worktree" "add" "-q" "-b" "task/a" wt)
+      (let ((sids (list (harness-insights-test-session root "Owner" :id owner-id)
+                        (harness-insights-test-session scratch "Research" :id "child-1"
+                                                       :kind 'subagent :parent-id owner-id)
+                        (harness-insights-test-session orphan "Worker" :id "lost-1" :kind 'subagent)
+                        (harness-insights-test-session other "Elsewhere" :id "else-1"))))
+        (dolist (sid sids)
+          (harness-insights-test-node sid 'user (harness-insights-test-ts 2 10) :content "Work"))
+        ;; A task made before the board filed tasks under the main checkout
+        ;; has the worktree it was made in for its project.
+        (puthash "t-wt" (list :id "t-wt" :project wt :prompt "From the worktree" :state 'done
+                              :created (harness-insights-test-ts 2 9) :started (harness-insights-test-ts 2 9)
+                              :finished (harness-insights-test-ts 2 11))
+                 harness-tasks--table)
+        (should (equal (sort (list root other) #'string<) (harness-call 'insights/projects)))
+        (let ((mine (harness-insights-test-compute :since since :project root :period '7d)))
+          (should (equal root (plist-get mine :project)))
+          ;; The owner's and its sub-agent's, not the one whose parent is gone.
+          (should (= 2 (plist-get (plist-get mine :sessions) :active)))
+          (should (equal (sort (list "child-1" owner-id) #'string<)
+                         (sort (mapcar (lambda (r) (plist-get r :id)) (plist-get mine :session-list)) #'string<))))
+        (let* ((all (harness-insights-test-compute :since since :period '7d))
+               (rows (plist-get all :projects)))
+          (should (= 4 (plist-get (plist-get all :sessions) :active)))
+          (should (= 2 (plist-get (harness-insights-test-find :main root rows) :sessions)))
+          (should (= 1 (plist-get (harness-insights-test-find :main other rows) :sessions)))
+          ;; The one with no project is counted, under none.
+          (should (= 1 (plist-get (harness-insights-test-find :main "" rows) :sessions))))))))
+
 ;;;; Tasks
 
 (ert-deftest harness-insights-task-figures ()

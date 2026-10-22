@@ -1013,20 +1013,25 @@ a third-party ACP client shows them.")
   "Return the stable node id of virtual session ID."
   (if (equal id "harness:projects") "virtual-projects" "virtual-new-task"))
 
+(declare-function harness-project-main "harness-project" (root &optional seen))
+
 (defun harness-acp--virtual-projects ()
   "Return the project directories the project-list page shows, sorted.
 They are main checkouts, as `insights/projects' lists them: a session in
 a git worktree, a task's or a sub-agent's, is of the project the worktree
-was made from (`harness-files-owning-checkout'), not a project of its own."
+was made from (`harness-files-owning-checkout'), not a project of its own,
+and a session in a scratch directory of its parent's is of its parent's
+\(`harness-project-main')."
   (or (and (harness-method-exists-p 'insights/projects)
            (ignore-errors (harness-call 'insights/projects)))
       (and (harness-method-exists-p 'session/list)
            (let (roots)
              (dolist (s (harness-call 'session/list))
-               (when-let* ((p (plist-get s :project)))
-                 (cl-pushnew (file-name-as-directory
-                              (expand-file-name
-                               (or (ignore-errors (harness-files-owning-checkout p)) p)))
+               (when-let* ((p (plist-get s :project))
+                           (main (if (fboundp 'harness-project-main)
+                                     (harness-project-main p)
+                                   (or (ignore-errors (harness-files-owning-checkout p)) p))))
+                 (cl-pushnew (file-name-as-directory (expand-file-name main))
                              roots :test #'equal)))
              (sort roots #'string<)))))
 

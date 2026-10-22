@@ -148,7 +148,8 @@ class AppController extends ChangeNotifier {
   List<SessionSummary> sessions = const [];
 
   /// The projects of the harness: main checkouts, which the git worktrees
-  /// of their tasks belong to rather than being projects themselves.
+  /// of their tasks belong to rather than being projects themselves, and
+  /// the scratch directories of its agents are no project's at all.
   List<String> projects = const [];
   String? selectedProject;
   TaskController? tasks;
@@ -680,16 +681,18 @@ class AppController extends ChangeNotifier {
         projectDirectory(task.project ?? task.cwd),
   };
 
-  /// Work out the projects: the main checkouts the harness lists and the
-  /// ones the work of its sessions and tasks is in.
+  /// Work out the projects: the ones the harness lists and the ones the
+  /// work of its sessions and tasks is in.
   ///
   /// A session or a task names the directory it works in, which for a task,
   /// and for the sub-agents and forks started in its worktree, is a git
-  /// worktree of the project.  That is no project of its own, so each
-  /// directory is folded into the checkout it belongs to: the harness says
-  /// which, once per directory, when it offers `project/mains`; else the
-  /// directory itself tells, in the layout the harness makes worktrees in
-  /// (see [ProjectRoots]).
+  /// worktree of the project, and for a sub-agent an agent gave a scratch
+  /// directory to, one in the temporary directory of a session.  Those are
+  /// no projects of their own, so each directory, the ones the harness lists
+  /// too, is folded into the project it belongs to: the harness says which,
+  /// once per directory, when it offers `project/mains`; else the directory
+  /// itself tells, in the layouts the harness makes worktrees in and the
+  /// place it makes scratch directories (see [ProjectRoots]).
   Future<void> refreshProjects() async {
     final service = api;
     if (service == null) return;
@@ -699,12 +702,14 @@ class AppController extends ChangeNotifier {
         listed = await service.projects();
       } catch (_) {}
     }
-    final listedMains = ProjectRoots(mains: listed).mains;
+    final directories = {
+      for (final directory in listed)
+        if (projectDirectory(directory).isNotEmpty) projectDirectory(directory),
+      ..._workingDirectories(),
+    };
     final unasked = [
-      for (final directory in _workingDirectories())
-        if (!_askedMains.contains(directory) &&
-            !listedMains.contains(directory))
-          directory,
+      for (final directory in directories)
+        if (!_askedMains.contains(directory)) directory,
     ]..sort();
     Map<String, String>? answers;
     if (unasked.isNotEmpty && service.can('project/mains')) {
@@ -720,8 +725,8 @@ class AppController extends ChangeNotifier {
       _resolvedMains.addAll(answers);
       _askedMains.addAll(unasked);
     }
-    _roots = ProjectRoots(mains: listed, resolved: _resolvedMains);
-    projects = _roots.projectsOf([...listedMains, ..._workingDirectories()]);
+    _roots = ProjectRoots(resolved: _resolvedMains);
+    projects = _roots.projectsOf(directories);
     if (selectedProject == null || !projects.contains(selectedProject)) {
       selectedProject = _defaultProject();
     }

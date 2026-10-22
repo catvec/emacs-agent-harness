@@ -422,7 +422,11 @@ class HarnessApi {
 
   // ---- Projects, providers, server ---------------------------------------
 
-  /// The main checkouts of the harness's sessions and tasks.
+  /// The directories of the harness's sessions and tasks, as it names their
+  /// projects: main checkouts.  An older harness lists a git worktree or a
+  /// scratch directory of an agent's among them, as it lists what a task
+  /// was made in, so the app folds these like any other directory (see
+  /// `ProjectRoots`).
   Future<List<String>> projects() async {
     if (!can('insights/projects')) return const [];
     final result = await extensionRaw('insights/projects');
@@ -432,9 +436,11 @@ class HarnessApi {
 
   /// The main checkout each of [directories] belongs to, as the harness
   /// finds it on disk (`project/mains`): a git worktree, wherever it was
-  /// made, belongs to the checkout it was made from.  Directories the
-  /// harness gives no answer for are left out; a harness without the method
-  /// answers none.
+  /// made, belongs to the checkout it was made from, and the work in a
+  /// scratch directory of an agent's to the project of its session.  A
+  /// directory no project's work is in, such as a scratch directory whose
+  /// session is gone, is answered with ''.  Directories the harness gives
+  /// no answer for are left out; a harness without the method answers none.
   Future<Map<String, String>> mainProjects(List<String> directories) async {
     if (directories.isEmpty || !can('project/mains')) return const {};
     // It reads no more than a few files for each directory, and the app
@@ -447,9 +453,7 @@ class HarnessApi {
     for (final row in asMapList(result)) {
       final root = asString(row['root']);
       final main = asString(row['main']);
-      if (root != null && root.isNotEmpty && main != null && main.isNotEmpty) {
-        found[root] = main;
-      }
+      if (root != null && root.isNotEmpty && main != null) found[root] = main;
     }
     return found;
   }

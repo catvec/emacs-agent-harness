@@ -78,17 +78,62 @@ walk up the tree, and remote roots are returned untouched."
                     (file-name-as-directory (match-string 1 common))))))))
           root))))
 
+(defun harness-files--legacy-worktree-owner (dir)
+  "Return the checkout the old layout says the worktree DIR is of, or nil.
+Worktrees were made in ROOT/../NAME-worktrees/BRANCH before they went
+under ROOT/.worktrees, and one made for a task started in such a
+worktree in its own NAME-worktrees beside it.  So the first directory
+of DIR's name ending in -worktrees, with a directory in it, belongs to
+the sibling NAME, the outermost checkout when they nest.  Nil when that
+sibling is no directory: the name alone does not make a project."
+  (let ((dir (file-name-as-directory (expand-file-name dir))))
+    (when (string-match "\\`\\(.*?/\\)\\([^/]+\\)-worktrees/[^/]+/" dir)
+      (let ((owner (file-name-as-directory
+                    (concat (match-string 1 dir) (match-string 2 dir)))))
+        (and (file-directory-p owner) owner)))))
+
 (defun harness-files-owning-checkout (root)
   "Return the main checkout that project ROOT belongs to.
 That is ROOT itself, unless ROOT is a linked git worktree, such as a
 task's, which belongs to its repository's main checkout (see
 `harness-files-main-checkout'), or is gone from disk, like an archived
 task's worktree, which belongs to the project around it (see
-`harness-files-main-root').  Remote roots are returned untouched, and
-not looked at."
+`harness-files-main-root'), or to the checkout beside it when it was
+made in the layout the harness used before `.worktrees' (see
+`harness-files--legacy-worktree-owner').  Remote roots are returned
+untouched, and not looked at."
   (cond ((file-remote-p root) root)
         ((file-directory-p root) (harness-files-main-checkout root))
-        (t (harness-files-main-root root))))
+        (t (let ((owner (harness-files--legacy-worktree-owner root)))
+             (if owner
+                 (harness-files-owning-checkout owner)
+               (harness-files-main-root root))))))
+
+(defconst harness-files--scratch-regexp
+  (concat "/harness-[0-9]+/\\("
+          "[0-9a-f]\\{8\\}-[0-9a-f]\\{4\\}-[0-9a-f]\\{4\\}-[0-9a-f]\\{4\\}-[0-9a-f]\\{12\\}"
+          "\\|id-[0-9a-f]\\{32\\}\\)/")
+  "Matches the temporary directory of a session, and what is in it.
+That directory is harness-UID/NAME in the variable `temporary-file-directory',
+NAME being the session's id, a UUID, or `id-' and the hash of an id that is
+no plain name (`harness-session--tmp-name'); group 1 is NAME.  A directory
+that is merely called harness-2 is no such directory.")
+
+(defun harness-files-scratch-owner (dir)
+  "Return the name of the session temporary directory that holds DIR, or nil.
+Every local session has a directory of its own to make files in, and
+what an agent makes there, a scratch repository or the working
+directory of a sub-agent say, is no project of the user's: its work is
+its session's.  The name is the session's id, or a hash of it
+\(`harness-files--scratch-regexp'); the session may be gone.  Only the
+name of DIR is looked at, so that this says the same of a directory a
+reboot emptied, and the UI can ask it too.  Remote directories give
+nil."
+  (when (and (stringp dir) (not (string-empty-p dir)) (not (file-remote-p dir)))
+    (let ((dir (file-name-as-directory (expand-file-name dir)))
+          (case-fold-search nil))
+      (and (string-match harness-files--scratch-regexp dir)
+           (match-string 1 dir)))))
 
 (defun harness-files-git-common-dir (dir)
   "Return the git directory every worktree of DIR's repository shares, or nil.

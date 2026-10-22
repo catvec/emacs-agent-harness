@@ -1444,7 +1444,8 @@ project list and refreshing it rewrites its first message in place."
   "Without the insights module the project list is of checkouts, not worktrees.
 A session in a git worktree, a sub-agent's say, is filed under the
 worktree; the list names the checkout each worktree was made from, also
-for one made beside the repository."
+for one made beside the repository.  A sub-agent's scratch directory in
+its parent's temporary directory is no project of its own either."
   (harness-acp-test-with
     (let* ((base (harness-test-temp-dir))
            (main (file-name-as-directory (expand-file-name "repo" base)))
@@ -1466,13 +1467,22 @@ for one made beside the repository."
                                  (concat ".git/worktrees/" (file-name-nondirectory (directory-file-name tree)))
                                  main)))))
             (dolist (dir (list main inside beside other))
-              (harness-call 'session/create :cwd dir :project dir))
+              (harness-call 'session/create :cwd dir :project dir
+                            :id (and (equal dir main) "6f2c1a90-0001-4000-8000-000000000001")))
+            ;; A sub-agent works in a scratch directory in its parent's
+            ;; temporary directory, whose session may be gone: no project.
+            (dolist (scratch (list (expand-file-name
+                                    "harness-1000/6f2c1a90-0001-4000-8000-000000000001/q13b-1/" base)
+                                   (expand-file-name
+                                    "harness-1000/6f2c1a90-0002-4000-8000-000000000002/wt/core/" base)))
+              (harness-call 'session/create :cwd scratch :project scratch :kind 'subagent))
             (should (equal (list other main) (harness-acp--virtual-projects)))
             (let ((text (harness-acp--projects-text)))
               (should (string-match-p (regexp-quote main) text))
               (should (string-match-p (regexp-quote other) text))
               (should-not (string-match-p (regexp-quote inside) text))
-              (should-not (string-match-p (regexp-quote beside) text))))
+              (should-not (string-match-p (regexp-quote beside) text))
+              (should-not (string-match-p "harness-1000" text))))
         (ignore-errors (delete-directory base t))))))
 
 (ert-deftest harness-acp-local-virtual-task-submit ()

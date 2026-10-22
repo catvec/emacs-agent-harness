@@ -207,6 +207,26 @@ also once the worktree is gone; other groupings have no `:main'."
         (should-not (cl-some (lambda (r) (plist-member r :main))
                              (harness-call 'usage/summary :group-by group)))))))
 
+(ert-deftest harness-usage-summary-by-project-counts-scratch-directories-for-their-session ()
+  "Usage recorded in a scratch directory in a session's temporary directory,
+a sub-agent's working directory, counts for the project of that session;
+for none, \"\", once the session is gone."
+  (harness-usage-test-with
+    (let* ((base (harness-test-temp-dir))
+           (project (harness-test-temp-dir))
+           (owner-id "6f2c1a90-0001-4000-8000-000000000001")
+           (scratch (file-name-as-directory
+                     (expand-file-name (format "harness-1000/%s/q13b-1" owner-id) base)))
+           (orphan (file-name-as-directory
+                    (expand-file-name "harness-1000/6f2c1a90-0002-4000-8000-000000000002/wt/core" base))))
+      (harness-call 'session/create :id owner-id :cwd project :model "demo:scripted")
+      (cl-loop for (dir cost) in (list (list project 1.0) (list scratch 2.0) (list orphan 4.0))
+               do (harness-call 'usage/record (list :ts (float-time) :session "s" :project dir
+                                                    :model "demo:scripted" :cost cost)))
+      (let ((by-project (harness-call 'usage/summary :group-by 'project)))
+        (should (equal (list orphan scratch project) (mapcar (lambda (r) (plist-get r :key)) by-project)))
+        (should (equal (list "" project project) (mapcar (lambda (r) (plist-get r :main)) by-project)))))))
+
 (ert-deftest harness-usage-series-fills-gaps ()
   (harness-usage-test-with
     (harness-usage-test-seed)

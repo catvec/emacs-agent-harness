@@ -234,6 +234,72 @@ Its gitdir, ROOT/.git/worktrees/ID, is gone; a submodule's is no worktree."
                   ((symbol-function 'harness-files-main-root) (lambda (&rest _) (error "Looked at"))))
           (should (equal remote (harness-files-owning-checkout remote))))))))
 
+(ert-deftest harness-files-owning-checkout-of-a-gone-worktree-in-the-old-layout ()
+  "Worktrees were made in NAME-worktrees beside their checkout, and one for
+a task started in such a worktree in its own NAME-worktrees.  Gone from disk
+they belong to the checkout beside them; a name with no checkout there is
+no project's."
+  (harness-worktree-test-with-repo
+    (let ((old (file-name-as-directory (expand-file-name "repo-worktrees/task-old" base)))
+          (inner (file-name-as-directory
+                  (expand-file-name "repo-worktrees/task-old-worktrees/task-new" base)))
+          (ghost (file-name-as-directory (expand-file-name "ghost-worktrees/task-x" base))))
+      (harness-worktree-test--git root "worktree" "add" "-q" "-b" "task/old" old)
+      (harness-worktree-test--git root "worktree" "add" "-q" "-b" "task/new" inner)
+      ;; Present they say it themselves.
+      (dolist (dir (list old inner))
+        (should (equal (harness-worktree-test--dir root)
+                       (harness-worktree-test--dir (harness-files-owning-checkout dir)))))
+      (harness-worktree-test--git root "worktree" "remove" inner)
+      (harness-worktree-test--git root "worktree" "remove" old)
+      (should-not (file-exists-p old))
+      (should-not (file-exists-p inner))
+      (dolist (dir (list old inner (expand-file-name "lib/src" old)))
+        (should (equal (harness-worktree-test--dir root)
+                       (harness-worktree-test--dir (harness-files-owning-checkout dir)))))
+      ;; The name alone makes no project: nothing is beside it.
+      (should-not (file-directory-p (expand-file-name "ghost" base)))
+      (should (equal ghost (harness-files-owning-checkout ghost)))
+      ;; A directory of its own that is not in that layout stays its own.
+      (let ((plain (file-name-as-directory (expand-file-name "repo-worktrees" base))))
+        (make-directory plain t)
+        (should (equal plain (harness-files-owning-checkout plain)))))))
+
+(defconst harness-worktree-test--session-id "6f2c1a90-1111-4222-8333-444444444444"
+  "An id as the harness makes them, a UUID, naming a session's temporary directory.")
+
+(ert-deftest harness-files-scratch-owner-is-the-session-whose-directory-holds-it ()
+  "A session's temporary directory is harness-UID/ID, wherever the temporary
+directory is, and what is in it is scratch: only the name is looked at."
+  (let ((id harness-worktree-test--session-id))
+    (should (equal id (harness-files-scratch-owner (format "/tmp/harness-1000/%s/" id))))
+    (should (equal id (harness-files-scratch-owner (format "/tmp/harness-1000/%s" id))))
+    (should (equal id (harness-files-scratch-owner (format "/tmp/harness-1000/%s/q13b-1/" id))))
+    (should (equal id (harness-files-scratch-owner (format "/tmp/harness-1000/%s/wt/core" id))))
+    (should (equal id (harness-files-scratch-owner
+                       (format "/var/folders/xy/T/harness-501/%s/x/" id))))
+    ;; An id that is no plain name is hashed, and the hash names the directory.
+    (should (equal "id-5d41402abc4b2a76b9719d911017c592"
+                   (harness-files-scratch-owner
+                    "/tmp/harness-1000/id-5d41402abc4b2a76b9719d911017c592/x/")))
+    ;; The directory of the sessions is no session's, and the rest is not scratch:
+    ;; not a directory that is only called like one, nor one of another name.
+    (should-not (harness-files-scratch-owner "/tmp/harness-1000/"))
+    (should-not (harness-files-scratch-owner "/tmp/harness-1000"))
+    (should-not (harness-files-scratch-owner "/tmp/harness-1000/abc-123/x/"))
+    (should-not (harness-files-scratch-owner "/home/noah/harness-2/notes/"))
+    (should-not (harness-files-scratch-owner (format "/tmp/harness-mine/%s/x/" id)))
+    (should-not (harness-files-scratch-owner (format "/tmp/xharness-1000/%s/x/" id)))
+    (should-not (harness-files-scratch-owner (format "/tmp/harness-1000/.%s/x/" id)))
+    (should-not (harness-files-scratch-owner "/home/noah/code/harness/lib/"))
+    (should-not (harness-files-scratch-owner ""))
+    (should-not (harness-files-scratch-owner nil))
+    ;; A remote directory is not looked at.
+    (let ((remote (format "/ssh:nobody@example.invalid:/tmp/harness-1000/%s/x/" id)))
+      (should (file-remote-p remote)) ; loads TRAMP before file access is watched
+      (cl-letf (((symbol-function 'file-directory-p) (lambda (&rest _) (error "Looked at"))))
+        (should-not (harness-files-scratch-owner remote))))))
+
 (ert-deftest harness-files-git-common-dir-is-the-main-repository ()
   "Every directory of a repository, linked worktrees included, shares the main .git."
   (harness-worktree-test-with-repo

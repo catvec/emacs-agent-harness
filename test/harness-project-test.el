@@ -146,6 +146,115 @@ and `projectile-invalidate-cache' makes the next request list again."
               (should (equal plain (plist-get (nth 4 answer) :main)))))
         (ignore-errors (delete-directory base t))))))
 
+;;;; Scratch directories
+
+(defvar harness-sessions)
+
+(defmacro harness-project-test-with-sessions (&rest body)
+  "Run BODY with the project and session modules loaded into a fresh bus.
+`base' names a directory of its own, in which a session's temporary
+directory is made as harness-1000/ID, as /tmp/harness-1000/ID is."
+  (declare (indent 0))
+  `(harness-test-with-temp-state
+     (harness-test-reset-bus)
+     (dolist (m '(store project config provider session)) (harness-test-load-module m))
+     (clrhash harness-sessions)
+     (let ((base (harness-test-temp-dir)))
+       (unwind-protect (progn ,@body)
+         (ignore-errors (delete-directory base t))))))
+
+(defun harness-project-test--id (n)
+  "Return the Nth session id, a UUID as the harness makes them."
+  (format "6f2c1a90-%04d-4000-8000-%012d" n n))
+
+(defun harness-project-test--scratch (base n &optional leaf)
+  "Return the directory LEAF in the temporary directory of session N, in BASE."
+  (file-name-as-directory
+   (expand-file-name (concat "harness-1000/" (harness-project-test--id n) "/" (or leaf "")) base)))
+
+(defun harness-project-test--session (n project &rest plist)
+  "Create session N working in PROJECT, PLIST added; return its id."
+  (plist-get (apply #'harness-call 'session/create :id (harness-project-test--id n)
+                    :cwd project :project project plist)
+             :id))
+
+(ert-deftest harness-project-main-counts-a-scratch-directory-for-its-sessions-project ()
+  "A sub-agent's working directory in its parent's temporary directory is no
+project: its work counts for the project of the session whose directory it
+is, gone from disk or not, and for none once that session is gone."
+  (skip-unless (executable-find "git"))
+  (harness-project-test-with-sessions
+    (let* ((root (harness-project-test--committed-repo base))
+           (elsewhere (harness-test-temp-dir))
+           (gone (harness-project-test--scratch base 1 "q13b-1"))
+           (made (harness-project-test--scratch base 1 "proto3"))
+           (repo (harness-project-test--scratch base 1 "scratch-repo")))
+      (harness-project-test--session 1 root)
+      (make-directory made t)
+      (make-directory repo t)
+      (harness-project-test--git repo "init" "-q" "-b" "main")
+      (dolist (dir (list gone made repo (harness-project-test--scratch base 1)))
+        (should (harness-project-test--same-dir root (harness-project-main dir))))
+      ;; A session that works in its own temporary directory is its own.
+      (harness-project-test--session 2 (harness-project-test--scratch base 2 "x"))
+      (should-not (harness-project-main (harness-project-test--scratch base 2 "x")))
+      ;; Scratch directories of scratch directories end at the first project.
+      (harness-project-test--session 3 made)
+      (harness-project-test--session 4 (harness-project-test--scratch base 3 "deep"))
+      (should (harness-project-test--same-dir
+               root (harness-project-main (harness-project-test--scratch base 4 "deeper"))))
+      ;; Sessions that point at each other's directories end the search.
+      (harness-project-test--session 5 (harness-project-test--scratch base 6 "a"))
+      (harness-project-test--session 6 (harness-project-test--scratch base 5 "b"))
+      (should-not (harness-project-main (harness-project-test--scratch base 5 "c")))
+      ;; No session of that name: no project.
+      (should-not (harness-project-main (harness-project-test--scratch base 7 "x")))
+      ;; What is not in a temporary directory is its own checkout, as ever,
+      ;; though its name is like one's.
+      (let ((named (file-name-as-directory (expand-file-name "harness-1000/notes" base))))
+        (make-directory named t)
+        (should (equal named (harness-project-main named))))
+      (should (equal elsewhere (harness-project-main elsewhere)))
+      (should (harness-project-test--same-dir root (harness-project-main root))))))
+
+(ert-deftest harness-project-main-of-a-scratch-worktree-is-the-checkout-it-is-of ()
+  "A worktree made in a scratch directory is of the checkout it was made from,
+whatever project the session whose directory it is works for."
+  (skip-unless (executable-find "git"))
+  (harness-project-test-with-sessions
+    (let* ((root (harness-project-test--committed-repo base))
+           (other (harness-test-temp-dir))
+           (worktree (harness-project-test--scratch base 8 "wt/core")))
+      (harness-project-test--session 8 other)
+      (harness-project-test--git root "worktree" "add" "-q" "-b" "core" worktree)
+      (should (harness-project-test--same-dir root (harness-project-main worktree)))
+      ;; Gone, it is only a scratch directory of that session.
+      (harness-project-test--git root "worktree" "remove" worktree)
+      (should-not (file-exists-p worktree))
+      (should (equal other (harness-project-main worktree))))))
+
+(ert-deftest harness-project-mains-answers-for-scratch-directories ()
+  "`project/mains' names the project a scratch directory's work counts for,
+and says \"\" for none."
+  (harness-project-test-with-sessions
+    (let* ((project (harness-test-temp-dir))
+           (scratch (harness-project-test--scratch base 9 "q13b-2"))
+           (orphan (harness-project-test--scratch base 10 "q13b-3")))
+      (harness-project-test--session 9 project)
+      (should (equal (list (list :root scratch :main project)
+                           (list :root orphan :main "")
+                           (list :root project :main project))
+                     (harness-call 'project/mains (list scratch orphan project)))))))
+
+(ert-deftest harness-project-main-of-a-scratch-directory-needs-the-sessions ()
+  "Without the session module a scratch directory counts for no project."
+  (harness-project-test-with-module
+    (let ((scratch (format "/tmp/harness-1000/%s/x/" (harness-project-test--id 11))))
+      (should-not (harness-method-exists-p 'session/exists-p))
+      (should-not (harness-project-main scratch))
+      (should (equal (list (list :root scratch :main ""))
+                     (harness-call 'project/mains (list scratch)))))))
+
 (ert-deftest harness-project-mains-leaves-out-what-is-not-a-directory-name ()
   (harness-project-test-with-module
     (let ((dir (harness-test-temp-dir)))

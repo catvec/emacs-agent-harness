@@ -67,13 +67,22 @@ time it opens. It asks again only when the harness does.
   | ![A session's header with its plan quota, and the details a tap opens](screenshots/android-plan-sheet.png) | ![The plan section of the Usage view](screenshots/android-usage.png) |
 - **Treats a project as a main checkout.** A task, and a sub-agent started in
   its worktree, works in a git worktree, which the harness files under the
-  worktree itself. The app folds each worktree into the checkout it was made
-  from, so the project pickers and filters, the session and task rows, and the
-  Usage "Projects" list have one entry per project, and a project's usage adds
-  up the spend of its worktrees. The harness says which checkout a directory
-  belongs to (`project/mains`, which reads the repository's own `.git` files,
-  wherever the worktree was made); a harness without it is folded by the
-  `PROJECT/.worktrees/BRANCH` layout it makes worktrees in.
+  worktree itself, and an agent may give a sub-agent a scratch directory in the
+  temporary directory of its session (`/tmp/harness-UID/ID/...`). The app folds
+  each worktree into the checkout it was made from, and a scratch directory
+  into the project of the session whose directory it is, so the project
+  pickers and filters (the new task sheet's among them), the session and task
+  rows, and the Usage "Projects" list have one entry per project, and a
+  project's usage adds up the spend of its worktrees. The harness says which
+  checkout a directory belongs to (`project/mains`, which reads the
+  repository's own `.git` files, wherever the worktree was made, and answers
+  for none, `""`, for a scratch directory whose session is gone); the app asks
+  about every directory it knows, the ones `insights/projects` lists too, once.
+  Where the harness has no answer, because it is older or the directory is
+  gone, the path says what it can: the `PROJECT/.worktrees/BRANCH` layout, the
+  `PROJECT-worktrees/BRANCH` one the harness made worktrees in first, and a
+  scratch directory is none. What the harness names as another project, or as
+  none, wins over the path.
 - **Detects extensions per feature.** `initialize` is read for standard ACP
   capabilities and for the harness's `_harness.methods` and `_harness.events`.
   Each screen asks for the exact methods it needs. A missing method turns off
@@ -351,7 +360,7 @@ The client never assumes a method because the agent calls itself a harness.
 | Usage | `usage/totals` or `usage/summary` |
 | Plan quota | `provider/quota` and `provider/list`, which says which providers report one |
 | Question diagrams | `question/image` for images; ASCII comes with the request |
-| Project picker | `insights/projects` (and `project/mains`, to fold worktrees) |
+| Project picker | `insights/projects` (and `project/mains`, to fold worktrees and scratch directories) |
 | Rename, fork, delete | `session/update`, `session/fork`, `session/delete` |
 | Priority | `priority/set` |
 | Model catalogue | `provider/list`, `provider/models` |
@@ -480,6 +489,8 @@ The widget tests drive the real `AcpClient` against an in-memory ACP server
   panel, pairing links (`POST /pair` against a fake HTTP client), connection
   links with a token, refused codes, and plain TCP's second `initialize`
 - sessions, search and project filter (worktrees fold into their project)
+- the new task sheet's project row against a harness that lists worktrees and
+  scratch directories as projects
 - transcript replay, streaming, tool cards, thought blocks and plan
 - permission request and allow, question with a diagram and send
 - creating a session and opening the new-task sheet / submitting a task, with

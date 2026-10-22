@@ -932,18 +932,33 @@ Each is what `usage/live' returns for the session, with `:session' added."
 
 ;;;; Queries
 
+(declare-function harness-project-main "harness-project" (root &optional seen))
+
+(defun harness-usage--main (key)
+  "Return the main checkout the usage recorded under project KEY counts for.
+That is `harness-project-main' when the project module is there, else the
+checkout the files say (`harness-files-owning-checkout').  \"\" when the
+usage belongs to no project: it was recorded in a scratch directory
+whose session is gone."
+  (if (fboundp 'harness-project-main)
+      (or (harness-project-main key) "")
+    (harness-files-owning-checkout key)))
+
 (defun harness-usage--with-main (rows)
   "Return ROWS, aggregates by project, each with `:main' added.
 `:main' is the main checkout the project belongs to: for a linked git
 worktree, such as a task's or a sub-agent's, its repository's main
-checkout, even once the worktree is gone; else the project itself.  The
-row without a project keeps \"\".  Each distinct root is resolved once,
-here in the harness, so the UI never reads the disk for it."
+checkout, even once the worktree is gone; for a scratch directory in a
+session's temporary directory, such as a sub-agent's working directory,
+the project of that session; else the project itself.  The row without
+a project keeps \"\", and so does one in a scratch directory whose
+session is gone.  Each distinct root is resolved once, here in the
+harness, so the UI never reads the disk for it."
   (mapcar (lambda (row)
             (let ((key (plist-get row :key)))
               (append row (list :main (if (or (null key) (string-empty-p key))
                                           ""
-                                        (harness-files-owning-checkout key))))))
+                                        (harness-usage--main key))))))
           rows))
 
 (harness-defmethod usage/summary (&rest opts)

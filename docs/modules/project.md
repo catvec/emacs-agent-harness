@@ -26,3 +26,10 @@ is; see there for why listing never blocks.
 - `project/name` (root) — Return a display name for the project at ROOT.
 - `project/root` (cwd) — Return the project root directory for CWD, or CWD itself.
 
+## Uses
+
+### Methods it calls
+
+- `session/exists-p` ([session](session.md)), when it is loaded
+- `session/get` ([session](session.md))
+

@@ -1139,12 +1139,21 @@ See docs/configuration-audit.md for the rule and the audit behind it.
 - `project/name ROOT` → display name.
 - `project/mains ROOTS` → one `(:root ROOT :main MAIN)` for each absolute
   directory name in ROOTS, in order (anything else is left out): the main
-  checkout ROOT belongs to.  A linked git worktree, such as a task's or a
-  sub-agent's, is of the checkout it was made from, wherever it is and
-  also once it is gone from disk; any other directory is its own
-  (`harness-files-owning-checkout`).  It reads `.git` files and runs no
-  process, so a client such as the phone app asks about every directory
-  its sessions and tasks work in at once, to fold the worktrees of a
+  checkout the work in ROOT counts for (`harness-project-main`).  A linked
+  git worktree, such as a task's or a sub-agent's, is of the checkout it
+  was made from, wherever it is and also once it is gone from disk,
+  which for one made beside its checkout, in `NAME-worktrees` (the
+  layout before `.worktrees`), the checkout beside it says
+  (`harness-files-owning-checkout`); any other directory is its own.  A
+  scratch directory, one in a session's temporary directory
+  (`harness-UID/ID` where temporary files go: `harness-files-scratch-owner`),
+  is no checkout: an agent made it for the session of that id, say as
+  the working directory of a sub-agent, so its work counts for that
+  session's project, followed through scratch directories of scratch
+  directories, and for none, with `:main ""`, once that session is gone.
+  It reads `.git` files and runs no process, so a client such as the
+  phone app asks about every directory its sessions and tasks work in,
+  and the ones the harness lists, at once, to fold the worktrees of a
   project into it: a project is a main checkout, and a session started in
   a worktree has that worktree as its `:project`.
 - `project/files ROOT &optional QUERY LIMIT` → promise of relative paths,
@@ -4000,11 +4009,14 @@ decisions.
   cost.  `:cost` is what was billed, `:list-cost` the same usage at API
   prices (rows from before list costs count their cost).  By project a
   row also has `:main`, the main checkout its project belongs to
-  (`harness-files-owning-checkout`, resolved here so the UI never reads
-  the disk for it): a linked git worktree's, such as a task's, is its
+  (`harness-project-main`, resolved here so the UI never reads the disk
+  for it): a linked git worktree's, such as a task's, is its
   repository's main checkout, also once the worktree is removed or git
-  pruned its registration; any other project's is its own root, and the
-  row without a project has "".
+  pruned its registration; a scratch directory's, such as a sub-agent's
+  working directory, is the project of the session whose temporary
+  directory it is; any other project's is its own root, and the row
+  without a project has "", as does one in a scratch directory whose
+  session is gone.
 - `usage/budgets`, `usage/set-budget BUDGET`, `usage/remove-budget ID`,
   `usage/budget-status ID &rest (:now)` (ID may be "session:SID" for a
   session's implicit budget) → `(:budget :spent :amount :remaining
@@ -4213,7 +4225,12 @@ decision log), so it is the same for every provider.  Methods are
     :conflict :created :done-at)`, WHY one of failed, sent-back, review,
     done.
 - `insights/projects` → the main checkouts of every session's and
-  task's project, sorted: what the report can be narrowed to.  An
+  task's project, sorted: what the report can be narrowed to.  A git
+  worktree is no project of its own, a task's, which a task made from
+  inside a worktree has for its project, included, and nor is a scratch
+  directory in a session's temporary directory, such as a sub-agent's
+  working directory: its work counts for the project of that session
+  (`harness-project-main`), and for none once the session is gone.  An
   internal session's project is not counted for that.
 - `insights/narrative &key since until project period refresh` →
   promise of `(:summary :themes :patterns :friction :suggestions :model
@@ -9305,7 +9322,8 @@ Two sessions the harness advertises, on the first page of
 `harness:projects` (title "Projects") renders the project list, which
 is of main checkouts: `insights/projects` when the bus has it, else the
 checkouts of the sessions' projects, a session in a git worktree being of
-the checkout the worktree was made from; and
+the checkout the worktree was made from and one in a scratch directory
+of another session's of that session's project; and
 `harness:new-task` (title "New task") submits what its chat input sends
 as a task.  `session/load` renders a virtual session as a single
 `user_message_chunk` whose first message is the page; prompting

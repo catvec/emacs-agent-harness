@@ -12,17 +12,27 @@ const _titles = '$_main.worktrees/task-fix-titles/';
 const _flutter = '$_main.worktrees/task-flutter/';
 const _beside =
     '/Users/noah/Code/emacs-agent-harness-worktrees/task-old-layout/';
+const _elsewhere = '/Users/noah/Code/elsewhere/task-x/';
+const _scratch1 = '/tmp/harness-1000/${FakeHarness.scratchOwner}/client-1/';
+const _scratch2 = '/tmp/harness-1000/${FakeHarness.scratchOwner}/client-2/';
+const _orphan = '/tmp/harness-1000/${FakeHarness.goneOwner}/wt/core/';
 
 Future<(AppController, FakeHarness)> _connected({
   bool worktrees = true,
+  bool scratch = false,
   bool projectMains = true,
+  bool tidyProjects = true,
   void Function(FakeHarness harness)? arrange,
 }) async {
   SharedPreferences.setMockInitialValues({});
   final settings = SettingsController();
   await settings.load();
-  final harness = FakeHarness(projectMains: projectMains);
+  final harness = FakeHarness(
+    projectMains: projectMains,
+    tidyProjects: tidyProjects,
+  );
   if (worktrees) harness.seedWorktreeSessions();
+  if (scratch) harness.seedScratchSessions();
   arrange?.call(harness);
   final app = AppController(settings: settings, connector: harness.connector);
   await app.connect('ws://memory/acp');
@@ -73,11 +83,23 @@ void main() {
     test(
       'are folded by an older harness too, as far as its paths say',
       () async {
-        final (app, harness) = await _connected(projectMains: false);
+        final (app, harness) = await _connected(
+          projectMains: false,
+          arrange: (harness) {
+            // A worktree made somewhere the harness never made them: only
+            // the harness, reading the repository, could tell what it is of.
+            harness.sessions['w5'] = {
+              ...harness.sessions['w1']!,
+              'id': 'w5',
+              'name': 'Try it elsewhere',
+              'project': _elsewhere,
+              'cwd': _elsewhere,
+            };
+          },
+        );
         expect(app.capability!.has('project/mains'), isFalse);
-        // The worktrees in a `.worktrees` are folded.  One made elsewhere can
-        // only be told by the harness, which cannot here.
-        expect(app.projects, [_beside, _main, _other]);
+        // The worktrees in the layouts the harness made them in are folded.
+        expect(app.projects, [_elsewhere, _main, _other]);
         expect(
           harness.requestsByClient,
           isNot(contains('_harness/project/mains')),
@@ -145,9 +167,9 @@ void main() {
       expect(_asked(harness, '_harness/project/mains'), hasLength(1));
       final roots =
           _asked(harness, '_harness/project/mains').single.$2['roots'] as List;
-      // Only the directories that are not a main checkout it listed.
-      expect(roots, isNot(contains(_main)));
-      expect(roots, containsAll([_titles, _beside]));
+      // The ones it lists too: what it lists is folded like the rest.
+      expect(roots, containsAll([_main, _other, _titles, _beside]));
+      expect(roots.toSet(), hasLength(roots.length));
     });
 
     test('stay the same when a session starts in a new worktree', () async {
@@ -185,13 +207,95 @@ void main() {
     test('are what the harness says, over what a path looks like', () async {
       final (app, _) = await _connected(
         arrange: (harness) {
-          // The directory beside the repository is no worktree of it, as
-          // far as the harness reads from the disk: a project of its own.
-          harness.worktreeOf.clear();
+          // The harness read a repository that says the worktree in a
+          // `.worktrees` is not of the checkout around it.
+          harness.worktreeOf[_titles] = _other;
         },
       );
-      expect(app.projects, [_beside, _main, _other]);
+      expect(app.projects, [_main, _other]);
+      expect(
+        app.projectOfSession(
+          app.sessions.firstWhere((session) => session.id == 'w1'),
+        ),
+        _other,
+      );
     });
+  });
+
+  group('the projects of a harness whose agents work in scratch '
+      'directories', () {
+    String? projectOf(AppController app, String id) => app.projectOfSession(
+      app.sessions.firstWhere((session) => session.id == id),
+    );
+
+    test('are its main checkouts, and the scratch directories none', () async {
+      final (app, harness) = await _connected(scratch: true);
+      expect(
+        app.sessions.map((s) => s.id),
+        containsAll(['scratch-1', 'scratch-2', 'scratch-3']),
+      );
+      expect(app.projects, [_main, _other]);
+      // The sub-agents' work is for the project of the session whose
+      // directory it is, and for none once that session is gone.
+      expect(projectOf(app, 'scratch-1'), _main);
+      expect(projectOf(app, 'scratch-2'), _main);
+      expect(projectOf(app, 'scratch-3'), isNull);
+      expect(
+        _asked(harness, '_harness/project/mains').single.$2['roots'],
+        containsAll([_scratch1, _scratch2, _orphan]),
+      );
+    });
+
+    test('are folded by a harness that does not know them', () async {
+      // It lists them, and takes each for a checkout of its own: a task
+      // made from inside an old worktree, and the scratch directories.
+      final (app, harness) = await _connected(
+        scratch: true,
+        tidyProjects: false,
+      );
+      expect(
+        harness.listedProjects(),
+        containsAll([_beside, _scratch1, _scratch2, _orphan]),
+      );
+      expect(app.projects, [_main, _other]);
+      expect(projectOf(app, 'scratch-1'), isNull);
+      // The task made in the old worktree is in the checkout it is of.
+      await app.tasks!.load(showSpinner: false);
+      final old = app.tasks!.tasks.firstWhere((task) => task.id == 'task-old');
+      expect(old.project, _beside);
+      expect(app.projectOfTask(old), _main);
+    });
+
+    test('are folded by a harness without project/mains, by paths', () async {
+      final (app, harness) = await _connected(
+        scratch: true,
+        tidyProjects: false,
+        projectMains: false,
+      );
+      expect(
+        harness.requestsByClient,
+        isNot(contains('_harness/project/mains')),
+      );
+      expect(app.projects, [_main, _other]);
+      expect(projectOf(app, 'w3'), _main);
+      expect(projectOf(app, 'scratch-2'), isNull);
+    });
+
+    test(
+      'keep a project that is only called like a temporary directory',
+      () async {
+        final (app, _) = await _connected(
+          scratch: true,
+          arrange: (harness) {
+            harness.sessions[FakeHarness.scratchOwner]!['project'] =
+                '/Users/noah/harness-2/notes/';
+          },
+        );
+        expect(app.projects, [_main, _other, '/Users/noah/harness-2/notes/']);
+        // The sub-agents are for it.
+        expect(projectOf(app, 'scratch-1'), '/Users/noah/harness-2/notes/');
+      },
+    );
   });
 
   group('usage of a project and its worktrees', () {

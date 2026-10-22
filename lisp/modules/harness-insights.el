@@ -44,7 +44,11 @@
 ;; its parent's path, with the parent's `:session') and reports
 ;; figures, not transcripts.  A session belongs to the main checkout of
 ;; its project, worked out as the usage dashboard works it out
-;; (`harness-files-owning-checkout').
+;; (`harness-files-owning-checkout'), and a session in a scratch
+;; directory, a sub-agent's working directory in its parent's temporary
+;; directory, to its parent's project (`harness-project-main'): the
+;; harness says so for the sessions it hands the child, which has the
+;; files only.
 ;;
 ;; `insights/narrative' writes the words.  The figures, and the names
 ;; and first requests of the sessions, go to a cheap model of the user's
@@ -219,15 +223,32 @@ the project's work."
   (let ((main (harness-insights--main project (make-hash-table :test 'equal))))
     (unless (string-empty-p main) main)))
 
+(declare-function harness-project-main "harness-project" (root &optional seen))
+
+(defun harness-insights--resolve (root)
+  "Return the main checkout the work in ROOT counts for, \"\" for none.
+In the harness that is `harness-project-main': a scratch directory, a
+sub-agent's working directory in its parent's temporary directory, counts
+for the project of that session.  The child that reads the transcripts
+has only the files to go by (`harness-files-owning-checkout'); the
+harness tells it what its sessions' scratch directories count for (see
+`harness-insights--scan-input')."
+  (if (fboundp 'harness-project-main)
+      (condition-case nil
+          (or (harness-project-main root) "")
+        (error root))
+    (or (ignore-errors (harness-files-owning-checkout root)) root)))
+
 (defun harness-insights--main (root memo)
   "Return the main checkout project ROOT belongs to, \"\" for none.
-As the usage dashboard says it (`harness-files-owning-checkout').  MEMO,
-a hash table, keeps the answers of one run."
+As the usage dashboard says it (`harness-files-owning-checkout'), and as
+`project/mains' does (`harness-project-main').  MEMO, a hash table,
+keeps the answers of one run."
   (let ((root (harness-insights--root root)))
     (if (null root)
         ""
       (or (gethash root memo)
-          (puthash root (or (ignore-errors (harness-files-owning-checkout root)) root) memo)))))
+          (puthash root (harness-insights--resolve root) memo)))))
 
 ;;;; Reading the transcripts (in the child Emacs)
 
@@ -343,7 +364,10 @@ read, the period, the scope, the decision logs.  The result has
          (t-calls 0) (t-errors 0) (t-denied 0) (t-interrupted 0))
     (dolist (s (plist-get input :sessions))
       (let* ((sid (plist-get s :id))
-             (main (harness-insights--main (plist-get s :project) mains))
+             ;; The harness says what a scratch directory counts for.
+             (main (if (plist-member s :main)
+                       (or (plist-get s :main) "")
+                     (harness-insights--main (plist-get s :project) mains)))
              (file (and (stringp sid) (expand-file-name (concat sid ".nodes.jsonl") dir))))
         (when (and file (or (null project) (equal main project)))
           (puthash sid main scope)
@@ -538,7 +562,8 @@ sessions are those whose life overlaps the period, from the harness's
 records, which are current where their files may lag; internal ones,
 the records of the model calls the harness made on its own (see
 `session/internal-start'), are no work of the user's and are left out."
-  (let ((task-of (make-hash-table :test 'equal)))
+  (let ((task-of (make-hash-table :test 'equal))
+        (memo (make-hash-table :test 'equal)))
     (dolist (task tasks)
       (when-let* ((sid (plist-get task :session)))
         (puthash sid (plist-get task :id) task-of)))
@@ -554,10 +579,16 @@ the records of the model calls the harness made on its own (see
                         for updated = (or (plist-get s :updated) created)
                         when (and (or (null since) (>= updated since)) (< created until)
                                   (not (eq (plist-get s :kind) 'internal)))
-                        collect (list :id (plist-get s :id) :name (plist-get s :name)
-                                      :kind (format "%s" (or (plist-get s :kind) "main"))
-                                      :project (plist-get s :project) :model (plist-get s :model)
-                                      :task (gethash (plist-get s :id) task-of)))))))
+                        collect (append
+                                 (list :id (plist-get s :id) :name (plist-get s :name)
+                                       :kind (format "%s" (or (plist-get s :kind) "main"))
+                                       :project (plist-get s :project) :model (plist-get s :model)
+                                       :task (gethash (plist-get s :id) task-of))
+                                 ;; The child has the files only, and a session
+                                 ;; in a scratch directory is its parent's: here
+                                 ;; the sessions are known.
+                                 (and (harness-files-scratch-owner (plist-get s :project))
+                                      (list :main (harness-insights--main (plist-get s :project) memo)))))))))
 
 (defun harness-insights--scan-file ()
   "Return the file the child loads: this module, as the harness loaded it.
@@ -923,9 +954,12 @@ A report asked for again while it is computed shares its promise."
 (harness-defmethod insights/projects ()
   "Return the main checkouts an Insights report can be narrowed to, sorted.
 They are the projects of the sessions and of the tasks, each as the
-main checkout it belongs to.  An internal session's project is not
-among them for that: one with no parent is in a directory of the
-harness's own (see `session/internal-start')."
+main checkout it belongs to: a git worktree, a task's or a sub-agent's,
+is no project of its own, wherever it was made, nor is a scratch
+directory in a session's temporary directory, whose work counts for the
+project of the session (`harness-project-main').  An internal session's
+project is not among them for that: one with no parent is in a directory
+of the harness's own (see `session/internal-start')."
   (let ((mains (make-hash-table :test 'equal))
         (memo (make-hash-table :test 'equal)))
     (when (harness-method-exists-p 'session/list)
@@ -934,8 +968,10 @@ harness's own (see `session/internal-start')."
           (let ((main (harness-insights--main (plist-get s :project) memo)))
             (unless (string-empty-p main) (puthash main t mains))))))
     (dolist (task (harness-insights--all-tasks))
-      (when-let* ((root (harness-insights--root (plist-get task :project))))
-        (puthash root t mains)))
+      ;; A task made from inside a worktree, before the board filed it
+      ;; under the main checkout, still has the worktree for its project.
+      (let ((main (harness-insights--main (plist-get task :project) memo)))
+        (unless (string-empty-p main) (puthash main t mains))))
     (sort (hash-table-keys mains) #'string<)))
 
 ;;;; The written summary

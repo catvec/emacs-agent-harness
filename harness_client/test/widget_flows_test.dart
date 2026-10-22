@@ -29,6 +29,9 @@ Future<_Rig> _rig({
   Set<String>? knownSecrets,
   List<Uri>? opened,
   bool worktrees = false,
+  bool scratch = false,
+  bool projectMains = true,
+  bool tidyProjects = true,
 }) async {
   SharedPreferences.setMockInitialValues({});
   final settings = SettingsController();
@@ -41,8 +44,11 @@ Future<_Rig> _rig({
     oidcUrl: oidcUrl,
     issueSecret: issueSecret,
     knownSecrets: knownSecrets,
+    projectMains: projectMains,
+    tidyProjects: tidyProjects,
   );
   if (worktrees) harness.seedWorktreeSessions();
+  if (scratch) harness.seedScratchSessions();
   final app = AppController(
     settings: settings,
     connector: harness.connector,
@@ -454,6 +460,65 @@ void main() {
     expect(find.text('Profile the model cache'), findsNothing);
     expect(find.textContaining('task-'), findsNothing);
   });
+
+  testWidgets(
+    'the new task sheet offers projects, not the worktrees and scratch '
+    'directories an older harness lists',
+    (tester) async {
+      // What the app showed: a worktree a task was made in, the scratch
+      // directories sub-agents were given, and the worktrees of sessions,
+      // each as a project, from a harness that says nothing of them.
+      final rig = await _rig(
+        worktrees: true,
+        scratch: true,
+        tidyProjects: false,
+        projectMains: false,
+      );
+      expect(
+        rig.harness.listedProjects(),
+        containsAll([
+          '/Users/noah/Code/emacs-agent-harness-worktrees/task-old-layout/',
+          '/tmp/harness-1000/${FakeHarness.scratchOwner}/client-1/',
+          '/tmp/harness-1000/${FakeHarness.goneOwner}/wt/core/',
+        ]),
+      );
+      await _pump(tester, rig);
+      await tester.tap(find.text('Tasks'));
+      await _settle(tester, 5);
+      await tester.tap(find.byIcon(Icons.add_rounded));
+      await _settle(tester, 4);
+      final sheet = find.byType(BottomSheet);
+      expect(
+        find.descendant(of: sheet, matching: find.text('PROJECT')),
+        findsOneWidget,
+      );
+      final chips = find.descendant(
+        of: sheet,
+        matching: find.byIcon(Icons.folder_outlined),
+      );
+      expect(chips, findsNWidgets(2));
+      for (final name in ['emacs-agent-harness', 'other-project']) {
+        expect(
+          find.descendant(of: sheet, matching: find.text(name)),
+          findsOneWidget,
+          reason: name,
+        );
+      }
+      for (final junk in [
+        'task-old-layout',
+        'client-1',
+        'client-2',
+        'core',
+        'task-fix-titles',
+      ]) {
+        expect(
+          find.descendant(of: sheet, matching: find.text(junk)),
+          findsNothing,
+          reason: junk,
+        );
+      }
+    },
+  );
 
   testWidgets('usage by project has a row for a project, not a worktree', (
     tester,

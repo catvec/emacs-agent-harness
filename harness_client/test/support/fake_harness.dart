@@ -76,6 +76,7 @@ class FakeHarness {
     this.oidcUrl,
     this.issueSecret,
     this.projectMains = true,
+    this.tidyProjects = true,
     this.taskPictures = true,
     this.quota = true,
     Set<String>? knownSecrets,
@@ -158,6 +159,15 @@ class FakeHarness {
   /// Whether the harness offers `project/mains`, which says what checkout a
   /// directory is a git worktree of.  An older harness does not.
   final bool projectMains;
+
+  /// Whether the harness lists only checkouts as its projects, and knows that
+  /// a scratch directory (one in the temporary directory of a session, such
+  /// as an agent gives a sub-agent to work in) is no project's: it says the
+  /// project of the session whose directory it is, and none when that
+  /// session is gone.  An older one lists the directories its sessions and
+  /// tasks work in, worktrees and scratch directories among them, and takes
+  /// a scratch directory for a checkout of its own.
+  final bool tidyProjects;
 
   /// Whether the harness takes pictures sent as data with a task, which its
   /// `task/settings` say (`inlineAttachments`).  An older harness does not
@@ -771,11 +781,123 @@ class FakeHarness {
 
   /// The checkout the git worktree at [directory] was made from, or
   /// [directory] itself when it is no worktree: what its `.git` file says.
+  /// For a scratch directory of a [tidyProjects] harness the checkout of the
+  /// project of the session whose directory it is, or '' for none.
   String mainCheckoutOf(String directory) {
     final known = worktreeOf[directory];
     if (known != null) return known;
     final at = directory.indexOf('/.worktrees/');
-    return at > 0 ? directory.substring(0, at + 1) : directory;
+    if (at > 0) return directory.substring(0, at + 1);
+    if (tidyProjects) {
+      final owner = _scratchOwner.firstMatch(directory)?.group(1);
+      if (owner != null) {
+        final project = sessions[owner]?['project'];
+        return project is String ? mainCheckoutOf(project) : '';
+      }
+    }
+    return directory;
+  }
+
+  static final _scratchOwner = RegExp(
+    r'/harness-[0-9]+/'
+    r'([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/',
+  );
+
+  /// What `insights/projects` lists: the checkouts, and for an older harness
+  /// the directories its tasks and its sessions in scratch directories work
+  /// in besides.
+  List<String> listedProjects() => <String>{
+    '/Users/noah/Code/emacs-agent-harness/',
+    '/Users/noah/Code/other-project/',
+    if (!tidyProjects) ..._untidyProjects(),
+  }.toList()..sort();
+
+  Set<String> _untidyProjects() => {
+    for (final task in tasks.values)
+      if (task['project'] case final String project) project,
+    for (final session in sessions.values)
+      if (session['project'] case final String project)
+        if (_scratchOwner.hasMatch(project)) project,
+  };
+
+  /// Sessions as a harness whose agents work in scratch directories has
+  /// them: [scratchOwner], a session of the checkout, started sub-agents in
+  /// directories of its own temporary directory, which is where
+  /// `/tmp/harness-UID/ID/` is; another's, [goneOwner], is not a session any
+  /// more.  And a task that was made from inside an old worktree, which
+  /// therefore has the worktree for its project.
+  static const scratchOwner = '6f2c1a90-1111-4222-8333-444444444444';
+  static const goneOwner = '6f2c1a90-2222-4222-8333-555555555555';
+
+  void seedScratchSessions() {
+    final now = DateTime.now();
+    void add(String id, String name, String kind, String directory) {
+      sessions[id] = {
+        'id': id,
+        'name': name,
+        'kind': kind,
+        'project': directory,
+        'cwd': directory,
+        'model': 'claude:claude-fable-5-1',
+        'permissionMode': 'auto',
+        'status': 'inactive',
+        'created':
+            now.subtract(const Duration(hours: 3)).millisecondsSinceEpoch /
+            1000,
+        'updated':
+            now.subtract(const Duration(hours: 2)).millisecondsSinceEpoch /
+            1000,
+        'lastMessage':
+            now.subtract(const Duration(hours: 2)).millisecondsSinceEpoch /
+            1000,
+        'contextWindow': 200000,
+        'todos': [],
+        'pending': [],
+        'queue': [],
+      };
+      nodes[id] = [];
+    }
+
+    add(
+      scratchOwner,
+      'Compare the client libraries',
+      'main',
+      '/Users/noah/Code/emacs-agent-harness/',
+    );
+    add(
+      'scratch-1',
+      'Try the first client',
+      'subagent',
+      '/tmp/harness-1000/$scratchOwner/client-1/',
+    );
+    add(
+      'scratch-2',
+      'Try the second client',
+      'subagent',
+      '/tmp/harness-1000/$scratchOwner/client-2/',
+    );
+    add(
+      'scratch-3',
+      'Check the supervisor',
+      'subagent',
+      '/tmp/harness-1000/$goneOwner/wt/core/',
+    );
+    tasks['task-old'] = {
+      'id': 'task-old',
+      'name': 'Explain the concurrency limit',
+      'prompt': 'Why does it say 3?',
+      'state': 'done',
+      'column': 'done',
+      'priority': 'medium',
+      'project':
+          '/Users/noah/Code/emacs-agent-harness-worktrees/task-old-layout/',
+      'cwd': '/Users/noah/Code/emacs-agent-harness-worktrees/task-old-layout/',
+      'created':
+          now.subtract(const Duration(days: 9)).millisecondsSinceEpoch / 1000,
+      'updated':
+          now.subtract(const Duration(days: 9)).millisecondsSinceEpoch / 1000,
+      'verified': true,
+    };
   }
 
   /// Sessions as a harness that works in git worktrees has them.  A task's
@@ -1434,10 +1556,7 @@ class FakeHarness {
         return;
       }
       if (method == '_harness/insights/projects') {
-        _respond(id, [
-          '/Users/noah/Code/emacs-agent-harness/',
-          '/Users/noah/Code/other-project/',
-        ]);
+        _respond(id, listedProjects());
         return;
       }
       if (method == '_harness/provider/list') {
