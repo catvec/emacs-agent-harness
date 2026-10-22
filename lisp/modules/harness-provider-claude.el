@@ -12,7 +12,8 @@
 ;;
 ;; - We spawn `claude -p --input-format stream-json --output-format
 ;;   stream-json ...' with every built-in tool disabled and one SDK MCP
-;;   server called "harness".  The CLI asks us to serve that server over
+;;   server called "harness" (by default: the experimental options
+;;   below change it).  The CLI asks us to serve that server over
 ;;   `control_request' messages of subtype `mcp_message'; we answer the
 ;;   JSON-RPC calls (initialize, tools/list, tools/call) inline.  A
 ;;   tools/call becomes a `tool-call' provider event whose `:respond'
@@ -34,20 +35,71 @@
 ;; - The harness's permission system decides every tool call, so the
 ;;   CLI only has to let the harness's tools through, never bypass its
 ;;   checks: `harness-provider-claude-permission-args' fixes its
-;;   permission mode and allows `mcp__harness__*' by rule.  When a
-;;   permission prompt tool sends the CLI's prompts here instead
+;;   permission mode and allows `mcp__harness__*' by rule.  Bypassing
+;;   was the first version's way (--permission-mode bypassPermissions);
+;;   an organisation's managed settings can forbid it
+;;   (permissions.disableBypassPermissionsMode), and the CLI then ran
+;;   as `default' and denied every call.  So nothing here asks for it,
+;;   and managed settings outrank whatever the harness asks of the CLI.
+;;   When a permission prompt tool sends the CLI's prompts here instead
 ;;   (`can_use_tool' control requests), the harness's tools are allowed
 ;;   and any other refused.  A call the CLI refuses on its own
 ;;   (`system/permission_denied') becomes a hint.
 ;; - One built-in tool can stand in for a harness tool: WebSearch for
-;;   web_search (`harness-provider-claude-builtin-tools').  A request
-;;   whose `:builtin-tools' names it gets `--tools WebSearch', and
+;;   web_search (`harness-provider-claude-builtin-tools'), and with
+;;   native tools (below) seven more.  A request whose `:builtin-tools'
+;;   names it gets `--tools WebSearch', and
 ;;   `--permission-prompt-tool stdio' unless the permission arguments
 ;;   already send the prompts somewhere, so the CLI asks before each
-;;   search.  The model's tool_use becomes a `tool-call' marked
-;;   `:builtin', the CLI's question a `tool-permission' that the
-;;   harness's permission chain answers, and the echoed tool_result a
-;;   `tool-result'; all three name the harness tool.
+;;   search.  The model's
+;;   tool_use becomes a `tool-call' marked `:builtin', the CLI's
+;;   question a `tool-permission' that the harness's permission chain
+;;   answers, and the echoed tool_result a `tool-result'; all three
+;;   name the harness tool, with the harness tool's input
+;;   (`harness-provider-claude--tool-input').
+;; - Experimental, opt-in, off by default: to whatever records the
+;;   session (a company's OpenTelemetry collector, say) the defaults
+;;   look unlike any other Claude Code session -- every call an MCP call
+;;   to an SDK server nobody installed, where Claude Code's own Bash,
+;;   Read and Edit are logged under their names.  Two options change
+;;   that, alone or together:
+;;   `harness-provider-claude-native-tools' has the CLI run the harness
+;;   tools it has counterparts of (bash, read_file, write_file,
+;;   edit_file, glob, grep, web_fetch, web_search) with its own, and
+;;   `harness-provider-claude-plugin' serves the other tools from a
+;;   Claude Code plugin (harness-claude-plugin.el) in place of the SDK
+;;   server.  Who decides a native call is
+;;   `harness-provider-claude-native-permissions': by default the
+;;   harness, by `ask' rules in the one --settings JSON and the prompt
+;;   tool, so that even the reads in the working directory, which the
+;;   CLI's mode would not ask about, reach the harness's chain (and
+;;   Bash's sandbox does not allow a command either, as it otherwise
+;;   does: sandbox.autoAllowBashIfSandboxed is set false); or the
+;;   CLI, which allows the tools by rule (--allowedTools) and tells
+;;   the harness of the calls.  Neither bypasses anything.  The harness
+;;   deciding needs its prompts to reach it: arguments that skip the
+;;   CLI's checks, send them to another prompt tool or pass a
+;;   --settings of their own would leave native tools unasked, so they
+;;   stay off then, with a hint (`harness-provider-claude--prompts-lost').
+;;   What the harness cannot do for these tools is said in
+;;   `harness-provider-claude-native-tools': the sandbox, the masking
+;;   of output and the tool slots are for tools the harness runs.
+;;   A plugin the CLI refuses (the managed setting disableSideloadFlags
+;;   exits the CLI on --plugin-dir), or whose server does not come up,
+;;   sends the turn on over the SDK channel.  The first message waits
+;;   for the plugin's server (`mcp_status'), as the CLI connects
+;;   a plugin's servers in the background and a request made before
+;;   has none of its tools; that wait belongs to its message, and
+;;   cancelling or replacing the message ends it with the process,
+;;   which never got what the message carried
+;;   (`harness-provider-claude--await-plugin').  The CLI would give up
+;;   on a call of the plugin's server that waits for 30 minutes, as
+;;   `ask_user' may, so its process gets no idle timeout
+;;   (CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT).  The plugin cannot be had
+;;   along with --strict-mcp-config, so a session also loads the MCP
+;;   servers of the user's own: the CLI asks the harness about their
+;;   tools, which it refuses, but runs those the user's settings allow
+;;   without asking (`harness-provider-claude--note-foreign-tool').
 ;; - Streaming deltas arrive as `stream_event' messages carrying
 ;;   Anthropic streaming events; `assistant' messages are authoritative
 ;;   and are used to remember tool_use ids; `result' ends the turn.
@@ -184,6 +236,7 @@
 (require 'harness-http)
 (require 'harness-provider)
 (require 'harness-redaction)
+(require 'harness-claude-plugin)
 
 (defvar harness-state-directory)
 
@@ -223,7 +276,16 @@ has the CLI ask the harness instead, which lets its own tools through,
 decides the stand-ins with its permission rules and refuses any other.
 \(\"--permission-mode\" \"bypassPermissions\") skips the CLI's checks
 altogether, as the harness once did, so WebSearch then runs without
-the harness's say; managed settings may forbid it."
+the harness's say; managed settings may forbid it, and then the CLI
+denies every call.
+
+The experimental options `harness-provider-claude-native-tools' and
+`harness-provider-claude-plugin' add their own arguments after these:
+with the plugin, a rule that names `mcp__harness__*' names the
+plugin's tools instead.  They never add a bypass.  One set here
+stands, and then nothing asks the harness about the CLI's own tools, so
+native tools stay off while the harness is to decide them (see
+`harness-provider-claude-native-permissions')."
   :type '(choice (const :tag "Allow the harness's tools by rule"
                         ("--permission-mode" "default" "--allowedTools" "mcp__harness__*"))
                  (const :tag "Let the CLI ask the harness"
@@ -231,6 +293,120 @@ the harness's say; managed settings may forbid it."
                  (const :tag "Bypass the CLI's permission checks"
                         ("--permission-mode" "bypassPermissions"))
                  (repeat :tag "Other arguments" string))
+  :group 'harness)
+
+(defconst harness-provider-claude--native-default
+  '("bash" "read_file" "write_file" "edit_file" "glob" "grep" "web_fetch" "web_search")
+  "The harness tools that native tools set to t run with Claude Code's own.
+See `harness-provider-claude-native-tools'.")
+
+(defcustom harness-provider-claude-native-tools nil
+  "Experimental: harness tools that Claude Code runs itself, with its own tools.
+By default the CLI gets the harness's tools as MCP tools and no tool of
+its own (but WebSearch, in place of web_search, while the harness's
+cannot search).  To a company that records its people's Claude Code
+sessions with OpenTelemetry that looks unlike any other session: every
+call is an MCP call to a server nobody installed, where Claude Code's
+own Bash, Read, Edit and the rest are logged under their names.
+
+Non-nil turns the CLI's counterparts on, and the harness's off, for the
+tools it names: t is the usual set -- Bash for bash, Read for read_file,
+Write for write_file, Edit for edit_file, Glob, Grep, WebFetch for
+web_fetch and WebSearch for web_search -- a list names the harness tools
+to run that way (t leaves web_search to `harness-websearch-builtin' when
+that is `never').  The other tools (emacs_*, the session and task tools,
+ask_user, hand_in...) are served as before, or through a plugin
+\(`harness-provider-claude-plugin').
+
+Who decides each call is `harness-provider-claude-native-permissions',
+by default the harness's own permission chain, as for its own tools.
+What the harness can no longer do for these tools, because the CLI
+runs them: bash is not sandboxed (`harness-sandbox-policy' `required'
+keeps bash a harness tool), their output reaches the model unmasked
+\(`harness-secrets-mask'), and the tool slots do not hold them back.
+Nothing here asks the CLI to bypass its permission checks: managed
+settings that forbid that, or deny a call, stay in force.  Nor may the
+CLI run a command unasked because it sandboxes it:
+`sandbox.autoAllowBashIfSandboxed' is set false in the harness's flag
+settings, though a managed true still wins.
+
+Only sessions on this machine get them: a session on another host
+\(TRAMP) keeps the harness's tools.  Each change reaches a session at its
+next turn: its CLI process restarts in the same conversation."
+  :type '(choice (const :tag "No: the harness serves all its tools" nil)
+                 (const :tag "Yes: Bash, Read, Write, Edit, Glob, Grep, WebFetch, WebSearch" t)
+                 (repeat :tag "These harness tools" string))
+  :group 'harness)
+
+(defcustom harness-provider-claude-native-permissions 'harness
+  "Who decides a call of one of Claude Code's own tools, with native tools on.
+Only matters when `harness-provider-claude-native-tools' is set.
+
+`harness': the harness's permission chain, as for a tool of its own.
+The CLI runs in permission mode `default' with a permission prompt tool
+\(--permission-prompt-tool stdio) and an `ask' rule for each of these
+tools, so it asks the harness before every call and the harness's
+modes, rules, judge and prompts answer.  Nothing is allowed by flag;
+Bash's sandbox is not to allow a command either
+\(sandbox.autoAllowBashIfSandboxed is set false).  Where managed
+settings override the CLI's rules, the CLI asks only what they leave to
+a prompt, and the rest is theirs: a managed sandbox that allows
+sandboxed commands, say.  This needs the CLI's prompts to reach the
+harness: when `harness-provider-claude-permission-args' or
+`harness-provider-claude-extra-args' skip the CLI's checks (a bypass,
+the mode `dontAsk'), name another permission prompt tool or pass a
+--settings of their own, native tools stay off, and a hint says why.
+
+`cli': Claude Code decides: the tools are allowed by rule
+\(--allowedTools), every use of them, and the harness only records the
+calls.  Its permission modes, rules and judge do not apply to them.
+
+Neither bypasses the CLI's checks (no --dangerously-skip-permissions,
+no `bypassPermissions' mode), which an organisation's managed settings
+may forbid."
+  :type '(choice (const :tag "The harness's permission chain decides" harness)
+                 (const :tag "Claude Code allows the tools by rule; the harness only records" cli))
+  :group 'harness)
+
+(defvar harness-provider-claude--plugin-broken)
+
+(defun harness-provider-claude--set-plugin (symbol value)
+  "Set SYMBOL to VALUE, and forget that Claude Code refused the plugin.
+SYMBOL is `harness-provider-claude-plugin'.  Turning it off and on is
+how to try the plugin again after a refusal (see
+`harness-provider-claude--plugin-broken')."
+  (set-default symbol value)
+  (setq harness-provider-claude--plugin-broken nil))
+
+(defcustom harness-provider-claude-plugin nil
+  "Experimental: serve the harness's MCP tools through a Claude Code plugin.
+By default the harness serves its tools to the CLI as an SDK MCP server
+\"harness\", over the CLI's own control channel.  An SDK server is one
+only programs that embed the CLI register, so to a company that records
+Claude Code sessions with OpenTelemetry it looks unlike what its people
+run.  Non-nil serves the tools instead from a Claude Code plugin,
+`emacs-harness', which the harness writes into its state directory and
+starts the CLI with (--plugin-dir): its MCP server is a stdio server,
+as plugins' are, whose small relay script connects to the harness on
+127.0.0.1 with a token made for that process.  See harness-claude-plugin.el.
+
+It combines with `harness-provider-claude-native-tools': with both on,
+the usual tools are Claude Code's own and the rest come from the plugin,
+so no tool is an SDK server's.
+
+A CLI that refuses the plugin (an organisation's managed setting
+disableSideloadFlags rejects --plugin-dir) or a server that does not
+come up sends the session back to the SDK server, with a hint; setting
+this option off and on again, with `setopt' or Customize, which is what
+clears the memory of the refusal, tries the plugin again.  A plugin
+needs a local session, bash and a CLI that answers `mcp_status'.  The
+plugin cannot be had along with --strict-mcp-config, so MCP servers you
+configured for Claude Code are offered to the model too: the harness
+refuses their calls when Claude Code asks it, which it does unless your
+Claude Code settings allow them, and Claude Code then runs them
+without asking the harness; claude.ai's connectors are left out."
+  :type 'boolean
+  :set #'harness-provider-claude--set-plugin
   :group 'harness)
 
 (defcustom harness-provider-claude-auto-memory nil
@@ -311,19 +487,34 @@ models the listings name, which give none.  A model missing here works
 all the same, from the CLI's listing or an estimate.")
 
 (defconst harness-provider-claude-builtin-tools
-  '(("web_search" . "WebSearch"))
+  '(("web_search" . "WebSearch")
+    ("bash" . "Bash")
+    ("read_file" . "Read")
+    ("write_file" . "Write")
+    ("edit_file" . "Edit")
+    ("glob" . "Glob")
+    ("grep" . "Grep")
+    ("web_fetch" . "WebFetch"))
   "Harness tools that a tool of Claude Code can stand in for.
 Each entry is (HARNESS-NAME . CLI-NAME).  WebSearch searches the web on
-Anthropic's side.  A request's `:builtin-tools' (see `tools/builtin')
-names the harness tools whose stand-ins to turn on.")
+Anthropic's side, and stands in while the harness's web_search cannot
+search (`harness-websearch-builtin'); the others only when
+`harness-provider-claude-native-tools' asks for them.  A request's
+`:builtin-tools' (see `tools/builtin') names the harness tools whose
+stand-ins to turn on.  What the CLI's tool is called with becomes the
+harness tool's input for the permission chain and the transcript
+\(`harness-provider-claude--tool-input').")
 
 (defconst harness-provider-claude-capabilities
-  '(:hosted-loop t :fork t :resume t :vision t :thinking t :quota t
+  `(:hosted-loop t :fork t :resume t :vision t :thinking t :quota t
     :compaction hosted :cost-reported t :billing t :cache-status t :cache-refresh t
-    :builtin-tools ("web_search"))
+    :builtin-tools ,(mapcar #'car harness-provider-claude-builtin-tools))
   "Capabilities of every Claude Code model.
 `:builtin-tools' names the harness tools of
-`harness-provider-claude-builtin-tools'.  `:cache-refresh' says a
+`harness-provider-claude-builtin-tools': those the provider can run
+with the CLI's tools, of which a session gets the ones the
+`agent/builtin-tools' filters pick (`harness-provider-claude--builtin-filter').
+`:cache-refresh' says a
 request that sends the conversation again, flagged `:cache-refresh',
 reads the prompt cache the conversation's last request wrote and keeps
 it alive, in the CLI process that holds the conversation
@@ -398,7 +589,11 @@ runs on the `simple' one."
   baseline-id        ; id of the usage request whose session total starts it
   seen-output        ; non-nil once the CLI produced a reply or a result
   probe              ; non-nil for a quota probe, which serves no session
-  tools)             ; the harness tools the last request served, kept between turns
+  tools              ; the harness tools the last request served, kept between turns
+  bridge             ; the plugin's bridge to this process's relay, nil without the plugin
+  plugin-state       ; nil without the plugin, else `pending' until its server is up, then `ready'
+  plugin-gate        ; the wait for the plugin's server before the first message (see `--drop-gate'), or nil
+  status-waiters)    ; alist (REQUEST-ID . FUNCTION) of `mcp_status' requests in flight
 
 (defvar harness-provider-claude--sessions (make-hash-table :test 'equal)
   "Harness session id -> `harness-provider-claude-session'.")
@@ -414,6 +609,14 @@ runs on the `simple' one."
 
 (defvar harness-provider-claude--request-count 0
   "Counter that keeps control request ids unique.")
+
+(defvar harness-provider-claude--plugin-broken nil
+  "Why the plugin is not used, or nil while it is.
+A string once Claude Code refused `--plugin-dir' (an organisation's
+managed settings can forbid it) or the plugin's server did not come up:
+the harness serves its tools over the SDK channel from then on, until
+this is cleared (`harness-provider-claude-plugin' set again, or the
+harness started again).")
 
 (defvar harness-provider-claude--asked nil
   "When a usage report was last asked for, as a float time.")
@@ -436,6 +639,19 @@ failure the CLI reported (`quota', `billing', `rate-limit' or `auth'),
 when a used-up quota comes back, and what it said.  Kept beside the
 session records, as `harness-provider-claude--blocks' is, so reloading
 this file leaves the running CLI processes alone.")
+
+(defvar harness-provider-claude--foreign-asked (make-hash-table :test 'equal)
+  "Harness session id -> the ids of other servers' calls the CLI asked about.
+The harness refused them, and its decision is the news; a call the CLI
+did not ask about is the one it ran itself, and only then is the user
+told (`harness-provider-claude--report-foreign-calls').  Kept beside
+the session records, as `harness-provider-claude--blocks' is.")
+
+(defvar harness-provider-claude--foreign-calls (make-hash-table :test 'equal)
+  "Harness session id -> alist (TOOL-USE-ID . NAME) of this turn's other tools.
+A call of a tool of an MCP server of the user's, which a plugin session
+also loads; see `harness-provider-claude--note-foreign-tool'.  Kept
+beside the session records, as `harness-provider-claude--blocks' is.")
 
 (defvar harness-provider-claude--call-checkpoints (make-hash-table :test 'equal)
   "Harness session id -> alist (TOOL-USE-ID . CHECKPOINT) of the current turn.
@@ -490,23 +706,45 @@ the session records, as `harness-provider-claude--blocks' is.")
 (defvar harness-provider-claude--side-count 0
   "Counter that keeps the ids of side requests' CLI processes unique.")
 
+(defun harness-provider-claude--raw-slot (entry slot)
+  "Return SLOT of ENTRY, read from the record as it is, or nil.
+ENTRY may be a record of an older layout, which the accessors of the
+current one refuse (a `cl-defstruct' record knows its length): slots
+added later go last, so the slots of the first layouts keep their
+places, and their values are read where they are."
+  (let ((offset (cl-struct-slot-offset 'harness-provider-claude-session slot)))
+    (and (< offset (length entry)) (aref entry offset))))
+
 (defun harness-provider-claude--drop-stale-entries ()
   "Stop the CLI processes of records older than the current record layout.
 A reload keeps live records; one made before slots were added has no
 room for them, so its process stops and the session's next turn
-resumes the CLI session in a new one."
+resumes the CLI session in a new one.  What the record holds for the
+plugin goes too: the bridge, whose token would stay good, and the wait
+for the plugin's server, whose timer would act on a record that is gone.
+The values are read where they are (`harness-provider-claude--raw-slot'):
+the current accessors refuse a record of another length."
   (let ((size (length (harness-provider-claude--make-session))))
     (maphash (lambda (id entry)
-               (when (< (length entry) size)
-                 (let ((proc (harness-provider-claude-session-process entry))
-                       (stderr (harness-provider-claude-session-stderr entry))
-                       (fn (harness-provider-claude-session-on-event entry)))
+               (when (and (or (vectorp entry) (recordp entry))
+                          (< (length entry) size))
+                 (let* ((ref (lambda (slot) (harness-provider-claude--raw-slot entry slot)))
+                        (proc (funcall ref 'process))
+                        (stderr (funcall ref 'stderr))
+                        (fn (funcall ref 'on-event))
+                        (active (funcall ref 'active))
+                        (bridge (funcall ref 'bridge))
+                        (gate (funcall ref 'plugin-gate)))
+                   (cond ((timerp gate) (cancel-timer gate))
+                         ((timerp (car-safe gate)) (cancel-timer (car gate))))
+                   (when (and bridge (fboundp 'harness-claude-plugin-close))
+                     (ignore-errors (harness-claude-plugin-close bridge)))
                    (when (process-live-p proc)
                      (set-process-sentinel proc #'ignore)
                      (set-process-filter proc #'ignore)
                      (delete-process proc))
                    (when (buffer-live-p stderr) (kill-buffer stderr))
-                   (when (and fn (harness-provider-claude-session-active entry))
+                   (when (and fn active)
                      (ignore-errors
                        (funcall fn '(:type done :stop-reason error
                                      :error "The Claude provider was reloaded during this turn")))))
@@ -517,11 +755,26 @@ resumes the CLI session in a new one."
 
 ;;;; Small helpers
 
+(defconst harness-provider-claude--tool-prefixes
+  (list harness-provider-claude-tool-prefix harness-claude-plugin-tool-prefix)
+  "What the CLI puts before the name of a tool the harness serves.
+The first is the SDK server's, the second the plugin's server's
+\(harness-claude-plugin.el).")
+
+(defun harness-provider-claude--ours-p (name)
+  "Non-nil when NAME, a tool name of the CLI, is a tool the harness serves."
+  (and (stringp name)
+       (cl-some (lambda (prefix) (string-prefix-p prefix name))
+                harness-provider-claude--tool-prefixes)
+       t))
+
 (defun harness-provider-claude--strip-prefix (name)
   "Return tool NAME without the CLI's MCP server prefix."
-  (if (and (stringp name) (string-prefix-p harness-provider-claude-tool-prefix name))
-      (substring name (length harness-provider-claude-tool-prefix))
-    name))
+  (or (and (stringp name)
+           (cl-some (lambda (prefix)
+                      (and (string-prefix-p prefix name) (substring name (length prefix))))
+                    harness-provider-claude--tool-prefixes))
+      name))
 
 (defun harness-provider-claude--emit (entry event)
   "Deliver EVENT to the current turn's callback on ENTRY."
@@ -529,11 +782,27 @@ resumes the CLI session in a new one."
     (when (and fn (harness-provider-claude-session-active entry))
       (funcall fn event))))
 
+(defun harness-provider-claude--hint (entry text)
+  "Tell ENTRY's session TEXT, in its turn or as a hint of the session.
+A hint said while a turn runs is one of its events, as the others are;
+one that comes outside a turn (the plugin's relay went, say) is kept in
+the transcript, where the user reads it (`session/hint')."
+  (if (harness-provider-claude-session-active entry)
+      (harness-provider-claude--emit entry (list :type 'hint :text text))
+    (when (harness-method-exists-p 'session/hint)
+      (condition-case err
+          (harness-call 'session/hint (harness-provider-claude-session-id entry) text)
+        (error (harness-log 'warn "provider-claude: cannot record a hint of %s: %s"
+                            (harness-provider-claude-session-id entry)
+                            (harness-error-short-message err)))))))
+
 (defun harness-provider-claude--finish (entry event)
   "End the current turn on ENTRY by delivering the done EVENT once."
   (when (harness-provider-claude-session-active entry)
     (when-let* ((timer (harness-provider-claude-session-cancel-timer entry)))
       (cancel-timer timer))
+    ;; A turn over has nothing to wait for any more.
+    (harness-provider-claude--drop-gate entry)
     (harness-provider-claude--end-block entry)
     (remhash (harness-provider-claude-session-id entry) harness-provider-claude--builtin-calls)
     (remhash (harness-provider-claude-session-id entry) harness-provider-claude--turn-failure)
@@ -541,6 +810,9 @@ resumes the CLI session in a new one."
     (remhash (harness-provider-claude-session-id entry) harness-provider-claude--call-output)
     (remhash (harness-provider-claude-session-id entry) harness-provider-claude--cache-at)
     (remhash (harness-provider-claude-session-id entry) harness-provider-claude--cache-request)
+    (harness-provider-claude--report-foreign-calls entry)
+    (remhash (harness-provider-claude-session-id entry) harness-provider-claude--foreign-asked)
+    (remhash (harness-provider-claude-session-id entry) harness-provider-claude--foreign-calls)
     (let ((fn (harness-provider-claude-session-on-event entry)))
       (setf (harness-provider-claude-session-active entry) nil
             (harness-provider-claude-session-cancel-timer entry) nil
@@ -658,46 +930,284 @@ They name a permission prompt tool, or skip the CLI's checks."
                             when (equal a "--permission-mode")
                             collect (concat a "=" b)))))
 
-(defun harness-provider-claude--ask-args (builtin)
+(defun harness-provider-claude--ask-args (builtin &optional plugin)
   "Return the arguments that make the CLI ask before it runs a BUILTIN tool.
 BUILTIN lists the CLI's own tools turned on.  The CLI then sends its
 permission prompts here as `can_use_tool' requests, which the harness's
 permission chain answers for those tools; the harness's own tools stay
-allowed by rule.  Nothing when there is no BUILTIN tool, or when
+allowed by rule.  With PLUGIN the harness's tools are served from the
+plugin, whose session also loads MCP servers of the user's (the plugin
+cannot be had along with --strict-mcp-config): the CLI then asks about
+those too, and the harness refuses them.  Nothing when there is no
+BUILTIN tool and no PLUGIN, or when
 `harness-provider-claude-permission-args' or
 `harness-provider-claude-extra-args' already settle where the prompts
 go."
-  (unless (or (null builtin)
+  (unless (or (and (null builtin) (not plugin))
               (harness-provider-claude--prompts-routed-p
                (append harness-provider-claude-permission-args harness-provider-claude-extra-args)))
     (list "--permission-prompt-tool" "stdio")))
 
-(defun harness-provider-claude--command (model effort system resume fork &optional builtin resume-at)
+(defun harness-provider-claude--arg-values (args option)
+  "Return the values that ARGS give OPTION, oldest first.
+Both forms count: OPTION VALUE and OPTION=VALUE."
+  (let ((prefix (concat option "="))
+        values)
+    (while args
+      (let ((arg (pop args)))
+        (cond ((equal arg option) (when args (push (pop args) values)))
+              ((string-prefix-p prefix arg) (push (substring arg (length prefix)) values)))))
+    (nreverse values)))
+
+;;;; Native tools and the plugin
+
+;; Two experimental, opt-in ways to make a session look less unlike an
+;; ordinary Claude Code session to whatever records it: the CLI runs
+;; some of the harness's tools with its own (`harness-provider-claude-native-tools'),
+;; and serves the rest from a plugin (`harness-provider-claude-plugin').
+;; Neither is on unless asked for, and with both off nothing below
+;; changes the command line.
+
+(defvar harness-websearch-builtin)
+
+(defun harness-provider-claude--prompts-lost ()
+  "Return why the CLI's permission prompts cannot be left to the harness, or nil.
+The harness decides the CLI's own tools by being asked: the CLI is told
+to ask it before each call, with a rule for each tool in the one
+`--settings' it gets (`harness-provider-claude--settings-json').  That
+fails when the arguments in `harness-provider-claude-permission-args'
+and `harness-provider-claude-extra-args' skip the CLI's checks
+\(--dangerously-skip-permissions, permission mode `bypassPermissions',
+or `dontAsk', which denies what a rule does not allow without asking),
+send the prompts to a permission prompt tool that is not the harness's,
+or pass a `--settings' of their own, which would replace the harness's
+\(the CLI takes one).  The text says which, for the user."
+  (let* ((args (append harness-provider-claude-permission-args harness-provider-claude-extra-args))
+         (mode (car (last (harness-provider-claude--arg-values args "--permission-mode"))))
+         (prompt-tool (car (last (harness-provider-claude--arg-values args "--permission-prompt-tool")))))
+    (cond ((member "--dangerously-skip-permissions" args)
+           "the arguments skip the CLI's permission checks (--dangerously-skip-permissions)")
+          ((member mode '("bypassPermissions" "dontAsk"))
+           (format "the arguments set the CLI's permission mode to %s, in which it does not ask" mode))
+          ((and prompt-tool (not (equal prompt-tool "stdio")))
+           (format "the arguments send the CLI's permission prompts to %s, not to the harness" prompt-tool))
+          ((harness-provider-claude--arg-values args "--settings")
+           "the arguments pass a --settings of their own, which would replace the one the harness's rules are in"))))
+
+(defun harness-provider-claude--native-refusal ()
+  "Return why native tools are off though asked for, or nil.
+With the harness deciding (`harness-provider-claude-native-permissions'
+`harness') they need the CLI's prompts to reach it
+\(`harness-provider-claude--prompts-lost'); without that the CLI would
+run them with no one asking, which is not what the option promises, so
+they stay the harness's own."
+  (and harness-provider-claude-native-tools
+       (eq harness-provider-claude-native-permissions 'harness)
+       (harness-provider-claude--prompts-lost)))
+
+(defun harness-provider-claude--native-set ()
+  "Return the harness tools the CLI runs with its own tools, or nil.
+That is what `harness-provider-claude-native-tools' asks for, as harness
+tool names the CLI has a counterpart of.  The usual set (t) leaves
+web_search out when `harness-websearch-builtin' says the model
+provider's search is never to stand in for it; a list that names it
+asks for it.  Nil while the harness cannot decide them
+\(`harness-provider-claude--native-refusal')."
+  (let ((value harness-provider-claude-native-tools))
+    (cond ((null value) nil)
+          ((harness-provider-claude--native-refusal) nil)
+          ((eq value t)
+           (if (eq (and (boundp 'harness-websearch-builtin) harness-websearch-builtin) 'never)
+               (remove "web_search" harness-provider-claude--native-default)
+             harness-provider-claude--native-default))
+          ((listp value)
+           (cl-remove-if-not (lambda (name)
+                               (and (stringp name) (assoc name harness-provider-claude-builtin-tools)))
+                             value)))))
+
+(defun harness-provider-claude--native-mode-p ()
+  "Non-nil when the native tools option is on."
+  (and (harness-provider-claude--native-set) t))
+
+(defun harness-provider-claude--sandbox-required-p (session)
+  "Non-nil when `harness-sandbox-policy' is `required' for SESSION's directory.
+The harness's bash runs in the sandbox; the CLI's Bash would not, so a
+policy that fails closed keeps bash a harness tool."
+  (let* ((cwd (plist-get session :cwd))
+         (policy (or (and cwd (harness-method-exists-p 'config/get)
+                          (ignore-errors (harness-call 'config/get 'harness-sandbox-policy cwd)))
+                     (and (boundp 'harness-sandbox-policy) (symbol-value 'harness-sandbox-policy)))))
+    (equal (format "%s" policy) "required")))
+
+(defun harness-provider-claude--builtin-filter (names session offered)
+  "Add to NAMES the harness tools SESSION's CLI runs with its own tools.
+A filter on `agent/builtin-tools' (see `tools/builtin').  OFFERED lists
+the harness tools the session's provider has counterparts of.  Only
+sessions on this provider get them, and only the tools
+`harness-provider-claude-native-tools' names; bash is left out under a
+required sandbox (`harness-provider-claude--sandbox-required-p').  A
+session on another host keeps the harness's tools: they take its files
+by TRAMP name, which the permission chain decides on, and the CLI's
+tools name them as that host does."
+  (let ((add (and session
+                  (eq (car (harness-provider-parse-model (plist-get session :model))) 'claude)
+                  (not (plist-get session :host))
+                  (not (file-remote-p (or (plist-get session :cwd) default-directory)))
+                  (cl-remove-if-not
+                   (lambda (name)
+                     (and (member name offered)
+                          (not (member name names))
+                          (not (and (equal name "bash")
+                                    (harness-provider-claude--sandbox-required-p session)))))
+                   (harness-provider-claude--native-set)))))
+    (if add (append names add) names)))
+
+(defun harness-provider-claude--plist (&rest pairs)
+  "Return the plist of PAIRS (KEY VALUE ...) without the keys whose value is nil."
+  (cl-loop for (key value) on pairs by #'cddr
+           when value append (list key value)))
+
+(defun harness-provider-claude--tool-input (cli-name input)
+  "Return the input of the harness tool the CLI's CLI-NAME stands in for.
+INPUT is what the CLI's tool is called with; the harness tool's is what
+its permission chain, its path rules and its transcript read: Read's
+`file_path' is read_file's `path', Bash's timeout in milliseconds is
+bash's in seconds, and so on.  What the harness tool has no use for is
+left out.  A tool that needs no translation (WebSearch) gets INPUT as it is."
+  (let ((true (lambda (key) (harness-json-true-p (plist-get input key)))))
+    (pcase cli-name
+      ("Bash" (harness-provider-claude--plist
+               :command (plist-get input :command)
+               :timeout (let ((ms (plist-get input :timeout)))
+                          (and (numberp ms) (max 1 (ceiling (/ ms 1000.0)))))))
+      ("Read" (harness-provider-claude--plist
+               :path (plist-get input :file_path)
+               :offset (plist-get input :offset)
+               :limit (plist-get input :limit)))
+      ("Write" (harness-provider-claude--plist
+                :path (plist-get input :file_path)
+                :content (plist-get input :content)))
+      ("Edit" (harness-provider-claude--plist
+               :path (plist-get input :file_path)
+               :old_string (plist-get input :old_string)
+               :new_string (plist-get input :new_string)
+               :replace_all (and (plist-member input :replace_all) (plist-get input :replace_all))))
+      ("Glob" (harness-provider-claude--plist
+               :pattern (plist-get input :pattern)
+               :path (plist-get input :path)))
+      ("Grep" (harness-provider-claude--plist
+               :pattern (plist-get input :pattern)
+               :path (plist-get input :path)
+               :glob (plist-get input :glob)
+               ;; The CLI's search is case sensitive unless -i; the harness's, unless told.
+               :case_sensitive (if (funcall true :-i) :false t)))
+      ("WebFetch" (harness-provider-claude--plist :url (plist-get input :url)))
+      (_ input))))
+
+(defun harness-provider-claude--native-args (builtin plugin)
+  "Return the arguments that settle who decides the CLI's own tools BUILTIN.
+The CLI asks the harness (`harness-provider-claude--ask-args'), whose
+permission chain answers each call; with native tools on and
+`harness-provider-claude-native-permissions' `cli' it also allows them
+by rule, every use (--allowedTools), so that it asks about none.  Where
+managed settings make the CLI ignore that rule, the questions are what
+is left: the CLI does not deny every call for want of an answer, as it
+did when the rule was all the provider sent.  The `ask' rules that make
+the CLI ask about every use, reads in the working directory included,
+are flag settings (`harness-provider-claude--settings-json').  PLUGIN
+is non-nil when the harness's tools come from the plugin.  Never a
+bypass."
+  (append (and builtin
+               (harness-provider-claude--native-mode-p)
+               (eq harness-provider-claude-native-permissions 'cli)
+               (list "--allowedTools" (string-join builtin ",")))
+          (harness-provider-claude--ask-args builtin plugin)))
+
+(defconst harness-provider-claude--native-bash-denials
+  '("Bash(run_in_background:true)" "Bash(dangerouslyDisableSandbox:true)")
+  "Deny rules for what the harness's bash does not have, for the CLI's Bash.
+A command in the background is a task the CLI tells the model of later,
+in turns of its own that the harness does not run, and a command that
+escapes the CLI's sandbox is a decision the harness's permission chain
+is not shown (it is asked about the command alone).  A deny rule
+only takes away; managed settings are not touched by it.")
+
+(defun harness-provider-claude--native-deny-args (builtin)
+  "Return the arguments that take from the CLI's tools what the harness lacks.
+BUILTIN lists the CLI's own tools turned on.  With native tools on and
+Bash among them: no command in the background, none outside the sandbox
+\(`harness-provider-claude--native-bash-denials')."
+  (when (and (member "Bash" builtin) (harness-provider-claude--native-mode-p))
+    (cons "--disallowedTools" harness-provider-claude--native-bash-denials)))
+
+(defun harness-provider-claude--settings-json (effort builtin)
+  "Return the flag settings of a process as JSON, or nil when it has none.
+One `--settings' is all the CLI takes (a second replaces the first), so
+everything goes in it: thinking off (EFFORT `off'), which flag settings
+set over a user's `env', and, with native tools on and the harness
+deciding, an `ask' rule for each of the CLI's own tools BUILTIN.  An ask
+rule makes the CLI ask the permission prompt tool about every use of
+the tool, including the reads in the working directory that its mode
+would not ask about; it is no permission, and managed settings can
+override it.  Bash has a way round a rule: while the CLI sandboxes a
+command (`sandbox.enabled' in any settings file, a project's included)
+it runs it without asking, unless `sandbox.autoAllowBashIfSandboxed' is
+false, which the settings here say.  A managed setting that says true
+still wins; the sandbox is then the organisation's to trust."
+  (let ((settings
+         (append (and (eq effort 'off) (list :env (list :MAX_THINKING_TOKENS "0")))
+                 (and builtin
+                      (harness-provider-claude--native-mode-p)
+                      (eq harness-provider-claude-native-permissions 'harness)
+                      (append (list :permissions (list :ask (apply #'vector builtin)))
+                              (and (member "Bash" builtin)
+                                   (list :sandbox (list :autoAllowBashIfSandboxed :false))))))))
+    (and settings (harness-json-encode settings))))
+
+(defun harness-provider-claude--permission-args (plugin)
+  "Return `harness-provider-claude-permission-args' as they go on the command line.
+With PLUGIN the harness's tools are served from the plugin, whose tool
+names begin differently, so the rules that name the SDK server's tools
+name the plugin's."
+  (if plugin
+      (mapcar (lambda (arg)
+                (string-replace harness-provider-claude-tool-prefix
+                                harness-claude-plugin-tool-prefix arg))
+              harness-provider-claude-permission-args)
+    harness-provider-claude-permission-args))
+
+(defun harness-provider-claude--command (model effort system resume fork &optional builtin resume-at plugin)
   "Build the `claude' command line.
 MODEL is the model name, EFFORT the thinking level, `off' for no
 extended thinking, or nil, SYSTEM the system prompt or nil, RESUME a
 CLI session id to continue or nil, and FORK non-nil to fork RESUME into
 a new session.  BUILTIN lists the CLI's own tools to turn on
-\(\"WebSearch\"); every other one is off.  RESUME-AT, the uuid of an
-entry of RESUME's chain, keeps the resumed conversation up to and
-including that entry; only a fork is cut, so RESUME itself keeps all
-it has."
+\(\"WebSearch\", or with native tools more); every other one is off.
+RESUME-AT, the uuid of an entry of RESUME's chain, keeps the resumed
+conversation up to and including that entry; only a fork is cut, so
+RESUME itself keeps all it has.  PLUGIN, the directory of the plugin
+\(harness-claude-plugin.el), serves the harness's tools in place of the
+SDK server and the `--strict-mcp-config' that goes with it."
   (append
    (list harness-provider-claude-program
          "-p" "--input-format" "stream-json" "--output-format" "stream-json"
          "--verbose" "--include-partial-messages"
-         "--tools" (string-join builtin ",")
-         "--strict-mcp-config"
-         "--mcp-config" (harness-json-encode
-                         '(:mcpServers (:harness (:type "sdk" :name "harness")))))
-   harness-provider-claude-permission-args
-   (harness-provider-claude--ask-args builtin)
+         "--tools" (string-join builtin ","))
+   (if plugin
+       (list "--plugin-dir" plugin)
+     (list "--strict-mcp-config"
+           "--mcp-config" (harness-json-encode
+                           '(:mcpServers (:harness (:type "sdk" :name "harness"))))))
+   (harness-provider-claude--permission-args plugin)
+   (harness-provider-claude--native-args builtin plugin)
+   (harness-provider-claude--native-deny-args builtin)
    (list "--model" model)
-   (cond ((eq effort 'off)
-          ;; Thinking off.  Flag settings beat the user's settings files,
-          ;; whose `env' would otherwise beat the process environment.
-          (list "--settings" (harness-json-encode '(:env (:MAX_THINKING_TOKENS "0")))))
-         (effort (list "--effort" effort)))
+   (when-let* ((settings (harness-provider-claude--settings-json effort builtin)))
+     ;; Flag settings beat the user's settings files, whose `env' would
+     ;; otherwise beat the process environment.
+     (list "--settings" settings))
+   (when (and effort (not (eq effort 'off)))
+     (list "--effort" effort))
    (when (and system (not (harness-string-blank-p system)))
      (list "--system-prompt" system))
    (when resume (list "--resume" resume))
@@ -707,25 +1217,58 @@ it has."
 
 (defun harness-provider-claude--cli-tools (request)
   "Return the CLI's own tools that REQUEST turns on, by their CLI names.
-They stand in for the harness tools its `:builtin-tools' names."
-  (let ((wanted (plist-get request :builtin-tools)))
+They stand in for the harness tools its `:builtin-tools' names.  The
+usual ones are left out while the harness cannot decide them
+\(`harness-provider-claude--native-refusal'), whatever the request
+says: a request made before the arguments changed must not turn on a
+tool no one can ask about.  WebSearch, the stand-in for web_search,
+stays as it was: it is not a native tool, and has its own rule."
+  (let* ((wanted (plist-get request :builtin-tools))
+         (wanted (if (harness-provider-claude--native-refusal)
+                     (cl-remove-if (lambda (name) (member name harness-provider-claude--native-default))
+                                   wanted)
+                   wanted)))
     (delq nil (mapcar (lambda (cell) (and (member (car cell) wanted) (cdr cell)))
                       harness-provider-claude-builtin-tools))))
 
+(defun harness-provider-claude--plugin-wanted-p (request)
+  "Non-nil when REQUEST's process is to serve the harness's tools from the plugin.
+That is `harness-provider-claude-plugin' on, unless the plugin did not
+work before (`harness-provider-claude--plugin-broken'); only for a
+session's own conversation, on this machine (the relay is a local
+process connecting to this Emacs), and with bash to run the relay."
+  (let* ((session (plist-get request :session))
+         (cwd (or (plist-get session :cwd) default-directory)))
+    (and harness-provider-claude-plugin
+         (not harness-provider-claude--plugin-broken)
+         ;; A request with no tools of the harness's needs no server for them
+         ;; (a warming request, a search): no bridge, no wait.
+         (plist-get request :tools)
+         (not (harness-json-true-p (plist-get request :ephemeral)))
+         (not (harness-provider-claude--side-request-p request))
+         (not (plist-get session :host))
+         (not (file-remote-p cwd))
+         (executable-find "bash")
+         t)))
+
 (defun harness-provider-claude--spawn-key (request)
   "Return the settings a CLI process must have been started with to serve REQUEST.
-That is (MODEL EFFORT SYSTEM BUILTIN PCT MEMORY): EFFORT `off' for no
-extended thinking (see `harness-provider-claude--effort'), the CLI
-tools it turns on (nil when none), the auto-compact percentage it was
-given (nil without one) and whether it loads its auto memory
-\(`harness-provider-claude-auto-memory').  A process started otherwise
-is restarted."
+That is (MODEL EFFORT SYSTEM BUILTIN PCT MEMORY PLUGIN PERMISSIONS):
+EFFORT `off' for no extended thinking (see
+`harness-provider-claude--effort'), the CLI tools it turns on (nil when
+none), the auto-compact percentage it was given (nil without one),
+whether it loads its auto memory (`harness-provider-claude-auto-memory'),
+whether it serves the harness's tools from the plugin and who decides
+the CLI's own tools (`harness-provider-claude-native-permissions', nil
+without native tools).  A process started otherwise is restarted."
   (list (cdr (harness-provider-parse-model (plist-get request :model)))
         (harness-provider-claude--effort request)
         (plist-get request :system)
         (harness-provider-claude--cli-tools request)
         (harness-provider-claude--autocompact-pct request)
-        (and harness-provider-claude-auto-memory t)))
+        (and harness-provider-claude-auto-memory t)
+        (harness-provider-claude--plugin-wanted-p request)
+        (and (harness-provider-claude--native-mode-p) harness-provider-claude-native-permissions)))
 
 (defun harness-provider-claude--builtin-name (entry name)
   "Return the harness tool that the CLI's tool NAME stands in for on ENTRY, or nil.
@@ -733,6 +1276,35 @@ Only the tools ENTRY's process was started with count."
   (and (stringp name)
        (member name (nth 3 (harness-provider-claude-session-spawn-key entry)))
        (car (rassoc name harness-provider-claude-builtin-tools))))
+
+(defun harness-provider-claude--plugin-start (entry request)
+  "Set up the plugin for the process about to be started for ENTRY serving REQUEST.
+Return (:dir DIRECTORY :bridge BRIDGE), or nil when REQUEST does not
+call for the plugin or it cannot be set up (the harness then serves its
+tools over the SDK channel, and says so)."
+  (when (harness-provider-claude--plugin-wanted-p request)
+    (condition-case err
+        (list :dir (harness-claude-plugin-write)
+              :bridge (harness-claude-plugin-open
+                       (lambda (bridge line) (harness-provider-claude--relay-receive entry bridge line))
+                       (lambda (bridge) (harness-provider-claude--relay-closed entry bridge))))
+      (error
+       (harness-provider-claude--plugin-fail
+        entry (format "the plugin could not be set up: %s" (harness-error-short-message err)))
+       nil))))
+
+(defun harness-provider-claude--plugin-fail (entry reason)
+  "Note that the plugin does not work, for REASON, and tell ENTRY's session.
+The harness serves its tools over the SDK channel from now on (see
+`harness-provider-claude--plugin-broken')."
+  (setq harness-provider-claude--plugin-broken reason)
+  (harness-log 'warn "provider-claude: not using the plugin any more: %s" reason)
+  ;; Said once the turn that is starting has begun.
+  (harness-run-soon
+   (lambda ()
+     (harness-provider-claude--hint
+      entry (format "Claude Code's plugin mode is off for now: %s. The harness serves its tools over the SDK channel instead (set harness-provider-claude-plugin off and on again, with setopt or Customize, to try the plugin again)."
+                    reason)))))
 
 (defun harness-provider-claude--spawn (entry request resume fork &optional resume-at)
   "Start a CLI process for ENTRY serving REQUEST.
@@ -743,12 +1315,15 @@ RESUME, FORK and RESUME-AT are passed to `harness-provider-claude--command'."
          (cwd (if (and host (not (file-remote-p cwd))) (concat host cwd) cwd))
          (default-directory (file-name-as-directory (expand-file-name cwd)))
          (effort (harness-provider-claude--effort request))
-         (process-environment (harness-provider-claude--environment-for request))
+         (plugin (harness-provider-claude--plugin-start entry request))
+         (bridge (plist-get plugin :bridge))
+         (process-environment (append (and bridge (harness-provider-claude--plugin-environment bridge))
+                                      (harness-provider-claude--environment-for request)))
          (model (cdr (harness-provider-parse-model (plist-get request :model))))
          (system (plist-get request :system))
-         (command (harness-provider-claude--command model effort system resume fork
-                                                    (harness-provider-claude--cli-tools request)
-                                                    resume-at))
+         (builtin (harness-provider-claude--cli-tools request))
+         (command (harness-provider-claude--command model effort system resume fork builtin
+                                                    resume-at (plist-get plugin :dir)))
          (stderr (generate-new-buffer " *harness-claude-stderr*" t))
          (proc (condition-case err
                    (make-process :name (format "harness-claude-%s" (harness-provider-claude-session-id entry))
@@ -764,25 +1339,44 @@ RESUME, FORK and RESUME-AT are passed to `harness-provider-claude--command'."
                  ;; its stderr was to come through behind.
                  (error (when-let* ((ep (get-buffer-process stderr))) (delete-process ep))
                         (kill-buffer stderr)
+                        (when bridge (harness-claude-plugin-close bridge))
                         (signal (car err) (cdr err))))))
     (when-let* ((ep (get-buffer-process stderr)))
       (set-process-query-on-exit-flag ep nil)
       (set-process-sentinel ep #'ignore))
-    (harness-log 'info "provider-claude: spawned for %s%s%s%s"
+    (harness-log 'info "provider-claude: spawned for %s%s%s%s%s"
                  (harness-provider-claude-session-id entry)
                  (if resume (format " (resume %s)" resume) "")
                  (cond ((and fork resume-at) (format " forked at %s" resume-at))
                        (fork " forked")
                        (t ""))
-                 (let ((builtin (harness-provider-claude--cli-tools request)))
-                   (if builtin (format " with %s" (string-join builtin ", ")) "")))
-    (puthash (harness-provider-claude-session-id entry) (list :resume resume :started nil :blocks nil)
+                 (if builtin (format " with %s" (string-join builtin ", ")) "")
+                 (if bridge " through the plugin" ""))
+    ;; Asked for and not given: the user is told why, once the turn has begun.
+    (when-let* ((why (and (plist-get request :tools)
+                          (not (harness-provider-claude--side-request-p request))
+                          (harness-provider-claude--native-refusal))))
+      (harness-log 'warn "provider-claude: native tools are off for %s: %s"
+                   (harness-provider-claude-session-id entry) why)
+      (harness-run-soon
+       (lambda ()
+         (harness-provider-claude--hint
+          entry (format "Claude Code's own tools are off for now, and the harness serves its tools as before: %s (see harness-provider-claude-native-tools)."
+                        why)))))
+    (puthash (harness-provider-claude-session-id entry)
+             (list :resume resume :fork fork :resume-at resume-at :started nil :blocks nil
+                   :plugin (and bridge t))
              harness-provider-claude--spawns)
+    ;; Nothing of a wait for an earlier process's plugin carries over.
+    (harness-provider-claude--drop-gate entry)
     (setf (harness-provider-claude-session-process entry) proc
           (harness-provider-claude-session-stderr entry) stderr
           (harness-provider-claude-session-buffer entry) ""
           (harness-provider-claude-session-spawn-key entry) (harness-provider-claude--spawn-key request)
           (harness-provider-claude-session-account entry) nil
+          (harness-provider-claude-session-bridge entry) bridge
+          (harness-provider-claude-session-plugin-state entry) (and bridge 'pending)
+          (harness-provider-claude-session-status-waiters entry) nil
           ;; A fresh CLI session starts from zero; a resumed or forked
           ;; one from the spend it restores, which the usage report says.
           (harness-provider-claude-session-cost-total entry) (if resume nil 0.0)
@@ -791,11 +1385,48 @@ RESUME, FORK and RESUME-AT are passed to `harness-provider-claude--command'."
           ;; the one it resumes, and none yet for a new one or a fork.
           (harness-provider-claude-session-cli-session-id entry) (and (not fork) resume))
     (harness-provider-claude--send
-     entry '(:type "control_request" :request_id "init-1"
-             :request (:subtype "initialize" :sdkMcpServers ("harness"))))
+     entry (list :type "control_request" :request_id "init-1"
+                 ;; The SDK server is the one the CLI is to ask us for.
+                 :request (if bridge
+                              '(:subtype "initialize")
+                            '(:subtype "initialize" :sdkMcpServers ("harness")))))
     (setf (harness-provider-claude-session-baseline-id entry)
           (harness-provider-claude--request-usage entry))
     proc))
+
+(defun harness-provider-claude--plugin-environment (bridge)
+  "Return the environment entries for a process served through BRIDGE.
+They are the port and the token the plugin's relay connects with; the
+switch that keeps claude.ai's connectors out of the session, which
+`--strict-mcp-config' does for an SDK server's session (it cannot be
+had along with a plugin); and no idle timeout for the plugin's tool
+calls.  The CLI gives up on a call of a stdio server that has answered
+nothing for 30 minutes (an SDK server's calls are exempt), but a call
+of the harness's waits as long as a person does: `ask_user', a
+permission prompt, `task_wait'."
+  (append (harness-claude-plugin-environment bridge)
+          (list "ENABLE_CLAUDEAI_MCP_SERVERS=false"
+                "CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT=0")))
+
+(defun harness-provider-claude--drop-gate (entry)
+  "End the wait for the plugin's server on ENTRY, if one is under way.
+The wait (`harness-provider-claude--await-plugin') is a gate: a list
+holding its watchdog timer, kept in ENTRY's `plugin-gate' slot for as
+long as the wait lasts.  Every timer and answer the wait has left
+goes on only while its gate is the one in the slot, so a dropped wait,
+or one that a later message's wait replaced, does nothing more."
+  (when-let* ((gate (harness-provider-claude-session-plugin-gate entry)))
+    (when (timerp (car-safe gate)) (cancel-timer (car gate)))
+    (setf (harness-provider-claude-session-plugin-gate entry) nil)))
+
+(defun harness-provider-claude--close-bridge (entry)
+  "End the plugin's bridge to ENTRY's process, if it has one."
+  (harness-provider-claude--drop-gate entry)
+  (when-let* ((bridge (harness-provider-claude-session-bridge entry)))
+    (harness-claude-plugin-close bridge))
+  (setf (harness-provider-claude-session-bridge entry) nil
+        (harness-provider-claude-session-plugin-state entry) nil
+        (harness-provider-claude-session-status-waiters entry) nil))
 
 (defun harness-provider-claude--kill (entry)
   "Kill ENTRY's process and its stderr buffer."
@@ -806,6 +1437,7 @@ RESUME, FORK and RESUME-AT are passed to `harness-provider-claude--command'."
       (delete-process proc))
     (when (buffer-live-p buf) (kill-buffer buf))
     (harness-provider-claude--end-block entry)
+    (harness-provider-claude--close-bridge entry)
     (setf (harness-provider-claude-session-process entry) nil
           (harness-provider-claude-session-stderr entry) nil)))
 
@@ -952,8 +1584,26 @@ text of the result is what matters most, and it must go out."
                   (harness-error-short-message err))
      nil)))
 
-(defun harness-provider-claude--tools-call (entry request-id message)
-  "Serve a tools/call MESSAGE under control request REQUEST-ID on ENTRY.
+(defun harness-provider-claude--call-tool-id (entry name params)
+  "Return the tool_use id of the call of tool NAME that PARAMS belong to, on ENTRY.
+The relay's CLI names it in the call's `_meta' (claudecode/toolUseId);
+the SDK channel's does not, and the id is that of the oldest call of
+NAME the CLI announced, else a made-up one (see
+`harness-provider-claude--take-tool-id')."
+  (let ((id (plist-get (plist-get params :_meta) :claudecode/toolUseId)))
+    (if (and (stringp id) (not (string-empty-p id)))
+        (progn
+          ;; Not left to a later call of the same tool, which would take it.
+          (setf (harness-provider-claude-session-pending-tools entry)
+                (cl-remove id (harness-provider-claude-session-pending-tools entry)
+                           :key #'car :test #'equal))
+          id)
+      (harness-provider-claude--take-tool-id entry name))))
+
+(defun harness-provider-claude--serve-tool-call (entry message send)
+  "Serve a tools/call MESSAGE on ENTRY, answering with SEND.
+SEND takes the JSON-RPC message to send back (see
+`harness-provider-claude--mcp-dispatch').
 The tool call's `:respond' takes the result, (:content TEXT :is-error
 BOOL), and with it `:images' when the model is to see pictures (see
 `harness-provider-claude--image-blocks'): they follow the text, as
@@ -967,16 +1617,15 @@ otherwise wait for the tool for good.  `:respond' answers once."
          (params (plist-get message :params))
          (name (harness-provider-claude--strip-prefix (plist-get params :name)))
          (input (plist-get params :arguments))
-         (tool-id (harness-provider-claude--take-tool-id entry name))
+         (tool-id (harness-provider-claude--call-tool-id entry name params))
          (answered nil)
          (reply
           (lambda (text is-error &optional images)
-            (harness-provider-claude--control-response
-             entry request-id
-             (list :jsonrpc "2.0" :id rpc-id
-                   :result (list :content (cons (list :type "text" :text text)
-                                                (harness-provider-claude--image-blocks images))
-                                 :isError (if is-error t :false))))))
+            (funcall send
+                     (list :jsonrpc "2.0" :id rpc-id
+                           :result (list :content (cons (list :type "text" :text text)
+                                                        (harness-provider-claude--image-blocks images))
+                                         :isError (if is-error t :false))))))
          (respond
           (lambda (result)
             (unless answered
@@ -1000,37 +1649,102 @@ otherwise wait for the tool for good.  `:respond' answers once."
                          (list :checkpoint checkpoint))))
       (funcall respond (list :content "The harness is not running a turn" :is-error t)))))
 
-(defun harness-provider-claude--handle-mcp (entry request-id message)
-  "Answer the JSON-RPC MESSAGE from the CLI under REQUEST-ID on ENTRY."
+(defun harness-provider-claude--tools-call (entry request-id message)
+  "Serve a tools/call MESSAGE under control request REQUEST-ID on ENTRY.
+The SDK channel's answers are control responses
+\(`harness-provider-claude--serve-tool-call')."
+  (harness-provider-claude--serve-tool-call
+   entry message
+   (lambda (reply) (harness-provider-claude--control-response entry request-id reply))))
+
+(defun harness-provider-claude--mcp-dispatch (entry message send &optional strict)
+  "Answer the JSON-RPC MESSAGE of the CLI about the harness's tools on ENTRY.
+SEND takes the JSON-RPC message to send back; it gets nil for a message
+that is a notification, which wants no answer.  The SDK channel and the
+plugin's relay both bring such messages.  With STRICT, a request the
+harness does not know is answered with the error JSON-RPC gives for
+it, where the SDK channel is given an empty result."
   (let ((method (plist-get message :method))
         (rpc-id (plist-get message :id)))
     (pcase method
       ("initialize"
-       (harness-provider-claude--control-response
-        entry request-id
-        (list :jsonrpc "2.0" :id rpc-id
-              :result (list :protocolVersion (or (harness-plist-get-in message '(:params :protocolVersion))
-                                                 "2025-06-18")
-                            :capabilities '(:tools :empty)
-                            :serverInfo '(:name "harness" :version "3.0.0")))))
-      ("notifications/initialized"
-       ;; The CLI waits for an answer even though this is a notification.
-       (harness-provider-claude--control-response
-        entry request-id '(:jsonrpc "2.0" :id 0 :result :empty)))
+       (funcall send
+                (list :jsonrpc "2.0" :id rpc-id
+                      :result (list :protocolVersion (or (harness-plist-get-in message '(:params :protocolVersion))
+                                                         "2025-06-18")
+                                    :capabilities '(:tools :empty)
+                                    :serverInfo '(:name "harness" :version "3.0.0")))))
+      ("notifications/initialized" (funcall send nil))
       ("tools/list"
-       (harness-provider-claude--control-response
-        entry request-id
-        (list :jsonrpc "2.0" :id rpc-id
-              :result (list :tools (harness-json-array (harness-provider-claude--tool-list entry))))))
+       (funcall send
+                (list :jsonrpc "2.0" :id rpc-id
+                      :result (list :tools (harness-json-array (harness-provider-claude--tool-list entry))))))
       ("tools/call"
-       (harness-provider-claude--tools-call entry request-id message))
+       (harness-provider-claude--serve-tool-call entry message send))
+      ("ping"
+       (funcall send (list :jsonrpc "2.0" :id rpc-id :result :empty)))
       (_
        (harness-log 'debug "provider-claude: unhandled MCP method %s" method)
-       (if rpc-id
-           (harness-provider-claude--control-response
-            entry request-id (list :jsonrpc "2.0" :id rpc-id :result :empty))
-         (harness-provider-claude--control-response
-          entry request-id '(:jsonrpc "2.0" :id 0 :result :empty)))))))
+       (funcall send
+                (cond ((null rpc-id) nil)
+                      (strict (list :jsonrpc "2.0" :id rpc-id
+                                    :error (list :code -32601 :message "Method not found")))
+                      (t (list :jsonrpc "2.0" :id rpc-id :result :empty))))))))
+
+(defun harness-provider-claude--handle-mcp (entry request-id message)
+  "Answer the JSON-RPC MESSAGE of control request REQUEST-ID of ENTRY's CLI.
+The control protocol wants an answer to every request, a notification's
+included."
+  (harness-provider-claude--mcp-dispatch
+   entry message
+   (lambda (reply)
+     (harness-provider-claude--control-response
+      entry request-id (or reply '(:jsonrpc "2.0" :id 0 :result :empty))))))
+
+;;;; The plugin's server
+
+(defun harness-provider-claude--relay-send (entry bridge reply)
+  "Send the JSON-RPC message REPLY to the relay of ENTRY's CLI process, by BRIDGE."
+  (unless (and (eq bridge (harness-provider-claude-session-bridge entry))
+               (harness-claude-plugin-send bridge (harness-json-encode reply)))
+    (harness-log 'warn "provider-claude: the plugin's relay of %s is gone; an answer was lost"
+                 (harness-provider-claude-session-id entry))))
+
+(defun harness-provider-claude--relay-receive (entry bridge line)
+  "Handle LINE, a JSON-RPC message of the relay of ENTRY's CLI process on BRIDGE.
+The plugin's stdio server is the harness's tools, served as the SDK
+channel serves them (`harness-provider-claude--mcp-dispatch').  A
+bridge ENTRY no longer has is ignored."
+  (when (eq bridge (harness-provider-claude-session-bridge entry))
+    (let ((message (condition-case err
+                       (harness-json-parse line)
+                     (error (harness-log 'warn "provider-claude: bad line from the relay: %s"
+                                         (harness-error-short-message err))
+                            nil))))
+      (when (consp message)
+        (harness-provider-claude--mcp-dispatch
+         entry message
+         (lambda (reply) (when reply (harness-provider-claude--relay-send entry bridge reply)))
+         t)))))
+
+(defun harness-provider-claude--relay-closed (entry bridge)
+  "Note that the relay of ENTRY's CLI process on BRIDGE went.
+A process that is still running has lost the harness's tools with it:
+it is marked, by a word added to its spawn key, so that its next turn
+starts a new process in the same conversation (`--ensure-process'); the
+tool calls of this turn that are still to come fail.  The process
+ending is no news, and the sentinel's."
+  (when (eq bridge (harness-provider-claude-session-bridge entry))
+    (let ((alive (process-live-p (harness-provider-claude-session-process entry))))
+      (harness-log (if alive 'warn 'debug)
+                   "provider-claude: the plugin's relay of %s disconnected"
+                   (harness-provider-claude-session-id entry))
+      (when alive
+        (unless (memq 'relay-lost (harness-provider-claude-session-spawn-key entry))
+          (setf (harness-provider-claude-session-spawn-key entry)
+                (append (harness-provider-claude-session-spawn-key entry) (list 'relay-lost))))
+        (harness-provider-claude--hint
+         entry "The plugin's connection to the harness ended, so Claude Code has no harness tools until its next turn, which starts a new process.")))))
 
 (defun harness-provider-claude--answer-permission (entry request-id answer)
   "Answer the CLI's permission prompt REQUEST-ID on ENTRY with ANSWER.
@@ -1060,8 +1774,14 @@ it serves it.  A tool of the CLI's that stands in for a harness tool
 goes to the turn, whose permission chain decides it (see
 `harness-provider-claude--ask-builtin'); any other tool is refused."
   (let* ((name (plist-get request :tool_name))
-         (ours (and (stringp name) (string-prefix-p harness-provider-claude-tool-prefix name)))
+         (id (plist-get request :tool_use_id))
+         (ours (harness-provider-claude--ours-p name))
          (builtin (and (not ours) (harness-provider-claude--builtin-name entry name))))
+    (unless (or ours builtin)
+      (when (stringp id)
+        (let ((sid (harness-provider-claude-session-id entry)))
+          (puthash sid (cons id (gethash sid harness-provider-claude--foreign-asked))
+                   harness-provider-claude--foreign-asked))))
     (if (and builtin (harness-provider-claude-session-active entry))
         (harness-provider-claude--ask-builtin entry request-id request builtin)
       (harness-log 'debug "provider-claude: %s %s for %s"
@@ -1089,15 +1809,19 @@ goes to the turn, whose permission chain decides it (see
 
 (defun harness-provider-claude--announce-builtin (entry id name input)
   "Report call ID on ENTRY of the CLI's tool standing in for harness tool NAME.
-INPUT is its input.  The turn hears of each call once, as a `tool-call'
-marked `:builtin'.  Return the call's record."
+INPUT is what the CLI's tool is called with; the turn hears the harness
+tool's input (`harness-provider-claude--tool-input').  The turn hears of
+each call once, as a `tool-call' marked `:builtin'.  Return the call's
+record, which keeps the CLI's own input as `:cli-input'."
   (or (harness-provider-claude--builtin-call entry id)
-      (let ((call (list :id id :name name :input input :asked nil))
-            (sid (harness-provider-claude-session-id entry)))
+      (let* ((shaped (harness-provider-claude--tool-input
+                      (cdr (assoc name harness-provider-claude-builtin-tools)) input))
+             (call (list :id id :name name :cli-input input :input shaped :asked nil))
+             (sid (harness-provider-claude-session-id entry)))
         (puthash sid (append (gethash sid harness-provider-claude--builtin-calls) (list call))
                  harness-provider-claude--builtin-calls)
         (harness-provider-claude--emit
-         entry (append (list :type 'tool-call :id id :name name :input input :builtin t)
+         entry (append (list :type 'tool-call :id id :name name :input shaped :builtin t)
                        (when-let* ((checkpoint (harness-provider-claude--call-checkpoint entry id)))
                          (list :checkpoint checkpoint))))
         call)))
@@ -1106,24 +1830,27 @@ marked `:builtin'.  Return the call's record."
   "Ask the turn on ENTRY whether the CLI may run its tool standing in for NAME.
 REQUEST is the CLI's `can_use_tool' prompt, answered under REQUEST-ID
 once the harness has decided: the `tool-permission' event's `:respond'
-gets the harness's DECISION.  CLIs that do not say which call they ask
-about mean the oldest one not asked about yet."
+gets the harness's DECISION.  The turn is asked about the harness
+tool's input (`harness-provider-claude--tool-input'); an allowance goes
+back with the CLI's own input, which a decision cannot rewrite, as it
+is the harness tool's.  CLIs that do not say which call they ask about
+mean the oldest one not asked about yet."
   (let* ((id (or (plist-get request :tool_use_id)
                  (plist-get (cl-find-if (lambda (c) (and (equal name (plist-get c :name))
                                                          (not (plist-get c :asked))))
                                         (harness-provider-claude--builtin-calls entry))
                             :id)
                  (concat "toolu_" (harness-short-id 12))))
-         (input (or (plist-get request :input)
-                    (plist-get (harness-provider-claude--builtin-call entry id) :input)))
-         (call (harness-provider-claude--announce-builtin entry id name input))
+         (cli-input (or (plist-get request :input)
+                        (plist-get (harness-provider-claude--builtin-call entry id) :cli-input)))
+         (call (harness-provider-claude--announce-builtin entry id name cli-input))
          (answered nil))
     (plist-put call :asked t)
     (harness-log 'debug "provider-claude: asking the harness about %s (%s) for %s"
                  name id (harness-provider-claude-session-id entry))
     (harness-provider-claude--emit
      entry
-     (list :type 'tool-permission :id id :name name :input input
+     (list :type 'tool-permission :id id :name name :input (plist-get call :input)
            :respond
            (lambda (decision)
              (unless answered
@@ -1132,7 +1859,7 @@ about mean the oldest one not asked about yet."
                 entry request-id
                 (if (eq (plist-get decision :behavior) 'allow)
                     ;; Parsing turned {} into nil, which would go back as null.
-                    (list :behavior "allow" :updatedInput (or (plist-get decision :input) input :empty))
+                    (list :behavior "allow" :updatedInput (or cli-input :empty))
                   (list :behavior "deny"
                         :message (or (plist-get decision :message) "The harness denied this call"))))))))))
 
@@ -1362,6 +2089,42 @@ is not in the session's chain, and a CLI that sends no uuid gives none."
          (not (plist-get msg :parent_tool_use_id))
          (list :cli-session-id id :uuid uuid))))
 
+(defun harness-provider-claude--note-foreign-tool (entry id name)
+  "Remember that the CLI called NAME, a tool the harness does not serve, on ENTRY.
+NAME is a tool of an MCP server of the user's, which a session has when
+the plugin serves the harness's tools (`--strict-mcp-config' cannot be
+had along with a plugin).  Nothing is said yet: the CLI may still ask
+the harness whether it may run the call, and its refusal is the news
+then; a call never asked about is the CLI's own, and the turn hears of
+it when it ends (`harness-provider-claude--report-foreign-calls')."
+  (when (and (stringp name)
+             (string-prefix-p "mcp__" name)
+             (not (harness-provider-claude--ours-p name)))
+    (let ((sid (harness-provider-claude-session-id entry)))
+      (puthash sid (cons (cons id name) (gethash sid harness-provider-claude--foreign-calls))
+               harness-provider-claude--foreign-calls))))
+
+(defun harness-provider-claude--report-foreign-calls (entry)
+  "Tell the turn on ENTRY of each other server's call the CLI ran without asking.
+One hint per server, and only for a call the CLI did not ask the
+harness about: a call it asked about was refused, which the model
+reads in its result."
+  (let* ((sid (harness-provider-claude-session-id entry))
+         (asked (gethash sid harness-provider-claude--foreign-asked))
+         (unasked (cl-remove-if (lambda (call) (member (car call) asked))
+                                (gethash sid harness-provider-claude--foreign-calls)))
+         (spawn (gethash sid harness-provider-claude--spawns)))
+    (dolist (call unasked)
+      (let* ((name (cdr call))
+             (server (if (string-match "\\`mcp__\\(.+?\\)__" name) (match-string 1 name) name)))
+        (unless (member server (plist-get spawn :foreign-tools))
+          (when spawn
+            (plist-put spawn :foreign-tools (cons server (plist-get spawn :foreign-tools))))
+          (harness-provider-claude--emit
+           entry (list :type 'hint
+                       :text (format "Claude Code called %s, a tool of an MCP server of yours (%s), not one of the harness's. The harness refuses such a call when Claude Code asks it; where your Claude Code settings allow the tool, Claude Code runs it without asking, and the harness does not decide."
+                                     name server))))))))
+
 (defun harness-provider-claude--handle-assistant (entry message &optional checkpoint sub-agent)
   "Remember tool_use ids from the authoritative assistant MESSAGE on ENTRY.
 A call of the CLI's own tools that stands in for a harness tool is
@@ -1402,6 +2165,7 @@ sub-agent's requests use a cache of their own."
             (puthash sid (cons (cons (plist-get block :id) checkpoint)
                                (gethash sid harness-provider-claude--call-checkpoints))
                      harness-provider-claude--call-checkpoints)))
+        (harness-provider-claude--note-foreign-tool entry (plist-get block :id) (plist-get block :name))
         (when-let* ((name (harness-provider-claude--builtin-name entry (plist-get block :name))))
           (harness-provider-claude--announce-builtin
            entry (plist-get block :id) name (plist-get block :input)))))
@@ -1415,10 +2179,16 @@ sub-agent's requests use a cache of their own."
   (cdr (assoc id (gethash (harness-provider-claude-session-id entry) harness-provider-claude--call-checkpoints))))
 
 (defun harness-provider-claude--result-text (content)
-  "Flatten a tool_result CONTENT (string or list of blocks) into text."
+  "Flatten a tool_result CONTENT (string or list of blocks) into text.
+A picture, which the CLI's Read gives the model for an image file, is
+\"[image]\" in the text."
   (cond ((stringp content) content)
         ((listp content)
-         (mapconcat (lambda (b) (or (plist-get b :text) "")) content "\n"))
+         (mapconcat (lambda (b)
+                      (or (plist-get b :text)
+                          (and (equal (plist-get b :type) "image") "[image]")
+                          ""))
+                    content "\n"))
         (t (format "%s" content))))
 
 (defun harness-provider-claude--handle-user-echo (entry message &optional checkpoint)
@@ -1447,12 +2217,15 @@ holds, once the turn has recorded that result."
   "Report that the CLI refused to run a tool, from the system MSG on ENTRY.
 The harness never hears of a harness tool's call that the CLI refuses,
 so the user learns of it here; nor does it decide on one of the CLI's
-own tools that the CLI's rules refuse."
+own tools that the CLI's rules refuse.  Settings files and an
+organisation's managed settings outrank what the harness asks of the
+CLI: a deny rule of theirs holds, and the harness does not try to get
+round it."
   (let* ((name (plist-get msg :tool_name))
          (why (or (plist-get msg :message) "permission denied"))
          (builtin (harness-provider-claude--builtin-name entry name)))
     (cond
-     ((and (stringp name) (string-prefix-p harness-provider-claude-tool-prefix name))
+     ((harness-provider-claude--ours-p name)
       (harness-log 'warn "provider-claude: Claude Code denied %s for %s: %s"
                    name (harness-provider-claude-session-id entry) why)
       (harness-provider-claude--emit
@@ -1466,10 +2239,11 @@ own tools that the CLI's rules refuse."
                    name (harness-provider-claude-session-id entry) why)
       (harness-provider-claude--emit
        entry (list :type 'hint
-                   :text (format (concat "Claude Code refused to run its %s, which stands in for %s;"
-                                         " its permission rules must leave the decision to the harness"
-                                         " (see the setting harness-provider-claude-permission-args)."
-                                         "  It said: %s")
+                   :text (format (concat "Claude Code refused to run its %s, which stands in for %s: its own"
+                                         " permission rules decided, and its settings files and an"
+                                         " organisation's managed settings outrank the harness (see the"
+                                         " settings harness-provider-claude-native-permissions and"
+                                         " harness-provider-claude-permission-args).  It said: %s")
                                  name builtin why)))))))
 
 ;;;; Account, billing and quota
@@ -1841,7 +2615,134 @@ back; the CLI's error code says when it is money that ran out."
      ((and (stringp id) (string-prefix-p "usage-" id))
       (harness-provider-claude--handle-usage entry id (and ok payload)
                                              (unless ok (or (plist-get response :error) "failed"))))
+     ((and (stringp id) (string-prefix-p "mcpstatus-" id))
+      (harness-provider-claude--handle-mcp-status entry id (if ok (plist-get payload :mcpServers) 'unsupported)))
      (t (harness-log 'debug "provider-claude: control_response %S" response)))))
+
+(defconst harness-provider-claude--plugin-wait 8
+  "Seconds to wait for the plugin's server to come up before a first message.")
+
+(defconst harness-provider-claude--plugin-poll 0.15
+  "Seconds between two questions to the CLI about the plugin's server.")
+
+(defconst harness-provider-claude--plugin-absent-polls 8
+  "Answers that do not list the plugin's server before it counts as not loaded.")
+
+(defun harness-provider-claude--request-mcp-status (entry callback)
+  "Ask ENTRY's CLI how its MCP servers are; call CALLBACK with the answer.
+CALLBACK gets the list of servers, plists with `:name' and `:status'
+\(\"pending\", \"connected\", \"failed\"...), or the symbol `unsupported'
+when the CLI does not answer the question (an older one)."
+  (let ((id (format "mcpstatus-%d" (cl-incf harness-provider-claude--request-count))))
+    (push (cons id callback) (harness-provider-claude-session-status-waiters entry))
+    (harness-provider-claude--send
+     entry (list :type "control_request" :request_id id :request '(:subtype "mcp_status")))
+    id))
+
+(defun harness-provider-claude--handle-mcp-status (entry id servers)
+  "Hand SERVERS, the answer to `mcp_status' request ID, to whoever asked on ENTRY."
+  (when-let* ((cell (assoc id (harness-provider-claude-session-status-waiters entry))))
+    (setf (harness-provider-claude-session-status-waiters entry)
+          (delq cell (harness-provider-claude-session-status-waiters entry)))
+    (condition-case err
+        (funcall (cdr cell) servers)
+      (error (harness-log 'warn "provider-claude: handling the MCP status failed: %s"
+                          (harness-error-short-message err))))))
+
+(defun harness-provider-claude--await-plugin (entry then)
+  "Call THEN once the plugin's server of ENTRY's process is up.
+The CLI connects a plugin's server in the background, a fraction of a
+second after it starts, and a model request made before that has none of
+its tools, so the first message waits (ENTRY's turn is under way, and
+cancelling it ends the wait).  A server that fails, or is not loaded at
+all, or is not up within `harness-provider-claude--plugin-wait' seconds
+\(a watchdog counts them, for a CLI that does not answer) sends the turn
+on without the plugin (`harness-provider-claude--plugin-fallback'); a
+CLI that cannot say how its servers are is trusted."
+  (harness-provider-claude--drop-gate entry)
+  (let* ((proc (harness-provider-claude-session-process entry))
+         (deadline (+ (float-time) harness-provider-claude--plugin-wait))
+         (absent 0)
+         (gate (list nil)))
+    (setf (harness-provider-claude-session-plugin-gate entry) gate)
+    (cl-labels
+        ((current-p ()
+           ;; The gate is this wait's own: a later turn on the same process
+           ;; has another, and this one's leftovers must not act on it.
+           (and (eq gate (harness-provider-claude-session-plugin-gate entry))
+                (eq proc (harness-provider-claude-session-process entry))
+                (harness-provider-claude-session-active entry)
+                (not (harness-provider-claude-session-cancelled entry))))
+         (finish ()
+           (harness-provider-claude--drop-gate entry))
+         (up ()
+           (when (current-p)
+             (finish)
+             (setf (harness-provider-claude-session-plugin-state entry) 'ready)
+             (funcall then)))
+         (down (why)
+           (when (current-p)
+             (finish)
+             (harness-provider-claude--plugin-fallback entry why)))
+         (poll ()
+           (when (current-p)
+             (harness-provider-claude--request-mcp-status
+              entry
+              (lambda (servers)
+                (when (current-p)
+                  (let ((status (and (listp servers)
+                                     (plist-get (cl-find harness-claude-plugin-server-label servers
+                                                         :key (lambda (s) (plist-get s :name))
+                                                         :test #'equal)
+                                                :status))))
+                    (cond
+                     ((eq servers 'unsupported) (up))
+                     ((equal status "connected") (up))
+                     ((member status '("failed" "needs-auth" "disabled"))
+                      (down (format "its server is %s" status)))
+                     ((> (float-time) deadline)
+                      (down "its server did not come up in time"))
+                     ((and (null status) (> (cl-incf absent) harness-provider-claude--plugin-absent-polls))
+                      (down "Claude Code did not load it"))
+                     (t (run-at-time harness-provider-claude--plugin-poll nil #'poll))))))))))
+      (setcar gate (run-at-time (+ harness-provider-claude--plugin-wait 1) nil
+                                (lambda () (down "its server did not come up in time"))))
+      (poll))))
+
+(defun harness-provider-claude--send-when-ready (entry blocks)
+  "Write a user message with content BLOCKS to ENTRY's process, once it can serve.
+A process that serves the harness's tools from the plugin gets the
+message when the plugin's server is up
+\(`harness-provider-claude--await-plugin')."
+  (if (eq (harness-provider-claude-session-plugin-state entry) 'pending)
+      (harness-provider-claude--await-plugin
+       entry (lambda () (harness-provider-claude--send-user entry blocks)))
+    (harness-provider-claude--send-user entry blocks)))
+
+(defun harness-provider-claude--plugin-fallback (entry reason)
+  "Carry the turn of ENTRY on without the plugin, because of REASON.
+The process, which serves the harness's tools through the plugin, goes;
+a new one opens the same conversation and serves them over the SDK
+channel, and gets the turn's message.  The plugin stays off for every
+session until it is turned off and on
+\(`harness-provider-claude--plugin-broken')."
+  (let* ((sid (harness-provider-claude-session-id entry))
+         (request (harness-provider-claude-session-request entry))
+         (spawn (gethash sid harness-provider-claude--spawns))
+         (resume (plist-get spawn :resume))
+         (fork (plist-get spawn :fork))
+         (blocks (plist-get spawn :blocks))
+         (fresh (eq (plist-get spawn :mode) 'fresh)))
+    (harness-provider-claude--plugin-fail entry reason)
+    (harness-provider-claude--kill entry)
+    (setf (harness-provider-claude-session-cli-session-id entry) (and (not fork) resume))
+    (harness-provider-claude--spawn entry request resume fork (plist-get spawn :resume-at))
+    (when blocks
+      (when-let* ((new (gethash sid harness-provider-claude--spawns)))
+        (plist-put new :blocks blocks)
+        (plist-put new :mode (plist-get spawn :mode)))
+      (harness-provider-claude--send-user
+       entry (if fresh (harness-provider-claude--with-history request blocks) blocks)))))
 
 (defun harness-provider-claude--turn-cost (entry msg)
   "Return the API-price cost of the turn that result MSG ends on ENTRY, or nil.
@@ -2001,7 +2902,43 @@ It is no longer the probe: whoever needs one next starts another."
         (harness-provider-claude--handle-account entry (list :apiKeySource key))))
     (harness-provider-claude--emit
      entry (list :type 'provider-state :state (list :cli-session-id id :model model)))
-    (dolist (server (plist-get msg :mcp_servers))
+    (harness-provider-claude--check-servers entry (plist-get msg :mcp_servers))
+    ;; A tools/list answer the CLI refuses, a schema it finds invalid say,
+    ;; leaves the server connected but the model with none of its tools.
+    ;; (The plugin's server may still be coming up: its own check, before
+    ;; the first message, is `harness-provider-claude--await-plugin'.)
+    (when (and (plist-get (harness-provider-claude-session-request entry) :tools)
+               (not (eq (harness-provider-claude-session-plugin-state entry) 'pending))
+               (not (cl-some #'harness-provider-claude--ours-p (plist-get msg :tools))))
+      (harness-log 'error "provider-claude: Claude Code offers none of the harness tools to %s"
+                   (harness-provider-claude-session-id entry))
+      (harness-provider-claude--emit
+       entry (list :type 'hint
+                   :text "Claude Code refused the harness's tool list; tools are unavailable this turn")))))
+
+(defun harness-provider-claude--check-servers (entry servers)
+  "Check the MCP SERVERS of the banner of ENTRY's process.
+Without the plugin the harness's SDK server must be connected.  With
+it, a server of the user's own the CLI loaded as well (the plugin
+cannot be had along with `--strict-mcp-config') is said once: the
+model is offered its tools, the harness refuses their calls when the
+CLI asks it, and the CLI runs the ones the user's settings allow
+without asking (`harness-provider-claude--note-foreign-tool')."
+  (if (harness-provider-claude-session-bridge entry)
+      (let ((others (cl-remove harness-claude-plugin-server-label servers
+                               :key (lambda (s) (plist-get s :name)) :test #'equal)))
+        (when-let* ((spawn (and others (gethash (harness-provider-claude-session-id entry)
+                                                harness-provider-claude--spawns)))
+                    ((not (plist-get spawn :foreign-noted))))
+          (plist-put spawn :foreign-noted t)
+          (harness-log 'info "provider-claude: %s also loaded the MCP servers %s"
+                       (harness-provider-claude-session-id entry)
+                       (mapconcat (lambda (s) (format "%s" (plist-get s :name))) others ", "))
+          (harness-provider-claude--emit
+           entry (list :type 'hint
+                       :text (format "Claude Code also loaded MCP servers of yours (%s), which the plugin mode cannot keep out. Their tools are offered to the model. The harness refuses their calls unless your Claude Code settings allow them, and then Claude Code runs them without asking the harness."
+                                     (mapconcat (lambda (s) (format "%s" (plist-get s :name))) others ", "))))))
+    (dolist (server servers)
       (when (and (equal (plist-get server :name) "harness")
                  (not (equal (plist-get server :status) "connected")))
         (harness-log 'error "provider-claude: harness MCP server status %s"
@@ -2009,19 +2946,7 @@ It is no longer the probe: whoever needs one next starts another."
         (harness-provider-claude--emit
          entry (list :type 'hint
                      :text (format "Claude Code reports the harness tool server as %s; tools are unavailable this turn"
-                                   (plist-get server :status))))))
-    ;; A tools/list answer the CLI refuses, a schema it finds invalid say,
-    ;; leaves the server connected but the model with none of its tools.
-    (when (and (plist-get (harness-provider-claude-session-request entry) :tools)
-               (not (cl-some (lambda (tool)
-                               (and (stringp tool)
-                                    (string-prefix-p harness-provider-claude-tool-prefix tool)))
-                             (plist-get msg :tools))))
-      (harness-log 'error "provider-claude: Claude Code offers none of the harness tools to %s"
-                   (harness-provider-claude-session-id entry))
-      (harness-provider-claude--emit
-       entry (list :type 'hint
-                   :text "Claude Code refused the harness's tool list; tools are unavailable this turn")))))
+                                   (plist-get server :status))))))))
 
 (defun harness-provider-claude--handle-result (entry msg)
   "Handle the turn-ending result MSG on ENTRY."
@@ -2142,12 +3067,22 @@ It is no longer the probe: whoever needs one next starts another."
                                 (harness-truncate-end line 200) err))))))
     (setf (harness-provider-claude-session-buffer entry) (substring data start))))
 
+(defun harness-provider-claude--plugin-refused-p (tail)
+  "Non-nil when TAIL, the end of a CLI's stderr, says it refused the plugin.
+An organisation's managed settings can forbid `--plugin-dir'
+\(disableSideloadFlags): the CLI then prints so and exits before it
+starts."
+  (string-match-p "plugin-dir\\|sideload\\|--plugin" tail))
+
 (defun harness-provider-claude--sentinel (entry proc _event)
   "Handle the death of ENTRY's process PROC.
 A process told to resume or fork a CLI session that exits during a
 turn before it started could not open that conversation (the CLI
 session is gone, or a cut before the CLI compacted it): the turn goes
-on in a new CLI session instead (`harness-provider-claude--restart-fresh')."
+on in a new CLI session instead (`harness-provider-claude--restart-fresh').
+One started with the plugin that exits then, saying it refused the
+plugin, sends the turn on without it
+\(`harness-provider-claude--plugin-fallback')."
   (unless (process-live-p proc)
     (when (eq proc (harness-provider-claude-session-process entry))
       (let ((code (process-exit-status proc))
@@ -2158,18 +3093,31 @@ on in a new CLI session instead (`harness-provider-claude--restart-fresh')."
         (let ((buf (harness-provider-claude-session-stderr entry)))
           (when (buffer-live-p buf) (kill-buffer buf)))
         (setf (harness-provider-claude-session-stderr entry) nil)
-        (if (and (harness-provider-claude-session-active entry)
-                 (not (harness-provider-claude-session-cancelled entry))
-                 (plist-get spawn :resume)
-                 (not (plist-get spawn :started)))
-            (harness-provider-claude--restart-fresh entry spawn code tail)
+        (harness-provider-claude--close-bridge entry)
+        (cond
+         ((and (harness-provider-claude-session-active entry)
+               (not (harness-provider-claude-session-cancelled entry))
+               (plist-get spawn :plugin)
+               (not (plist-get spawn :started))
+               (harness-provider-claude--plugin-refused-p tail))
+          (harness-provider-claude--plugin-fallback
+           entry (if (string-match-p "disableSideloadFlags" tail)
+                     "Claude Code refused --plugin-dir: managed settings (disableSideloadFlags) forbid it"
+                   (format "Claude Code refused it (%s)"
+                           (harness-truncate-end (harness-first-line tail) 200)))))
+         ((and (harness-provider-claude-session-active entry)
+               (not (harness-provider-claude-session-cancelled entry))
+               (plist-get spawn :resume)
+               (not (plist-get spawn :started)))
+          (harness-provider-claude--restart-fresh entry spawn code tail))
+         (t
           (harness-provider-claude--finish
            entry
            (if (harness-provider-claude-session-cancelled entry)
                '(:type done :stop-reason cancelled)
              (list :type 'done :stop-reason 'error
                    :error (format "claude exited with status %s%s" code
-                                  (if (string-empty-p tail) "" (concat ": " tail)))))))))))
+                                  (if (string-empty-p tail) "" (concat ": " tail))))))))))))
 
 (defun harness-provider-claude--with-history (request blocks)
   "Return BLOCKS, the new message of REQUEST, after the transcript before it.
@@ -2196,7 +3144,11 @@ gets the turn's message again, after the transcript."
                                why)))
     (setf (harness-provider-claude-session-cli-session-id entry) nil)
     (harness-provider-claude--spawn entry request nil nil)
-    (harness-provider-claude--send-user
+    ;; Kept for the plugin's sake, which may yet fail (see `--plugin-fallback').
+    (when-let* ((new (gethash (harness-provider-claude-session-id entry) harness-provider-claude--spawns)))
+      (plist-put new :blocks (plist-get spawn :blocks))
+      (plist-put new :mode 'fresh))
+    (harness-provider-claude--send-when-ready
      entry (harness-provider-claude--with-history request (plist-get spawn :blocks)))))
 
 ;;;; Provider entry points
@@ -2295,6 +3247,10 @@ new one gets them first, as text (`harness-provider-claude--with-history')."
          (blocks (harness-provider-claude--user-blocks request))
          (mode nil))
     (when (harness-provider-claude-session-active entry)
+      ;; A message still waiting for the plugin's server never reached the
+      ;; CLI, which has none of what it carried either (see `--cancel').
+      (when (eq (harness-provider-claude-session-plugin-state entry) 'pending)
+        (harness-provider-claude--kill entry))
       (harness-provider-claude--finish
        entry '(:type done :stop-reason error :error "superseded by a new request")))
     ;; Kept after the turn, for a CLI that lists the tools between turns.
@@ -2319,10 +3275,14 @@ new one gets them first, as text (`harness-provider-claude--with-history')."
     (if (null blocks)
         (harness-provider-claude--finish
          entry '(:type done :stop-reason error :error "No user message to send"))
-      ;; Kept for a process that cannot resume, which a new one replaces.
-      (when-let* ((spawn (and (memq mode '(resume fork)) (gethash id harness-provider-claude--spawns))))
-        (plist-put spawn :blocks blocks))
-      (harness-provider-claude--send-user
+      ;; Kept for a process that cannot resume, or cannot serve the tools
+      ;; through the plugin, which a new one replaces.
+      (when-let* ((spawn (and (or (memq mode '(resume fork))
+                                  (eq (harness-provider-claude-session-plugin-state entry) 'pending))
+                              (gethash id harness-provider-claude--spawns))))
+        (plist-put spawn :blocks blocks)
+        (plist-put spawn :mode mode))
+      (harness-provider-claude--send-when-ready
        entry (if (eq mode 'fresh) (harness-provider-claude--with-history request blocks) blocks)))
     (list :cancel (lambda () (harness-provider-claude--cancel entry)))))
 
@@ -2347,8 +3307,16 @@ a turn is left alone, and so is a live process with those settings."
   (when (and (harness-provider-claude-session-active entry)
              (not (harness-provider-claude-session-cancelled entry)))
     (setf (harness-provider-claude-session-cancelled entry) t)
-    (if (not (process-live-p (harness-provider-claude-session-process entry)))
-        (harness-provider-claude--finish entry '(:type done :stop-reason cancelled))
+    ;; A message that waits for the plugin's server (`harness-provider-claude--await-plugin')
+    ;; is not sent yet: the CLI has no turn to interrupt.  Nor did it get
+    ;; what the message carried (a new CLI session's transcript, say), so
+    ;; the process goes, and the next turn opens its conversation anew.
+    (if (or (not (process-live-p (harness-provider-claude-session-process entry)))
+            (eq (harness-provider-claude-session-plugin-state entry) 'pending))
+        (progn
+          (when (eq (harness-provider-claude-session-plugin-state entry) 'pending)
+            (harness-provider-claude--kill entry))
+          (harness-provider-claude--finish entry '(:type done :stop-reason cancelled)))
       (harness-provider-claude--send
        entry (list :type "control_request" :request_id (harness-uuid)
                    :request '(:subtype "interrupt")))
@@ -3186,7 +4154,8 @@ with an error, and nothing is started."
     (harness-provider-claude-close id))
   (when harness-provider-claude--probe
     (harness-provider-claude--end-probe harness-provider-claude--probe t))
-  (harness-provider-claude--settle-refresh))
+  (harness-provider-claude--settle-refresh)
+  (harness-claude-plugin-stop))
 
 (defun harness-provider-claude--on-session-gone (session-id &rest _)
   "Close the process for SESSION-ID when its session is deleted or deactivated.
@@ -3452,7 +4421,11 @@ harness stopped.  Loading this file ends the idle ones."
 (harness-provider-claude--drop-judge-conversations)
 
 (defun harness-provider-claude--init ()
-  "Register the provider and subscribe to session lifecycle events."
+  "Register the provider and subscribe to session lifecycle events.
+It also offers the harness tools the CLI can run with its own tools
+\(`harness-provider-claude-native-tools'), through the filter
+`agent/builtin-tools'."
+  (harness-add-filter 'agent/builtin-tools #'harness-provider-claude--builtin-filter)
   (harness-on 'session/deleted #'harness-provider-claude--on-session-gone)
   (harness-on 'session/deactivated #'harness-provider-claude--on-session-gone)
   (harness-on 'session/provider-state-changed #'harness-provider-claude--on-state-changed))

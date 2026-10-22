@@ -21,7 +21,8 @@ Wire protocol (newline delimited JSON on stdin/stdout):
 
 - We spawn `claude -p --input-format stream-json --output-format
   stream-json ...' with every built-in tool disabled and one SDK MCP
-  server called "harness".  The CLI asks us to serve that server over
+  server called "harness" (by default: the experimental options
+  below change it).  The CLI asks us to serve that server over
   `control_request` messages of subtype `mcp_message`; we answer the
   JSON-RPC calls (initialize, tools/list, tools/call) inline.  A
   tools/call becomes a `tool-call` provider event whose `:respond`
@@ -43,20 +44,71 @@ Wire protocol (newline delimited JSON on stdin/stdout):
 - The harness's permission system decides every tool call, so the
   CLI only has to let the harness's tools through, never bypass its
   checks: `harness-provider-claude-permission-args` fixes its
-  permission mode and allows `mcp__harness__*` by rule.  When a
-  permission prompt tool sends the CLI's prompts here instead
+  permission mode and allows `mcp__harness__*` by rule.  Bypassing
+  was the first version's way (--permission-mode bypassPermissions);
+  an organisation's managed settings can forbid it
+  (permissions.disableBypassPermissionsMode), and the CLI then ran
+  as `default` and denied every call.  So nothing here asks for it,
+  and managed settings outrank whatever the harness asks of the CLI.
+  When a permission prompt tool sends the CLI's prompts here instead
   (`can_use_tool` control requests), the harness's tools are allowed
   and any other refused.  A call the CLI refuses on its own
   (`system/permission_denied`) becomes a hint.
 - One built-in tool can stand in for a harness tool: WebSearch for
-  web_search (`harness-provider-claude-builtin-tools`).  A request
-  whose `:builtin-tools` names it gets `--tools WebSearch`, and
+  web_search (`harness-provider-claude-builtin-tools`), and with
+  native tools (below) seven more.  A request whose `:builtin-tools`
+  names it gets `--tools WebSearch`, and
   `--permission-prompt-tool stdio` unless the permission arguments
   already send the prompts somewhere, so the CLI asks before each
-  search.  The model's tool_use becomes a `tool-call` marked
-  `:builtin`, the CLI's question a `tool-permission` that the
-  harness's permission chain answers, and the echoed tool_result a
-  `tool-result`; all three name the harness tool.
+  search.  The model's
+  tool_use becomes a `tool-call` marked `:builtin`, the CLI's
+  question a `tool-permission` that the harness's permission chain
+  answers, and the echoed tool_result a `tool-result`; all three
+  name the harness tool, with the harness tool's input
+  (`harness-provider-claude--tool-input`).
+- Experimental, opt-in, off by default: to whatever records the
+  session (a company's OpenTelemetry collector, say) the defaults
+  look unlike any other Claude Code session -- every call an MCP call
+  to an SDK server nobody installed, where Claude Code's own Bash,
+  Read and Edit are logged under their names.  Two options change
+  that, alone or together:
+  `harness-provider-claude-native-tools` has the CLI run the harness
+  tools it has counterparts of (bash, read_file, write_file,
+  edit_file, glob, grep, web_fetch, web_search) with its own, and
+  `harness-provider-claude-plugin` serves the other tools from a
+  Claude Code plugin (harness-claude-plugin.el) in place of the SDK
+  server.  Who decides a native call is
+  `harness-provider-claude-native-permissions`: by default the
+  harness, by `ask` rules in the one --settings JSON and the prompt
+  tool, so that even the reads in the working directory, which the
+  CLI's mode would not ask about, reach the harness's chain (and
+  Bash's sandbox does not allow a command either, as it otherwise
+  does: sandbox.autoAllowBashIfSandboxed is set false); or the
+  CLI, which allows the tools by rule (--allowedTools) and tells
+  the harness of the calls.  Neither bypasses anything.  The harness
+  deciding needs its prompts to reach it: arguments that skip the
+  CLI's checks, send them to another prompt tool or pass a
+  --settings of their own would leave native tools unasked, so they
+  stay off then, with a hint (`harness-provider-claude--prompts-lost`).
+  What the harness cannot do for these tools is said in
+  `harness-provider-claude-native-tools`: the sandbox, the masking
+  of output and the tool slots are for tools the harness runs.
+  A plugin the CLI refuses (the managed setting disableSideloadFlags
+  exits the CLI on --plugin-dir), or whose server does not come up,
+  sends the turn on over the SDK channel.  The first message waits
+  for the plugin's server (`mcp_status`), as the CLI connects
+  a plugin's servers in the background and a request made before
+  has none of its tools; that wait belongs to its message, and
+  cancelling or replacing the message ends it with the process,
+  which never got what the message carried
+  (`harness-provider-claude--await-plugin`).  The CLI would give up
+  on a call of the plugin's server that waits for 30 minutes, as
+  `ask_user` may, so its process gets no idle timeout
+  (CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT).  The plugin cannot be had
+  along with --strict-mcp-config, so a session also loads the MCP
+  servers of the user's own: the CLI asks the harness about their
+  tools, which it refuses, but runs those the user's settings allow
+  without asking (`harness-provider-claude--note-foreign-tool`).
 - Streaming deltas arrive as `stream_event` messages carrying
   Anthropic streaming events; `assistant` messages are authoritative
   and are used to remember tool_use ids; `result` ends the turn.
@@ -197,7 +249,10 @@ sentinel, and cancellation by an interrupt request plus a timer.
 - `harness-provider-claude-api-key` — Anthropic API key the Claude provider lists the API's models with.
 - `harness-provider-claude-auto-memory` — Whether sessions get Claude Code's auto memory.
 - `harness-provider-claude-extra-args` — Extra command line arguments appended to every `claude` invocation.
+- `harness-provider-claude-native-permissions` — Who decides a call of one of Claude Code's own tools, with native tools on.
+- `harness-provider-claude-native-tools` — Experimental: harness tools that Claude Code runs itself, with its own tools.
 - `harness-provider-claude-permission-args` — Arguments that let the `claude` CLI run the harness's tools.
+- `harness-provider-claude-plugin` — Experimental: serve the harness's MCP tools through a Claude Code plugin.
 - `harness-provider-claude-program` — Path to the `claude` command line program.
 - `harness-provider-claude-projects-directory` — Directory where Claude Code keeps its conversation logs, or nil.
 - `harness-provider-claude-tiers` — Claude models named for the tiers, by family.
@@ -207,7 +262,9 @@ sentinel, and cancellation by an interrupt request plus a timer.
 ### Methods it calls
 
 - `agent/running` ([agent](agent.md)), when it is loaded
+- `config/get` ([config](config.md)), when it is loaded
 - `provider/model` ([provider](provider.md))
+- `session/hint` ([session](session.md)), when it is loaded
 - `session/list` ([session](session.md)), when it is loaded
 
 ### Events it handles
@@ -219,4 +276,8 @@ sentinel, and cancellation by an interrupt request plus a timer.
 ### Events it emits
 
 - `provider/quota-updated`
+
+### Filter chains it joins
+
+- `agent/builtin-tools` → `harness-provider-claude--builtin-filter`
 

@@ -298,6 +298,19 @@ ones: `harness-log-level`, `harness-naming-auto`,
 above; the 12 startup options listed in *Result* are the other global
 ones.)
 
+Three experimental options were added later, each a choice two people
+could make differently and none the implementation's to decide: whether
+the CLI runs the harness's usual tools with its own
+(`harness-provider-claude-native-tools`), who decides those calls, the
+harness's permission chain or Claude Code's allow rules
+(`harness-provider-claude-native-permissions`), and whether the rest of
+the tools come from a Claude Code plugin rather than an SDK server
+(`harness-provider-claude-plugin`).  All three are off, so that a
+harness whose owner never reads this keeps the behaviour it had; they
+sit under Advanced with the other Claude Code options.  Everything they
+need that is not a choice -- the plugin's name, how long to wait for its
+server, which deny rules the CLI's Bash gets -- is a constant.
+
 ## Feature duplication (the same audit on tools)
 
 The same question applies to features: where two tools or commands are

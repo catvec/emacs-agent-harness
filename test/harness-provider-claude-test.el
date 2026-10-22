@@ -2042,9 +2042,11 @@ answers them.  Return the events, oldest first."
       (should (equal "" (after "--tools" cmd)))
       (should-not (member "--permission-prompt-tool" cmd)))
     ;; Only the harness tools Claude Code has a counterpart of count.
-    (should (equal '("WebSearch") (harness-provider-claude--cli-tools '(:builtin-tools ("web_search" "bash")))))
-    (should-not (harness-provider-claude--cli-tools '(:builtin-tools ("bash"))))
-    (should (equal '("web_search")
+    (should (equal '("WebSearch" "Bash")
+                   (harness-provider-claude--cli-tools '(:builtin-tools ("web_search" "bash" "emacs_eval")))))
+    (should-not (harness-provider-claude--cli-tools '(:builtin-tools ("emacs_eval" "session_list"))))
+    ;; The provider can run all of them; a session gets the ones its filters pick.
+    (should (equal '("web_search" "bash" "read_file" "write_file" "edit_file" "glob" "grep" "web_fetch")
                    (plist-get (harness-call 'provider/capabilities "claude:claude-fable-5-1") :builtin-tools)))))
 
 (ert-deftest harness-provider-claude-no-thinking-turns-thinking-off ()

@@ -3904,6 +3904,111 @@ The CLI keeps every conversation in a log under `~/.claude/projects/`
 a redaction takes it out of there; see [Secrets and
 redaction](#secrets-and-redaction).
 
+#### Looking like an ordinary Claude Code session (experimental)
+
+By default the harness gives the `claude` CLI its tools as MCP tools of
+an SDK server called `harness`, and none of the CLI's own. Anything that
+watches Claude Code then sees something unlike every other session: where
+Claude Code logs its own tools under their names (Bash, Read, Edit...),
+every call of a harness session is an opaque MCP call to a server of a
+kind only programs that embed the CLI use. Some companies collect their
+people's Claude Code sessions with OpenTelemetry and analyse them; to
+such a pipeline a session whose every tool call goes through an MCP
+server nobody installed can look like a way round the company's tool
+rules, though the harness's permission system and transcripts do the
+same job. Two options, both off, change what the CLI is given. Neither
+asks it to bypass anything.
+
+```elisp
+(setopt harness-provider-claude-native-tools t   ; Bash, Read, Write, Edit, Glob, Grep, WebFetch, WebSearch
+        harness-provider-claude-plugin t)         ; the rest, from a Claude Code plugin
+```
+
+Both are under Advanced on the settings page (Claude Code), and a change
+reaches a session at its next turn: its CLI restarts in the same
+conversation.
+
+- `harness-provider-claude-native-tools` has the CLI run the harness
+  tools it has counterparts of with its own: `bash` with Bash,
+  `read_file` with Read, `write_file`, `edit_file`, `glob`, `grep`,
+  `web_fetch` and `web_search` with Write, Edit, Glob, Grep, WebFetch and
+  WebSearch. `t` is that set; a list names the harness tools to run that
+  way. The session shows the calls as it always did (a call of
+  `read_file`, "Read file: src/x.el") and the harness's permission modes,
+  rules, access and judge decide each one *before* it runs. How: the CLI
+  runs in the permission mode `default` and asks the harness about every
+  use of these tools (an `ask` rule for each, in flag settings, and the
+  CLI's permission prompt tool), even the reads and read-only commands
+  its own mode would let through, and Bash commands the CLI sandboxes
+  (it runs those unasked, unless told not to: the harness tells it
+  `sandbox.autoAllowBashIfSandboxed` is false). `harness-provider-claude-native-permissions`
+  can instead be `cli`: Claude Code allows the tools by rule
+  (`--allowedTools`), every use, and the harness only records what they
+  did, which means its permission modes and rules do not apply to them.
+- `harness-provider-claude-plugin` serves the harness's other tools
+  (`emacs_*`, the session and task tools, `ask_user`, `hand_in`...) from
+  a Claude Code plugin called `emacs-harness`, which the harness writes
+  into its state directory and starts the CLI with (`--plugin-dir`).
+  A plugin's tools are MCP tools of an ordinary stdio server, how
+  plugins are shipped. The plugin's server is a few lines of bash that
+  connect to the harness on `127.0.0.1` with a token made for that CLI
+  process; the harness listens there only while such a process runs. It
+  needs a local session and bash. The CLI gives up on a call of a stdio
+  server that has answered nothing for 30 minutes, which would cut an
+  `ask_user` or a long `task_wait` short, so these processes run with no
+  such timeout (`CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT=0`).
+
+What it does not do:
+
+- **It never bypasses the CLI's permission checks**, with or without
+  these options: no `--dangerously-skip-permissions`, no
+  `bypassPermissions` mode, which a company's managed settings
+  (`permissions.disableBypassPermissionsMode`) can forbid. The first
+  version of the Claude provider used it and was refused on a company
+  laptop; the arguments were rebuilt around `--permission-mode default`,
+  `--allowedTools` rules and the CLI's permission prompt tool, and these
+  options use only those. Managed settings outrank the harness: a managed
+  `deny` rule holds (the call is refused, a hint says that settings
+  outrank the harness, and the harness is not asked), settings that
+  make the CLI ignore command line rules leave the harness the questions
+  the CLI still asks, and a *managed* sandbox that allows the commands
+  it sandboxes (`sandbox.autoAllowBashIfSandboxed`) runs them unasked:
+  the harness sets that off in its flag settings, which outrank a
+  repository's settings file, but not the administrator's.
+- **It does not run native tools unasked when the harness is to decide
+  them.** If your own `harness-provider-claude-permission-args` or
+  `harness-provider-claude-extra-args` skip the CLI's checks (a bypass,
+  the mode `dontAsk`), send its prompts to another permission prompt tool
+  or pass a `--settings` of their own (the CLI takes one, so it would
+  replace the harness's rules), native tools stay off, the harness serves
+  its tools as before, and a hint in the session says which argument is
+  the cause. Put such settings in a settings file instead.
+- **It is for sessions on this machine.** A session on another host
+  (TRAMP) keeps the harness's tools, which take its files by TRAMP name;
+  the plugin's relay is a local process.
+- **It does not sandbox or mask what the CLI runs.** The harness's
+  sandbox, the masking of secrets in tool output (the transcript's copy
+  is masked; the model has the output as the CLI printed it) and the tool
+  slots are for tools the harness runs. `harness-sandbox-policy`
+  `required` keeps `bash` a harness tool. The CLI's Bash may not run a
+  command in the background, nor outside its own sandbox.
+- **It cannot go round a company that forbids plugins.** If managed
+  settings set `disableSideloadFlags`, the CLI exits on `--plugin-dir`;
+  the harness sees that, serves its tools over the SDK channel as before
+  and says so in the session. The same happens when the plugin's server
+  does not come up. Set the option off and on again, with `setopt` or
+  Customize (a plain `setq` does not do it), to try the plugin again.
+- **MCP servers you configured for Claude Code load too** with the
+  plugin (`--strict-mcp-config`, which keeps them out, would hide the
+  plugin as well). The model is offered their tools. The harness refuses
+  their calls when the CLI asks it, which it does unless your Claude Code
+  settings allow the tool (an `allow` rule such as `mcp__github__*`):
+  then the CLI runs it without asking, the harness does not decide, and
+  a hint says so once per server. claude.ai's connectors are left out.
+
+[docs/architecture.md](docs/architecture.md) has the details and what each
+managed policy was observed to do to each setting.
+
 ### GitHub Copilot
 
 Copilot is the `provider-copilot` module (`:providers copilot`).
@@ -4302,6 +4407,14 @@ It leaves alone:
   still reach the network. Use a permission mode that asks before
   commands run (Ask or Accept edits), and set `harness-sandbox-policy`
   to `required` so that no command runs outside the sandbox.
+
+Corporate mode does not change how a Claude Code session looks to the
+OpenTelemetry collector a company may run: every harness tool is an MCP
+call to a server of the harness's own. The experimental options in
+[Looking like an ordinary Claude Code
+session](#looking-like-an-ordinary-claude-code-session-experimental)
+have the CLI run the usual tools as its own and serve the rest from a
+plugin, without bypassing the company's managed permission settings.
 
 The settings page does not list the option, and no ACP client can
 change it. If you change it later with `setopt` or Customize, the

@@ -12,6 +12,9 @@ Behaviour is chosen by the prompt text:
   "call echo"  -> issues a tools/call for mcp__harness__echo first
   "call bash"  -> calls the built-in Bash tool first, as if extra
                   arguments had given the model built-in tools
+  "call another server"
+               -> calls mcp__other__query, a tool of an MCP server that is
+                  not the harness's
   "search the web"
                -> searches for "emacs" with the built-in WebSearch tool
                   when --tools turns it on, else with the harness's
@@ -25,6 +28,9 @@ Behaviour is chosen by the prompt text:
                   harness listed in the MCP handshake ("none" for none)
   "recall"     -> answers "I remember: " and the user prompts the
                   conversation holds, oldest first, joined by " | "
+  "show results"
+               -> answers "results: " and the text of every tool result
+                  the turn's calls got, joined by " | "
 Anything else streams the text "hello" and finishes.
 
 Like the real CLI, the session's chain is a list of entries, each with a
@@ -66,6 +72,43 @@ system message.  A denied call gets an error tool result and is listed
 in the result's permission_denials.  A permitted WebSearch call returns
 search results the way the real tool words them; any other built-in
 tool returns "ran TOOL".
+
+The CLI's own tools (--tools) are called as the real CLI's tools are,
+with their input shapes:
+  "call read"   -> Read {file_path}        "call write" -> Write {file_path, content}
+  "call edit"   -> Edit {file_path, old_string, new_string}
+  "call glob"   -> Glob {pattern}          "call grep"  -> Grep {pattern, -i}
+  "call fetch"  -> WebFetch {url, prompt}  "call bash"  -> Bash {command}
+  "call native" -> all of them, in that order
+The model sees only the tools it was given, so a call to a tool --tools
+lacks is left out.  An "ask" rule of --settings ({"permissions": {"ask":
+[...]}}) makes the CLI ask the permission prompt tool about every use of
+the tool, before any allow rule or mode is looked at; without one, Read,
+Glob and Grep run without asking (reads in the working directory), as
+the real CLI runs them.  HARNESS_FAKE_CLAUDE_POLICY picks a managed
+policy, a comma separated list of:
+  disableBypass      permission mode bypassPermissions (and
+                     --dangerously-skip-permissions) runs as `default'
+  managedRulesOnly   the rules of the command line (allow and ask) are
+                     ignored; the CLI's own defaults decide
+  deny=Tool,Tool     calls of these tools are denied, whatever the
+                     command line says
+  disableSideload    --plugin-dir is refused: the CLI says so on stderr
+                     and exits with status 1 before it starts
+
+--plugin-dir DIR loads the plugin DIR holds, as the real CLI does: the
+stdio server of its .mcp.json is started in the background, with
+${NAME} expanded from the environment and ${CLAUDE_PLUGIN_ROOT} from
+DIR, and spoken to over its standard input and output.  It shows as
+`pending' to the control request mcp_status for
+HARNESS_FAKE_CLAUDE_PLUGIN_DELAY seconds (default 0.3) and is then
+`connected', or `failed' with HARNESS_FAKE_CLAUDE_PLUGIN=fail, or
+`pending' for good with =never.  Its tools are the model's only once it
+is connected, and are named mcp__plugin_PLUGIN_SERVER__TOOL.
+HARNESS_FAKE_CLAUDE_MCP_STATUS=silent leaves mcp_status unanswered and
+=unsupported answers it with an error, as an older CLI would.
+HARNESS_FAKE_CLAUDE_ALLOW is a comma separated list of allow rules the
+user's own settings file would have, which run a call without asking.
 
 Like the real CLI, each result's total_cost_usd is the running total
 of the process: every turn adds 0.01, and --resume or --fork-session
@@ -110,7 +153,10 @@ message's text.
 
 import json
 import os
+import select
+import subprocess
 import sys
+import threading
 import time
 import uuid
 
@@ -179,6 +225,122 @@ def allowed_tools(argv):
         else:
             i += 1
     return rules
+
+
+def settings_of(argv):
+    """The flag settings: the JSON of the last --settings flag in ARGV, else {}."""
+    value = arg_value(argv, "--settings")
+    try:
+        return json.loads(value) if value else {}
+    except ValueError:
+        return {}
+
+
+POLICY = [p for p in os.environ.get("HARNESS_FAKE_CLAUDE_POLICY", "").split(",") if p]
+
+
+def policy_denied():
+    """The tools the managed policy denies."""
+    names = []
+    for p in POLICY:
+        if p.startswith("deny="):
+            names.extend(p[len("deny="):].split("+"))
+    return names
+
+
+# Reads in the working directory run without asking, as the real CLI's do.
+AUTO_ALLOWED = ("Read", "Glob", "Grep")
+
+
+def expand(value, plugin_dir):
+    """Expand ${CLAUDE_PLUGIN_ROOT} and ${NAME} in VALUE, as the CLI does for a plugin."""
+    out = value.replace("${CLAUDE_PLUGIN_ROOT}", plugin_dir)
+    while "${" in out:
+        start = out.index("${")
+        end = out.index("}", start)
+        out = out[:start] + os.environ.get(out[start + 2:end], "") + out[end + 1:]
+    return out
+
+
+class PluginServer:
+    """The stdio MCP server of a plugin, started and spoken to as the CLI does."""
+
+    def __init__(self, plugin_dir):
+        self.dir = os.path.abspath(plugin_dir)
+        with open(os.path.join(self.dir, ".claude-plugin", "plugin.json")) as f:
+            self.plugin = json.load(f)["name"]
+        with open(os.path.join(self.dir, ".mcp.json")) as f:
+            servers = json.load(f)["mcpServers"]
+        self.key, self.config = next(iter(servers.items()))
+        self.label = "plugin:%s:%s" % (self.plugin, self.key)
+        self.prefix = "mcp__plugin_%s_%s__" % (self.plugin, self.key)
+        self.status = "pending"
+        self.tools = []
+        self.proc = None
+        self.next_id = 0
+        self.lock = threading.Lock()
+        threading.Thread(target=self.connect, daemon=True).start()
+
+    def connect(self):
+        mode = os.environ.get("HARNESS_FAKE_CLAUDE_PLUGIN", "")
+        time.sleep(float(os.environ.get("HARNESS_FAKE_CLAUDE_PLUGIN_DELAY", "0.3")))
+        if mode == "never":
+            return
+        if mode == "fail":
+            self.status = "failed"
+            return
+        env = dict(os.environ)
+        for key, value in (self.config.get("env") or {}).items():
+            env[key] = expand(value, self.dir)
+        command = [expand(self.config["command"], self.dir)] + \
+                  [expand(a, self.dir) for a in self.config.get("args", [])]
+        self.proc = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                     stderr=subprocess.DEVNULL, text=True, env=env)
+        # The newest CLIs ask a server to discover itself first; an error is fine.
+        self.rpc("server/discover", {"_meta": {"io.modelcontextprotocol/protocolVersion": "2026-07-28"}})
+        init = self.rpc("initialize", {"protocolVersion": "2025-11-25", "capabilities": {},
+                                       "clientInfo": {"name": "fake-claude", "version": "0"}})
+        if not init or "result" not in init:
+            self.status = "failed"
+            return
+        self.send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+        listed = self.rpc("tools/list", {})
+        self.tools = (listed or {}).get("result", {}).get("tools", [])
+        self.status = "connected"
+
+    def send(self, message):
+        self.proc.stdin.write(json.dumps(message) + "\n")
+        self.proc.stdin.flush()
+
+    def rpc(self, method, params):
+        """Call METHOD on the server and return its JSON-RPC reply, or None."""
+        with self.lock:
+            self.next_id += 1
+            rid = self.next_id
+            self.send({"jsonrpc": "2.0", "id": rid, "method": method, "params": params})
+            deadline = time.time() + 20
+            while time.time() < deadline:
+                ready, _, _ = select.select([self.proc.stdout], [], [], 0.5)
+                if not ready:
+                    continue
+                line = self.proc.stdout.readline()
+                if not line:
+                    return None
+                try:
+                    reply = json.loads(line)
+                except ValueError:
+                    continue
+                if reply.get("id") == rid:
+                    return reply
+            return None
+
+    def close(self):
+        if self.proc:
+            try:
+                self.proc.stdin.close()
+                self.proc.wait(timeout=2)
+            except Exception:
+                self.proc.kill()
 
 
 def builtin_tools(argv):
@@ -304,12 +466,31 @@ class Fake:
         self.total = RESTORED_COST if resume else 0.0
         self.needs_handshake = "--mcp-config" in argv
         self.permission_mode = arg_value(argv, "--permission-mode") or "default"
-        self.allowed = allowed_tools(argv)
+        if "--dangerously-skip-permissions" in argv:
+            self.permission_mode = "bypassPermissions"
+        if "disableBypass" in POLICY and self.permission_mode == "bypassPermissions":
+            # What the real CLI does under managed settings that forbid it.
+            self.permission_mode = "default"
+        managed_only = "managedRulesOnly" in POLICY
+        settings = settings_of(argv)
+        self.allowed = [] if managed_only else allowed_tools(argv)
+        # Rules of the user's own settings file, for a tool the CLI then runs unasked.
+        self.allowed += [r for r in os.environ.get("HARNESS_FAKE_CLAUDE_ALLOW", "").split(",") if r]
+        self.asks = [] if managed_only else list((settings.get("permissions") or {}).get("ask") or [])
         self.builtin = builtin_tools(argv)
         self.prompt_tool = arg_value(argv, "--permission-prompt-tool")
+        self.plugin = None
+        plugin_dir = arg_value(argv, "--plugin-dir")
+        if plugin_dir:
+            if "disableSideload" in POLICY:
+                fail("--plugin-dir is disabled by your organization's managed settings "
+                     "(disableSideloadFlags). Plugins, custom agents, and MCP servers can "
+                     "only be loaded from sources your administrator has approved.")
+            self.plugin = PluginServer(plugin_dir)
         self.denials = []
         self.interrupted = False
         self.pauses = 0
+        self.results = []
 
     # -- the session's chain ------------------------------------------------
 
@@ -392,6 +573,36 @@ class Fake:
               "response": {"subtype": "success", "request_id": request_id,
                            "response": response}})
 
+    def mcp_servers(self):
+        """The MCP servers as mcp_status and the banner list them."""
+        servers = []
+        if self.needs_handshake:
+            servers.append({"name": "harness", "status": "connected", "source": "sdk"})
+        if self.plugin:
+            servers.append({"name": self.plugin.label, "status": self.plugin.status,
+                            "source": "plugin"})
+        extra = os.environ.get("HARNESS_FAKE_CLAUDE_USER_MCP")
+        if extra:
+            servers.append({"name": extra, "status": "connected", "source": "user"})
+        return servers
+
+    def model_tools(self):
+        """The names of the tools the model is given, as the banner lists them."""
+        names = list(self.builtin)
+        names += ["mcp__harness__" + t["name"] for t in self.tools]
+        if self.plugin and self.plugin.status == "connected":
+            names += [self.plugin.prefix + t["name"] for t in self.plugin.tools]
+        return names
+
+    def echo_name(self):
+        """The name the model calls the echo tool by, or None when it has none."""
+        if self.plugin and self.plugin.status == "connected" and \
+           any(t["name"] == "echo" for t in self.plugin.tools):
+            return self.plugin.prefix + "echo"
+        if any(t["name"] == "echo" for t in self.tools):
+            return "mcp__harness__echo"
+        return None
+
     def usage_report(self):
         """What get_usage answers: the session's spend and the plan's quota."""
         session = {"total_cost_usd": round(self.total, 6), "total_api_duration_ms": 0,
@@ -414,6 +625,16 @@ class Fake:
             self.answer(rid, response)
             if self.needs_handshake:
                 self.handshake()
+        elif sub == "mcp_status":
+            mode = os.environ.get("HARNESS_FAKE_CLAUDE_MCP_STATUS", "")
+            if mode == "silent":
+                return
+            if mode == "unsupported":
+                emit({"type": "control_response",
+                      "response": {"subtype": "error", "request_id": rid,
+                                   "error": "Unsupported control request subtype: mcp_status"}})
+                return
+            self.answer(rid, {"mcpServers": self.mcp_servers()})
         elif sub == "get_usage":
             if AUTH:
                 self.answer(rid, self.usage_report())
@@ -496,16 +717,32 @@ class Fake:
     def permit(self, tool, tool_input, tool_use_id):
         """Decide a call of TOOL as the CLI does.
 
-        Return (True, INPUT) to run it with INPUT, or (False, MESSAGE)."""
-        if self.permission_mode == "bypassPermissions" or \
-           any(rule_allows(rule, tool) for rule in self.allowed):
+        Return (True, INPUT) to run it with INPUT, or (False, MESSAGE).
+        Deny rules come first and nothing overrides them; then ask rules,
+        then the mode and the allow rules, then what the CLI runs without
+        asking (reads); what is left goes to the permission prompt tool,
+        else it is denied."""
+        if tool in policy_denied():
+            message = "Permission to use %s has been denied." % tool
+            emit({"type": "system", "subtype": "permission_denied", "tool_name": tool,
+                  "tool_use_id": tool_use_id, "message": message,
+                  "session_id": self.session_id})
+            return False, message
+        asked = tool in self.asks
+        if not asked and (self.permission_mode == "bypassPermissions" or
+                          any(rule_allows(rule, tool) for rule in self.allowed)):
+            return True, tool_input
+        if not asked and tool in AUTO_ALLOWED:
             return True, tool_input
         if self.prompt_tool == "stdio":
             rid = "perm-" + uuid.uuid4().hex[:8]
-            emit({"type": "control_request", "request_id": rid,
-                  "request": {"subtype": "can_use_tool", "tool_name": tool,
-                              "input": tool_input, "tool_use_id": tool_use_id,
-                              "permission_suggestions": []}})
+            request = {"subtype": "can_use_tool", "tool_name": tool,
+                       "input": tool_input, "tool_use_id": tool_use_id,
+                       "permission_suggestions": []}
+            if asked:
+                request["decision_reason_type"] = "rule"
+                request["decision_reason_rule_source"] = "flagSettings"
+            emit({"type": "control_request", "request_id": rid, "request": request})
             answer = self.wait_control_response(rid).get("response") or {}
             if answer.get("behavior") == "allow":
                 return True, answer.get("updatedInput", tool_input)
@@ -561,10 +798,25 @@ class Fake:
                 return False
             content = reply.get("result", {}).get("content", [])
             is_error = bool(reply.get("result", {}).get("isError"))
+        elif self.plugin and tool.startswith(self.plugin.prefix):
+            reply = self.plugin.rpc("tools/call", {
+                "name": tool[len(self.plugin.prefix):], "arguments": value,
+                "_meta": {"claudecode/toolUseId": tool_use_id}}) or {}
+            if self.interrupted:
+                return False
+            if "error" in reply or "result" not in reply:
+                content, is_error = (reply.get("error") or {}).get("message", "no answer"), True
+            else:
+                content = reply["result"].get("content", [])
+                is_error = bool(reply["result"].get("isError"))
         elif tool == "WebSearch":
             content, is_error = web_search_results(value.get("query", "")), False
+        elif os.environ.get("HARNESS_FAKE_CLAUDE_BIG"):
+            content, is_error = "x" * int(os.environ["HARNESS_FAKE_CLAUDE_BIG"]), False
         else:
             content, is_error = "ran %s" % tool, False
+        self.results.append(content if isinstance(content, str) else
+                            " ".join(b.get("text", "") for b in content if isinstance(b, dict)))
         emit({"type": "user", "session_id": self.session_id,
               "uuid": self.record("tool_result", "[result of %s]" % tool),
               "parent_tool_use_id": None,
@@ -599,6 +851,7 @@ class Fake:
     def turn(self, message):
         self.interrupted = False
         self.denials = []
+        self.results = []
         blocks = message.get("message", {}).get("content", [])
         if isinstance(blocks, str):
             text = blocks
@@ -612,8 +865,8 @@ class Fake:
         self.record("user", text)
         emit({"type": "system", "subtype": "init", "session_id": self.session_id,
               "model": self.model, "cwd": os.getcwd(),
-              "tools": ["mcp__harness__" + t["name"] for t in self.tools],
-              "mcp_servers": [{"name": "harness", "status": "connected"}],
+              "tools": self.model_tools(),
+              "mcp_servers": self.mcp_servers(),
               "apiKeySource": "ANTHROPIC_API_KEY" if AUTH == "api" else "none",
               "permissionMode": self.permission_mode})
         if "compacting" in text:
@@ -674,9 +927,30 @@ class Fake:
                 self.queue.append(msg)
         calls = []
         if "call echo" in text or "slow-tool" in text:
-            calls.append(("mcp__harness__echo", {"text": "ping"}, "toolu_fake_1", "slow-tool" in text))
+            calls.append((self.echo_name() or "mcp__harness__echo", {"text": "ping"}, "toolu_fake_1",
+                          "slow-tool" in text))
         if "call bash" in text:
             calls.append(("Bash", {"command": "ls"}, "toolu_fake_2", False))
+        if "call another server" in text:
+            # A tool of an MCP server of the user's: no rule here allows it,
+            # so the CLI asks the permission prompt tool and the harness refuses.
+            calls.append(("mcp__other__query", {"sql": "select 1"}, "toolu_fake_4", False))
+        # The model calls the tools it was given.
+        native = [
+            ("call read", "Read", {"file_path": os.path.join(os.getcwd(), "notes.txt")}),
+            ("call write", "Write", {"file_path": os.path.join(os.getcwd(), "out.txt"), "content": "hi\n"}),
+            ("call edit", "Edit", {"file_path": os.path.join(os.getcwd(), "out.txt"),
+                                   "old_string": "hi", "new_string": "ho"}),
+            ("call glob", "Glob", {"pattern": "*.txt"}),
+            ("call grep", "Grep", {"pattern": "Hello", "-i": True}),
+            ("call fetch", "WebFetch", {"url": "https://example.com/", "prompt": "summarize"}),
+        ]
+        for n, (word, tool, tool_input) in enumerate(native):
+            if (word in text or "call native" in text) and tool in self.builtin:
+                calls.append((tool, tool_input, "toolu_fake_n%d" % n, False))
+        if "call native" in text and "Bash" in self.builtin and "call bash" not in text:
+            calls.append(("Bash", {"command": "touch made.txt", "timeout": 5000,
+                                   "description": "Make a file"}, "toolu_fake_n9", False))
         if "search the web" in text:
             # The model sees only the tools it was given.
             if "WebSearch" in self.builtin:
@@ -696,8 +970,16 @@ class Fake:
         self.stream({"type": "content_block_delta", "index": 1,
                      "delta": {"type": "signature_delta", "signature": "sig"}})
         self.stream({"type": "content_block_stop", "index": 1})
-        if "list your tools" in text:
-            pieces = ["tools: " + (", ".join(t.get("name", "?") for t in self.tools) or "none")]
+        if "list your tools" in text or "show results" in text:
+            parts = []
+            if "list your tools" in text:
+                seen = [t.get("name", "?") for t in self.tools]
+                if self.plugin and self.plugin.status == "connected":
+                    seen += [t.get("name", "?") for t in self.plugin.tools]
+                parts.append("tools: " + (", ".join(seen) or "none"))
+            if "show results" in text:
+                parts.append("results: " + " | ".join(self.results))
+            pieces = [" ; ".join(parts)]
         elif "paragraphs" in text:
             pieces = ["One.", "\n\n", "Two."]
         elif "slow-text" in text:
@@ -740,7 +1022,8 @@ class Fake:
         path = os.environ.get("HARNESS_FAKE_CLAUDE_ARGV")
         if path:
             with open(path, "w") as f:
-                json.dump({"env": {k: v for k, v in os.environ.items() if k.startswith("CLAUDE_CODE_")},
+                json.dump({"env": {k: v for k, v in os.environ.items()
+                                   if k.startswith(("CLAUDE_CODE_", "HARNESS_MCP_", "ENABLE_CLAUDEAI"))},
                            "argv": self.argv,
                            "cwd": os.getcwd(),
                            "claudecode": os.environ.get("CLAUDECODE"),
@@ -748,6 +1031,8 @@ class Fake:
         while True:
             msg = self.next_message()
             if msg is None:
+                if self.plugin:
+                    self.plugin.close()
                 return
             kind = msg.get("type")
             if kind == "control_request":

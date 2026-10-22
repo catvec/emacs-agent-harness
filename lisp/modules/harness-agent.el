@@ -1697,20 +1697,35 @@ harness could not send it (see `harness-agent--respond-with-fallback')."
          (harness-agent--update-activity sid)
          (funcall refuse (format "the permission check failed: %s" (harness-error-short-message err)))))))))
 
+(defun harness-agent--builtin-output (output)
+  "Return OUTPUT, what a provider's own tool printed, as the transcript keeps it.
+The provider ran the tool and the model has all of OUTPUT.  The
+transcript is read by people and sent to models again, so it keeps no
+more than a harness tool's output may be (`harness-tools-max-output-chars'),
+the rest said in a line, where a harness tool saves the whole to a file."
+  (let* ((text (if (stringp output) output (format "%s" (or output ""))))
+         (max (and (boundp 'harness-tools-max-output-chars) harness-tools-max-output-chars)))
+    (if (and (natnump max) (> (length text) max))
+        (concat (substring text 0 max)
+                (format "\n[%d more characters: the provider's tool printed them to the model, the transcript keeps the first %d]"
+                        (- (length text) max) max))
+      text)))
+
 (defun harness-agent--record-builtin-result (sid call output is-error &optional meta)
   "Record OUTPUT as the result of SID's running built-in CALL and end it.
 IS-ERROR marks a failed call; META is added to the node's meta.  Return
 the node, or nil when it could not be recorded: that is logged, short,
 and the call is over all the same.  The output goes through the
 `tools/output-text' filter first, as the text of a harness tool does, so
-the secrets module masks it here too."
+the secrets module masks it here too; a long one is cut
+\(`harness-agent--builtin-output')."
   (harness-agent--remove-call sid (car call))
   (let ((node (harness-agent--try (format "recording result of %s" (or (plist-get (cdr call) :tool) (car call)))
                 (harness-call 'session/append sid
                               (list :kind 'tool-result :call-id (car call)
                                     :output (harness-run-filter
                                              'tools/output-text
-                                             (if (stringp output) output (format "%s" (or output "")))
+                                             (harness-agent--builtin-output output)
                                              sid)
                                     :is-error (and is-error t)
                                     :meta (append (list :builtin t

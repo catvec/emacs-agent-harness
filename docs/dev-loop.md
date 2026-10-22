@@ -54,7 +54,18 @@ depth, so loading sources directly is not supported.  Set
 handler signals.
 Integration suites that talk to real models run only with
 `HARNESS_INTEGRATION=1`; the local ACP suites and the TCP suites both
-run by default so both transports stay green.
+run by default so both transports stay green.  The suite that runs the
+Claude provider against the real `claude` binary runs only with
+`HARNESS_REAL_CLAUDE` naming it: it talks to no model, only to
+`test/fixtures/mock-anthropic.py` on 127.0.0.1, with a home directory
+and a dummy key of its own, and a company's managed settings are
+simulated in a private `/etc` with bubblewrap (those tests skip without
+it).  Run it after a Claude Code upgrade, which is what the fake CLI the
+other suites use cannot tell you:
+
+```sh
+HARNESS_REAL_CLAUDE=$(command -v claude) scripts/test.sh test/harness-provider-claude-real-cli-test.el
+```
 
 ## The fast test loop
 
