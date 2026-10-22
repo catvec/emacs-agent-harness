@@ -58,9 +58,19 @@
 ;; The status of a thread changes by an operation that records who made
 ;; it and when (`change-review-thread-history').
 ;;
+;; A thread that someone other than the user closed -- an agent says
+;; what it did and closes the thread -- is TO REVIEW until the user has
+;; looked at it and says so (`change-review-mark-reviewed'), or answers
+;; it.  The mark is on the change of status that closed the thread
+;; (`:reviewed' in its history entry), so a thread closed again after it
+;; was opened is to review again, and nothing marks one by the passing
+;; of time: a close missed for two rounds is still waiting.
+;; `change-review-thread-unreviewed-p' says which threads wait.
+;;
 ;; Everything that changes a set is an OPERATION, a plist of plain
 ;; data: `add-comment', `set-status', `add-version', `mark-sent',
-;; `edit-comment', `delete-comment'.  `change-review-apply' performs
+;; `edit-comment', `delete-comment', `mark-reviewed',
+;; `unmark-reviewed'.  `change-review-apply' performs
 ;; one, and performing the same operation twice changes nothing the
 ;; second time (the ids see to that), so a set can be kept by writing
 ;; down operations, copied to another Emacs by sending them, and made
@@ -359,7 +369,9 @@ ID names it.  STATUS is `open' or `closed'; a thread is closed when
 what it raised is done.  COMMENTS are its comments in the order they
 were written, the first being the root.  HISTORY lists the changes of
 status, oldest first, each a plist :status, :time, :author (a
-`change-review-author'), :revision and :id.  META is a plist."
+`change-review-author'), :revision and :id, and :reviewed, the time
+the user reviewed a close by someone else, once they did
+\(`change-review-thread-unreviewed-p').  META is a plist."
   id status comments history meta)
 
 (cl-defstruct (change-review-file
@@ -521,6 +533,25 @@ found where the files of the revision are (`change-review-origin')."
   "Return non-nil when THREAD is open."
   (eq (change-review-thread-status thread) 'open))
 
+(defun change-review-thread-closing (thread)
+  "Return the history entry that closed THREAD, or nil.
+That is the newest change of status to closed, when THREAD is closed; a
+thread that is open, or was closed with no record of it, has none."
+  (unless (change-review-thread-open-p thread)
+    (cl-find 'closed (change-review-thread-history thread)
+             :key (lambda (entry) (plist-get entry :status)) :from-end t)))
+
+(defun change-review-thread-unreviewed-p (set thread)
+  "Return non-nil when THREAD of SET waits for the user to review it.
+It is closed, by someone other than the user (`change-review-own-author-p'),
+and the user has not reviewed that close (`change-review-mark-reviewed').
+A thread the user closed, or one closed with no record of who did, never
+waits: there is nothing of someone else's to look at."
+  (when-let* ((entry (change-review-thread-closing thread))
+              (author (plist-get entry :author)))
+    (and (not (plist-get entry :reviewed))
+         (not (change-review-own-author-p set author)))))
+
 (defun change-review-thread-drafts (thread)
   "Return the comments of THREAD that are drafts, in order."
   (cl-remove-if-not #'change-review-comment-draft-p (change-review-thread-comments thread)))
@@ -569,23 +600,31 @@ INDEX counts from 1; nil when THREAD does not hold COMMENT."
 
 (defun change-review-threads (set &optional status)
   "Return the threads of SET, in the order they were started.
-STATUS limits them to the `open' or the `closed' ones; nil or `all'
+STATUS limits them to the `open' or the `closed' ones, or to the
+`unreviewed' ones, closed by someone else and waiting for the user to
+look at them (`change-review-thread-unreviewed-p'); nil or `all'
 returns every one."
-  (if (memq status '(nil all))
-      (copy-sequence (change-review-set-threads set))
-    (cl-remove-if-not (lambda (thread) (eq (change-review-thread-status thread) status))
-                      (change-review-set-threads set))))
+  (cond ((memq status '(nil all))
+         (copy-sequence (change-review-set-threads set)))
+        ((eq status 'unreviewed)
+         (cl-remove-if-not (lambda (thread) (change-review-thread-unreviewed-p set thread))
+                           (change-review-set-threads set)))
+        (t
+         (cl-remove-if-not (lambda (thread) (eq (change-review-thread-status thread) status))
+                           (change-review-set-threads set)))))
 
 (defun change-review-thread-counts (set)
   "Return the counts of SET's threads as a plist.
-:open and :closed count the threads of each status, :drafts the draft
-comments, :comments all the comments."
-  (let ((open 0) (closed 0) (drafts 0) (comments 0))
+:open and :closed count the threads of each status, :unreviewed those of
+the closed ones that wait for the user to review them, :drafts the
+draft comments, :comments all the comments."
+  (let ((open 0) (closed 0) (unreviewed 0) (drafts 0) (comments 0))
     (dolist (thread (change-review-set-threads set))
       (if (change-review-thread-open-p thread) (cl-incf open) (cl-incf closed))
+      (when (change-review-thread-unreviewed-p set thread) (cl-incf unreviewed))
       (cl-incf comments (length (change-review-thread-comments thread)))
       (cl-incf drafts (length (change-review-thread-drafts thread))))
-    (list :open open :closed closed :drafts drafts :comments comments)))
+    (list :open open :closed closed :unreviewed unreviewed :drafts drafts :comments comments)))
 
 (defun change-review-drafts (set)
   "Return the draft comments of SET, in the order they were written."
@@ -753,7 +792,8 @@ STATUS limits the threads as for `change-review-threads'."
    :status (change-review--symbol (plist-get data :status))
    :time (change-review--number (plist-get data :time))
    :author (change-review-author-from-data (plist-get data :author))
-   :revision (change-review--string (plist-get data :revision))))
+   :revision (change-review--string (plist-get data :revision))
+   :reviewed (change-review--number (plist-get data :reviewed))))
 
 (defun change-review--history-to-data (entry)
   "Return the history ENTRY, a plist with an author struct, as plain data."
@@ -762,7 +802,8 @@ STATUS limits the threads as for `change-review-threads'."
    :status (and (plist-get entry :status) (symbol-name (plist-get entry :status)))
    :time (plist-get entry :time)
    :author (change-review-author-to-data (plist-get entry :author))
-   :revision (plist-get entry :revision)))
+   :revision (plist-get entry :revision)
+   :reviewed (plist-get entry :reviewed)))
 
 (defun change-review--apply-add-comment (set op)
   "Perform the `add-comment' operation OP on SET; non-nil if SET changed."
@@ -802,6 +843,34 @@ STATUS limits the threads as for `change-review-threads'."
                            :time (change-review--number (plist-get op :time))
                            :author (change-review-author-from-data (plist-get op :author))
                            :revision (change-review--string (plist-get op :revision))))))
+      t)))
+
+(defun change-review--apply-reviewed (set op reviewed)
+  "Perform the `mark-reviewed' operation OP on SET; non-nil if SET changed.
+With REVIEWED nil, perform the `unmark-reviewed' operation OP instead.
+OP names the thread (:thread) and the change of status that closed it
+\(:status-id), by the id of its history entry; with no :status-id it is
+the change that closed the thread now.  The mark is on that change and
+not on the thread, so a thread opened and closed again is to review
+again.  Marking what is marked, unmarking what is not, an entry that is
+not there or is no close: nothing changes."
+  (let* ((thread (or (change-review-find-thread set (plist-get op :thread))
+                     (signal 'change-review-error
+                             (list (format "No thread %s" (plist-get op :thread))))))
+         (id (change-review--string (plist-get op :status-id)))
+         (entry (if id
+                    (cl-find id (change-review-thread-history thread)
+                             :key (lambda (e) (plist-get e :id)) :test #'equal)
+                  (change-review-thread-closing thread))))
+    (when (and entry (eq (plist-get entry :status) 'closed)
+               (if reviewed (not (plist-get entry :reviewed)) (plist-get entry :reviewed)))
+      (let ((new (if reviewed
+                     (append entry (list :reviewed (or (change-review--number (plist-get op :time))
+                                                       (float-time))))
+                   (cl-loop for (key value) on entry by #'cddr
+                            unless (eq key :reviewed) append (list key value)))))
+        (setf (change-review-thread-history thread)
+              (mapcar (lambda (e) (if (eq e entry) new e)) (change-review-thread-history thread))))
       t)))
 
 (defun change-review--apply-add-version (set op)
@@ -874,7 +943,10 @@ OP is a plist whose :op is one of
   add-version     :version, the data of a version;
   mark-sent       :comments, ids, :time, :meta (merged into theirs);
   edit-comment    :comment, an id, :body and :time;
-  delete-comment  :comment, an id (of a draft).
+  delete-comment  :comment, an id (of a draft);
+  mark-reviewed   :thread, :status-id, the id of the change of status
+                  that closed it, and :time: the user reviewed that close;
+  unmark-reviewed :thread and :status-id: it is to review again.
 An operation that finds its change made already -- a comment, a version
 or a status change of that id is there -- does nothing and returns nil,
 so an operation can be performed again without harm.  Unless SILENT,
@@ -887,6 +959,8 @@ operation that cannot be performed signals `change-review-error'."
                    ('mark-sent (change-review--apply-mark-sent set op))
                    ('edit-comment (change-review--apply-edit-comment set op))
                    ('delete-comment (change-review--apply-delete-comment set op))
+                   ('mark-reviewed (change-review--apply-reviewed set op t))
+                   ('unmark-reviewed (change-review--apply-reviewed set op nil))
                    (kind (signal 'change-review-error
                                  (list (format "Unknown operation %S" kind)))))))
     (when (and changed (not silent))
@@ -1050,6 +1124,36 @@ version's).  Return non-nil when the status changed."
 (defun change-review-reopen (set thread &rest keys)
   "Open THREAD of SET again.  KEYS are those of `change-review-update-status'."
   (apply #'change-review-update-status set thread 'open keys))
+
+(defun change-review--thread-argument (set thread)
+  "Return THREAD, a thread of SET or its id, as the thread; signal when none."
+  (or (if (change-review-thread-p thread) thread (change-review-find-thread set thread))
+      (signal 'change-review-error (list "No such thread"))))
+
+(cl-defun change-review-mark-reviewed (set thread &key time)
+  "Say the user has reviewed how THREAD of SET was closed, at TIME (now).
+THREAD is a thread of SET or its id.  What is marked is the change of
+status that closed it, by its id, so that a thread opened again and
+closed once more is to review again.  Return non-nil when that changed
+something; nil, with nothing sent, for a thread that is open or whose
+close is reviewed already.  See `change-review-thread-unreviewed-p'."
+  (let* ((thread (change-review--thread-argument set thread))
+         (entry (change-review-thread-closing thread)))
+    (when (and entry (not (plist-get entry :reviewed)))
+      (change-review-dispatch
+       set (list :op 'mark-reviewed :thread (change-review-thread-id thread)
+                 :status-id (plist-get entry :id) :time (or time (float-time)))))))
+
+(defun change-review-unmark-reviewed (set thread)
+  "Make THREAD of SET, a thread or its id, to review again.
+The opposite of `change-review-mark-reviewed'; return non-nil when the
+close of THREAD was reviewed and no longer is."
+  (let* ((thread (change-review--thread-argument set thread))
+         (entry (change-review-thread-closing thread)))
+    (when (and entry (plist-get entry :reviewed))
+      (change-review-dispatch
+       set (list :op 'unmark-reviewed :thread (change-review-thread-id thread)
+                 :status-id (plist-get entry :id))))))
 
 (defun change-review-add-version (set version)
   "Add VERSION, a `change-review-version', to SET; return the version SET has.

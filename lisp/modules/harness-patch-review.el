@@ -41,6 +41,14 @@
 ;; `review_comment', closing it when its point is done; the user closes
 ;; it in turn, once they agree.
 ;;
+;; THE CLOSES.  The agent closes a thread; the user is the one who says
+;; the point is done.  A thread the agent closed is TO REVIEW until the
+;; user has looked at it: the library keeps that on the close itself
+;; (the operations `mark-reviewed' and `unmark-reviewed', which a UI
+;; sends like any other), so a close from two rounds ago still waits
+;; and nothing takes it for read.  The agent is told, with the threads
+;; it answers, that the user looks at every thread it closes.
+;;
 ;; THE EARLIER ROUNDS.  A task sent back before there were threads kept
 ;; its feedback as text.  The first time a task's set is made, the
 ;; comments quoted in those rounds become closed threads of the set, with
@@ -580,13 +588,15 @@ of feedback as closed threads."
 (harness-defmethod patch-review/apply (task-id op)
   "Perform OP, an operation of change-review, on the review of task TASK-ID.
 The UI sends the operations the user makes: `add-comment', `set-status',
-`edit-comment', `delete-comment' and `add-version'.  Return (:changed
-BOOL).  `patch-review/changed' announces what changed to every UI, so
-that each performs it on its own copy."
+`edit-comment', `delete-comment', `add-version', and `mark-reviewed' and
+`unmark-reviewed' for a close by the agent the user has looked at, or
+no longer has.  Return (:changed BOOL).  `patch-review/changed' announces
+what changed to every UI, so that each performs it on its own copy."
   (let ((kind (let ((value (plist-get op :op)))
                 (cond ((symbolp value) value)
                       ((stringp value) (intern value))))))
-    (unless (memq kind '(add-comment set-status edit-comment delete-comment add-version))
+    (unless (memq kind '(add-comment set-status edit-comment delete-comment add-version
+                                     mark-reviewed unmark-reviewed))
       (signal 'harness-error (list (format "The review does not take %S operations from a UI" kind))))
     (let ((set (harness-patch-review--set-for task-id t)))
       (list :changed (and (change-review-dispatch set op) t)))))
@@ -724,7 +734,7 @@ Return a promise of (:seen N :unviewed M :revision COMMIT :tip COMMIT)."
 (defun harness-patch-review--attribution (task set)
   "Return the line before the first quote of the drafts of TASK's review in SET."
   (let ((version (change-review-latest-version set)))
-    (format "My review comments on your branch %s%s%s. Each is quoted from the diff, with my comment under the lines it is about; [thread ...] names the thread it belongs to. Answer a thread with the review_comment tool, giving its id, and close it (status \"closed\") once what it raises is done: a thread left open is not done."
+    (format "My review comments on your branch %s%s%s. Each is quoted from the diff, with my comment under the lines it is about; [thread ...] names the thread it belongs to. Answer a thread with the review_comment tool, giving its id, and close it (status \"closed\") once what it raises is done: a thread left open is not done. I look at every thread you close, so say in your answer what you changed and where."
             (or (plist-get task :branch) "")
             (if version (format " (at %s)" (change-review-short-revision (change-review-version-tip version))) "")
             (if (and version (change-review-version-base version))

@@ -14,12 +14,13 @@
 ;; context say.
 ;;
 ;; `review_comment' adds a comment of the agent's to a thread, and may
-;; close the thread or open it again.  The comment records the agent, the
-;; session and this very tool call, so that whoever reads the thread can
-;; follow it to the point of the conversation it came from, and the
-;; commit the agent was at, so that a reply that says "fixed" says where.
-;; With no thread it starts one, on the change as a whole, or on a file
-;; and line of it.
+;; close the thread or open it again; a thread it closes waits for the
+;; user to review it, so its answer says what changed and where.  The
+;; comment records the agent, the session and this very tool call, so
+;; that whoever reads the thread can follow it to the point of the
+;; conversation it came from, and the commit the agent was at, so that a
+;; reply that says "fixed" says where.  With no thread it starts one, on
+;; the change as a whole, or on a file and line of it.
 ;;
 ;; Both are offered to task sessions: a session that is no task's has no
 ;; review (the filter `agent/tools' removes them), unless it names a task.
@@ -118,7 +119,7 @@ That is the task INPUT names, else the task of the calling session."
 
 (harness-define-tool "review_comment"
   :label "Review comment"
-  :description "Answer a thread of the review of your work, or start one. The thread id is given in the feedback after \"[thread ...]\", and review_threads lists them. Write what you did or why you disagree, briefly, in Markdown: the review draws it rendered, so name code in `backquotes`, put lines of code in a fenced block and steps in a list. Close the thread (status closed) once what it raises is done; leave it open when it is not, or when you want the user's answer, and never close a thread you only argued against. Without thread a new thread starts: on the change as a whole, or on file and line of it, to explain something to the user where they will read the diff. The comment records this call, so the user can follow it back to this point of the conversation. With thread and status but no body, only the status changes."
+  :description "Answer a thread of the review of your work, or start one. The thread id is given in the feedback after \"[thread ...]\", and review_threads lists them. Write what you did or why you disagree, briefly, in Markdown: the review draws it rendered, so name code in `backquotes`, put lines of code in a fenced block and steps in a list; the user looks at every thread you close, so when you close one say what you changed and where. Close the thread (status closed) once what it raises is done; leave it open when it is not, or when you want the user's answer, and never close a thread you only argued against. Without thread a new thread starts: on the change as a whole, or on file and line of it, to explain something to the user where they will read the diff. The comment records this call, so the user can follow it back to this point of the conversation. With thread and status but no body, only the status changes."
   :schema '(:type "object"
             :properties (:thread (:type "string"
                                   :description "The id of the thread to answer, or the start of it when unique. Omit to start a new thread.")

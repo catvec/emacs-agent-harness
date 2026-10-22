@@ -3620,19 +3620,29 @@ Return the report's popout buffer, once it shows its changes."
                            :author agent :time (harness-media--ago 50) :sent (harness-media--ago 50))
       (change-review-close set (change-review-comment-thread resolution)
                            :author you :time (harness-media--ago 40))
+      ;; Two threads the agent answered and closed: they wait for the
+      ;; reviewer to look (the one `resolution' the user closed does not).
       (let ((rename (change-review-comment
                      set "Why rename `application`? The WSGI server imports it by that name."
                      :author you :time (harness-media--ago 88) :sent (harness-media--ago 87)
-                     :revision first-tip :location (funcall where "acme/app.py" "def _application"))))
+                     :revision first-tip :location (funcall where "acme/app.py" "def _application")))
+            (clock (change-review-comment
+                    set "Why time.monotonic() and not time.time()?"
+                    :author you :time (harness-media--ago 91) :sent (harness-media--ago 90)
+                    :revision first-tip :location (funcall where "acme/timing.py" "started = time.monotonic"))))
         (change-review-reply set rename
                              (concat "It still exists: the last line of the module binds it to the timed one, "
                                      "so imports keep working:\n\n"
                                      "```python\napplication = timed(_application)\n```")
                              :author agent :time (harness-media--ago 50) :sent (harness-media--ago 50))
-        ;; The answer was enough: closed, which the Ediff picture opens again to read.
         (change-review-close set (change-review-comment-thread rename)
-                             :author you :time (harness-media--ago 45)))
-      ;; Closed by the agent, the thread the Ediff picture leaves as one line.
+                             :author agent :time (harness-media--ago 49))
+        (change-review-reply set clock "The wall clock can step while a request runs, and the log would show a negative or a huge time. The monotonic one only goes forward."
+                             :author agent :time (harness-media--ago 50) :sent (harness-media--ago 50))
+        (change-review-close set (change-review-comment-thread clock)
+                             :author agent :time (harness-media--ago 49)))
+      ;; Closed by the agent and reviewed already, the thread the Ediff
+      ;; picture leaves as one line.
       (let ((auth (change-review-comment
                    set "Is the authentication inside the time that is logged? A slow key lookup would count."
                    :author you :time (harness-media--ago 86) :sent (harness-media--ago 85)
@@ -3640,7 +3650,8 @@ Return the report's popout buffer, once it shows its changes."
         (change-review-reply set auth "Yes, on purpose: the middleware wraps the whole application, so a slow lookup is what the log shows."
                              :author agent :time (harness-media--ago 50) :sent (harness-media--ago 50))
         (change-review-close set (change-review-comment-thread auth)
-                             :author agent :time (harness-media--ago 49)))
+                             :author agent :time (harness-media--ago 49))
+        (change-review-mark-reviewed set (change-review-comment-thread auth) :time (harness-media--ago 40)))
       (change-review-comment set "Should the health check be timed too? A slow probe would fill the log."
                              :author you :time (harness-media--ago 2)
                              :location (funcall where "acme/app.py" "application = timed"))
@@ -3728,6 +3739,26 @@ fold a thread and list them."
       (with-current-buffer (plist-get (harness-ui-patch-review--r-ediff review) :control)
         (call-interactively #'harness-ui-patch-review-ediff-quit))
       (harness-media--settle 0.5))))
+
+(defun harness-media-shot-review-to-review ()
+  "The threads view on its filter `to review': what the agent closed, and its answers.
+The reviewer has not looked at these two threads yet, so they wait for
+them; the one the reviewer closed themselves is not here."
+  (let ((popout (harness-media--review-layout)))
+    (ignore popout)
+    (harness-media--reset-layout)
+    (let ((buffer (change-review-open-threads
+                   (harness-ui-patch-review--r-set harness-media--review) 'unreviewed)))
+      (delete-other-windows)
+      (with-current-buffer buffer
+        (goto-char (point-min))
+        (search-forward "It still exists")
+        (beginning-of-line))
+      (harness-media--settle 1)
+      (harness-media--fit (harness-media--text-lines (selected-window)) nil 60)
+      (set-window-start nil (point-min))
+      (harness-media--settle 0.5))
+    (harness-media--capture "review-to-review")))
 
 (defun harness-media--review-diff-read-p (review selector)
   "Non-nil when REVIEW shows the diff SELECTOR, read and its threads placed."
@@ -3821,6 +3852,7 @@ it puts the report back at the branch against main when it is done."
     ("review" . harness-media-shot-review)
     ("review-threads" . harness-media-shot-review-threads)
     ("review-ediff" . harness-media-shot-review-ediff)
+    ("review-to-review" . harness-media-shot-review-to-review)
     ;; After them: it chooses another diff, and puts the first back.
     ("review-diff" . harness-media-shot-review-diff))
   "Every picture, as (NAME . FUNCTION), in the order they are taken.")

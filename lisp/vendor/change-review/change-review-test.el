@@ -362,6 +362,152 @@ even when the thread was moved on meanwhile."
     (should (eq 'open (change-review-thread-status thread)))
     (should (= 2 (length (change-review-thread-history thread))))))
 
+;;;; Reviewing a close
+
+(defun change-review-test--closed-by-bot (set &optional time)
+  "Return a thread of SET that the bot closed at TIME, started by the user."
+  (let* ((comment (change-review-comment set "Fix this" :author (change-review-test--alice) :time 1))
+         (thread (change-review-find-thread set (change-review-comment-thread comment))))
+    (change-review-close set thread :author (change-review-test--bot) :time (or time 50))
+    thread))
+
+(ert-deftest change-review-a-close-by-someone-else-waits-for-review ()
+  "A thread closed by someone other than the user is to review, until the
+user marks that close reviewed; the user's own closes never wait."
+  (let* ((set (change-review-test--set))
+         (thread (change-review-test--closed-by-bot set)))
+    (should (change-review-thread-unreviewed-p set thread))
+    (should (eq 'closed (plist-get (change-review-thread-closing thread) :status)))
+    (should (equal (list thread) (change-review-threads set 'unreviewed)))
+    (should (= 1 (plist-get (change-review-thread-counts set) :unreviewed)))
+    ;; Closed by the user: nothing of someone else's to look at.
+    (let* ((mine (change-review-comment set "Mine" :time 2))
+           (mine-thread (change-review-find-thread set (change-review-comment-thread mine))))
+      (change-review-close set mine-thread :time 60)
+      (should-not (change-review-thread-unreviewed-p set mine-thread))
+      (should (= 1 (length (change-review-threads set 'unreviewed))))
+      (should (= 2 (plist-get (change-review-thread-counts set) :closed))))
+    ;; An open thread, and a closed one with no record of who closed it.
+    (let ((open (change-review-find-thread set (change-review-comment-thread
+                                                (change-review-comment set "Open" :time 3)))))
+      (should-not (change-review-thread-closing open))
+      (should-not (change-review-thread-unreviewed-p set open)))
+    (let ((bare (change-review-thread-from-data
+                 (list :id "t-bare" :status "closed"
+                       :comments (list (list :id "c-bare" :body "x" :time 4))))))
+      (should-not (change-review-thread-closing bare))
+      (should-not (change-review-thread-unreviewed-p set bare)))))
+
+(ert-deftest change-review-reviewing-a-close-is-kept-in-its-history ()
+  "Marking a close reviewed puts the time on the change of status that closed
+the thread, once; unmarking takes it off; an open thread has nothing to mark."
+  (let* ((set (change-review-test--set))
+         (thread (change-review-test--closed-by-bot set))
+         (calls nil))
+    (add-hook 'change-review-changed-functions (lambda (_set op) (push (plist-get op :op) calls)))
+    (unwind-protect
+        (progn
+          (should (change-review-mark-reviewed set thread :time 90))
+          (should (= 90 (plist-get (change-review-thread-closing thread) :reviewed)))
+          (should-not (change-review-thread-unreviewed-p set thread))
+          (should (= 0 (plist-get (change-review-thread-counts set) :unreviewed)))
+          (should (equal '(closed) (mapcar (lambda (e) (plist-get e :status))
+                                           (change-review-thread-history thread))))
+          ;; Marked once: again, nothing happens and nothing is sent.
+          (should-not (change-review-mark-reviewed set (change-review-thread-id thread) :time 91))
+          (should (= 90 (plist-get (change-review-thread-closing thread) :reviewed)))
+          (should (change-review-unmark-reviewed set thread))
+          (should-not (plist-member (change-review-thread-closing thread) :reviewed))
+          (should (change-review-thread-unreviewed-p set thread))
+          (should-not (change-review-unmark-reviewed set thread))
+          ;; Marking it again after that is as good as the first time.
+          (should (change-review-mark-reviewed set thread :time 92))
+          (should (= 92 (plist-get (change-review-thread-closing thread) :reviewed)))
+          (should (equal '(mark-reviewed unmark-reviewed mark-reviewed) calls))
+          ;; An open thread has no close to review.
+          (change-review-reopen set thread :time 100)
+          (should-not (change-review-mark-reviewed set thread))
+          (should-not (change-review-unmark-reviewed set thread))
+          (should (equal '(set-status mark-reviewed unmark-reviewed mark-reviewed) calls)))
+      (setq change-review-changed-functions nil))
+    (should-error (change-review-mark-reviewed set "t-none") :type 'change-review-error)
+    (should-error (change-review-unmark-reviewed set "t-none") :type 'change-review-error)))
+
+(ert-deftest change-review-a-close-reviewed-is-not-the-next-close ()
+  "A thread the user reviewed, opened and closed again by someone else is to
+review again, and a mark meant for the earlier close never reaches the later."
+  (let* ((set (change-review-test--set))
+         (bot (change-review-test--bot))
+         (alice (change-review-test--alice))
+         (find-entry (lambda (thread id)
+                       (cl-find id (change-review-thread-history thread)
+                                :key (lambda (e) (plist-get e :id)) :test #'equal)))
+         (reviewed (change-review-test--closed-by-bot set 50))
+         (first (plist-get (change-review-thread-closing reviewed) :id)))
+    (change-review-mark-reviewed set reviewed :time 60)
+    (change-review-reopen set reviewed :author alice :time 70)
+    (should-not (change-review-thread-unreviewed-p set reviewed))
+    (change-review-close set reviewed :author bot :time 80)
+    (should (change-review-thread-unreviewed-p set reviewed))
+    (should-not (equal first (plist-get (change-review-thread-closing reviewed) :id)))
+    ;; The earlier close stays reviewed.
+    (should (= 60 (plist-get (funcall find-entry reviewed first) :reviewed)))
+    ;; Two closes, neither reviewed: a mark that names the earlier one, heard
+    ;; late, marks that one and leaves the later waiting.
+    (let* ((thread (change-review-test--closed-by-bot set 50))
+           (id (change-review-thread-id thread))
+           (early (plist-get (change-review-thread-closing thread) :id)))
+      (change-review-reopen set thread :author alice :time 70)
+      (change-review-close set thread :author bot :time 80)
+      (let ((late (plist-get (change-review-thread-closing thread) :id)))
+        (should (change-review-apply set (list :op 'mark-reviewed :thread id :status-id early :time 85)))
+        (should (= 85 (plist-get (funcall find-entry thread early) :reviewed)))
+        (should-not (plist-member (funcall find-entry thread late) :reviewed))
+        (should (change-review-thread-unreviewed-p set thread))
+        (should (change-review-apply set (list :op 'mark-reviewed :thread id :status-id late :time 86)))
+        (should-not (change-review-thread-unreviewed-p set thread))))))
+
+(ert-deftest change-review-review-operations-come-over-a-wire ()
+  "The review operations are plain data: names as strings, the history's mark
+as a number; they signal for a thread that is not there and leave an entry
+that is not there or no close alone."
+  (let* ((set (change-review-test--set))
+         (thread (change-review-test--closed-by-bot set))
+         (id (change-review-thread-id thread))
+         (status-id (plist-get (change-review-thread-closing thread) :id)))
+    (should (change-review-apply set (list :op "mark-reviewed" :thread id :status-id status-id :time 7)))
+    (should-not (change-review-apply set (list :op "mark-reviewed" :thread id :status-id status-id :time 8)))
+    (should (= 7 (plist-get (change-review-thread-closing thread) :reviewed)))
+    (should (change-review-apply set (list :op "unmark-reviewed" :thread id :status-id status-id)))
+    (should-not (change-review-apply set (list :op "unmark-reviewed" :thread id :status-id status-id)))
+    ;; With no :status-id, the close that is there; without a :time, now.
+    (should (change-review-apply set (list :op "mark-reviewed" :thread id)))
+    (should (numberp (plist-get (change-review-thread-closing thread) :reviewed)))
+    (should-not (change-review-apply set (list :op "mark-reviewed" :thread id :status-id "s-nothing")))
+    (should-error (change-review-apply set (list :op "mark-reviewed" :thread "t-none"))
+                  :type 'change-review-error)
+    (should-error (change-review-apply set (list :op "unmark-reviewed" :thread "t-none"))
+                  :type 'change-review-error)
+    ;; A thread that was opened again has no close to mark.
+    (change-review-reopen set thread :time 99)
+    (should-not (change-review-apply set (list :op "mark-reviewed" :thread id)))))
+
+(ert-deftest change-review-the-mark-of-a-review-survives-data-and-json ()
+  "A close marked reviewed comes back marked from the plain data of its set,
+also after JSON; one not marked comes back to review."
+  (let* ((set (change-review-test--set))
+         (marked (change-review-test--closed-by-bot set))
+         (waiting (change-review-test--closed-by-bot set)))
+    (change-review-mark-reviewed set marked :time 90)
+    (let* ((data (change-review-set-to-data set))
+           (back (change-review-set-from-data (change-review-test--through-json data)))
+           (back-marked (change-review-find-thread back (change-review-thread-id marked)))
+           (back-waiting (change-review-find-thread back (change-review-thread-id waiting))))
+      (should (= 90 (plist-get (change-review-thread-closing back-marked) :reviewed)))
+      (should (equal data (change-review-set-to-data back)))
+      (should-not (plist-member (change-review-thread-closing back-waiting) :reviewed))
+      (should (equal (list back-waiting) (change-review-threads back 'unreviewed))))))
+
 ;;;; Operations
 
 (ert-deftest change-review-operations-are-idempotent ()
@@ -464,7 +610,8 @@ threads in the order of their lines."
                              (cdr (assoc "a.el" groups))))))
     (should (equal '(nil "a.el" "c.el") (mapcar #'car (change-review-threads-by-file set 'open))))
     (should (equal '("b.el") (mapcar #'car (change-review-threads-by-file set 'closed))))
-    (should (equal '(:open 4 :closed 1 :drafts 5 :comments 5) (change-review-thread-counts set)))))
+    (should (equal '(:open 4 :closed 1 :unreviewed 0 :drafts 5 :comments 5)
+                   (change-review-thread-counts set)))))
 
 (ert-deftest change-review-threads-on-one-line-come-in-the-order-they-were-started ()
   "A thread added late with an early time -- one imported from before --

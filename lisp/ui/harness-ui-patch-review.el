@@ -38,13 +38,16 @@
 ;;   a file      its status, its name, the lines it adds and deletes,
 ;;               a mark once it was looked at in Ediff and a firmer one
 ;;               once it was approved, how many threads it has, open and
-;;               closed, and whether it changed since the reviewer's
+;;               closed -- and how many of those the agent closed that the
+;;               reviewer has not looked at yet, "to review" -- and
+;;               whether it changed since the reviewer's
 ;;               last comment on it.  RET or a click compares it in
 ;;               Ediff; n and p move between rows; a approves it, A
 ;;               approves every file, t shows the files flat instead.
 ;;               An approved file need not be looked at again unless the
-;;               branch changes it.  Under it, its open threads, a line
-;;               each, where they are now (see below).  The marks are
+;;               branch changes it.  Under it, its open threads and
+;;               those to review, a line each, where they are now (see
+;;               below).  The marks are
 ;;               kept by the harness with the review, each by the
 ;;               file's path and blob (`patch-review/set-viewed'), so
 ;;               they are there after a restart.  V takes every file as
@@ -165,6 +168,24 @@
 ;; file, where it is now in the branch's whole change.  What cannot be
 ;; shown -- a revision that is not there, a review before this one of
 ;; which nothing is known -- is said, and the diff shown stays.
+;;
+;; WHAT THE AGENT CLOSED.  The agent answers a thread with its
+;; `review_comment' tool and closes it when its point is done; whether
+;; it is, is for the reviewer to say.  A thread the agent closed is "to
+;; review" until the reviewer has looked at it (the library's
+;; `change-review-thread-unreviewed-p'), however many rounds ago it was
+;; closed.  The report's heading counts them as a button that lists
+;; them (`[3 to review]', the threads view with its filter on them), a
+;; file's row says how many it has, and the report lists them under
+;; their file, a line each, with the open threads.  Ediff draws them
+;; whole under their line, the agent's answer in sight, where a closed
+;; thread is one line.  m on such a row, in either version of Ediff or
+;; in its control panel, marks the thread reviewed (and again, makes it
+;; wait once more), M every one that waits, and a reply to it is as good
+;; as m.  The mark is on that close: a thread the agent closes again
+;; after it was opened is to review again, and nothing marks one by
+;; itself, so a close missed for two rounds waits still.  The harness
+;; keeps the marks with the threads (`patch-review/apply').
 ;;
 ;; Replies you wrote by hand before there were threads -- under a quote of
 ;; the agent's words, in a round of feedback or typed in its session while it
@@ -317,10 +338,12 @@ shows, as the whole frame is Ediff's then."
   'change-review-diff-context-lines "2026-10-19")
 
 (defcustom harness-ui-patch-review-closed-threads nil
-  "Whether the report lists the closed threads under their files too.
-Open threads show as a line each under the file they are about; the
-closed ones, the good ending, only count in the file's row unless this
-is non-nil.  T lists them all, with a filter."
+  "Whether the report lists all the closed threads under their files too.
+Open threads show as a line each under the file they are about, and so
+do the ones the agent closed that you have not reviewed yet (they are
+\"to review\"); the other closed ones, the good ending, only count in
+the file's row unless this is non-nil.  T lists them all, with a
+filter."
   :type 'boolean)
 
 (defcustom harness-ui-patch-review-file-tree t
@@ -1874,6 +1897,8 @@ snapshot's is the review's own."
   (define-key map (kbd "r") #'change-review-ui-reply)
   (define-key map (kbd "e") #'change-review-ui-edit-draft)
   (define-key map (kbd "x") #'change-review-ui-toggle-status)
+  (define-key map (kbd "m") #'change-review-ui-toggle-reviewed)
+  (define-key map (kbd "M") #'change-review-ui-mark-all-reviewed)
   (define-key map (kbd "o") #'change-review-ui-follow-author)
   (define-key map (kbd "c") #'change-review-ui-comment-on-change))
 
@@ -1881,16 +1906,20 @@ snapshot's is the review's own."
 
 (defun harness-ui-patch-review--counts (review)
   "Return the threads of REVIEW per file of its changes.
-An alist of (PATH . (:open N :closed M :drafts K)), for the files that have
-threads."
-  (let (alist)
+An alist of (PATH . (:open N :closed M :unreviewed U :drafts K)), for the
+files that have threads; U is how many of the M closed threads wait for
+the reviewer's look (`change-review-thread-unreviewed-p')."
+  (let ((set (harness-ui-patch-review--r-set review))
+        alist)
     (dolist (file (harness-ui-patch-review--r-files review))
-      (let ((open 0) (closed 0) (drafts 0))
+      (let ((open 0) (closed 0) (unreviewed 0) (drafts 0))
         (dolist (thread (harness-ui-patch-review--file-threads review file))
           (if (change-review-thread-open-p thread) (cl-incf open) (cl-incf closed))
+          (when (change-review-thread-unreviewed-p set thread) (cl-incf unreviewed))
           (cl-incf drafts (length (change-review-thread-drafts thread))))
         (when (> (+ open closed) 0)
-          (push (cons (change-review-file-path file) (list :open open :closed closed :drafts drafts))
+          (push (cons (change-review-file-path file)
+                      (list :open open :closed closed :unreviewed unreviewed :drafts drafts))
                 alist))))
     (nreverse alist)))
 
@@ -1920,14 +1949,23 @@ compares the file in Ediff with the thread's line in sight."
      row)
     row))
 
+(defun harness-ui-patch-review--listed-p (review thread)
+  "Return non-nil when REVIEW's report lists THREAD under its file.
+The open ones, and the closed ones that wait for the reviewer's look,
+those the agent closed that were not reviewed yet; every closed one when
+`harness-ui-patch-review-closed-threads' wants them."
+  (or harness-ui-patch-review-closed-threads
+      (change-review-thread-open-p thread)
+      (change-review-thread-unreviewed-p (harness-ui-patch-review--r-set review) thread)))
+
 (defun harness-ui-patch-review--thread-rows (review file index indent)
   "Return the rows of the threads about FILE of REVIEW, at INDEX of its files.
-The open ones, unless `harness-ui-patch-review-closed-threads' wants
-the closed too; each after INDENT.  Empty without threads."
+The open ones and those to review, unless
+`harness-ui-patch-review-closed-threads' wants all the closed ones; each
+after INDENT.  Empty without threads."
   (mapconcat
    (lambda (thread) (harness-ui-patch-review--thread-row review thread index indent))
-   (cl-remove-if-not (lambda (thread)
-                       (or harness-ui-patch-review-closed-threads (change-review-thread-open-p thread)))
+   (cl-remove-if-not (lambda (thread) (harness-ui-patch-review--listed-p review thread))
                      (harness-ui-patch-review--file-threads review file))
    ""))
 
@@ -1942,22 +1980,24 @@ the closed too; each after INDENT.  Empty without threads."
   (define-key map (kbd "r") #'change-review-ui-reply)
   (define-key map (kbd "e") #'change-review-ui-edit-draft)
   (define-key map (kbd "x") #'change-review-ui-toggle-status)
+  (define-key map (kbd "m") #'change-review-ui-toggle-reviewed)
+  (define-key map (kbd "M") #'change-review-ui-mark-all-reviewed)
   (define-key map (kbd "o") #'change-review-ui-follow-author)
   (define-key map (kbd "c") #'change-review-ui-comment-on-change))
 
 (defun harness-ui-patch-review--other-threads (review)
   "Return the rows of the threads of REVIEW that no file row shows, or nil.
 Those on the change as a whole and on files the diff shown does not
-change, under a heading, each with the file it is about; the open ones,
-unless `harness-ui-patch-review-closed-threads' says."
+change, under a heading, each with the file it is about; the open ones
+and those to review, unless `harness-ui-patch-review-closed-threads'
+says."
   (let* ((files (harness-ui-patch-review--r-files review))
          (set (harness-ui-patch-review--r-set review))
          (others (cl-stable-sort
                   (cl-remove-if
                    (lambda (thread)
                      (or (cl-some (lambda (file) (harness-ui-patch-review--thread-file-p thread file)) files)
-                         (and (not harness-ui-patch-review-closed-threads)
-                              (not (change-review-thread-open-p thread)))))
+                         (not (harness-ui-patch-review--listed-p review thread))))
                    (change-review-set-threads set))
                   ;; In the order they were started, one imported late where it belongs.
                   #'< :key (lambda (thread) (or (change-review-thread-time thread) 0)))))
@@ -1984,7 +2024,7 @@ unless `harness-ui-patch-review-closed-threads' says."
              (list 'harness-ui-patch-review-task (harness-ui-patch-review--r-id review)
                    'change-review-thread (change-review-thread-id thread)
                    'mouse-face 'highlight
-                   'help-echo "RET: list the threads; r replies, e edits a draft, x closes or opens the thread"
+                   'help-echo "RET: list the threads; r replies, e edits a draft, x closes or opens the thread, m marks it reviewed"
                    'keymap harness-ui-patch-review--thread-map)
              row)
             row))
@@ -2038,6 +2078,7 @@ with, \"  \" by default; LABEL names the file, its path by default."
   (let* ((threads (cdr (assoc (change-review-file-path file) counts)))
          (open (or (plist-get threads :open) 0))
          (closed (or (plist-get threads :closed) 0))
+         (unreviewed (or (plist-get threads :unreviewed) 0))
          (drafts (or (plist-get threads :drafts) 0))
          (indent (or indent "  "))
          (label (or label (harness-ui-patch-review--path-label file)))
@@ -2061,6 +2102,11 @@ with, \"  \" by default; LABEL names the file, its path by default."
                         "")
                       (if (> closed 0)
                           (concat "   " (propertize (format "%d closed" closed) 'face 'harness-dim-face))
+                        "")
+                      (if (> unreviewed 0)
+                          (concat " " (propertize (format "(%d to review)" unreviewed)
+                                                  'face 'change-review-ui-review-face
+                                                  'help-echo "Closed by the agent, and not reviewed by you yet: m marks a thread reviewed"))
                         "")
                       (if (> drafts 0)
                           (concat "   " (propertize (harness-ui-patch-review--plural drafts "draft")
@@ -2195,18 +2241,22 @@ each file to its place among REVIEW's files."
                                (harness-ui-report-task))))
           (gethash (plist-get task :id) harness-ui-patch-review--reviews)))))
 
-(defun harness-ui-patch-review-threads ()
+(defun harness-ui-patch-review-threads (&optional filter)
   "List the threads of the review at point by file, with a filter on their status.
 In the report of a task's changes, from a row or anywhere else in it;
 in Ediff, from the control panel or either version.  The list is the
 library's threads view (`change-review-open-threads'): n and p move
-between comments, r replies, x closes a thread or opens it again, d
-shows it in Ediff, D the code as it was when the comment was written."
+between comments, r replies, x closes a thread or opens it again, m
+marks one the agent closed as reviewed, d shows it in Ediff, D the code
+as it was when the comment was written, f changes the filter.  FILTER,
+`open', `unreviewed' (the threads the agent closed that you have not
+reviewed), `closed' or `all', is the one to start with; by default the
+one the list showed last."
   (interactive)
   (let ((review (or (harness-ui-patch-review--review-here)
                     harness-ui-patch-review--review
                     (user-error "No review here"))))
-    (let ((buffer (change-review-open-threads (harness-ui-patch-review--r-set review))))
+    (let ((buffer (change-review-open-threads (harness-ui-patch-review--r-set review) filter)))
       ;; The links of its comments to files are the branch's.
       (when (buffer-live-p buffer)
         (with-current-buffer buffer
@@ -2393,7 +2443,8 @@ It also says how many threads the review has, open and closed."
          (tip (harness-ui-patch-review--r-tip review))
          (counts (change-review-thread-counts (harness-ui-patch-review--r-set review)))
          (open (plist-get counts :open))
-         (closed (plist-get counts :closed)))
+         (closed (plist-get counts :closed))
+         (unreviewed (plist-get counts :unreviewed)))
     (concat
      (propertize (if tip (format "Changes (%d)" (length files)) "Changes") 'face 'harness-label-face)
      ;; How far through the files the reviewer is, just after the count.
@@ -2413,9 +2464,23 @@ It also says how many threads the review has, open and closed."
          (concat "   " (propertize (format "%d open, %d closed" open closed)
                                    'face 'harness-ui-patch-review-comments-face
                                    'help-echo "The threads of comments: T lists them by file")
+                 (if (> unreviewed 0)
+                     (concat " " (harness-ui-patch-review--to-review-button unreviewed))
+                   "")
                  " " (harness-ui-patch-review--threads-button))
        "")
      "")))
+
+(defun harness-ui-patch-review--to-review-button (count)
+  "Return the heading's button that lists the COUNT threads to review.
+Those are the threads the agent closed that the reviewer has not looked
+at yet."
+  (propertize (buttonize (format "[%d to review]" count)
+                         (lambda (_) (harness-ui-patch-review-threads 'unreviewed))
+                         nil "The threads the agent closed that you have not reviewed yet: list them")
+              ;; The warning's colour, a button's underline.
+              'face '(change-review-ui-review-face button)
+              'mouse-face 'highlight))
 
 (defun harness-ui-patch-review--threads-button ()
   "Return the [Threads] button of the report's heading."
@@ -2466,7 +2531,7 @@ It also says how many threads the review has, open and closed."
       (_ (format "The branch changes nothing against %s." (harness-ui-patch-review--r-base review))))))
 
 (defconst harness-ui-patch-review--hint
-  "RET or a click compares a file in Ediff, n and p move between them, a approves it, A approves all, V takes the files the newest commit did not change as viewed, t shows a tree or a flat list, T lists the threads by file, e on a thread's row edits one of its drafts, d chooses the diff shown: the branch against its base, since the last review, or any revisions.  In Ediff c comments on a difference -- in either version, on the line at point -- as a thread of its own, r replies to a thread, x closes it or opens it again and TAB folds it to a line or opens a closed one to its conversation, and e edits one of your drafts there (each draft has an [Edit] button too) or, with none, goes to the box below (C-c C-d comes back to Ediff); n at the last difference offers the next file, N and P go on to the next or previous file, q comes back here."
+  "RET or a click compares a file in Ediff, n and p move between them, a approves it, A approves all, V takes the files the newest commit did not change as viewed, t shows a tree or a flat list, T lists the threads by file, e on a thread's row edits one of its drafts, m marks a thread the agent closed as reviewed (M all of them), d chooses the diff shown: the branch against its base, since the last review, or any revisions.  In Ediff c comments on a difference -- in either version, on the line at point -- as a thread of its own, r replies to a thread, x closes it or opens it again and m marks one the agent closed as reviewed, TAB folds it to a line or opens a closed one to its conversation, and e edits one of your drafts there (each draft has an [Edit] button too) or, with none, goes to the box below (C-c C-d comes back to Ediff); n at the last difference offers the next file, N and P go on to the next or previous file, q comes back here."
   "What the report says under the changes.")
 
 ;;;;; Choosing the diff
@@ -2852,6 +2917,24 @@ As a draft, in the thread: it goes with the feedback."
   (pcase-let ((`(,review . ,thread) (harness-ui-patch-review--ediff-thread)))
     (change-review-ui-toggle-thread (harness-ui-patch-review--r-set review) thread)))
 
+(defun harness-ui-patch-review-toggle-reviewed ()
+  "Mark the thread at the current difference reviewed, or make it wait again.
+In the control panel that is the thread at the current difference, in a
+version the one under the line at point.  It is for a thread the agent
+closed: you looked at what it answered, and it no longer waits for you.
+Of several threads there, one that waits comes first."
+  (interactive)
+  (let* ((review (harness-ui-patch-review--current))
+         (set (harness-ui-patch-review--r-set review))
+         (file (or (and (integerp harness-ui-patch-review--index)
+                        (nth harness-ui-patch-review--index (harness-ui-patch-review--r-files review)))
+                   (user-error "No file here")))
+         (threads (or (harness-ui-patch-review--ediff-threads review file)
+                      (user-error "No thread here; c starts one"))))
+    (change-review-ui-toggle-thread-reviewed
+     set (or (cl-find-if (lambda (thread) (change-review-thread-unreviewed-p set thread)) threads)
+             (car threads)))))
+
 (defun harness-ui-patch-review--difference-ranges ()
   "Return the lines the current difference of this Ediff spans, per side.
 A plist of `:old' and `:new', each (FIRST . LAST) lines of that version, nil
@@ -2990,7 +3073,7 @@ Return a promise of the review."
     (define-key map (kbd "T") #'harness-ui-patch-review-threads)
     map)
   "Keys in the two versions Ediff compares: c comments on the line at point.
-Those of the library's threads under a line -- r, x, o, RET -- are its.")
+Those of the library's threads under a line -- r, x, m, o, RET -- are its.")
 
 (define-minor-mode harness-ui-patch-review-lines-mode
   "Keys to review one of the two versions Ediff compares.
@@ -2998,6 +3081,7 @@ Those of the library's threads under a line -- r, x, o, RET -- are its.")
 \\[harness-ui-patch-review-comment-line] comments on the line at point, as a thread of its own.
 \\[change-review-ui-reply] replies to the thread under it.
 \\[change-review-ui-toggle-status] closes it or opens it again.
+\\[change-review-ui-toggle-reviewed] marks it reviewed, when the agent closed it.
 \\[change-review-ui-cycle-fold] folds it: one line, its conversation, all of it.
 \\[change-review-ui-return] opens it if it is one line, else shows where its comments were made.
 \\[change-review-ui-show-source] shows the code the comment under the line was written on, as it was then.
@@ -3311,6 +3395,8 @@ It gets the review's keys and help, and gives the report back as it ends."
     (define-key map "c" #'harness-ui-patch-review-comment)
     (define-key map "r" #'harness-ui-patch-review-reply)
     (define-key map "x" #'harness-ui-patch-review-toggle-thread)
+    ;; Instead of Ediff's wide display, which a review has no use for.
+    (define-key map "m" #'harness-ui-patch-review-toggle-reviewed)
     (define-key map "T" #'harness-ui-patch-review-threads)
     (define-key map (kbd "TAB") #'harness-ui-patch-review-cycle-fold)
     (define-key map "e" #'harness-ui-patch-review-edit-comment)

@@ -43,7 +43,9 @@
 ;; sits in the thread: its number out of the thread's comments, and the
 ;; one it answers when that is not the one before.  The header says
 ;; whether the thread is open or closed, who closed it and when.  A
-;; closed thread can be drawn as one line.
+;; closed thread can be drawn as one line.  One that someone else closed
+;; says `to review' until the user has looked at it and said so, or
+;; answered it (see below), and is then drawn whole.
 ;;
 ;; A DRAFT can be changed: it has an [Edit] button, which edits that
 ;; draft whatever point is on -- point cannot be on a thread drawn under
@@ -78,13 +80,25 @@
 ;;
 ;; THE THREADS VIEW (`change-review-open-threads').  All the threads of a
 ;; change set, grouped by file, with a filter on their status: open,
-;; closed or all.  Point is on a comment, and the keys act on it: RET
-;; shows where it was made (the file and line, the revision, and the
-;; lines of the diff it was made on), r replies to it, x closes its
-;; thread or opens it again, d shows it in the diff view, o follows an
-;; agent's comment to the conversation it came from, e edits a draft, c
-;; comments on the change as a whole.  n and p move between comments, N
-;; and P between threads, f changes the filter.
+;; closed, all, or to review.  Point is on a comment, and the keys act
+;; on it: RET shows where it was made (the file and line, the revision,
+;; and the lines of the diff it was made on), r replies to it, x closes
+;; its thread or opens it again, m marks its thread reviewed, d shows
+;; it in the diff view, o follows an agent's comment to the
+;; conversation it came from, e edits a draft, c comments on the change
+;; as a whole.  n and p move between comments, N and P between threads,
+;; f changes the filter.
+;;
+;; WHAT WAITS FOR THE USER.  An agent answers a thread and closes it; the
+;; user is the one who says it is done.  A thread closed by someone other
+;; than the user is TO REVIEW (`change-review-thread-unreviewed-p'), and
+;; the filter of that name lists those, so that after a round of work the
+;; user sees what was closed and reads the answers.  A thread leaves the
+;; filter only when the user acts on it: m (or [Mark reviewed]) says
+;; they looked at it, M says so for all that wait, a reply to it does
+;; too, and opening it again takes it out of the closed ones.  Nothing
+;; marks a thread by itself, so a close missed for two rounds still
+;; waits.  m on a thread already reviewed makes it wait again.
 ;;
 ;; WHERE A COMMENT WAS MADE.  The lines under a comment are the diff of
 ;; the revision it was written against, as it was then: the answer to a
@@ -140,14 +154,18 @@ Long lines of a comment are wrapped to it, under the comment's bar."
 
 (defcustom change-review-ui-default-filter 'open
   "Which threads the threads view shows at first.
-`open', `closed' or `all'."
-  :type '(choice (const open) (const closed) (const all)))
+`open', `closed', `all', or `unreviewed': the closed threads that wait
+for the user to review them."
+  :type '(choice (const open) (const closed) (const all)
+                 (const :tag "to review" unreviewed)))
 
 (defcustom change-review-ui-collapse-closed-in-diff t
   "Whether a closed thread is drawn as one line, until it is opened.
 In the diff view, and in any other view of the lines of a file, a
 comparison in Ediff say.  \\`TAB' on the line opens it to its conversation,
-and folds any thread to one line."
+and folds any thread to one line.  A closed thread that waits for the
+user to review it is drawn whole all the same, so that what was
+answered is in sight."
   :type 'boolean)
 
 (defcustom change-review-ui-max-thread-lines 'window
@@ -187,6 +205,8 @@ comparison say, has its set through this, or in `change-review-ui--set'.")
   "The mark and the word of an open thread.")
 (defface change-review-ui-closed-face '((t :inherit success))
   "The mark and the word of a closed thread.")
+(defface change-review-ui-review-face '((t :inherit warning))
+  "The words \"to review\", on a thread someone else closed that waits for the user.")
 (defface change-review-ui-user-face '((t :inherit font-lock-keyword-face :weight bold))
   "The name of a comment's author, for a user.")
 (defface change-review-ui-agent-face '((t :inherit font-lock-type-face :weight bold))
@@ -578,6 +598,20 @@ closed and no more."
              'face 'change-review-ui-closed-face
              (and time (list 'help-echo (change-review-ui--time time)))))))
 
+(defun change-review-ui--review-text (set thread)
+  "Return what THREAD of SET says of the user's review of its close, or nil.
+Only a thread closed by someone else says anything: `to review' while
+the user has not looked at it, `reviewed' once they did."
+  (when-let* ((entry (change-review-thread-closing thread))
+              (author (plist-get entry :author))
+              ((not (change-review-own-author-p set author))))
+    (if-let* ((time (plist-get entry :reviewed)))
+        (propertize "reviewed" 'face 'change-review-ui-meta-face
+                    'help-echo (format "You reviewed this close, %s; m makes it wait for you again"
+                                       (change-review-ui--time time)))
+      (propertize "to review" 'face 'change-review-ui-review-face
+                  'help-echo "Closed by someone else, and you have not reviewed it: m marks it reviewed"))))
+
 (defun change-review-ui-thread-short-id (set thread)
   "Return the id of THREAD as short as it can be and still be its own in SET."
   (let* ((id (change-review-thread-id thread))
@@ -770,7 +804,8 @@ where the thread is, how many comments it has and the buttons."
                             (and note (propertize note 'face 'change-review-ui-meta-face))
                             (and (change-review-ui--opt options :count t)
                                  (format "%d %s" count (if (= count 1) "comment" "comments")))
-                            (change-review-ui--status-text set thread (plist-get options :status)))))
+                            (change-review-ui--status-text set thread (plist-get options :status))
+                            (change-review-ui--review-text set thread))))
          (buttons (and (change-review-ui--opt options :buttons t)
                        (concat
                         (change-review-ui--button "[Reply]" "Reply to this thread"
@@ -780,6 +815,12 @@ where the thread is, how many comments it has and the buttons."
                                                   (if open "Close this thread: it is done"
                                                     "Open this thread again")
                                                   (lambda () (change-review-ui-toggle-thread set thread)))
+                        (if (change-review-thread-unreviewed-p set thread)
+                            (concat " " (change-review-ui--button
+                                         "[Mark reviewed]"
+                                         "You looked at how this thread was closed: it no longer waits for you"
+                                         (lambda () (change-review-ui-mark-thread-reviewed set thread))))
+                          "")
                         (if (eq view 'diff)
                             ""
                           (concat " " (change-review-ui--button
@@ -794,7 +835,9 @@ where the thread is, how many comments it has and the buttons."
                         " " (mapconcat #'identity parts
                                        (propertize " · " 'face 'change-review-ui-meta-face))
                         (if buttons (concat "   " buttons) ""))
-                'change-review-thread-start t)))
+                'change-review-thread-start t
+                ;; A long header wraps under its mark, not at the margin.
+                'wrap-prefix (concat prefix "  "))))
 
 (defun change-review-ui--thread-header (set thread view placement prefix width &optional fold keep)
   "Return the first line of THREAD in SET, drawn for VIEW, after PREFIX.
@@ -875,7 +918,8 @@ INDENT starts it; its words are a button that draws all of the thread."
   "Return THREAD of SET drawn as text, each line ending in a newline.
 This is the one drawing of a thread, in the threads view and in the
 diff view.  It has a header line -- the thread's mark and short id,
-where it is, how many comments it has, whether it is open or closed --
+where it is, how many comments it has, whether it is open or closed,
+and for a thread someone else closed whether it is still to review --
 and buttons, then each comment: the bar, the comment's place in the
 thread (\"2/3\", and \"↳ re 1/3\" when it answers another than the one
 before), who wrote it, when, against which revision, whether it is a
@@ -936,7 +980,8 @@ of it.  A thread whose DETAILS show is not cut."
   "Return THREAD of SET as one line, for a list of threads.
 Its mark, short id, line, the author and first words of its root, and
 how many comments it has; each part drawn as the thread's header and
-comments draw it.  PLACEMENT says where the thread is now.  The line
+comments draw it, and \"to review\" for a thread someone else closed that
+waits for the user.  PLACEMENT says where the thread is now.  The line
 ends in a newline and carries the thread's id."
   (let* ((root (change-review-thread-root thread))
          (open (change-review-thread-open-p thread))
@@ -960,6 +1005,8 @@ ends in a newline and carries the thread's id."
                           "")
                         (if (change-review-thread-drafts thread)
                             (propertize " · draft" 'face 'change-review-ui-draft-face) "")
+                        (if (change-review-thread-unreviewed-p set thread)
+                            (propertize " · to review" 'face 'change-review-ui-review-face) "")
                         "\n")
                 'change-review-thread (change-review-thread-id thread))))
 
@@ -1289,13 +1336,17 @@ gets the text when the user finishes it with \\`C-c C-c'."
 ;;;; Commands on a thread
 
 (defun change-review-ui-reply-to-comment (set thread comment)
-  "Read a reply to COMMENT of THREAD in SET and add it as a draft."
+  "Read a reply to COMMENT of THREAD in SET and add it as a draft.
+Answering a thread that waits for the user's review is looking at it:
+the thread is reviewed then."
   (change-review-ui-read
    (format "Reply to %s:" (change-review-ui--comment-label set thread comment)) ""
    (lambda (text)
      (if (string-blank-p text)
          (message "No reply")
-       (change-review-reply set comment (string-trim text))))))
+       (change-review-reply set comment (string-trim text))
+       (when (change-review-thread-unreviewed-p set thread)
+         (change-review-mark-reviewed set thread))))))
 
 (defun change-review-ui-reply-to-thread (set thread)
   "Read a reply to the last comment of THREAD in SET and add it as a draft."
@@ -1329,6 +1380,55 @@ comment to point at, to the thread's last comment."
   (pcase-let ((`(,set ,thread ,_) (change-review-ui--target)))
     (change-review-update-status set thread status)
     (message "Thread %s is %s" (change-review-ui-thread-short-id set thread) status)))
+
+(defun change-review-ui-mark-thread-reviewed (set thread)
+  "Say the user looked at how THREAD of SET was closed: it no longer waits."
+  (when (change-review-mark-reviewed set thread)
+    (message "Thread %s is reviewed" (change-review-ui-thread-short-id set thread))))
+
+(defun change-review-ui-toggle-thread-reviewed (set thread)
+  "Mark how THREAD of SET was closed reviewed, or make it wait for the user again.
+Only a close by someone else is the user's to review: for a thread that
+is open, or that the user closed, it signals."
+  (let* ((entry (change-review-thread-closing thread))
+         (author (and entry (plist-get entry :author)))
+         (short (change-review-ui-thread-short-id set thread)))
+    (cond ((change-review-thread-open-p thread)
+           (user-error "Thread %s is open: only a closed thread is reviewed" short))
+          ((null author)
+           (user-error "Thread %s has no record of who closed it: nothing to review" short))
+          ((change-review-own-author-p set author)
+           (user-error "You closed thread %s yourself: nothing to review" short))
+          ((plist-get entry :reviewed)
+           (change-review-unmark-reviewed set thread)
+           (message "Thread %s waits for your review again" short))
+          (t
+           (change-review-mark-reviewed set thread)
+           (message "Thread %s is reviewed" short)))))
+
+(defun change-review-ui-toggle-reviewed ()
+  "Mark the thread at point reviewed, or make it wait for you again.
+A thread someone else closed is to review until you say you looked at
+it.  Marking it takes it out of the `to review' filter, and a second
+press puts it back, so a slip is undone."
+  (interactive)
+  (pcase-let ((`(,set ,thread ,_) (change-review-ui--target)))
+    (change-review-ui-toggle-thread-reviewed set thread)))
+
+(defun change-review-ui-mark-all-reviewed ()
+  "Mark every thread that waits for your review reviewed, after asking.
+It is the answer for an agent you trust: you read what it said, and
+leave it at that."
+  (interactive)
+  (let* ((set (change-review-ui--current-set))
+         (threads (change-review-threads set 'unreviewed))
+         (count (length threads)))
+    (cond ((null threads) (message "Nothing to review"))
+          ((y-or-n-p (if (= count 1)
+                         "Mark the thread that waits for your review reviewed? "
+                       (format "Mark all %d threads that wait for your review reviewed? " count)))
+           (dolist (thread threads) (change-review-mark-reviewed set thread))
+           (message "%d %s reviewed" count (if (= count 1) "thread" "threads"))))))
 
 (defun change-review-ui-show-in-diff ()
   "Show the thread at point in the diff view, at the line it is about."
@@ -1429,11 +1529,14 @@ of that status is, again.")
   (let ((table (gethash set change-review-ui--trimmed)))
     (and table (gethash (change-review-thread-id thread) table))))
 
-(defun change-review-ui-default-fold (thread)
+(defun change-review-ui-default-fold (thread &optional set)
   "Return how THREAD is folded before anyone folded it.
 A closed thread is `collapsed', one line, unless
-`change-review-ui-collapse-closed-in-diff' says not; any other is `expanded'."
-  (if (and change-review-ui-collapse-closed-in-diff (not (change-review-thread-open-p thread)))
+`change-review-ui-collapse-closed-in-diff' says not, or it waits for the
+user's review in SET; any other is `expanded'."
+  (if (and change-review-ui-collapse-closed-in-diff
+           (not (change-review-thread-open-p thread))
+           (not (and set (change-review-thread-unreviewed-p set thread))))
       'collapsed
     'expanded))
 
@@ -1447,7 +1550,7 @@ a full one in full.  What the user chose
          (entry (and table (gethash (change-review-thread-id thread) table))))
     (if (and entry (eq (car entry) (change-review-thread-status thread)))
         (cdr entry)
-      (change-review-ui-default-fold thread))))
+      (change-review-ui-default-fold thread set))))
 
 (defun change-review-ui-set-fold (set thread fold)
   "Fold THREAD of SET to FOLD, `collapsed', `expanded' or `full'.
@@ -1642,7 +1745,8 @@ On `change-review-changed-functions'."
 
 (defun change-review-ui--anchor ()
   "Return where point is in a view, to put it back after drawing it again.
-The comment or the thread under it, and the line within that."
+The comment or the thread under it, and the line within that, then the
+line of the buffer: where the thread was, when it is no longer shown."
   (let ((comment (get-text-property (point) 'change-review-comment))
         (thread (get-text-property (point) 'change-review-thread))
         (file (get-text-property (point) 'change-review-file)))
@@ -1652,7 +1756,8 @@ The comment or the thread under it, and the line within that."
                                        (and thread (change-review-ui--property-start 'change-review-thread))
                                        (and file (change-review-ui--property-start 'change-review-file))
                                        (point-min))))
-          (current-column))))
+          (current-column)
+          (line-number-at-pos))))
 
 (defun change-review-ui--property-start (property)
   "Return where the run of text at point with the same PROPERTY starts."
@@ -1664,15 +1769,25 @@ The comment or the thread under it, and the line within that."
       (point))))
 
 (defun change-review-ui--goto-anchor (anchor)
-  "Put point where ANCHOR, from `change-review-ui--anchor', says."
-  (pcase-let ((`(,comment ,thread ,file ,offset ,column) anchor))
+  "Put point where ANCHOR, from `change-review-ui--anchor', says.
+When what point was on is gone -- a thread marked reviewed in the filter
+that lists those waiting, say -- it goes to where that was, which is the
+next thread now, so that the keys can go on."
+  (pcase-let ((`(,comment ,thread ,file ,offset ,column ,line) anchor))
     (let ((found (or (and comment (change-review-ui--find-property 'change-review-comment comment))
                      (and thread (change-review-ui--find-property 'change-review-thread thread))
                      (and file (change-review-ui--find-property 'change-review-file file)))))
-      (when found
+      (cond
+       (found
         (goto-char found)
         (forward-line (or offset 0))
-        (move-to-column (or column 0))))))
+        (move-to-column (or column 0)))
+       ((and (or comment thread file) line)
+        (goto-char (point-min))
+        (forward-line (1- line))
+        ;; Off the end, or in a gap: back to the last thread before it.
+        (while (and (not (bobp)) (not (get-text-property (point) 'change-review-thread)))
+          (forward-line -1)))))))
 
 (defun change-review-ui--find-property (property value)
   "Return where the first text with PROPERTY equal to VALUE starts, or nil."
@@ -1685,34 +1800,35 @@ The comment or the thread under it, and the line within that."
 
 ;;;; The threads view
 
-(defvar change-review-threads-mode-map
-  (let ((map (make-sparse-keymap)))
-    (set-keymap-parent map special-mode-map)
-    (define-key map (kbd "n") #'change-review-ui-next-comment)
-    (define-key map (kbd "p") #'change-review-ui-previous-comment)
-    (define-key map (kbd "N") #'change-review-ui-next-thread)
-    (define-key map (kbd "P") #'change-review-ui-previous-thread)
-    (define-key map (kbd "RET") #'change-review-ui-show-origin)
-    (define-key map (kbd "TAB") #'change-review-ui-show-origin)
-    (define-key map (kbd "r") #'change-review-ui-reply)
-    (define-key map (kbd "x") #'change-review-ui-toggle-status)
-    (define-key map (kbd "s") #'change-review-ui-set-status)
-    (define-key map (kbd "d") #'change-review-ui-show-in-diff)
-    (define-key map (kbd "o") #'change-review-ui-follow-author)
-    (define-key map (kbd "e") #'change-review-ui-edit-draft)
-    (define-key map (kbd "k") #'change-review-ui-delete-draft)
-    (define-key map (kbd "c") #'change-review-ui-comment-on-change)
-    (define-key map (kbd "f") #'change-review-ui-cycle-filter)
-    (define-key map (kbd "F") #'change-review-ui-set-filter)
-    (define-key map (kbd "g") #'change-review-ui-redraw)
-    (define-key map (kbd "I") #'change-review-ui-import-reply)
-    (define-key map (kbd "C-c C-c") #'change-review-ui-send)
-    map)
+(defvar change-review-threads-mode-map (make-sparse-keymap)
   "Keys of the threads view.")
 
-;; Outside the `defvar', which keeps the map an Emacs has already: a
-;; library loaded again gives that Emacs the key too.
-(define-key change-review-threads-mode-map (kbd "D") #'change-review-ui-show-source)
+;; Filled at top level, not in the `defvar', so that loading this file
+;; again, as a reload does, gives a keymap that exists already its new keys.
+(let ((map change-review-threads-mode-map))
+  (set-keymap-parent map special-mode-map)
+  (define-key map (kbd "n") #'change-review-ui-next-comment)
+  (define-key map (kbd "p") #'change-review-ui-previous-comment)
+  (define-key map (kbd "N") #'change-review-ui-next-thread)
+  (define-key map (kbd "P") #'change-review-ui-previous-thread)
+  (define-key map (kbd "RET") #'change-review-ui-show-origin)
+  (define-key map (kbd "TAB") #'change-review-ui-show-origin)
+  (define-key map (kbd "r") #'change-review-ui-reply)
+  (define-key map (kbd "x") #'change-review-ui-toggle-status)
+  (define-key map (kbd "m") #'change-review-ui-toggle-reviewed)
+  (define-key map (kbd "M") #'change-review-ui-mark-all-reviewed)
+  (define-key map (kbd "s") #'change-review-ui-set-status)
+  (define-key map (kbd "d") #'change-review-ui-show-in-diff)
+  (define-key map (kbd "D") #'change-review-ui-show-source)
+  (define-key map (kbd "o") #'change-review-ui-follow-author)
+  (define-key map (kbd "e") #'change-review-ui-edit-draft)
+  (define-key map (kbd "k") #'change-review-ui-delete-draft)
+  (define-key map (kbd "c") #'change-review-ui-comment-on-change)
+  (define-key map (kbd "f") #'change-review-ui-cycle-filter)
+  (define-key map (kbd "F") #'change-review-ui-set-filter)
+  (define-key map (kbd "g") #'change-review-ui-redraw)
+  (define-key map (kbd "I") #'change-review-ui-import-reply)
+  (define-key map (kbd "C-c C-c") #'change-review-ui-send))
 
 (define-derived-mode change-review-threads-mode special-mode "Review-Threads"
   "The threads of a change set, grouped by file.
@@ -1724,6 +1840,8 @@ Point is on a comment; the keys act on it:
 \\[change-review-ui-show-origin] shows where the comment was made, hides it again.
 \\[change-review-ui-reply] replies to it, as a draft.
 \\[change-review-ui-toggle-status] closes its thread or opens it again.
+\\[change-review-ui-toggle-reviewed] marks a thread someone else closed reviewed, or makes it wait again;
+\\[change-review-ui-mark-all-reviewed] marks every one that waits.
 \\[change-review-ui-set-status] sets the status by name.
 \\[change-review-ui-show-in-diff] shows it in the diff view, in the newest version.
 \\[change-review-ui-show-source] shows the code the comment was written on, as it was then.
@@ -1739,6 +1857,18 @@ comment at point, or on a thread's header one of the thread's drafts.
   (setq-local truncate-lines nil)
   (setq change-review-ui--redraw-function #'change-review-ui--draw-threads))
 
+(defconst change-review-ui--filters
+  '((open . "open") (unreviewed . "to review") (closed . "closed") (all . "all"))
+  "The filters of the views, in the order f goes through them, and their names.
+`unreviewed' shows the closed threads that wait for the user's review: it
+comes after `open', the other threads that want the user's attention.")
+
+(defun change-review-ui--filter-phrase (filter)
+  "Return what the threads of FILTER are called: \"open threads\", say."
+  (if (eq filter 'unreviewed)
+      "threads to review"
+    (format "%s threads" filter)))
+
 (defun change-review-ui--filter-button (set label filter current)
   "Return a button that shows the threads of FILTER, labelled LABEL, of SET.
 The one for CURRENT, the filter in force, is marked instead."
@@ -1746,6 +1876,7 @@ The one for CURRENT, the filter in force, is marked instead."
          (number (pcase filter
                    ('open (plist-get counts :open))
                    ('closed (plist-get counts :closed))
+                   ('unreviewed (plist-get counts :unreviewed))
                    (_ (+ (plist-get counts :open) (plist-get counts :closed)))))
          (text (format "%s %d" label number)))
     (if (eq filter current)
@@ -1778,8 +1909,8 @@ The one for CURRENT, the filter in force, is marked instead."
      "\n"
      (propertize "Threads  " 'face 'change-review-ui-header-face)
      (mapconcat (lambda (spec)
-                  (change-review-ui--filter-button set (car spec) (cdr spec) filter))
-                '(("open" . open) ("closed" . closed) ("all" . all)) " ")
+                  (change-review-ui--filter-button set (cdr spec) (car spec) filter))
+                change-review-ui--filters " ")
      (if (> (plist-get counts :drafts) 0)
          (propertize (format "     %d %s not sent" (plist-get counts :drafts)
                              (if (= 1 (plist-get counts :drafts)) "draft" "drafts"))
@@ -1791,9 +1922,7 @@ The one for CURRENT, the filter in force, is marked instead."
 \\[change-review-ui-next-comment]/\\[change-review-ui-previous-comment] comments  \
 \\[change-review-ui-next-thread]/\\[change-review-ui-previous-thread] threads  \
 \\[change-review-ui-show-origin] where  \\[change-review-ui-reply] reply  \
-\\[change-review-ui-edit-draft] edit draft  \
-\\[change-review-ui-toggle-status] close/open  \\[change-review-ui-show-in-diff] diff now  \
-\\[change-review-ui-show-source] diff then  \\[change-review-ui-cycle-filter] filter  \\[quit-window] quit")
+\\[change-review-ui-edit-draft] edit draft  \\[change-review-ui-toggle-status] close/open  \\[change-review-ui-toggle-reviewed] reviewed  \\[change-review-ui-show-in-diff] diff now  \\[change-review-ui-show-source] diff then  \\[change-review-ui-cycle-filter] filter  \\[quit-window] quit")
                  'face 'change-review-ui-meta-face)
      "\n\n")))
 
@@ -1811,6 +1940,7 @@ The one for CURRENT, the filter in force, is marked instead."
                  (pcase change-review-ui--filter
                    ('open "No open threads.  f shows the closed ones.\n")
                    ('closed "No closed threads.  f shows the open ones.\n")
+                   ('unreviewed "Nothing to review: no thread closed by someone else waits for you.  f shows the others.\n")
                    (_ "No threads yet.  c comments on the change; in the diff view, c comments on a line.\n"))
                  'face 'change-review-ui-meta-face))
       (dolist (group groups)
@@ -1890,17 +2020,24 @@ last, else `change-review-ui-default-filter'.  Return the buffer."
       (change-review-ui--draw-threads))
     buffer))
 
+(defun change-review-ui--read-filter ()
+  "Ask which threads to show, and return the filter that is."
+  (let ((name (completing-read "Show threads: " (mapcar #'cdr change-review-ui--filters) nil t)))
+    (car (rassoc name change-review-ui--filters))))
+
 (defun change-review-ui-set-filter (filter)
-  "Show the threads of FILTER: `open', `closed' or `all'."
-  (interactive (list (intern (completing-read "Show threads: " '("open" "closed" "all") nil t))))
+  "Show the threads of FILTER: `open', `closed', `all', or `unreviewed'.
+The last is the closed threads someone else closed and the user has not
+reviewed yet: what an agent answered and closed since they looked."
+  (interactive (list (change-review-ui--read-filter)))
   (setq change-review-ui--filter filter)
   (change-review-ui-redraw))
 
 (defun change-review-ui-cycle-filter ()
-  "Change which threads show: open, then closed, then all."
+  "Change which threads show: open, those to review, closed, and all."
   (interactive)
-  (change-review-ui-set-filter (pcase change-review-ui--filter
-                                 ('open 'closed) ('closed 'all) (_ 'open))))
+  (let ((order (mapcar #'car change-review-ui--filters)))
+    (change-review-ui-set-filter (or (cadr (memq change-review-ui--filter order)) (car order)))))
 
 ;;;; Moving between comments and threads
 
@@ -1969,6 +2106,8 @@ LINES maps (SIDE . NUMBER) to the end of the line that has it.")
   (define-key map (kbd "c") #'change-review-ui-comment-at-point)
   (define-key map (kbd "r") #'change-review-ui-reply)
   (define-key map (kbd "x") #'change-review-ui-toggle-status)
+  (define-key map (kbd "m") #'change-review-ui-toggle-reviewed)
+  (define-key map (kbd "M") #'change-review-ui-mark-all-reviewed)
   (define-key map (kbd "o") #'change-review-ui-follow-author)
   (define-key map (kbd "e") #'change-review-ui-edit-draft)
   (define-key map (kbd "RET") #'change-review-ui-return)
@@ -1990,6 +2129,8 @@ Under a thread:
 \\[change-review-ui-reply] replies to it.
 \\[change-review-ui-edit-draft] edits a draft of it (the [Edit] button of a draft does too).
 \\[change-review-ui-toggle-status] closes it or opens it again.
+\\[change-review-ui-toggle-reviewed] marks it reviewed when someone else closed it, or makes it wait again;
+\\[change-review-ui-mark-all-reviewed] marks every thread that waits.
 \\[change-review-ui-return] opens it if it is one line, else shows where its comments were made.
 \\[change-review-ui-cycle-fold] folds it: one line, its conversation, all of it.
 \\[change-review-ui-follow-author] follows an agent's comment to its conversation.
@@ -2106,11 +2247,13 @@ the first file too, saying so."
                 " · " (change-review-ui--set-title set)
                 " · " (change-review-version-name version)
                 (let ((counts (change-review-thread-counts set)))
-                  (format " · %d open, %d closed%s" (plist-get counts :open) (plist-get counts :closed)
+                  (format " · %d open, %d closed%s%s" (plist-get counts :open) (plist-get counts :closed)
+                          (if (> (plist-get counts :unreviewed) 0)
+                              (format ", %d to review" (plist-get counts :unreviewed)) "")
                           (if (> (plist-get counts :drafts) 0)
                               (format ", %d not sent" (plist-get counts :drafts)) "")))
                 (if (eq change-review-ui--filter 'all) ""
-                  (format " · showing %s threads" change-review-ui--filter))))
+                  (format " · showing %s" (change-review-ui--filter-phrase change-review-ui--filter)))))
     (force-mode-line-update)))
 
 ;;;###autoload
@@ -2335,6 +2478,7 @@ the thread it answers; importing it again adds nothing."
 (let ((map change-review-ui-lines-mode-map))
   (define-key map (kbd "r") #'change-review-ui-reply)
   (define-key map (kbd "x") #'change-review-ui-toggle-status)
+  (define-key map (kbd "m") #'change-review-ui-toggle-reviewed)
   (define-key map (kbd "o") #'change-review-ui-follow-author)
   (define-key map (kbd "e") #'change-review-ui-edit-draft)
   (define-key map (kbd "RET") #'change-review-ui-return)

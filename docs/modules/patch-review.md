@@ -51,6 +51,14 @@ marked sent once the task is.  The agent answers a thread with
 `review_comment`, closing it when its point is done; the user closes
 it in turn, once they agree.
 
+THE CLOSES.  The agent closes a thread; the user is the one who says
+the point is done.  A thread the agent closed is TO REVIEW until the
+user has looked at it: the library keeps that on the close itself
+(the operations `mark-reviewed` and `unmark-reviewed`, which a UI
+sends like any other), so a close from two rounds ago still waits
+and nothing takes it for read.  The agent is told, with the threads
+it answers, that the user looks at every thread it closes.
+
 THE EARLIER ROUNDS.  A task sent back before there were threads kept
 its feedback as text.  The first time a task's set is made, the
 comments quoted in those rounds become closed threads of the set, with

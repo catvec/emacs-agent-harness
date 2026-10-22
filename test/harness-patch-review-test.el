@@ -188,6 +188,93 @@ directory, announced, and read back after a restart."
       (should-error (harness-call 'patch-review/apply id (list :op "nonsense")) :type 'harness-error)
       (should-not events))))
 
+;;;; The closes the user has looked at
+
+(defun harness-patch-review-test--agent-closes (id)
+  "Have the agent of task ID answer a new thread of the user's and close it.
+Return (THREAD-ID . STATUS-ID): the thread, and the id of the change of
+status that closed it, from the harness's data."
+  (let* ((made (harness-patch-review-test--user-comment id "Why eighteen?"
+                                                       :location harness-patch-review-test--a18 :sent 5.0)))
+    (harness-patch-review-test--tool
+     "review_comment" (list :thread (car made) :body "Because the loop needs it." :status "closed") id)
+    (cons (car made)
+          (plist-get (car (last (plist-get (cl-find (car made) (plist-get (harness-call 'patch-review/get id) :threads)
+                                                    :key (lambda (th) (plist-get th :id)) :test #'equal)
+                                           :history)))
+                     :id))))
+
+(defun harness-patch-review-test--history (id thread-id)
+  "Return the history of the thread THREAD-ID of task ID, as the harness keeps it."
+  (plist-get (cl-find thread-id (plist-get (harness-call 'patch-review/get id) :threads)
+                      :key (lambda (th) (plist-get th :id)) :test #'equal)
+             :history))
+
+(ert-deftest harness-patch-review-keeps-the-close-the-user-reviewed ()
+  "What the agent closes waits for the user until they say they looked: the
+operations that say so are kept with the thread, announced to every UI, read
+back after a restart, and heard once.  A close the agent makes again after
+the thread was opened is not reviewed."
+  (harness-patch-review-test-with
+    (let* ((id (harness-patch-review-test--task))
+           (closed (harness-patch-review-test--agent-closes id))
+           (thread-id (car closed))
+           (status-id (cdr closed)))
+      (should (stringp status-id))
+      (should-not (plist-get (car (harness-patch-review-test--history id thread-id)) :reviewed))
+      (setq events nil)
+      ;; The user looked: kept, and announced as the operation it was.
+      (should (plist-get (harness-call 'patch-review/apply id
+                                       (list :op "mark-reviewed" :thread thread-id
+                                             :status-id status-id :time 77.0))
+                         :changed))
+      (should (= 77.0 (plist-get (car (harness-patch-review-test--history id thread-id)) :reviewed)))
+      (should (equal '("mark-reviewed") (mapcar (lambda (e) (format "%s" (plist-get (cadr e) :op))) events)))
+      (should (equal status-id (plist-get (cadr (car events)) :status-id)))
+      ;; Heard once.
+      (should-not (plist-get (harness-call 'patch-review/apply id
+                                           (list :op "mark-reviewed" :thread thread-id
+                                                 :status-id status-id :time 78.0))
+                             :changed))
+      (should (= 1 (length events)))
+      ;; Kept in the state directory: a restart reads it back.
+      (clrhash harness-patch-review--sets)
+      (should (= 77.0 (plist-get (car (harness-patch-review-test--history id thread-id)) :reviewed)))
+      ;; Waiting again, after a slip.
+      (should (plist-get (harness-call 'patch-review/apply id
+                                       (list :op "unmark-reviewed" :thread thread-id :status-id status-id))
+                         :changed))
+      (should-not (plist-get (car (harness-patch-review-test--history id thread-id)) :reviewed))
+      (should (equal '("unmark-reviewed" "mark-reviewed")
+                     (mapcar (lambda (e) (format "%s" (plist-get (cadr e) :op))) events)))
+      ;; Reviewed, then opened, then closed by the agent again: that close is new.
+      (harness-call 'patch-review/apply id (list :op "mark-reviewed" :thread thread-id
+                                                 :status-id status-id :time 79.0))
+      (harness-patch-review-test--tool "review_comment" (list :thread thread-id :status "open") id)
+      (harness-patch-review-test--tool "review_comment" (list :thread thread-id :body "Again, properly."
+                                                              :status "closed") id)
+      (let ((history (harness-patch-review-test--history id thread-id)))
+        (should (equal '("closed" "open" "closed") (mapcar (lambda (e) (plist-get e :status)) history)))
+        (should (= 79.0 (plist-get (car history) :reviewed)))
+        (should-not (plist-get (car (last history)) :reviewed))
+        (should (equal "agent" (plist-get (plist-get (car (last history)) :author) :kind))))
+      ;; A mark meant for a thread that is not there is an error, not a guess.
+      (should-error (harness-call 'patch-review/apply id (list :op "mark-reviewed" :thread "t-nope"))
+                    :type 'change-review-error))))
+
+(ert-deftest harness-patch-review-tells-the-agent-the-user-looks-at-what-it-closes ()
+  "The agent reads, with the feedback and in its tool's description, that the
+user looks at every thread it closes, so it says what it changed and where."
+  (harness-patch-review-test-with
+    (let ((id (harness-patch-review-test--task)))
+      ;; A draft to send: the feedback quotes it, after the line that says how to answer.
+      (harness-patch-review-test--user-comment id "Why eighteen?"
+                                               :location harness-patch-review-test--a18)
+      (should (string-search "I look at every thread you close, so say in your answer what you changed and where."
+                             (car (harness-patch-review--additions (harness-call 'task/get id) nil))))
+      (should (string-search "the user looks at every thread you close"
+                             (harness-tool-description (harness-tool-get "review_comment")))))))
+
 (ert-deftest harness-patch-review-records-the-version-a-task-hands-in ()
   "The commit the branch ends at is a version of the task's change set: the
 source revision comments are made against, with the commit it was made

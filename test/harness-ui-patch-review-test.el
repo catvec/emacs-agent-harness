@@ -3126,6 +3126,189 @@ they are drawn again when a window changes its size."
 
 ;;;; Self-contained
 
+(defun harness-ui-patch-review-test--agent-closes (review id sid comment text)
+  "Have the agent of task ID, session SID, answer the thread of COMMENT with TEXT and close it.
+It goes through the harness, as the agent's tool does; the UI hears of it.
+Wait until REVIEW's set has the close; return the thread."
+  (let* ((thread (harness-ui-patch-review-test--thread-of review comment))
+         (before (length (change-review-thread-history thread))))
+    (harness-call 'patch-review/comment id text
+                  :thread (change-review-thread-id thread) :status "closed"
+                  :session sid :call-id "toolu_close")
+    (harness-test-wait (lambda () (> (length (change-review-thread-history thread)) before))
+                       5 "the UI to hear that the agent closed the thread")
+    thread))
+
+(ert-deftest harness-ui-patch-review-lists-what-the-agent-closed-to-review ()
+  "A thread the agent closed waits for the reviewer: the heading counts it, as
+a button that lists it, the file's row says so, and the report lists it under
+its file with the open threads, where one the reviewer closed is only counted.
+m on its row marks it reviewed, which the harness keeps, and it leaves the
+rows; the agent closing it again brings it back."
+  (harness-ui-patch-review-test-with-task
+    (let* ((popout (harness-ui-patch-review-test--changes board id))
+           (review (gethash id harness-ui-patch-review--reviews))
+           (set (harness-ui-patch-review--r-set review))
+           (two (harness-ui-patch-review-test--comment-on review "a.el" '(:new . 2) "Why two?"
+                                                          :sent (float-time)))
+           (_eighteen (harness-ui-patch-review-test--comment-on review "a.el" '(:new . 18) "Why eighteen?"))
+           (b3 (harness-ui-patch-review-test--comment-on review "b.el" '(:old . 3) "Who used b3?")))
+      (harness-ui-patch-review-test--wait-harness-threads id 3)
+      ;; The reviewer closes b3 themselves: nothing of theirs to review.
+      (change-review-close set (harness-ui-patch-review-test--thread-of review b3))
+      (let ((thread (harness-ui-patch-review-test--agent-closes review id sid two "Because two reads better.")))
+        (should (change-review-thread-unreviewed-p set thread))
+        (harness-ui-patch-review-test--wait-text
+         popout "^Changes (6) .*   1 open, 2 closed \\[1 to review\\] \\[Threads\\]$")
+        (let ((text (harness-ui-patch-review-test--text popout)))
+          ;; The file's row: its threads and how many of the closed ones wait.
+          (should (string-match-p "^    M  a\\.el +\\+2 −2   1 open   1 closed (1 to review)   1 draft$" text))
+          (should (string-match-p "^    D  b\\.el +\\+0 −5   1 closed   1 draft$" text))
+          ;; Under a.el: the open thread and the one to review, a line each.
+          (should (string-match-p "^       ↳ ✓ [^ ]+ · line 2 · Noah[^:]*: “Why two\\?” · 2 comments · to review$" text))
+          (should (string-match-p "^       ↳ ● [^ ]+ · line 18 · Noah[^:]*: “Why eighteen\\?”" text))
+          ;; The one the reviewer closed is only counted.
+          (should-not (string-search "Who used b3?" text)))
+        ;; The row of one to review is a row of its file like any thread's:
+        ;; RET compares the file with that line in sight.
+        (with-current-buffer popout
+          (goto-char (point-min))
+          (re-search-forward "↳ ✓ [^\n]*line 2")
+          (beginning-of-line)
+          (should (eql 0 (cdr (harness-ui-patch-review--at-point))))
+          (should (equal '(:new . 2) (get-text-property (point) 'harness-ui-patch-review-where)))
+          (should (eq #'harness-ui-patch-review-ediff (key-binding (kbd "RET")))))
+        ;; The heading's button lists them in the threads view, filtered.
+        (with-current-buffer popout
+          (goto-char (point-min))
+          (re-search-forward "\\[1 to review\\]")
+          (backward-char 3)
+          (push-button))
+        (let ((view (cl-find-if (lambda (b) (eq 'change-review-threads-mode (buffer-local-value 'major-mode b)))
+                                (buffer-list))))
+          (should view)
+          (with-current-buffer view
+            (should (eq 'unreviewed change-review-ui--filter))
+            (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+              (should (string-match-p "\\[to review 1\\]" text))
+              (should (string-search "Because two reads better." text))
+              (should-not (string-search "Why eighteen?" text))))
+          (kill-buffer view))
+        ;; m on its row: reviewed, kept by the harness, off the rows.
+        (with-current-buffer popout
+          (goto-char (point-min))
+          (re-search-forward "↳ ✓ [^\n]*line 2")
+          (beginning-of-line)
+          (should (eq #'change-review-ui-toggle-reviewed (key-binding "m")))
+          (should (eq #'change-review-ui-mark-all-reviewed (key-binding "M")))
+          (call-interactively (key-binding "m")))
+        (should-not (change-review-thread-unreviewed-p set thread))
+        (harness-ui-patch-review-test--wait-text popout "1 to review" t)
+        (let ((text (harness-ui-patch-review-test--text popout)))
+          (should (string-match-p "^    M  a\\.el +\\+2 −2   1 open   1 closed   1 draft$" text))
+          (should-not (string-search "Why two?" text)))
+        (harness-test-wait
+         (lambda ()
+           (let ((history (plist-get (cl-find (change-review-thread-id thread)
+                                              (harness-ui-patch-review-test--harness-threads id)
+                                              :key (lambda (th) (plist-get th :id)) :test #'equal)
+                                     :history)))
+             (numberp (plist-get (car (last history)) :reviewed))))
+         5 "the harness to keep that the thread was reviewed")
+        ;; Opened and closed again by the agent, it waits once more.
+        (change-review-reopen set thread)
+        (harness-test-wait (lambda () (equal "open" (plist-get (cl-find (change-review-thread-id thread)
+                                                                        (harness-ui-patch-review-test--harness-threads id)
+                                                                        :key (lambda (th) (plist-get th :id))
+                                                                        :test #'equal)
+                                                               :status)))
+                           5 "the harness to open the thread")
+        (harness-ui-patch-review-test--agent-closes review id sid two "Now it is two for good.")
+        (should (change-review-thread-unreviewed-p set thread))
+        (harness-ui-patch-review-test--wait-text
+         popout "^    M  a\\.el +\\+2 −2   1 open   1 closed (1 to review)   1 draft$")))))
+
+(ert-deftest harness-ui-patch-review-draws-what-the-agent-closed-whole-in-ediff ()
+  "In Ediff a thread the agent closed that waits for the reviewer is drawn
+whole, its answer in sight, where other closed threads are a line.  m, in a
+version or in the control panel, marks it reviewed -- and makes it wait again
+-- and the thread follows."
+  (harness-ui-patch-review-test-with-task
+    (let* ((popout (harness-ui-patch-review-test--changes board id))
+           (review (gethash id harness-ui-patch-review--reviews))
+           (set (harness-ui-patch-review--r-set review))
+           (two (harness-ui-patch-review-test--comment-on review "a.el" '(:new . 2) "Why two?"
+                                                          :sent (float-time)))
+           (thread (harness-ui-patch-review-test--agent-closes review id sid two "Because two reads better.")))
+      (ignore popout)
+      (harness-ui-patch-review-ediff review 0)
+      (let* ((control (harness-ui-patch-review-test--control review 0))
+             (new (nth 2 (harness-ui-patch-review--ediff-buffers review)))
+             (shown (lambda () (with-current-buffer new
+                                 (mapconcat (lambda (ov) (substring-no-properties (or (overlay-get ov 'after-string) "")))
+                                            (overlays-in (point-min) (point-max)) "")))))
+        ;; Whole: both comments, and what it waits for.
+        (should (string-match-p "2/2  .* (agent)" (funcall shown)))
+        (should (string-search "Because two reads better." (funcall shown)))
+        (should (string-search "· to review" (funcall shown)))
+        (should (string-search "[Mark reviewed]" (funcall shown)))
+        ;; m in the version, on the line of the thread.
+        (with-current-buffer new
+          (goto-char (point-min))
+          (forward-line 1)
+          (should (eq #'change-review-ui-toggle-reviewed (key-binding "m")))
+          (call-interactively #'change-review-ui-toggle-reviewed))
+        (should-not (change-review-thread-unreviewed-p set thread))
+        (change-review-ui-flush)
+        ;; Reviewed, it is a line like any closed thread.
+        (should (string-match-p "closed by .*, .* · reviewed" (funcall shown)))
+        (should-not (string-search "2/2" (funcall shown)))
+        ;; m in the control panel acts on the thread at the current difference.
+        (with-current-buffer control
+          (should (eq #'harness-ui-patch-review-toggle-reviewed (key-binding "m")))
+          (should (equal '(:new . 2) (harness-ui-patch-review--ediff-position)))
+          (call-interactively #'harness-ui-patch-review-toggle-reviewed))
+        (should (change-review-thread-unreviewed-p set thread))
+        (change-review-ui-flush)
+        (should (string-match-p "2/2  .* (agent)" (funcall shown)))
+        ;; The second difference has no thread: m says so.
+        (with-current-buffer control
+          (ediff-next-difference)
+          (should-error (call-interactively #'harness-ui-patch-review-toggle-reviewed) :type 'user-error)
+          (call-interactively #'harness-ui-patch-review-ediff-quit))))))
+
+(ert-deftest harness-ui-patch-review-lists-the-other-threads-to-review ()
+  "A thread on the change as a whole, which no file's row shows, is listed in
+the block of the other threads when the agent closed it and the reviewer has
+not looked, and m there marks it reviewed."
+  (harness-ui-patch-review-test-with-task
+    (let* ((popout (harness-ui-patch-review-test--changes board id))
+           (review (gethash id harness-ui-patch-review--reviews))
+           (set (harness-ui-patch-review--r-set review))
+           (whole (change-review-comment set "Is this the whole of it?" :sent (float-time)
+                                         :author (change-review-user "Noah" "noah@example.org")))
+           (done (change-review-comment set "Fine as it is." :sent (float-time)
+                                        :author (change-review-user "Noah" "noah@example.org"))))
+      (harness-ui-patch-review-test--wait-harness-threads id 2)
+      ;; The reviewer closed one themselves; the agent closes the other.
+      (change-review-close set (harness-ui-patch-review-test--thread-of review done))
+      (let ((thread (harness-ui-patch-review-test--agent-closes review id sid whole "Yes: nothing else is needed.")))
+        (harness-ui-patch-review-test--wait-text
+         popout "^Other threads +1 thread: on the change as a whole")
+        (let ((text (harness-ui-patch-review-test--text popout)))
+          (should (string-match-p "^  ✓ [^ ]+ · the change · Noah[^:]*: “Is this the whole of it\\?” · 2 comments · to review$" text))
+          (should-not (string-search "Fine as it is." text))
+          (should (string-match-p "0 of 6 files viewed.*   0 open, 2 closed \\[1 to review\\] \\[Threads\\]" text)))
+        (with-current-buffer popout
+          (goto-char (point-min))
+          (re-search-forward "^  ✓ [^\n]*the change")
+          (beginning-of-line)
+          (should (eq #'change-review-ui-toggle-reviewed (key-binding "m")))
+          (call-interactively (key-binding "m")))
+        (should-not (change-review-thread-unreviewed-p set thread))
+        (harness-ui-patch-review-test--wait-text popout "^Other threads" t)
+        (should (string-match-p "0 open, 2 closed \\[Threads\\]" (harness-ui-patch-review-test--text popout)))))))
+
 (ert-deftest harness-ui-patch-review-is-known-only-to-its-halves ()
   "No other file of the harness names the review of a task's changes but its
 two halves, the review tools and the ACP lists of what a UI may call and

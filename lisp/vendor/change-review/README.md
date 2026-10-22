@@ -8,7 +8,11 @@ and `[PATCH v2]` of an emailed series. Reviewers talk about it in
 **threads** of **comments**, each thread open or closed (closed is the
 good ending: the point made, the change made). Every comment says who
 wrote it, when, where in the code it was made if it was made anywhere in
-particular, and against which revision of the code.
+particular, and against which revision of the code. A thread that someone
+else closed -- an agent says what it did and closes it -- is **to review**
+until the user has looked at it and said so, so what an agent closed
+since the last look is one filter away, and a close missed for two rounds
+is still waiting.
 
 ```
 Review of Retry the upload                v2 of 2
@@ -118,8 +122,9 @@ comparison say, does not wrap.
 
 **The threads view**, `change-review-open-threads`, lists all the
 threads of a set, grouped by file, with a filter on their status
-(`change-review-ui-default-filter`). Point is on a comment, and the keys
-act on it:
+(`change-review-ui-default-filter`): open, to review (the closed threads
+that wait for the user, see [Closes to review](#closes-to-review)), closed
+or all. Point is on a comment, and the keys act on it:
 
 | Key | Does |
 | --- | --- |
@@ -127,18 +132,19 @@ act on it:
 | `RET` `TAB` | Show where the comment was made (file, line, revision, the lines of the diff of that revision around it), or hide that again. `RET` on a line of that diff shows the line of the source. |
 | `r` | Reply to the comment, as a draft. |
 | `x` / `s` | Close the thread or open it again / set its status by name. |
+| `m` / `M` | Mark the thread someone else closed reviewed, or make it wait again / mark every thread that waits. |
 | `d` / `D` | Show the thread in the diff view of the newest version / the code the comment was written on, in the version it was written against (`change-review-visit`). |
 | `o` | Follow an agent's comment to the conversation it came from. |
 | `e` `k` | Edit / delete a draft: the comment at point, or on a thread's header one of the thread's drafts (asking which when there are several). |
 | `c` | Comment on the change as a whole. |
-| `f` `F` | Cycle / set the filter: open, closed, all. |
+| `f` `F` | Cycle / set the filter: open, to review, closed, all. |
 | `C-c C-c` `I` | Send the drafts / read the comments out of a reply. |
 | `g` | Draw again. |
 
 **The diff view**, `change-review-open-diff`, shows the files of a
 version as the unified diff (it is a `diff-mode`, so its own keys work),
 with the threads of each line under it, drawn by the same function. `c`
-comments on the line at point, or the region's lines; `r`, `x`, `o`, `e`
+comments on the line at point, or the region's lines; `r`, `x`, `m`, `o`, `e`
 and `RET` act on the thread under point as they do in the threads view
 (for `e`, a draft of it, asking which when several threads under the line
 have one; the `[Edit]` button of a draft names it);
@@ -147,7 +153,8 @@ have one; the `[Edit]` button of a draft names it);
 
 **Folding.** Under a line a thread can be folded, to keep the lines of
 the file in sight. A closed thread is **one line** at first (unless
-`change-review-ui-collapse-closed-in-diff` says not): a triangle `▸`, its
+`change-review-ui-collapse-closed-in-diff` says not, or it waits for the
+user's review: then it is whole, with what was answered): a triangle `▸`, its
 mark and short id, how long ago it was closed, and the first words of
 what it says (of what was said, not of what it quotes: a comment that
 opens with `> ` lines is summed up by those that follow). `TAB` on the
@@ -208,7 +215,7 @@ file or sent anywhere.
 | `change-review-set` | The change under review: `id`, `title`, `description`, its `versions` and `threads`, the `file` it keeps itself in. |
 | `change-review-version` | One proposal of the change. Its `id` is its **source revision**: the commit it ends at, the message id of its first mail. Also `number`, `label` ("v2"), `time`, `author`, `title`, `description` (a cover letter, a report), `base`, `tip` and its `files`. |
 | `change-review-file` | A file the version changes: `path`, `old-path`, `status` (A, D, M, R, C, T), its part of the unified diff in `patch`, the counts of lines added and deleted. |
-| `change-review-thread` | A conversation: `id`, `status` (`open` or `closed`), its `comments`, and a `history` of who changed the status and when. |
+| `change-review-thread` | A conversation: `id`, `status` (`open` or `closed`), its `comments`, and a `history` of who changed the status and when, and, for a close the user reviewed, when. |
 | `change-review-comment` | One message of a thread: `id`, `thread`, `reply-to`, `author`, `body`, `time`, `location` (optional), `revision`, `sent`. |
 | `change-review-location` | Where in the change: `file`, `line`, `end-line`, `side` (`new` or `old`), the lines of the diff around it (`excerpt`). A comment with none is on the change as a whole. |
 | `change-review-author` | Who: `kind` (`user`, `agent`, `other`), `name`, `email`. An agent has its `session` and the `tool-call` that produced the comment too, which is a link to the point of the conversation it came from. |
@@ -232,6 +239,8 @@ data, performed by `change-review-apply`:
 | `mark-sent` | `:comments`, `:time`, `:meta` | Marks drafts as delivered. |
 | `edit-comment` | `:comment`, `:body` | Replaces the text of a comment. |
 | `delete-comment` | `:comment` | Deletes a draft. |
+| `mark-reviewed` | `:thread`, `:status-id`, `:time` | The user reviewed the close of a thread: the change of status that closed it, named by its id, gets the time. |
+| `unmark-reviewed` | `:thread`, `:status-id` | The close is to review again. |
 
 Performing an operation twice changes nothing the second time, because
 it names what it adds by id. So a set can be kept by writing its
@@ -240,16 +249,43 @@ sending them again. The functions that make the operations are
 `change-review-comment`, `change-review-reply`,
 `change-review-update-status` (`change-review-close`,
 `change-review-reopen`), `change-review-add-version`,
-`change-review-mark-sent`, `change-review-edit` and
-`change-review-delete`; they hand the operation to
+`change-review-mark-sent`, `change-review-edit`, `change-review-delete`,
+`change-review-mark-reviewed` and `change-review-unmark-reviewed`; they
+hand the operation to
 `change-review-dispatch` (below). Whatever changes a set by one calls
 `change-review-changed-functions` with the set and the operation, which
 is how the views stay current.
 
-Queries: `change-review-threads` (by status), `change-review-threads-by-file`,
+Queries: `change-review-threads` (by status: `open`, `closed`, or
+`unreviewed`), `change-review-threads-by-file`,
 `change-review-thread-counts`, `change-review-drafts`,
 `change-review-find-thread` (by id or the start of one),
-`change-review-find-comment`, `change-review-latest-version`.
+`change-review-find-comment`, `change-review-latest-version`,
+`change-review-thread-closing` (the change of status that closed a
+thread) and `change-review-thread-unreviewed-p`.
+
+## Closes to review
+
+Closing a thread is how an agent says its point is done, and whether it is
+is for the user to say. A thread closed by someone other than the user
+(`change-review-own-author-p` decides who that is) is **to review** until
+the user has looked at it. The library keeps that on the close itself --
+the `:reviewed` time in the thread's history entry that closed it -- so:
+
+- the filter **to review** lists them, the threads view and the diff view
+  count them, and a thread that waits says so in its header, with a
+  `[Mark reviewed]` button, and is drawn whole in the diff view, the
+  agent's answer in sight, where other closed threads are one line;
+- the user says they looked with `m` (or the button), for every thread
+  that waits with `M`, or by replying in it; `m` on a thread already
+  reviewed makes it wait again, so a slip is undone; opening the thread
+  takes it out of the closed ones, and a close by someone else after it
+  was opened is a new one, to review;
+- nothing marks a thread by itself: not the time, not the number of
+  versions since, not showing it. A close missed for two rounds waits as
+  one made a minute ago;
+- a close by the user themselves, or one with no record of who made it,
+  never waits.
 
 ## Diffs
 

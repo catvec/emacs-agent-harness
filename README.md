@@ -184,10 +184,12 @@ OpenAI-compatible APIs and AWS Bedrock.
 | ![A chat whose agent replied in three paragraphs, the reply quoted in the compose box with C-c > and answered inline: the middle of the long paragraph elided as [...], the quote split in two with an answer under each part](docs/media/quote-reply.png) | ![A chat whose agent answered a reply that quoted it: the agent's answer quoted in the compose box with the thread under it one level deeper, the user's answers and the agent's message they quoted, and an answer typed under the agent's line](docs/media/quote-thread.png) |
 | Answering a reply inline: `C-c >` quotes it, `C-c [` elides what you skip as `[...]`, `M-RET` splits the quote to answer a part | The thread kept: the message the reply answers, and what that answered, nested under the quote |
 
-| ![A task in review, its report at the changes: the files with their open and closed threads, and under each file its open threads, a line each; the drafts waiting to be sent](docs/media/review.png) | ![The threads of that review by file, filtered by status: each comment with who wrote it, when, its version and its place in the thread, one with where it was made and the lines of the diff, the agent's answer linking to its conversation](docs/media/review-threads.png) |
+| ![A task in review, its report at the changes: the files with their open and closed threads, the ones the agent closed counted as to review, and under each file its open threads and those, a line each; the drafts waiting to be sent](docs/media/review.png) | ![The threads of that review by file, filtered by status: each comment with who wrote it, when, its version and its place in the thread, one with where it was made and the lines of the diff, the agent's answer linking to its conversation](docs/media/review-threads.png) |
 | A task's changes, and the threads of comments on them | The threads by file: sender, when, content (Markdown, rendered) and place in the thread; where a comment was made |
 | ![Ediff on a file of that review: the two versions and the control panel, the threads drawn under their lines in the branch's version -- a closed thread opened to its conversation, another folded to one line -- the agent's answer with its code block rendered, the report with its box at the bottom](docs/media/review-ediff.png) | ![The same report with the diff chosen since the last review: the Diff line marks it, one file changed since, with its threads, and the threads of the file the diff leaves out among the other threads](docs/media/review-diff.png) |
 | Ediff: the threads under their lines, drawn as the threads view draws them, the comments' Markdown rendered, to the width of the window; a closed thread is a line, `TAB` or a click opens it | The diff of your choice: the branch against main, since the last review, or any revisions |
+| ![The threads view on its to-review filter: the two threads the agent closed that the reviewer has not looked at yet, each with the agent's answer, marked to review, with Mark reviewed beside Reopen](docs/media/review-to-review.png) | |
+| What the agent closed since you looked: the filter lists it, with the answers | |
 
 ## Requirements
 
@@ -3306,11 +3308,13 @@ with), `recap` writes the recaps on the cards,
   with its status, what changed (`+3 −1`), a check mark once you looked
   at it, a firmer one once you approved it (`a`; `A` approves them all:
   a file the branch changes again is reviewed anew), and how many
-  threads of comments it has, open and closed. The marks are kept with
+  threads of comments it has, open and closed, and how many of the
+  closed ones are to review (below). The marks are kept with
   the review, so they survive a restart; `V` takes every file as viewed
   but those the branch's newest commit changed, for a review you went
   through before the marks were kept (the heading says when files were
-  taken as viewed, not looked at). Each open thread is a
+  taken as viewed, not looked at). Each open thread, and each one the
+  agent closed that you have not looked at yet, is a
   line under its file. `RET` on a file, or a click, compares it in
   Ediff, the merge base against the branch, in the report's frame, the
   report itself staying at the bottom of it, small, with its feedback
@@ -3372,16 +3376,38 @@ with), `recap` writes the recaps on the cards,
   it. Threads are drawn to the width of the window that shows them, so
   with the two versions side by side nothing wraps. `T`, in the
   report and in Ediff (or `[Threads]`), lists all the threads by file in
-  a view of their own: filtered by status (`f`: open, closed, all),
-  `n` and `p` between comments, `N` and `P` between threads, `r` to
+  a view of their own: filtered by status (`f`: open, to review, closed,
+  all), `n` and `p` between comments, `N` and `P` between threads, `r` to
   reply to the comment at point, `e` to edit it when it is a draft (on
-  a thread's header, one of its drafts), `x` to close or open its thread, `d` to
+  a thread's header, one of its drafts), `x` to close or open its thread,
+  `m` to mark a thread the agent closed reviewed, `d` to
   show it in Ediff, `D` to show the code as it was when the comment was
   written, `o` to follow an agent's comment to its
   conversation. The agent answers with its own tools, `review_threads`
   and `review_comment`, which record its session and the call, and
   closes a thread when what it raised is done; you close it once you
-  agree. Replies you wrote by hand before there were threads -- under a
+  agree.
+
+  **What the agent closed is yours to look at.** A thread the agent
+  closed is *to review* until you have looked at it: the report's
+  heading counts those (`3 open, 5 closed [2 to review]`, the button
+  lists them in the threads view, filtered), a file's row says how many
+  it has, the report lists them under their file with the open threads,
+  and Ediff draws them whole under their line, the agent's answer in
+  sight, where a closed thread is one line. So after a round of work
+  what the agent closed is one click away, with its answer, and the
+  code it is about is `RET` away. You say you looked with `m` on the
+  thread (or `[Mark reviewed]`; in Ediff's control panel `m` too, in
+  place of its wide-display toggle), with `M` for all of them -- the
+  answer for an agent you trust -- or by replying in it; `x` opens the
+  thread again, when the agent was wrong. Nothing marks a thread by
+  itself, so a close you missed two rounds ago is still waiting, and the
+  mark is on that close: a thread the agent closes again after you
+  opened it is to review again. A thread you closed yourself never
+  waits. The harness keeps the marks with the threads, so they survive
+  a restart and show in every Emacs that reviews the task, and the agent
+  is told that you look at every thread it closes, so that it says in its
+  answer what it changed and where. Replies you wrote by hand before there were threads -- under a
   quote of the agent's words, in a round of feedback or typed in its
   session while it worked -- are threads too, closed, each with the
   quote it answered; `M-x harness-ui-patch-review-import-manual`, in a

@@ -48,13 +48,16 @@ DIFF SHOWN), a tree of the directories and their files:
   a file      its status, its name, the lines it adds and deletes,
               a mark once it was looked at in Ediff and a firmer one
               once it was approved, how many threads it has, open and
-              closed, and whether it changed since the reviewer's
+              closed -- and how many of those the agent closed that the
+              reviewer has not looked at yet, "to review" -- and
+              whether it changed since the reviewer's
               last comment on it.  RET or a click compares it in
               Ediff; n and p move between rows; a approves it, A
               approves every file, t shows the files flat instead.
               An approved file need not be looked at again unless the
-              branch changes it.  Under it, its open threads, a line
-              each, where they are now (see below).  The marks are
+              branch changes it.  Under it, its open threads and
+              those to review, a line each, where they are now (see
+              below).  The marks are
               kept by the harness with the review, each by the
               file's path and blob (`patch-review/set-viewed`), so
               they are there after a restart.  V takes every file as
@@ -176,6 +179,24 @@ file, where it is now in the branch's whole change.  What cannot be
 shown -- a revision that is not there, a review before this one of
 which nothing is known -- is said, and the diff shown stays.
 
+WHAT THE AGENT CLOSED.  The agent answers a thread with its
+`review_comment` tool and closes it when its point is done; whether
+it is, is for the reviewer to say.  A thread the agent closed is "to
+review" until the reviewer has looked at it (the library's
+`change-review-thread-unreviewed-p`), however many rounds ago it was
+closed.  The report's heading counts them as a button that lists
+them (`[3 to review]`, the threads view with its filter on them), a
+file's row says how many it has, and the report lists them under
+their file, a line each, with the open threads.  Ediff draws them
+whole under their line, the agent's answer in sight, where a closed
+thread is one line.  m on such a row, in either version of Ediff or
+in its control panel, marks the thread reviewed (and again, makes it
+wait once more), M every one that waits, and a reply to it is as good
+as m.  The mark is on that close: a thread the agent closes again
+after it was opened is to review again, and nothing marks one by
+itself, so a close missed for two rounds waits still.  The harness
+keeps the marks with the threads (`patch-review/apply`).
+
 Replies you wrote by hand before there were threads -- under a quote of
 the agent's words, in a round of feedback or typed in its session while it
 worked -- are threads too, closed, each with the quote it answered:
@@ -258,11 +279,12 @@ part of the report out.
 - `harness-ui-patch-review-select-diff` — Choose the diff the report of the changes shows.
 - `harness-ui-patch-review-threads` — List the threads of the review at point by file, with a filter on their status.
 - `harness-ui-patch-review-toggle-file-tree` — Show the changed files flat, in the diff's order, or as a tree.
+- `harness-ui-patch-review-toggle-reviewed` — Mark the thread at the current difference reviewed, or make it wait again.
 - `harness-ui-patch-review-toggle-thread` — Close the thread at the current difference, or at point, or open it again.
 
 ### Options
 
-- `harness-ui-patch-review-closed-threads` — Whether the report lists the closed threads under their files too.
+- `harness-ui-patch-review-closed-threads` — Whether the report lists all the closed threads under their files too.
 - `harness-ui-patch-review-ediff-box-height` — How much of the frame's height the report takes beside an Ediff.
 - `harness-ui-patch-review-ediff-window-setup` — How Ediff lays out its windows while it compares a task's change.
 - `harness-ui-patch-review-file-tree` — Whether a report shows the changed files as a tree.

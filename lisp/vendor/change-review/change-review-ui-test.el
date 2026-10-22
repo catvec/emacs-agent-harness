@@ -125,6 +125,10 @@ Relative times are off, so a drawing does not change with the clock."
                                        :time change-review-ui-test--now)))
     set))
 
+(defvar change-review-ui-test--reviewed nil
+  "Non-nil: `change-review-ui-test--populate' marks the agent's close reviewed.
+It is a thread that waits for the user's review otherwise, drawn whole.")
+
 (defun change-review-ui-test--populate (set)
   "Put threads in SET and return them as (A B C D).
 A is on a.el with three comments, the third a draft answering the first;
@@ -158,6 +162,9 @@ B is on b.el and closed; C is on the change as a whole; D on a.el, open."
     (ignore a2)
     (change-review-close set (change-review-comment-thread b1) :author bot
                          :time (- change-review-ui-test--now 1800))
+    (when change-review-ui-test--reviewed
+      (change-review-mark-reviewed set (change-review-comment-thread b1)
+                                   :time change-review-ui-test--now))
     (mapcar (lambda (comment)
               (change-review-find-thread set (change-review-comment-thread comment)))
             (list a1 b1 c1 d1))))
@@ -309,12 +316,12 @@ whether it is a draft, and where it is in the thread."
 
 (ert-deftest change-review-ui-draws-a-closed-thread-and-who-closed-it ()
   "A closed thread says closed, by whom and when, and can be one line.
-All of that takes 92 columns; in less it says less (see the tests of fitting)."
+This one the agent closed, so it waits for the user's review as well."
   (change-review-ui-test--drawing
     (let* ((set (change-review-ui-test--set))
            (thread (nth 1 (change-review-ui-test--populate set)))
-           (lines (change-review-ui-test--lines (change-review-ui-thread-string set thread :width 100))))
-      (should (string-match-p "\\`✓ [^ ]+ · line 2 · 1 comment · closed by Claude, 2026-10-14 17:16 +\\[Reply\\] \\[Reopen\\] \\[Diff\\]\\'"
+           (lines (change-review-ui-test--lines (change-review-ui-thread-string set thread :width 120))))
+      (should (string-match-p "\\`✓ [^ ]+ · line 2 · 1 comment · closed by Claude, 2026-10-14 17:16 · to review +\\[Reply\\] \\[Reopen\\] \\[Mark reviewed\\] \\[Diff\\]\\'"
                               (car lines)))
       (should (= 3 (length lines)))
       (let ((one (change-review-ui-test--lines
@@ -557,8 +564,13 @@ words, how many comments, and whether one is a draft."
       (should (= 1 (length (change-review-ui-test--lines one))))
       (should (string-match-p "\\`● [^ ]+ · line 3 · Noah: “Why 'two\\? Second line of the question\\.” · 3 comments · draft\\'"
                               (car (change-review-ui-test--lines one))))
-      (should (string-match-p "\\`✓ [^ ]+ · line 2 · Noah: “Fine\\.”\\'"
+      ;; The agent closed this one: it waits for the user's review.
+      (should (string-match-p "\\`✓ [^ ]+ · line 2 · Noah: “Fine\\.” · to review\\'"
                               (car (change-review-ui-test--lines closed))))
+      (change-review-mark-reviewed set (nth 1 threads))
+      (should (string-match-p "\\`✓ [^ ]+ · line 2 · Noah: “Fine\\.”\\'"
+                              (car (change-review-ui-test--lines
+                                    (change-review-ui-thread-line set (nth 1 threads) :width 100)))))
       (should (equal (change-review-thread-id (car threads))
                      (get-text-property 0 'change-review-thread one)))
       ;; Too narrow for the words: they are cut.
@@ -716,6 +728,7 @@ least there is, 40 columns."
 (ert-deftest change-review-ui-says-less-of-a-closed-thread-in-less-room ()
   "What a closed thread was closed by and when goes from all of it, to how
 long ago, to who, to nothing; the count of comments and the buttons go last."
+  (let ((change-review-ui-test--reviewed t))
   (change-review-ui-test--drawing
     (cl-letf (((symbol-function 'float-time) (lambda (&rest _) change-review-ui-test--now))
               (change-review-ui-relative-times t))
@@ -725,13 +738,13 @@ long ago, to who, to nothing; the count of comments and the buttons go last."
                        (car (change-review-ui-test--lines
                              (change-review-ui-thread-string set thread :view 'diff :width width))))))
         ;; The thread was closed by an agent, so it says so as long as it can.
-        (should (string-suffix-p "· closed by Claude, 2026-10-14 17:16 (30m ago)   [Reply] [Reopen]"
+        (should (string-suffix-p "· closed by Claude, 2026-10-14 17:16 (30m ago) · reviewed   [Reply] [Reopen]"
                                  (funcall header 120)))
-        (should (string-suffix-p "· closed by Claude, 30m ago   [Reply] [Reopen]" (funcall header 70)))
-        (should (string-suffix-p "· 1 comment · closed by Claude   [Reply] [Reopen]" (funcall header 60)))
-        (should (string-suffix-p "· 1 comment · closed   [Reply] [Reopen]" (funcall header 50)))
-        (should (string-match-p "\\`✓ [^ ]+ · closed   \\[Reply\\] \\[Reopen\\]\\'" (funcall header 45)))
-        (should (string-match-p "\\`✓ [^ ]+ · closed\\'" (funcall header 25)))))))
+        (should (string-suffix-p "· closed by Claude · reviewed   [Reply] [Reopen]" (funcall header 70)))
+        (should (string-suffix-p "· 1 comment · closed · reviewed   [Reply] [Reopen]" (funcall header 60)))
+        (should (string-suffix-p "· closed · reviewed   [Reply] [Reopen]" (funcall header 50)))
+        (should (string-match-p "\\`✓ [^ ]+ · closed · reviewed\\'" (funcall header 45)))
+        (should (string-match-p "\\`✓ [^ ]+ · closed · revi…\\'" (funcall header 25))))))))
 
 (ert-deftest change-review-ui-says-who-closed-a-thread-unless-it-was-you ()
   "A shortened status leaves out that the user closed the thread, not that
@@ -839,6 +852,9 @@ unless the option says a closed one is too."
     (let* ((set (change-review-ui-test--set))
            (threads (change-review-ui-test--populate set)))
       (should (eq 'expanded (change-review-ui-thread-fold set (nth 0 threads))))
+      ;; The agent's close waits for the user's review: it is in full, until reviewed.
+      (should (eq 'expanded (change-review-ui-thread-fold set (nth 1 threads))))
+      (change-review-mark-reviewed set (nth 1 threads))
       (should (eq 'collapsed (change-review-ui-thread-fold set (nth 1 threads))))
       (let ((change-review-ui-collapse-closed-in-diff nil))
         (should (eq 'expanded (change-review-ui-thread-fold set (nth 1 threads))))))))
@@ -846,6 +862,7 @@ unless the option says a closed one is too."
 (ert-deftest change-review-ui-remembers-how-a-thread-was-folded ()
   "What was chosen stays, for the set, while the thread keeps its status;
 a thread whose status changed is drawn as one of that status again."
+  (let ((change-review-ui-test--reviewed t))
   (change-review-ui-test--drawing
     (let* ((set (change-review-ui-test--set))
            (other (change-review-ui-test--set))
@@ -865,11 +882,12 @@ a thread whose status changed is drawn as one of that status again."
       (should (eq 'expanded (change-review-ui-thread-fold set closed)))
       (change-review-close set open)
       (should (eq 'collapsed (change-review-ui-thread-fold set open)))
-      (should-error (change-review-ui-set-fold set open 'folded) :type 'change-review-error))))
+      (should-error (change-review-ui-set-fold set open 'folded) :type 'change-review-error)))))
 
 (ert-deftest change-review-ui-goes-through-the-folds-in-turn ()
   "One line, then the conversation, then all of it -- where something was
 left out of the conversation -- then one line; several threads follow the first."
+  (let ((change-review-ui-test--reviewed t))
   (change-review-ui-test--drawing
     (let* ((set (change-review-ui-test--set))
            (threads (change-review-ui-test--populate set))
@@ -903,12 +921,13 @@ left out of the conversation -- then one line; several threads follow the first.
         (should (string-suffix-p "2 threads: one line" (car message-log)))
         (should (eq 'expanded (change-review-ui-cycle-folds set (list closed open))))
         (should (eq 'expanded (change-review-ui-thread-fold set open)))
-        (should-not (change-review-ui-cycle-folds set nil))))))
+        (should-not (change-review-ui-cycle-folds set nil)))))))
 
 (ert-deftest change-review-ui-draws-a-folded-thread-with-a-triangle-that-opens-it ()
   "A thread that can be folded starts with a triangle, which is a button:
 pointing right on a thread of one line, down on one that is open to its
 conversation.  Clicking it, or the words of a thread of one line, folds it."
+  (let ((change-review-ui-test--reviewed t))
   (change-review-ui-test--drawing
     (let* ((set (change-review-ui-test--set))
            (thread (nth 1 (change-review-ui-test--populate set)))
@@ -918,7 +937,7 @@ conversation.  Clicking it, or the words of a thread of one line, folds it."
       ;; One line: the triangle takes the place of the indent.
       (let ((one (funcall line 'collapsed)))
         (should (= 1 (length (change-review-ui-test--lines one))))
-        (should (string-match-p "\\`▸ ✓ [^ ]+ · 1 comment · closed by Claude, 2026-10-14 17:16   \\[Reply\\] \\[Reopen\\]  “Fine\\.”\n\\'"
+        (should (string-match-p "\\`▸ ✓ [^ ]+ · 1 comment · closed by Claude[^\n]*· reviewed  “Fine\\.”\n\\'"
                                 (substring-no-properties one)))
         (change-review-ui-test--press one "▸")
         (should (eq 'expanded (change-review-ui-thread-fold set thread)))
@@ -936,7 +955,7 @@ conversation.  Clicking it, or the words of a thread of one line, folds it."
       (should (string-prefix-p "  ✓ " (substring-no-properties (funcall line nil))))
       (let ((plain (funcall line nil :collapsed t)))
         (should (string-match-p "“Fine\\.”\n\\'" (substring-no-properties plain)))
-        (should-not (change-review-ui-test--button plain "“Fine.”"))))))
+        (should-not (change-review-ui-test--button plain "“Fine.”")))))))
 
 (ert-deftest change-review-ui-cuts-a-thread-that-is-longer-than-the-room-it-has ()
   "A thread longer than MAX-LINES is cut, and says how many lines more there
@@ -1078,7 +1097,7 @@ the files in the order of the newest version."
   (change-review-ui-test--threads-view
     (let ((text (change-review-ui-test--text)))
       (should (string-prefix-p "Review of Fix the flaky test   second of 2\n" text))
-      (should (string-match-p "^Threads  +open 3 +closed 1 +\\[all 4\\]" text))
+      (should (string-match-p "^Threads  +open 3 +to review 1 +closed 1 +\\[all 4\\]" text))
       (should (string-match-p "2 drafts not sent" text))
       (let ((whole (string-match "^▾ The change as a whole" text))
             (a (string-match "^▾ a\\.el" text))
@@ -1090,7 +1109,8 @@ the files in the order of the newest version."
       (should (string-match-p "What about a4\\?" text)))))
 
 (ert-deftest change-review-ui-threads-view-filters-by-status ()
-  "f changes which threads show: open, closed, all; the buttons say how many."
+  "f changes which threads show: open, closed, all, those to review; the
+buttons say how many."
   (change-review-ui-test--threads-view
     (change-review-ui-set-filter 'open)
     (let ((text (change-review-ui-test--text)))
@@ -1098,6 +1118,8 @@ the files in the order of the newest version."
       (should (string-match-p "What about a4\\?" text))
       (should-not (string-match-p "▾ b\\.el" text))
       (should-not (string-match-p "Fine\\." text)))
+    (change-review-ui-cycle-filter)
+    (should (eq 'unreviewed change-review-ui--filter))
     (change-review-ui-cycle-filter)
     (let ((text (change-review-ui-test--text)))
       (should (string-match-p "\\[closed 1\\]" text))
@@ -1496,9 +1518,181 @@ a stretch there instead; text whose last newline has no face ends as it did."
         (forward-line 1)
         (should-error (call-interactively #'change-review-ui-reply) :type 'user-error)))))
 
+;;;; What waits for the user's review
+
+(ert-deftest change-review-ui-says-when-a-close-waits-for-review ()
+  "A thread someone else closed says `to review' and offers [Mark reviewed]
+until the user marks it; then it says `reviewed'.  What the user closed, and
+what is open, say nothing of the kind."
+  (change-review-ui-test--drawing
+    (let* ((set (change-review-ui-test--set))
+           (threads (change-review-ui-test--populate set))
+           (open (car threads))
+           (waiting (nth 1 threads)))
+      (let ((string (change-review-ui-thread-string set waiting :width 100)))
+        (should (string-match-p " · closed by Claude\\(?:, 2026-10-14 17:16\\)? · to review +\\[Reply\\]"
+                                (substring-no-properties string)))
+        (should (change-review-ui-test--button string "[Mark reviewed]"))
+        (should (eq 'change-review-ui-review-face
+                    (get-text-property (string-match "to review" string) 'face string)))
+        (change-review-ui-test--press string "[Mark reviewed]"))
+      (should-not (change-review-thread-unreviewed-p set waiting))
+      (let ((string (change-review-ui-thread-string set waiting :width 100)))
+        (should (string-match-p "closed by Claude\\(?:, 2026-10-14 17:16\\)? · reviewed +\\[Reply\\] \\[Reopen\\] \\[Diff\\]"
+                                (substring-no-properties string)))
+        (should-not (change-review-ui-test--button string "[Mark reviewed]"))
+        (should-not (string-match-p "to review" string)))
+      ;; Closed by the user: nothing of someone else's to review.
+      (should-not (string-match-p "to review\\|\\breviewed\\b"
+                                  (substring-no-properties
+                                   (change-review-ui-thread-string set open :width 100))))
+      (change-review-close set open)
+      (let ((string (change-review-ui-thread-string set open :width 100)))
+        (should (string-match-p "closed by Noah (you)" (substring-no-properties string)))
+        (should-not (string-match-p "to review\\|\\breviewed\\b" (substring-no-properties string)))
+        (should-not (change-review-ui-test--button string "[Mark reviewed]"))))))
+
+(ert-deftest change-review-ui-threads-view-lists-what-waits-for-review ()
+  "The `to review' filter lists the closed threads the user has not reviewed;
+m marks one reviewed and takes it out, and a second m brings it back."
+  (change-review-ui-test--threads-view
+    (should (string-match-p "to review 1" (change-review-ui-test--text)))
+    (change-review-ui-set-filter 'unreviewed)
+    (let ((text (change-review-ui-test--text)))
+      (should (string-match-p "\\[to review 1\\]" text))
+      (should (string-match-p "^▾ b\\.el +1 thread$" text))
+      (should (string-match-p "Fine\\." text))
+      (should-not (string-match-p "What about a4" text))
+      (should-not (string-match-p "Overall: good" text)))
+    (goto-char (point-min))
+    (search-forward "Fine.")
+    (call-interactively #'change-review-ui-toggle-reviewed)
+    (should-not (change-review-thread-unreviewed-p set (nth 1 threads)))
+    (change-review-ui-flush)
+    (let ((text (change-review-ui-test--text)))
+      (should (string-match-p "Nothing to review" text))
+      (should (string-match-p "\\[to review 0\\]" text)))
+    ;; In the closed threads it says it was reviewed; m makes it wait again.
+    (change-review-ui-set-filter 'closed)
+    (should (string-match-p "closed[^\n]* · reviewed" (change-review-ui-test--text)))
+    (goto-char (point-min))
+    (search-forward "Fine.")
+    (call-interactively #'change-review-ui-toggle-reviewed)
+    (should (change-review-thread-unreviewed-p set (nth 1 threads)))
+    (change-review-ui-flush)
+    (should (string-match-p "closed[^\n]* · to review" (change-review-ui-test--text)))
+    (should (eq #'change-review-ui-toggle-reviewed (key-binding "m")))
+    (should (eq #'change-review-ui-mark-all-reviewed (key-binding "M")))))
+
+(ert-deftest change-review-ui-point-goes-on-to-the-next-thread-when-one-leaves-the-view ()
+  "A thread marked reviewed leaves the filter of those that wait: point goes to
+the thread that took its place, so the keys can go on from one to the next."
+  (change-review-ui-test--threads-view
+    ;; A second thread the agent closed, on the change as a whole: listed first.
+    (let ((second (change-review-find-thread
+                   set (change-review-comment-thread
+                        (change-review-comment set "One more" :time change-review-ui-test--now)))))
+      (change-review-close set second :author (change-review-agent "Claude" :session "sess-1")))
+    (change-review-ui-set-filter 'unreviewed)
+    (goto-char (point-min))
+    (search-forward "One more")
+    (call-interactively #'change-review-ui-toggle-reviewed)
+    (change-review-ui-flush)
+    (should (equal (change-review-thread-id (nth 1 threads))
+                   (get-text-property (point) 'change-review-thread)))
+    (should-not (string-search "One more" (change-review-ui-test--text)))
+    ;; The last one: nothing waits, and nothing is left to be on.
+    (call-interactively #'change-review-ui-toggle-reviewed)
+    (change-review-ui-flush)
+    (should (string-match-p "Nothing to review" (change-review-ui-test--text)))
+    (should-error (call-interactively #'change-review-ui-toggle-reviewed) :type 'user-error)))
+
+(ert-deftest change-review-ui-a-long-header-wraps-under-its-mark ()
+  "A header too long for the window continues under its mark, indented as the
+thread is."
+  (change-review-ui-test--drawing
+    (let* ((set (change-review-ui-test--set))
+           (thread (nth 1 (change-review-ui-test--populate set)))
+           (string (change-review-ui-thread-string set thread :width 90 :indent "  ")))
+      (should (equal "    " (get-text-property 0 'wrap-prefix string))))))
+
+(ert-deftest change-review-ui-only-a-close-by-someone-else-is-reviewed ()
+  "m on an open thread, or one the user closed, says why there is nothing
+to mark, and changes nothing."
+  (change-review-ui-test--threads-view
+    (change-review-close set (nth 3 threads))
+    (change-review-ui-flush)
+    (goto-char (point-min))
+    (search-forward "Overall: good.")
+    (let ((error (should-error (call-interactively #'change-review-ui-toggle-reviewed) :type 'user-error)))
+      (should (string-match-p "is open" (cadr error))))
+    (goto-char (point-min))
+    (search-forward "What about a4?")
+    (let ((error (should-error (call-interactively #'change-review-ui-toggle-reviewed) :type 'user-error)))
+      (should (string-match-p "You closed thread .* yourself" (cadr error))))
+    (should (equal (list (nth 1 threads)) (change-review-threads set 'unreviewed)))
+    (should-not (plist-get (change-review-thread-closing (nth 3 threads)) :reviewed))))
+
+(ert-deftest change-review-ui-marks-everything-that-waits-reviewed ()
+  "M marks every thread that waits for the user, after asking; declining
+changes nothing, and with nothing waiting it says so."
+  (change-review-ui-test--threads-view
+    (let ((second (change-review-find-thread
+                   set (change-review-comment-thread
+                        (change-review-comment set "One more" :time change-review-ui-test--now)))))
+      (change-review-close set second :author (change-review-agent "Claude" :session "sess-1")))
+    (should (= 2 (length (change-review-threads set 'unreviewed))))
+    (let (asked)
+      (cl-letf (((symbol-function 'y-or-n-p) (lambda (prompt) (push prompt asked) nil)))
+        (call-interactively #'change-review-ui-mark-all-reviewed))
+      (should (string-match-p "all 2 threads" (car asked)))
+      (should (= 2 (length (change-review-threads set 'unreviewed))))
+      (cl-letf (((symbol-function 'y-or-n-p) (lambda (prompt) (push prompt asked) t)))
+        (call-interactively #'change-review-ui-mark-all-reviewed))
+      (should-not (change-review-threads set 'unreviewed))
+      (should (= 2 (length asked)))
+      ;; Nothing waits now: it does not even ask.
+      (cl-letf (((symbol-function 'y-or-n-p) (lambda (prompt) (push prompt asked) t)))
+        (call-interactively #'change-review-ui-mark-all-reviewed))
+      (should (= 2 (length asked))))))
+
+(ert-deftest change-review-ui-answering-a-close-is-reviewing-it ()
+  "A reply to a thread that waits for the user's review marks it reviewed; an
+empty reply is no reply and marks nothing."
+  (change-review-ui-test--drawing
+    (let* ((set (change-review-ui-test--set))
+           (waiting (nth 1 (change-review-ui-test--populate set))))
+      (let ((change-review-ui-read-function (lambda (_prompt _initial callback) (funcall callback "  "))))
+        (change-review-ui-reply-to-thread set waiting))
+      (should (change-review-thread-unreviewed-p set waiting))
+      (let ((change-review-ui-read-function
+             (lambda (_prompt _initial callback) (funcall callback "Thanks, but why not b3?"))))
+        (change-review-ui-reply-to-thread set waiting))
+      (should-not (change-review-thread-unreviewed-p set waiting))
+      (should (equal "Thanks, but why not b3?"
+                     (change-review-comment-body (change-review-thread-last-comment waiting)))))))
+
+(ert-deftest change-review-ui-lines-mode-marks-the-thread-under-the-line-reviewed ()
+  "In a buffer that shows threads under its lines, m marks the thread there."
+  (change-review-ui-test--drawing
+    (let* ((set (change-review-ui-test--set))
+           (waiting (nth 1 (change-review-ui-test--populate set))))
+      (with-temp-buffer
+        (insert "one\ntwo\n")
+        (setq change-review-ui--set set)
+        (change-review-ui-lines-mode 1)
+        (goto-char (point-min))
+        (change-review-ui-add-thread-overlay set waiting (line-end-position) :view 'diff :width 70)
+        (should (eq #'change-review-ui-toggle-reviewed (key-binding "m")))
+        (call-interactively #'change-review-ui-toggle-reviewed)
+        (should-not (change-review-thread-unreviewed-p set waiting))
+        (call-interactively #'change-review-ui-toggle-reviewed)
+        (should (change-review-thread-unreviewed-p set waiting))))))
+
 (ert-deftest change-review-ui-lines-mode-folds-the-thread-under-the-line ()
   "TAB on a line with a thread folds it: one line, its conversation; on a
 line with none it is what it was without the library's keys."
+  (let ((change-review-ui-test--reviewed t))
   (change-review-ui-test--drawing
     (let* ((set (change-review-ui-test--set))
            (threads (change-review-ui-test--populate set))
@@ -1564,10 +1758,11 @@ line with none it is what it was without the library's keys."
           (setq other nil)
           (cl-letf (((symbol-function 'indent-for-tab-command) (lambda (&rest _) (interactive) (setq other 'global-tab))))
             (call-interactively #'change-review-ui-cycle-fold))
-          (should (eq 'global-tab other)))))))
+          (should (eq 'global-tab other))))))))
 
 (ert-deftest change-review-ui-lines-mode-folds-all-the-threads-under-a-line-together ()
   "Two threads under one line are folded as the first, the chosen one, goes."
+  (let ((change-review-ui-test--reviewed t))
   (change-review-ui-test--drawing
     (let* ((set (change-review-ui-test--set))
            (threads (change-review-ui-test--populate set))
@@ -1592,7 +1787,7 @@ line with none it is what it was without the library's keys."
         (let ((inhibit-message t))
           (call-interactively #'change-review-ui-cycle-fold))
         (should (eq 'expanded (change-review-ui-thread-fold set closed)))
-        (should (eq 'expanded (change-review-ui-thread-fold set open)))))))
+        (should (eq 'expanded (change-review-ui-thread-fold set open))))))))
 
 (ert-deftest change-review-ui-scrolls-to-show-what-a-fold-grew ()
   "TAB shows the line second from the top of its window when the thread
@@ -1683,7 +1878,7 @@ about, the change's own at the top."
       ;; In the diff view the line is implied: no "line 3" in the header.
       (should-not (string-match-p "· line 3 ·" string)))
     ;; (`format-mode-line' draws nothing in a batch Emacs.)
-    (should (string-match-p "3 open, 1 closed, 2 not sent"
+    (should (string-match-p "3 open, 1 closed, 1 to review, 2 not sent"
                             (apply #'concat (cl-remove-if-not #'stringp header-line-format)))))))
 
 (ert-deftest change-review-ui-diff-view-comments-on-a-line ()
@@ -1839,6 +2034,47 @@ line with a thread that was sent only, it says there is no draft."
     (should (= 1 (length (cl-remove-if-not (lambda (o) (and (overlay-get o 'change-review-thread)
                                                             (overlay-get o 'after-string)))
                                            (overlays-in (point-min) (point-max))))))))
+
+(ert-deftest change-review-ui-diff-view-draws-a-close-that-waits-whole ()
+  "A closed thread is one line in the diff view, unless it waits for the
+user's review: then what was answered is in sight, until it is reviewed."
+  (change-review-ui-test--diff-view
+    (let ((drawn (lambda ()
+                   (overlay-get (cl-find-if (lambda (o) (and (overlay-get o 'after-string)
+                                                             (string-match-p "Fine\\."
+                                                                             (overlay-get o 'after-string))))
+                                            (overlays-in (point-min) (point-max)))
+                                'after-string))))
+      (should (string-match-p "┃ 1/1  Noah" (funcall drawn)))
+      (change-review-ui-test--goto "^\\+(setq b2 'two)")
+      (end-of-line)
+      (call-interactively #'change-review-ui-toggle-reviewed)
+      (change-review-ui-flush)
+      (should (string-match-p "“Fine\\.”" (funcall drawn)))
+      (should-not (string-match-p "┃" (funcall drawn)))
+      (should (string-match-p "3 open, 1 closed, 2 not sent"
+                              (apply #'concat (cl-remove-if-not #'stringp header-line-format))))
+      (should (eq #'change-review-ui-toggle-reviewed (key-binding "m")))
+      (should (eq #'change-review-ui-mark-all-reviewed (key-binding "M")))
+      ;; Made to wait again, it is whole again, though closed threads collapse.
+      (call-interactively #'change-review-ui-toggle-reviewed)
+      (should change-review-ui-collapse-closed-in-diff)
+      (change-review-ui-flush)
+      (should (string-match-p "┃ 1/1  Noah" (funcall drawn))))))
+
+(ert-deftest change-review-ui-diff-view-shows-only-what-waits-for-review ()
+  "The `to review' filter draws only the closed threads that wait, and the
+header line says which are shown."
+  (change-review-ui-test--diff-view
+    (change-review-ui-set-filter 'unreviewed)
+    (should (= 1 (length (cl-remove-if-not (lambda (o) (and (overlay-get o 'change-review-thread)
+                                                            (overlay-get o 'after-string)))
+                                           (overlays-in (point-min) (point-max))))))
+    (should (string-match-p "showing threads to review"
+                            (apply #'concat (cl-remove-if-not #'stringp header-line-format))))
+    (change-review-ui-set-filter 'open)
+    (should (string-match-p "showing open threads"
+                            (apply #'concat (cl-remove-if-not #'stringp header-line-format))))))
 
 (ert-deftest change-review-ui-diff-view-places-threads-of-another-version ()
   "A thread made against an earlier version is drawn where its line is now;
@@ -2121,6 +2357,7 @@ location, or at a thread: the thread's place in that version."
   "A closed thread is one line in the diff view, its triangle pointing right;
 TAB on its line opens it to its conversation and again folds it; with no
 thread on the line TAB is what it is without the library's keys."
+  (let ((change-review-ui-test--reviewed t))
   (change-review-ui-test--diff-view
     (let ((drawn (lambda (regexp)
                    (change-review-ui-test--goto regexp)
@@ -2131,7 +2368,7 @@ thread on the line TAB is what it is without the library's keys."
                                      'after-string)
                         "")))))
       (should (eq #'change-review-ui-cycle-fold (key-binding (kbd "TAB"))))
-      (should (string-match-p "\n  ▸ ✓ [^ ]+ · 1 comment · closed .*“Fine\\.”\\'" (funcall drawn "^\\+(setq b2 'two)")))
+      (should (string-match-p "\n  ▸ ✓ [^ ]+ · closed .*“Fine\\.”\\'" (funcall drawn "^\\+(setq b2 'two)")))
       (should (string-match-p "\n  ▾ ● [^ ]+ · 1 comment · open " (funcall drawn "^ (setq a4 4)")))
       (let ((inhibit-message t))
         (change-review-ui-test--goto "^\\+(setq b2 'two)")
@@ -2150,7 +2387,7 @@ thread on the line TAB is what it is without the library's keys."
           (cl-letf (((symbol-function 'indent-for-tab-command)
                      (lambda (&rest _) (interactive) (setq ran t))))
             (call-interactively #'change-review-ui-cycle-fold))
-          (should ran))))))
+          (should ran)))))))
 
 (ert-deftest change-review-ui-diff-view-draws-closed-threads-in-full-when-asked ()
   "The option that says closed threads are not one line makes them as open ones."

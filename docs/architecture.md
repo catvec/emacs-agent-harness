@@ -7447,6 +7447,25 @@ task's agent two tools.  The module needs `store`, `tasks` and
   UI's operation is and announced in `patch-review/changed`.  It is
   asked for, not done on its own: the words of a session are not all
   comments.
+- The closes.  The agent closes a thread (`review_comment` with the
+  status `closed`: a change of status in the thread's history, its author
+  the agent); whether the point is done is the user's to say.  A thread
+  closed by someone other than the user is TO REVIEW
+  (`change-review-thread-unreviewed-p`) until the user has looked at it,
+  and the mark is the library's: the operation `mark-reviewed` (`:thread`,
+  `:status-id`, `:time`) puts `:reviewed TIME` on the history entry that
+  closed the thread, `unmark-reviewed` takes it off.  The UI sends them
+  through `patch-review/apply` like any other, so they are kept with the
+  thread in `patch-review/TASK-ID.json`, announced in
+  `patch-review/changed` and performed on every UI's copy.  The mark names
+  the close by its id, which the UI resolves when the user acts, so a mark
+  heard late cannot reach a later close, and a thread the agent closes
+  again after it was opened is to review again.  Nothing marks a thread on
+  its own; a task whose threads were closed before the marks existed has
+  them all to review.  The agent is told, with the line that says how to
+  answer a thread (`harness-patch-review--attribution`) and in the
+  description of `review_comment`, that the user looks at every thread it
+  closes, so that it says what it changed and where.
 - The files viewed.  The files the reviewer compared in Ediff and those
   approved are kept in `patch-review-viewed/TASK-ID.json`: `:seen` and
   `:approved`, lists of `(:path PATH :blob BLOB)` -- the blob the file
@@ -7471,9 +7490,10 @@ task's agent two tools.  The module needs `store`, `tasks` and
 - `patch-review/get TASK-ID` → the set as plain data (versions without
   files, threads), made if it was not; `patch-review/apply TASK-ID OP` →
   `(:changed BOOL)`, performing OP, an operation of the library
-  (`:op` `add-comment`, `set-status`, `edit-comment`, `delete-comment` or
-  `add-version`, the ones a UI makes; any other signals), and nothing
-  happens the second time an operation is performed;
+  (`:op` `add-comment`, `set-status`, `edit-comment`, `delete-comment`,
+  `add-version`, `mark-reviewed` or `unmark-reviewed`, the ones a UI
+  makes; any other signals), and nothing happens the second time an
+  operation is performed;
   `patch-review/drafts TASK-ID` → the comments not sent yet, as data;
   `patch-review/threads-text TASK-ID &optional STATUS` → the threads
   (`open`, `closed` or all) as text for an agent: "N open, M closed" and
@@ -7502,7 +7522,9 @@ task's agent two tools.  The module needs `store`, `tasks` and
   the task is sent back, it returns the drafts of its set as text: a
   line saying what the quotes are and how to answer
   (`review_comment`, with the thread's id, and close the thread once
-  what it raises is done), then each comment quoted from the diff as a
+  what it raises is done, saying in the answer what changed and where,
+  since the user looks at every thread the agent closes), then each
+  comment quoted from the diff as a
   reply on a mailing list quotes it, a reply in a thread after the
   comments before it, each with its `[thread ID]`
   (`change-review-mail-render-comments`).  Once the task is sent back it
@@ -12842,8 +12864,9 @@ hosts is a generic function that a subtype of the set answers
 THE ONE DRAWING.  A thread is drawn in one place,
 `change-review-ui-thread-string`, whichever view shows it: a header (a
 mark, open ● or closed ✓, the thread's short id, where it is, how many
-comments, open or closed -- and by whom and when) with buttons for what
-can be done with it ([Reply] [Close] or [Reopen] [Diff]), then each
+comments, open or closed -- and by whom and when, and "to review" or
+"reviewed" for a thread someone else closed) with buttons for what can be
+done with it ([Reply] [Close] or [Reopen] [Mark reviewed] [Diff]), then each
 comment under a bar that runs the thread's length: its place in the
 thread (`2/3`), its author (marked "you" or "agent"), the time (exact,
 and relative), the revision it was written against, a "draft" mark, the
@@ -12880,11 +12903,11 @@ goes one line, conversation, all of it when it did, one line again.
 `change-review-ui-thread-line`
 is the same thread as one row of a list.  The report's rows, the threads
 view (`change-review-open-threads`, which lists every thread by file,
-filtered by status with f and F) and the threads under the lines of
+filtered by status -- open, to review, closed, all -- with f and F) and the threads under the lines of
 Ediff's two versions and of the library's own diff view
 (`change-review-open-diff`) all call them, and the keys on a thread are
 the library's whichever view it is in: r replies, x closes it or opens
-it, s sets a status, e edits a draft, k deletes one, o follows an
+it, m marks one the agent closed reviewed (M every one that waits), s sets a status, e edits a draft, k deletes one, o follows an
 agent's comment to the point of its conversation, RET (TAB in the
 threads view) shows where its comment was made -- the file and line, the
 revision, the lines of the diff it was made on, the session and tool
@@ -12926,6 +12949,18 @@ keeps it with `change-review-edit` -- unless the text is blank, or the
 comment was sent while it was written, from the feedback box say: what
 was delivered was read, so it stays as it was and the text goes to the
 kill ring.
+
+WHAT THE AGENT CLOSED.  A thread someone other than the user closed is
+TO REVIEW until the user looked at it (`change-review-thread-unreviewed-p`;
+the library's README has the whole rule): the mark is on the change of
+status that closed the thread, so a close from two rounds ago still
+waits, a thread closed again after it was opened waits again, and nothing
+marks a thread by itself.  The user marks one with m, the `[Mark
+reviewed]` button, or by replying in it, all of them with M; m again
+makes it wait.  The threads view has it as a filter, `unreviewed`, shown
+as "to review" and counted in its heading; the diff view draws such a
+thread whole where other closed threads are a line; the review of a task
+(below) counts them, lists them and draws them whole in Ediff.
 
 THE ADAPTER.  This module gives a task to the library as a change set of
 its own subtype (`harness-ui-patch-review--set`):
@@ -13085,18 +13120,23 @@ taken as viewed and not looked at ("unchanged since 7ec4f03 taken as
 viewed").  a
 approves the file at point, A every file; the heading counts those
 viewed and those approved, the threads ("3 open, 2 closed", with the
-key that lists them, T) and the drafts that wait for the feedback.  A
-file's row counts its threads and says whether it changed since the
-reviewer's last comment on it or stayed the same.  Under it are its open
-threads, a line each (`change-review-ui-thread-line`: `● 3f9a1c · line
-44 (was 42) · Claude: “Because the retry loop…” · 3 comments`), or all
-of them with `harness-ui-patch-review-closed-threads`.  RET or a click
+key that lists them, T, and, when the agent closed some the reviewer has
+not looked at, a button "[2 to review]" that lists those, the threads view
+filtered) and the drafts that wait for the feedback.  A file's row counts
+its threads, says how many of the closed ones are to review ("1 closed (1
+to review)") and whether it changed since the reviewer's last comment on
+it or stayed the same.  Under it are its open threads and those to
+review, a line each (`change-review-ui-thread-line`: `● 3f9a1c · line
+44 (was 42) · Claude: “Because the retry loop…” · 3 comments`; `✓ 7c2b11 ·
+line 40 · … · to review`), or all the closed ones too with
+`harness-ui-patch-review-closed-threads`.  m on such a row (or in Ediff)
+marks the thread reviewed, M every one that waits.  RET or a click
 on a thread's row compares the file with that line in sight (the row's
 `harness-ui-patch-review-where` property); r, x and o act on the thread
 as in the threads view, and c comments on the change as a whole.
 Threads that no file row shows -- those on the change as a whole and on
 files the diff shown does not change, each with its file -- stay in a
-block above the files, "Other threads".
+block above the files, "Other threads", with the same rule for which are listed.
 
 RET on a file runs `ediff-buffers` on the two blobs, laid out by
 `harness-ui-patch-review-ediff-window-setup`, once it saved the frame's
@@ -13115,7 +13155,9 @@ configuration to give back.  n is Ediff's next difference, wrapped
 (`harness-ui-patch-review-next-difference`): at the last difference it
 says once that the next difference is the next file, and the same key
 again goes on to it in Ediff.  The control panel's map is a child of
-Ediff's with c, r, x, T, TAB, e, a, n, N, P and q (under evil,
+Ediff's with c, r, x, m (which takes the place of Ediff's wide-display
+toggle: it marks the thread at the current difference reviewed, one that
+waits first), T, TAB, e, a, n, N, P and q (under evil,
 `evil-normalize-keymaps` puts it where evil-collection made Ediff's map
 overriding) and a brief help of its own
 (`ediff-brief-help-message-function`); quitting goes through
@@ -13129,7 +13171,9 @@ line, drawn as the library draws them
 file, at the place `change-review-placement` gives -- the merge base's
 version for a thread on a removed line, the top of the branch's for one
 on the file as a whole or whose line is gone.  A thread that moved says
-where it was ("line 44 (was 42)") or that its line changed since.  In
+where it was ("line 44 (was 42)") or that its line changed since.  A
+closed thread is a line, unless it waits for the reviewer's look: then it
+is drawn whole, with the agent's answer, and `[Mark reviewed]`.  In
 either version (`harness-ui-patch-review-lines-mode`, whose map has the
 library's for its parent) c starts a thread, a draft, on the line at
 point -- on the branch's side it is a line of the branch, on the merge
