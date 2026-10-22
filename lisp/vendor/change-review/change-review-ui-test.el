@@ -211,6 +211,21 @@ version has no files, as a version a program has not read yet."
         (and (get-text-property 0 'button string)
              (string-prefix-p label (substring-no-properties string 0)) 0))))
 
+(defun change-review-ui-test--press-nth (string label n)
+  "Press the Nth (from 0) button labelled LABEL in STRING, as a click would."
+  (let (starts (pos 0))
+    (while (setq pos (next-single-property-change pos 'button string))
+      (when (and (get-text-property pos 'button string)
+                 (string-prefix-p label (substring-no-properties string pos)))
+        (push pos starts)))
+    (when (and (get-text-property 0 'button string)
+               (string-prefix-p label (substring-no-properties string 0)))
+      (push 0 starts))
+    (setq starts (sort starts #'<))
+    (with-temp-buffer
+      (insert string)
+      (push-button (1+ (or (nth n starts) (error "No button %d %s in %S" n label (substring-no-properties string))))))))
+
 (defun change-review-ui-test--press (string label)
   "Press the button labelled LABEL in STRING, as a click would."
   (let ((pos (or (change-review-ui-test--button string label)
@@ -253,7 +268,7 @@ whether it is a draft, and where it is in the thread."
     (let* ((set (change-review-ui-test--set))
            (thread (car (change-review-ui-test--populate set)))
            (lines (change-review-ui-test--lines
-                   (change-review-ui-thread-string set thread :view 'threads :width 80))))
+                   (change-review-ui-thread-string set thread :view 'threads :width 90))))
       (should (string-match-p
                (format "\\`● %s · line 3 · 3 comments · open +\\[Reply\\] \\[Close\\] \\[Diff\\]\\'"
                        (change-review-ui-thread-short-id set thread))
@@ -265,7 +280,8 @@ whether it is a draft, and where it is in the thread."
                      (nth 4 lines)))
       (should (equal "┃      Because the retry loop needs it." (nth 5 lines)))
       ;; The third answers the first, not the one before it, and is a draft.
-      (should (equal "┃ 3/3  Noah (you) · 2026-10-14 17:45 · second · draft · ↳ re 1/3  ▸ where"
+      ;; (and the one comment that can still be changed has its button.)
+      (should (equal "┃ 3/3  Noah (you) · 2026-10-14 17:45 · second · draft · ↳ re 1/3  [Edit]  ▸ where"
                      (nth 6 lines)))
       (should (equal "┃      Then say so in a comment." (nth 7 lines)))
       (should (= 8 (length lines))))))
@@ -390,6 +406,142 @@ All of that takes 92 columns; in less it says less (see the tests of fitting)."
       (change-review-ui-test--press (change-review-ui-thread-string set thread :width 90) "↗ conversation")
       (should (equal "sess-1" (change-review-author-session
                                 (car (change-review-ui-test--set-followed set))))))))
+
+;; The comment that can still be changed has a button of its own.
+
+(ert-deftest change-review-ui-draws-an-edit-button-on-a-draft-only ()
+  "A draft has [Edit] in its header, a comment that was sent has none."
+  (change-review-ui-test--drawing
+    (let* ((set (change-review-ui-test--set))
+           (thread (car (change-review-ui-test--populate set)))
+           (string (change-review-ui-thread-string set thread :width 90))
+           (headers (cl-remove-if-not (lambda (line) (string-match-p "\\`┃ [0-9]/" line))
+                                      (change-review-ui-test--lines string))))
+      (should (= 3 (length headers)))
+      (should-not (string-search "[Edit]" (nth 0 headers)))
+      (should-not (string-search "[Edit]" (nth 1 headers)))
+      (should (string-match-p "· draft · ↳ re 1/3  \\[Edit\\]  ▸ where\\'" (nth 2 headers)))
+      ;; One button, on the line of the draft, which says what it does.
+      (let ((pos (change-review-ui-test--button string "[Edit]")))
+        (should pos)
+        (should (equal "Edit this draft" (get-text-property pos 'help-echo string)))
+        (should (equal (change-review-comment-id (change-review-thread-last-comment thread))
+                       (get-text-property pos 'change-review-comment string)))
+        (should-not (change-review-ui-test--button (substring string (1+ pos)) "[Edit]")))
+      ;; Closed, and one line: no button, the thread is read, not changed.
+      (should-not (string-search "[Edit]" (change-review-ui-thread-string
+                                           set thread :width 90 :collapsed t))))))
+
+(ert-deftest change-review-ui-edit-button-edits-that-draft ()
+  "[Edit] edits the draft it is on, the first of two as well as the last:
+the text to start from is that draft's, and what is read replaces it."
+  (change-review-ui-test--drawing
+    (let* ((set (change-review-ui-test--set))
+           (thread (car (change-review-ui-test--populate set)))
+           (first (change-review-thread-last-comment thread))
+           (second (change-review-reply set first "And name the test."
+                                        :author (change-review-ui-test--author)
+                                        :time (- change-review-ui-test--now 30)))
+           (asked nil)
+           (change-review-ui-read-function
+            (lambda (prompt initial callback)
+              (push (cons prompt initial) asked)
+              (funcall callback (concat initial " (better)")))))
+      (should (= 2 (length (change-review-thread-drafts thread))))
+      (change-review-ui-test--press-nth (change-review-ui-thread-string set thread :width 90) "[Edit]" 0)
+      (should (equal "Then say so in a comment. (better)" (change-review-comment-body first)))
+      (should (equal "And name the test." (change-review-comment-body second)))
+      (should (string-match-p "\\`Edit Noah's comment 3/4 on a\\.el:3:" (car (car asked))))
+      (should (equal "Then say so in a comment." (cdr (car asked))))
+      (should (change-review-comment-edited first))
+      ;; The second, the other button of the same drawing.
+      (change-review-ui-test--press-nth (change-review-ui-thread-string set thread :width 90) "[Edit]" 1)
+      (should (equal "And name the test. (better)" (change-review-comment-body second)))
+      (should (string-match-p "\\`Edit Noah's comment 4/4" (car (car asked))))
+      ;; Both are still drafts, and the thread has the same comments.
+      (should (= 2 (length (change-review-thread-drafts thread))))
+      (should (= 4 (length (change-review-thread-comments thread)))))))
+
+(ert-deftest change-review-ui-edit-keeps-what-was-sent-meanwhile ()
+  "A draft sent while its new text was written is not changed -- it was read
+as it was -- and the text is not lost: it is in the kill ring.  A blank text
+changes nothing either, and neither does one for a draft that is gone."
+  (change-review-ui-test--drawing
+    (let* ((set (change-review-ui-test--set))
+           (thread (car (change-review-ui-test--populate set)))
+           (draft (change-review-thread-last-comment thread))
+           (kill-ring nil)
+           (said nil))
+      (cl-letf (((symbol-function 'message) (lambda (&rest args) (setq said (apply #'format args)))))
+        ;; Sent while the text is written.
+        (let ((change-review-ui-read-function
+               (lambda (_prompt _initial callback)
+                 (change-review-mark-sent set (list draft))
+                 (funcall callback "Too late."))))
+          (change-review-ui-edit-comment set thread draft))
+        (should (equal "Then say so in a comment." (change-review-comment-body draft)))
+        (should (equal '("Too late.") kill-ring))
+        (should (string-match-p "sent meanwhile" said))
+        ;; What is sent cannot be edited at all.
+        (should-error (change-review-ui-edit-comment set thread draft) :type 'user-error)
+        ;; A blank text is no change, nor is the same one.
+        (let ((other (change-review-reply set draft "Another." :author (change-review-ui-test--author)))
+              (change-review-ui-read-function (lambda (_prompt _initial callback) (funcall callback " \n "))))
+          (change-review-ui-edit-comment set thread other)
+          (should (equal "Another." (change-review-comment-body other)))
+          (should (equal "No change" said))
+          (should-not (change-review-comment-edited other))
+          (setq said nil)
+          (let ((change-review-ui-read-function (lambda (_prompt initial callback) (funcall callback (concat initial "\n")))))
+            (change-review-ui-edit-comment set thread other))
+          (should (equal "No change" said))
+          (should-not (change-review-comment-edited other))
+          ;; Deleted meanwhile: nothing to change.
+          (let ((change-review-ui-read-function
+                 (lambda (_prompt _initial callback)
+                   (change-review-delete set other)
+                   (funcall callback "Gone."))))
+            (change-review-ui-edit-comment set thread other))
+          (should (string-match-p "gone" said))
+          (should (equal '("Too late.") kill-ring)))))))
+
+(ert-deftest change-review-ui-chooses-a-draft-among-several ()
+  "The only draft is the one to act on, without a question; of several, the
+prompt lists them in order by thread, place and first words, the newest being
+the default, and what is chosen is the draft."
+  (change-review-ui-test--drawing
+    (let* ((set (change-review-ui-test--set))
+           (threads (change-review-ui-test--populate set))
+           (a (nth 0 threads)) (d (nth 3 threads))
+           (a3 (change-review-thread-last-comment a))
+           (d1 (change-review-thread-root d))
+           (asked nil))
+      (should (equal (list (cons a a3) (cons d d1))
+                     (change-review-ui-draft-candidates (list a (nth 1 threads) (nth 2 threads) d))))
+      ;; One draft: no question.
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (&rest _) (ert-fail "asked which of one"))))
+        (should (equal (cons a a3) (change-review-ui-choose-draft set (list (cons a a3)))))
+        (should-not (change-review-ui-choose-draft set nil)))
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (prompt table _predicate _require _initial _hist default &rest _)
+                   (setq asked (list prompt (all-completions "" table)
+                                     (completion-metadata "" table nil) default))
+                   (car (all-completions "" table)))))
+        (let ((choice (change-review-ui-choose-draft set (list (cons a a3) (cons d d1)) "Delete")))
+          (should (equal (cons a a3) choice)))
+        ;; The prompt says what RET takes: the newest.
+        (should (equal (format "Delete which draft (default %s): " (nth 3 asked)) (nth 0 asked)))
+        (should (equal (list (format "%s 3/3  Then say so in a comment." (change-review-ui-thread-short-id set a))
+                             (format "%s 1/1  What about a4?" (change-review-ui-thread-short-id set d)))
+                       (nth 1 asked)))
+        ;; In the order given, not sorted by the completion UI.
+        (should (eq 'identity (alist-get 'display-sort-function (cdr (nth 2 asked)))))
+        (should (equal (nth 1 (nth 1 asked)) (nth 3 asked))))
+      ;; An answer that is none of the drafts is no draft.
+      (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "something else")))
+        (should-error (change-review-ui-choose-draft set (list (cons a a3) (cons d d1)))
+                      :type 'user-error)))))
 
 (ert-deftest change-review-ui-draws-a-thread-as-a-line ()
   "A thread in a list is a line: mark, id, line, who wrote it and the first
@@ -1113,6 +1265,65 @@ again, s sets the status by name; the view follows the set."
     (change-review-ui-flush)
     (should-not (string-match-p "Then explain it" (change-review-ui-test--text)))))
 
+(ert-deftest change-review-ui-threads-view-edits-the-draft-of-the-thread-at-point ()
+  "e on a thread's header, where N and P stop, edits a draft of the thread:
+the only one, or the one chosen of several; a thread with none says so, and
+what is no thread is none.  k finds a draft the same way."
+  (change-review-ui-test--threads-view
+    (let* ((a (nth 0 threads)) (b (nth 1 threads)) (d (nth 3 threads))
+           (header (lambda (thread)
+                     (goto-char (point-min))
+                     (search-forward (change-review-ui-thread-short-id set thread))
+                     (beginning-of-line)
+                     (should (get-text-property (point) 'change-review-thread-start))
+                     (should-not (get-text-property (point) 'change-review-comment))))
+           asked)
+      ;; The only draft of the thread: no question.
+      (funcall header d)
+      (let ((change-review-ui-read-function
+             (lambda (prompt initial callback)
+               (should (string-match-p "\\`Edit Noah's comment 1/1 on a\\.el:4" prompt))
+               (should (equal "What about a4?" initial))
+               (funcall callback "What about a4, then?"))))
+        (change-review-ui-edit-draft))
+      (should (equal "What about a4, then?" (change-review-comment-body (change-review-thread-root d))))
+      ;; Two drafts in thread A: asked which, the newest by default.
+      (let* ((first (change-review-thread-last-comment a))
+             (second (change-review-reply set (change-review-thread-root a) "And the test's name."
+                                          :author (change-review-ui-test--author))))
+        (change-review-ui-flush)
+        (funcall header a)
+        (cl-letf (((symbol-function 'completing-read)
+                   (lambda (prompt table _predicate _require _initial _hist default &rest _)
+                     (setq asked (list prompt (all-completions "" table) default))
+                     (car (all-completions "" table)))))
+          (let ((change-review-ui-read-function
+                 (lambda (_prompt initial callback) (funcall callback (concat initial "!")))))
+            (change-review-ui-edit-draft)))
+        (should (equal (format "Edit which draft (default %s): " (nth 2 asked)) (nth 0 asked)))
+        (should (= 2 (length (nth 1 asked))))
+        (should (string-match-p " 3/4  Then say so in a comment\\.\\'" (car (nth 1 asked))))
+        (should (equal (nth 2 asked) (cadr (nth 1 asked))))
+        (should (string-match-p " 4/4  And the test's name\\.\\'" (nth 2 asked)))
+        ;; The first of the list was chosen, not the default (the newest).
+        (should (equal "Then say so in a comment.!" (change-review-comment-body first)))
+        (should (equal "And the test's name." (change-review-comment-body second))))
+      ;; A thread whose comments were all sent has no draft to edit.
+      (funcall header b)
+      (let ((error (should-error (change-review-ui-edit-draft) :type 'user-error)))
+        (should (equal "No draft in this thread" (cadr error))))
+      ;; On the text that is not a thread: none.
+      (goto-char (point-min))
+      (should-error (change-review-ui-edit-draft) :type 'user-error)
+      (should-error (change-review-ui-delete-draft) :type 'user-error)
+      ;; k: the draft of thread D, which goes with its thread.
+      (funcall header d)
+      (let ((count (length (change-review-set-threads set))))
+        (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) t)))
+          (change-review-ui-delete-draft))
+        (should (= (1- count) (length (change-review-set-threads set))))
+        (should-not (memq d (change-review-set-threads set)))))))
+
 (ert-deftest change-review-ui-threads-view-follows-an-agent ()
   "o on a comment of an agent follows it to its conversation; on the thread
 of a user alone, it says there is none."
@@ -1185,6 +1396,57 @@ it by the line point is on."
           (change-review-ui-clear-overlays)
           (forward-line -1)
           (should-not (change-review-ui--overlay-thread-ids)))))))
+
+(ert-deftest change-review-ui-lines-mode-edits-the-drafts-under-the-line ()
+  "Where two threads are drawn under one line, e asks which of their drafts to
+edit -- point cannot be on either -- and edits it; a line with none says so.
+The [Edit] buttons of the drawing name one directly."
+  (change-review-ui-test--drawing
+    (let* ((set (change-review-ui-test--set))
+           (threads (change-review-ui-test--populate set))
+           (a (nth 0 threads)) (d (nth 3 threads)) (b (nth 1 threads))
+           (a3 (change-review-thread-last-comment a))
+           (d1 (change-review-thread-root d)))
+      (with-temp-buffer
+        (insert "one\ntwo\nthree\n")
+        (setq change-review-ui--set set)
+        (change-review-ui-lines-mode 1)
+        (goto-char (point-min))
+        (forward-line 1)
+        (dolist (thread (list a b d))
+          (change-review-ui-add-thread-overlay set thread (line-end-position) :view 'diff :width 70))
+        (should (eq #'change-review-ui-edit-draft (key-binding "e")))
+        (should (equal (list a b d) (change-review-ui--threads-at-point set)))
+        (should (equal (list (cons a a3) (cons d d1))
+                       (change-review-ui-draft-candidates (change-review-ui--threads-at-point set))))
+        (let (asked)
+          (cl-letf (((symbol-function 'completing-read)
+                     (lambda (_prompt table &rest _)
+                       (setq asked (all-completions "" table))
+                       ;; The second: thread D's.
+                       (cadr (all-completions "" table)))))
+            (let ((change-review-ui-read-function
+                   (lambda (_prompt initial callback)
+                     (should (equal "What about a4?" initial))
+                     (funcall callback "Which a4?"))))
+              (call-interactively #'change-review-ui-edit-draft)))
+          (should (= 2 (length asked)))
+          (should (equal "Which a4?" (change-review-comment-body d1)))
+          (should (equal "Then say so in a comment." (change-review-comment-body a3))))
+        ;; The button of a draft in the drawing goes straight to it.
+        (let ((change-review-ui-read-function
+               (lambda (_prompt _initial callback) (funcall callback "By the button"))))
+          (change-review-ui-test--press (change-review-ui-thread-string set a :width 70) "[Edit]"))
+        (should (equal "By the button" (change-review-comment-body a3)))
+        ;; A line with no thread under it.
+        (forward-line 1)
+        (should-error (call-interactively #'change-review-ui-edit-draft) :type 'user-error)
+        ;; A line with only threads that were sent.
+        (forward-line -2)
+        (change-review-ui-clear-overlays)
+        (change-review-ui-add-thread-overlay set b (line-end-position) :view 'diff :width 70)
+        (let ((error (should-error (call-interactively #'change-review-ui-edit-draft) :type 'user-error)))
+          (should (equal "No draft in this thread" (cadr error))))))))
 
 (ert-deftest change-review-ui-keeps-the-face-of-the-last-newline-under-a-line ()
   "The buffer's own newline ends the last line of a thread under a line, so a
@@ -1509,6 +1771,42 @@ about, the change's own at the top."
         (call-interactively #'change-review-ui-return)
         (change-review-ui-flush)
         (should (string-match-p "made at a\\.el:4" (funcall drawn)))))))
+
+(ert-deftest change-review-ui-diff-view-edits-the-draft-under-the-line ()
+  "e on the line a draft's thread is drawn under edits the draft; under a
+line with a thread that was sent only, it says there is no draft."
+  (change-review-ui-test--diff-view
+    (should (eq #'change-review-ui-edit-draft (key-binding "e")))
+    (change-review-ui-test--goto "^ (setq a4 4)")
+    (end-of-line)
+    (let ((thread (change-review-ui--thread-at-point)))
+      (should (equal "What about a4?" (change-review-comment-body (change-review-thread-root thread))))
+      (let ((change-review-ui-read-function
+             (lambda (prompt initial callback)
+               (should (string-match-p "\\`Edit Noah's comment 1/1 on a\\.el:4" prompt))
+               (should (equal "What about a4?" initial))
+               (funcall callback "What does a4 do?"))))
+        (call-interactively #'change-review-ui-edit-draft))
+      (should (equal "What does a4 do?" (change-review-comment-body (change-review-thread-root thread))))
+      (change-review-ui-flush)
+      ;; Drawn again, with the new text and the button on it.
+      (let ((drawn (overlay-get (cl-find-if (lambda (o) (and (overlay-get o 'after-string)
+                                                               (string-match-p "a4 do" (overlay-get o 'after-string))))
+                                             (overlays-in (point-min) (point-max)))
+                                'after-string)))
+        (should (string-match-p "draft · edited  \\[Edit\\]" drawn))))
+    ;; The thread under (setq a3 3) has a draft too: the third comment.
+    (change-review-ui-test--goto "^ (setq a3 3)")
+    (end-of-line)
+    (let ((change-review-ui-read-function (lambda (_prompt _initial callback) (funcall callback "Say why."))))
+      (call-interactively #'change-review-ui-edit-draft))
+    (should (equal "Say why." (change-review-comment-body
+                               (change-review-thread-last-comment (change-review-ui--thread-at-point)))))
+    ;; The thread of b.el was sent: no draft to edit under its line.
+    (change-review-ui-test--goto "^\\+(setq b2 'two)")
+    (end-of-line)
+    (let ((error (should-error (call-interactively #'change-review-ui-edit-draft) :type 'user-error)))
+      (should (equal "No draft in this thread" (cadr error))))))
 
 (ert-deftest change-review-ui-diff-view-moves-between-threads ()
   "C-c C-n and C-c C-p move between the lines that have a thread."

@@ -80,6 +80,14 @@
 ;;               the report and in Ediff, lists all the threads by file,
 ;;               with a filter on their status; d there comes back to
 ;;               Ediff, at the thread's line.
+;;   drafts      A draft is yours to change until the feedback sends it:
+;;               it has an [Edit] button, which edits that draft, and e
+;;               edits one by where point is: under the line in a
+;;               version, at the current difference in the control
+;;               panel (the only draft there, or the one chosen of
+;;               several), on a thread's row in the report, on a
+;;               thread's header or a comment in the threads list.
+;;               e with no draft in Ediff goes to the report's box.
 ;;   folds       A closed thread is one line under its line, the
 ;;               first words of what it says, no wider than the window
 ;;               shows; so is any thread folded.  TAB on its line (in
@@ -1864,6 +1872,7 @@ snapshot's is the review's own."
   (define-key map (kbd "T") #'harness-ui-patch-review-threads)
   (define-key map (kbd "d") #'harness-ui-patch-review-select-diff)
   (define-key map (kbd "r") #'change-review-ui-reply)
+  (define-key map (kbd "e") #'change-review-ui-edit-draft)
   (define-key map (kbd "x") #'change-review-ui-toggle-status)
   (define-key map (kbd "o") #'change-review-ui-follow-author)
   (define-key map (kbd "c") #'change-review-ui-comment-on-change))
@@ -1905,7 +1914,7 @@ compares the file in Ediff with the thread's line in sight."
            'harness-ui-patch-review-where
            (and line (cons (intern (concat ":" (symbol-name side))) line))
            'mouse-face 'highlight
-           'help-echo "RET or a click: compare the file in Ediff at this line; r replies, x closes or opens the thread"
+           'help-echo "RET or a click: compare the file in Ediff at this line; r replies, e edits a draft, x closes or opens the thread"
            'wrap-prefix (concat indent "    ")
            'keymap harness-ui-patch-review--row-map)
      row)
@@ -1931,6 +1940,7 @@ the closed too; each after INDENT.  Empty without threads."
   (define-key map (kbd "T") #'harness-ui-patch-review-threads)
   (define-key map (kbd "d") #'harness-ui-patch-review-select-diff)
   (define-key map (kbd "r") #'change-review-ui-reply)
+  (define-key map (kbd "e") #'change-review-ui-edit-draft)
   (define-key map (kbd "x") #'change-review-ui-toggle-status)
   (define-key map (kbd "o") #'change-review-ui-follow-author)
   (define-key map (kbd "c") #'change-review-ui-comment-on-change))
@@ -1974,7 +1984,7 @@ unless `harness-ui-patch-review-closed-threads' says."
              (list 'harness-ui-patch-review-task (harness-ui-patch-review--r-id review)
                    'change-review-thread (change-review-thread-id thread)
                    'mouse-face 'highlight
-                   'help-echo "RET: list the threads; r replies, x closes or opens the thread"
+                   'help-echo "RET: list the threads; r replies, e edits a draft, x closes or opens the thread"
                    'keymap harness-ui-patch-review--thread-map)
              row)
             row))
@@ -2456,7 +2466,7 @@ It also says how many threads the review has, open and closed."
       (_ (format "The branch changes nothing against %s." (harness-ui-patch-review--r-base review))))))
 
 (defconst harness-ui-patch-review--hint
-  "RET or a click compares a file in Ediff, n and p move between them, a approves it, A approves all, V takes the files the newest commit did not change as viewed, t shows a tree or a flat list, T lists the threads by file, d chooses the diff shown: the branch against its base, since the last review, or any revisions.  In Ediff c comments on a difference -- in either version, on the line at point -- as a thread of its own, r replies to a thread, x closes it or opens it again and TAB folds it to a line or opens a closed one to its conversation, and e goes to the box below (C-c C-d comes back to Ediff); n at the last difference offers the next file, N and P go on to the next or previous file, q comes back here."
+  "RET or a click compares a file in Ediff, n and p move between them, a approves it, A approves all, V takes the files the newest commit did not change as viewed, t shows a tree or a flat list, T lists the threads by file, e on a thread's row edits one of its drafts, d chooses the diff shown: the branch against its base, since the last review, or any revisions.  In Ediff c comments on a difference -- in either version, on the line at point -- as a thread of its own, r replies to a thread, x closes it or opens it again and TAB folds it to a line or opens a closed one to its conversation, and e edits one of your drafts there (each draft has an [Edit] button too) or, with none, goes to the box below (C-c C-d comes back to Ediff); n at the last difference offers the next file, N and P go on to the next or previous file, q comes back here."
   "What the report says under the changes.")
 
 ;;;;; Choosing the diff
@@ -2783,12 +2793,14 @@ In the control panel that is the current difference
       (cons (if (eq (current-buffer) (plist-get state :a)) :old :new)
             (line-number-at-pos)))))
 
-(defun harness-ui-patch-review-edit-feedback ()
+(defun harness-ui-patch-review-edit-feedback (&optional why)
   "Go to the report's feedback box, to write the words that go with the comments.
 In an Ediff of a task's change, from the control panel or either
 version.  The box is at the bottom of the frame, under Ediff; point goes
 to its end.  Ediff stays as it is: \\<harness-ui-patch-review-mode-map>\\[harness-ui-patch-review-open] in the report goes back to it,
-and \\<harness-ui-popout-mode-map>\\[harness-ui-popout-submit] there sends the feedback, with the drafts of the threads."
+and \\<harness-ui-popout-mode-map>\\[harness-ui-popout-submit] there sends the feedback, with the drafts of the threads.
+WHY, a sentence, is said first in the echo area when something else brought
+the reviewer here, a key that edits a draft where there is none."
   (interactive)
   (let* ((review (harness-ui-patch-review--current))
          (popout (harness-ui-patch-review--feedback-box review))
@@ -2796,7 +2808,8 @@ and \\<harness-ui-popout-mode-map>\\[harness-ui-popout-submit] there sends the f
                      (user-error "The box is not shown beside Ediff: see `harness-ui-patch-review-ediff-box-height'"))))
     (select-window window)
     (goto-char (buffer-local-value 'harness-compose-end popout))
-    (message "The feedback: %s goes back to Ediff, %s sends it with the %s"
+    (message "%sThe feedback: %s goes back to Ediff, %s sends it with the %s"
+             (if why (concat why " ") "")
              (substitute-command-keys "\\<harness-ui-patch-review-mode-map>\\[harness-ui-patch-review-open]")
              (substitute-command-keys "\\<harness-ui-popout-mode-map>\\[harness-ui-popout-submit]")
              (harness-ui-patch-review--plural
@@ -2887,25 +2900,23 @@ or the words of a thread does it for that thread."
     (change-review-ui-cycle-folds (harness-ui-patch-review--r-set review) threads)))
 
 (defun harness-ui-patch-review-edit-comment ()
-  "Edit your draft in the thread at point in Ediff; else go to the feedback box.
-In a version, the draft in the thread under the line at point; in the
-control panel, in the thread at the current difference.  Without such a
-thread, \\[harness-ui-patch-review-edit-feedback]'s: the box."
+  "Edit a draft of yours under point in Ediff; else go to the feedback box.
+In a version, a draft in the threads under the line at point; in the
+control panel, in the threads at the current difference.  The only draft
+there is edited at once; of several, which one is asked, the newest the
+default.  Without a draft there, \\[harness-ui-patch-review-edit-feedback]'s: the box.
+The [Edit] button of a draft edits that one, wherever point is."
   (interactive)
   (let* ((review (harness-ui-patch-review--current))
+         (set (harness-ui-patch-review--r-set review))
          (file (and (integerp harness-ui-patch-review--index)
                     (nth harness-ui-patch-review--index (harness-ui-patch-review--r-files review))))
-         (thread (and file (car (harness-ui-patch-review--ediff-threads review file))))
-         (draft (and thread (car (last (change-review-thread-drafts thread))))))
-    (if (null draft)
-        (harness-ui-patch-review-edit-feedback)
-      (let ((set (harness-ui-patch-review--r-set review)))
-        (change-review-ui-read
-         (format "Edit your comment in thread %s:" (change-review-ui-thread-short-id set thread))
-         (change-review-comment-body draft)
-         (lambda (text)
-           (unless (string-blank-p text)
-             (change-review-edit set draft (string-trim text)))))))))
+         (drafts (and file (change-review-ui-draft-candidates
+                            (harness-ui-patch-review--ediff-threads review file)))))
+    (if (null drafts)
+        (harness-ui-patch-review-edit-feedback "No draft of yours here.")
+      (pcase-let ((`(,thread . ,comment) (change-review-ui-choose-draft set drafts "Edit")))
+        (change-review-ui-edit-comment set thread comment)))))
 
 ;;;; Ediff
 
@@ -2991,7 +3002,7 @@ Those of the library's threads under a line -- r, x, o, RET -- are its.")
 \\[change-review-ui-return] opens it if it is one line, else shows where its comments were made.
 \\[change-review-ui-show-source] shows the code the comment under the line was written on, as it was then.
 \\[harness-ui-patch-review-approve-ediff] approves the file.
-\\[harness-ui-patch-review-edit-comment] edits your draft there, or goes to the feedback box.
+\\[harness-ui-patch-review-edit-comment] edits a draft of yours there, or goes to the feedback box.
 \\[harness-ui-patch-review-threads] lists the threads."
   :lighter nil :keymap harness-ui-patch-review-lines-mode-map :group 'harness-ui-patch-review)
 
@@ -3200,7 +3211,7 @@ many were compared already (`harness-ui-patch-review--ediff-progress')."
                        (harness-ui-patch-review--help-button "[Comment]" #'harness-ui-patch-review-comment "c")
                        "   " (harness-ui-patch-review--help-button "[Reply]" #'harness-ui-patch-review-reply "r")
                        "   " (harness-ui-patch-review--help-button "[Threads]" #'harness-ui-patch-review-threads "T")
-                       "   " (harness-ui-patch-review--help-button "[Feedback box]" #'harness-ui-patch-review-edit-comment "e")
+                       "   " (harness-ui-patch-review--help-button "[Edit draft/box]" #'harness-ui-patch-review-edit-comment "e")
                        "   " (harness-ui-patch-review--help-button "[Approve]" #'harness-ui-patch-review-approve-ediff "a")))
          (elsewhere (concat (harness-ui-patch-review--help-button "[Fold thread]" #'harness-ui-patch-review-cycle-fold "TAB")
                             "   " (harness-ui-patch-review--help-button "[Next file]" #'harness-ui-patch-review-ediff-next-file "N")

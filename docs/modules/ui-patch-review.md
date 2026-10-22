@@ -90,6 +90,14 @@ DIFF SHOWN), a tree of the directories and their files:
               the report and in Ediff, lists all the threads by file,
               with a filter on their status; d there comes back to
               Ediff, at the thread's line.
+  drafts      A draft is yours to change until the feedback sends it:
+              it has an [Edit] button, which edits that draft, and e
+              edits one by where point is: under the line in a
+              version, at the current difference in the control
+              panel (the only draft there, or the one chosen of
+              several), on a thread's row in the report, on a
+              thread's header or a comment in the threads list.
+              e with no draft in Ediff goes to the report's box.
   folds       A closed thread is one line under its line, the
               first words of what it says, no wider than the window
               shows; so is any thread folded.  TAB on its line (in
@@ -238,7 +246,7 @@ part of the report out.
 - `harness-ui-patch-review-ediff-next-file` — On to the next file of the task's changes, in Ediff.
 - `harness-ui-patch-review-ediff-previous-file` — On to the previous file of the task's changes, in Ediff.
 - `harness-ui-patch-review-ediff-quit` — Back to the task's report, the windows as they were, without asking.
-- `harness-ui-patch-review-edit-comment` — Edit your draft in the thread at point in Ediff; else go to the feedback box.
+- `harness-ui-patch-review-edit-comment` — Edit a draft of yours under point in Ediff; else go to the feedback box.
 - `harness-ui-patch-review-edit-feedback` — Go to the report's feedback box, to write the words that go with the comments.
 - `harness-ui-patch-review-import-manual` — Make the replies you wrote by hand for this task threads of its review.
 - `harness-ui-patch-review-mouse-ediff` — Compare the file clicked on in EVENT in Ediff.

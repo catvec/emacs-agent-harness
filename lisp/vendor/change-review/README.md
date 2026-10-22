@@ -80,8 +80,8 @@ can be done with it; then each comment under a bar that runs the
 thread's length, with its place in the thread (`2/3`), its author (marked
 "you" or "agent"), the time, the revision it was written against, a
 mark when it is still a draft, the comment it answers when that is not
-the one above (`↳ re 1/3`), a `▸ where` button that shows where it was
-made, and for an agent's comment `↗ conversation`, then its text.
+the one above (`↳ re 1/3`), for a draft an `[Edit]` button that edits
+it, a `▸ where` button that shows where it was made, and for an agent's comment `↗ conversation`, then its text.
 
 **Where a comment was made** is where it was made, not where its thread
 is now. The answer to a comment changes the code it is about, so the
@@ -129,7 +129,7 @@ act on it:
 | `x` / `s` | Close the thread or open it again / set its status by name. |
 | `d` / `D` | Show the thread in the diff view of the newest version / the code the comment was written on, in the version it was written against (`change-review-visit`). |
 | `o` | Follow an agent's comment to the conversation it came from. |
-| `e` `k` | Edit / delete a draft. |
+| `e` `k` | Edit / delete a draft: the comment at point, or on a thread's header one of the thread's drafts (asking which when there are several). |
 | `c` | Comment on the change as a whole. |
 | `f` `F` | Cycle / set the filter: open, closed, all. |
 | `C-c C-c` `I` | Send the drafts / read the comments out of a reply. |
@@ -139,7 +139,9 @@ act on it:
 version as the unified diff (it is a `diff-mode`, so its own keys work),
 with the threads of each line under it, drawn by the same function. `c`
 comments on the line at point, or the region's lines; `r`, `x`, `o`, `e`
-and `RET` act on the thread under point as they do in the threads view;
+and `RET` act on the thread under point as they do in the threads view
+(for `e`, a draft of it, asking which when several threads under the line
+have one; the `[Edit]` button of a draft names it);
 `C-c C-n` and `C-c C-p` move between threads, `C-c C-t` lists them,
 `C-c C-f` changes which show.
 
@@ -176,6 +178,16 @@ both, which a view that follows its window compares with the size it drew
 at, to draw again when the window gives the threads another.
 `change-review-ui-set-fold` and `change-review-ui-cycle-folds` fold a
 thread from code.
+
+Point cannot be on a thread drawn under a line, so `e` there edits a draft
+of the threads under the line, and asks which when there are several. A
+view that finds its threads its own way -- by where a side-by-side
+comparison is, say -- does the same with the pieces:
+`change-review-ui-draft-candidates` lists the drafts of some threads as
+`(THREAD . COMMENT)`, `change-review-ui-choose-draft` returns the only one
+or asks which, and `change-review-ui-edit-comment` reads a new text for
+one and keeps it. Each draft's `[Edit]` button edits that draft, whatever
+point is on.
 
 The options of the views are `change-review-ui-time-format`,
 `change-review-ui-relative-times`, `change-review-ui-width`,

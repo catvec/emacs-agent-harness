@@ -12847,7 +12847,8 @@ can be done with it ([Reply] [Close] or [Reopen] [Diff]), then each
 comment under a bar that runs the thread's length: its place in the
 thread (`2/3`), its author (marked "you" or "agent"), the time (exact,
 and relative), the revision it was written against, a "draft" mark, the
-comment it answers when that is not the one above (`↳ re 1/3`), a `▸
+comment it answers when that is not the one above (`↳ re 1/3`), for a
+draft an `[Edit]` button, a `▸
 where` button that shows where the comment was made, and for an agent's
 comment `↗ conversation`, then the text.  The text is drawn by the kind
 of set: as it was typed, its lines wrapped under the bar, for a plain one,
@@ -12910,6 +12911,21 @@ of v1, where the thread started").  The details lead to the code: a
 newest version, or one `[Source]` for a comment written against it; D in
 the threads view; RET or a click on a line of the diff, that line of the
 source, on the side a removed line is on (`change-review-ui-follow-source`).
+A draft is the one comment that can be changed (what was sent was read),
+and e and k find it the same way (`change-review-ui--draft-target`): the
+comment point is on, which has to be a draft; on a thread's header, or
+on a line that has threads drawn under it -- point cannot be on one --
+the drafts of those threads, `change-review-ui-choose-draft` asking
+which when there are several, in the order the views draw them, the
+newest the default.  The `[Edit]` button of a draft names it without
+asking, whatever point is on: it holds the draft's id, not the struct, so
+a set read again since the drawing does no harm.
+`change-review-ui-edit-comment` reads the new text in a buffer of its
+own (`change-review-ui-read-function`), starting from the draft's, and
+keeps it with `change-review-edit` -- unless the text is blank, or the
+comment was sent while it was written, from the feedback box say: what
+was delivered was read, so it stays as it was and the text goes to the
+kill ring.
 
 THE ADAPTER.  This module gives a task to the library as a change set of
 its own subtype (`harness-ui-patch-review--set`):
@@ -13119,7 +13135,9 @@ library's for its parent) c starts a thread, a draft, on the line at
 point -- on the branch's side it is a line of the branch, on the merge
 base's one of the merge base -- and r, x, o, RET and TAB act on the thread
 under point (TAB is the key of the major mode where no thread is under
-the line); e edits the draft there, or goes to the box.  In the
+the line); e edits a draft there -- the only one under the line, or the one
+chosen of several -- or goes to the box when there is none, and each
+draft has the library's `[Edit]` button.  In the
 control panel c comments on the last line of the current difference (at
 the merge base for a difference that only deletes), r replies to the
 thread there, x closes or opens it, TAB folds the threads the difference
@@ -13185,10 +13203,13 @@ refresh keeps where such windows had point and puts it back
 lets go of the limit when no Ediff is under way, so a limit left by an
 Ediff killed from outside does not stay.  A report closed meanwhile
 comes back, as a side window, when the box is wanted.  e
-(`harness-ui-patch-review-edit-comment`), in the control panel or either
-version, edits your draft under point -- or, with none, selects the
-window with point at the end of the box: the box is the popout's, so
-editing it is typing, and C-c C-c sends it.
+(`harness-ui-patch-review-edit-comment`, labelled "[Edit draft/box]" in
+the control panel), in the control panel or either version, edits a
+draft of yours under point -- the only one, or the one chosen of the
+several there -- or, with none, selects the window with point at the end
+of the box: the box is the popout's, so editing it is typing, and C-c
+C-c sends it.  On a thread's row in the report e is the library's
+`change-review-ui-edit-draft`: a draft of that thread.
 `harness-ui-patch-review-open` on C-c C-d, which the review's minor mode
 now has in the report too, selects the control panel of the Ediff beside
 the report instead of opening it.  When the task's `:feedback` gets a

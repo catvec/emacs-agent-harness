@@ -3353,7 +3353,10 @@ with), `recap` writes the recaps on the cards,
   changes the code it is about, so a reply shows the code its own commit
   had, not the code the thread started on), and `[Source @ v1]` shows
   that code in Ediff, `[Source @ v2]` the branch as it is, and `e` edits
-  your draft or goes to the box. A comment is
+  a draft of yours -- the only one under the line, or the one you choose
+  of several -- or goes to the box when there is none. A draft has an
+  `[Edit]` button too, which edits that very draft whatever point is on,
+  and `e` on a thread's row in the report edits one of its drafts. A comment is
   Markdown -- yours, typed in the buffer, and the agent's, from its
   tool call -- and every view draws it rendered, as the chat draws a
   message: emphasis, `code`, fenced blocks, lists, quotes, tables and
@@ -3371,7 +3374,8 @@ with), `recap` writes the recaps on the cards,
   report and in Ediff (or `[Threads]`), lists all the threads by file in
   a view of their own: filtered by status (`f`: open, closed, all),
   `n` and `p` between comments, `N` and `P` between threads, `r` to
-  reply to the comment at point, `x` to close or open its thread, `d` to
+  reply to the comment at point, `e` to edit it when it is a draft (on
+  a thread's header, one of its drafts), `x` to close or open its thread, `d` to
   show it in Ediff, `D` to show the code as it was when the comment was
   written, `o` to follow an agent's comment to its
   conversation. The agent answers with its own tools, `review_threads`

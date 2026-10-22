@@ -45,6 +45,15 @@
 ;; whether the thread is open or closed, who closed it and when.  A
 ;; closed thread can be drawn as one line.
 ;;
+;; A DRAFT can be changed: it has an [Edit] button, which edits that
+;; draft whatever point is on -- point cannot be on a thread drawn under
+;; a line of another buffer, so the button is how one of several drafts
+;; there is named -- and `change-review-ui-edit-draft' (e) edits the
+;; comment at point, or, on a thread's header or under a line that has
+;; threads, a draft of those threads, asking which when there are
+;; several.  k deletes a draft the same way.  What was sent is not a
+;; draft any more, and is not changed.
+;;
 ;; THE TEXT.  What a comment says is drawn as its author typed it, its
 ;; lines wrapped to the width under the bar.  A kind of set whose
 ;; comments are written in a markup -- Markdown, say -- draws them as
@@ -361,6 +370,20 @@ unless KEEP is non-nil: the caller sees that it did not fit."
         (truncate-string-to-width line (max 1 width) nil nil "…")
       line)))
 
+(defun change-review-ui--edit-button (set comment)
+  "Return the [Edit] button of COMMENT of SET, a draft.
+It edits that draft, whichever view it is drawn in and whatever point is
+on: the one way to name a draft among several under one line, where
+point cannot be on it.  It finds the comment by its id when pressed, so
+a set that was read again since the view was drawn does no harm."
+  (let ((id (change-review-comment-id comment)))
+    (change-review-ui--button
+     "[Edit]" "Edit this draft"
+     (lambda ()
+       (if-let* ((found (change-review-find-comment set id)))
+           (change-review-ui-edit-comment set (car found) (cdr found))
+         (user-error "That draft is gone"))))))
+
 ;;;; Placement
 
 (cl-defgeneric change-review-placement (set thread &optional version)
@@ -627,7 +650,13 @@ leave out the revision and the marks of who wrote it, `:links' is `full',
                        answer))
            (propertize " · " 'face 'change-review-ui-meta-face)))
          (short (eq links-mode 'short))
-         (links (if (eq links-mode 'none)
+         (links (concat
+                 ;; A draft is the one comment that can be changed; its
+                 ;; button is kept when the other links are given up.
+                 (if (change-review-comment-draft-p comment)
+                     (concat "  " (change-review-ui--edit-button set comment))
+                   "")
+                 (if (eq links-mode 'none)
                     ""
                   (concat
                    (if (and agent (or (change-review-author-session author)
@@ -640,7 +669,7 @@ leave out the revision and the marks of who wrote it, `:links' is `full',
                    "  " (change-review-ui--button
                          (concat (if details "▾" "▸") (if short "" " where"))
                          "Show where this comment was made"
-                         (lambda () (change-review-ui-toggle-details comment)))))))
+                         (lambda () (change-review-ui-toggle-details comment))))))))
     (propertize (concat prefix bar " " header links) 'change-review-comment-start t)))
 
 (defun change-review-ui--comment-lines (set thread comment prefix width details)
@@ -1145,6 +1174,18 @@ When several threads are drawn under one line, the commands act on it.")
                        (car ids))))))
     (and id (change-review-find-thread set id))))
 
+(defun change-review-ui--threads-at-point (set)
+  "Return the threads of SET point is on, or under: all those drawn under its line.
+Point on the text of a thread is on that thread alone.  Those under a
+line are in the order the set has them, which is the order the views
+draw them in; the overlays themselves come in no order to count on."
+  (let ((id (get-text-property (point) 'change-review-thread)))
+    (if id
+        (delq nil (list (change-review-find-thread set id)))
+      (let ((ids (change-review-ui--overlay-thread-ids)))
+        (cl-remove-if-not (lambda (thread) (member (change-review-thread-id thread) ids))
+                          (change-review-set-threads set))))))
+
 (defun change-review-ui--comment-at-point ()
   "Return the comment at point, or nil."
   (when-let* ((id (get-text-property (point) 'change-review-comment))
@@ -1162,6 +1203,64 @@ the line; with NEED-COMMENT a thread's last comment will not do."
                       (and (not need-comment) (change-review-thread-last-comment thread)))))
     (when (and need-comment (null comment)) (user-error "No comment here"))
     (list set thread comment)))
+
+(defun change-review-ui-draft-candidates (threads)
+  "Return the drafts of THREADS as (THREAD . COMMENT) each, in the order drawn."
+  (cl-loop for thread in threads
+           append (mapcar (lambda (comment) (cons thread comment))
+                          (change-review-thread-drafts thread))))
+
+(defun change-review-ui--draft-label (set thread comment)
+  "Return COMMENT of THREAD in SET, a draft, as a line to choose it by."
+  (let ((position (change-review-comment-position thread comment)))
+    (format "%s %d/%d  %s" (change-review-ui-thread-short-id set thread)
+            (car position) (cdr position)
+            (truncate-string-to-width
+             (string-replace "\n" " " (change-review-comment-body comment)) 60 nil nil "…"))))
+
+(defun change-review-ui-choose-draft (set candidates &optional verb)
+  "Return the one of CANDIDATES, (THREAD . COMMENT) drafts of SET, to act on.
+It is the only one, or the one chosen when there are several: the
+prompt, which starts with VERB (\"Edit\" by default), lists each by its
+thread, its place in it and its first words; the last is the default,
+so RET takes the newest.  CANDIDATES keep their order in the list."
+  (if (null (cdr candidates))
+      (car candidates)
+    (let* ((labels (mapcar (lambda (candidate)
+                             (cons (change-review-ui--draft-label set (car candidate) (cdr candidate))
+                                   candidate))
+                           candidates))
+           (table (lambda (string predicate action)
+                    (if (eq action 'metadata)
+                        '(metadata (display-sort-function . identity)
+                                   (cycle-sort-function . identity))
+                      (complete-with-action action (mapcar #'car labels) string predicate))))
+           (default (car (car (last labels))))
+           (choice (completing-read (format-prompt "%s which draft" default (or verb "Edit"))
+                                    table nil t nil nil default)))
+      ;; A completion that takes any input can answer with what is none of them.
+      (or (cdr (assoc choice labels))
+          (user-error "No such draft: %s" choice)))))
+
+(defun change-review-ui--draft-target (&optional verb)
+  "Return (SET THREAD COMMENT) for the draft point is on, or signal an error.
+That is the comment point is on, which has to be a draft; on a thread's
+header, or under a line that has threads drawn under it, the draft of
+those threads, asking which when there are several (VERB, \"Edit\" by
+default, is what the question says to do with it)."
+  (let* ((set (change-review-ui--current-set))
+         (comment (change-review-ui--comment-at-point)))
+    (if comment
+        (progn
+          (unless (change-review-comment-draft-p comment)
+            (user-error "That comment was sent already"))
+          (list set (car (change-review-find-comment set (change-review-comment-id comment))) comment))
+      (let* ((threads (or (change-review-ui--threads-at-point set)
+                          (user-error "No thread here")))
+             (candidates (or (change-review-ui-draft-candidates threads)
+                             (user-error "No draft in %s" (if (cdr threads) "these threads" "this thread"))))
+             (choice (change-review-ui-choose-draft set candidates verb)))
+        (list set (car choice) (cdr choice))))))
 
 ;;;; Reading a comment
 
@@ -1254,26 +1353,44 @@ comment to point at, to the thread's last comment."
                        (user-error "No agent wrote in this thread")))))
       (change-review-follow-author set author))))
 
-(defun change-review-ui-edit-draft ()
-  "Edit the comment at point, which has to be a draft."
-  (interactive)
-  (pcase-let ((`(,set ,thread ,comment) (change-review-ui--target t)))
-    (unless (change-review-comment-draft-p comment)
-      (user-error "That comment was sent already"))
+(defun change-review-ui-edit-comment (set thread comment)
+  "Read a new text for COMMENT of THREAD in SET, a draft, and keep it.
+The text to start from is the draft's own.  A blank text, or the
+same one, changes nothing.  What was delivered was read, so a comment
+that was sent while the text was written, from the feedback box say, is
+left as it was: the new text goes to the kill ring instead, not lost."
+  (unless (change-review-comment-draft-p comment)
+    (user-error "That comment was sent already"))
+  (let ((id (change-review-comment-id comment)))
     (change-review-ui-read
      (format "Edit %s:" (change-review-ui--comment-label set thread comment))
      (change-review-comment-body comment)
      (lambda (text)
-       (if (string-blank-p text)
-           (message "No change")
-         (change-review-edit set comment (string-trim text)))))))
+       (let ((found (change-review-find-comment set id)))
+         (cond ((string-blank-p text) (message "No change"))
+               ((null found) (message "That draft is gone: nothing to change"))
+               ((not (change-review-comment-draft-p (cdr found)))
+                (kill-new text)
+                (message "That comment was sent meanwhile, so it stays as it was; your text is in the kill ring"))
+               ((equal (string-trim text) (change-review-comment-body (cdr found)))
+                (message "No change"))
+               (t (change-review-edit set (cdr found) (string-trim text)))))))))
+
+(defun change-review-ui-edit-draft ()
+  "Edit a draft: the comment at point, else a draft of the thread there.
+Point on a comment edits it, which has to be a draft.  Point on a thread's
+header, or on a line with threads drawn under it, edits the draft of
+those threads, asking which when they have several.  The [Edit] button
+of a draft edits that draft, whatever point is on."
+  (interactive)
+  (pcase-let ((`(,set ,thread ,comment) (change-review-ui--draft-target "Edit")))
+    (change-review-ui-edit-comment set thread comment)))
 
 (defun change-review-ui-delete-draft ()
-  "Delete the comment at point, which has to be a draft."
+  "Delete a draft: the comment at point, else a draft of the thread there.
+It is found as `change-review-ui-edit-draft' finds it."
   (interactive)
-  (pcase-let ((`(,set ,_ ,comment) (change-review-ui--target t)))
-    (unless (change-review-comment-draft-p comment)
-      (user-error "That comment was sent already"))
+  (pcase-let ((`(,set ,_ ,comment) (change-review-ui--draft-target "Delete")))
     (when (y-or-n-p "Delete this draft? ")
       (change-review-delete set comment))))
 
@@ -1611,7 +1728,8 @@ Point is on a comment; the keys act on it:
 \\[change-review-ui-show-in-diff] shows it in the diff view, in the newest version.
 \\[change-review-ui-show-source] shows the code the comment was written on, as it was then.
 \\[change-review-ui-follow-author] follows an agent's comment to its conversation.
-\\[change-review-ui-edit-draft] edits a draft, \\[change-review-ui-delete-draft] deletes it.
+\\[change-review-ui-edit-draft] edits a draft, \\[change-review-ui-delete-draft] deletes it: the
+comment at point, or on a thread's header one of the thread's drafts.
 \\[change-review-ui-comment-on-change] comments on the change as a whole.
 \\[change-review-ui-send] sends the drafts, \\[change-review-ui-import-reply] adds the comments of a reply.
 \\[change-review-ui-cycle-filter] changes which threads show.
@@ -1673,6 +1791,7 @@ The one for CURRENT, the filter in force, is marked instead."
 \\[change-review-ui-next-comment]/\\[change-review-ui-previous-comment] comments  \
 \\[change-review-ui-next-thread]/\\[change-review-ui-previous-thread] threads  \
 \\[change-review-ui-show-origin] where  \\[change-review-ui-reply] reply  \
+\\[change-review-ui-edit-draft] edit draft  \
 \\[change-review-ui-toggle-status] close/open  \\[change-review-ui-show-in-diff] diff now  \
 \\[change-review-ui-show-source] diff then  \\[change-review-ui-cycle-filter] filter  \\[quit-window] quit")
                  'face 'change-review-ui-meta-face)
@@ -1869,6 +1988,7 @@ LINES maps (SIDE . NUMBER) to the end of the line that has it.")
 \\[change-review-ui-comment-at-point] comments on the line at point, or on the region.
 Under a thread:
 \\[change-review-ui-reply] replies to it.
+\\[change-review-ui-edit-draft] edits a draft of it (the [Edit] button of a draft does too).
 \\[change-review-ui-toggle-status] closes it or opens it again.
 \\[change-review-ui-return] opens it if it is one line, else shows where its comments were made.
 \\[change-review-ui-cycle-fold] folds it: one line, its conversation, all of it.

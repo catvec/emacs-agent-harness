@@ -1303,19 +1303,202 @@ current difference; e edits your draft there.  The threads draw again."
           (let ((change-review-ui-read-function (lambda (_p _i callback) (funcall callback "From the panel"))))
             (call-interactively #'harness-ui-patch-review-reply))
           (should (equal "From the panel" (change-review-comment-body (change-review-thread-last-comment thread))))
-          ;; e edits the draft there, not the box.
+          ;; e edits a draft there, not the box: three drafts are in the
+          ;; thread by now, and RET takes the newest.
           (let ((change-review-ui-read-function
                  (lambda (prompt initial callback)
-                   (should (string-match-p "\\`Edit your comment in thread" prompt))
+                   (should (string-match-p "\\`Edit Noah's comment 3/3 on a\\.el:2:" prompt))
                    (should (equal "From the panel" initial))
                    (funcall callback "From the panel, better"))))
-            (call-interactively #'harness-ui-patch-review-edit-comment))
+            (cl-letf (((symbol-function 'completing-read)
+                       (lambda (prompt _table _predicate _require _initial _hist default &rest _)
+                         (should (equal (format "Edit which draft (default %s): " default) prompt))
+                         default)))
+              (call-interactively #'harness-ui-patch-review-edit-comment)))
           (should (equal "From the panel, better" (change-review-comment-body (change-review-thread-last-comment thread)))))
         ;; The second difference has no thread: r says so, and c starts one.
         (with-current-buffer control
           (ediff-next-difference)
           (should-error (call-interactively #'harness-ui-patch-review-reply) :type 'user-error)
           (call-interactively #'harness-ui-patch-review-ediff-quit))))))
+
+(defun harness-ui-patch-review-test--press-nth (string label n)
+  "Press the Nth (from 0) button of STRING that starts with LABEL, as a click does."
+  (let ((pos 0) starts)
+    (when (and (get-text-property 0 'button string)
+               (string-prefix-p label (substring-no-properties string 0)))
+      (push 0 starts))
+    (while (setq pos (next-single-property-change pos 'button string))
+      (when (and (get-text-property pos 'button string)
+                 (string-prefix-p label (substring-no-properties string pos)))
+        (push pos starts)))
+    (setq starts (sort starts #'<))
+    (with-temp-buffer
+      (insert string)
+      (push-button (1+ (or (nth n starts) (error "No button %d %s" n label)))))))
+
+(defun harness-ui-patch-review-test--comments (set)
+  "Return every comment of SET's threads, thread by thread."
+  (cl-loop for thread in (change-review-set-threads set)
+           append (change-review-thread-comments thread)))
+
+(defun harness-ui-patch-review-test--count (needle string)
+  "Return how many times NEEDLE is in STRING."
+  (let ((count 0) (pos 0) (text (substring-no-properties string)))
+    (while (setq pos (string-search needle text pos))
+      (cl-incf count)
+      (setq pos (1+ pos)))
+    count))
+
+(defun harness-ui-patch-review-test--thread-string (buffer thread)
+  "Return the text drawn under its line in BUFFER for THREAD, with properties."
+  (with-current-buffer buffer
+    (overlay-get (or (cl-find-if (lambda (ov) (equal (change-review-thread-id thread)
+                                                     (overlay-get ov 'change-review-thread)))
+                                 (overlays-in (point-min) (point-max)))
+                     (error "No thread %s drawn in %s" (change-review-thread-id thread) buffer))
+                 'after-string)))
+
+(ert-deftest harness-ui-patch-review-edits-any-of-several-drafts ()
+  "Where drafts pile up under one line -- three in a thread, one in another --
+each has an [Edit] button in its drawing in Ediff, which edits that draft; e
+asks which to edit, in the control panel and in a version, the newest the
+default; and e on a thread's row in the report edits one of its drafts."
+  (let ((change-review-ui-max-thread-lines nil))
+  (harness-ui-patch-review-test-with-task
+    (let* ((popout (harness-ui-patch-review-test--changes board id))
+           (review (gethash id harness-ui-patch-review--reviews))
+           (set (harness-ui-patch-review--r-set review))
+           (noah (change-review-user "Noah" "noah@example.org"))
+           (first (harness-ui-patch-review-test--comment-on review "a.el" '(:new . 2) "Why two?"))
+           (thread (harness-ui-patch-review-test--thread-of review first))
+           (second (change-review-reply set first "And the second." :author noah))
+           (third (change-review-reply set first "And the third." :author noah))
+           (other (harness-ui-patch-review-test--comment-on review "a.el" '(:new . 2) "Also this line."))
+           (other-thread (harness-ui-patch-review-test--thread-of review other))
+           (body (lambda (comment) (change-review-comment-body comment)))
+           (short (lambda (th) (change-review-ui-thread-short-id set th))))
+      (should (= 4 (length (change-review-drafts set))))
+      ;; The report's row of the first thread: e edits one of its three drafts,
+      ;; not the other thread's.
+      (harness-ui-patch-review-test--wait-text popout "↳ ● [^ ]+ · line 2 · Noah[^:]*: “Why two\\?” · 3 comments · draft")
+      (with-current-buffer popout
+        (goto-char (point-min))
+        (re-search-forward "↳ ● [^\n]*“Why two\\?”")
+        (beginning-of-line)
+        (should (eq #'change-review-ui-edit-draft (key-binding "e")))
+        (let (asked)
+          (cl-letf (((symbol-function 'completing-read)
+                     (lambda (prompt table _predicate _require _initial _hist default &rest _)
+                       (setq asked (list prompt (all-completions "" table) default))
+                       (car (all-completions "" table)))))
+            (let ((change-review-ui-read-function
+                   (lambda (_prompt initial callback) (funcall callback (concat initial " (row)")))))
+              (call-interactively (key-binding "e"))))
+          (should (equal (format "Edit which draft (default %s): " (nth 2 asked)) (nth 0 asked)))
+          (should (equal (list (format "%s 1/3  Why two?" (funcall short thread))
+                               (format "%s 2/3  And the second." (funcall short thread))
+                               (format "%s 3/3  And the third." (funcall short thread)))
+                         (nth 1 asked)))
+          (should (equal (nth 2 (nth 1 asked)) (nth 2 asked))))
+        (should (equal "Why two? (row)" (funcall body first))))
+      ;; Ediff, on the first difference: line 2 of the branch.
+      (harness-ui-patch-review-ediff review 0)
+      (let* ((control (harness-ui-patch-review-test--control review 0))
+             (new (nth 2 (harness-ui-patch-review--ediff-buffers review)))
+             (drawing (harness-ui-patch-review-test--thread-string new thread))
+             (asked nil)
+             (choose-first (lambda (prompt table _predicate _require _initial _hist default &rest _)
+                             (push (list prompt (all-completions "" table) default) asked)
+                             (car (all-completions "" table))))
+             (append-to (lambda (suffix)
+                          (lambda (_prompt initial callback) (funcall callback (concat initial suffix))))))
+        ;; A button on each draft of the drawing: three in the thread, one in the other.
+        (should (= 3 (harness-ui-patch-review-test--count "[Edit]" drawing)))
+        (should (= 1 (harness-ui-patch-review-test--count
+                      "[Edit]" (harness-ui-patch-review-test--thread-string new other-thread))))
+        ;; The second button edits the second draft, whatever point is on.
+        (with-current-buffer new (goto-char (point-max)))
+        (let ((change-review-ui-read-function
+               (lambda (prompt initial callback)
+                 (should (string-match-p "\\`Edit Noah's comment 2/3 on a\\.el:2:" prompt))
+                 (should (equal "And the second." initial))
+                 (funcall callback "And the second, changed."))))
+          (harness-ui-patch-review-test--press-nth drawing "[Edit]" 1))
+        (should (equal "And the second, changed." (funcall body second)))
+        (should (equal "And the third." (funcall body third)))
+        (should (equal "Also this line." (funcall body other)))
+        ;; The other thread's one button goes to its draft.
+        (let ((change-review-ui-read-function (funcall append-to " (button)")))
+          (harness-ui-patch-review-test--press-nth
+           (harness-ui-patch-review-test--thread-string new other-thread) "[Edit]" 0))
+        (should (equal "Also this line. (button)" (funcall body other)))
+        ;; In the control panel: four drafts at the difference, asked which, in
+        ;; the order the threads draw them; the first is chosen.
+        (with-current-buffer control
+          (cl-letf (((symbol-function 'completing-read) choose-first))
+            (let ((change-review-ui-read-function (funcall append-to " (panel)")))
+              (call-interactively #'harness-ui-patch-review-edit-comment))))
+        (should (equal (list (format "%s 1/3  Why two? (row)" (funcall short thread))
+                             (format "%s 2/3  And the second, changed." (funcall short thread))
+                             (format "%s 3/3  And the third." (funcall short thread))
+                             (format "%s 1/1  Also this line. (button)" (funcall short other-thread)))
+                       (nth 1 (car asked))))
+        (should (equal (nth 3 (nth 1 (car asked))) (nth 2 (car asked))))
+        (should (equal "Why two? (row) (panel)" (funcall body first)))
+        ;; In the version, with point on the line: the same question.
+        (with-current-buffer new
+          (goto-char (point-min))
+          (forward-line 1)
+          (cl-letf (((symbol-function 'completing-read)
+                     (lambda (prompt table predicate require initial hist default &rest _)
+                       (funcall choose-first prompt table predicate require initial hist default)
+                       ;; The newest: the other thread's draft.
+                       default)))
+            (let ((change-review-ui-read-function (funcall append-to " (line)")))
+              (call-interactively #'harness-ui-patch-review-edit-comment))))
+        (should (= 2 (length asked)))
+        (should (equal "Also this line. (button) (line)" (funcall body other)))
+        ;; What was sent is not edited; of the one draft left, that draft.
+        (change-review-apply set (list :op 'mark-sent :time (float-time)
+                                       :comments (mapcar #'change-review-comment-id (list first second other))))
+        (with-current-buffer control
+          (cl-letf (((symbol-function 'completing-read)
+                     (lambda (&rest _) (ert-fail "asked which of one draft"))))
+            (let ((change-review-ui-read-function (funcall append-to " (only)")))
+              (call-interactively #'harness-ui-patch-review-edit-comment))))
+        (should (equal "And the third. (only)" (funcall body third)))
+        (should (equal "Why two? (row) (panel)" (funcall body first)))
+        (with-current-buffer control (call-interactively #'harness-ui-patch-review-ediff-quit)))
+      ;; The harness has what the user made of the drafts: each edit went to
+      ;; it as an operation, and it keeps them.
+      (let ((kept (lambda ()
+                    (sort (mapcar (lambda (c) (plist-get c :body))
+                                  (cl-loop for th in (harness-ui-patch-review-test--harness-threads id)
+                                           append (plist-get th :comments)))
+                          #'string<))))
+        (harness-test-wait (lambda ()
+                             (equal (funcall kept)
+                                    (sort (mapcar body (harness-ui-patch-review-test--comments set)) #'string<)))
+                           5 "the harness to keep the edited drafts")
+        (should (member "And the second, changed." (funcall kept)))
+        (should (member "Why two? (row) (panel)" (funcall kept))))
+      ;; A draft on the change as a whole is under "Other threads", and e on
+      ;; its row edits it too.
+      (let ((whole (change-review-comment set "Overall: tests?" :author noah)))
+        (harness-ui-patch-review-test--wait-text popout "^Other threads")
+        (with-current-buffer popout
+          (goto-char (point-min))
+          (re-search-forward "^  ● [^\n]*“Overall: tests\\?”")
+          (beginning-of-line)
+          (should (eq #'change-review-ui-edit-draft (key-binding "e")))
+          (let ((change-review-ui-read-function
+                 (lambda (prompt initial callback)
+                   (should (string-match-p "\\`Edit Noah's comment 1/1:" prompt))
+                   (should (equal "Overall: tests?" initial))
+                   (funcall callback "Overall: where are the tests?"))))
+            (call-interactively #'change-review-ui-edit-draft)))
+        (should (equal "Overall: where are the tests?" (funcall body whole))))))))
 
 (ert-deftest harness-ui-patch-review-hears-the-agents-comments ()
   "A comment the agent made with its tool comes from the harness as an
@@ -1515,9 +1698,13 @@ been left."
         (should (window-live-p box))
         (with-current-buffer control
           (should (eq #'harness-ui-patch-review-edit-comment (key-binding "e")))
-          (should (string-search "[Feedback box] e" (harness-ui-patch-review-test--text control)))
-          ;; No thread at the difference yet: e is the box.
-          (call-interactively #'harness-ui-patch-review-edit-comment))
+          (should (string-search "[Edit draft/box] e" (harness-ui-patch-review-test--text control)))
+          ;; No thread at the difference yet: e is the box, and says why.
+          (let (said)
+            (cl-letf (((symbol-function 'message)
+                       (lambda (format-string &rest args) (setq said (apply #'format format-string args)))))
+              (call-interactively #'harness-ui-patch-review-edit-comment))
+            (should (string-prefix-p "No draft of yours here. The feedback: " said))))
         (should (eq box (selected-window)))
         (should (eq popout (window-buffer box)))
         (with-current-buffer popout
