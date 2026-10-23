@@ -109,6 +109,14 @@ OpenAI-compatible APIs and AWS Bedrock.
   BTW conversations, browse the conversation tree, and compact long
   conversations, automatically or by hand: into a summary, a cheap
   brief one, or a transcript file the model reads from.
+- **A todo list that stays true.** A model that never updates its todo
+  list leaves the panel above the compose box saying nothing of how far
+  the task has come, or showing a plan it dropped hours ago. With the
+  `todo-sync` module, after every few steps without an update a
+  cheap model reads what the agent did and rewrites the list, or
+  replaces it when the agent changed its approach, without a word added
+  to the agent's conversation (see [Keeping the todo list
+  current](#keeping-the-todo-list-current)).
 - **Session search.** Find any session by what was said in it: words
   in any form, ranked by a full-text index the harness keeps in SQLite,
   the exact text, a regular expression, or, with an embedding model,
@@ -1981,6 +1989,82 @@ option is an "always" answer, the note names it too, with its own `[Undo]`
 and `[Redo]`: the choice of what goes first can be changed from the note. A
 compaction made this way says so in its header: "context compacted into a
 brief summary, before the prompt cache lapsed".
+
+### Keeping the todo list current
+
+Many models never keep the todo list (`todo_write`) they are given: they
+write it once, or not at all, and the panel above the compose box says
+nothing of how far a long task has come -- or shows a plan the model
+dropped hours ago. A reminder to update it does harm (it sits in the
+model's context, and the model starts writing lists to please it), so the
+`todo-sync` module (`:features todo-sync`, which brings its UI,
+`ui-todo-sync`) leaves the model alone and keeps the list for you: after
+a few steps without an update, a cheap model looks at the work and
+writes the list as it should read now. Nothing is added to the agent's
+conversation or prompt, and the agent is never told.
+
+The unit is the step, not the turn. A step is one go the model has at the
+work: what it writes, thinks or asks a tool for after a tool result or a
+message of yours. A turn is the whole run, from your message to the
+model stopping, and a long one has many steps; steps are counted across
+turns, and the sync does not wait for a turn to end. They are counted
+from the transcript, so it is the same for every provider. For a loop
+the harness runs itself (OpenAI, Bedrock, DeepSeek) these are the steps
+a task card counts for the running turn (`7 steps`). A hosted loop
+(Claude Code, Copilot) makes all its model calls inside one request,
+which the card counts as one step, so its steps can only be seen in the
+transcript; and where such a loop runs calls the model made together one
+after another (Claude Code can, for tools that do not say they only
+read, as the harness's do not), each of them may count. Any update of the list starts the count over, the model's own
+`todo_write` too: a model that keeps its list up is never
+second-guessed, and the module fills in only where the list went stale.
+
+- In the middle of a turn, after `harness-todo-sync-steps` steps
+  without an update (6; `nil` never syncs on its own), the list is
+  written, from nothing when the session has none yet.
+- When a turn ends, a list that still has open items is looked at after
+  half that many steps, so it does not stay behind what the turn just
+  did. A list is never made from nothing then, so a short exchange gets
+  none.
+
+Who writes it is `harness-todo-sync-model`:
+
+- `auto` (the default) is a dumb agent: the simple tier of the session's
+  provider (see [Model tiers](#model-tiers)), asked a question that
+  stands on its own -- your first and latest messages, the list as it
+  stands, and the tail of what the agent did since the list was last
+  updated -- with no tools and no thinking. It costs next to nothing.
+- A `PROVIDER:MODEL` asks that model the same question.
+- `nil` asks the session's own model about its whole conversation, on a
+  fork of the provider's state where the provider has one (Claude Code
+  and Copilot do; the others are sent the conversation as for any
+  request). It knows what the agent knows, and costs the conversation
+  read again each time. A hosted loop that gives no fork is asked the
+  dumb agent's question instead, so the process that runs the turn is
+  never disturbed.
+
+The answer is a checklist, `[x]` for finished, `[~]` for the one item in
+hand and `[ ]` for the rest; or `UNCHANGED` when the list is right as it
+stands, or `NONE` when the work is too small for a list. The model is
+told to write a list that fits the work when the agent changed its
+approach: the list is then replaced, keeping the finished items that
+still hold, not added to. Items whose words stay keep their ids, so the
+agent's own `todo_write` calls afterwards still find them, and a list
+that changed while the model was asked (the agent wrote its own) wins
+over the answer. The list lands as any other does: in the panel above the
+compose box, on the task cards, and in ACP clients. Each call is
+recorded as an internal "Todo sync" session under the session it was for,
+with its prompt, answer and cost (see [Session list](#session-list)),
+and internal sessions and BTW conversations get no list. A request that
+fails waits two minutes before the next, and one that takes longer than
+90 seconds is cancelled.
+
+For one session, `/todos` in the message box writes its list now,
+`/todos on` syncs it every few steps even where
+`harness-todo-sync-steps` is `nil`, `/todos off` never does, `/todos
+default` leaves it to the option again and `/todos status` says how it
+stands. `M-x harness-todo-sync` does the same, asking which. The two
+options are on the settings page under **Todo list**.
 
 ### Searching sessions
 
@@ -4653,11 +4737,11 @@ cached for it, so a changed URL or model list shows at once.
 ### Model tiers
 
 Some calls get their model from the harness rather than from you: the
-auto-mode judge, a session's title, a brief summary, the plan and the
-work of a task in the board's Plan mode (until you pick others), the
-workers of a supervisor's plan. The harness picks such a model by tier, from the
-provider the session is on. Each provider names a model for each of four
-tiers, weakest first:
+auto-mode judge, a session's title, a brief summary, a session's todo
+list kept current, the plan and the work of a task in the board's Plan
+mode (until you pick others), the workers of a supervisor's plan. The
+harness picks such a model by tier, from the provider the session is on.
+Each provider names a model for each of four tiers, weakest first:
 
 | Tier | For | Claude | DeepSeek |
 |---|---|---|---|
@@ -5185,13 +5269,13 @@ with it.
 
 | Area | Core | Enabled by you |
 |---|---|---|
-| Sessions | `config` `project` `store` `session` `agent` `compaction` `retry` `priority` `usage` `naming` | `cowboy` `cache` `cache-warm` `cache-compact` `handoff` `fallback` `seed` `supervisor` `insights` `pet` `version` `decisions` `session-search` `cost-compare` `commit-msg` |
+| Sessions | `config` `project` `store` `session` `agent` `compaction` `retry` `priority` `usage` `naming` | `cowboy` `cache` `cache-warm` `cache-compact` `handoff` `fallback` `seed` `supervisor` `insights` `pet` `version` `decisions` `session-search` `cost-compare` `commit-msg` `todo-sync` |
 | Tasks and git | `worktree` | `tasks` `tasks-notify` `tasks-search` `recap` `merge` `patch-review` |
 | Safety | `perms` `sandbox` `access` `readonly` | `tool-slots` `tool-slots-load` `secrets` `redact` `judge` |
 | Providers | `provider` `provider-claude` | `provider-copilot` `provider-openai` `provider-deepseek` `provider-bedrock` `provider-demo` |
 | Tools | `tools` `tools-fs` `tools-shell` `tools-emacs` `tools-question` `tools-plan` `tools-todo` `tools-session-info` `tools-agent` | `tools-ssh` `tools-web` `tools-sessions` `tools-notify` `tools-handin` `tools-review` `tools-emacs-eval` `tools-dev` `tools-events` `tools-compact` `skills` |
 | Connections | `acp` | `acp-remote` `notifications` |
-| User interface | `ui` `ui-chat` `ui-compose` `ui-pending` `ui-sessions` `ui-notify` `ui-config` `ui-usage` `ui-priority` `ui-worktree` `ui-access` | `ui-btw` `ui-tree` `ui-compact` `ui-cache` `ui-cache-warm` `ui-review` `ui-report` `ui-patch-review` `ui-popout` `ui-media` `ui-qr` `ui-acp-remote` `ui-handoff` |
+| User interface | `ui` `ui-chat` `ui-compose` `ui-pending` `ui-sessions` `ui-notify` `ui-config` `ui-usage` `ui-priority` `ui-worktree` `ui-access` | `ui-btw` `ui-tree` `ui-compact` `ui-cache` `ui-cache-warm` `ui-review` `ui-report` `ui-patch-review` `ui-popout` `ui-media` `ui-qr` `ui-acp-remote` `ui-handoff` `ui-todo-sync` |
 
 [docs/modules](docs/modules/README.md) has a page for each module,
 generated from its source by `scripts/module-docs.sh`: what it is, what

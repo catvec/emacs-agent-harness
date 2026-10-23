@@ -43,7 +43,9 @@
 ;; for a "how ..." question a command answers, an answer in words that
 ;; names it (`harness-provider-demo--how-to');
 ;; and a request to name a session the first words of its opening
-;; message (`harness-provider-demo--title').  The companion pet gets
+;; message (`harness-provider-demo--title'); a request to write a
+;; session's todo list a checklist that moves on a step each time
+;; (`harness-provider-demo--todos').  The companion pet gets
 ;; its name and its lines (`harness-provider-demo--pet'), and the
 ;; Insights report a summary of its figures
 ;; (`harness-provider-demo--insights').
@@ -221,6 +223,8 @@ else the last user message picks one (see the Commentary)."
           (:type done :stop-reason end-turn))))
      ((string-prefix-p "You write short titles" (or (plist-get request :system) ""))
       (harness-provider-demo--title request))
+     ((string-prefix-p "You keep the todo list" (or (plist-get request :system) ""))
+      (harness-provider-demo--todos request))
      ((string-match-p "^## Task planning" (or (plist-get request :system) ""))
       (harness-provider-demo--plan request cwd))
      ((string-match-p "^## Task refinement" (or (plist-get request :system) ""))
@@ -495,6 +499,44 @@ The title is the first words of its first clause, capitalised."
          (title (if words (string-join words " ") "Demo conversation")))
     `((:type text :delta ,(concat (upcase (substring title 0 1)) (substring title 1)))
       (:type usage :input 80 :output 8 :cost 0.0001)
+      (:type done :stop-reason end-turn))))
+
+(defun harness-provider-demo--todos (request)
+  "Answer the request to write a session's todo list (todo-sync) as a model would.
+The list is the checklist under \"The todo list now:\" in REQUEST's last
+user message.  With none, the demo writes three items from the engineer's
+request, the survey done and the change in hand.  With one, it moves on by
+a step: the item in hand is done and the next to do is in hand; a list
+with nothing left is UNCHANGED."
+  (let* ((text (harness-provider-demo--last-user-text request))
+         (items (let (out)
+                  (dolist (line (split-string text "\n"))
+                    (when (string-match "\\`\\[\\([x~ ]\\)\\] \\(.+\\)\\'" line)
+                      (push (cons (match-string 1 line) (match-string 2 line)) out)))
+                  (nreverse out)))
+         (opening (if (string-match "<message>\n\\(\\(?:.\\|\n\\)*?\\)\n</message>" text)
+                      (match-string 1 text)
+                    ""))
+         (words (take 6 (split-string (harness-first-line opening) "[[:space:]]+" t)))
+         (answer
+          (cond
+           ((null items)
+            (format "[x] Survey the project\n[~] %s\n[ ] Check the result"
+                    (if words (string-join words " ") "Make the change")))
+           ((cl-notany (lambda (item) (member (car item) '("~" " "))) items) "UNCHANGED")
+           ;; The item in hand is done, and the first item to do is in hand.
+           (t (let ((moved nil))
+                (mapconcat
+                 (lambda (item)
+                   (let ((mark (cond ((equal (car item) "~") "x")
+                                     ((and (equal (car item) " ") (not moved)
+                                           (setq moved t))
+                                      "~")
+                                     (t (car item)))))
+                     (format "[%s] %s" mark (cdr item))))
+                 items "\n"))))))
+    `((:type text :delta ,answer)
+      (:type usage :input 300 :output 40 :cost 0.0002)
       (:type done :stop-reason end-turn))))
 
 (defun harness-provider-demo--same-task (request note)

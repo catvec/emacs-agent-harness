@@ -1453,8 +1453,8 @@ redact).
 - `session/internal-start &rest PLIST` → the id of a new internal
   session, running: the record of one model call the harness makes on
   its own, outside any turn (the permission and Elisp judges, the
-  session judge, a session's name, a recap, the Insights summary, the
-  pet, the task board's search).  The provider module starts it for a
+  session judge, a session's name, a recap, a todo sync, the Insights
+  summary, the pet, the task board's search).  The provider module starts it for a
   request that names its job (`provider/complete`, "provider").  PLIST:
   `:job` (a few words, "Permission judge"; it names the session, and is
   "Internal call" when blank), `:model` (the model asked), `:prompt` (a
@@ -1869,8 +1869,8 @@ fails in setup finishes it too.  A failure of the recording is logged
 and goes no further; a request without `:job`, or a harness without the
 method, is not recorded.  Callers: the permission judge, the Elisp
 judge, the session judge, auto-naming (`naming/title` too, with no
-parent), recaps, the Insights summary, the pet and the task board's
-search.
+parent), recaps, todo syncs, the Insights summary, the pet and the task
+board's search.
 
 Events delivered to `:on-event` (one plist each, in order):
 
@@ -5379,6 +5379,77 @@ so switching to either loses nothing.
 - Sync filter `naming/auto-p` (value the verdict, args session) can hold
   the automatic naming of a session off: tasks do while the title of the
   session's task is on its way, which then names the session.
+
+### todo-sync
+
+Opt-in (`:features todo-sync`); its UI half is `ui-todo-sync`.  It
+keeps a session's todo list (`session/set-todos`) true to its work
+without a word in the model's conversation or prompt.
+
+- Counting.  The unit is the step, not the turn: a turn (one run, from
+  a message to the model stopping) has many steps, and they are counted
+  across turns.  A step is counted per session
+  (`harness-todo-sync--steps`) from `session/node-added`: an
+  `assistant`, `thinking` or `tool-call` node that follows a
+  `tool-result` or a `user` node starts one.  The transcript is what is
+  counted, not `agent/step-started`: for a loop the harness runs itself
+  the two agree, but a hosted loop's (`:hosted-loop`) many model calls
+  inside one `provider/complete` are one `agent/step-started`, and count
+  as they happen here.  Calls the model made together that a hosted loop
+  runs one after another may each count.  Nodes the harness
+  recorded for the session (`harness-outside-node-p`) are not the
+  model's.  `session/todos`, whoever caused it (the model's
+  `todo_write` too), starts the count over, and so does a request that
+  left the list as it was.  The last node the transcript had then is the
+  anchor: what follows it is what a question carries.  Internal and btw
+  sessions are not counted (`harness-todo-sync--skip-kinds`).
+- When.  `harness-todo-sync--maybe` runs, from a clean stack
+  (`harness-run-soon`), after every counted step and when
+  `agent/turn-ended` fires.  Mid-turn a list is due after
+  `harness-todo-sync-steps` steps, from nothing too; at a turn's
+  end only a list with an item not done, after half as many (rounded
+  up).  Not while a request for the session runs, nor within
+  `harness-todo-sync--retry` (120) seconds of a failed one.  A session's
+  `:ext :todo-sync` is its own switch (`:false` never, `t` every
+  `harness-todo-sync--default-steps` (6) steps where the option is nil).
+- The request.  `harness-todo-sync-model` `auto` (the default) asks the
+  session provider's `:simple` tier (`provider/tier-model`) a question
+  that stands on its own: `:ephemeral t`, no tools, `:no-thinking t`, a
+  600-token budget, one user message holding the opening message, the
+  latest one when it differs, the session's plan, the list as it stands
+  (`[x]`, `[~]`, `[ ]` lines) and the entries since the anchor, the
+  newest 10000 characters of them.  A model name asks that model the
+  same; nil asks the session's own model (`:session`, the conversation
+  from `session/messages` with the question added to its last user
+  message, the images of tool results left out) on a fork of its
+  provider state (`provider/fork`, when the `:fork` capability says so).
+  A provider with `:hosted-loop` and no fork gets the dumb question on
+  the session's model, so the process running the turn is never asked.
+  The request names its job, "Todo sync", made for the session, so it
+  is recorded as an internal session; it is cancelled after
+  `harness-todo-sync--timeout` (90) seconds.
+- The answer.  `harness-todo-sync-parse` reads `[x]`/`[~]`/`[ ]` lines
+  (a bullet or number before the bracket, a preamble or closing remark,
+  are skipped; at most one `[~]`, at most 15 items) into `(:todos ITEMS)`,
+  or `UNCHANGED` into `(:unchanged)`, or `NONE` into `(:none)`; anything
+  else is a failure.  An item whose words an item of the old list has
+  keeps its id; the others are numbered `t1`, `t2`...  A list that
+  changed while the model was asked wins (`stale`); a list that reads
+  the same, `UNCHANGED` and `NONE` only start the count over.
+- `todo-sync/run SESSION-ID` → promise of `(:status STATUS :todos
+  TODOS)`: STATUS `updated`, `unchanged`, `none`, `stale` or `gone`;
+  rejects when the model could not be asked or gave nothing usable.  A
+  request under way is the one returned; an internal session is refused.
+- `todo-sync/set SESSION-ID ENABLED` sets the switch (t or "on",
+  `:false` or "off", nil or "default") and returns the state.
+- `todo-sync/state SESSION-ID` → `(:setting "default"|"on"|"off" :every N
+  :steps N :running BOOL :model MODEL :own BOOL)`.
+- Events `todo-sync/done SID TODOS` (the module rewrote the list) and
+  `todo-sync/failed SID MESSAGE`.  The `todo-sync/` prefix is callable as
+  `_harness/todo-sync/…` (`harness-acp-extension-prefixes`).
+- `ui-todo-sync`: `/todos [on|off|default|status]` in a chat's message
+  box (`harness-chat-commands`) and `harness-todo-sync`, which call
+  those three methods and say the outcome in the echo area.
 
 ### judge
 
@@ -9974,7 +10045,7 @@ Extension methods: any bus method whose name starts with `session/`,
 `project/`, `task/`, `plugins/`, `search/`, `notification/`, `sandbox/status`, `harness/api`,
 `harness/modules`, `harness/version`, `harness/reload`, `harness/call`, `acp/remote-`,
 `pet/`, `version/`, `insights/`, `supervisor/`, `seed/`, `priority/`,
-`secrets/`, `commit-msg/`, `patch-review/`, `tool-slots/`, `cache/` (`harness-acp-extension-prefixes`), or with one of
+`secrets/`, `commit-msg/`, `patch-review/`, `tool-slots/`, `cache/`, `todo-sync/` (`harness-acp-extension-prefixes`), or with one of
 `harness-acp-extra-method-prefixes`, which modules of the user's own
 and projects' plugins add to (see Modules of your own; the harness
 repository's plugin adds `harness-dev/`), is callable as `_harness/NAME` with a

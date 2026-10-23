@@ -46,6 +46,7 @@ ui-tasks); `(setq harness-enabled-modules t)` loads every module.
  ;;tasks              ; Task mode: one session per task, through review and the merge queue,…
  ;;tasks-notify       ; Notifies you when a task's work waits for your review or a task is…
  ;;tasks-search       ; Search the harness with a cheap model: tasks and actions on them,…
+ ;;todo-sync          ; Keep a session's todo list true to its work: every few steps a cheap…
  ;;tool-slots         ; A few slots per machine for the tools that start processes.
  ;;tool-slots-load    ; Fewer tool slots while this machine is loaded.
  ;;version            ; Whether the running harness is the latest: its commit against its…
@@ -136,6 +137,7 @@ ui-tasks); `(setq harness-enabled-modules t)` loads every module.
 | [tasks](tasks.md) |  | [store](store.md), [project](project.md), [session](session.md), [agent](agent.md) | Task mode: one session per task, through review and the merge queue, with a limit of tasks at once per project, started by priority. |
 | [tasks-notify](tasks-notify.md) |  | [tasks](tasks.md), [notifications](notifications.md) | Notifies you when a task's work waits for your review or a task is done (and, opt-in, when one needs your input). |
 | [tasks-search](tasks-search.md) |  | [tasks](tasks.md), [provider](provider.md), [session-search](session-search.md) | Search the harness with a cheap model: tasks and actions on them, sessions, commands and an answer in words. |
+| [todo-sync](todo-sync.md) |  | [session](session.md), [provider](provider.md), [agent](agent.md) | Keep a session's todo list true to its work: every few steps a cheap model rewrites it. |
 | [tool-slots](tool-slots.md) |  | [tools](tools.md) | A few slots per machine for the tools that start processes. |
 | [tool-slots-load](tool-slots-load.md) |  | [tool-slots](tool-slots.md) | Fewer tool slots while this machine is loaded. |
 | [tools](tools.md) | by default |  | Tool registry, permission-gated execution and context-bomb guard. |
@@ -202,6 +204,7 @@ ui-tasks); `(setq harness-enabled-modules t)` loads every module.
 | [ui-supervisor](ui-supervisor.md) |  | [ui](ui.md), [ui-chat](ui-chat.md) | Supervisor mode: the chat header's segment and the V key that toggles it. |
 | [ui-tasks](ui-tasks.md) |  | [ui](ui.md) | Task mode: a kanban of one-session tasks with a compose box. |
 | [ui-tasks-search](ui-tasks-search.md) |  | [ui-tasks](ui-tasks.md), [ui-quick-search](ui-quick-search.md) | The task board's search: find tasks, sessions and commands or act on tasks in words, answered by a cheap model. |
+| [ui-todo-sync](ui-todo-sync.md) |  | [ui](ui.md), [ui-chat](ui-chat.md) | Sync a session's todo list by hand, or switch the sync on or off for it: /todos in a chat. |
 | [ui-tool-slots-load](ui-tool-slots-load.md) |  | [ui](ui.md), [ui-chat](ui-chat.md) | The tool slots held back by the machine's load, pinned above a chat's compose box while they are. |
 | [ui-tree](ui-tree.md) |  | [ui](ui.md) | Conversation tree: the fork family of a session as a git-like graph. |
 | [ui-usage](ui-usage.md) | by default | [ui](ui.md) | Usage and cost dashboard with charts, plan quota and budgets. |
@@ -229,7 +232,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `agent/stream` | [agent](agent.md) | [agent](agent.md) | [acp](acp.md), [resilience](resilience.md), [usage](usage.md) |  |
 | `agent/tool-call` | [agent](agent.md) | [agent](agent.md) | [resilience](resilience.md), [supervisor](supervisor.md), [tasks](tasks.md), [tools](tools.md) |  |
 | `agent/tool-result` | [agent](agent.md) | [agent](agent.md) | [perms](perms.md), [recap](recap.md), [resilience](resilience.md), [tools](tools.md) |  |
-| `agent/turn-ended` | [agent](agent.md) | [agent](agent.md) | [compaction](compaction.md), [cowboy](cowboy.md), [handoff](handoff.md), [merge](merge.md), [perms](perms.md), [pet](pet.md), [recap](recap.md), [redact](redact.md), [resilience](resilience.md), [retry](retry.md), [seed](seed.md), [session](session.md), [supervisor](supervisor.md), [tasks](tasks.md), [tools](tools.md), [tools-agent](tools-agent.md), [tools-events](tools-events.md), [tools-sessions](tools-sessions.md), [ui-chat](ui-chat.md), [ui-children](ui-children.md), [ui-usage](ui-usage.md), [usage](usage.md) | yes |
+| `agent/turn-ended` | [agent](agent.md) | [agent](agent.md) | [compaction](compaction.md), [cowboy](cowboy.md), [handoff](handoff.md), [merge](merge.md), [perms](perms.md), [pet](pet.md), [recap](recap.md), [redact](redact.md), [resilience](resilience.md), [retry](retry.md), [seed](seed.md), [session](session.md), [supervisor](supervisor.md), [tasks](tasks.md), [todo-sync](todo-sync.md), [tools](tools.md), [tools-agent](tools-agent.md), [tools-events](tools-events.md), [tools-sessions](tools-sessions.md), [ui-chat](ui-chat.md), [ui-children](ui-children.md), [ui-usage](ui-usage.md), [usage](usage.md) | yes |
 | `agent/turn-started` | [agent](agent.md) | [agent](agent.md) | [merge](merge.md), [naming](naming.md), [perms](perms.md), [resilience](resilience.md), [retry](retry.md), [supervisor](supervisor.md), [tasks](tasks.md), [tools](tools.md), [tools-sessions](tools-sessions.md), [ui-chat](ui-chat.md), [ui-children](ui-children.md), [ui-pet](ui-pet.md), [usage](usage.md) | yes |
 | `cache/compacted` | [cache-compact](cache-compact.md) | [cache-compact](cache-compact.md) |  |  |
 | `cache/pre-expire` | [cache](cache.md) | [cache](cache.md) | [cache-compact](cache-compact.md), [cache-warm](cache-warm.md) |  |
@@ -279,12 +282,12 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `session/changed` | [session](session.md) | [session](session.md) | [acp](acp.md), [cache](cache.md), [cache-warm](cache-warm.md), [tools](tools.md), [tools-sessions](tools-sessions.md) |  |
 | `session/created` | [session](session.md) | [session](session.md) | [access](access.md), [plugins](plugins.md), [supervisor](supervisor.md), [ui-tree](ui-tree.md) | yes |
 | `session/deactivated` | [session](session.md) | [session](session.md) | [provider-claude](provider-claude.md), [provider-copilot](provider-copilot.md) |  |
-| `session/deleted` | [session](session.md) | [session](session.md) | [access](access.md), [acp](acp.md), [cache](cache.md), [cache-compact](cache-compact.md), [cache-warm](cache-warm.md), [compaction](compaction.md), [cowboy](cowboy.md), [fallback](fallback.md), [handoff](handoff.md), [perms](perms.md), [provider-claude](provider-claude.md), [provider-copilot](provider-copilot.md), [redact](redact.md), [seed](seed.md), [session-search](session-search.md), [supervisor](supervisor.md), [tasks](tasks.md), [tools](tools.md), [tools-events](tools-events.md), [tools-sessions](tools-sessions.md), [ui-access](ui-access.md), [ui-cache-warm](ui-cache-warm.md), [ui-tree](ui-tree.md), [usage](usage.md) | yes |
+| `session/deleted` | [session](session.md) | [session](session.md) | [access](access.md), [acp](acp.md), [cache](cache.md), [cache-compact](cache-compact.md), [cache-warm](cache-warm.md), [compaction](compaction.md), [cowboy](cowboy.md), [fallback](fallback.md), [handoff](handoff.md), [perms](perms.md), [provider-claude](provider-claude.md), [provider-copilot](provider-copilot.md), [redact](redact.md), [seed](seed.md), [session-search](session-search.md), [supervisor](supervisor.md), [tasks](tasks.md), [todo-sync](todo-sync.md), [tools](tools.md), [tools-events](tools-events.md), [tools-sessions](tools-sessions.md), [ui-access](ui-access.md), [ui-cache-warm](ui-cache-warm.md), [ui-tree](ui-tree.md), [usage](usage.md) | yes |
 | `session/ext-changed` | [session](session.md) | [session](session.md) | [supervisor](supervisor.md), [tasks](tasks.md), [ui-priority](ui-priority.md), [ui-tasks](ui-tasks.md) | yes |
 | `session/forked` | [session](session.md) | [session](session.md) | [fallback](fallback.md), [session-search](session-search.md), [ui-tree](ui-tree.md) | yes |
 | `session/head-moved` | [session](session.md) | [session](session.md) | [tools-sessions](tools-sessions.md), [ui-chat](ui-chat.md), [ui-tree](ui-tree.md) | yes |
 | `session/moved` | [session](session.md) | [session](session.md) |  | yes |
-| `session/node-added` | [session](session.md) | [session](session.md) | [acp](acp.md), [pet](pet.md), [session-search](session-search.md), [tools-sessions](tools-sessions.md) |  |
+| `session/node-added` | [session](session.md) | [session](session.md) | [acp](acp.md), [pet](pet.md), [session-search](session-search.md), [todo-sync](todo-sync.md), [tools-sessions](tools-sessions.md) |  |
 | `session/node-updated` | [session](session.md) | [session](session.md) | [acp](acp.md), [session-search](session-search.md) |  |
 | `session/nodes-removed` | [session](session.md) | [session](session.md) | [ui-chat](ui-chat.md) | yes |
 | `session/pending-changed` | [session](session.md) | [session](session.md) | [resilience](resilience.md), [tasks](tasks.md), [tools](tools.md), [tools-sessions](tools-sessions.md) | yes |
@@ -295,7 +298,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `session/redacted` | [session](session.md) | [redact](redact.md) | [ui-secrets](ui-secrets.md) | yes |
 | `session/resumed` | [session](session.md) | [session](session.md) |  |  |
 | `session/status` | [session](session.md) | [session](session.md) | [tasks](tasks.md), [tools](tools.md), [tools-sessions](tools-sessions.md) | yes |
-| `session/todos` | [session](session.md) | [session](session.md) | [acp](acp.md) |  |
+| `session/todos` | [session](session.md) | [session](session.md) | [acp](acp.md), [todo-sync](todo-sync.md) |  |
 | `session/updated` | [session](session.md) | [session](session.md) | [access](access.md), [acp](acp.md), [cache-warm](cache-warm.md), [fallback](fallback.md), [perms](perms.md), [pet](pet.md) |  |
 | `session/usage` | [session](session.md) | [session](session.md) | [cache-warm](cache-warm.md), [tools](tools.md), [usage](usage.md) |  |
 | `supervisor/changed` | [supervisor](supervisor.md) | [supervisor](supervisor.md) |  | yes |
@@ -305,6 +308,8 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `task/done` | [tasks](tasks.md) | [tasks](tasks.md) | [pet](pet.md), [ui-patch-review](ui-patch-review.md), [ui-review](ui-review.md), [ui-tasks](ui-tasks.md) | yes |
 | `task/queue` | [tasks](tasks.md) | [tasks](tasks.md) |  | yes |
 | `task/review` | [tasks](tasks.md) | [tasks](tasks.md) | [patch-review](patch-review.md), [ui-patch-review](ui-patch-review.md), [ui-review](ui-review.md), [ui-tasks](ui-tasks.md) | yes |
+| `todo-sync/done` | [todo-sync](todo-sync.md) | [todo-sync](todo-sync.md) |  |  |
+| `todo-sync/failed` | [todo-sync](todo-sync.md) | [todo-sync](todo-sync.md) |  |  |
 | `tool-slots/changed` | [tool-slots-load](tool-slots-load.md) | [tool-slots-load](tool-slots-load.md) | [ui-tool-slots-load](ui-tool-slots-load.md) | yes |
 | `tools/file-written` | [tools](tools.md) | [tools-fs](tools-fs.md) |  | yes |
 | `tools/finished` | [tools](tools.md) | [tools](tools.md) | [supervisor](supervisor.md) |  |

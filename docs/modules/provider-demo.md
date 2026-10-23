@@ -52,7 +52,9 @@ from the words of the query (`harness-provider-demo--search`), and
 for a "how ..." question a command answers, an answer in words that
 names it (`harness-provider-demo--how-to`);
 and a request to name a session the first words of its opening
-message (`harness-provider-demo--title`).  The companion pet gets
+message (`harness-provider-demo--title`); a request to write a
+session's todo list a checklist that moves on a step each time
+(`harness-provider-demo--todos`).  The companion pet gets
 its name and its lines (`harness-provider-demo--pet`), and the
 Insights report a summary of its figures
 (`harness-provider-demo--insights`).

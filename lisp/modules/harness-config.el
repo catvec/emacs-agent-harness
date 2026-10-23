@@ -226,6 +226,10 @@ reader of the layers skips it (see `harness-config--layered-keys').")
             harness-tasks-require-verification
             harness-tasks-max-running harness-tasks-lend-blocked-slot-after harness-tasks-worktrees
             harness-merge-conflict-resolver harness-merge-resolver-model))
+    (todo
+     :title "Todo list"
+     :doc "Keeping a session's todo list true to its work, for a model that does not keep its own.  Every few steps (model calls) without an update of the list, a cheap model reads what the agent did and rewrites it -- as the work stands, or as a new plan when the agent changed course.  The agent is never told: nothing is added to its conversation.  A model that keeps its list up is left alone."
+     :keys (harness-todo-sync-steps harness-todo-sync-model))
     (commits
      :title "Commits"
      :doc "Whether the commits made in a project lose the lines that attribute them to Claude, through a commit-msg hook the harness installs in its repository.  It is off unless you turn it on: for one project in that project's .dir-locals.el (the Project scope of this page), or for every project with the global value."
