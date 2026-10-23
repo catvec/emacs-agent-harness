@@ -45,9 +45,13 @@ may reach the user's real `harness-state-directory'.")
 (setq harness-state-directory harness-test-state-root)
 
 (defvar harness-session--tmp-root)
+(defvar harness-session--tmp-sweep-delay)
 ;; So do the sessions' temporary directories: never the real
-;; /tmp/harness-UID, which the user's own harness hands out.
-(setq harness-session--tmp-root (expand-file-name "session-tmp/" harness-test-state-root))
+;; /var/tmp/harness-UID, which the user's own harness hands out.  And no
+;; suite sweeps them on a timer, behind its back; a test of the sweep
+;; runs it itself.
+(setq harness-session--tmp-root (expand-file-name "session-tmp/" harness-test-state-root)
+      harness-session--tmp-sweep-delay nil)
 
 (defvar harness-policy-file)
 ;; No test reads the machine's policy (/etc/harness/policy.el), which

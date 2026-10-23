@@ -102,7 +102,7 @@ time it opens. It asks again only when the harness does.
 - **Treats a project as a main checkout.** A task, and a sub-agent started in
   its worktree, works in a git worktree, which the harness files under the
   worktree itself, and an agent may give a sub-agent a scratch directory in the
-  temporary directory of its session (`/tmp/harness-UID/ID/...`). The app folds
+  temporary directory of its session (`harness-UID/ID/...`). The app folds
   each worktree into the checkout it was made from, and a scratch directory
   into the project of the session whose directory it is, so the project
   pickers and filters (the new task sheet's among them), the session and task

@@ -75,3 +75,7 @@ Insights report a summary of its figures
 - `session/tmp-dir` ([session](session.md)), when it is loaded
 - `task/list` ([tasks](tasks.md)), when it is loaded
 
+### Hooks it adds to
+
+- `kill-emacs-hook` → `harness-provider-demo--delete-own-dirs`
+

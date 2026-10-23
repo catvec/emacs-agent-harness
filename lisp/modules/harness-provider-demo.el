@@ -162,15 +162,31 @@ no background of its own, and text in the default colour."
      "<rect x=\"1\" y=\"1\" width=\"598\" height=\"398\" fill=\"none\" stroke=\"#8a8f98\" stroke-width=\"2\"/>\n"
      "</svg>\n")))
 
+(defvar harness-provider-demo--own-dirs nil
+  "Temporary directories made for sessions that had none, to delete at exit.")
+
+(defun harness-provider-demo--delete-own-dirs ()
+  "Delete the temporary directories made for sessions that had none."
+  (dolist (dir harness-provider-demo--own-dirs)
+    (ignore-errors (delete-directory dir t)))
+  (setq harness-provider-demo--own-dirs nil))
+
+(defun harness-provider-demo--own-dir ()
+  "Return a new temporary directory, deleted when Emacs exits."
+  (let ((dir (make-temp-file "harness-demo-" t)))
+    (push dir harness-provider-demo--own-dirs)
+    (add-hook 'kill-emacs-hook #'harness-provider-demo--delete-own-dirs)
+    dir))
+
 (defun harness-provider-demo--layout-files (request)
   "Write the mockups of the demo `images' question; return their paths.
 They go to the temporary directory of REQUEST's session, where the
 ask_user tool tells a model to put the images it makes, or to a new
-temporary directory when the session has none."
+temporary directory, deleted when Emacs exits, when the session has none."
   (let* ((sid (plist-get (plist-get request :session) :id))
          (dir (or (and sid (harness-method-exists-p 'session/tmp-dir)
                        (ignore-errors (harness-call 'session/tmp-dir sid)))
-                  (make-temp-file "harness-demo-" t))))
+                  (harness-provider-demo--own-dir))))
     (mapcar (lambda (image)
               (let ((path (expand-file-name (cdr image) dir)))
                 (write-region (harness-provider-demo--layout-svg (car image)) nil path nil 'silent)

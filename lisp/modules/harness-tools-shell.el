@@ -553,10 +553,16 @@ directory."
                     (cons "HARNESS_ELISP_MAX_VALUE_CHARS"
                           (number-to-string harness-elisp--max-value-chars))))
          cmd)
-    (with-file-modes #o700 (make-directory io))
-    (let ((coding-system-for-write 'utf-8-unix))
-      (write-region code nil code-file nil 'silent)
-      (set-file-modes code-file #o600))
+    ;; The call's directory is ours to delete from here on, whatever fails
+    ;; before the command that uses it starts: a full /tmp, say.
+    (condition-case err
+        (progn
+          (with-file-modes #o700 (make-directory io))
+          (let ((coding-system-for-write 'utf-8-unix))
+            (write-region code nil code-file nil 'silent)
+            (set-file-modes code-file #o600)))
+      (error (ignore-errors (delete-directory dir t))
+             (signal (car err) (cdr err))))
     (setq cmd (condition-case err
                   (harness-tools-shell--elisp-command child env cwd io ctx)
                 (error (list :error (harness-error-message err)))))

@@ -609,8 +609,12 @@ the compiled one is gone."
          (in (expand-file-name "input.json" dir))
          (out (expand-file-name "output.json" dir))
          (clean (lambda () (ignore-errors (delete-directory dir t)))))
-    (let ((coding-system-for-write 'utf-8-unix))
-      (write-region (harness-json-encode input) nil in nil 'silent))
+    ;; A full /tmp, say, must not leave the directory behind.
+    (condition-case err
+        (let ((coding-system-for-write 'utf-8-unix))
+          (write-region (harness-json-encode input) nil in nil 'silent))
+      (error (funcall clean)
+             (signal (car err) (cdr err))))
     (harness-then
      (harness-run-command
       (list (if (boundp 'harness-elisp-emacs)

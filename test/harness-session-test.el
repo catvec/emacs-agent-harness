@@ -105,6 +105,445 @@ is never handed out, nor deleted with the session."
           (should-not (harness-call 'session/tmp-dir other)))
         (should (harness-call 'session/tmp-dir other))))))
 
+(ert-deftest harness-session-tmp-root-keeps-off-the-ram-disk ()
+  "The sessions' temporary directories go where the user chose; else where
+the system's temporary directory was set to (TMPDIR); else to the disk's
+temporary directory, not the stock /tmp, a RAM disk on many systems;
+and to /tmp after all where there is no such directory."
+  (harness-session-test-with
+    (let* ((harness-session--tmp-root nil)
+           (uid (user-uid))
+           (disk (harness-test-temp-dir))
+           (chosen (harness-test-temp-dir))
+           (harness-session--disk-tmp disk)
+           (harness-session-tmp-directory nil)
+           (temporary-file-directory "/tmp/")
+           (under (lambda (base) (expand-file-name (format "harness-%d/" uid) base))))
+      ;; Nothing chose a place: the disk's.
+      (should (equal (funcall under disk) (harness-session-tmp-root)))
+      ;; Unless that is no directory to write in.
+      (let ((harness-session--disk-tmp (expand-file-name "missing/" disk)))
+        (should (equal (format "/tmp/harness-%d/" uid) (harness-session-tmp-root))))
+      (let ((harness-session--disk-tmp nil))
+        (should (equal (format "/tmp/harness-%d/" uid) (harness-session-tmp-root))))
+      ;; TMPDIR, or the user's own setting of the variable, is a choice.
+      (let ((temporary-file-directory "/data/scratch"))
+        (should (equal (format "/data/scratch/harness-%d/" uid) (harness-session-tmp-root))))
+      ;; The option wins over all of that; it can name /tmp to have RAM again.
+      (let ((harness-session-tmp-directory chosen))
+        (should (equal (funcall under chosen) (harness-session-tmp-root))))
+      (let ((harness-session-tmp-directory "/tmp"))
+        (should (equal (format "/tmp/harness-%d/" uid) (harness-session-tmp-root))))
+      ;; A blank option names nothing.
+      (let ((harness-session-tmp-directory "  "))
+        (should (equal (funcall under disk) (harness-session-tmp-root))))
+      ;; The internal root, which the tests set, beats the option.
+      (let ((harness-session-tmp-directory chosen)
+            (harness-session--tmp-root (expand-file-name "mine/" disk)))
+        (should (equal (expand-file-name "mine/" disk) (harness-session-tmp-root)))
+        (should (equal (list (expand-file-name "mine/" disk)) (harness-session-tmp-roots)))))))
+
+(ert-deftest harness-session-tmp-roots-include-the-one-earlier-harnesses-used ()
+  "What earlier harnesses made in the system's temporary directory is
+cleaned up all the same, so the old root follows the one in use."
+  (harness-session-test-with
+    (let* ((harness-session--tmp-root nil)
+           (uid (user-uid))
+           (system (harness-test-temp-dir))
+           (disk (harness-test-temp-dir))
+           (temporary-file-directory system)
+           (harness-session--disk-tmp disk)
+           (harness-session-tmp-directory disk))
+      (should (equal (list (expand-file-name (format "harness-%d/" uid) disk)
+                           (expand-file-name (format "harness-%d/" uid) system))
+                     (harness-session-tmp-roots)))
+      ;; The same place twice is one.
+      (let ((harness-session-tmp-directory nil))
+        (should (equal (list (expand-file-name (format "harness-%d/" uid) system))
+                       (harness-session-tmp-roots)))))))
+
+(defun harness-session-test--make (cwd &rest args)
+  "Make a session in CWD with ARGS, a `session/create' plist; return its id."
+  (plist-get (apply #'harness-call 'session/create :cwd cwd args) :id))
+
+(defun harness-session-test--age (id days)
+  "Make the last change of session ID DAYS days old."
+  (aset (harness-session--get id) (cl-struct-slot-offset 'harness-session 'updated)
+        (- (float-time) (* days 86400))))
+
+(defun harness-session-test--await-trash (root)
+  "Wait until the directories being deleted in ROOT are gone."
+  (harness-test-wait (lambda () (not (directory-files root nil "\\`\\.trash-")))
+                     10 "the deletions in the background to finish"))
+
+(ert-deftest harness-session-tmp-finished-p-follows-the-task-or-the-closing ()
+  "A task's session is over when the task is done, a sub-agent's with its
+task's; a session of no task when it is closed.  One at work, or waiting
+for the user, never is."
+  (harness-session-test-with
+    (let* ((cwd (harness-test-temp-dir))
+           (tasks nil)
+           (finished (lambda (id) (and (harness-session--tmp-finished-p (harness-session--get id)) t))))
+      (harness-register-method 'task/for-session
+                               (lambda (id) (when-let* ((c (cdr (assoc id tasks)))) (list :id "t-1" :column c))))
+      (let* ((open (harness-session-test--make cwd))
+             (closed (harness-session-test--make cwd))
+             (done (harness-session-test--make cwd))
+             (review (harness-session-test--make cwd))
+             (kid-done (harness-session-test--make cwd :kind 'subagent :parent-id done))
+             (kid-review (harness-session-test--make cwd :kind 'subagent :parent-id review))
+             (kid-closed (harness-session-test--make cwd :kind 'subagent :parent-id closed))
+             (kid-open (harness-session-test--make cwd :kind 'subagent :parent-id open))
+             (grandkid (harness-session-test--make cwd :kind 'subagent :parent-id kid-done))
+             (fork (harness-session-test--make cwd :parent-id done)))
+        (setq tasks (list (cons done 'done) (cons review 'review)))
+        ;; Open (idle) is not over, task or none, unless the task is done.
+        (should-not (funcall finished open))
+        (should-not (funcall finished review))
+        (should (funcall finished done))
+        (should (funcall finished kid-done))
+        (should (funcall finished grandkid))
+        (should-not (funcall finished kid-review))
+        (should-not (funcall finished kid-open))
+        ;; A sub-agent of a conversation of no task is over when it is closed.
+        (should-not (funcall finished kid-closed))
+        (dolist (id (list closed review kid-open kid-closed fork))
+          (harness-call 'session/deactivate id))
+        (should-not (funcall finished open))
+        (should (funcall finished closed))
+        ;; A task in review keeps its session's files, closed or not.
+        (should-not (funcall finished review))
+        (should-not (funcall finished kid-review))
+        (should (funcall finished kid-open))
+        (should (funcall finished kid-closed))
+        ;; A fork of a done task's session is a conversation of its own.
+        (should (funcall finished fork))
+        (harness-call 'session/resume fork)
+        (should-not (funcall finished fork))
+        ;; At work, or waiting on the user: never.
+        (dolist (status '(running blocked))
+          (harness-call 'session/set-status done status)
+          (harness-call 'session/set-status closed status)
+          (should-not (funcall finished done))
+          (should-not (funcall finished closed)))
+        ;; Without the tasks module, only closing counts.
+        (harness-unregister-method 'task/for-session)
+        (harness-call 'session/set-status done 'idle)
+        (should-not (funcall finished done))
+        (harness-call 'session/deactivate done)
+        (should (funcall finished done))))))
+
+(ert-deftest harness-session-tmp-sweep-deletes-the-directories-of-finished-sessions ()
+  "A sweep deletes the temporary directory of each session that is over and
+has been quiet long enough, at once, and what was in it in the
+background -- links not followed.  What belongs to a session still open or
+at work, a task in review, a session that changed lately, a session of
+some other harness (the root is shared), a link and the dev sockets'
+directory stays."
+  (harness-session-test-with
+    (let* ((harness-session--tmp-root (expand-file-name "root/" (harness-test-temp-dir)))
+           (harness-session--tmp-warned nil)
+           (cwd (harness-test-temp-dir))
+           (elsewhere (harness-test-temp-dir))
+           (tasks nil)
+           (dir-of (lambda (id)
+                     (let ((dir (harness-call 'session/tmp-dir id)))
+                       (with-temp-file (expand-file-name "scratch.txt" dir) (insert "x"))
+                       dir))))
+      (with-temp-file (expand-file-name "precious.txt" elsewhere) (insert "mine"))
+      (harness-register-method 'task/for-session
+                               (lambda (id) (when-let* ((c (cdr (assoc id tasks)))) (list :id "t-1" :column c))))
+      (let* ((open (harness-session-test--make cwd))
+             (closed (harness-session-test--make cwd))
+             (recent (harness-session-test--make cwd))
+             (done (harness-session-test--make cwd))
+             (kid (harness-session-test--make cwd :kind 'subagent :parent-id done))
+             (review (harness-session-test--make cwd))
+             (busy (harness-session-test--make cwd))
+             (linked (harness-session-test--make cwd))
+             (bare (harness-session-test--make cwd))
+             (dirs (mapcar (lambda (id) (cons id (funcall dir-of id)))
+                           (list open closed recent done kid review busy linked)))
+             (dir (lambda (id) (cdr (assoc id dirs))))
+             (stranger (expand-file-name "0a0a0a0a-0a0a-4a0a-8a0a-0a0a0a0a0a0a/" harness-session--tmp-root))
+             (sockets (expand-file-name ".dev/" harness-session--tmp-root)))
+        (setq tasks (list (cons done 'done) (cons review 'review) (cons busy 'done)))
+        (dolist (id (list closed done kid review linked bare))
+          (harness-call 'session/deactivate id))
+        (harness-call 'session/set-status busy 'running)
+        (harness-call 'session/deactivate recent)
+        ;; A directory another harness made for a session of its own.
+        (make-directory stranger t)
+        (with-temp-file (expand-file-name "theirs.txt" stranger) (insert "theirs"))
+        (make-directory sockets t)
+        ;; A link where one session's directory goes, and none for another.
+        (delete-directory (funcall dir linked) t)
+        (make-symbolic-link (directory-file-name elsewhere) (directory-file-name (funcall dir linked)))
+        (delete-directory (harness-call 'session/tmp-dir bare) t)
+        ;; Everything but the recent one has been quiet for a week.
+        (dolist (id (list open closed done kid review busy linked bare))
+          (harness-session-test--age id 7))
+        (let ((due (sort (mapcar (lambda (f) (plist-get f :id)) (harness-session--tmp-sweep t)) #'string<)))
+          ;; A dry run says what would go, and deletes nothing.
+          (should (equal (sort (list closed done kid) #'string<) due))
+          (dolist (id (list closed done kid))
+            (should (file-directory-p (funcall dir id)))))
+        (let ((gone (harness-call 'session/tmp-sweep)))
+          (should (equal (sort (list closed done kid) #'string<)
+                         (sort (mapcar (lambda (f) (plist-get f :id)) gone) #'string<)))
+          (should (equal (funcall dir closed) (plist-get (cl-find closed gone :key (lambda (f) (plist-get f :id))) :dir))))
+        ;; Gone at once, whatever the removal in the background is at.
+        (dolist (id (list closed done kid))
+          (should-not (file-exists-p (funcall dir id))))
+        (dolist (id (list open recent review busy))
+          (should (file-exists-p (expand-file-name "scratch.txt" (funcall dir id)))))
+        (should (file-symlink-p (directory-file-name (funcall dir linked))))
+        (should (file-exists-p (expand-file-name "precious.txt" elsewhere)))
+        (should (file-exists-p (expand-file-name "theirs.txt" stranger)))
+        (should (file-directory-p sockets))
+        (harness-session-test--await-trash harness-session--tmp-root)
+        ;; Nothing is left to do, and a session that comes back gets a new directory.
+        (should-not (harness-session--tmp-sweep t))
+        (should (file-directory-p (harness-call 'session/tmp-dir closed)))
+        (should-not (directory-files (harness-call 'session/tmp-dir closed) nil "\\`[^.]"))))))
+
+(ert-deftest harness-session-tmp-sweep-waits-for-the-retention ()
+  "A finished session's directory goes once the session has been quiet
+for `harness-session-tmp-retention-days'; with none, it goes with its
+session only; with a retention of 0, at the next sweep."
+  (harness-session-test-with
+    (let* ((harness-session--tmp-root (expand-file-name "root/" (harness-test-temp-dir)))
+           (cwd (harness-test-temp-dir))
+           (id (harness-session-test--make cwd))
+           (dir (harness-call 'session/tmp-dir id)))
+      (harness-call 'session/deactivate id)
+      (harness-session-test--age id 2)
+      (let ((harness-session-tmp-retention-days 3))
+        (should-not (harness-session--tmp-sweep)))
+      (let ((harness-session-tmp-retention-days nil))
+        (should-not (harness-session--tmp-sweep)))
+      (should (file-directory-p dir))
+      (let ((harness-session-tmp-retention-days 1))
+        (should (equal (list (list :id id :dir dir)) (harness-session--tmp-sweep t))))
+      (harness-session-test--age id 0)
+      (let ((harness-session-tmp-retention-days 1))
+        (should-not (harness-session--tmp-sweep)))
+      (let ((harness-session-tmp-retention-days 0))
+        (should (equal (list (list :id id :dir dir)) (harness-session--tmp-sweep))))
+      (should-not (file-exists-p dir))
+      (harness-session-test--await-trash harness-session--tmp-root))))
+
+(ert-deftest harness-session-tmp-sweep-counts-from-the-day-a-task-was-accepted ()
+  "A task that waited a week in review is over from the day it was accepted
+or finished, not from the session's last change, so that what its report
+shows outlives the review by the whole retention; a sub-agent follows its
+task."
+  (harness-session-test-with
+    (let* ((harness-session--tmp-root (expand-file-name "root/" (harness-test-temp-dir)))
+           (cwd (harness-test-temp-dir))
+           (now (float-time))
+           (tasks nil))
+      (harness-register-method 'task/for-session (lambda (id) (cdr (assoc id tasks))))
+      (let* ((lately (harness-session-test--make cwd))
+             (kid (harness-session-test--make cwd :kind 'subagent :parent-id lately))
+             (long-ago (harness-session-test--make cwd))
+             (unreviewed (harness-session-test--make cwd))
+             (undated (harness-session-test--make cwd)))
+        (setq tasks
+              (list (cons lately (list :id "t-1" :column 'done :finished (- now (* 5 86400)) :verified-at now))
+                    (cons long-ago (list :id "t-2" :column 'done :finished (- now (* 9 86400))
+                                         :verified-at (- now (* 3 86400))))
+                    ;; Done with no review: a verification of false (JSON's), no time.
+                    (cons unreviewed (list :id "t-3" :column 'done :finished (- now (* 9 86400)) :verified-at :false))
+                    ;; A record that says nothing of times: the session's own.
+                    (cons undated (list :id "t-4" :column 'done))))
+        (dolist (id (list lately kid long-ago unreviewed undated))
+          (harness-call 'session/deactivate id)
+          (harness-session-test--age id 10))
+        (should (> (harness-session--tmp-over-since (harness-session--get lately)) (- now 5)))
+        (should (> (harness-session--tmp-over-since (harness-session--get kid)) (- now 5)))
+        (should (= (- now (* 9 86400))
+                   (harness-session--tmp-over-since (harness-session--get unreviewed))))
+        (should (equal (sort (list long-ago unreviewed undated) #'string<)
+                       (sort (mapcar (lambda (f) (plist-get f :id)) (harness-session--tmp-sweep t))
+                             #'string<)))
+        ;; With a longer retention, only what has been over longer is due.
+        (let ((harness-session-tmp-retention-days 6))
+          (should (equal (sort (list unreviewed undated) #'string<)
+                         (sort (mapcar (lambda (f) (plist-get f :id)) (harness-session--tmp-sweep t))
+                               #'string<))))))))
+
+(ert-deftest harness-session-tmp-sweep-touches-only-what-is-the-users-own ()
+  "A root, or a directory, somebody else owns is left alone by a sweep, as
+by the deletion of its session: the temporary directory is shared."
+  (harness-session-test-with
+    (let* ((harness-session--tmp-root (expand-file-name "root/" (harness-test-temp-dir)))
+           (cwd (harness-test-temp-dir))
+           (id (harness-session-test--make cwd))
+           (other (harness-session-test--make cwd))
+           (dir (harness-call 'session/tmp-dir id))
+           (other-dir (harness-call 'session/tmp-dir other))
+           (owner (file-attribute-user-id (file-attributes harness-session--tmp-root 'integer))))
+      (harness-call 'session/deactivate id)
+      (harness-session-test--age id 7)
+      (cl-letf (((symbol-function 'user-uid) (lambda () (1+ owner))))
+        (should-not (harness-session--tmp-sweep))
+        (harness-call 'session/delete other))
+      (should (file-directory-p dir))
+      (should (file-directory-p other-dir))
+      (should (equal (list (list :id id :dir dir)) (harness-session--tmp-sweep)))
+      (should-not (file-exists-p dir))
+      (harness-session-test--await-trash harness-session--tmp-root))))
+
+(ert-deftest harness-session-tmp-sweep-and-deletion-reach-the-old-root ()
+  "The directories earlier harnesses made in the system's temporary
+directory go too: with their session, or once it is finished."
+  (harness-session-test-with
+    (let* ((harness-session--tmp-root nil)
+           (system (harness-test-temp-dir))
+           (new (harness-test-temp-dir))
+           (temporary-file-directory system)
+           (harness-session-tmp-directory new)
+           (old-root (expand-file-name (format "harness-%d/" (user-uid)) system))
+           (cwd (harness-test-temp-dir))
+           (closed (harness-session-test--make cwd))
+           (gone (harness-session-test--make cwd))
+           (open (harness-session-test--make cwd))
+           (old (lambda (id) (expand-file-name (concat id "/") old-root))))
+      (with-file-modes #o700 (make-directory old-root t))
+      (dolist (id (list closed gone open))
+        (with-file-modes #o700 (make-directory (funcall old id)))
+        (with-temp-file (expand-file-name "scratch.txt" (funcall old id)) (insert "x")))
+      (harness-call 'session/deactivate closed)
+      (harness-session-test--age closed 7)
+      (should (equal (list (list :id closed :dir (funcall old closed)) )
+                     (cl-remove-if-not (lambda (f) (equal (plist-get f :dir) (funcall old closed)))
+                                       (harness-session--tmp-sweep t))))
+      (harness-session--tmp-sweep)
+      (should-not (file-exists-p (funcall old closed)))
+      (should (file-directory-p (funcall old open)))
+      (harness-call 'session/delete gone)
+      (should-not (file-exists-p (funcall old gone)))
+      (should (file-directory-p (funcall old open)))
+      (harness-session-test--await-trash old-root)
+      (harness-session-test--await-trash (harness-session-tmp-root)))))
+
+(ert-deftest harness-session-tmp-sweep-purges-what-a-deletion-left ()
+  "A directory still named for deletion an hour after it was set aside was
+left by an `rm' that failed, or a harness that stopped: the next sweep
+deletes it, and nothing else of the root."
+  (harness-session-test-with
+    (let* ((harness-session--tmp-root (expand-file-name "root/" (harness-test-temp-dir)))
+           (leftover (expand-file-name ".trash-abc-123456/" harness-session--tmp-root))
+           (other (expand-file-name "not-trash/" harness-session--tmp-root)))
+      (with-file-modes #o700
+        (make-directory leftover t)
+        (make-directory other t))
+      (with-temp-file (expand-file-name "x" leftover) (insert "x"))
+      (harness-session--tmp-sweep)
+      ;; Fresh: its `rm' may be running.
+      (should (file-directory-p leftover))
+      (let ((later (time-add (current-time) 7200)))
+        (cl-letf (((symbol-function 'current-time) (lambda () later)))
+          (harness-session--tmp-sweep)))
+      (harness-session-test--await-trash harness-session--tmp-root)
+      (should-not (file-exists-p leftover))
+      (should (file-directory-p other)))))
+
+(ert-deftest harness-session-tmp-sweep-runs-on-a-timer-the-module-stops ()
+  "The module sweeps by itself a while after it starts and then every half
+hour, and stops sweeping when it stops; no delay sets no timer."
+  (harness-session-test-with
+    (let ((harness-session--tmp-timer nil)
+          (harness-session--tmp-sweep-delay nil))
+      (harness-session--tmp-arm)
+      (should-not harness-session--tmp-timer)
+      (let ((harness-session--tmp-sweep-delay 3600))
+        (harness-session--tmp-arm)
+        (should (timerp harness-session--tmp-timer))
+        (should (= harness-session--tmp-sweep-interval (timer--repeat-delay harness-session--tmp-timer)))
+        ;; Started again, as a reload does: the same timer.
+        (let ((timer harness-session--tmp-timer))
+          (harness-session--tmp-arm)
+          (should (eq timer harness-session--tmp-timer)))
+        (harness-session--shutdown)
+        (should-not harness-session--tmp-timer)
+        (should-not (memq 'harness-session--tmp-sweep-on-timer
+                          (mapcar #'timer--function timer-list)))))))
+
+(ert-deftest harness-session-tmp-sweep-waits-for-the-tasks-it-must-ask ()
+  "Without the tasks module's say, the session of a task in review would
+pass for a closed conversation: a sweep does not run while the module is
+there and not ready, and a session whose task cannot be told is kept
+while the rest is swept."
+  (harness-session-test-with
+    (let* ((harness-session--tmp-root (expand-file-name "root/" (harness-test-temp-dir)))
+           (harness-session-tmp-retention-days 0)
+           (cwd (harness-test-temp-dir))
+           (trouble (harness-session-test--make cwd))
+           (closed (harness-session-test--make cwd))
+           (dir (lambda (id) (harness-call 'session/tmp-dir id))))
+      (dolist (id (list trouble closed))
+        (harness-call 'session/deactivate id)
+        (harness-session-test--age id 7))
+      ;; The module is defined, and has not started: nothing may go.
+      (harness-define-module 'tasks :doc "the tasks, not started")
+      (should-not (harness-module-ready-p 'tasks))
+      (should-error (harness-session--tmp-sweep) :type 'harness-error)
+      (should-error (harness-call 'session/tmp-sweep t) :type 'harness-error)
+      ;; The timer says so in the debug log, and goes on.
+      (let ((harness-log-level 'debug))
+        (harness-session--tmp-sweep-on-timer))
+      (with-current-buffer (get-buffer-create harness-log-buffer-name)
+        (should (string-match-p "not sweeping the temporary directories: the tasks module is not ready"
+                                (buffer-string))))
+      (should (file-directory-p (funcall dir closed)))
+      ;; Ready, and one session whose task it cannot tell: that one stays.
+      (harness-define-module 'tasks :doc "the tasks" :init #'ignore)
+      (harness-module-start 'tasks)
+      (should (harness-module-ready-p 'tasks))
+      (harness-register-method 'task/for-session
+                               (lambda (id) (if (equal id trouble) (error "no task board") nil)))
+      (should (equal (list (list :id closed :dir (funcall dir closed))) (harness-session--tmp-sweep)))
+      (should (file-directory-p (funcall dir trouble)))
+      (with-current-buffer (get-buffer-create harness-log-buffer-name)
+        (should (string-match-p (format "keeping the temporary directory of %s" trouble) (buffer-string))))
+      (harness-session-test--await-trash harness-session--tmp-root))))
+
+(ert-deftest harness-session-tmp-sweep-timer-sweeps ()
+  "The timer the module sets runs the sweep, by itself."
+  (harness-session-test-with
+    (let* ((harness-session--tmp-root (expand-file-name "root/" (harness-test-temp-dir)))
+           (harness-session-tmp-retention-days 0)
+           (harness-session--tmp-timer nil)
+           (id (harness-session-test--make (harness-test-temp-dir)))
+           (dir (harness-call 'session/tmp-dir id))
+           (kept (harness-session-test--make (harness-test-temp-dir)))
+           (kept-dir (harness-call 'session/tmp-dir kept)))
+      (harness-call 'session/deactivate id)
+      (harness-session-test--age id 1)
+      (unwind-protect
+          (let ((harness-session--tmp-sweep-delay 0.05))
+            (harness-session--tmp-arm)
+            (harness-test-wait (lambda () (not (file-exists-p dir))) 10 "the timer's sweep")
+            (should (file-directory-p kept-dir)))
+        (harness-session--tmp-disarm))
+      (harness-session-test--await-trash harness-session--tmp-root))))
+
+(ert-deftest harness-session-tmp-sweep-method-takes-a-dry-run-from-json ()
+  "A client asks for a dry run with true; a false is a real sweep."
+  (harness-session-test-with
+    (let* ((harness-session--tmp-root (expand-file-name "root/" (harness-test-temp-dir)))
+           (id (harness-session-test--make (harness-test-temp-dir)))
+           (dir (harness-call 'session/tmp-dir id)))
+      (harness-call 'session/deactivate id)
+      (harness-session-test--age id 7)
+      (should (equal (list (list :id id :dir dir)) (harness-call 'session/tmp-sweep t)))
+      (should (file-directory-p dir))
+      (should (equal (list (list :id id :dir dir)) (harness-call 'session/tmp-sweep :false)))
+      (should-not (file-exists-p dir))
+      (harness-session-test--await-trash harness-session--tmp-root))))
+
 (ert-deftest harness-session-update-adds-hint-and-persists ()
   (harness-session-test-with
     (let* ((s (harness-call 'session/create :cwd (harness-test-temp-dir)))

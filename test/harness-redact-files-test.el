@@ -417,6 +417,34 @@ names its file in its `:handoff', as a compaction does in its `:meta'."
                          (harness-call 'session/nodes a)))
         (should-not (harness-redact-files-test--holds-p report))))))
 
+(ert-deftest harness-redact-files-looks-in-the-old-temporary-root-too ()
+  "A secret in what an earlier harness left in the system's temporary
+directory is taken out as well: the directories move to the disk, and the
+old ones stay until their sessions are over."
+  (harness-redact-files-test-with
+    (let* ((harness-session--tmp-root nil)
+           (system (harness-test-temp-dir))
+           (temporary-file-directory system)
+           (harness-session-tmp-directory (harness-test-temp-dir))
+           (a (harness-redact-files-test--session "w" (harness-test-temp-dir)))
+           (old-root (expand-file-name (format "harness-%d/" (user-uid)) system))
+           (old (expand-file-name (concat a "/") old-root))
+           (new (harness-call 'session/tmp-dir a))
+           (old-file (expand-file-name "out.txt" old))
+           (new-file (expand-file-name "out.txt" new))
+           (text (harness-redact-files-test--dirty-text)))
+      (should-not (equal old new))
+      (with-file-modes #o700 (make-directory old t))
+      (harness-redact-files-test--write old-file text)
+      (harness-redact-files-test--write new-file text)
+      (dolist (file (list old-file new-file)) (harness-redact-files-test--age file))
+      (let ((report (harness-redact-files-test--call :source (harness-redact-files-test--ref) :scope 'session
+                                                     :sessions (list a) :include-forks :false :mode 'redact)))
+        (should (= 0 (harness-redact-files-test--count old-file)))
+        (should (= 0 (harness-redact-files-test--count new-file)))
+        (should (= 6 (plist-get (plist-get (car (harness-redact-files-test--redactions a)) :counts) :temp)))
+        (should-not (harness-redact-files-test--holds-p report))))))
+
 (ert-deftest harness-redact-files-leaves-a-scratch-file-that-was-just-written ()
   "A file a process may be writing is not replaced under it: it is counted, left, and said."
   (harness-redact-files-test-with

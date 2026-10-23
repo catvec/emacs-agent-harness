@@ -72,14 +72,25 @@ stand-in given for a model the catalogue had not listed yet.  When
 the catalogue changes, the sessions whose window moved are announced.
 
 Every local session but an internal one (see below) has a temporary
-directory of its own, harness-UID/ID in `temporary-file-directory`
-(/tmp/harness-1000/ID/).
-It is made with the session, made again whenever it is asked for and
-missing (a reboot empties /tmp), and deleted with the session.
-`session/tmp-dir` hands it out: the permission layer lets the session
-use it, the sandbox lets its commands write there, and the system
-prompt names it.  /tmp is shared, so only a directory that is the
-user's own is ever handed out.
+directory of its own, harness-UID/ID in a temporary directory that is
+no RAM disk (/var/tmp/harness-1000/ID/; see `harness-session-tmp-root`
+for where, and `harness-session-tmp-directory` to choose).  It is made
+with the session, made again whenever it is asked for and missing, and
+deleted with the session.  `session/tmp-dir` hands it out: the
+permission layer lets the session use it, the sandbox lets its
+commands write there, and the system prompt names it.  The directory
+is shared, so only a directory that is the user's own is ever handed
+out.
+
+Nobody has to delete these: the harness does, for the sessions it made
+them for (`harness-session--tmp-sweep`).  A session is over when its
+task is done (a sub-agent goes with the task it works for) or, when it
+has no task, when it is closed; `harness-session-tmp-retention-days`
+after that (counted from its last change, or from the day its task
+was accepted) its directory goes, and a session still at work, or
+open, or a task in review, keeps its own.  Only the directories of
+sessions this harness has are ever touched: another harness of the
+same user (a development instance, scripts/dev.sh) shares the root.
 
 A session can move to another working directory, and with it to that
 directory's project (`session/move`): one started in the wrong place
@@ -165,6 +176,7 @@ take it in.  The session list hides internal sessions unless asked.
 - `session/set-status` (id status) — Set the status of session ID to STATUS (idle, running, blocked, inactive).
 - `session/set-todos` (id todos) — Replace the todo list of session ID with TODOS.
 - `session/tmp-dir` (id) — Return the temporary directory of session ID, made if missing.
+- `session/tmp-sweep` (&optional dry-run) — Delete the temporary directories of the sessions that are over; return them.
 - `session/transcript-text` (id) — Return the transcript of session ID as searchable plain text.
 - `session/tree` (id) — Return (:sessions SUMMARIES :nodes NODES) for the family of session ID.
 - `session/update` (id &rest plist) — Change settings of session ID from PLIST (see `harness-session--settings`).
@@ -202,6 +214,11 @@ take it in.  The session list hides internal sessions unless asked.
 
 - `session/before-move`
 
+### Options
+
+- `harness-session-tmp-directory` — Directory the sessions' temporary directories are made in, or nil.
+- `harness-session-tmp-retention-days` — Days a finished session's temporary directory is kept, or nil to keep it.
+
 ## Uses
 
 ### Methods it calls
@@ -221,6 +238,7 @@ take it in.  The session list hides internal sessions unless asked.
 - `store/load` ([store](store.md))
 - `store/read-all` ([store](store.md))
 - `store/save` ([store](store.md))
+- `task/for-session` ([tasks](tasks.md)), when it is loaded
 - `task/session-ids` ([tasks](tasks.md)), when it is loaded
 - `usage/price` ([usage](usage.md)), when it is loaded
 

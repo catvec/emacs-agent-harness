@@ -126,10 +126,12 @@ untouched, and not looked at."
           "[0-9a-f]\\{8\\}-[0-9a-f]\\{4\\}-[0-9a-f]\\{4\\}-[0-9a-f]\\{4\\}-[0-9a-f]\\{12\\}"
           "\\|id-[0-9a-f]\\{32\\}\\)/")
   "Matches the temporary directory of a session, and what is in it.
-That directory is harness-UID/NAME in the variable `temporary-file-directory',
-NAME being the session's id, a UUID, or `id-' and the hash of an id that is
-no plain name (`harness-session--tmp-name'); group 1 is NAME.  A directory
-that is merely called harness-2 is no such directory.")
+That directory is harness-UID/NAME in the temporary directory the harness
+keeps them in (/var/tmp, or the /tmp earlier harnesses used; see
+`harness-session-tmp-root'), NAME being the session's id, a UUID, or
+`id-' and the hash of an id that is no plain name
+\(`harness-session--tmp-name'); group 1 is NAME.  A directory that is
+merely called harness-2 is no such directory.")
 
 (defun harness-files-scratch-owner (dir)
   "Return the name of the session temporary directory that holds DIR, or nil.

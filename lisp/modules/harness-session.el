@@ -62,14 +62,25 @@
 ;; the catalogue changes, the sessions whose window moved are announced.
 ;;
 ;; Every local session but an internal one (see below) has a temporary
-;; directory of its own, harness-UID/ID in `temporary-file-directory'
-;; (/tmp/harness-1000/ID/).
-;; It is made with the session, made again whenever it is asked for and
-;; missing (a reboot empties /tmp), and deleted with the session.
-;; `session/tmp-dir' hands it out: the permission layer lets the session
-;; use it, the sandbox lets its commands write there, and the system
-;; prompt names it.  /tmp is shared, so only a directory that is the
-;; user's own is ever handed out.
+;; directory of its own, harness-UID/ID in a temporary directory that is
+;; no RAM disk (/var/tmp/harness-1000/ID/; see `harness-session-tmp-root'
+;; for where, and `harness-session-tmp-directory' to choose).  It is made
+;; with the session, made again whenever it is asked for and missing, and
+;; deleted with the session.  `session/tmp-dir' hands it out: the
+;; permission layer lets the session use it, the sandbox lets its
+;; commands write there, and the system prompt names it.  The directory
+;; is shared, so only a directory that is the user's own is ever handed
+;; out.
+;;
+;; Nobody has to delete these: the harness does, for the sessions it made
+;; them for (`harness-session--tmp-sweep').  A session is over when its
+;; task is done (a sub-agent goes with the task it works for) or, when it
+;; has no task, when it is closed; `harness-session-tmp-retention-days'
+;; after that (counted from its last change, or from the day its task
+;; was accepted) its directory goes, and a session still at work, or
+;; open, or a task in review, keeps its own.  Only the directories of
+;; sessions this harness has are ever touched: another harness of the
+;; same user (a development instance, scripts/dev.sh) shares the root.
 ;;
 ;; A session can move to another working directory, and with it to that
 ;; directory's project (`session/move'): one started in the wrong place
@@ -923,23 +934,89 @@ BTW's model too (`harness-session--pinned'), whatever this answers."
 
 ;;;; Temporary directories
 
+(defcustom harness-session-tmp-directory nil
+  "Directory the sessions' temporary directories are made in, or nil.
+The harness makes harness-UID in it, UID being yours, so that the users
+of a machine never share it, and a directory for each session in that.
+Nil, the default, takes the system's temporary directory when
+something chose one (the environment variable TMPDIR, or
+`temporary-file-directory'), else /var/tmp where there is one.  On
+GNU/Linux /tmp is often a RAM disk, where the Go and Flutter caches of
+an agent's builds eat your memory; /var/tmp is on the disk, which the
+system cleans out on its own as well (the harness cleans out the
+directories of finished sessions sooner, see
+`harness-session-tmp-retention-days').  Name /tmp to have them in RAM
+again.  It applies to the directories made from then on."
+  :type '(choice (const :tag "Automatic" nil) directory)
+  :group 'harness)
+
+(defcustom harness-session-tmp-retention-days 1
+  "Days a finished session's temporary directory is kept, or nil to keep it.
+A session is finished when its task is done (a sub-agent goes with the
+task it works for) or, when it belongs to no task, when it is closed;
+one still at work, blocked on you, or open keeps its directory.  The
+harness deletes the directory of a finished session this many days after
+the session was last changed, or its task was accepted or finished if
+later (0 deletes it at the next sweep, every half hour), so that scratch
+files, Go and Flutter caches do not pile up.  A task in review keeps
+its directory, where the screenshots of its report are, however long
+you take.  Nil deletes a directory only with its session."
+  :type '(choice (const :tag "Only with the session" nil) number)
+  :group 'harness)
+
 (defvar harness-session--tmp-root nil
   "Directory holding every session's temporary directory, or nil for the default.
-The default is harness-UID in the directory the variable
-`temporary-file-directory' names, UID being the user's, so that the
-users of a machine never share it.  Internal, not an option (see
-docs/configuration-audit.md): TMPDIR, through the variable
-`temporary-file-directory', already says where temporary files go.
-The tests point it into their throwaway state directory.")
+The default is harness-UID, UID being the user's, in the directory
+`harness-session--tmp-base' names.  Internal, not an option (see
+docs/configuration-audit.md): `harness-session-tmp-directory' says where
+it goes.  The tests point it into their throwaway state directory.")
 
 (defvar harness-session--tmp-warned nil
   "Temporary directories the log already said could not be had.")
+
+(defvar harness-session--disk-tmp "/var/tmp/"
+  "The temporary directory that is on the disk, where /tmp may be a RAM disk.
+Internal, not an option (see docs/configuration-audit.md):
+`harness-session-tmp-directory' says where the directories go.  The
+system cleans it out by itself, as it does /tmp, only less often.")
+
+(defun harness-session--tmp-base ()
+  "Return the directory the root of the sessions' temporary directories is made in.
+That is `harness-session-tmp-directory'; else the system's temporary
+directory (`temporary-file-directory') when something other than the
+stock /tmp chose it -- TMPDIR, or the user's own setting -- else
+`harness-session--disk-tmp' (/var/tmp) when that is a directory to
+write in, else /tmp after all.  /tmp is a RAM disk on many systems, and
+/var/tmp is on the disk.  macOS gets its per-user temporary directory,
+which the system cleans out too, from `temporary-file-directory'."
+  (let ((chosen harness-session-tmp-directory)
+        (system (file-name-as-directory (expand-file-name temporary-file-directory)))
+        (disk harness-session--disk-tmp))
+    (cond ((and (stringp chosen) (not (string-blank-p chosen)))
+           (file-name-as-directory (expand-file-name chosen)))
+          ((not (equal system "/tmp/")) system)
+          ((and (stringp disk) (file-directory-p disk) (file-writable-p disk))
+           (file-name-as-directory (expand-file-name disk)))
+          (t system))))
 
 (defun harness-session-tmp-root ()
   "Return the directory holding every session's temporary directory."
   (file-name-as-directory
    (expand-file-name (or harness-session--tmp-root
-                         (expand-file-name (format "harness-%d" (user-uid)) temporary-file-directory)))))
+                         (expand-file-name (format "harness-%d" (user-uid)) (harness-session--tmp-base))))))
+
+(defun harness-session-tmp-roots ()
+  "Return the directories that hold, or held, the sessions' temporary directories.
+The root in use (`harness-session-tmp-root') first.  Then the one
+earlier harnesses used, harness-UID in `temporary-file-directory', when
+that is another: the directories they made there are deleted with their
+sessions, or once these are finished, all the same.  A root the tests set
+(`harness-session--tmp-root') has no other."
+  (let ((root (harness-session-tmp-root))
+        (old (and (null harness-session--tmp-root)
+                  (file-name-as-directory
+                   (expand-file-name (format "harness-%d" (user-uid)) temporary-file-directory)))))
+    (if (and old (not (equal old root))) (list root old) (list root))))
 
 (defun harness-session--tmp-name (id)
   "Return the file name of the temporary directory of session ID.
@@ -950,8 +1027,9 @@ can reach outside the root and no two ids share a directory."
         id
       (concat "id-" (md5 id)))))
 
-(defun harness-session--tmp-path (s)
-  "Return the name of the temporary directory of session S.
+(defun harness-session--tmp-path (s &optional root)
+  "Return the name of the temporary directory of session S, in ROOT.
+ROOT is by default the one in use, `harness-session-tmp-root'.
 Nil for a remote session: its tools work on another host, where the
 harness makes no directories behind the user's back.  Nil for an
 internal session too: it records one model call and runs no tools.
@@ -962,7 +1040,7 @@ checks it."
               (file-remote-p (or (harness-session-cwd s) "")))
     (file-name-as-directory
      (expand-file-name (harness-session--tmp-name (harness-session-id s))
-                       (harness-session-tmp-root)))))
+                       (or root (harness-session-tmp-root))))))
 
 (defun harness-session--own-dir-p (dir)
   "Non-nil when DIR is a directory of the user's own.
@@ -1003,17 +1081,239 @@ every session's is not the user's own (see `harness-session--own-dir')."
     (and (harness-session--own-dir (harness-session-tmp-root))
          (harness-session--own-dir dir))))
 
-(defun harness-session--delete-tmp (s)
-  "Delete the temporary directory of session S and everything in it.
-Only a directory of the user's own, in a root of the user's own, is
-deleted; symbolic links inside it are removed, never followed."
-  (when-let* ((dir (harness-session--tmp-path s)))
-    (when (and (harness-session--own-dir-p (harness-session-tmp-root))
-               (harness-session--own-dir-p dir))
+(defun harness-session--tmp-removable (s root)
+  "Return the temporary directory of session S in ROOT if it may be deleted.
+That is the directory when it is there, a real directory of the user's
+own in a root of the user's own: a symbolic link, or a directory
+somebody else made, is nil.  So is a session with no such directory."
+  (when-let* ((dir (harness-session--tmp-path s root)))
+    (and (harness-session--own-dir-p root)
+         (harness-session--own-dir-p dir)
+         dir)))
+
+(defconst harness-session--tmp-trash-prefix ".trash-"
+  "What the name of a temporary directory starts with while it is being deleted.")
+
+(defun harness-session--remove-tree (path)
+  "Delete the directory PATH and everything in it, in the background.
+Symbolic links in it are removed, never followed.  A tree of a Flutter
+SDK and its caches takes seconds to delete, in which a harness that
+did it itself would answer no one; so `rm' does, and the harness goes
+on.  A failure is logged, and the next sweep tries again
+\(`harness-session--tmp-purge-trash')."
+  (let ((rm (executable-find "rm"))
+        (failed (lambda (why) (harness-log 'warn "session: could not delete %s: %s" path why))))
+    (if (null rm)
+        (condition-case err
+            (delete-directory path t)
+          (error (funcall failed (harness-error-message err))))
+      (harness-then
+       (harness-run-command (list rm "-rf" "--" path) :cwd "/" :timeout 3600 :name "harness-tmp-rm")
+       (lambda (r)
+         (unless (eql 0 (plist-get r :exit))
+           (funcall failed (let ((err (string-trim (or (plist-get r :stderr) ""))))
+                             (if (string-empty-p err) (format "rm: %s" (plist-get r :exit)) err)))))
+       (lambda (err) (funcall failed (harness-error-message err)))))))
+
+(defun harness-session--discard-tmp (dir root)
+  "Take the temporary directory DIR of ROOT away now, and delete it.
+DIR is renamed first, so that its name is free again at once: a session
+that asks for its directory while the old one is still being deleted
+gets a new, empty one, and nothing it makes there is deleted with the
+old.  What is in it is deleted in the background
+\(`harness-session--remove-tree'); where it cannot be renamed, it is
+deleted where it is.  Callers have checked that DIR and ROOT are the
+user's own (`harness-session--tmp-removable')."
+  (let ((trash (expand-file-name
+                (format "%s%s-%s" harness-session--tmp-trash-prefix
+                        (file-name-nondirectory (directory-file-name dir)) (harness-short-id 6))
+                root)))
+    (if (condition-case nil
+            (progn (rename-file (directory-file-name dir) trash) t)
+          (error nil))
+        (harness-session--remove-tree trash)
       (condition-case err
           (delete-directory dir t)
         (error (harness-log 'warn "session: could not delete %s: %s"
                             dir (harness-error-message err)))))))
+
+(defun harness-session--delete-tmp (s)
+  "Delete the temporary directory of session S and everything in it.
+That is the one in the root in use and the one earlier harnesses made
+in theirs (`harness-session-tmp-roots').  Only a directory of the
+user's own, in a root of the user's own, is deleted; symbolic links
+inside it are removed, never followed."
+  (dolist (root (harness-session-tmp-roots))
+    (when-let* ((dir (harness-session--tmp-removable s root)))
+      (harness-session--discard-tmp dir root))))
+
+;;;; Temporary directories: the ones nobody needs any more
+
+(defun harness-session--family-task (s)
+  "Return the task session S works for, or nil.
+That is the task S is the session of (`task/for-session', if the tasks
+module is there), else, for a sub-agent, the task of the session that
+started it, and so on up: its files are the task's, and are needed as
+long as the task is.  A session that started a sub-agent of its own,
+other than a task's, has none.  An error of the tasks module is not
+caught: a session whose task cannot be told is not to be taken for one
+of no task."
+  (let ((seen nil) (cur s) task)
+    (while (and cur (not task) (< (length seen) 16)
+                (not (member (harness-session-id cur) seen)))
+      (push (harness-session-id cur) seen)
+      (setq task (and (harness-method-exists-p 'task/for-session)
+                      (harness-call 'task/for-session (harness-session-id cur))))
+      (setq cur (and (not task)
+                     (eq (harness-session-kind cur) 'subagent)
+                     (harness-session-parent-id cur)
+                     (gethash (harness-session-parent-id cur) harness-sessions))))
+    task))
+
+(defun harness-session--tmp-over-since (s)
+  "Return when session S was over, or nil while it is not.
+Over means nothing needs its temporary directory any more.  A session at
+work (running) or waiting on the user (blocked) is not.  One that works
+on a task is over when the task is done, in the done column of the
+board, whatever the session itself does (closed, or idle after the
+merge); so is a sub-agent of such a task.  One that belongs to no task is
+over when it is closed (inactive): an open conversation, idle as it may
+be, is one the user can come back to.
+
+The time is the latest of the session's last change and, for a task's, the
+time the task was finished and the time the user verified it: a task
+that waited a week in review is over from the moment it was accepted, not
+from the week before, so that its screenshots outlive the review by the
+whole of `harness-session-tmp-retention-days'."
+  (let ((status (harness-session-status s)))
+    (unless (memq status '(running blocked))
+      (let* ((task (harness-session--family-task s))
+             (over (if task (eq (plist-get task :column) 'done) (eq status 'inactive))))
+        (when over
+          (apply #'max (or (harness-session-updated s) 0)
+                 (cl-remove-if-not #'numberp (list (plist-get task :finished)
+                                                   (plist-get task :verified-at)))))))))
+
+(defun harness-session--tmp-finished-p (s)
+  "Non-nil when session S is over, so that nothing needs its temporary directory.
+See `harness-session--tmp-over-since'."
+  (and (harness-session--tmp-over-since s) t))
+
+(defun harness-session--tmp-purge-trash (root)
+  "Delete the leftovers of deletions in ROOT that never finished.
+A directory goes by a name of `harness-session--tmp-trash-prefix' while
+`rm' deletes it; one still there an hour later was left by a harness
+that stopped, or by an `rm' that failed.  They are ours by their name,
+and the user's own by their owner."
+  (when (harness-session--own-dir-p root)
+    (dolist (f (directory-files root t (concat "\\`" (regexp-quote harness-session--tmp-trash-prefix))))
+      (let ((attrs (file-attributes f 'integer)))
+        (when (and (harness-session--own-dir-p f)
+                   (time-less-p (time-add (file-attribute-status-change-time attrs) 3600)
+                                (current-time)))
+          (harness-session--remove-tree f))))))
+
+(defun harness-session--tmp-sweep-blocked ()
+  "Return why the temporary directories must not be swept now, or nil.
+The tasks module says which sessions are over: asked before it has its
+tasks, or after it failed to start, it would let the session of a task
+in review pass for a closed conversation, and its screenshots go."
+  (and (harness-module-get 'tasks)
+       (not (harness-module-ready-p 'tasks))
+       "the tasks module is not ready"))
+
+(defun harness-session--tmp-sweep (&optional dry-run)
+  "Delete the temporary directories of the sessions that are over; return them.
+A session's directory goes when it has been over for
+`harness-session-tmp-retention-days' (`harness-session--tmp-over-since'),
+in the root in use and in the one earlier harnesses used
+\(`harness-session-tmp-roots').  Only the directories of the sessions
+this harness has are looked at: the root is shared with the other
+harnesses of the user (a development instance has one), whose sessions
+are none of its business, and a directory no session of its own names
+is left to the system to clean out.  Return the directories as
+\(:id ID :dir DIR) plists, deleted unless DRY-RUN, which leaves
+everything and only says what would go.  Without a retention, nothing is
+deleted.  While the tasks module is not ready, nothing is swept, and an
+error says so (`harness-session--tmp-sweep-blocked')."
+  (let ((days harness-session-tmp-retention-days)
+        (roots (harness-session-tmp-roots))
+        found)
+    (when-let* ((why (and (numberp days) (harness-session--tmp-sweep-blocked))))
+      (signal 'harness-error (list (format "The temporary directories are not swept: %s" why))))
+    (when (numberp days)
+      (let ((limit (- (float-time) (* days 86400))))
+        (maphash
+         (lambda (id s)
+           ;; The cheap tests first: most sessions have no directory.
+           (when (and (<= (or (harness-session-updated s) 0) limit)
+                      (not (memq (harness-session-status s) '(running blocked))))
+             (let ((dirs (delq nil (mapcar (lambda (root)
+                                             (when-let* ((dir (harness-session--tmp-removable s root)))
+                                               (cons dir root)))
+                                           roots))))
+               (when-let* ((over (and dirs
+                                      (condition-case err
+                                          (harness-session--tmp-over-since s)
+                                        (error (harness-log 'warn "session: keeping the temporary directory of %s: %s"
+                                                            id (harness-error-message err))
+                                               nil)))))
+                 (when (<= over limit)
+                   (dolist (d dirs)
+                     (push (list :id id :dir (car d) :root (cdr d)) found)))))))
+         harness-sessions)))
+    (setq found (nreverse found))
+    (unless dry-run
+      (dolist (f found)
+        (harness-session--discard-tmp (plist-get f :dir) (plist-get f :root)))
+      (dolist (root roots)
+        (harness-session--tmp-purge-trash root))
+      (when found
+        (let ((n (length (delete-dups (mapcar (lambda (f) (plist-get f :id)) found)))))
+          (harness-log 'info "session: deleted the temporary directories of %d finished session%s"
+                       n (if (= n 1) "" "s")))))
+    (mapcar (lambda (f) (list :id (plist-get f :id) :dir (plist-get f :dir))) found)))
+
+(defvar harness-session--tmp-sweep-delay 120
+  "Seconds after the session module starts before the first sweep, or nil.
+Internal, not an option (see docs/configuration-audit.md): a harness
+that has just started has other things to do, and the sessions and the
+tasks must be loaded first.  Nil sets no timer at all, as the tests
+have it, so that no suite sweeps behind its back.")
+
+(defconst harness-session--tmp-sweep-interval 1800
+  "Seconds between two sweeps of the temporary directories.")
+
+(defvar harness-session--tmp-timer nil
+  "The timer that sweeps the temporary directories, or nil.")
+
+(defun harness-session--tmp-sweep-on-timer ()
+  "Sweep the temporary directories (`harness-session--tmp-sweep'); log a failure.
+A sweep that must wait for the tasks module
+\(`harness-session--tmp-sweep-blocked') says so in the debug log only:
+for a harness without a working tasks module it would be said every
+half hour."
+  (if-let* ((why (harness-session--tmp-sweep-blocked)))
+      (harness-log 'debug "session: not sweeping the temporary directories: %s" why)
+    (condition-case err
+        (harness-session--tmp-sweep)
+      (error (harness-log 'warn "session: could not sweep the temporary directories: %s"
+                          (harness-error-message err))))))
+
+(defun harness-session--tmp-arm ()
+  "Start the timer that sweeps the temporary directories, unless there is one.
+A module that starts again (a reload) keeps the timer it has."
+  (unless (or (timerp harness-session--tmp-timer)
+              (null harness-session--tmp-sweep-delay))
+    (setq harness-session--tmp-timer
+          (run-at-time harness-session--tmp-sweep-delay harness-session--tmp-sweep-interval
+                       #'harness-session--tmp-sweep-on-timer))))
+
+(defun harness-session--tmp-disarm ()
+  "Stop the timer that sweeps the temporary directories."
+  (when (timerp harness-session--tmp-timer)
+    (cancel-timer harness-session--tmp-timer))
+  (setq harness-session--tmp-timer nil))
 
 ;;;; Methods: lifecycle
 
@@ -1100,16 +1400,31 @@ some for a session (see `session/set-ext'), a plist."
 
 (harness-defmethod session/tmp-dir (id)
   "Return the temporary directory of session ID, made if missing.
-Every local session has one of its own, harness-UID/ID in
-`temporary-file-directory', private to the user.  It is made with the
-session, made again whenever it is asked for and missing (a reboot
-empties /tmp), and deleted with the session.  The permission layer lets
-the session use it, the sandbox lets its commands write there, and the
-system prompt names it.  Nil for a remote session, for an internal
+Every local session has one of its own, harness-UID/ID in the
+temporary directory `harness-session-tmp-directory' chooses (by
+default /var/tmp, on the disk, where /tmp is often a RAM disk),
+private to the user.  It is made with the session, made again whenever
+it is asked for and missing, and deleted with the session, or once the
+session is finished (see `session/tmp-sweep').  The permission layer
+lets the session use it, the sandbox lets its commands write there, and
+the system prompt names it.  Nil for a remote session, for an internal
 one (see `session/internal-start'), and when no directory of the user's
-own can be had there: /tmp is shared, so a directory somebody else
-made, or a symbolic link, is refused."
+own can be had there: the temporary directory is shared, so a
+directory somebody else made, or a symbolic link, is refused."
   (harness-session--tmp-dir (harness-session--get id)))
+
+(harness-defmethod session/tmp-sweep (&optional dry-run)
+  "Delete the temporary directories of the sessions that are over; return them.
+The harness does this by itself a couple of minutes after it starts and
+every half hour (`harness-session--tmp-sweep'); this does it now.  A
+session's directory goes when its task is done (a sub-agent goes with
+its task) or, with no task, when it is closed, and that has been so for
+`harness-session-tmp-retention-days'.  A session at work, blocked
+on the user, or open keeps its directory, and so does every directory
+no session of this harness names.  Returns a list of (:id ID :dir DIR),
+the directories gone; with DRY-RUN true, the ones that would go, and
+nothing is deleted."
+  (harness-session--tmp-sweep (harness-json-true-p dry-run)))
 
 (harness-defmethod session/list (&optional filter)
   "Return session plists matching FILTER, newest first.
@@ -1136,7 +1451,8 @@ nil (or a missing key) matches every session, as the other keys do."
     (sort out (lambda (a b) (> (plist-get a :updated) (plist-get b :updated))))))
 
 (harness-defmethod session/delete (id)
-  "Delete session ID and its files, its temporary directory included."
+  "Delete session ID and its files, its temporary directory included.
+The directory is gone at once; what was in it is deleted in the background."
   (let ((s (harness-session--get id)))
     (harness-emit 'session/deleted id (harness-session-plist s))
     (remhash id harness-sessions)
@@ -3200,6 +3516,11 @@ After that, a budget a session has was given to it, and stays."
   "Write every session record, as Emacs exits."
   (harness-session-flush))
 
+(defun harness-session--shutdown ()
+  "Stop the module: write every session record, and stop sweeping."
+  (harness-session--tmp-disarm)
+  (harness-session-flush))
+
 (defun harness-session--on-models-updated (&rest _)
   "Announce the sessions whose context window changed with the model catalogue."
   (let (moved)
@@ -3214,10 +3535,12 @@ After that, a budget a session has was given to it, and stays."
 Load the saved sessions, drop the copies of the Budget setting they
 hold, follow the updates of the model catalogue, hold every session to
 the policy after a reload, make the move a session waits to make once
-its turn ends, and write every record when Emacs exits.  A reload loads
-no session: the sessions are in memory already, and loading would
-settle the turns it finds running and make the moves waiting for them,
-while these turns run on in this process."
+its turn ends, sweep the temporary directories of the sessions that are
+over (`harness-session--tmp-sweep') soon and then every half hour, and
+write every record when Emacs exits.  A reload loads no session: the
+sessions are in memory already, and loading would settle the turns it
+finds running and make the moves waiting for them, while these turns
+run on in this process."
   (unless (harness-module-ready-p 'session)
     (harness-session--load-all))
   (harness-session--drop-budget-copies)
@@ -3225,6 +3548,7 @@ while these turns run on in this process."
   (harness-on 'harness/reloaded #'harness-session--on-reloaded)
   ;; A session that asked to move during a turn moves when it ends.
   (harness-on 'agent/turn-ended #'harness-session--apply-pending-move)
+  (harness-session--tmp-arm)
   (add-hook 'kill-emacs-hook #'harness-session--on-kill-emacs))
 
 ;; The context-window slot of sessions loaded by an earlier version of
@@ -3259,7 +3583,7 @@ while these turns run on in this process."
   :doc "Session records, conversation DAG, queue and pending requests."
   :requires '(store project)
   :init #'harness-session--init
-  :shutdown #'harness-session-flush)
+  :shutdown #'harness-session--shutdown)
 
 (provide 'harness-session)
 ;;; harness-session.el ends here

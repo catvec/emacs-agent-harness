@@ -1246,7 +1246,8 @@ See docs/configuration-audit.md for the rule and the audit behind it.
   layout before `.worktrees`), the checkout beside it says
   (`harness-files-owning-checkout`); any other directory is its own.  A
   scratch directory, one in a session's temporary directory
-  (`harness-UID/ID` where temporary files go: `harness-files-scratch-owner`),
+  (`harness-UID/ID` where the sessions' temporary directories go:
+  `harness-files-scratch-owner`),
   is no checkout: an agent made it for the session of that id, say as
   the working directory of a sub-agent, so its work counts for that
   session's project, followed through scratch directories of scratch
@@ -1355,18 +1356,77 @@ redact).
   directory goes too).
 - `session/tmp-dir ID` → the session's own temporary directory, made if
   missing, or nil.  Every local session but an internal one has one:
-  `harness-UID/ID/` in `temporary-file-directory` (`/tmp/harness-1000/ID/`;
-  the internal `harness-session--tmp-root` moves the root, which the
+  `harness-UID/ID/` in the directory `harness-session-tmp-directory`
+  chooses (`/var/tmp/harness-1000/ID/`; see below for what nil picks; the
+  internal `harness-session--tmp-root` moves the whole root, which the
   tests do).  It is made with the session (mode 700, as is the root),
-  made again whenever it is asked for and missing (a reboot empties
-  /tmp), and deleted with the session.  Being made when asked for is the
-  point: callers ask right before they rely on it.  /tmp is shared, so
-  only a real directory of the user's own, in a root of the user's own,
-  is handed out; a symbolic link or somebody else's directory gives nil
-  and one warning in the log.  Remote sessions have none (nothing is
-  made on their host).  The perms jail lists it (source `tmp`), bash
-  binds it writable in the sandbox, and the system prompt and
-  `session_info` name it.
+  made again whenever it is asked for and missing, and deleted with the
+  session or once the session is over (below).  Being made when asked
+  for is the point: callers ask right before they rely on it.  The
+  temporary directory is shared, so only a real directory of the user's
+  own, in a root of the user's own, is handed out; a symbolic link or
+  somebody else's directory gives nil and one warning in the log.
+  Remote sessions have none (nothing is made on their host).  The perms
+  jail lists it (source `tmp`), bash binds it writable in the sandbox,
+  and the system prompt and `session_info` name it.
+- Where the sessions' temporary directories go.  `/tmp` is a RAM disk
+  on many systems (a tmpfs, often with a quota), and what agents leave
+  there -- Go and Flutter caches of their builds above all -- ate the
+  memory of the machine, tens of GB, until somebody deleted it by hand.
+  So the root, `harness-UID` (`harness-session-tmp-root`), is made in
+  `harness-session--tmp-base`: the option `harness-session-tmp-directory`
+  when it names a directory; else `temporary-file-directory` when
+  something other than the stock `/tmp/` chose it (`TMPDIR`, a setting
+  of the user's, macOS's per-user directory); else `/var/tmp/`
+  (`harness-session--disk-tmp`) when that is a directory to write in,
+  which is on the disk and which `systemd-tmpfiles` ages out by itself
+  (30 days); else `/tmp/` after all.  Naming `/tmp` as the option puts
+  them in RAM again.  `harness-session-tmp-roots` lists the root in use
+  and the one earlier harnesses used in `temporary-file-directory`
+  (nothing else when the tests set the root): deletion, the sweep below
+  and the redaction of secrets (`harness-redact--stage-temp`) look in
+  both, so what an older harness left in `/tmp` is not forgotten.
+  Nothing moves between them: a session asked for its directory gets
+  one in the root in use.
+- Cleaning up.  Nobody is to delete these by hand: the harness deletes
+  the temporary directory of a session that is over.  Over
+  (`harness-session--tmp-finished-p`) means not running and not blocked,
+  and: the session of a task, or a sub-agent of one (followed up the
+  `:parent-id`s of sub-agents, `harness-session--family-task`), when the
+  task is in the done column (`task/for-session`, a method of the tasks
+  module, which the session module does not require); any other session
+  when it is closed (`inactive`).  An open conversation, a task in
+  review (its evidence images are files in the directory), a pending one
+  and the rest keep theirs.  A session over also has to have been so for
+  `harness-session-tmp-retention-days` (an option, default 1; nil never
+  deletes but with the session, 0 at the next sweep): since
+  `harness-session--tmp-over-since`, the latest of its `:updated` and,
+  for a task's, the task's `:finished` and `:verified-at`, so that a task
+  that waited a week in review keeps its screenshots for the retention
+  after the user accepted it, not from the week before.
+  `harness-session--tmp-sweep` (the method
+  `session/tmp-sweep &optional dry-run`, which returns `(:id :dir)`
+  plists, the ones gone, or with a dry run the ones that would go) runs
+  on a timer: `harness-session--tmp-sweep-delay` (120 s; nil sets no
+  timer, as the tests have it) after the module starts, then every
+  `harness-session--tmp-sweep-interval` (30 minutes), and stops with the
+  module.  It only looks at the directories named after the sessions
+  *this harness has*, in its roots, and that are real directories of the
+  user's own in a root of the user's own.  The root is shared with the
+  user's other harnesses (a `scripts/dev.sh` instance has a state of its
+  own and sessions of its own, in the same `/var/tmp/harness-UID`), so a
+  directory no session of its own names -- a stranger's, or `.dev` --
+  is never touched, and the system's own cleaning is what gets those.
+  Deleting is by rename and `rm`: the directory is renamed to
+  `.trash-ID-RANDOM` in its root, so that its name is free at once (a
+  session asking for its directory while the old one goes gets a new,
+  empty one), and `rm -rf` deletes it in the background
+  (`harness-session--remove-tree`; a copy of the Flutter SDK takes tens
+  of seconds, in which the harness process would answer no one).  Links
+  are removed, never followed.  A `.trash-*` still there an hour later,
+  a crash or a failed `rm` having left it, is deleted by the next sweep
+  (`harness-session--tmp-purge-trash`).  `session/delete` deletes the
+  same way, in both roots.
 - `session/update ID &rest PLIST` — settings and name; appends a `hint`
   node ("model → …") and persists the setting through `config/set` when
   `:persist t`.  `:context-window N` sets the session's own window, nil
@@ -8762,7 +8822,7 @@ so they all reach one daemon and the path stays far below the limit of
 a socket's address (104 bytes on macOS, 108 on Linux):
 `HARNESS_DEV_SOCKET_DIR` is the `.dev` directory beside the sessions'
 temporary directories (`harness-tools-dev-socket-dir`:
-/tmp/harness-UID/.dev/, made 0700).  When the sessions' root is not a
+/var/tmp/harness-UID/.dev/, made 0700).  When the sessions' root is not a
 directory of the user's own, it is refused with a warning, dev.sh
 gets the variable empty and the socket falls back to the checkout's
 `scripts/.dev/run`.  An agent's sandboxed shell sees its own temporary

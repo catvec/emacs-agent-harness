@@ -1334,20 +1334,26 @@ that is not under it is not touched."
 
 ;;;; Session temp files
 
-(defun harness-redact--session-temp-dir (sid)
-  "Return the temporary directory of session SID to look in, or nil.
+(defun harness-redact--session-temp-dirs (sid)
+  "Return the temporary directories of session SID to look in.
 That is harness-UID/ID in the temporary directory, where the tools of the
-session are told to put their scratch files (`session/tmp-dir').  It is
-looked in only when it is there already -- nothing is made for a look --
-and is a directory of the user's own, not a link."
-  (when (and (fboundp 'harness-session-tmp-root)
+session are told to put their scratch files (`session/tmp-dir'), and in
+the one earlier harnesses used (`harness-session-tmp-roots'): what they
+left there holds a secret as well as what is left here, until its
+session is over.  A directory is looked in only when it is there
+already -- nothing is made for a look -- and is a directory of the user's
+own, not a link."
+  (when (and (fboundp 'harness-session-tmp-roots)
              (string-match-p "\\`[A-Za-z0-9_-]+\\'" sid))
-    (let* ((dir (expand-file-name sid (harness-session-tmp-root)))
-           (attrs (file-attributes dir 'integer)))
-      (and attrs
-           (eq t (file-attribute-type attrs))
-           (eql (file-attribute-user-id attrs) (user-uid))
-           (file-name-as-directory dir)))))
+    (delq nil
+          (mapcar (lambda (root)
+                    (let* ((dir (expand-file-name sid root))
+                           (attrs (file-attributes dir 'integer)))
+                      (and attrs
+                           (eq t (file-attribute-type attrs))
+                           (eql (file-attribute-user-id attrs) (user-uid))
+                           (file-name-as-directory dir))))
+                  (harness-session-tmp-roots)))))
 
 (defun harness-redact--stage-temp (run)
   "Take the secrets of RUN out of the temporary directories of its sessions.
@@ -1358,7 +1364,7 @@ the last minute, which a process may be writing, is left alone (`busy').
 Rewriting it by rename would leave that process writing into the old file."
   (let ((owners (make-hash-table :test 'equal)) (links 0) (unreadable nil))
     (dolist (sid (harness-redact-run-ids run))
-      (when-let* ((dir (harness-redact--session-temp-dir sid)))
+      (dolist (dir (harness-redact--session-temp-dirs sid))
         (pcase-let ((`(,files . ,bad) (harness-redact--walk dir)))
           (setq unreadable (append unreadable bad))
           (dolist (file files)

@@ -552,6 +552,42 @@ free slot, and the next one waits for it."
                     (plist-get (harness-tasks-test-task first) :finished)))
         (dolist (sid (list worker merger helper)) (harness-call 'session/set-status sid 'idle))))))
 
+(ert-deftest harness-tasks-sweep-deletes-the-temporary-directories-of-done-tasks-only ()
+  "The sweep of the sessions' temporary directories asks the board: the
+session of a task in the done column, and its sub-agents, are over and
+lose theirs; those of a task in review (its report shows the screenshots
+in them), at work or waiting, and a sub-agent of such a task, keep
+theirs, however long they have been quiet."
+  (harness-tasks-test-with
+    (let* ((harness-session--tmp-root (expand-file-name "root/" (harness-test-temp-dir)))
+           (make (lambda (&rest opts)
+                   (plist-get (apply #'harness-call 'session/create :cwd dir :model "demo:scripted" opts)
+                              :id)))
+           (done (funcall make))
+           (review (funcall make))
+           (active (funcall make))
+           (waiting (funcall make))
+           (done-kid (funcall make :kind 'subagent :parent-id done))
+           (review-kid (funcall make :kind 'subagent :parent-id review))
+           (all nil))
+      (harness-tasks--put (harness-tasks-test--record 'done done))
+      (harness-tasks--put (harness-tasks-test--record 'review review))
+      (harness-tasks--put (harness-tasks-test--record 'active active))
+      (harness-tasks--put (harness-tasks-test--record 'pending waiting))
+      (setq all (list done review active waiting done-kid review-kid))
+      (dolist (id all)
+        (harness-call 'session/deactivate id)
+        (aset (harness-session--get id) (cl-struct-slot-offset 'harness-session 'updated)
+              (- (float-time) (* 30 86400))))
+      (should (equal (sort (list done done-kid) #'string<)
+                     (sort (mapcar (lambda (f) (plist-get f :id)) (harness-call 'session/tmp-sweep)) #'string<)))
+      (dolist (id (list done done-kid))
+        (should-not (file-exists-p (expand-file-name id harness-session--tmp-root))))
+      (dolist (id (list review active waiting review-kid))
+        (should (file-directory-p (expand-file-name id harness-session--tmp-root))))
+      (harness-test-wait (lambda () (not (directory-files harness-session--tmp-root nil "\\`\\.trash-")))
+                         10 "the deletions in the background to finish"))))
+
 (ert-deftest harness-tasks-sub-agent-takes-no-slot ()
   "A task's sub-agent at work takes no slot: the task holds one, through
 its own session, which waits on the sub-agent.  With two slots, while a

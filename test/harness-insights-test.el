@@ -35,6 +35,7 @@
 (declare-function harness-insights--permissions-name "harness-insights")
 (declare-function harness-insights--parse-narrative "harness-insights")
 (declare-function harness-insights--streaks "harness-insights")
+(declare-function harness-insights--run-scan "harness-insights")
 
 (defmacro harness-insights-test-with (&rest body)
   "Load the state layer with the demo provider, usage, tasks and insights; run BODY."
@@ -486,6 +487,24 @@ time, merges that met a conflict, and the tasks worth a look."
   "Ask for the summary of the fixture's week with OPTS added; return it."
   (harness-test-await (apply #'harness-call 'insights/narrative :since (harness-insights-test-since) :period '7d opts)
                       60))
+
+(ert-deftest harness-insights-scan-leaves-no-directory-when-it-cannot-write-its-input ()
+  "The directory the scan makes for its input and output is deleted, when
+the input cannot be written to it -- the temporary directory is full, as
+a RAM disk with a quota gets."
+  (harness-insights-test-with
+    (let ((temporary-file-directory (file-name-as-directory (make-temp-file "harness-insights-test-" t)))
+          (real (symbol-function 'write-region)))
+      (unwind-protect
+          (cl-letf (((symbol-function 'write-region)
+                     (lambda (start end file &rest args)
+                       (if (string-prefix-p (expand-file-name temporary-file-directory)
+                                            (expand-file-name file))
+                           (signal 'file-error (list "Writing" "Disk quota exceeded" file))
+                         (apply real start end file args)))))
+            (should-error (harness-insights--run-scan (list :since 0)) :type 'file-error)
+            (should-not (directory-files temporary-file-directory nil "\\`[^.]")))
+        (delete-directory temporary-file-directory t)))))
 
 (ert-deftest harness-insights-writes-and-keeps-a-summary ()
   "The configured model writes the summary from the figures; it is kept

@@ -1127,7 +1127,11 @@ otherwise."
          (archive (expand-file-name "update.tar" tmp))
          (emacs (if (boundp 'harness-server-emacs) harness-server-emacs
                   (expand-file-name invocation-name invocation-directory))))
-    (make-directory tree)
+    ;; A full /tmp, say, must not leave the directory behind.
+    (condition-case err
+        (make-directory tree)
+      (error (ignore-errors (delete-directory tmp t))
+             (signal (car err) (cdr err))))
     (harness-then
      (thread-first
        (harness--git dir "archive" "--format=tar" "-o" archive rev)

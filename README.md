@@ -1058,15 +1058,32 @@ says how many lines it has written and shows the latest one.
 
 A session may use its working directory, its worktree, the directories
 in `harness-allowed-directories` and the ones you grant it. It also has
-a temporary directory of its own, `/tmp/harness-UID/ID/` (under
-`temporary-file-directory`), which needs no grant. The agent keeps
-scratch files, logs and screenshots there. Its shell commands can write
-there even in the sandbox, where the rest of `/tmp` is private to each
-command. The directory is made with the session, made again if it went
-missing, and deleted with the session. `C-c h d` lists all of these
-directories, in the session's access view (see [A session's
+a temporary directory of its own, `/var/tmp/harness-UID/ID/`, which
+needs no grant. The agent keeps scratch files, logs and screenshots
+there. Its shell commands can write there even in the sandbox, where
+the rest of `/tmp` is private to each command. The directory is made
+with the session and made again if it went missing. `C-c h d` lists all
+of these directories, in the session's access view (see [A session's
 access](#a-sessions-access)). Remote sessions have no temporary
 directory.
+
+The directories are on the disk, not in `/tmp`, which is a RAM disk on
+many systems, where the Go and Flutter caches of a few agents' builds
+fill the memory of the machine. `harness-session-tmp-directory` moves
+them: unset, they go to `/var/tmp` (or to `TMPDIR`, when you set it);
+name `/tmp` to have them in RAM again. The system cleans `/var/tmp` out
+too, but slowly (30 days, on systemd), so the harness cleans its
+directories out itself and they do not pile up: a day after a session
+is over -- its task is done (and so are its sub-agents), or, with no
+task, it is closed -- its directory is deleted, in the background. A
+session still at work, an open conversation, and a task in review (the
+screenshots of its report are files there) keep theirs, however long it
+takes. `harness-session-tmp-retention-days` sets the day (0 deletes at
+the next sweep, which runs every half hour; nil only when the session
+is deleted); the method `session/tmp-sweep` sweeps now, and with a dry
+run says what would go. Only the directories of sessions this harness has
+are touched: the instance `scripts/dev.sh` starts shares the directory
+and keeps to its own.
 
 In the sandbox a shell command sees the system directories and, of
 yours, only these directories, each at its own path: a directory you

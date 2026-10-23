@@ -41,7 +41,7 @@
 ;;
 ;; Sockets.  An instance's emacsclient socket is a file named after its
 ;; checkout in `harness-tools-dev-socket-dir': .dev in the directory
-;; holding every session's temporary directory, /tmp/harness-UID/.dev/
+;; holding every session's temporary directory, /var/tmp/harness-UID/.dev/
 ;; say.  Whoever opens a checkout -- an agent, a sub-agent of it, the
 ;; board -- finds its instance there, and the path is short, as a
 ;; socket's address must be.  An agent's shell runs in the sandbox,
@@ -261,9 +261,9 @@ one (see `harness-tools-dev--link')."
 It is made private to the user (mode 700), as is the root holding it
 when that is missing too: Emacs's server refuses a socket directory
 others can reach.  Nil, with a warning in the log, when it cannot be
-made, or the root is not a directory of the user's own (/tmp is
-shared): an instance then has its socket in Emacs's default directory,
-which the sandbox does not show."
+made, or the root is not a directory of the user's own (the temporary
+directory is shared): an instance then has its socket in Emacs's
+default directory, which the sandbox does not show."
   (let* ((dir (harness-tools-dev-socket-dir))
          (root (file-name-directory (directory-file-name dir))))
     (condition-case err

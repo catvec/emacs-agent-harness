@@ -298,6 +298,20 @@ ones: `harness-log-level`, `harness-naming-auto`,
 above; the 12 startup options listed in *Result* are the other global
 ones.)
 
+Two options were added for the sessions' temporary directories, which
+used to be left to `TMPDIR`: where they go (`harness-session-tmp-directory`)
+and how long a finished session's is kept
+(`harness-session-tmp-retention-days`).  Both are choices two people make
+differently and the implementation cannot make for them: `/tmp` is a RAM
+disk on many systems, which is quick and eats the memory agents' build
+caches grow into, and /var/tmp is on the disk; and a day after a session
+is over suits one person, a week another.  They sit under Advanced, in
+the session module.  Everything else about it is a constant or an
+internal variable: the disk's temporary directory
+(`harness-session--disk-tmp`), when the first sweep runs and how often
+(`harness-session--tmp-sweep-delay`, `-interval`), and what the sweep
+counts as a finished session (`harness-session--tmp-finished-p`).
+
 Three experimental options were added later, each a choice two people
 could make differently and none the implementation's to decide: whether
 the CLI runs the harness's usual tools with its own

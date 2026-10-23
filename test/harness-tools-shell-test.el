@@ -891,6 +891,27 @@ directory goes with it."
         (harness-sandbox-detect)
         (delete-directory temporary-file-directory t)))))
 
+(ert-deftest harness-tools-shell-elisp-leaves-no-directory-when-its-setup-fails ()
+  "A call whose own directory cannot be filled -- the temporary directory
+is full, as a RAM disk with a quota gets -- is an error, and the
+directory it made is not left behind."
+  (harness-tools-shell-test--setup)
+  (harness-tools-shell-test-in-dir
+    (let ((temporary-file-directory (file-name-as-directory (make-temp-file "harness-elisp-test-" t)))
+          (real (symbol-function 'write-region)))
+      (unwind-protect
+          (cl-letf (((symbol-function 'write-region)
+                     (lambda (start end file &rest args)
+                       (if (string-prefix-p (expand-file-name temporary-file-directory)
+                                            (expand-file-name file))
+                           (signal 'file-error (list "Writing" "Disk quota exceeded" file))
+                         (apply real start end file args)))))
+            (let ((r (harness-tools-shell-test--call "elisp" :code "(+ 1 2)")))
+              (should (plist-get r :is-error))
+              (should (string-search "Disk quota exceeded" (plist-get r :content))))
+            (should-not (directory-files temporary-file-directory nil "\\`[^.]")))
+        (delete-directory temporary-file-directory t)))))
+
 (ert-deftest harness-tools-shell-elisp-sandbox-required-without-the-module ()
   "A required sandbox, as a policy sets it, refuses an evaluation when the
 sandbox module is not loaded, rather than run the background Emacs
