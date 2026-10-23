@@ -33,6 +33,15 @@
 ;; library keeps the parent, and `harness-files-project-root' asks for
 ;; it.
 ;;
+;; Live.  While a window shows the list it follows the sessions, the
+;; worktrees and the merge queue.  The session cache changes many times
+;; a second while agents work, mostly in ways no row shows -- tokens,
+;; costs, the harness's own records of its model calls -- so the list is
+;; drawn again only when a row's sessions cell reads otherwise.  A list
+;; no window shows is left alone altogether, and catches up when a
+;; window shows it again: redrawing a list nobody sees, for each change
+;; of the cache, kept Emacs busy.
+;;
 ;; Everything else goes through ACP (`_harness/worktree/*',
 ;; `_harness/merge/*', `session/new', `_harness/session/fork').
 
@@ -88,6 +97,11 @@
 (defvar-local harness-ui-worktree--status-queue nil "Paths whose status is not fetched yet.")
 (defvar-local harness-ui-worktree--status-in-flight 0 "Status requests not answered yet.")
 (defvar-local harness-ui-worktree--status-generation 0 "Bumped per reload; stale status answers are ignored.")
+(defvar-local harness-ui-worktree--stale nil
+  "What the list missed while no window showed it: nil or a kind.
+A kind is one of `harness-ui-worktree--kinds'.  `harness-ui-worktree--update'
+leaves a list nobody looks at alone and notes here the most it would have
+done; `harness-ui-worktree--shown' does it once a window shows the list.")
 
 (defconst harness-ui-worktree--status-concurrency 6
   "Most worktree status requests in flight at once, per list buffer.")
@@ -98,18 +112,76 @@
   "Normalise PATH for comparisons."
   (file-name-as-directory (expand-file-name path)))
 
+;; Two spellings of one place -- git lists the real path of a worktree, a
+;; session may have started in it through a link -- are known for one by
+;; their true names.  Finding one walks the whole path and costs about a
+;; tenth of a millisecond, and this runs on the UI thread: the sessions
+;; column used to ask for two of them per session per row on every redraw,
+;; 1,300 sessions and 4 rows being 1.5 s in which Emacs did nothing else,
+;; again and again, as sessions changed.  So each directory's is found
+;; once, and a redraw looks the sessions up (`harness-ui-worktree--session-index').
+
+(defconst harness-ui-worktree--true-names-limit 4096
+  "Most directories `harness-ui-worktree--true-names' holds before starting over.")
+
+(defvar harness-ui-worktree--true-names (make-hash-table :test 'equal)
+  "Memo of `harness-ui-worktree--true': a directory's name -> its true name.
+Emptied when the list is opened or refreshed by hand, so a link that
+changed is seen then.")
+
+(defun harness-ui-worktree--true (path)
+  "Return the place PATH names: its true name, as a directory name.
+Symbolic links are resolved, so that two spellings of one place are
+equal.  A remote name is returned as it is, and so is one that cannot be
+resolved: looking at a remote name would reach its host, from the UI
+thread (the worktree-assume library leaves them alone for the same
+reason).  The answer is remembered."
+  (let ((key (if (file-name-absolute-p path) path (harness-ui-worktree--dir path))))
+    (or (gethash key harness-ui-worktree--true-names)
+        (let* ((dir (harness-ui-worktree--dir path))
+               (true (if (file-remote-p dir)
+                         dir
+                       (or (ignore-errors (file-name-as-directory (file-truename dir))) dir))))
+          (when (> (hash-table-count harness-ui-worktree--true-names)
+                   harness-ui-worktree--true-names-limit)
+            (clrhash harness-ui-worktree--true-names))
+          (puthash key true harness-ui-worktree--true-names)))))
+
 (defun harness-ui-worktree--same-p (a b)
   "Non-nil when directories A and B are the same place."
-  (and a b (or (string= (harness-ui-worktree--dir a) (harness-ui-worktree--dir b))
-               (ignore-errors (string= (file-truename (harness-ui-worktree--dir a))
-                                       (file-truename (harness-ui-worktree--dir b)))))))
+  (and (stringp a) (stringp b)
+       (string= (harness-ui-worktree--true a) (harness-ui-worktree--true b))))
+
+(defun harness-ui-worktree--session-dir (session)
+  "Return the directory SESSION lives in: its worktree, else its cwd.
+Nil when it names none."
+  (let ((dir (or (plist-get session :worktree) (plist-get session :cwd))))
+    (and (stringp dir) (not (string-empty-p dir)) dir)))
+
+(defun harness-ui-worktree--session-index ()
+  "Return the user's cached sessions by the place they live in.
+A hash table from the true name of a directory (`harness-ui-worktree--true')
+to the sessions that live there, newest first.  The internal sessions are
+the harness's own records of its model calls, and are left out.  One pass
+over the sessions, however many worktrees ask."
+  (let ((index (make-hash-table :test 'equal)))
+    (dolist (session (harness-ui-user-sessions))
+      (when-let* ((dir (harness-ui-worktree--session-dir session)))
+        (push session (gethash (harness-ui-worktree--true dir) index))))
+    ;; Pushed newest first, so each list came out oldest first.
+    (maphash (lambda (place sessions) (puthash place (nreverse sessions) index)) index)
+    index))
+
+(defvar harness-ui-worktree--index nil
+  "The session index while `harness-ui-worktree--refresh-entries' builds the rows.
+Nil otherwise: `harness-ui-worktree--sessions-in' then builds its own.")
 
 (defun harness-ui-worktree--sessions-in (path)
-  "Return cached sessions living in PATH: by `:worktree', else by `:cwd'."
-  (harness-ui-user-sessions (lambda (s)
-                              (let ((wt (plist-get s :worktree)))
-                                (if wt (harness-ui-worktree--same-p wt path)
-                                  (harness-ui-worktree--same-p (plist-get s :cwd) path))))))
+  "Return cached sessions living in PATH: by `:worktree', else by `:cwd'.
+Newest first, the internal ones left out."
+  (and (stringp path)
+       (gethash (harness-ui-worktree--true path)
+                (or harness-ui-worktree--index (harness-ui-worktree--session-index)))))
 
 (defun harness-ui-worktree--sessions-label (path)
   "Return a short description of the sessions using PATH."
@@ -256,8 +328,11 @@ for a remote repository, which the library leaves alone."
      "")))
 
 (defun harness-ui-worktree--refresh-entries ()
-  "Rebuild `tabulated-list-entries' from the cached worktrees."
-  (setq tabulated-list-entries (mapcar #'harness-ui-worktree--entry harness-ui-worktree--worktrees))
+  "Rebuild `tabulated-list-entries' from the cached worktrees.
+The sessions are sorted into their places once, not looked for again
+for every row."
+  (let ((harness-ui-worktree--index (harness-ui-worktree--session-index)))
+    (setq tabulated-list-entries (mapcar #'harness-ui-worktree--entry harness-ui-worktree--worktrees)))
   (setq mode-line-process (harness-ui-worktree--mode-line)))
 
 (defun harness-ui-worktree--redraw ()
@@ -322,7 +397,9 @@ dropped: a reload clears the cache, so it would carry stale data."
 (defun harness-ui-worktree--load (buffer)
   "Fetch the worktree list for BUFFER's root, then each row's status."
   (with-current-buffer buffer
-    (setq harness-ui-worktree--loading t harness-ui-worktree--error nil)
+    ;; Everything is fetched again: nothing the list missed is left to catch up on.
+    (setq harness-ui-worktree--loading t harness-ui-worktree--error nil
+          harness-ui-worktree--stale nil)
     (harness-ui-worktree--redraw)
     (let ((root harness-ui-worktree--root))
       (harness-ui-call
@@ -384,6 +461,7 @@ dropped: a reload clears the cache, so it would carry stale data."
   (setq tabulated-list-padding 1)
   (setq harness-ui-worktree--status (make-hash-table :test 'equal))
   (add-hook 'tabulated-list-revert-hook #'harness-ui-worktree--refresh-entries nil t)
+  (add-hook 'window-buffer-change-functions #'harness-ui-worktree--shown nil t)
   (tabulated-list-init-header))
 
 ;; The list's keys in the harness menu, behind `.'.
@@ -411,6 +489,7 @@ dropped: a reload clears the cache, so it would carry stale data."
 (defun harness-worktrees (&optional root)
   "List the git worktrees of the repository at ROOT (default: this project)."
   (interactive)
+  (clrhash harness-ui-worktree--true-names)
   (let ((start (expand-file-name (or root (harness-ui--default-directory))))
         (buf (get-buffer-create harness-ui-worktree--buffer-name)))
     (with-current-buffer buf
@@ -438,6 +517,8 @@ dropped: a reload clears the cache, so it would carry stale data."
 (defun harness-ui-worktree-refresh ()
   "Reload the list."
   (interactive)
+  ;; By hand, so a link that changed since is looked at again.
+  (clrhash harness-ui-worktree--true-names)
   (harness-ui-worktree--load (current-buffer)))
 
 (defun harness-ui-worktree-dired ()
@@ -698,41 +779,119 @@ Every assumption that stands in this repository, as the rows show them."
                         assumptions ", "))
     (harness-ui-worktree--redraw)))
 
-(defun harness-ui-worktree--on-assumed (&rest _)
-  "Redraw the list after a worktree is assumed or reset, from wherever."
-  (when-let* ((buf (harness-ui-worktree--buffer)))
-    (with-current-buffer buf (harness-ui-worktree--redraw))))
-
 ;;;; Live refresh
+
+;; Only a list a window shows is kept up to date.  The session cache
+;; changes many times a second while agents work -- every model call the
+;; harness makes on its own is a session that comes and goes -- and each
+;; change used to redraw this list, shown or not, from a timer on the UI
+;; thread.  A list nobody looks at notes what it missed
+;; (`harness-ui-worktree--stale') and catches up when a window shows it.
 
 (defun harness-ui-worktree--buffer ()
   "Return the live worktree buffer, or nil."
   (let ((b (get-buffer harness-ui-worktree--buffer-name)))
     (and b (with-current-buffer b (derived-mode-p 'harness-ui-worktree-mode)) b)))
 
+(defconst harness-ui-worktree--kinds '(sessions redraw reload)
+  "What a list can need doing to it, the least first.
+`sessions' is a change of the session cache: the list is drawn again if
+a row's sessions cell reads otherwise now, and left as it is if not.
+`redraw' draws it again whatever it holds, and `reload' fetches the
+worktrees anew, which draws it as well.")
+
+(defun harness-ui-worktree--more (a b)
+  "Return the greater of the kinds A and B, nil being none."
+  (if (> (or (cl-position a harness-ui-worktree--kinds) -1)
+         (or (cl-position b harness-ui-worktree--kinds) -1))
+      a b))
+
+(defconst harness-ui-worktree--sessions-column 5
+  "Where the sessions cell is in an entry's vector (`harness-ui-worktree--entry').")
+
+(defun harness-ui-worktree--sessions-unchanged-p ()
+  "Non-nil when every row's sessions cell reads as drawing the list now would.
+Most changes of the session cache -- a session's tokens or cost, the
+harness's own records coming and going -- change no cell, and drawing
+the rows again costs a tenth of a second or more in a list of hundreds,
+which a repository with a worktree for each task has."
+  (and (consp tabulated-list-entries)
+       (= (length tabulated-list-entries) (length harness-ui-worktree--worktrees))
+       (let ((harness-ui-worktree--index (harness-ui-worktree--session-index)))
+         (cl-every (lambda (entry worktree)
+                     (let ((path (plist-get worktree :path)))
+                       (and (equal (car entry) path)
+                            (equal-including-properties
+                             (aref (cadr entry) harness-ui-worktree--sessions-column)
+                             (harness-ui-worktree--sessions-label path)))))
+                   tabulated-list-entries harness-ui-worktree--worktrees))))
+
+(defun harness-ui-worktree--update (buffer kind)
+  "Do for BUFFER now what KIND, one of `harness-ui-worktree--kinds', says.
+Unless no window shows BUFFER: it is left as it is, and
+`harness-ui-worktree--stale' says the most it missed."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (cond
+       ((not (get-buffer-window buffer t))
+        (setq harness-ui-worktree--stale
+              (harness-ui-worktree--more harness-ui-worktree--stale kind)))
+       (t
+        (setq harness-ui-worktree--stale nil)
+        (pcase kind
+          ('reload (harness-ui-worktree--load buffer))
+          ('redraw (harness-ui-worktree--redraw))
+          (_ (unless (harness-ui-worktree--sessions-unchanged-p)
+               (harness-ui-worktree--redraw)))))))))
+
+(defun harness-ui-worktree--update-soon (buffer kind)
+  "Do `harness-ui-worktree--update' of BUFFER, for KIND, once changes settle.
+Settled is 0.2 seconds after the last change, 0.3 for a reload.  With no
+window showing BUFFER it is at once, which only notes what BUFFER
+missed: no timer is started for a list nobody looks at."
+  (if (get-buffer-window buffer t)
+      (pcase-let ((`(,key ,delay)
+                   (pcase kind
+                     ('reload '(harness-ui-worktree-reload 0.3))
+                     ('redraw '(harness-ui-worktree-redraw 0.2))
+                     (_ '(harness-ui-worktree-sessions 0.2)))))
+        (harness-debounce key delay #'harness-ui-worktree--update buffer kind))
+    (harness-ui-worktree--update buffer kind)))
+
+(defun harness-ui-worktree--shown (&rest _)
+  "Bring the list up to date when a window shows it after changes it missed.
+On `window-buffer-change-functions', buffer-locally.  Redisplay runs
+this, so the work waits for a timer."
+  (when harness-ui-worktree--stale
+    (harness-ui-worktree--update-soon (current-buffer) harness-ui-worktree--stale)))
+
+(defun harness-ui-worktree--on-assumed (&rest _)
+  "Redraw the list after a worktree is assumed or reset, from wherever."
+  (when-let* ((buf (harness-ui-worktree--buffer)))
+    (harness-ui-worktree--update buf 'redraw)))
+
 (defun harness-ui-worktree--on-event (event args)
   "Reload after a worktree or merge EVENT with ARGS."
   (when-let* ((buf (harness-ui-worktree--buffer)))
     (cond
      ((string-prefix-p "worktree/" event)
-      (harness-debounce 'harness-ui-worktree-reload 0.3 (lambda () (when (buffer-live-p buf) (harness-ui-worktree--load buf)))))
+      (harness-ui-worktree--update-soon buf 'reload))
      ((string-prefix-p "merge/" event)
       (with-current-buffer buf
         (when-let* ((parent (or (and harness-ui-worktree--queue (car harness-ui-worktree--queue))
                                 (nth 1 args))))
-          (harness-ui-worktree--show-queue parent))
-        (harness-debounce 'harness-ui-worktree-reload 0.3 (lambda () (when (buffer-live-p buf) (harness-ui-worktree--load buf)))))))))
+          (harness-ui-worktree--show-queue parent)))
+      (harness-ui-worktree--update-soon buf 'reload)))))
 
 (defun harness-ui-worktree--on-sessions-changed ()
-  "Redraw the sessions column when the session cache changes."
+  "Redraw the sessions column when the session cache changes it."
   (when-let* ((buf (harness-ui-worktree--buffer)))
-    (harness-debounce 'harness-ui-worktree-sessions 0.2
-                      (lambda () (when (buffer-live-p buf) (with-current-buffer buf (harness-ui-worktree--redraw)))))))
+    (harness-ui-worktree--update-soon buf 'sessions)))
 
 (defun harness-ui-worktree--redraw-all ()
   "Rebuild the buffer after a reload or reconnect."
   (when-let* ((buf (harness-ui-worktree--buffer)))
-    (harness-ui-worktree--load buf)))
+    (harness-ui-worktree--update buf 'reload)))
 
 ;;;; Module
 
@@ -742,6 +901,11 @@ Every assumption that stands in this repository, as the rows show them."
   (add-hook 'harness-ui-sessions-changed-hook #'harness-ui-worktree--on-sessions-changed)
   (add-hook 'harness-ui-redraw-hook #'harness-ui-worktree--redraw-all)
   (add-hook 'worktree-assume-change-functions #'harness-ui-worktree--on-assumed)
+  ;; A list that exists already, when the harness reloads, was started
+  ;; by a mode function that did not know this hook.
+  (when-let* ((buf (harness-ui-worktree--buffer)))
+    (with-current-buffer buf
+      (add-hook 'window-buffer-change-functions #'harness-ui-worktree--shown nil t)))
   (define-key harness-ui-map (kbd "w") #'harness-worktrees))
 
 (harness-define-module 'ui-worktree

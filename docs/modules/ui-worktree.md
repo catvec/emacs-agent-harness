@@ -43,6 +43,15 @@ list, the task board, settings -- still sees the main checkout: the
 library keeps the parent, and `harness-files-project-root` asks for
 it.
 
+Live.  While a window shows the list it follows the sessions, the
+worktrees and the merge queue.  The session cache changes many times
+a second while agents work, mostly in ways no row shows -- tokens,
+costs, the harness's own records of its model calls -- so the list is
+drawn again only when a row's sessions cell reads otherwise.  A list
+no window shows is left alone altogether, and catches up when a
+window shows it again: redrawing a list nobody sees, for each change
+of the cache, kept Emacs busy.
+
 Everything else goes through ACP (`_harness/worktree/*`,
 `_harness/merge/*`, `session/new`, `_harness/session/fork`).
 
@@ -95,5 +104,6 @@ Everything else goes through ACP (`_harness/worktree/*`,
 - `harness-ui-redraw-hook` → `harness-ui-worktree--redraw-all`
 - `harness-ui-sessions-changed-hook` → `harness-ui-worktree--on-sessions-changed`
 - `tabulated-list-revert-hook` → `harness-ui-worktree--refresh-entries`
+- `window-buffer-change-functions` → `harness-ui-worktree--shown`
 - `worktree-assume-change-functions` → `harness-ui-worktree--on-assumed`
 
