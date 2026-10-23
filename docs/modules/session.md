@@ -154,6 +154,7 @@ take it in.  The session list hides internal sessions unless asked.
 - `session/nodes` (id &optional opts) — Return the transcript nodes of session ID, oldest first.
 - `session/pending` (id) — Return the pending requests of session ID.
 - `session/pending-add` (id request) — Register a blocking REQUEST (:kind permission|question :payload …) on ID.
+- `session/pending-dismiss` (id &optional reason calls-only) — Dismiss the requests of session ID that no one will answer; return how many.
 - `session/pending-resolve` (id pid answer) — Remove pending request PID from session ID with ANSWER; return the item or nil.
 - `session/pending-update` (id pid changes) — Merge CHANGES into the payload of pending request PID of session ID.
 - `session/provider-continuation` (id &optional node-id) — Return how the provider conversation of session ID goes on from NODE-ID.
@@ -230,12 +231,14 @@ take it in.  The session list hides internal sessions unless asked.
 - `agent/running` ([agent](agent.md)), when it is loaded
 - `config/get` ([config](config.md)), when it is loaded
 - `config/set` ([config](config.md)), when it is loaded
+- `permission/answer` ([perms](perms.md)), when it is loaded
 - `project/root` ([project](project.md))
 - `provider/cache-ttl` ([provider](provider.md)), when it is loaded
 - `provider/capabilities` ([provider](provider.md)), when it is loaded
 - `provider/fork` ([provider](provider.md)), when it is loaded
 - `provider/model` ([provider](provider.md)), when it is loaded
 - `provider/tier-model` ([provider](provider.md)), when it is loaded
+- `question/cancel` ([tools-question](tools-question.md)), when it is loaded
 - `store/append` ([store](store.md))
 - `store/delete` ([store](store.md))
 - `store/list` ([store](store.md))

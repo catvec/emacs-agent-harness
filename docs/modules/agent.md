@@ -138,6 +138,7 @@ The loop is entirely event driven: nothing here waits.
 - `session/messages` ([session](session.md))
 - `session/node` ([session](session.md))
 - `session/nodes` ([session](session.md))
+- `session/pending-dismiss` ([session](session.md))
 - `session/provider-continuation` ([session](session.md))
 - `session/provider-state` ([session](session.md))
 - `session/queue` ([session](session.md))

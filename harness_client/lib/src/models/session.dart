@@ -177,6 +177,26 @@ class SessionSummary {
         extra: {...extra, 'non-interactive': on, 'nonInteractive': on},
       );
 
+  /// Whether the record this was made from says anything of [key], a list
+  /// the harness keeps for a session (`pending`, `queue`, `todos`).  A plain
+  /// ACP listing says nothing of them; a session record from the harness
+  /// always does, and an empty list in it is an answer: nothing is waited
+  /// for.
+  bool says(String key) => extra.containsKey(key);
+
+  /// Whether the record says what state the session is in.  [status] is
+  /// never null -- a record that says nothing of it reads `inactive` --
+  /// which is no word on the session to bring what is known up to date with.
+  bool get saysStatus =>
+      says('status') || asMap(extra['_meta']).containsKey('status');
+
+  /// This record brought up to date by [newer], a later reading of the same
+  /// session: what [newer] says replaces what this said, and what it leaves
+  /// out stays.  A list it carries replaces this one even when it is empty
+  /// (a question answered meanwhile is no longer pending: keeping the old
+  /// list would show it for ever), and one it does not carry stays.
+  ///
+  /// So `old.merge(new)`: the argument is the later reading.
   SessionSummary merge(SessionSummary newer) {
     if (newer.id != id) return this;
     return SessionSummary(
@@ -186,7 +206,7 @@ class SessionSummary {
       project: newer.project ?? project,
       model: newer.model ?? model,
       kind: newer.kind ?? kind,
-      status: newer.status ?? status,
+      status: newer.saysStatus ? newer.status : status,
       parentId: newer.parentId ?? parentId,
       updatedAt: newer.updatedAt ?? updatedAt,
       createdAt: newer.createdAt ?? createdAt,
@@ -194,10 +214,10 @@ class SessionSummary {
       usage: newer.usage ?? usage,
       contextWindow: newer.contextWindow ?? contextWindow,
       permissionMode: newer.permissionMode ?? permissionMode,
-      todos: newer.todos.isNotEmpty ? newer.todos : todos,
-      pending: newer.pending.isNotEmpty ? newer.pending : pending,
-      queue: newer.queue.isNotEmpty ? newer.queue : queue,
-      steering: newer.steering.isNotEmpty ? newer.steering : steering,
+      todos: newer.says('todos') ? newer.todos : todos,
+      pending: newer.says('pending') ? newer.pending : pending,
+      queue: newer.says('queue') ? newer.queue : queue,
+      steering: newer.says('steering') ? newer.steering : steering,
       worktree: newer.worktree ?? worktree,
       head: newer.head ?? head,
       plan: newer.plan ?? plan,

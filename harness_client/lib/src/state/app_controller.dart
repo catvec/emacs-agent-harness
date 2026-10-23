@@ -266,8 +266,11 @@ class AppController extends ChangeNotifier {
     return provider == null ? null : quota?.labelOf(provider);
   }
 
+  /// How many of the listed sessions wait for the person, among those the
+  /// app holds a conversation of.  A session the harness no longer lists
+  /// (it was deleted while the app was out of reach) waits for nobody.
   int get attentionCount =>
-      _sessions.values.where((controller) => controller.needsAttention).length;
+      sessions.where((session) => needsAttention(session.id)).length;
 
   bool get hasTasks => capabilities?.tasks == true && tasks != null;
   bool get hasUsage => capabilities?.usage == true && usage != null;
@@ -704,6 +707,11 @@ class AppController extends ChangeNotifier {
               .toList()
             ..sort(_sortByTouched);
       sessions = loaded;
+      // What was read is the harness's word on every session, the ones the
+      // app holds a conversation of included: their own records are only as
+      // new as the last event each heard, and a connection that was out
+      // heard none.
+      if (service.can('session/list')) _adoptIntoConversations(loaded);
       _keepSelectedProject();
       _notify();
       if (defaultNonInteractive == null && canSetNonInteractiveEverywhere) {
@@ -720,6 +728,19 @@ class AppController extends ChangeNotifier {
       error = failure.message;
       _notify();
       if (throwOnAuth) rethrow;
+    }
+  }
+
+  /// Hand each of [records], the harness's records of its sessions, to the
+  /// conversation the app holds of that session, if it holds one: what the
+  /// conversation knows of the session, and the requests it recovered from
+  /// the harness, are then what the harness says now (see
+  /// [SessionController.adopt]).  A conversation that is open, which reads
+  /// its own record when the connection is back, is no different: this is
+  /// the same word.
+  void _adoptIntoConversations(List<SessionSummary> records) {
+    for (final record in records) {
+      _sessions[record.id]?.adopt(record, unlessOlder: true);
     }
   }
 
@@ -924,7 +945,8 @@ class AppController extends ChangeNotifier {
       sessions = [...sessions, summary]..sort(_sortByTouched);
     } else {
       final copy = [...sessions];
-      copy[index] = summary.merge(copy[index]);
+      // What is known of it, brought up to date by what was just heard.
+      copy[index] = copy[index].merge(summary);
       sessions = copy..sort(_sortByTouched);
     }
     if (notify) _notify();
@@ -937,14 +959,11 @@ class AppController extends ChangeNotifier {
       if (sid == null || sid.isEmpty) {
         throw const AcpException(-32602, 'A request without a sessionId.');
       }
-      final controller = sessionController(sid);
-      if (activeSessionId != sid) {
-        lastActionError = controller.currentInteraction == null
-            ? 'A session needs your attention.'
-            : controller.currentInteraction!.title;
-      }
-      _notify();
-      return controller.handleAgentRequest(method, params);
+      // That a session waits for the person is not said once, in a banner
+      // that stays until it is closed by hand: the sessions say it
+      // themselves, for as long as it is so (the list of sessions, and the
+      // notice of the shell, see [attentionCount]).
+      return sessionController(sid).handleAgentRequest(method, params);
     }
     throw AcpException(-32601, 'Method not found: $method');
   }

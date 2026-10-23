@@ -1652,7 +1652,21 @@ redact).
 - `session/pending-add ID REQUEST` → id; `session/pending-resolve ID PID ANSWER`;
   `session/pending ID`.  Event `session/pending-changed ID ITEMS`.
   Status becomes `blocked` while anything is pending.
-  `session/pending-update ID PID CHANGES` merges CHANGES, a plist, into
+- `session/pending-dismiss ID &optional REASON CALLS-ONLY` → how many it
+  dismissed: ends the requests nobody will answer, each by whoever holds
+  it (`question/cancel`; `permission/answer` denying the call, once, for
+  REASON), so the usual events say so (`question/answered`,
+  `session/pending-changed`), and a request nobody holds any more goes
+  all the same.  With CALLS-ONLY only the requests of a tool call (a
+  `:call-id` in the payload) go.  A request must not outlive what waited
+  on it, or every UI goes on asking the user a question nothing waits
+  for: `agent/turn-ended` is preceded by dismissing the calls' requests
+  of the turn that ended (cancelled, failed or finished), and
+  `session/deactivate` dismisses what a session with no running turn
+  still has pending.  A session that stops being blocked as its turn
+  ends goes to `idle`, not back to the `running` it was blocked in.
+
+- `session/pending-update ID PID CHANGES` merges CHANGES, a plist, into
   the payload of a request that still waits (what is learned of it after
   it was made: a cheap model's summary of a permission prompt's call) and
   returns the item, or nil when the request, or the session, is gone.  It

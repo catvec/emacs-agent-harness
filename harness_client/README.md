@@ -80,8 +80,17 @@ time it opens. It asks again only when the harness does.
   through `permission/pending` and `question/pending` -- when the conversation
   is opened and whenever the harness says (`session/pending-changed`) what a
   session waits for -- and one that is answered somewhere else (in Emacs, on
-  another device) goes from the screen. The task board's *Answer* opens the
-  conversation of the task that waits.
+  another device) goes from the screen. A request is shown only while the
+  harness holds it: one that its turn took with it (the turn was cancelled or
+  failed), that came with a session that was closed (an inactive session waits
+  for nobody), or that was answered while the phone was out of reach and heard
+  nothing of it, is gone as soon as the app reads the sessions again -- when the
+  connection is back (every conversation, not only the open one), on
+  pull-to-refresh, and as the harness's records of a session arrive. What the
+  harness says of a session replaces what the app knew of it, so *Needs you*,
+  the count on its tab and the notice that sessions need an answer match what
+  Emacs shows. The task board's *Answer* opens the conversation of the task
+  that waits.
 - **Shows the rest of the harness.** The task board (all seven columns, queue
   state and slot use, backlog mode, submit/start/queue/verify/reject/retry/
   complete/archive), spend, tokens, live sessions, daily spend, per-model and

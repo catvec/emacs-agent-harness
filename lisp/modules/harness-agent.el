@@ -2371,6 +2371,17 @@ messages next."
         (harness-agent--flush-steering turn))
       (when (harness-call 'session/exists-p sid)
         (harness-call 'session/usage-add sid (list :turns 1))
+        ;; With the turn over, a session that stops waiting for the user
+        ;; goes back to idle, not to the running it was blocked in.
+        (harness-call 'session/runtime sid :status-before-block 'idle)
+        ;; What the turn's tool calls waited on goes with it: a question
+        ;; or a permission prompt nobody answered (the turn was cancelled)
+        ;; has nothing left to go on, and would keep the session blocked.
+        ;; After the turn is no longer current, so that the calls that end
+        ;; with them find nothing to continue.
+        (harness-agent--try (format "dismissing what the turn of %s waited on" sid)
+          (harness-call 'session/pending-dismiss sid
+                        "the turn ended before anyone answered" t))
         (let ((session (harness-call 'session/get sid)))
           ;; The provider conversation got this far: a head moved off it
           ;; later makes the next turn cut it (`harness-agent--follow-head').

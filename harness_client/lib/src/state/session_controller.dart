@@ -69,8 +69,12 @@ class SessionController extends ChangeNotifier {
       if (request.toolCallId case final String id when id.isNotEmpty) id,
   };
 
+  /// Whether the harness waits for the person on this conversation: a
+  /// request is shown, or the session is blocked.  A closed session waits
+  /// for nobody.
   bool get needsAttention =>
-      interactions.isNotEmpty || summary?.isBlocked == true;
+      summary?.isInactive != true &&
+      (interactions.isNotEmpty || summary?.isBlocked == true);
 
   bool get isRunning => promptInFlight || summary?.isRunning == true;
 
@@ -127,7 +131,7 @@ class SessionController extends ChangeNotifier {
       if (api.capabilities.richNodes) {
         try {
           final info = await api.sessionGet(sessionId);
-          summary = SessionSummary.fromWire(info);
+          adopt(SessionSummary.fromWire(info));
         } catch (_) {
           // Keep the summary from the list; the replay is still usable.
         }
@@ -174,12 +178,62 @@ class SessionController extends ChangeNotifier {
     if (!api.capabilities.richNodes) return;
     try {
       final info = await api.sessionGet(sessionId);
-      summary = SessionSummary.fromWire(info);
-      _syncPlan();
-      _notify();
+      adopt(SessionSummary.fromWire(info));
     } catch (_) {
       // Not fatal: the transcript is still live.
     }
+  }
+
+  /// Take [record], the harness's own record of this session as it stands
+  /// (`session/get`, or its entry in `session/list`), as what is known of
+  /// it, in place of what was.
+  ///
+  /// What the harness waits on is in it, and the requests recovered from the
+  /// harness ([InteractionRequest.synthetic]) are shown only while it does:
+  /// one it no longer lists was answered somewhere else, or belonged to a
+  /// turn that ended, or to a session that was closed, and goes.  That is
+  /// what keeps a conversation nobody has open honest: the events that
+  /// would have told of it are not sent again to a phone that was out of
+  /// reach when they were.  A request asked of this client is the harness's
+  /// reply to wait for, and is only ever dropped by the harness telling so
+  /// ([_dropUnheld]): a record read while it was being asked may not list
+  /// it yet.
+  ///
+  /// With [unlessOlder], a record the harness changed before the one this
+  /// holds is let go: a listing of all the sessions that was asked for
+  /// before an event is heard may arrive after the conversation read its own
+  /// session because of it, and the older word must not undo the newer.
+  void adopt(SessionSummary record, {bool unlessOlder = false}) {
+    if (_disposed) return;
+    final known = summary?.updatedAt;
+    final read = record.updatedAt;
+    if (unlessOlder && known != null && read != null && read.isBefore(known)) {
+      return;
+    }
+    summary = record;
+    _syncPlan();
+    _dropRecovered(record);
+    _notify();
+  }
+
+  /// Drop the recovered requests [record] does not list as pending; all of
+  /// them for a closed session.  Whether any went.
+  bool _dropRecovered(SessionSummary record) {
+    // A record with no word of what is pending (a plain ACP listing) does
+    // not say that nothing is.
+    if (!record.says('pending') && !record.isInactive) return false;
+    final held = record.isInactive
+        ? const <String>{}
+        : {for (final request in record.pending) request.id};
+    var dropped = false;
+    for (final request in List.of(interactions)) {
+      final id = request.harnessId;
+      if (!request.synthetic || id == null || held.contains(id)) continue;
+      interactions.remove(request);
+      dropped = true;
+    }
+    if (dropped) activity = null;
+    return dropped;
   }
 
   /// The messages the harness holds for the running turn, as the transcript
@@ -329,9 +383,9 @@ class SessionController extends ChangeNotifier {
   Future<void> setNonInteractive(bool on) async {
     try {
       final updated = await api.setNonInteractive(sessionId, on);
-      summary = SessionSummary.fromWire(
-        updated,
-      ).merge(summary ?? SessionSummary(id: sessionId));
+      summary = (summary ?? SessionSummary(id: sessionId)).merge(
+        SessionSummary.fromWire(updated),
+      );
       // A JSON false may be left out of the reply: say what was asked.
       summary = summary!.withNonInteractive(on);
       _notify();
@@ -354,8 +408,9 @@ class SessionController extends ChangeNotifier {
   Future<void> rename(String name) async {
     try {
       final updated = await api.renameSession(sessionId, name);
-      summary = SessionSummary.fromWire(updated)
-          .merge(summary ?? SessionSummary(id: sessionId));
+      summary = (summary ?? SessionSummary(id: sessionId)).merge(
+        SessionSummary.fromWire(updated),
+      );
       _notify();
     } on AcpException catch (failure) {
       error = _friendlyError(failure);
@@ -485,8 +540,13 @@ class SessionController extends ChangeNotifier {
         !interactions.any((request) => request.synthetic)) {
       return;
     }
-    final held = await _heldRequests();
-    if (held == null || _disposed) return;
+    final read = await _heldRequests();
+    if (read == null || _disposed) return;
+    // A closed session waits for nobody, whatever the harness still lists
+    // on it (one that closed a session with a question pending did).
+    final held = summary?.isInactive == true
+        ? const <(String, InteractionRequest)>[]
+        : read;
     var changed = false;
     for (final request in List.of(interactions)) {
       final id = request.harnessId;
@@ -828,10 +888,10 @@ class SessionController extends ChangeNotifier {
         case '_harness/session':
           final session = asMap(update['session']);
           if (session.isNotEmpty) {
-            summary = summary == null
-                ? SessionSummary.fromWire(session)
-                : SessionSummary.fromWire(session).merge(summary!);
+            final record = SessionSummary.fromWire(session);
+            summary = summary == null ? record : summary!.merge(record);
             _syncPlan();
+            _dropRecovered(summary!);
           }
         case '_harness/activity':
           final raw = update['activity'];

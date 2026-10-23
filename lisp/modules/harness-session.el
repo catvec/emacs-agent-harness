@@ -1479,11 +1479,18 @@ The directory is gone at once; what was in it is deleted in the background."
     (harness-session-plist s)))
 
 (harness-defmethod session/deactivate (id)
-  "Mark session ID inactive (not open anywhere)."
+  "Mark session ID inactive (not open anywhere).
+A closed session waits for nobody: what it still has pending, with no turn
+running to read the answers, is dismissed (`session/pending-dismiss'), so
+that no UI goes on asking the user a question that nothing waits for.  A
+turn that still runs is left to end by itself, and dismisses what its
+calls wait on when it does."
   (let ((s (harness-session--get id)))
     (setf (harness-session-status s) 'inactive)
     (harness-emit 'session/status id 'inactive)
     (harness-emit 'session/deactivated id)
+    (unless (harness-session--turn-runs-p id)
+      (harness-call 'session/pending-dismiss id "the session was closed before anyone answered"))
     (harness-session--touch s)
     (harness-session-plist s)))
 
@@ -2504,6 +2511,12 @@ is touched only when something was taken."
       (harness-session--touch s))
     items))
 
+(defun harness-session--turn-runs-p (id)
+  "Non-nil when the agent says that a turn of session ID runs."
+  (and (harness-method-exists-p 'agent/running)
+       (harness-call 'agent/running id)
+       t))
+
 (harness-defmethod session/set-steering (id items)
   "Replace the messages the running turn of session ID has not taken with ITEMS.
 A message sent to a turn that runs waits outside the transcript until
@@ -2529,7 +2542,9 @@ the process.  Return ITEMS."
     items))
 
 (defun harness-session--reconcile-status (s)
-  "Make S enter or leave `blocked' as its pending requests come and go."
+  "Make S enter or leave `blocked' as its pending requests come and go.
+It leaves `blocked' for the status it had before, which `:status-before-block'
+of its runtime keeps."
   (let ((id (harness-session-id s)))
     (cond ((and (harness-session-pending s) (not (eq (harness-session-status s) 'blocked)))
            (setf (harness-session-runtime s)
@@ -2594,6 +2609,52 @@ as it is now)."
 (harness-defmethod session/pending (id)
   "Return the pending requests of session ID."
   (harness-session-pending (harness-session--get id)))
+
+(defun harness-session--dismiss-request (id item reason)
+  "Dismiss the pending request ITEM of session ID, for REASON (words).
+Whatever waits on a request ends it, so the one that holds it does: a
+question is cancelled (`question/cancel'), a permission denied for the
+call alone (`permission/answer'), and what waited on them goes on.  A
+request that nobody holds any more -- its owner was reloaded, or is not
+there -- is taken off the list all the same."
+  (let ((pid (plist-get item :id)))
+    (condition-case err
+        (pcase (format "%s" (plist-get item :kind))
+          ("question"
+           (when (harness-method-exists-p 'question/cancel)
+             (harness-call 'question/cancel id pid)))
+          ("permission"
+           (when (harness-method-exists-p 'permission/answer)
+             (harness-call 'permission/answer id pid
+                           (list :behavior 'deny :scope 'once :reason reason)))))
+      (error (harness-log 'warn "session %s: dismissing request %s failed: %s"
+                          id pid (harness-error-short-message err))))
+    (when (cl-find pid (harness-session-pending (harness-session--get id))
+                   :key (lambda (it) (plist-get it :id)) :test #'equal)
+      (harness-call 'session/pending-resolve id pid nil))))
+
+(harness-defmethod session/pending-dismiss (id &optional reason calls-only)
+  "Dismiss the requests of session ID that no one will answer; return how many.
+A request is a question or a permission prompt (see `session/pending-add'),
+and every UI shows it until it is answered.  When what waited on it is
+over -- the turn that asked ended, or the session was closed -- it must
+not stay behind: the session would read as waiting for the user, and a
+prompt would be shown that no answer can do anything with.  Each request
+is dismissed by whoever holds it, as when a user decides: a question is
+cancelled (`question/cancel'), a permission denied for the call alone
+\(`permission/answer'), and the events say so.  REASON, words, is the
+denial's reason.  With CALLS-ONLY non-nil only the requests that wait for
+a tool call, those with a `:call-id' in their payload, go: the ones of a
+turn that ended.  A question the harness asked on its own has no call,
+and an owner that ends it."
+  (let ((items (cl-remove-if-not
+                (lambda (item) (or (not calls-only)
+                                   (plist-get (plist-get item :payload) :call-id)))
+                (copy-sequence (harness-session-pending (harness-session--get id)))))
+        (reason (or reason "nobody answered it")))
+    (dolist (item items)
+      (harness-session--dismiss-request id item reason))
+    (length items)))
 
 (defvar harness-session--interrupted nil
   "The sessions the start of this harness found cut short, newest first.

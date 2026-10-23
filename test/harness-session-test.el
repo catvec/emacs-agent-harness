@@ -1518,6 +1518,94 @@ harness's too, so the model never sees either, and comes once."
         (should (eq 'running (plist-get (harness-call 'session/get id) :status))))
       (should (equal '(running blocked running) (reverse statuses))))))
 
+(defun harness-session-test-owners ()
+  "Register stand-ins for the modules that hold questions and permission prompts.
+Return a cell whose car collects what they were asked, newest first, each
+\(KIND SESSION-ID PENDING-ID ANSWER).  Like the real ones they resolve the
+request they are asked to end."
+  (let ((calls (list nil)))
+    (harness-register-method
+     'question/cancel
+     (lambda (sid pid)
+       (push (list 'question sid pid nil) (car calls))
+       (harness-call 'session/pending-resolve sid pid "dismissed")
+       t))
+    (harness-register-method
+     'permission/answer
+     (lambda (sid pid answer)
+       (push (list 'permission sid pid answer) (car calls))
+       (harness-call 'session/pending-resolve sid pid answer)
+       t))
+    calls))
+
+(ert-deftest harness-session-pending-dismiss-hands-each-request-to-its-owner ()
+  "A question is cancelled, a permission denied for the call alone, and the
+events say what is left; with CALLS-ONLY the harness's own questions stay."
+  (harness-session-test-with
+    (let* ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id))
+           (calls (harness-session-test-owners))
+           (changed nil)
+           (statuses nil))
+      (harness-on 'session/pending-changed (lambda (sid items) (when (equal sid id) (push items changed))))
+      (harness-on 'session/status (lambda (sid st) (when (equal sid id) (push st statuses))))
+      (let ((q (harness-call 'session/pending-add id '(:kind question :payload (:question "Q?" :call-id "c1"))))
+            (p (harness-call 'session/pending-add id '(:kind permission :payload (:tool "bash" :call-id "c2"))))
+            (own (harness-call 'session/pending-add id '(:kind question :payload (:question "On its own")))))
+        (should (eq 'blocked (plist-get (harness-call 'session/get id) :status)))
+        ;; Only what waits for a tool call.
+        (should (= 2 (harness-call 'session/pending-dismiss id "its turn ended" t)))
+        (should (equal `((question ,id ,q nil)
+                         (permission ,id ,p (:behavior deny :scope once :reason "its turn ended")))
+                       (reverse (car calls))))
+        (should (equal (list own) (mapcar (lambda (it) (plist-get it :id)) (harness-call 'session/pending id))))
+        (should (eq 'blocked (plist-get (harness-call 'session/get id) :status)))
+        ;; Then the rest.
+        (should (= 1 (harness-call 'session/pending-dismiss id)))
+        (should (equal `(question ,id ,own nil) (car (car calls)))))
+      (should-not (harness-call 'session/pending id))
+      (should (null (car changed)))
+      (should (eq 'idle (plist-get (harness-call 'session/get id) :status)))
+      (should (eq 'idle (car statuses)))
+      (should (= 0 (harness-call 'session/pending-dismiss id))))))
+
+(ert-deftest harness-session-pending-dismiss-takes-a-request-nobody-holds ()
+  "A request whose owner is not there, or fails, goes all the same."
+  (harness-session-test-with
+    (let ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id)))
+      ;; No module holds questions; the one that holds permissions fails.
+      (harness-register-method 'permission/answer (lambda (&rest _) (error "its owner was reloaded")))
+      (harness-call 'session/pending-add id '(:kind question :payload (:question "A?")))
+      (harness-call 'session/pending-add id '(:kind permission :payload (:tool "bash")))
+      (should (= 2 (harness-call 'session/pending-dismiss id)))
+      (should-not (harness-call 'session/pending id))
+      (should (eq 'idle (plist-get (harness-call 'session/get id) :status))))))
+
+(ert-deftest harness-session-deactivate-dismisses-what-is-pending ()
+  "A closed session waits for nobody -- unless a turn runs, which ends its own."
+  (harness-session-test-with
+    (let* ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id))
+           (calls (harness-session-test-owners))
+           (changed nil)
+           (turn-runs nil))
+      (harness-register-method 'agent/running (lambda (&optional _id) turn-runs))
+      (harness-on 'session/pending-changed (lambda (sid items) (when (equal sid id) (push items changed))))
+      (harness-call 'session/pending-add id '(:kind question :payload (:question "A?")))
+      (harness-call 'session/pending-add id '(:kind permission :payload (:tool "bash")))
+      (let ((session (harness-call 'session/deactivate id)))
+        (should (eq 'inactive (plist-get session :status)))
+        (should-not (plist-get session :pending)))
+      (should (= 2 (length (car calls))))
+      (should-not (harness-call 'session/pending id))
+      (should (null (car changed)))
+      (should (eq 'inactive (plist-get (harness-call 'session/get id) :status)))
+      ;; With a turn running, the requests are the turn's to end.
+      (harness-call 'session/resume id)
+      (setq turn-runs t)
+      (harness-call 'session/pending-add id '(:kind question :payload (:question "B?" :call-id "c9")))
+      (harness-call 'session/deactivate id)
+      (should (= 1 (length (harness-call 'session/pending id))))
+      (should (= 2 (length (car calls)))))))
+
 (ert-deftest harness-session-pending-update-adds-to-the-payload ()
   "What is learned about a pending request after it was made is merged
 into its payload, and told as `session/pending-updated': the session's

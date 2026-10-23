@@ -1827,6 +1827,51 @@ To be used inside `harness-test-with-temp-state'; the caller clears
             (should (null (gethash sid harness-perms--session-rules)))))
       (clrhash harness-sessions))))
 
+(defvar harness-provider-demo--delay)
+(defvar harness-provider-demo-script-override)
+(defvar harness-agent--cancel-grace)
+(declare-function harness-agent-running-p "harness-agent" (session-id))
+
+(ert-deftest harness-perms-a-prompt-goes-with-the-turn-that-waited-on-it ()
+  "Cancelling a turn that waits on a permission prompt leaves no prompt behind.
+The call is denied for itself alone, with the reason that its turn ended;
+nothing keeps the session blocked, no rule is recorded, and the tool never ran."
+  (harness-test-with-temp-state
+    (unwind-protect
+        (let* ((sid (harness-perms-test--real-session 'ask))
+               (ran 0)
+               (changed nil)
+               (harness-provider-demo--delay 0.005)
+               (harness-agent--cancel-grace 0.05))
+          (dolist (m '(provider-demo agent)) (harness-test-load-module m))
+          (harness-define-tool "t_exec" :label "Run" :kind 'exec
+                               :handler (lambda (_in _ctx) (cl-incf ran) "done"))
+          (harness-call 'session/update sid :model "demo:scripted")
+          (harness-on 'session/pending-changed (lambda (s items) (when (equal s sid) (push items changed))))
+          (let* ((harness-provider-demo-script-override
+                  '((:type tool-call :id "c1" :name "t_exec" :input nil)
+                    (:type done :stop-reason tool-use)))
+                 (p (harness-call 'agent/prompt sid "go")))
+            (harness-test-wait (lambda () (harness-call 'session/pending sid)) 5 "the prompt")
+            (should (eq 'blocked (plist-get (harness-call 'session/get sid) :status)))
+            (should (eq 'permission (plist-get (car (harness-call 'session/pending sid)) :kind)))
+            (should (harness-call 'agent/cancel sid))
+            (should (eq 'cancelled (plist-get (harness-test-await p 5) :stop-reason)))
+            (should-not (harness-call 'session/pending sid))
+            (should (null (car changed)))
+            (should (eq 'idle (plist-get (harness-call 'session/get sid) :status)))
+            (should-not (harness-agent-running-p sid))
+            (should (zerop ran))
+            (should (null (hash-table-keys harness-perms--waiting)))
+            (should (null (gethash sid harness-perms--session-rules)))
+            ;; The call has its result: denied, and why.
+            (let ((result (cl-find-if (lambda (n) (and (eq (plist-get n :kind) 'tool-result)
+                                                       (equal (plist-get n :call-id) "c1")))
+                                      (harness-call 'session/nodes sid))))
+              (should (plist-get result :is-error))
+              (should (string-match-p "the turn ended before anyone answered" (plist-get result :output))))))
+      (clrhash harness-sessions))))
+
 (ert-deftest harness-perms-yolo-switch-keeps-a-directory-prompt ()
   "Yolo is no permission to widen the jail: the directory prompt waits."
   (harness-test-with-temp-state

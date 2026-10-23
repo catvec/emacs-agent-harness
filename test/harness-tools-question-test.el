@@ -4,7 +4,9 @@
 (require 'harness-test-helpers)
 
 (defvar harness-provider-demo--delay)
+(defvar harness-agent--cancel-grace)
 (defvar harness-tools-question--questions)
+(declare-function harness-agent-running-p "harness-agent" (session-id))
 (declare-function harness-tools-question--answer-blocks "harness-tools-question" (answer))
 (declare-function harness-tools-question--answer-without-blocks "harness-tools-question" (answer))
 
@@ -350,6 +352,69 @@ and the caller hears the answer, or that it was dismissed."
         (should (equal "blue" (plist-get result :output))))
       (should (eq 'idle (plist-get (harness-call 'session/get sid) :status))))))
 
+
+(ert-deftest harness-tools-question-cancelled-turn-dismisses-its-question ()
+  "A question goes with the turn that asked it.
+Cancelling the turn while ask_user waits leaves nothing to answer: the call
+ends with the dismissal, the clients are told, and the session is idle
+instead of blocked for good on a question nobody can answer."
+  (harness-tools-question-test-with
+    (let* ((sid (harness-tools-question-test-session))
+           (harness-agent--cancel-grace 0.05)
+           (answered nil)
+           (changed nil)
+           (p (harness-call 'agent/prompt sid "ask me")))
+      (harness-on 'question/answered (lambda (s pid answer) (push (list s pid answer) answered)))
+      (harness-on 'session/pending-changed (lambda (s items) (when (equal s sid) (push items changed))))
+      (harness-test-wait (lambda () (harness-call 'question/pending sid)) 5 "question during turn")
+      (let ((pid (plist-get (car (harness-call 'question/pending sid)) :id))
+            (statuses nil))
+        (should (eq 'blocked (plist-get (harness-call 'session/get sid) :status)))
+        (harness-on 'session/status (lambda (s status) (when (equal s sid) (push status statuses))))
+        (should (harness-call 'agent/cancel sid))
+        (should (eq 'cancelled (plist-get (harness-test-await p 5) :stop-reason)))
+        (should-not (harness-call 'question/pending sid))
+        (should-not (harness-call 'session/pending sid))
+        (should (eq 'idle (plist-get (harness-call 'session/get sid) :status)))
+        ;; Straight to idle: not back to running, for a moment, first.
+        (should (equal '(idle) statuses))
+        (should-not (harness-agent-running-p sid))
+        ;; Told as when a user dismisses it, so that every client drops it.
+        (should (equal (list (list sid pid "The user dismissed the question")) answered))
+        (should (null (car changed)))
+        (should-not (gethash pid harness-tools-question--questions))
+        ;; The call has its result.
+        (let ((result (cl-find-if (lambda (n) (eq (plist-get n :kind) 'tool-result))
+                                  (harness-call 'session/nodes sid))))
+          (should (equal "The user dismissed the question" (plist-get result :output))))
+        ;; And a later answer is a no-op.
+        (should-not (harness-call 'question/answer sid pid "too late"))
+        (should (eq 'idle (plist-get (harness-call 'session/get sid) :status)))))))
+
+(ert-deftest harness-tools-question-a-question-the-harness-asked-outlives-the-turn ()
+  "A question the harness asked on its own has no tool call: ending a turn leaves it.
+Answered after the turn is over, it leaves the session idle: there is
+no turn to go back to running for."
+  (harness-tools-question-test-with
+    (let* ((sid (harness-tools-question-test-session))
+           (harness-provider-demo--delay 0.2)
+           (harness-agent--cancel-grace 0.05)
+           (heard nil)
+           (p (harness-call 'agent/prompt sid "tour")))
+      (harness-test-wait (lambda () (harness-agent-running-p sid)) 5 "the turn")
+      (let ((pid (harness-call 'question/ask sid '(:question "Which way?" :options ["Left" "Right"])
+                               (lambda (text dismissed) (push (list text dismissed) heard)))))
+        (should (eq 'blocked (plist-get (harness-call 'session/get sid) :status)))
+        (should (harness-call 'agent/cancel sid))
+        (should (eq 'cancelled (plist-get (harness-test-await p 5) :stop-reason)))
+        ;; Not the turn's: it waits on.
+        (should (equal 0 (harness-call 'session/pending-dismiss sid "its turn ended" t)))
+        (should (equal (list pid) (mapcar (lambda (it) (plist-get it :id)) (harness-call 'question/pending sid))))
+        (should (eq 'blocked (plist-get (harness-call 'session/get sid) :status)))
+        (should-not heard)
+        (should (harness-call 'question/answer sid pid "Left"))
+        (should (equal '(("Left" nil)) heard))
+        (should (eq 'idle (plist-get (harness-call 'session/get sid) :status)))))))
 
 (ert-deftest harness-tools-question-answer-attachments-reach-the-model ()
   "The files attached to an answer reach the model with it.
