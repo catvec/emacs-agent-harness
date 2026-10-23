@@ -103,6 +103,7 @@ ui-tasks); `(setq harness-enabled-modules t)` loads every module.
 | [handoff](handoff.md) |  | [session](session.md), [provider](provider.md), [agent](agent.md) | Warn before a lossy switch to a hosted-loop provider, and hand the conversation over. |
 | [insights](insights.md) |  | [store](store.md) | The Insights report: figures and a written summary of the work, for any provider. |
 | [judge](judge.md) |  |  | Judges: one-off questions to the simple tier of a session's model, read as a decision, with a few lookups that only read (emacs_eval's speed judge, event watches). |
+| [linking](linking.md) | by default | [session](session.md) | Links in what agents write: sessions, messages, tool calls, tasks and review threads, found and written out in full, and taught to agents in the system prompt. |
 | [merge](merge.md) |  | [session](session.md), [agent](agent.md) | Merge queue: worktree branches merged into the session they were built on, or into the main checkout. |
 | [naming](naming.md) | by default | [session](session.md), [provider](provider.md), [agent](agent.md) | Name nameless sessions with a cheap model as soon as their first message is sent. |
 | [notifications](notifications.md) |  |  | Notifications for the user through pluggable providers: desktop (system) and Gotify. |
@@ -181,6 +182,7 @@ ui-tasks); `(setq harness-enabled-modules t)` loads every module.
 | [ui-dirs](ui-dirs.md) |  | [ui-access](ui-access.md) | Obsolete: the directories of a session are a section of its access view (ui-access), which this loads. |
 | [ui-handoff](ui-handoff.md) |  | [ui](ui.md), [ui-chat](ui-chat.md) | The switch banner of a session: choose how to hand the conversation over. |
 | [ui-insights](ui-insights.md) |  | [ui](ui.md), [ui-usage](ui-usage.md) | The Insights report: figures and a written summary of your work with the agents, for any provider. |
+| [ui-linking](ui-linking.md) | by default | [ui](ui.md), [ui-chat](ui-chat.md) | Following the links agents write: a click on a harness: link opens the session, message, tool call, task or thread it names. |
 | [ui-media](ui-media.md) |  | [ui](ui.md) | Audio playback and recording, video thumbnails, clipboard images. |
 | [ui-merge](ui-merge.md) |  | [ui](ui.md), [ui-chat](ui-chat.md) | A session's merge queue: which sub-agent branches are queued, merging, in conflict, merged or failed. |
 | [ui-notify](ui-notify.md) | by default | [ui](ui.md) | Mode line notifier with blocked/running/idle counts. |
@@ -333,7 +335,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `agent/step-error` | [agent](agent.md) | [fallback](fallback.md) (50), [retry](retry.md) (60) |
 | `agent/stop` | [agent](agent.md) | [supervisor](supervisor.md) (50), [tasks](tasks.md) (50) |
 | `agent/stop-outstanding` | [agent](agent.md) | [supervisor](supervisor.md) (50), [tools-agent](tools-agent.md) (50) |
-| `agent/system-prompt` | [agent](agent.md) | [seed](seed.md) (1000), [skills](skills.md) (60), [supervisor](supervisor.md) (900), [tasks](tasks.md) (60), [tools-agent](tools-agent.md) (40) |
+| `agent/system-prompt` | [agent](agent.md) | [linking](linking.md) (45), [seed](seed.md) (1000), [skills](skills.md) (60), [supervisor](supervisor.md) (900), [tasks](tasks.md) (60), [tools-agent](tools-agent.md) (40) |
 | `agent/tools` | [tools](tools.md) | [access](access.md) (85), [readonly](readonly.md) (90), [supervisor](supervisor.md) (90), [tasks](tasks.md) (50), [tools-emacs-eval](tools-emacs-eval.md) (50), [tools-handin](tools-handin.md) (50), [tools-review](tools-review.md) (50) |
 | `naming/auto-p` | [naming](naming.md) | [tasks](tasks.md) (50) |
 | `naming/system-prompt` | [naming](naming.md) | [tasks](tasks.md) (60) |
@@ -387,6 +389,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `harness-ui-connected-hook` | [ui](ui.md) | [ui-cache-warm](ui-cache-warm.md), [ui-chat](ui-chat.md), [ui-decisions](ui-decisions.md), [ui-pending](ui-pending.md), [ui-pet](ui-pet.md), [ui-tasks](ui-tasks.md), [ui-tool-slots-load](ui-tool-slots-load.md), [ui-version](ui-version.md) |
 | `harness-ui-decision-functions` | [ui-chat](ui-chat.md), [ui-decisions](ui-decisions.md) | [ui-chat](ui-chat.md) |
 | `harness-ui-event-functions` | [ui](ui.md), [ui-children](ui-children.md), [ui-priority](ui-priority.md) | [ui-access](ui-access.md), [ui-acp-remote](ui-acp-remote.md), [ui-cache-warm](ui-cache-warm.md), [ui-chat](ui-chat.md), [ui-children](ui-children.md), [ui-config](ui-config.md), [ui-decisions](ui-decisions.md), [ui-merge](ui-merge.md), [ui-patch-review](ui-patch-review.md), [ui-pet](ui-pet.md), [ui-priority](ui-priority.md), [ui-report](ui-report.md), [ui-review](ui-review.md), [ui-secrets](ui-secrets.md), [ui-sessions](ui-sessions.md), [ui-slots](ui-slots.md), [ui-tasks](ui-tasks.md), [ui-tool-slots-load](ui-tool-slots-load.md), [ui-tree](ui-tree.md), [ui-usage](ui-usage.md), [ui-version](ui-version.md), [ui-worktree](ui-worktree.md) |
+| `harness-ui-linking-context-functions` | [ui-linking](ui-linking.md), [ui-patch-review](ui-patch-review.md) | [ui-linking](ui-linking.md), [ui-patch-review](ui-patch-review.md) |
 | `harness-ui-live-functions` | [ui](ui.md) | [ui-chat](ui-chat.md), [ui-sessions](ui-sessions.md) |
 | `harness-ui-media-rerender-functions` | [ui-media](ui-media.md) | [ui-chat](ui-chat.md) |
 | `harness-ui-notification-functions` | [ui](ui.md) | [ui-tasks](ui-tasks.md) |
@@ -429,3 +432,4 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `window-scroll-functions` |  | [ui-chat](ui-chat.md) |
 | `window-size-change-functions` |  | [ui-chat](ui-chat.md), [ui-compose](ui-compose.md), [ui-patch-review](ui-patch-review.md), [ui-pet](ui-pet.md), [ui-tasks](ui-tasks.md) |
 | `worktree-assume-change-functions` | `worktree-assume.el` | [ui-worktree](ui-worktree.md) |
+

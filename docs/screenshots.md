@@ -93,6 +93,8 @@ The pictures, by the name `scripts/media.sh` takes:
 | `review-to-review` | The threads of that review on its "to review" filter: the two threads the agent closed that the reviewer has not looked at yet, each with the agent's answer; the thread the reviewer closed themselves is not there | `harness-media-shot-review-to-review` |
 | `review-select` | The same Ediff, the end of the agent's answer on the renamed function selected with the mouse: the thread is a string an overlay shows, which no region holds, so the text of its comments has the mouse's keys and the selection is marked. Taken on the way to `review-quote`, by the same function | `harness-media-shot-review-quote` |
 | `review-quote` | That selection after `C-c >`: the reply opens in a buffer below the version with the selected part quoted, `> ` before each line, point under it, and the answer typed. The reply is given up after the picture | `harness-media-shot-review-quote` |
+| `links` | A chat whose agent wrote a message of links, `acme/app.py` beside it: a tool call (`harness:call/bash`, the newest call of the bash tool), a session by its name, a message of it, a thread of a task's review and the task, each written by a name or a handle and written out in full by the linking module when the message ended; each reads as the words the agent gave it. Taken last: it makes two sessions of its own and a thread on the slow-request task's review (`harness-media--links-sessions`) | `harness-media-shot-links` |
+| `links-followed` | That chat after a click on the link to the thread: the task's report opened under it, its review at the thread the link names, point on it | `harness-media-shot-links-followed` |
 
 ## How the pictures are made
 

@@ -3552,6 +3552,9 @@ afterwards."
 (defvar harness-media--review nil
   "The review the review pictures show, once its threads are made.")
 
+(defvar harness-media--links nil
+  "The sessions and thread of the links pictures, once made: (REPORT WORKER THREAD).")
+
 (defun harness-media--review-line (text file)
   "Return the number of the first line of FILE, in the slow task's worktree, matching TEXT."
   (let ((worktree (plist-get (harness-media--task (plist-get (plist-get harness-media--world :tasks) :slow))
@@ -3956,6 +3959,130 @@ it, and an answer is typed (`review-quote')."
           (call-interactively #'harness-ui-patch-review-ediff-quit))
         (harness-media--settle 0.5)))))
 
+;;;; Links in what agents write
+
+(defconst harness-media--links-message
+  "The timing middleware is in and the suite passes: [the test run](harness:call/bash).
+
+- [The survey session](harness:session/Find the slow endpoints) read the access log, and [its answer](harness:session/Find the slow endpoints/message/%s) puts `GET /orders` at 480 ms, so a threshold of half a second would fire on every other request.
+- You asked whether half a second is the right threshold: [that thread](harness:task/%s/thread/%s) has my answer, and [the task](harness:task/%s) the change, which keeps it a named constant."
+  "What the agent of the links pictures writes: a link of every kind.
+It writes them as a model does, by a name and a handle (`harness:call/bash',
+the newest call of the bash tool, and a session by its name), and the
+linking module writes them out in full when the message ends
+\(`harness-media--links-sessions').")
+
+(defun harness-media--links-append (id &rest nodes)
+  "Append NODES, plists of a node each, to session ID, and return them as stored."
+  (mapcar (lambda (node) (harness-call 'session/append id node)) nodes))
+
+(defun harness-media--links-sessions ()
+  "Make the two sessions the links pictures show, once; return (REPORT WORKER).
+The worker surveyed an access log and answered; the session of the
+pictures read the answer, ran the suite, and tells the user what it found
+with a link to everything it points at, among them a thread of the review
+of the slow-request task."
+  (or harness-media--links
+      (let* ((slow (plist-get (plist-get harness-media--world :tasks) :slow))
+             (worker (harness-media--new-session :name "Find the slow endpoints"
+                                                 :model "claude:claude-sonnet-5"
+                                                 :permission-mode 'accept-edits))
+             (report (harness-media--new-session :name "Time the slow requests"
+                                                 :model "claude:claude-fable-5-1"
+                                                 :permission-mode 'accept-edits))
+             (answer (cadddr
+                      (harness-media--links-append
+                       worker
+                       (list :kind 'user :content "Which endpoints of the orders API are the slowest? The access log is in logs/access.log.")
+                       (list :kind 'tool-call :call-id "toolu_media_survey" :tool "bash"
+                             :title "Bash: python3 tools/percentiles.py logs/access.log"
+                             :input (list :command "python3 tools/percentiles.py logs/access.log"))
+                       (list :kind 'tool-result :call-id "toolu_media_survey"
+                             :output "endpoint          p50     p95\nGET /orders       480 ms  910 ms\nPOST /webhooks    310 ms  640 ms\nGET /products     118 ms  190 ms\nPOST /orders       96 ms  170 ms")
+                       (list :kind 'assistant
+                             :content "`GET /orders` is the slowest: **480 ms** at the median and 910 ms at the 95th percentile. `POST /webhooks` follows at 310 ms, and everything else stays under 120 ms."))))
+             (thread (plist-get (harness-call 'patch-review/comment slow
+                                              "Is half a second the right threshold? The dashboards alert at 400 ms."
+                                              :session report)
+                                :thread)))
+        (harness-media--links-append
+         report
+         (list :kind 'user :content "Log a warning for every request slower than half a second, with the method, the path and the time. The survey session knows which endpoints are slow: read what it found.")
+         (list :kind 'assistant :content "I will add a timing middleware and run the suite.")
+         (list :kind 'tool-call :call-id "toolu_media_suite" :tool "bash"
+               :title "Bash: python3 -m unittest" :input (list :command "python3 -m unittest"))
+         (list :kind 'tool-result :call-id "toolu_media_suite"
+               :output "..............\n----------------------------------------------------------------------\nRan 14 tests in 0.312s\n\nOK"))
+        ;; What the turn does as a message ends: the links in full.
+        (harness-media--links-append
+         report
+         (list :kind 'assistant
+               :content (plist-get (harness-call 'link/canonicalize
+                                                 (format harness-media--links-message (plist-get answer :id)
+                                                         slow thread slow)
+                                                 report)
+                                   :text)))
+        (setq harness-media--links (list report worker thread)))))
+
+(defun harness-media--links-follow (buffer text)
+  "Press RET on the link in chat BUFFER whose words are TEXT, as a user would."
+  (let ((window (or (get-buffer-window buffer) (error "The chat shows in no window"))))
+    ;; The keys go to the selected window's buffer.
+    (select-window window)
+    (goto-char (point-min))
+    (unless (search-forward text nil t) (error "No %S in the chat" text))
+    (goto-char (match-beginning 0))
+    (harness-media--keys "RET")))
+
+(defun harness-media-shot-links ()
+  "A chat whose agent wrote a message full of links: to a call, a session, a message, a thread and a task.
+The agent wrote them by name and by handle -- `harness:call/bash', the
+survey session by its name -- and the harness wrote them out in full
+when the message ended, so they keep pointing at the same things.  The
+links read as the words the agent gave them; the tooltip says what a
+click opens."
+  (harness-media--links-sessions)
+  (cl-destructuring-bind (report _worker _thread) harness-media--links
+    (let ((buffer (harness-media--chat-shot report "acme/app.py")))
+      (with-current-buffer buffer (goto-char (point-max)))
+      (harness-media--settle 0.5)
+      (harness-media--capture "links"))))
+
+(defun harness-media-shot-links-followed ()
+  "That chat after a click on the link to the thread: the task's review, at the thread.
+The review opens under the chat in the report of the task, once its branch
+is read and its threads are drawn, with point on the thread the link
+names."
+  (harness-media--links-sessions)
+  (harness-media--review-prepare)
+  (cl-destructuring-bind (report _worker thread) harness-media--links
+    (let ((buffer (harness-media--chat-shot report "acme/app.py"))
+          (slow (plist-get (plist-get harness-media--world :tasks) :slow)))
+      (harness-media--links-follow buffer "that thread")
+      (let ((popout (harness-media--wait
+                     (lambda ()
+                       (let ((popout (harness-ui-popout-buffer (list 'report slow)))
+                             (review (gethash slow harness-ui-patch-review--reviews)))
+                         (and popout (buffer-live-p popout) review
+                              (not (harness-ui-patch-review--r-loading review))
+                              (not (harness-ui-patch-review--r-placing review))
+                              (with-current-buffer popout
+                                (text-property-any (point-min) (point-max) 'change-review-thread thread))
+                              popout)))
+                     60 "the review to open at the thread")))
+        (harness-media--settle 1.5)
+        (harness-media--fit-popout-shot 50)
+        ;; The changes at the top of the window and point on the thread,
+        ;; wherever it is below.
+        (with-selected-window (get-buffer-window popout)
+          (goto-char (point-min))
+          (re-search-forward "^Changes (")
+          (beginning-of-line)
+          (recenter 0)
+          (goto-char (text-property-any (point-min) (point-max) 'change-review-thread thread)))
+        (harness-media--settle 1)
+        (harness-media--capture "links-followed")))))
+
 (defconst harness-media-shots
   '(("chat" . harness-media-shot-chat)
     ("chat-permission" . harness-media-shot-chat-permission)
@@ -4020,7 +4147,11 @@ it, and an answer is typed (`review-quote')."
     ;; After them: it chooses another diff, and puts the first back.
     ("review-diff" . harness-media-shot-review-diff)
     ;; It takes review-select on the way.
-    ("review-quote" . harness-media-shot-review-quote))
+    ("review-quote" . harness-media-shot-review-quote)
+    ;; Last: two sessions of their own, and a thread on the slow-request
+    ;; task's review that the review pictures must not show.
+    ("links" . harness-media-shot-links)
+    ("links-followed" . harness-media-shot-links-followed))
   "Every picture, as (NAME . FUNCTION), in the order they are taken.")
 
 ;;;; Entry point

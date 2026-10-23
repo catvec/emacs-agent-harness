@@ -106,6 +106,7 @@ exist (`harness-tools--in-scope-p`).
 
 - `agent/activity` ([agent](agent.md)), when it is loaded
 - `emacs/request` ([acp](acp.md)), when it is loaded
+- `link/canonicalize` ([linking](linking.md)), when it is loaded
 - `permission/denied-note` ([perms](perms.md)), when it is loaded
 - `plugins/of-session` ([plugins](plugins.md)), when it is loaded
 - `provider/capabilities` ([provider](provider.md)), when it is loaded

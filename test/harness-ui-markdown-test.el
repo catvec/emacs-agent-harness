@@ -334,6 +334,154 @@ A file name is taken in `default-directory'; a file: URL is a file too."
           (should-error (harness-ui-markdown-follow-link) :type 'user-error))
         (should (= 8 (length visited)))))))
 
+;;;; Code is meant literally
+
+(ert-deftest harness-md-code-at-p-says-where-the-renderer-drew-code ()
+  "Inline code and a fenced block are code; the text around them, a heading,
+a link label and a list item are not."
+  (let* ((s (harness-ui-markdown-render
+             "# Head\n\nplain `inline` and [a link](https://e.org).\n\n- an item\n\n```sh\nfenced line\n```\n"))
+         (at (lambda (text) (string-search text s))))
+    (dolist (text '("inline" "fenced line"))
+      (ert-info (text)
+        (should (harness-ui-markdown-code-at-p s (funcall at text)))
+        (should (harness-ui-markdown-code-at-p s (+ (funcall at text) (1- (length text)))))))
+    (dolist (text '("Head" "plain" "and" "a link" "an item"))
+      (ert-info (text)
+        (should-not (harness-ui-markdown-code-at-p s (funcall at text)))))
+    ;; The language a block names is part of the block.
+    (should (harness-ui-markdown-code-at-p s (funcall at "sh")))))
+
+;;;; Links to the harness
+
+(defun harness-md-test-url-at (string text)
+  "Return the `harness-url' of the first TEXT in STRING."
+  (get-text-property (string-search text string) 'harness-url string))
+
+(ert-deftest harness-md-harness-links-are-links ()
+  "A link to a session, a message, a call or a thread renders as the label it was given."
+  (let ((s (harness-ui-markdown-inline
+            (concat "See [the run](harness:call/bash#2), [the plan](harness:session/abc/message/n-1) "
+                    "and [that thread](harness:task/t-4/thread/t-3)."))))
+    (should (equal "See the run, the plan and that thread." (substring-no-properties s)))
+    (should (equal "harness:call/bash#2" (harness-md-test-url-at s "the run")))
+    (should (equal "harness:session/abc/message/n-1" (harness-md-test-url-at s "the plan")))
+    (should (equal "harness:task/t-4/thread/t-3" (harness-md-test-url-at s "that thread")))
+    (dolist (label '("the run" "the plan" "that thread"))
+      (let ((pos (string-search label s)))
+        (should (memq 'link (harness-md-test-face-at s pos)))
+        (should (get-text-property pos 'keymap s))
+        (should (get-text-property pos 'follow-link s))))
+    ;; The tooltip says what the click opens, not the URL.
+    (should (string-match-p "tool call bash#2"
+                            (get-text-property (string-search "the run" s) 'help-echo s)))
+    (should (string-match-p "message n-1"
+                            (get-text-property (string-search "the plan" s) 'help-echo s)))))
+
+(ert-deftest harness-md-harness-autolinks-and-bare-links-read-as-what-they-name ()
+  "A link with no words of its own shows words made from what it names."
+  (let ((s (harness-ui-markdown-inline "Ask <harness:session/abc>, see harness:thread/t-3. Or harness:call/last, then.")))
+    (should (equal "Ask session abc, see thread t-3. Or tool call last, then."
+                   (substring-no-properties s)))
+    (should (equal "harness:session/abc" (harness-md-test-url-at s "session abc")))
+    ;; The full stop that ends the sentence is the sentence's.
+    (should (equal "harness:thread/t-3" (harness-md-test-url-at s "thread t-3")))
+    (should-not (get-text-property (+ (string-search "thread t-3" s) (length "thread t-3")) 'harness-url s))
+    (should (equal "harness:call/last" (harness-md-test-url-at s "tool call last")))
+    (should-not (get-text-property (+ (string-search "tool call last" s) (length "tool call last")) 'harness-url s))))
+
+(ert-deftest harness-md-harness-links-leave-alone-what-is-not-one ()
+  (dolist (text '("The harness: it runs." "harness:foo/bar" "the harness:8080 port" "xharness:session/abc"
+                  "see https://example.org/harness:session/abc"
+                  "`[x](harness:call/last)` and `harness:call/last`"
+                  "<harness> and harness:"))
+    (ert-info ((format "%S" text))
+      (let ((s (harness-ui-markdown-inline text)))
+        ;; Only the web address of the one case is a link, and not to the harness.
+        (should-not (cl-some (lambda (i)
+                               (let ((url (get-text-property i 'harness-url s)))
+                                 (and url (harness-links-p url))))
+                             (number-sequence 0 (max 0 (1- (length s))))))))))
+
+(ert-deftest harness-md-harness-links-nest-in-markup ()
+  "A link in a list, a heading, a table, a quote or bold is a link."
+  (let ((s (harness-ui-markdown-render
+            (concat "# Report [on it](harness:session/abc)
+
+"
+                    "- the run: [bash](harness:call/last)
+
+"
+                    "> said [here](harness:message/n-9)
+
+"
+                    "**see [this](harness:thread/t-1)**
+
+"
+                    "| what | where |
+|---|---|
+| run | [call](harness:call/bash#1) |
+"))))
+    (dolist (case '(("on it" . "harness:session/abc") ("bash" . "harness:call/last")
+                    ("here" . "harness:message/n-9") ("this" . "harness:thread/t-1")
+                    ("call" . "harness:call/bash#1")))
+      (ert-info ((car case))
+        (should (equal (cdr case) (harness-md-test-url-at s (car case))))))))
+
+(ert-deftest harness-md-harness-links-are-described-by-the-ui ()
+  "`harness-ui-markdown-link-describe-function' names what a link goes to."
+  (let ((harness-ui-markdown-link-describe-function
+         (lambda (url)
+           (pcase (plist-get (harness-links-parse url) :kind)
+             ('session (list :label "Fix the build" :help "open Fix the build, idle"))
+             (_ nil)))))
+    (let ((s (harness-ui-markdown-inline "[words](harness:session/abc) <harness:session/abc> [call](harness:call/last)")))
+      (should (equal "words Fix the build call" (substring-no-properties s)))
+      ;; Words given are kept, and the description is the tooltip.
+      (should (equal "open Fix the build, idle" (get-text-property (string-search "words" s) 'help-echo s)))
+      (should (equal "open Fix the build, idle" (get-text-property (string-search "Fix" s) 'help-echo s)))
+      (should (string-match-p "tool call last" (get-text-property (string-search "call" s) 'help-echo s)))))
+  ;; A describer that fails is as good as none.
+  (let ((harness-ui-markdown-link-describe-function (lambda (_) (error "Boom"))))
+    (should (equal "session abc" (substring-no-properties (harness-ui-markdown-inline "<harness:session/abc>"))))))
+
+(ert-deftest harness-md-a-link-that-names-nothing-says-so ()
+  (let ((s (harness-ui-markdown-inline "[x](harness:nothing/here) and [y](harness:session)")))
+    (should (equal "x and y" (substring-no-properties s)))
+    (should (string-match-p "not a link to anything"
+                            (get-text-property (string-search "x" s) 'help-echo s)))))
+
+(ert-deftest harness-md-harness-links-follow-the-ui-function ()
+  "Opening a harness link calls the UI's function with its URL, and browses nothing."
+  (harness-md-test-with-links "Run [it](harness:call/last), <harness:session/abc> and [web](https://e.org/)."
+    (let* ((followed nil)
+           (harness-ui-markdown-harness-link-function (lambda (url) (push (cons url (current-buffer)) followed))))
+      (goto-char (+ (point-min) (string-search "it" (buffer-string))))
+      (harness-ui-markdown-follow-link)
+      (goto-char (+ (point-min) (string-search "session abc" (buffer-string))))
+      (execute-kbd-macro (kbd "RET"))
+      (should (equal (list (cons "harness:session/abc" buffer) (cons "harness:call/last" buffer)) followed))
+      (should-not opened)
+      ;; A web link still goes to the browser.
+      (goto-char (+ (point-min) (string-search "web" (buffer-string))))
+      (harness-ui-markdown-follow-link)
+      (should (equal '("https://e.org/") opened))
+      (should (= 2 (length followed))))))
+
+(ert-deftest harness-md-harness-links-need-the-ui-function ()
+  (harness-md-test-with-links "Run [it](harness:call/last)."
+    (let ((harness-ui-markdown-harness-link-function nil))
+      (goto-char (+ (point-min) (string-search "it" (buffer-string))))
+      (should-error (harness-ui-markdown-follow-link) :type 'user-error)
+      (should-not opened))))
+
+(ert-deftest harness-md-harness-links-read-back-as-markdown ()
+  "Quoting a rendered message gives the link back, its URL whole."
+  (with-temp-buffer
+    (insert (harness-ui-markdown-render "Run [it](harness:call/last) and <harness:session/abc>."))
+    (should (equal "Run [it](harness:call/last) and [session abc](harness:session/abc)."
+                   (harness-ui-markdown-source (point-min) (point-max))))))
+
 (ert-deftest harness-md-table-fits-a-bound-width ()
   "A table wider than its bound wraps inside its columns, still aligned."
   (let* ((md "| name | description |\n|---|---|\n| alpha | a very long description that would not fit in a chat window at all, over and over and over again |\n")

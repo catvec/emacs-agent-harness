@@ -264,6 +264,41 @@ call is about nothing in particular."
   "Return an error RESULT with MESSAGE and extra PROPS."
   (append (list :content message :is-error t) props))
 
+;;;; The words an agent writes in a call
+
+(defun harness-tools-written (text ctx)
+  "Return (TEXT . NOTE): TEXT, written in the call CTX, with its links in full.
+Some tools carry the words of an agent -- a report, a comment, a question,
+a message to another session -- that a person reads, in Markdown, with
+links in them to sessions, messages, tool calls and review threads.  The
+linking module writes those out in full, in the terms of the session that
+made the call and the nodes before the call, so a link such as
+harness:call/last never means something else later.  NOTE is a sentence
+for the result of the call, saying which of the links named nothing and
+were left as written, or nil when all did.  Without the linking module,
+or for a text that holds no link, the text comes back as it is with no
+note; this never signals."
+  (if (and (stringp text) (string-match-p "harness:" text)
+           (harness-method-exists-p 'link/canonicalize))
+      (condition-case err
+          (let* ((done (harness-call 'link/canonicalize text
+                                     (plist-get ctx :session-id) (plist-get ctx :call-id)))
+                 (problems (plist-get done :problems)))
+            (cons (if (stringp (plist-get done :text)) (plist-get done :text) text)
+                  (and problems
+                       (format "Links that name nothing, left as you wrote them: %s"
+                               (string-join problems " | ")))))
+        (error (harness-log 'warn "tools: writing out the links of a call's words failed: %s"
+                            (harness-error-message err))
+               (cons text nil)))
+    (cons text nil)))
+
+(defun harness-tools-with-note (content note)
+  "Return CONTENT, the text of a result, with NOTE after it when there is one."
+  (if (and (stringp note) (not (string-empty-p note)))
+      (concat content "\n\n" note)
+    content))
+
 ;;;; The user's Emacs
 
 ;; Every tool runs here, in the harness; no client runs one.  A tool

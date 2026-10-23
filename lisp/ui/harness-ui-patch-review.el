@@ -304,6 +304,17 @@
 ;; which makes the review again, and the rest of the report -- [Verify]
 ;; and [Send back] -- and of the banner is drawn all the same.
 ;;
+;; A LINK TO A THREAD.  An agent that answers a thread, or points at one,
+;; writes a link to it (harness:thread/ID, lisp/harness-links.el), and a
+;; click on it comes here (`harness-ui-patch-review-show-thread'): the
+;; review opens in the task's report, once its threads are fetched and
+;; its branch read, with point on the thread and the filter changed to
+;; show it when the filter hid it.  Where the report cannot draw the
+;; changes -- the repository is not on this machine -- the library's
+;; threads view shows the thread instead.  ui-linking owns the click
+;; (`harness-ui-linking-handlers'); this module registers the one for
+;; threads, and the session a review's links are written in.
+;;
 ;; From a task's session history -- or a board card -- C-c C-d opens the
 ;; report with the changes, even after the task left review, when it shows
 ;; them without the review banner (`harness-ui-patch-review-mode').  C-u
@@ -392,6 +403,8 @@
 (declare-function harness-ui-display-session "harness-ui" (session-id))
 (declare-function harness-ui-review--task "harness-ui-review" (sid))
 (declare-function harness-ui-tasks--task "harness-ui-tasks" (&optional noerror))
+(defvar harness-ui-linking-handlers)
+(defvar harness-ui-linking-context-functions)
 
 (defgroup harness-ui-patch-review nil
   "A task's changes in its session and report: Ediff file by file, comments quoted in the feedback."
@@ -862,7 +875,10 @@ text as it was typed."
 (cl-defmethod change-review-ui-body-lines ((_set harness-ui-patch-review--set) comment width)
   (or (harness-ui-patch-review--markdown-or
         (let ((harness-ui-markdown-hard-breaks t))
-          (harness-ui-markdown-render-lines (change-review-comment-body comment) width)))
+          ;; The id of a session the UI knows is a link to it, as in the chat.
+          (mapcar (lambda (line)
+                    (harness-ui-link-session-ids line #'harness-ui-markdown-code-at-p))
+                  (harness-ui-markdown-render-lines (change-review-comment-body comment) width))))
       (cl-call-next-method)))
 
 (cl-defmethod change-review-ui-body-summary ((_set harness-ui-patch-review--set) comment)
@@ -5102,6 +5118,144 @@ changes."
                  (functionp harness-compose-redraw-function))
         (funcall harness-compose-redraw-function)))))
 
+;;;; Showing a thread
+
+(defun harness-ui-patch-review--thread-position (id)
+  "Return where the thread ID starts in this buffer, or nil."
+  (harness-ui-patch-review--find-property
+   'change-review-thread id (harness-ui-patch-review--section-start)))
+
+(defun harness-ui-patch-review--goto-thread (buffer id)
+  "Put point on the thread ID drawn in BUFFER, in the windows showing it too.
+Return non-nil when it is there.  A thread the filter of BUFFER hides
+shows: the filter becomes all, which draws BUFFER again."
+  (with-current-buffer buffer
+    (let ((pos (harness-ui-patch-review--thread-position id)))
+      (when (and (null pos) change-review-ui--redraw-function)
+        (change-review-ui-set-filter 'all)
+        (setq pos (harness-ui-patch-review--thread-position id)))
+      (when pos
+        (goto-char pos)
+        (dolist (window (get-buffer-window-list buffer nil t))
+          (set-window-point window pos)
+          (with-selected-window window (recenter 1)))
+        (pulse-momentary-highlight-one-line pos)
+        t))))
+
+(defun harness-ui-patch-review--report-shows-p (review)
+  "Return non-nil when the report of REVIEW's task draws its changes.
+That is what `harness-ui-patch-review--panel' decides: the task waits for
+review, or its review was opened from its session's history; it has a
+branch of its own, and the repository is a directory of this machine."
+  (let ((task (harness-ui-patch-review--r-task review)))
+    (and (or (harness-ui-patch-review--reviewing-p task)
+             (harness-ui-patch-review--r-show review))
+         (not (harness-string-blank-p (plist-get task :branch)))
+         (harness-ui-patch-review--repository task)
+         t)))
+
+(defun harness-ui-patch-review--when-settled (review function &optional tries)
+  "Call FUNCTION once REVIEW has read its branch and placed its threads.
+A report opened afresh reads the branch again and draws once more when it
+has, which would take point from where it was put, so FUNCTION waits for
+that: ten seconds at the most, TRIES counting the checks made."
+  (let ((tries (or tries 0)))
+    (if (or (>= tries 50)
+            (and (not (harness-ui-patch-review--r-loading review))
+                 (not (harness-ui-patch-review--r-placing review))))
+        (funcall function)
+      (run-with-timer 0.2 nil #'harness-ui-patch-review--when-settled review function (1+ tries)))))
+
+(defun harness-ui-patch-review--reveal-thread (review id)
+  "Show the thread ID of REVIEW, whose threads the UI has.
+In the task's report, with the changes, when it draws them
+\(`harness-ui-patch-review--report-shows-p'), point on the thread once
+the report has settled; else in the library's threads view, whose
+comments link to the files as the branch has them."
+  (let ((task (harness-ui-patch-review--r-task review)))
+    ;; A task no longer waiting for review is shown from its history.
+    (unless (harness-ui-patch-review--reviewing-p task)
+      (setf (harness-ui-patch-review--r-show review) t))
+    (if (harness-ui-patch-review--report-shows-p review)
+        (let ((popout (progn (harness-ui-patch-review--open-task task)
+                             (harness-ui-popout-buffer (list 'report (plist-get task :id))))))
+          (harness-ui-patch-review--when-settled
+           review
+           (lambda ()
+             (unless (and (buffer-live-p popout) (harness-ui-patch-review--goto-thread popout id))
+               (message "The thread %s is not in the report" id)))))
+      (let ((buffer (change-review-open-threads (harness-ui-patch-review--r-set review) 'all)))
+        (with-current-buffer buffer
+          (setq default-directory (harness-ui-patch-review--link-directory review)))
+        (unless (harness-ui-patch-review--goto-thread buffer id)
+          (message "The thread %s is not in the review" id))))))
+
+(defun harness-ui-patch-review--show-thread (task thread-id)
+  "Show THREAD-ID of the review of TASK, a task record, once its threads are here.
+THREAD-ID is a thread's id or the start of one that is unique."
+  (let ((review (harness-ui-patch-review--review-for task)))
+    (harness-then
+     (harness-ui-patch-review--sync review)
+     (lambda (_)
+       (condition-case err
+           (if-let* ((thread (change-review-find-thread (harness-ui-patch-review--r-set review)
+                                                        thread-id)))
+               (harness-ui-patch-review--reveal-thread review (change-review-thread-id thread))
+             (message "The review of %s has no thread %s" (harness-ui-patch-review--title review) thread-id)
+             (harness-ui-patch-review--open-task task))
+         (error (message "%s" (error-message-string err))))))))
+
+(defun harness-ui-patch-review-show-thread (task-id thread-id)
+  "Show the thread THREAD-ID of the review of the task TASK-ID.
+The review opens in the task's report, with point on the thread: the
+closed threads shown too, when the thread is one.  The task and its
+threads come from the harness, so this does not wait for them; what
+cannot be shown is said in the echo area."
+  (harness-ui-call "_harness/task/get" (list :id task-id)
+                   (lambda (task)
+                     (if (and (consp task) (plist-get task :id))
+                         (condition-case err
+                             (harness-ui-patch-review--show-thread task thread-id)
+                           (error (message "%s" (error-message-string err))))
+                       (message "No task %s" task-id)))
+                   (lambda (err)
+                     (message "Could not read the task %s: %s" task-id (harness-error-message err)))))
+
+(defun harness-ui-patch-review--follow-thread (result)
+  "Open the thread a link names: RESULT is what the harness resolved it to.
+On `harness-ui-linking-handlers'.  Without the task or the thread the
+session is shown, if the answer has one."
+  (let ((task (plist-get result :task))
+        (thread (plist-get result :thread))
+        (session (plist-get result :session)))
+    (cond ((and task thread) (harness-ui-patch-review-show-thread task thread))
+          (session (message "The link names no thread of a review: its session opens")
+                   (harness-ui-visit-session session))
+          (t (user-error "The harness named no thread for this link")))))
+
+(defun harness-ui-patch-review--link-context ()
+  "Return the session of the task whose review this buffer shows, or nil.
+On `harness-ui-linking-context-functions': the links in a thread's
+comments are written in the session that works on the task."
+  (when-let* ((review (or (and (bound-and-true-p change-review-ui--set)
+                               (harness-ui-patch-review--set-p change-review-ui--set)
+                               (harness-ui-patch-review--set-review change-review-ui--set))
+                          (harness-ui-patch-review--review-here)))
+              (session (plist-get (harness-ui-patch-review--r-task review) :session)))
+    (and (stringp session) (not (string-empty-p session)) session)))
+
+(defun harness-ui-patch-review--register-links ()
+  "Have ui-linking open a link to a thread here, and tell it whose text this is."
+  (setf (alist-get "thread" harness-ui-linking-handlers nil nil #'equal)
+        #'harness-ui-patch-review--follow-thread)
+  (add-hook 'harness-ui-linking-context-functions #'harness-ui-patch-review--link-context))
+
+(defun harness-ui-patch-review--unregister-links ()
+  "Take what `harness-ui-patch-review--register-links' added away again."
+  (when (eq (cdr (assoc "thread" harness-ui-linking-handlers)) #'harness-ui-patch-review--follow-thread)
+    (setq harness-ui-linking-handlers (assoc-delete-all "thread" harness-ui-linking-handlers)))
+  (remove-hook 'harness-ui-linking-context-functions #'harness-ui-patch-review--link-context))
+
 ;;;; Module
 
 (defun harness-ui-patch-review--redraw-dropped ()
@@ -5132,6 +5286,9 @@ the review again."
     (add-hook 'harness-ui-review-changes-functions #'harness-ui-patch-review--banner-panel))
   (with-eval-after-load 'harness-ui-chat
     (add-hook 'harness-chat-mode-hook #'harness-ui-patch-review--setup-chat))
+  ;; A link to a thread of a review opens here, once ui-linking is there.
+  (with-eval-after-load 'harness-ui-linking
+    (harness-ui-patch-review--register-links))
   (when (fboundp 'harness-chat-mode)
     (harness-ui-patch-review--setup-existing-buffers))
   (harness-ui-patch-review--redraw-dropped))
@@ -5144,6 +5301,8 @@ the review again."
   (remove-hook 'harness-ui-review-pending-functions #'harness-ui-patch-review--pending-p)
   (remove-hook 'harness-ui-review-changes-functions #'harness-ui-patch-review--banner-panel)
   (remove-hook 'harness-chat-mode-hook #'harness-ui-patch-review--setup-chat)
+  (when (boundp 'harness-ui-linking-handlers)
+    (harness-ui-patch-review--unregister-links))
   (dolist (buffer (buffer-list))
     (with-current-buffer buffer
       (when (and (bound-and-true-p harness-ui-patch-review-mode)

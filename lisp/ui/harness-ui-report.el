@@ -441,8 +441,11 @@ banner shows under the transcript."
 
 (defun harness-ui-report--insert-markdown (text)
   "Insert Markdown TEXT rendered, as whole lines.
-The renderer drops the last newline; what follows starts a line of its own."
-  (harness-ui-markdown-insert text)
+The renderer drops the last newline; what follows starts a line of its own.
+The id of a session the UI knows, written in the text, is a link to it, as
+in the chat; an id in what shows as code stays as it is."
+  (insert (harness-ui-link-session-ids (harness-ui-markdown-render text)
+                                       #'harness-ui-markdown-code-at-p))
   (unless (bolp) (insert "\n")))
 
 (defun harness-ui-report--insert-message (text)

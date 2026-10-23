@@ -132,7 +132,7 @@ after changing it run \\[harness-restart]."
   :type '(repeat directory) :group 'harness)
 
 (defconst harness-core-modules
-  '(access acp agent compaction config naming perms priority project provider provider-claude
+  '(access acp agent compaction config linking naming perms priority project provider provider-claude
     resilience retry sandbox session store usage worktree
     tools tools-agent tools-emacs tools-fs tools-plan tools-question tools-session-info
     tools-shell tools-todo
@@ -141,6 +141,8 @@ after changing it run \\[harness-restart]."
 They make a harness to work with: sessions and the turn loop, Claude
 Code for the default model, compaction and retries, carrying sessions
 on after a restart and reporting the ones that stall, session names,
+the links agents put in their messages to sessions, messages, tool
+calls and threads,
 the file, shell and Emacs tools with the permissions and the sandbox
 that guard them, the access view of what each session may reach and
 how its calls were judged, the tools that ask the user, plan, keep a todo list,
@@ -205,6 +207,7 @@ They define the macros modules expand, so a change to one recompiles
 every file (see `harness--compiled-fresh-p').")
 
 (defconst harness--library-files '("lisp/harness-policy.el" "lisp/harness-files.el"
+                                  "lisp/harness-links.el"
                                   "lisp/harness-redaction.el"
                                   "lisp/harness-claude-plugin.el"
                                   "lisp/harness-emacs-endpoint.el"
@@ -223,7 +226,10 @@ harness-module-docs among them (which reads the modules' pages from
 their source for `harness-describe-module'), and the harness process's
 modules require harness-policy (the settings an
 administrator fixes, which each side reads for itself), harness-files,
-harness-redaction (how a secret is named and taken out of text, which
+harness-links (how a link to a session, a message, a tool call or a
+thread reads, is written and is found in a text, which the linking
+module and the UI's Markdown renderer share), harness-redaction (how a
+secret is named and taken out of text, which
 the harness process's modules and the commands of the UI share),
 harness-claude-plugin (the Claude Code plugin through which the Claude
 provider serves tools, and the loopback listener its relay connects to),

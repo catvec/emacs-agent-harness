@@ -8,7 +8,7 @@ The chat buffer: transcript, pending panel, queue, attachments and compose box.
 - **Source:** [lisp/ui/harness-ui-chat.el](../../lisp/ui/harness-ui-chat.el)
 - **Loaded:** by default
 - **Requires:** [ui](ui.md)
-- **Required by:** [ui-access](ui-access.md), [ui-cache](ui-cache.md), [ui-cache-warm](ui-cache-warm.md), [ui-children](ui-children.md), [ui-compact](ui-compact.md), [ui-handoff](ui-handoff.md), [ui-merge](ui-merge.md), [ui-priority](ui-priority.md), [ui-supervisor](ui-supervisor.md), [ui-tool-slots-load](ui-tool-slots-load.md)
+- **Required by:** [ui-access](ui-access.md), [ui-cache](ui-cache.md), [ui-cache-warm](ui-cache-warm.md), [ui-children](ui-children.md), [ui-compact](ui-compact.md), [ui-handoff](ui-handoff.md), [ui-linking](ui-linking.md), [ui-merge](ui-merge.md), [ui-priority](ui-priority.md), [ui-supervisor](ui-supervisor.md), [ui-tool-slots-load](ui-tool-slots-load.md)
 - **Brings along:** [acp](acp.md) (its file requires it), [ui-compose](ui-compose.md) (its file requires it), [ui-pending](ui-pending.md) (its file requires it)
 
 ## About
@@ -77,6 +77,8 @@ this file never touches a session struct.
 - `harness-chat-approve-denied-call` — Approve the denied call whose block point is on.
 - `harness-chat-cancel` — Cancel the running turn.
 - `harness-chat-copy-last-response` — Copy the agent's last message (raw Markdown) to the kill ring.
+- `harness-chat-copy-link` — Copy a link to the message or tool call at point to the kill ring.
+- `harness-chat-copy-session-link` — Copy a link to this session to the kill ring.
 - `harness-chat-delete-steering` — Delete the queued message ID, which the model has not got yet.
 - `harness-chat-deny-newest` — Answer the permission request at point, else the newest, with Deny.
 - `harness-chat-edit-permission-pattern` — Edit the glob pattern the permission request PID is answered for.

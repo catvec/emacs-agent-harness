@@ -1274,9 +1274,25 @@ before a tool call never becomes an empty message."
           ;; The node's first chunk is all it opened with.
           (harness-emit 'agent/stream sid node-id kind buf)))))))
 
+(defun harness-agent--written-links (sid node-id text)
+  "Return TEXT, the final words of assistant node NODE-ID of SID, links in full.
+The links in a message -- to sessions, messages, tool calls, review
+threads -- are written out as the ids they stand for, in the terms of
+the nodes before this one, so a handle such as harness:call/last never
+means something else later (the `link/canonicalize' method of the
+linking module).  TEXT as it is when there is no such method, no link in
+it, or the method fails: what the model said must reach the transcript."
+  (or (and (stringp text) (string-match-p "harness:" text)
+           (harness-method-exists-p 'link/canonicalize)
+           (harness-agent--try (format "writing out the links of %s" node-id)
+             (plist-get (harness-call 'link/canonicalize text sid node-id) :text)))
+      text))
+
 (defun harness-agent--finalize (turn kind)
   "Write the live node of KIND (assistant or thinking) of TURN for good.
 Whitespace held back for a node that never got visible text is dropped.
+The links in the final words of an assistant node are written out in
+full (`harness-agent--written-links').
 The turn lets go of the node whether or not it could be written."
   (let* ((sid (harness-agent-turn-session-id turn))
          (thinking (eq kind 'thinking))
@@ -1284,7 +1300,8 @@ The turn lets go of the node whether or not it could be written."
          (buf (if thinking (harness-agent-turn-think-buf turn) (harness-agent-turn-text-buf turn))))
     (unwind-protect
         (when node-id
-          (harness-call 'session/update-node sid node-id :content (or buf "")
+          (harness-call 'session/update-node sid node-id
+                        :content (if thinking (or buf "") (harness-agent--written-links sid node-id (or buf "")))
                         :meta (list :model (or (gethash sid harness-agent--step-models)
                                                (plist-get (harness-call 'session/get sid) :model))
                                     :usage (and (not thinking) (harness-agent-turn-last-usage turn)))))

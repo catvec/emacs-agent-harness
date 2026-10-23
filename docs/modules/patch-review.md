@@ -97,6 +97,7 @@ to say.
 - `patch-review/set-viewed` (task-id kind files on) — Mark FILES viewed in task TASK-ID's review, or approved, or take the mark off.
 - `patch-review/threads-text` (task-id &optional status) — Return the threads of task TASK-ID's review as text for its agent.
 - `patch-review/viewed` (task-id) — Return the files viewed, and approved, in task TASK-ID's review.
+- `review/find-thread` (task-id ref) — Return the thread of task TASK-ID's review that REF names, or nil.
 
 ### Events
 

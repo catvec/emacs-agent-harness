@@ -405,8 +405,13 @@ the file of the harness's core that does."
 ;;;; Markdown
 
 (defun harness-module-docs--md (text)
-  "Return TEXT, Lisp documentation, as Markdown: `this' quoting becomes `this`."
-  (replace-regexp-in-string "`\\([^`'\n]+\\)'" "`\\1`" (or text "") t))
+  "Return TEXT, Lisp documentation, as Markdown: `this' quoting becomes `this`.
+An apostrophe between two letters, as in \"user's\", is no closing quote:
+the quoting would otherwise pair it with a backquote before it."
+  (let ((marked (replace-regexp-in-string "\\([[:alnum:]]\\)'\\([[:alnum:]]\\)" "\\1\0\\2" (or text "")))
+        (quoted nil))
+    (setq quoted (replace-regexp-in-string "`\\([^`'\n]+\\)'" "`\\1`" marked t))
+    (replace-regexp-in-string "\0" "'" quoted t t)))
 
 (defun harness-module-docs--line (doc)
   "Return the first line of DOC as Markdown, or nil."

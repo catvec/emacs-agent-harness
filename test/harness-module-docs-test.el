@@ -314,6 +314,18 @@ to it in BODY."
       (should-not (file-exists-p (expand-file-name "gone.md" out)))
       (should (file-exists-p (expand-file-name "guide.md" out))))))
 
+(ert-deftest harness-module-docs-md-turns-quoting-into-code ()
+  "`this' quoting becomes `this`, and the apostrophe of a word is left as it is."
+  (should (equal "Call `foo` and `bar baz`." (harness-module-docs--md "Call `foo' and `bar baz'.")))
+  (should (equal "plain text" (harness-module-docs--md "plain text")))
+  (should (equal "" (harness-module-docs--md nil)))
+  ;; A backquote that closes with a backquote, as Markdown has it, pairs with
+  ;; nothing: the user's word after it is no closing quote.
+  (should (equal "name `code`, then the user's answer, don't"
+                 (harness-module-docs--md "name `code`, then the user's answer, don't")))
+  ;; A contraction inside a quote does not end it.
+  (should (equal "see `the user's value` here" (harness-module-docs--md "see `the user's value' here"))))
+
 (ert-deftest harness-module-docs-describe-module-shows-its-page ()
   "\\[harness-describe-module] shows a module's page in a help buffer.
 Rendered, a link to another module describes that one; without the

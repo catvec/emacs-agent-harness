@@ -267,7 +267,7 @@ ready with what it set up before, and the reload reports the error; a
 disabled module stays off.
 `harness-reload` compiles every file first and refuses to load anything
 if one fails.  It loads harness.el, the core files, the libraries of
-lisp/ (`harness--library-files`: policy, files, redaction, the Emacs
+lisp/ (`harness--library-files`: policy, files, links, redaction, the Emacs
 endpoint, desktop notifications, server, revision, module docs, slots) and the
 modules, so a module never runs against a library as it was before an
 update; a file added to lisp/ that both sides load belongs in one of
@@ -287,7 +287,8 @@ longer enabled runs on until a restart, and the reload says so.
 
 Out of the box the harness loads its core, `harness-core-modules`:
 sessions and the turn loop, the Claude Code provider of the default
-model, compaction and retries, session names, the file, shell and
+model, compaction and retries, session names, the links agents write
+to sessions, messages and threads (`linking`), the file, shell and
 Emacs tools with the permissions and the sandbox that guard them, the
 question, plan, todo, session info and sub-agent tools (a module
 each), worktrees, usage, and the chat, session list and pending
@@ -7560,6 +7561,113 @@ task's agent two tools.  The module needs `store`, `tasks` and
   test/harness-ui-patch-review-test.el (the adapter), and the library's
   own, in lisp/vendor/change-review.
 
+### linking
+
+Links in what agents write.  A `harness:` URL names a session, a message
+or a tool call in one, a task, or a thread of a task's review, and the
+user's Emacs opens it on a click.  The library `harness-links`
+(lisp/harness-links.el, one of `harness--library-files`, so both sides
+load it) says how a link reads, is written and is found in a text; this
+module finds what one names, writes each link out in full where its
+author wrote it, and teaches agents to write them.  Its UI half is
+`ui-linking` (see Presentation contracts, links).  The module needs
+`session` and is in the core (`harness-core-modules`), which brings
+`ui-linking` along; it asks the tasks and review modules only when a
+link names a task or a thread, and says so when they are not there.
+
+- The syntax.  A link is `harness:` and pairs of `KIND/REF`, in these
+  shapes and no other (`harness-links-parse`): `session/REF`;
+  `session/REF/message/NODE`, `session/REF/call/NODE` and
+  `session/REF/thread/THREAD`; `message/REF` and `call/REF`, in the
+  session the text is in; `thread/THREAD`, in the review of that
+  session's task; `task/TASK` and `task/TASK/thread/THREAD`.  A kind
+  goes by `msg` or `node` (a message), `tool-call`, `tool_call`, `toolcall`
+  or `tool` (a call), in any case; a REF is written %XX where a URL could
+  not carry it (`harness-links-url` and its builders write only what a
+  Markdown link, an autolink and a bare link all carry).  It is written
+  as a Markdown link, `[text](harness:...)`, as an autolink,
+  `<harness:...>`, or bare, `harness:call/last`, which reads as a link
+  when a kind follows the scheme and ends before a blank, a full stop or
+  a colon that closes a sentence, and not inside a longer word or
+  address.  `harness-links-scan` finds them in a text as the renderer
+  (harness-ui-markdown.el) reads one, so what it shows as code -- a code
+  span, a fenced block -- holds none; a label or a target is read up to
+  `harness-links--reach` (400) characters, so a text of thousands of
+  brackets takes time linear in itself; `harness-links-rewrite` changes
+  the URLs of what it finds in place.  A HANDLE
+  (`harness-links-parse-handle`) names a call or a message by where it
+  stands, newest first: `last`, `#3`, `bash#2` (a name, which is the
+  tool for a call and the role for a message), `first`.
+- `link/resolve URL &optional SESSION` (`harness-linking-resolve`, never
+  signals; callable as `_harness/link/resolve`, prefix `link/` of
+  `harness-acp-extension-prefixes`) -- what URL names, in the session
+  whose text holds it, as a plist.  A named thing has `:kind` (a string:
+  `session`, `message`, `call`, `thread` or `task`), `:url` (the link in
+  full, made of ids alone), `:label`, and its ids: `:session` and
+  `:session-name` (for a task or a thread, those of the task's
+  session, when it has one), `:node` (the message's, or the call's
+  node), `:call-id` and `:tool` (a call), `:task` and `:task-name`,
+  `:thread` and `:status`.  One that names nothing has only `:error`, a
+  sentence that says what was looked for.  A session REF is an id, a
+  unique start of one or an exact name in any case (an internal session
+  answers only when no other does).  A call REF is the id of its node
+  or of its result's node, the id its provider gave it, a handle, or a
+  tool's name (its newest call); a message REF is the id of any node, or
+  a handle (`last` the newest assistant message, `first` the first user
+  message, `#3` the third newest of either, `user#1`, `assistant#2`).
+  Handles count the nodes before an optional node, `before` -- the one
+  that holds the text, which the model never sees the id of -- and a
+  call's count leaves `hand_in`'s own out, as `hand_in`'s `tool_call`
+  does.  A thread REF is an id or a unique start of three characters or
+  more, looked up in the review of the link's task, else the task of its
+  session, else the task of the session the text is in (`task/for-session`),
+  through `review/find-thread TASK-ID REF` of the review module, which
+  makes nothing; a task REF is an id or a unique start of one
+  (`task/get`, `task/list`).  A miss lists what the REF could have been:
+  the recent calls with their node ids and titles, the recent messages,
+  the ids a start is shared by, and for a node id that belongs to no
+  node of this session, how to name its session.
+- `link/canonicalize TEXT &optional SESSION BEFORE` (`harness-linking-
+  canonicalize`, never signals) -- `(:text TEXT :problems LIST)`.  Each
+  link `harness-links-scan` finds becomes the `:url` `link/resolve`
+  gives it, in the terms of SESSION and BEFORE, so a name, a prefix or a
+  handle becomes the ids it stood for and a link never means something
+  else once the session has moved on; one already in that form is
+  untouched, so doing it twice changes nothing more.  A bare link
+  becomes a Markdown link of `:label`, an autolink stays one.  A link
+  that names nothing stays as written and is a sentence of PROBLEMS.
+  A text without `harness:` comes back as the same object.
+- Where words are written out.  The turn does it for each assistant
+  message it finishes (`harness-agent--finalize`, through
+  `harness-agent--written-links`; BEFORE is the message's node), before
+  the node's final content is stored.  The tools that carry an agent's
+  words do it through `harness-tools-written TEXT CTX` -> `(TEXT .
+  NOTE)`, with CTX's session and its call id as BEFORE, and say NOTE --
+  "Links that name nothing, left as you wrote them: URL: why | ..." --
+  in the result with `harness-tools-with-note`: `hand_in` (the summary,
+  the problem, the reproduction, the notes and the captions; code is
+  left alone; the turn ends, so the note is for the transcript),
+  `review_comment` (the body), `session_send` (the message, in the
+  sender's terms), `ask_user` (the question; its result is the answer,
+  so no note), `plan`, `spawn_agent` (the prompt, in the parent's terms)
+  and `task_submit`; `task_control`'s message and reject texts are
+  written out too.  Everything is a no-op where the module is missing,
+  and the text goes on as it was when the method fails: what a model said
+  must reach the transcript.
+- Teaching.  A filter on `agent/system-prompt` (45, after the Planning
+  section of tools-agent) appends `harness-linking-prompt-section`, the
+  Links section: the syntax, where the ids are, the handles, and that a
+  link naming nothing is left as written.  It skips an internal session
+  (the harness's own model calls).  `session_read`, `session_search` and
+  `session_history` end with a line that shows how to link a node, with
+  the real ids, and say so in their descriptions, as `session_send`,
+  `review_comment` and `review_threads` do; `review_threads` lists each
+  thread with its `harness:task/TASK/thread/ID`.
+- Tests: test/harness-links-test.el (the library), test/harness-linking-test.el
+  (resolving, writing out, the prompt, the turn's hook with the demo
+  provider and each tool's), test/harness-patch-review-test.el (the
+  thread lookup) and test/harness-tools-sessions-test.el (the footers).
+
 ### readonly
 
 Read-only sessions, which look and change nothing: a supervisor
@@ -10604,6 +10712,47 @@ recorded (`harness-outside-node-p`) opens a turn of its own under its
 sender's line, as that sender's message does, rather than joining the
 agent's turn or a run of calls, and shows as running until its result
 comes, whatever its session is doing.
+
+Links to the harness (`ui-linking`, harness-ui-linking.el, the UI half of
+`linking`).  A `harness:` link in any Markdown the UI draws -- the chat's
+messages, the questions and plans, a report, the comments of a review --
+is a link like any other to the renderer
+(`harness-ui-markdown--harness-link`): the words its author wrote or,
+for an autolink or a bare link, words made of what it names, and a
+tooltip that says what a click opens.  The renderer knows nothing of
+sessions; it hands a click to `harness-ui-markdown-harness-link-function`
+(`harness-ui-linking-follow`) and asks
+`harness-ui-markdown-link-describe-function`
+(`harness-ui-linking-describe`) what a link is: the session cache gives
+a session's name and status, and the chat of a session that shows a node
+gives a call its title and a message the start of what it says.
+Following asks nobody when the UI knows: a session link whose REF the
+cache resolves opens that session, and a message or call link whose node
+the chat of its session shows opens the session and goes to the node.
+Anything else goes to `_harness/link/resolve`, with the session whose
+text holds the link as its context (the chat's, else what
+`harness-ui-linking-context-functions` say: a report names its task's
+session, the comments of a review theirs), and the answer is opened by
+the function `harness-ui-linking-handlers` holds for its kind, which the
+module that can show the thing registers: `harness-ui-visit-session` for
+a session; that, then `harness-ui-chat-goto-node`, for a message or a
+call; the task's report popout for a task; and for a thread
+`harness-ui-patch-review-show-thread`, which opens the task's report with
+point on the thread once the review has its threads and its branch, shows
+the closed threads too (the filter becomes `all`) when the thread is
+hidden, and uses the library's threads view where the report cannot draw
+the changes.  A click never waits, the answer is opened in the window and
+buffer of the click, and what fails is said in the echo area (a harness
+without the module: "This harness cannot resolve links").
+`harness-ui-linking-open` opens a link given as text, offering the one
+on the kill ring.  In a chat `C-c C-l` (`harness-chat-copy-link`) copies
+the link to the message or tool call at point, `C-c M-l`
+(`harness-chat-copy-session-link`) the session's, and `C-u` makes either
+the Markdown link.  The id of a session the UI knows, written in a
+message (`harness-chat--render-markdown`), a report or the comment of a
+review, is a link to it as in a call's input and output
+(`harness-ui-link-session-ids`), but not in code
+(`harness-ui-markdown-code-at-p`).
 Auto-scroll follows unless the user scrolled up.  While a window on the
 chat is away from the end, scrolled up by any command or moved there
 with the jump keys, the header line shows "↓ newer messages", which

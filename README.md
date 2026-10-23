@@ -114,6 +114,13 @@ OpenAI-compatible APIs and AWS Bedrock.
   the exact text, a regular expression, or, with an embedding model,
   meaning. A match opens its session right where it was said. Agents
   search the same way, and so does the quick search.
+- **Links in what agents write.** An agent points at a session, a
+  message or a tool call in one, a task or a thread of a review with a
+  `harness:` link, and a click opens it where it is: the session in its
+  project, the chat at the message, the review at the thread. Agents are
+  taught the syntax, and the harness writes each link out in full where
+  it is written, so `harness:call/last` keeps pointing at the same call
+  (see [Links in what agents write](#links-in-what-agents-write)).
 - **Secret masking and redaction.** What a tool returns is searched for
   secrets before it is stored or sent to the model, and each one is
   replaced by a placeholder. A secret that got into the transcripts
@@ -183,6 +190,8 @@ OpenAI-compatible APIs and AWS Bedrock.
 | A project's task slots: who holds them, who waits, for how long | |
 | ![A chat whose agent replied in three paragraphs, the reply quoted in the compose box with C-c > and answered inline: the middle of the long paragraph elided as [...], the quote split in two with an answer under each part](docs/media/quote-reply.png) | ![A chat whose agent answered a reply that quoted it: the agent's answer quoted in the compose box with the thread under it one level deeper, the user's answers and the agent's message they quoted, and an answer typed under the agent's line](docs/media/quote-thread.png) |
 | Answering a reply inline: `C-c >` quotes it, `C-c [` elides what you skip as `[...]`, `M-RET` splits the quote to answer a part | The thread kept: the message the reply answers, and what that answered, nested under the quote |
+| ![A chat whose agent wrote a message with links in it: the test run it ran, the survey session, that session's answer, a thread of the review of the task and the task, each a link in the words the agent chose](docs/media/links.png) | ![That chat after a click on the link to the thread: the task's report opened under it, the review at the thread the link names](docs/media/links-followed.png) |
+| Links in what agents write: a tool call, a session, one of its messages, a thread, a task | A click on the link to a thread opens the task's review at that thread |
 
 | ![The session of a task in review: its banner shows the changes -- the files as a tree with their marks, the threads of comments by file under them -- with [Verify] and [Send back] below](docs/media/review-banner.png) | ![A task in review, its report at the changes: the files as a tree, the threads below them in the same buffer, the drafts waiting to be sent](docs/media/review.png) |
 | The review banner: the changes where the work is handed in, with no click first | The same changes in the report: the files, and the threads below them |
@@ -348,7 +357,8 @@ for example, `. s` runs what `s` does on the task board.
 
 Every feature is a module, and out of the box only the core loads
 (`harness-core-modules`): sessions and the turn loop, Claude Code for
-the default model, compaction and retries, session names, the file,
+the default model, compaction and retries, session names, the links
+agents write to sessions, messages and threads, the file,
 shell and Emacs tools with the permissions and the sandbox that guard
 them, the access view of what each session may reach and how its calls
 were judged, the tools that ask you a question, plan, keep a todo list,
@@ -718,6 +728,8 @@ so `C-c .` is how you aim a key at a panel from there (see
 | `C-c C-s` | Search the transcript |
 | `C-c C-t` | Show or hide the session's todo list |
 | `C-c C-w` | Copy the last reply |
+| `C-c C-l` | Copy a link to the message or tool call at point -- `harness:session/ID/message/NODE`, `harness:session/ID/call/NODE` -- or to the session where point is on none; with `C-u` the Markdown link `[words](URL)`. Paste it in a message and the agent can write it in what it says (see [Links in what agents write](#links-in-what-agents-write)) |
+| `C-c M-l` | Copy a link to the session (`C-u`: as `[name](URL)`) |
 | `C-c >` | Quote, to reply: the selected text, or the agent's reply or plan at point (elsewhere the one above it, from the box the last), goes in the compose box as a Markdown quote, point under it. An answer that quotes nothing comes with the message it answers nested under it, so a thread's replies quote each other. A selection keeps its code blocks, inline code and links as Markdown, and leaves out what a fold hides. It is the [compose-quote](lisp/vendor/compose-quote/README.md) library's command (see *Answering inline*, below). `C-c h >` does it for the selection of any buffer (see [Prompting with the region](#prompting-with-the-region)) |
 | `M-RET` | In a quote in the compose box: split it where point is, to answer that part: the quote above, an empty line for your answer, the quote below |
 | `C-c [` | In a quote in the compose box: elide the region, or the rest of its paragraph from point (with `C-u`, the rest of the quote), leaving `[...]`, so a bit of front matter stays for context |
@@ -1917,6 +1929,78 @@ which is why this is off until you set it. In corporate mode only a
 server on this machine embeds.
 `harness-session-search-embedding-dimensions` asks a model that can
 shorten its vectors for fewer dimensions.
+
+### Links in what agents write
+
+An agent can point at things in the harness from its own words, and a
+click opens them: another session, one message of it, one tool call, a
+task, a thread of a task's review. The links are ordinary Markdown
+links whose target starts with `harness:`. The `linking` module, in the
+core, teaches agents the syntax in their system prompt and writes their
+links out in full; `ui-linking`, its UI half, opens them. A link is
+written where the agent cites evidence ("all tests pass: [the
+run](harness:call/bash)"), reports on a sub-agent, or answers a review
+thread, instead of describing where something is:
+
+| Link | Opens |
+|---|---|
+| `[the explorer](harness:session/ID)` | a session. ID is its id, the start of one that no other session shares, or its exact name |
+| `[its answer](harness:session/ID/message/NODE)` | one message of it. NODE is the id `session_read`, `session_search` and `session_history` print as `[assistant n-…]` |
+| `[the test run](harness:call/bash)` | a tool call of the session the text is in. `last` is the newest, `#2` the second newest, `bash#2` the second newest call of `bash`, `first` the oldest, or give the id of the call's node; another session's call is `harness:session/ID/call/NODE` |
+| `[my first message](harness:message/first)` | a message of the session the text is in: `last` is the newest assistant message, `first` the first user message, `#2`, `user#1`, `assistant#2`, or the id of a node |
+| `[that thread](harness:thread/ID)` | a thread of the review of the session's task: the id in `[thread …]` of the review's feedback, which `review_threads` lists with a link to copy. Another task's is `harness:task/TASK/thread/ID` |
+| `[the task](harness:task/ID)` | a task: its report |
+
+`<harness:session/ID>` and a bare `harness:call/last` need no words: the
+first reads as the session's name, the other as the call's title. A link
+inside backquotes or a fenced block is text, as in any Markdown. A
+click or `RET` on a link opens the session as the session list does,
+in its project (`harness-ui-visit-session`); a message or a tool call is
+that, and then the chat goes to the node, opening the fold or the run of
+calls that hides it, however far back it is; a task opens its report; a
+thread opens the task's review in its report with point on the thread
+(the closed ones are shown too, when the thread is one). The tooltip
+says what a click opens, and what the UI already knows opens without a
+round trip to the harness. The id of a session the UI knows is a link
+to it as well, wherever it is written in what you read: a message, a
+tool call's input or output, a report, the comment of a review (not in
+code).
+
+The words an agent writes are not left as it wrote them. `harness:call/last`
+means the newest call at the moment it is written, and a name can change
+later, so the harness writes each link out in full when it stores the
+text: the full session id, the id of the node, the id of the task and of
+the thread (`harness:session/…/call/n-…`). It does that for each message
+of the agent as it ends, and for what it hands in -- the summary, the
+problem, the reproduction, the notes and their captions -- a review
+comment, a message it sends another session, a question it asks you, a
+plan, and the prompts of the sub-agents and tasks it starts. Handles
+count only the calls and messages before the one that holds the link,
+and the calls `hand_in` made are left out, as they are for `hand_in`'s
+own `tool_call`. A link that names nothing -- a typo in an id, a call
+that was never made -- is left as it was written, and the result of the
+tool that carried it lists those links with why each failed, naming the
+recent calls or messages when the handle was the trouble, so the agent
+can write it again. A text that has no `harness:` in it is never read.
+
+The agent finds the ids it needs where it already looks. The Links
+section of its system prompt (`harness-linking-prompt-section`) says
+where: `session_info`, `session_list` and `spawn_agent` for sessions,
+the node tags of `session_read`, `session_search` and `session_history`
+for messages and tool calls, the `[thread …]` marks of review feedback
+and `review_threads` for threads. Those three read tools end with a
+line that shows how to link a node, the real ids filled in, and
+`review_threads` prints a `harness:task/…/thread/…` for each thread.
+What the model never sees, its own calls and messages, it names by
+handle.
+
+You can copy a link too: `C-c C-l` in a chat copies the link to the
+message or tool call at point, `C-c M-l` the link to the session, and
+`M-x harness-ui-linking-open` opens one you have as text, offering the
+one on the kill ring. Paste a link in a message and the agent can write
+it in what it says. Other ACP clients get the text as it is, a link they
+may not know how to follow; `_harness/link/resolve` tells them what
+one names.
 
 ### Secrets and redaction
 

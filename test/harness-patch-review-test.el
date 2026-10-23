@@ -881,5 +881,138 @@ the user sent; the drafts are the user's, and stay out."
       (let ((result (harness-patch-review-test--tool "review_threads" nil id)))
         (should-not (plist-get result :is-error))))))
 
+;;;; Links to a thread
+
+(ert-deftest harness-patch-review-finds-a-thread-for-a-link ()
+  "review/find-thread names a thread by its id or the start of it, and makes nothing."
+  (harness-patch-review-test-with
+    (let ((id (harness-patch-review-test--task)))
+      (harness-patch-review-test--user-comment id "Why eighteen?" :thread "t-1a2b3c4d"
+                                              :location harness-patch-review-test--a18 :sent 5.0)
+      (harness-patch-review-test--user-comment id "And the rest?" :thread "t-1a2b9999" :sent 6.0)
+      (let ((found (harness-call 'review/find-thread id "t-1a2b3c4d")))
+        (should (equal "t-1a2b3c4d" (plist-get found :id)))
+        (should (equal "open" (plist-get found :status)))
+        (should (equal "a.el:18" (plist-get found :where)))
+        (should (= 1 (plist-get found :comments))))
+      (should (equal "the change as a whole" (plist-get (harness-call 'review/find-thread id "t-1a2b9") :where)))
+      (should (equal "t-1a2b3c4d" (plist-get (harness-call 'review/find-thread id "t-1a2b3") :id)))
+      ;; Two threads start so.
+      (let ((err (should-error (harness-call 'review/find-thread id "t-1a2b") :type 'harness-error)))
+        (should (string-search "starts the ids of 2 threads" (cadr err))))
+      ;; None, or too little to go by, or nothing.
+      (should-not (harness-call 'review/find-thread id "t-zzz"))
+      (should-not (harness-call 'review/find-thread id "t-"))
+      (should-not (harness-call 'review/find-thread id nil))
+      ;; A task with no review has no thread, and asking makes none.
+      (should-not (harness-call 'review/find-thread "t-no-task" "t-1a2b3c4d"))
+      (should-not (harness-call 'store/load "patch-review/t-no-task.json")))))
+
+(ert-deftest harness-patch-review-gives-the-agent-a-link-to-each-thread ()
+  "review_threads shows, on each thread's line, the link to put in a message."
+  (harness-patch-review-test-with
+    (let* ((id (harness-patch-review-test--task))
+           (sent (harness-patch-review-test--user-comment id "Why eighteen?"
+                                                         :location harness-patch-review-test--a18 :sent 5.0))
+           (all (plist-get (harness-patch-review-test--tool "review_threads" nil id) :content)))
+      (should (string-search (format "[%s] open · a.el:18 · harness:task/%s/thread/%s" (car sent) id (car sent)) all))
+      ;; The link reads as the library reads one.
+      (should (equal (list :kind 'thread :task id :thread (car sent))
+                     (harness-links-parse (format "harness:task/%s/thread/%s" id (car sent))))))))
+
+(ert-deftest harness-patch-review-a-link-to-a-thread-is-resolved ()
+  "The linking module finds a thread of the review of a task, from the session of
+the task, from any session with the task named, and the task itself."
+  (harness-patch-review-test-with
+    (harness-test-load-module 'linking)
+    (let* ((id (harness-patch-review-test--task))
+           (sid (plist-get (harness-call 'task/get id) :session))
+           (sent (harness-patch-review-test--user-comment id "Why eighteen?"
+                                                         :location harness-patch-review-test--a18 :sent 5.0))
+           (thread (car sent)))
+      (dolist (case (list (list (format "harness:thread/%s" thread) sid)
+                          (list (format "harness:thread/%s" (substring thread 0 5)) sid)
+                          (list (format "harness:task/%s/thread/%s" id thread) nil)
+                          (list (format "harness:session/%s/thread/%s" sid thread) nil)))
+        (ert-info ((car case))
+          (let ((r (harness-call 'link/resolve (car case) (cadr case))))
+            (should-not (plist-get r :error))
+            (should (equal "thread" (plist-get r :kind)))
+            (should (equal (format "harness:task/%s/thread/%s" id thread) (plist-get r :url)))
+            (should (equal (format "thread %s on a.el:18" thread) (plist-get r :label)))
+            (should (equal id (plist-get r :task)))
+            (should (equal thread (plist-get r :thread)))
+            (should (equal sid (plist-get r :session))))))
+      (let ((r (harness-call 'link/resolve (format "harness:task/%s" (substring id 0 5)))))
+        (should (equal "task" (plist-get r :kind)))
+        (should (equal (format "harness:task/%s" id) (plist-get r :url)))
+        (should (equal sid (plist-get r :session))))
+      (should (string-match-p "No thread t-nope in the review of the task"
+                              (plist-get (harness-call 'link/resolve "harness:thread/t-nope" sid) :error)))
+      ;; A session that is no task's has no review.
+      (let ((plain (plist-get (harness-call 'session/create :cwd default-directory :model "demo:scripted") :id)))
+        (should (string-match-p "is no task's"
+                                (plist-get (harness-call 'link/resolve (format "harness:thread/%s" thread) plain)
+                                           :error)))))))
+
+(ert-deftest harness-patch-review-hand-in-writes-the-links-of-its-report-out ()
+  "The report a task hands in links the calls that ran in terms of that session, so it
+means the same whenever the review is read; a link that names nothing is said in the result."
+  (harness-patch-review-test-with
+    (harness-test-load-module 'linking)
+    (let* ((id (harness-patch-review-test--task))
+           (sid (plist-get (harness-call 'task/get id) :session))
+           (call (plist-get (harness-call 'session/append
+                                          sid '(:kind tool-call :tool "bash" :call-id "toolu_b"
+                                                :input (:command "make test") :title "Run command: make test"))
+                            :id))
+           (link (format "harness:session/%s/call/%s" sid call))
+           (r (harness-patch-review-test--tool
+               "hand_in"
+               (list :problem "Check [the run](harness:call/bash)."
+                     :summary "Done: [the tests](harness:call/last), [nothing](harness:call/zzz#3)."
+                     :reproduction "Run [it](harness:call/bash#1)."
+                     :evidence (list "A note [n](harness:call/bash)"
+                                     (list :note "Note [n2](harness:call/last)" :caption "Cap [c](harness:call/last)")
+                                     (list :code "[not](harness:call/last)" :language "text")))
+               id))
+           (report (plist-get (harness-call 'task/get id) :report)))
+      (should-not (plist-get r :is-error))
+      (should (equal (format "Check [the run](%s)." link) (plist-get report :problem)))
+      (should (equal (format "Done: [the tests](%s), [nothing](harness:call/zzz#3)." link) (plist-get report :summary)))
+      (should (equal (format "Run [it](%s)." link) (plist-get report :reproduction)))
+      (let ((items (plist-get report :evidence)))
+        (should (equal (format "A note [n](%s)" link) (plist-get (nth 0 items) :text)))
+        (should (equal (format "Note [n2](%s)" link) (plist-get (nth 1 items) :text)))
+        (should (equal (format "Cap [c](%s)" link) (plist-get (nth 1 items) :caption)))
+        ;; Code is code.
+        (should (equal "[not](harness:call/last)" (plist-get (nth 2 items) :code))))
+      ;; The result says which link named nothing, after the usual words.
+      (should (string-match-p "\\`Handed in: Done: [^\n]*\n\n3 pieces of evidence[^\n]*\n\nLinks that name nothing, left as you wrote them: harness:call/zzz#3: No tool call matches"
+                              (plist-get r :content))))))
+
+(ert-deftest harness-patch-review-a-comment-has-its-links-written-out ()
+  "review_comment writes the links of the comment out in full, and says which named nothing."
+  (harness-patch-review-test-with
+    (harness-test-load-module 'linking)
+    (let* ((id (harness-patch-review-test--task))
+           (sid (plist-get (harness-call 'task/get id) :session))
+           (made (harness-patch-review-test--user-comment id "Why?" :location harness-patch-review-test--a18 :sent 5.0))
+           (call (plist-get (harness-call 'session/append
+                                          sid '(:kind tool-call :tool "bash" :call-id "toolu_b"
+                                                :input (:command "make test") :title "Run command: make test"))
+                            :id))
+           (r (harness-patch-review-test--tool
+               "review_comment"
+               (list :thread (car made) :body "Fixed: see [the run](harness:call/bash#1) and [x](harness:call/zzz)."
+                     :status "closed")
+               id))
+           (comments (plist-get (car (plist-get (harness-call 'patch-review/get id) :threads)) :comments)))
+      (should-not (plist-get r :is-error))
+      (should (equal (format "Fixed: see [the run](harness:session/%s/call/%s) and [x](harness:call/zzz)." sid call)
+                     (plist-get (cadr comments) :body)))
+      (should (string-match-p "\\`Added comment .* to thread .*, which is now closed\\.\n\nLinks that name nothing, left as you wrote them: harness:call/zzz"
+                              (plist-get r :content))))))
+
 (provide 'harness-patch-review-test)
 ;;; harness-patch-review-test.el ends here

@@ -81,6 +81,7 @@
 (require 'seq)
 (require 'harness-core)
 (require 'harness-util)
+(require 'harness-links)
 
 ;; change-review is in lisp/vendor/change-review, which the harness puts
 ;; on `load-path' (`harness--setup-load-path').  A harness older than
@@ -609,6 +610,34 @@ in it: the drafts are the user's until they send the task back."
    (harness-patch-review--set-for task-id t)
    (and (stringp status) (member status '("open" "closed")) (intern status))))
 
+(harness-defmethod review/find-thread (task-id ref)
+  "Return the thread of task TASK-ID's review that REF names, or nil.
+REF is a thread's id, or the start of one, three characters or more, that
+no other thread's id starts with.  A plist: `:id', the thread's id,
+`:status', \"open\" or \"closed\", `:where', the file and line it is on or
+\"the change as a whole\", and `:comments', how many it holds.  The linking
+module finds what a link to a thread names with it.  Nothing is made: a
+task with no review has no thread.  Signal an error naming the threads
+when REF starts the ids of several."
+  (when-let* (((stringp ref))
+              (set (harness-patch-review--set-for task-id)))
+    (let* ((ref (string-trim ref))
+           (threads (change-review-set-threads set))
+           (exact (cl-find ref threads :key #'change-review-thread-id :test #'equal))
+           (starts (and (not exact) (>= (length ref) 3)
+                        (cl-remove-if-not (lambda (thread) (string-prefix-p ref (change-review-thread-id thread)))
+                                          threads)))
+           (thread (or exact (car starts))))
+      (when (cdr starts)
+        (signal 'harness-error
+                (list (format "%s starts the ids of %d threads (%s); give more of it" ref (length starts)
+                              (mapconcat #'change-review-thread-id starts ", ")))))
+      (when thread
+        (list :id (change-review-thread-id thread)
+              :status (if (change-review-thread-open-p thread) "open" "closed")
+              :where (harness-patch-review--where thread)
+              :comments (length (change-review-thread-comments thread)))))))
+
 (harness-defmethod patch-review/drafts (task-id)
   "Return the draft comments of task TASK-ID's review, those not sent yet, as data."
   (when-let* ((set (harness-patch-review--set-for task-id)))
@@ -808,9 +837,11 @@ draft is not shown: the user has not sent it."
        (mapconcat
         (lambda (thread)
           (concat
-           (format "[%s] %s · %s\n" (change-review-thread-id thread)
+           ;; The link is what the agent puts in a message to point at the thread.
+           (format "[%s] %s · %s · %s\n" (change-review-thread-id thread)
                    (if (change-review-thread-open-p thread) "open" "closed")
-                   (harness-patch-review--where thread))
+                   (harness-patch-review--where thread)
+                   (harness-links-thread-url (change-review-set-id set) (change-review-thread-id thread)))
            (mapconcat
             (lambda (comment)
               (let ((author (change-review-comment-author comment)))

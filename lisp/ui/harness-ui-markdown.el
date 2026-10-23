@@ -9,11 +9,21 @@
 ;; block quotes, links as buttons, horizontal rules and simple tables.
 ;; The renderer is pure: `harness-ui-markdown-render' returns a string
 ;; the caller inserts, so it can be used for streaming re-renders.
+;;
+;; A link to something in the harness -- a session, a message, a tool
+;; call, a task, a thread of a review (harness-links.el) -- is a link
+;; like any other, written [text](harness:...), <harness:...> or bare;
+;; the two that have no words of their own read as what they name.  The
+;; renderer does not know what they name or where they go: the UI module
+;; that does (ui-linking) sets `harness-ui-markdown-harness-link-function'
+;; to follow one, and `harness-ui-markdown-link-describe-function' to say
+;; what one is.
 
 ;;; Code:
 
 (require 'cl-lib)
 (require 'subr-x)
+(require 'harness-links)
 
 (defgroup harness-ui-markdown nil
   "Markdown rendering for the harness."
@@ -92,12 +102,49 @@
   (dolist (key '([double-mouse-1] [triple-mouse-1] [double-mouse-2] [triple-mouse-2]))
     (define-key map key #'ignore)))
 
-(defun harness-ui-markdown--link (text url)
-  "Return TEXT as a link to URL."
+(defun harness-ui-markdown--link (text url &optional help)
+  "Return TEXT as a link to URL, whose tooltip is HELP, by default URL."
   (propertize text 'face 'link 'mouse-face 'highlight
-              'help-echo url 'harness-url url
+              'help-echo (or help url) 'harness-url url
               'follow-link t
               'keymap harness-ui-markdown-link-map))
+
+(defvar harness-ui-markdown-harness-link-function nil
+  "Function that follows a harness link, or nil when none can.
+Called with the link's URL (`harness-links-p') by
+`harness-ui-markdown-open-link', in the buffer the link is in.  The
+UI module that knows what a session, a message or a thread is sets it
+\(ui-linking); with none, following one is an error that says so.")
+
+(defvar harness-ui-markdown-link-describe-function nil
+  "Function that says what a harness link is, or nil.
+Called with the link's URL, it returns a plist: `:label', the words to
+show for a link that has none of its own (an autolink or a bare one),
+and `:help', its tooltip; either may be left out.  It may name what the
+link goes to -- the session's name -- which the renderer cannot know.")
+
+(defun harness-ui-markdown--describe (url)
+  "Return what `harness-ui-markdown-link-describe-function' says of URL, or nil."
+  (when harness-ui-markdown-link-describe-function
+    (condition-case nil
+        (funcall harness-ui-markdown-link-describe-function url)
+      (error nil))))
+
+(defun harness-ui-markdown--harness-link (url &optional label)
+  "Return a link to the harness link URL, showing LABEL.
+Without LABEL it shows words that stand for what URL names.  The tooltip
+says what the click opens."
+  (let* ((described (harness-ui-markdown--describe url))
+         (parsed (harness-links-parse url))
+         (what (or (plist-get described :label)
+                   (and parsed (harness-links-label parsed))
+                   url)))
+    (harness-ui-markdown--link
+     (or label what) url
+     (or (plist-get described :help)
+         (if parsed
+             (format "mouse-1, RET: open %s" what)
+           (format "%s: not a link to anything in the harness" url))))))
 
 (defun harness-ui-markdown-follow-link (&optional event)
   "Open the link at point, or the one mouse EVENT clicked on.
@@ -138,19 +185,27 @@ suffix names, else nil; any other fragment is dropped."
 
 (defun harness-ui-markdown-open-link (target)
   "Open link TARGET, leaving the buffer the link is in alone.
+A harness link -- a session, a message, a tool call, a thread -- is
+followed by `harness-ui-markdown-harness-link-function', in this buffer.
 A URL -- https:, mailto: and the like -- goes to `browse-url'.  Anything
 else is a file: a file: URL, or a file name, absolute or relative to
 `default-directory'.  It opens in another window, at the line a \"#L12\"
 or \":12\" suffix names."
-  (if (harness-ui-markdown--url-p target)
-      (browse-url target)
+  (cond
+   ((harness-links-p target)
+    (if harness-ui-markdown-harness-link-function
+        (funcall harness-ui-markdown-harness-link-function target)
+      (user-error "Links to sessions, messages and threads need the linking module")))
+   ((harness-ui-markdown--url-p target)
+    (browse-url target))
+   (t
     (pcase-let ((`(,file . ,line) (harness-ui-markdown--link-file target)))
       (unless (and file (file-exists-p file))
         (user-error "No such file: %s" (or file target)))
       (find-file-other-window file)
       (when line
         (goto-char (point-min))
-        (forward-line (1- line))))))
+        (forward-line (1- line)))))))
 
 ;; Emphasis, as Markdown has it, has text against its markers: the one
 ;; that opens it is not followed by a blank, the one that closes it not
@@ -174,7 +229,8 @@ or \":12\" suffix names."
           ;; An autolink is a URL in angle brackets, so it names a scheme:
           ;; "List<Foo>" is not one, and its brackets stay.
           (group-n 8 "<" (any alpha) (* (any alnum "+.-")) ":" (+? (any alnum ":/._~?#=&%+@-")) ">") ; autolink
-          (group-n 9 (or "http://" "https://") (+ (any alnum ":/._~?#=&%+-@")))))) ; bare url
+          (group-n 9 (or "http://" "https://") (+ (any alnum ":/._~?#=&%+-@")))   ; bare url
+          (group-n 10 (regexp harness-links-bare-regexp)))))                      ; bare harness link
 
 (defun harness-ui-markdown--emphasis-p (text inner-start inner-end &optional word-after)
   "Return non-nil when TEXT from INNER-START to INNER-END is emphasised.
@@ -203,6 +259,10 @@ digit may follow it: a name with underscores is a name."
                              ((or (match-beginning 6) (match-beginning 7))
                               (harness-ui-markdown--emphasis-p
                                text (+ start lead 1) (1- end) (and (match-beginning 7) t)))
+                             ;; Not a link inside a longer word or address.
+                             ((match-beginning 10)
+                              (not (and (> start 0)
+                                        (harness-links-url-char-p (aref text (1- start))))))
                              (t t))))
         (if (not emphasis)
             ;; Not emphasis: a star, an underscore, and the text after it is
@@ -220,8 +280,11 @@ digit may follow it: a name with underscores is a name."
            ((match-beginning 5)
             ;; "[LABEL](URL)": LABEL holds no "]", so the first "](" splits it.
             (let* ((m (substring text start end))
-                   (sep (string-search "](" m)))
-              (setq piece (harness-ui-markdown--link (substring m 1 sep) (substring m (+ sep 2) -1)))))
+                   (sep (string-search "](" m))
+                   (url (substring m (+ sep 2) -1)))
+              (setq piece (if (harness-links-p (string-trim url))
+                              (harness-ui-markdown--harness-link (string-trim url) (substring m 1 sep))
+                            (harness-ui-markdown--link (substring m 1 sep) url)))))
            ((or (match-beginning 6) (match-beginning 7))
             (setq piece (concat (substring text start (+ start lead))
                                 (harness-ui-markdown--add-face
@@ -229,10 +292,16 @@ digit may follow it: a name with underscores is a name."
                                  'italic))))
            ((match-beginning 8)
             (let ((url (substring text (1+ start) (1- end))))
-              (setq piece (harness-ui-markdown--link url url))))
+              (setq piece (if (harness-links-p url)
+                              (harness-ui-markdown--harness-link url)
+                            (harness-ui-markdown--link url url)))))
            ((match-beginning 9)
             (let ((url (substring text start end)))
-              (setq piece (harness-ui-markdown--link url url)))))
+              (setq piece (harness-ui-markdown--link url url))))
+           ((match-beginning 10)
+            ;; A full stop or a colon that ends the sentence is not the link's.
+            (setq end (harness-links-trim-bare text start end))
+            (setq piece (harness-ui-markdown--harness-link (substring text start end)))))
           (push (substring text pos start) parts)
           (push piece parts)
           (setq pos end))))
@@ -617,6 +686,15 @@ the width, and a line is given eight columns at least."
   "Non-nil when the text of STRING at POS is drawn in FACE, alone or among others."
   (let ((faces (get-text-property pos 'face string)))
     (if (consp faces) (memq face faces) (eq faces face))))
+
+(defun harness-ui-markdown-code-at-p (string pos)
+  "Return non-nil when the character of STRING at POS was rendered as code.
+STRING is rendered Markdown (`harness-ui-markdown-render'); code is what
+the renderer drew in a fenced block or between backquotes.  What it says
+is meant literally: whoever finds things in rendered text, to link them,
+leaves it alone."
+  (or (eq (get-text-property pos 'harness-md-block string) 'code)
+      (and (harness-ui-markdown--string-face-p string pos 'harness-md-code) t)))
 
 (defun harness-ui-markdown-render-lines (text width)
   "Render Markdown TEXT as a list of lines, each WIDTH columns at most.

@@ -15,13 +15,18 @@
 
 (defun harness-tools-plan--record (input ctx)
   "Handler of the plan tool: record INPUT's plan on the session in CTX."
-  (let ((sid (plist-get ctx :session-id))
-        (plan (or (plist-get input :plan) ""))
-        (title (plist-get input :title)))
+  (let* ((sid (plist-get ctx :session-id))
+         ;; The links in the plan are written out in full, in the terms of
+         ;; this session before this call (`harness-tools-written').
+         (written (harness-tools-written (or (plist-get input :plan) "") ctx))
+         (plan (car written))
+         (title (plist-get input :title)))
     (harness-call 'session/set-plan sid plan)
     (harness-call 'session/append sid (list :kind 'plan :content plan :title title))
     (harness-call 'session/hint sid "Plan updated")
-    (harness-tool-ok "Plan recorded. Proceed when the user agrees or continue if they asked you to just do it.")))
+    (harness-tool-ok (harness-tools-with-note
+                      "Plan recorded. Proceed when the user agrees or continue if they asked you to just do it."
+                      (cdr written)))))
 
 (harness-define-tool "plan"
   :label "Plan"

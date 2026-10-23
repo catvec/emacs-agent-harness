@@ -3342,6 +3342,29 @@ left alone."
           (should (equal '(bold) (faces string 0)))
           (should (plain-p string 0 (length string))))))))
 
+(ert-deftest harness-ui-link-session-ids-leaves-alone-what-skip-says ()
+  "An id SKIP, a function of the string and the id's position, says to leave is
+text: the others are linked, and SKIP sees where each id starts."
+  (let* ((harness-ui--sessions (make-hash-table :test 'equal))
+         (known "0a1b2c3d-1111-4111-8111-111111111111")
+         (text (format "first %s then %s" known known))
+         (second (+ (string-search known text) (length known) (length " then ")))
+         (asked nil))
+    (puthash known (list :id known :name "Alpha") harness-ui--sessions)
+    (let ((string (harness-ui-link-session-ids
+                   (copy-sequence text)
+                   (lambda (string pos)
+                     (should (stringp string))
+                     (push pos asked)
+                     (= pos second)))))
+      (should (equal (list (string-search known text) second) (reverse asked)))
+      (should (keymapp (get-text-property (string-search known text) 'keymap string)))
+      (should-not (get-text-property second 'keymap string))
+      (should-not (memq 'harness-ui-session-link-face
+                        (ensure-list (get-text-property second 'face string)))))
+    ;; Skipping nothing is not skipping.
+    (should (get-text-property 0 'keymap (harness-ui-link-session-ids (copy-sequence known) #'ignore)))))
+
 (ert-deftest harness-ui-switch-to-project-only-switches-to-a-local-directory ()
   "`harness-ui-switch-to-project' switches only to a local, existing root.
 A remote root, a missing one or none at all switches nothing, and nor

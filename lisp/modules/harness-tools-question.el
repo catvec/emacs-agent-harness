@@ -143,7 +143,10 @@ is malformed, or when only some options have a diagram."
 A malformed call (see `harness-tools-question--options') returns an error
 saying what to fix, and asks nothing."
   (let* ((sid (plist-get ctx :session-id))
-         (question (or (plist-get input :question) ""))
+         ;; The question may link what it is about; written out in full, in
+         ;; the terms of this session before this call, the links mean the
+         ;; same whenever the user answers.
+         (question (car (harness-tools-written (or (plist-get input :question) "") ctx)))
          (free (if (plist-member input :allow_free_text)
                    (harness-json-true-p (plist-get input :allow_free_text))
                  t))

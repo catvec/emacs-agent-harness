@@ -333,7 +333,14 @@ compaction tells of it; all=true looks through the whole of it."
           (should-not (string-match-p "question 4" text))
           (should-not (string-match-p "a hint" text))
           (should-not (string-match-p "after the parser compaction" text))
-          (should (string-match-p "Read a node whole with node_id; find one with query\\.\\'" text)))
+          ;; A line at the end says how to link a node, the last one shown.
+          (should (string-match-p
+                   (format "Read a node whole with node_id; find one with query\\.\n\nLink a node in your message: %s; for a tool call write call in place of message\\.\\'"
+                           (regexp-quote (format "[text](harness:message/%s)"
+                                                 (plist-get (cl-find "answer 5" (harness-call 'session/nodes sid)
+                                                                     :key (lambda (n) (plist-get n :content)) :test #'equal)
+                                                            :id))))
+                   text)))
         ;; A query: matches newest first, paging back with before.
         (let ((text (harness-tools-sessions-test-ok sid "session_history" '(:query "PARSER" :limit 2))))
           (should (string-match-p "6 nodes mention \"PARSER\", newest first:" text))
@@ -434,6 +441,59 @@ tell it from the user's messages."
           (should (string-match-p (concat tag (regexp-quote " [Message from session")) text))
           (should (string-match-p "\\[user n-[a-z0-9]+\\] from the user" text)))
         (should (string-match-p tag (harness-tools-sessions-test-ok third "session_search" '(:query "status?"))))))))
+
+(ert-deftest harness-tools-sessions-results-say-how-to-link-a-node ()
+  "session_read, session_search and session_history end with a link the agent can
+copy, the real ids in it: the other session's id and the node's, or the
+calling session's own, for a tool call written with call."
+  (harness-tools-sessions-test-with
+    (let ((me (harness-tools-sessions-test-session :name "Me"))
+          (other (harness-tools-sessions-test-session :name "Other")))
+      (harness-call 'session/append other '(:kind user :content "Look at the zebra"))
+      (let* ((last (plist-get (harness-call 'session/append other '(:kind assistant :content "Seen the zebra")) :id))
+             (read (harness-tools-sessions-test-ok me "session_read" (list :session_id "Other"))))
+        (should (string-suffix-p
+                 (format "\n\nLink a node in your message: [text](harness:session/%s/message/%s); for a tool call write call in place of message."
+                         other last)
+                 read))
+        (let ((text (harness-tools-sessions-test-ok me "session_search" '(:query "zebra"))))
+          (should (string-match
+                   (concat "\n\nLink a node in your message: \\[text](harness:session/" (regexp-quote other)
+                           "/message/\\(n-[a-z0-9]+\\)); for a tool call write call in place of message\\.\\'")
+                   text))
+          ;; The node of a hit.
+          (should (member (match-string 1 text)
+                          (mapcar (lambda (n) (plist-get n :id)) (harness-call 'session/nodes other))))))
+      ;; Nothing shown, nothing to link.
+      (let ((empty (harness-tools-sessions-test-session :name "Empty")))
+        (should-not (string-search "Link a node" (harness-tools-sessions-test-ok me "session_read" (list :session_id empty)))))
+      (should-not (string-search "Link a node" (harness-tools-sessions-test-ok me "session_search" '(:query "giraffe"))))
+      ;; Its own conversation: the session is the calling one's, left out.
+      (harness-call 'session/append me '(:kind user :content "about the parser"))
+      (let ((text (harness-tools-sessions-test-ok me "session_history" '(:query "parser"))))
+        (should (string-match-p
+                 "\n\nLink a node in your message: \\[text\\](harness:message/n-[a-z0-9]+); for a tool call write call in place of message\\.\\'"
+                 text))))))
+
+(ert-deftest harness-tools-sessions-send-writes-the-links-of-the-message-out ()
+  "The receiver reads the message in its own session, where the sender's handles
+mean other things: the links are written out in full, in the sender's terms."
+  (harness-tools-sessions-test-with
+    (harness-test-load-module 'linking)
+    (let* ((me (harness-tools-sessions-test-session :name "Boss"))
+           (other (harness-tools-sessions-test-session :name "Worker"))
+           (call (plist-get (harness-call 'session/append
+                                          me '(:kind tool-call :tool "bash" :call-id "toolu_x"
+                                               :input (:command "make") :title "Run command: make"))
+                            :id)))
+      (let ((text (harness-tools-sessions-test-ok
+                   me "session_send" (list :session_id other :mode "queue"
+                                           :message "Look at [my run](harness:call/last) and [nothing](harness:call/zzz#2)."))))
+        (should (string-match-p "queued for its next turn" text))
+        (should (string-match-p "Links that name nothing, left as you wrote them: harness:call/zzz#2" text)))
+      (let ((item (car (plist-get (harness-call 'session/get other) :queue))))
+        (should (string-search (format "Look at [my run](harness:session/%s/call/%s) and [nothing](harness:call/zzz#2)." me call)
+                               (plist-get item :text)))))))
 
 (defun harness-tools-sessions-test-wakes (sid)
   "Return the wake-up messages `session_wait' sent to SID, oldest first."

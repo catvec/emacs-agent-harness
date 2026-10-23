@@ -105,6 +105,7 @@
 (require 'harness-core)
 (require 'harness-util)
 (require 'harness-files)
+(require 'harness-links)
 (require 'harness-priority)
 (require 'harness-tools)
 
@@ -204,6 +205,27 @@ A user message the user did not write says who sent it."
   (let ((from (and (eq (plist-get node :kind) 'user) (harness-node-sender node))))
     (format "[%s %s%s]" (plist-get node :kind) (plist-get node :id)
             (if from (concat ", from " (harness-sender-description from)) ""))))
+
+(defun harness-tools-sessions--link-line (text session-id &optional node-id)
+  "Return the lines that tell how to link a node of TEXT, or \"\" if it shows none.
+TEXT, the answer of a tool, shows nodes by their tags, [kind id]
+\(`harness-tools-sessions--tag').  The line is a link to one of them,
+with the real ids: SESSION-ID's, or the link without it for the
+calling session's own nodes (nil), and NODE-ID's, else the id of the
+last node TEXT shows."
+  (let ((pos 0) (last nil))
+    ;; The newest node the text shows, when it is not given one.
+    (while (string-match "\\[[a-z-]+ \\(n-[a-z0-9]+\\)" text pos)
+      (setq last (match-string 1 text) pos (match-end 0)))
+    (if (null last)
+        ""
+      (format "\n\nLink a node in your message: %s; for a tool call write call in place of message."
+              (harness-links-markdown "text" (harness-links-message-url session-id (or node-id last)))))))
+
+(defun harness-tools-sessions--with-link-line (text session-id)
+  "Return TEXT, a tool's answer that shows nodes, with how to link one after it.
+SESSION-ID is as for `harness-tools-sessions--link-line'."
+  (concat text (harness-tools-sessions--link-line text session-id)))
 
 (defun harness-tools-sessions--last-reply (session-id)
   "Return the last assistant text of SESSION-ID, or nil."
@@ -401,7 +423,13 @@ A user message the user did not write says who sent it."
         sessions "\n")
        (if (> total (length sessions))
            (format "\n… %d more sessions match" (- total (length sessions)))
-         "")))))
+         "")
+       (let ((hit (cl-some (lambda (s) (and (plist-get s :hits)
+                                            (cons (plist-get s :id) (plist-get (car (plist-get s :hits)) :node))))
+                           sessions)))
+         (if hit
+             (harness-tools-sessions--link-line "[hit n-0]" (car hit) (cdr hit))
+           ""))))))
 
 (defun harness-tools-sessions--search (input ctx)
   "Handler of session_search.
@@ -426,7 +454,7 @@ sessions (`harness-tools-sessions--internal-p') are not searched."
 
 (harness-define-tool "session_search"
   :label "Search sessions"
-  :description "Search the transcripts of other sessions (messages, thinking, tool calls and results) and their names. Mode text (the default) is full-text search: words match in any form (\"parse\" finds \"parsing\"), case and accents aside; every word must match; \"quoted words\" match as a phrase, word* as a prefix, a OR b either, and -word excludes; best matches first, and when no session has every word, those with some. Mode literal finds the exact text and regexp an extended regular expression (as grep -E), both case-insensitively, newest sessions first. Mode semantic finds what is nearest in meaning, when the user set an embedding model. Returns the matching sessions with snippets and node ids; read one with session_read. Searches this project unless all_projects is set; closed sessions are included, internal ones (the records of the harness's own model calls) are not. This session's own conversation from before a compaction is searched with session_history instead."
+  :description "Search the transcripts of other sessions (messages, thinking, tool calls and results) and their names. Mode text (the default) is full-text search: words match in any form (\"parse\" finds \"parsing\"), case and accents aside; every word must match; \"quoted words\" match as a phrase, word* as a prefix, a OR b either, and -word excludes; best matches first, and when no session has every word, those with some. Mode literal finds the exact text and regexp an extended regular expression (as grep -E), both case-insensitively, newest sessions first. Mode semantic finds what is nearest in meaning, when the user set an embedding model. Returns the matching sessions with snippets and node ids (the line at the end shows how to link a hit in your message); read one with session_read. Searches this project unless all_projects is set; closed sessions are included, internal ones (the records of the harness's own model calls) are not. This session's own conversation from before a compaction is searched with session_history instead."
   :schema '(:type "object"
             :properties (:query (:type "string" :description "What to find.")
                          :mode (:type "string" :enum ("text" "literal" "regexp" "semantic")
@@ -475,14 +503,15 @@ INPUT is the tool call's input plist."
               (if (> (length nodes) (length shown))
                   (format "; earlier ones with before=%s" (plist-get (car shown) :id))
                 ""))
-      (mapconcat (lambda (n)
-                   (format "%s %s" (harness-tools-sessions--tag n)
-                           (harness-truncate-end (harness-tools-sessions--node-text n) chars)))
-                 shown "\n")))))
+      (let ((lines (mapconcat (lambda (n)
+                                (format "%s %s" (harness-tools-sessions--tag n)
+                                        (harness-truncate-end (harness-tools-sessions--node-text n) chars)))
+                              shown "\n")))
+        (concat lines (harness-tools-sessions--link-line lines sid)))))))
 
 (harness-define-tool "session_read"
   :label "Read session"
-  :description "Read another session: its status, plan, todos and the last nodes of its transcript (user and assistant messages, thinking, tool calls and results). Page back with before=<node id> from the previous result."
+  :description "Read another session: its status, plan, todos and the last nodes of its transcript (user and assistant messages, thinking, tool calls and results). Page back with before=<node id> from the previous result. The line at the end shows how to link a node in your message."
   :schema '(:type "object"
             :properties (:session_id (:type "string" :description "Session id, unique id prefix or unique name.")
                          :limit (:type "integer" :description "Most nodes to show, newest last (default 20).")
@@ -648,7 +677,8 @@ Its text is cut to CHARS; the nodes around it are shown short."
                     harness-tools-sessions--history-kinds))
          (header (harness-tools-sessions--history-scope path boundary all)))
     (harness-tool-ok
-     (if node-id
+     (harness-tools-sessions--with-link-line
+      (if node-id
          (concat header "\n\n"
                  (harness-tools-sessions--history-node
                   path node-id (or (plist-get input :max_chars) harness-tools-sessions--history-whole)))
@@ -691,11 +721,12 @@ Its text is cut to CHARS; the nodes around it are shown short."
                                     (format "; earlier ones with before=%s" (plist-get (car shown) :id))
                                   ""))
                         (mapconcat (lambda (n) (harness-tools-sessions--history-line n chars)) shown "\n")
-                        "\nRead a node whole with node_id; find one with query."))))))))))
+                        "\nRead a node whole with node_id; find one with query.")))))))
+      nil))))
 
 (harness-define-tool "session_history"
   :label "Session history"
-  :description "Search and read this session's own conversation from before its last compaction (or a handoff from another model): the part your context holds only as a summary, a pointer to a transcript file, or not at all. Use it when you need something from back then -- what was asked, decided, tried, found or changed -- rather than guessing or redoing the work. query finds the messages, thinking, tool calls and results that mention it, newest first, with snippets and node ids; node_id shows one node whole with the nodes around it; with neither, the last nodes before the compaction, oldest first. Page back with before=<node id>. all=true looks through the whole conversation, the part since the compaction included. For other sessions, use session_search and session_read."
+  :description "Search and read this session's own conversation from before its last compaction (or a handoff from another model): the part your context holds only as a summary, a pointer to a transcript file, or not at all. Use it when you need something from back then -- what was asked, decided, tried, found or changed -- rather than guessing or redoing the work. query finds the messages, thinking, tool calls and results that mention it, newest first, with snippets and node ids; node_id shows one node whole with the nodes around it; with neither, the last nodes before the compaction, oldest first. Page back with before=<node id>. all=true looks through the whole conversation, the part since the compaction included. For other sessions, use session_search and session_read. The line at the end shows how to link a node in your message."
   :schema '(:type "object"
             :properties (:query (:type "string" :description "Text to find, case-insensitively.")
                          :regexp (:type "boolean" :description "Treat query as an Emacs regular expression (default false).")
@@ -728,9 +759,12 @@ Its text is cut to CHARS; the nodes around it are shown short."
 
 (defun harness-tools-sessions--send (input ctx)
   "Handler of session_send.
-INPUT is the tool call's input plist and CTX its context."
+INPUT is the tool call's input plist and CTX its context.  The links in
+the message are written out in full, in the terms of the sender's
+session (`harness-tools-written'): the receiver reads them in its own."
   (let* ((sid (harness-tools-sessions--other (plist-get input :session_id) ctx "message"))
-         (text (or (plist-get input :message) ""))
+         (written (harness-tools-written (or (plist-get input :message) "") ctx))
+         (text (car written))
          (queue (equal (plist-get input :mode) "queue"))
          (wait (harness-json-true-p (plist-get input :wait)))
          (s (harness-call 'session/get sid))
@@ -748,17 +782,21 @@ INPUT is the tool call's input plist and CTX its context."
           (progn
             ;; The turn's own failures surface in that session; keep them out of the log here.
             (harness-catch promise #'ignore)
-            (harness-tool-ok (format "Message %s (session %s). Use session_wait to wait for its reply." how sid)))
+            (harness-tool-ok (harness-tools-with-note
+                              (format "Message %s (session %s). Use session_wait to wait for its reply." how sid)
+                              (cdr written))))
         (harness-then promise
                       (lambda (result)
                         (harness-tool-ok
-                         (format "Message %s; the turn ended: %s%s\n\n%s" how (plist-get result :stop-reason)
-                                 (if (plist-get result :error) (format " (%s)" (plist-get result :error)) "")
-                                 (harness-tools-sessions--describe sid 8000)))))))))
+                         (harness-tools-with-note
+                          (format "Message %s; the turn ended: %s%s\n\n%s" how (plist-get result :stop-reason)
+                                  (if (plist-get result :error) (format " (%s)" (plist-get result :error)) "")
+                                  (harness-tools-sessions--describe sid 8000))
+                          (cdr written)))))))))
 
 (harness-define-tool "session_send"
   :label "Message session"
-  :description "Send a message to another session, as the user would. An idle or closed session starts a turn; a running one gets it as steering at its next step; mode=queue holds it for the session's next turn instead. The message is marked as coming from this session. wait=true returns once the turn ends, with the session's reply; otherwise it returns at once (follow with session_wait)."
+  :description "Send a message to another session, as the user would. An idle or closed session starts a turn; a running one gets it as steering at its next step; mode=queue holds it for the session's next turn instead. The message is marked as coming from this session. wait=true returns once the turn ends, with the session's reply; otherwise it returns at once (follow with session_wait). Links in the message (harness:call/last, harness:message/...) are written out in full, in your session's terms, before the other session reads them."
   :schema '(:type "object"
             :properties (:session_id (:type "string" :description "Session id, unique id prefix or unique name.")
                          :message (:type "string" :description "The message.")
@@ -2108,7 +2146,10 @@ INPUT is the tool call's input plist and CTX its context."
   "Handler of task_submit.
 INPUT is the tool call's input plist and CTX its context."
   (harness-tools-sessions--tasks-p)
-  (let* ((prompt (or (plist-get input :prompt) ""))
+  (let* ((written (harness-tools-written (or (plist-get input :prompt) "") ctx))
+         ;; The task reads it in a session of its own, so the links in it are
+         ;; written out in full in this one's terms (`harness-tools-written').
+         (prompt (car written))
          (cwd (or (plist-get input :cwd) (plist-get ctx :cwd)))
          (plan (harness-json-true-p (plist-get input :plan)))
          (refine (harness-json-true-p (plist-get input :refine)))
@@ -2120,11 +2161,13 @@ INPUT is the tool call's input plist and CTX its context."
                        (and refine (list :refine t))
                        (and plan (list :plan t))))
          (task (harness-call 'task/submit cwd prompt opts)))
-    (harness-tool-ok (concat (cond (plan "Added to the backlog; an agent is planning it.\n")
-                                   (refine "Added to the backlog; an agent is writing it up.\n")
-                                   (main-tree "Submitted to the project's main tree.\n")
-                                   (t "Submitted.\n"))
-                             (harness-tools-sessions--task-line task))
+    (harness-tool-ok (harness-tools-with-note
+                      (concat (cond (plan "Added to the backlog; an agent is planning it.\n")
+                                    (refine "Added to the backlog; an agent is writing it up.\n")
+                                    (main-tree "Submitted to the project's main tree.\n")
+                                    (t "Submitted.\n"))
+                              (harness-tools-sessions--task-line task))
+                      (cdr written))
                      :meta (list :task-id (plist-get task :id)))))
 
 (harness-define-tool "task_submit"
@@ -2233,7 +2276,7 @@ sends work back."
           ("start" (harness-call 'task/start id))
           ("queue" (harness-call 'task/queue id))
           ("message"
-           (let ((text (or (plist-get input :message) "")))
+           (let ((text (car (harness-tools-written (or (plist-get input :message) "") ctx))))
              (when (harness-string-blank-p text) (signal 'harness-error (list "message needs a message")))
              (if (and (eq (plist-get task :state) 'pending) (not (plist-get task :returned)))
                  (harness-call 'task/update id (concat (plist-get task :prompt) "\n\n" text) (plist-get task :attachments))
@@ -2244,7 +2287,7 @@ sends work back."
           ("merge" (harness-call 'task/merge id))
           ("verify" (harness-call 'task/verify id))
           ("reject"
-           (let ((text (or (plist-get input :message) "")))
+           (let ((text (car (harness-tools-written (or (plist-get input :message) "") ctx))))
              (when (harness-string-blank-p text)
                (signal 'harness-error (list "reject needs the feedback in message")))
              (harness-call 'task/reject id text)))

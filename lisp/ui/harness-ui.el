@@ -2568,7 +2568,7 @@ part of a longer word, not a session id."
        (let ((c (aref string index)))
          (or (<= ?0 c ?9) (<= ?a c ?z) (<= ?A c ?Z) (eq c ?_)))))
 
-(defun harness-ui-link-session-ids (string)
+(defun harness-ui-link-session-ids (string &optional skip)
   "Make every session id in STRING a session link, in place, and return STRING.
 This is the shared session link (`harness-ui-session-link') applied in
 place, for text that names sessions among other words, such as a tool
@@ -2580,7 +2580,9 @@ and tooltip of `harness-ui-add-session-keys' and the action of
 `harness-ui-session-action'.  Session ids are UUIDs (`harness-uuid'):
 only a whole one counts, not one inside a longer word, and never a short
 id, which is as likely a git hash.  An id the cache does not know stays
-plain text."
+plain text.  So does one SKIP, a function of STRING and the position of
+the id in it, says to leave: a message's code, which is meant literally
+\(`harness-ui-markdown-code-at-p')."
   (when (and (stringp string) (>= (length string) 36))
     (let ((case-fold-search nil)
           (pos 0))
@@ -2588,7 +2590,8 @@ plain text."
         (let ((start (match-beginning 0))
               (end (match-end 0)))
           (unless (or (harness-ui--word-char-at-p string (1- start))
-                      (harness-ui--word-char-at-p string end))
+                      (harness-ui--word-char-at-p string end)
+                      (and skip (funcall skip string start)))
             (let ((id (substring-no-properties string start end)))
               (when (harness-ui-session id)
                 (add-face-text-property start end 'harness-ui-session-link-face nil string)

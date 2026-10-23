@@ -626,7 +626,11 @@ on its own, and its answer is reported to the parent in a message of its
 own once its turn ends and nothing of it is outstanding any more."
   (let* ((sid (plist-get ctx :session-id))
          (parent (harness-call 'session/get sid))
-         (prompt (or (plist-get input :prompt) ""))
+         ;; The child reads the prompt in its own session, so the links in
+         ;; it are written out in full in this one's terms first
+         ;; (`harness-tools-written'): harness:call/last is this session's.
+         (written (harness-tools-written (or (plist-get input :prompt) "") ctx))
+         (prompt (car written))
          (child-id (harness-uuid))
          ;; A priority no level has is refused here, before the worktree
          ;; or the child is made.
@@ -675,12 +679,14 @@ own once its turn ends and nothing of it is outstanding any more."
                  (harness-tools-agent--child-result
                   cid (list :stop-reason 'error :error (harness-error-message err)))))
               (harness-tool-ok
-               (format (concat "Sub-agent %s started (session %s%s). It runs in the background; "
-                               "its answer arrives later in a message of its own, so do not "
-                               "wait or poll. Start more sub-agents the same way, or carry on "
-                               "with other work.")
-                       (harness-tools-agent--child-name cid entry) cid
-                       (if worktree (format ", worktree %s" (abbreviate-file-name worktree)) ""))
+               (harness-tools-with-note
+                (format (concat "Sub-agent %s started (session %s%s). It runs in the background; "
+                                "its answer arrives later in a message of its own, so do not "
+                                "wait or poll. Start more sub-agents the same way, or carry on "
+                                "with other work.")
+                        (harness-tools-agent--child-name cid entry) cid
+                        (if worktree (format ", worktree %s" (abbreviate-file-name worktree)) ""))
+                (cdr written))
                :meta (list :child-id cid))))))))))
 
 (harness-define-tool "spawn_agent"

@@ -314,6 +314,17 @@ any other reason say so in one short line with a [Try again] button,
 which makes the review again, and the rest of the report -- [Verify]
 and [Send back] -- and of the banner is drawn all the same.
 
+A LINK TO A THREAD.  An agent that answers a thread, or points at one,
+writes a link to it (harness:thread/ID, lisp/harness-links.el), and a
+click on it comes here (`harness-ui-patch-review-show-thread`): the
+review opens in the task's report, once its threads are fetched and
+its branch read, with point on the thread and the filter changed to
+show it when the filter hid it.  Where the report cannot draw the
+changes -- the repository is not on this machine -- the library's
+threads view shows the thread instead.  ui-linking owns the click
+(`harness-ui-linking-handlers`); this module registers the one for
+threads, and the session a review's links are written in.
+
 From a task's session history -- or a board card -- C-c C-d opens the
 report with the changes, even after the task left review, when it shows
 them without the review banner (`harness-ui-patch-review-mode`).  C-u
@@ -333,6 +344,7 @@ it takes its part of the report and the banner out.
 
 ### Hooks
 
+- `harness-ui-linking-context-functions`
 - `harness-ui-review-pending-functions`
 
 ### Commands
@@ -394,6 +406,7 @@ it takes its part of the report and the banner out.
 - `patch-review/set-viewed` ([patch-review](patch-review.md))
 - `patch-review/viewed` ([patch-review](patch-review.md))
 - `task/for-session` ([tasks](tasks.md))
+- `task/get` ([tasks](tasks.md))
 
 ### Events it hears over ACP
 
@@ -409,6 +422,7 @@ it takes its part of the report and the banner out.
 - `ediff-select-hook` → `harness-ui-patch-review--note-difference`
 - `harness-chat-mode-hook` → `harness-ui-patch-review--setup-chat`
 - `harness-ui-event-functions` → `harness-ui-patch-review--on-event`
+- `harness-ui-linking-context-functions` → `harness-ui-patch-review--link-context`
 - `harness-ui-report-panel-functions` → `harness-ui-patch-review--panel`
 - `harness-ui-review-changes-functions` → `harness-ui-patch-review--banner-panel`
 - `harness-ui-review-pending-functions` → `harness-ui-patch-review--pending-p`

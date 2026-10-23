@@ -75,8 +75,13 @@ That is the task INPUT names, else the task of the calling session."
      (t (harness-tool-ok (harness-call 'patch-review/threads-text id status))))))
 
 (defun harness-tools-review--comment (input ctx)
-  "Handler of review_comment: add the agent's comment INPUT says, in CTX's session."
-  (let ((id (harness-tools-review--task-id input ctx)))
+  "Handler of review_comment: add the agent's comment INPUT says, in CTX's session.
+The links in the comment are written out in full first
+\(`harness-tools-written'): the reviewer follows them from the thread,
+not from the session the comment was written in."
+  (let* ((id (harness-tools-review--task-id input ctx))
+         (written (harness-tools-written (plist-get input :body) ctx))
+         (body (car written)))
     (cond
      ((null id) (harness-tool-error harness-tools-review--no-task))
      ((not (harness-method-exists-p 'patch-review/comment))
@@ -86,7 +91,7 @@ That is the task INPUT names, else the task of the calling session."
        (harness-tools-review--head ctx)
        (lambda (head)
          (condition-case err
-             (let* ((result (harness-call 'patch-review/comment id (plist-get input :body)
+             (let* ((result (harness-call 'patch-review/comment id body
                                           :thread (plist-get input :thread)
                                           :status (plist-get input :status)
                                           :file (plist-get input :file)
@@ -97,17 +102,19 @@ That is the task INPUT names, else the task of the calling session."
                                           :revision head))
                     (comment (plist-get result :comment)))
                (harness-tool-ok
-                (format "%s thread %s, which is now %s."
-                        (if comment
-                            (format "Added comment %s to%s" (plist-get comment :id)
-                                    (if (plist-get input :thread) "" " the new"))
-                          "Changed")
-                        (plist-get result :thread) (plist-get result :status))))
+                (harness-tools-with-note
+                 (format "%s thread %s, which is now %s."
+                         (if comment
+                             (format "Added comment %s to%s" (plist-get comment :id)
+                                     (if (plist-get input :thread) "" " the new"))
+                           "Changed")
+                         (plist-get result :thread) (plist-get result :status))
+                 (cdr written))))
            (harness-error (harness-tool-error (harness-error-message err))))))))))
 
 (harness-define-tool "review_threads"
   :label "Review threads"
-  :description "List the threads of comments in the review of your task's work: for each, its id, whether it is open or closed, where in the change it is, and the comments the user sent, with who wrote them. Use it to find the thread to answer with review_comment when the feedback that sent the task back is no longer in your context. With status, only the open or only the closed threads; with task, another task's review."
+  :description "List the threads of comments in the review of your task's work: for each, its id, whether it is open or closed, where in the change it is, a link to it that you can put in a message, and the comments the user sent, with who wrote them. Use it to find the thread to answer with review_comment when the feedback that sent the task back is no longer in your context. With status, only the open or only the closed threads; with task, another task's review."
   :schema '(:type "object"
             :properties (:status (:type "string" :enum ("open" "closed")
                                   :description "Only the threads with this status. Default: all.")
@@ -119,7 +126,7 @@ That is the task INPUT names, else the task of the calling session."
 
 (harness-define-tool "review_comment"
   :label "Review comment"
-  :description "Answer a thread of the review of your work, or start one. The thread id is given in the feedback after \"[thread ...]\", and review_threads lists them. Write what you did or why you disagree, briefly, in Markdown: the review draws it rendered, so name code in `backquotes`, put lines of code in a fenced block and steps in a list; the user looks at every thread you close, so when you close one say what you changed and where. Close the thread (status closed) once what it raises is done; leave it open when it is not, or when you want the user's answer, and never close a thread you only argued against. Without thread a new thread starts: on the change as a whole, or on file and line of it, to explain something to the user where they will read the diff. The comment records this call, so the user can follow it back to this point of the conversation. With thread and status but no body, only the status changes."
+  :description "Answer a thread of the review of your work, or start one. The thread id is given in the feedback after \"[thread ...]\", and review_threads lists them. Write what you did or why you disagree, briefly, in Markdown: the review draws it rendered, so name code in `backquotes`, put lines of code in a fenced block and steps in a list; the user looks at every thread you close, so when you close one say what you changed and where. Close the thread (status closed) once what it raises is done; leave it open when it is not, or when you want the user's answer, and never close a thread you only argued against. Without thread a new thread starts: on the change as a whole, or on file and line of it, to explain something to the user where they will read the diff. The comment records this call, so the user can follow it back to this point of the conversation. Link what you mean in it, the tool call that proves a fix or the message you answer: [the test run](harness:call/bash#1). With thread and status but no body, only the status changes."
   :schema '(:type "object"
             :properties (:thread (:type "string"
                                   :description "The id of the thread to answer, or the start of it when unique. Omit to start a new thread.")

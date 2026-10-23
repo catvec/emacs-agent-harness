@@ -64,6 +64,7 @@
 (require 'harness-ui-drag)
 (require 'harness-ui-compose)
 (require 'harness-files)
+(require 'harness-links)
 (require 'harness-ui-markdown)
 (require 'harness-ui-pending)
 
@@ -896,10 +897,14 @@ still fit when one does."
   "Return TEXT rendered as Markdown, its tables fitted to the window.
 The width used is remembered in `harness-chat--table-width', so that a
 window resized after the render draws the tables again at the new
-width."
+width.  The id of a session the UI knows, written in the text, is a link
+to it, as it is in a tool call's input and output
+\(`harness-ui-link-session-ids'); what the text shows as code is meant
+literally, and an id in it stays as it is."
   (let ((harness-ui-markdown-table-width (harness-chat--content-width)))
     (setq harness-chat--table-width harness-ui-markdown-table-width)
-    (harness-ui-markdown-render text)))
+    (harness-ui-link-session-ids (harness-ui-markdown-render text)
+                                 #'harness-ui-markdown-code-at-p)))
 
 (defun harness-chat--block-has-table-p (block)
   "Non-nil when the rendering of BLOCK holds a Markdown table."
@@ -5066,6 +5071,67 @@ See `harness-chat-next-action'."
     (kill-new (or (harness-chat-block-content (gethash id harness-chat--blocks)) ""))
     (message "Copied the last response")))
 
+;;;; Links to the transcript
+
+;; A link to a message or a tool call of this session, or to the session
+;; itself, is what an agent -- or the user, in a message to one -- writes
+;; to point at it (lisp/harness-links.el): these copy it.
+
+(defun harness-chat--link-block ()
+  "Return the block of a node of the session at point, or nil.
+A block that exists only in this buffer -- an error the UI noted -- is no
+node, and has nothing to link to."
+  (let* ((id (get-text-property (point) 'harness-chat-node))
+         (block (and id (gethash id harness-chat--blocks))))
+    (and block
+         (not (string-prefix-p "local-" (harness-chat-block-id block)))
+         block)))
+
+(defun harness-chat--link-label (block)
+  "Return words that stand for the node of BLOCK in a Markdown link.
+A tool call is its title, a message the start of what it says."
+  (let ((node (harness-chat-block-node block)))
+    (or (if (equal (harness-chat-block-kind block) "tool-call")
+            (or (plist-get node :title) (plist-get node :tool))
+          (when-let* ((text (harness-chat--block-markdown block)))
+            (harness-first-line text 50)))
+        (if (equal (harness-chat-block-kind block) "tool-call") "tool call" "message"))))
+
+(defun harness-chat--copy-link (what url label)
+  "Put the link URL to WHAT in the kill ring, and say so.
+A prefix argument puts the Markdown link [LABEL](URL) there instead,
+which reads as LABEL in a message."
+  (let ((link (if current-prefix-arg (harness-links-markdown label url) url)))
+    (kill-new link)
+    (message "Copied the %s to %s: %s" (if current-prefix-arg "Markdown link" "link") what link)))
+
+(defun harness-chat-copy-link ()
+  "Copy a link to the message or tool call at point to the kill ring.
+The link is what an agent writes to point at it, or you, in a message to
+one: harness:session/ID/message/NODE, harness:session/ID/call/NODE for a
+tool call.  With a prefix argument it is a Markdown link, [words](URL).
+Where point is on no node of the session -- the box, say -- the link is
+to the session (`harness-chat-copy-session-link')."
+  (interactive)
+  (if-let* ((block (harness-chat--link-block)))
+      (let ((call (equal (harness-chat-block-kind block) "tool-call"))
+            (node (harness-chat-block-id block)))
+        (harness-chat--copy-link (if call "this tool call" "this message")
+                                 (if call
+                                     (harness-links-call-url harness-ui-session-id node)
+                                   (harness-links-message-url harness-ui-session-id node))
+                                 (harness-chat--link-label block)))
+    (harness-chat-copy-session-link)))
+
+(defun harness-chat-copy-session-link ()
+  "Copy a link to this session to the kill ring.
+The link is harness:session/ID; with a prefix argument it is the
+Markdown link [NAME](harness:session/ID)."
+  (interactive)
+  (unless harness-ui-session-id (user-error "No session here"))
+  (harness-chat--copy-link "the session" (harness-links-session-url harness-ui-session-id)
+                           (harness-ui-session-name harness-ui-session-id)))
+
 (defun harness-chat--block-markdown (block)
   "Return the Markdown BLOCK shows, as it was written, or nil for none."
   (let ((text (if (equal (harness-chat-block-kind block) "plan")
@@ -5399,6 +5465,9 @@ or a new one."
   (define-key map (kbd "C-M-n") #'harness-chat-next-action)
   (define-key map (kbd "C-M-p") #'harness-chat-previous-action)
   (define-key map (kbd "C-c C-w") #'harness-chat-copy-last-response)
+  ;; Links, to point at a message, a tool call or the session.
+  (define-key map (kbd "C-c C-l") #'harness-chat-copy-link)
+  (define-key map (kbd "C-c M-l") #'harness-chat-copy-session-link)
   (define-key map (kbd "C-c C-t") #'harness-chat-toggle-todos)
   (define-key map (kbd "C-c C-u") #'harness-up-to-parent)
   (define-key map (kbd "C-c C-r") #'harness-chat-redraw)
@@ -5468,6 +5537,12 @@ included; \\[harness-chat-next-action] and \\[harness-chat-previous-action] to t
 previous tool call or thinking block.  A run of tool calls folded under
 one summary line is one stop.
 
+\\<harness-chat-mode-map>\\[harness-chat-copy-link] copies a link to the message or tool call at point, and
+\\[harness-chat-copy-session-link] one to the session: what an agent writes to point at them, and
+you, in a message to one.  A link an agent writes to a session, a message,
+a tool call or a thread of a review opens it when clicked or on RET, and
+the id of a session written in a message is a link to it.
+
 \\{harness-chat-mode-map}"
   (setq buffer-read-only nil)
   (setq-local truncate-lines nil
@@ -5519,7 +5594,8 @@ one summary line is one stop.
         ("C-c C-t" "Show or hide the todo list" harness-chat-toggle-todos)
         ("C-c C-k" "Cancel turn" harness-chat-cancel)]
        ["Session"
-        ("C-c C-u" "Go to the session this one came from" harness-up-to-parent)]
+        ("C-c C-u" "Go to the session this one came from" harness-up-to-parent)
+        ("C-c M-l" "Copy a link to this session" harness-chat-copy-session-link)]
        ["Transcript"
         (". TAB" "Fold block" harness-chat-tab)
         ("M-n" "Next message" harness-chat-next-message)
@@ -5530,6 +5606,7 @@ one summary line is one stop.
         ("C-M-p" "Previous tool call or thinking" harness-chat-previous-action)
         ("C-c C-s" "Search" harness-chat-search)
         ("C-c C-w" "Copy last reply" harness-chat-copy-last-response)
+        ("C-c C-l" "Copy a link to the message or tool call at point" harness-chat-copy-link)
         ("C-c C-e" "Jump to bottom" harness-chat-scroll-to-bottom)
         ("C-c C-r" "Redraw" harness-chat-redraw)
         ("C-c C-z" "Bury: back to the buffer before" harness-ui-bury)]))

@@ -305,6 +305,18 @@ ITEM is a string (a note), or an object with exactly one of `:image',
   "Return VALUE as a non-blank trimmed string, or nil."
   (and (stringp value) (not (harness-string-blank-p value)) (string-trim value)))
 
+(defun harness-tools-handin--item-written (item written)
+  "Return the report evidence ITEM with the links in its words written out.
+WRITTEN, a function of a text, returns the text with its links in full
+\(`harness-tools-written').  The words of an item are those of a note and
+of a caption; a code block is code, and what it says is left alone."
+  (let ((item (copy-sequence item)))
+    (when (equal (plist-get item :kind) "note")
+      (setq item (plist-put item :text (funcall written (plist-get item :text)))))
+    (when (stringp (plist-get item :caption))
+      (setq item (plist-put item :caption (funcall written (plist-get item :caption)))))
+    item))
+
 (defun harness-tools-handin--merges-pending (sid)
   "Return the merges SID waits for, or nil.
 Those are the branches its own sub-agents have merging into its working
@@ -336,9 +348,19 @@ returns an error saying what to fix, and ends nothing.  A session whose
 sub-agents' merges are not through yet cannot hand in either: the work
 the session's branch is built on has to be in it first."
   (let* ((sid (plist-get ctx :session-id))
-         (summary (harness-tools-handin--clean (plist-get input :summary)))
-         (problem (harness-tools-handin--clean (plist-get input :problem)))
-         (reproduction (harness-tools-handin--clean (plist-get input :reproduction)))
+         ;; The words of the report may link sessions, messages and the
+         ;; calls that ran: written out in full, in the terms of this
+         ;; session before this call, they mean the same at every review.
+         (notes nil)
+         (written (lambda (text)
+                    (if (stringp text)
+                        (let ((done (harness-tools-written text ctx)))
+                          (when (cdr done) (push (cdr done) notes))
+                          (car done))
+                      text)))
+         (summary (funcall written (harness-tools-handin--clean (plist-get input :summary))))
+         (problem (funcall written (harness-tools-handin--clean (plist-get input :problem))))
+         (reproduction (funcall written (harness-tools-handin--clean (plist-get input :reproduction))))
          (cannot (harness-json-true-p (plist-get input :cannot_continue)))
          (no-merge (harness-json-true-p (plist-get input :no_merge)))
          (raw (append (plist-get input :evidence) nil))
@@ -361,6 +383,8 @@ the session's branch is built on has to be in it first."
                             collect (harness-tools-handin--item item n ctx)))
             (bad nil))
         (dolist (item items) (when (stringp item) (push item bad)))
+        (unless bad
+          (setq items (mapcar (lambda (item) (harness-tools-handin--item-written item written)) items)))
         (if bad
             (harness-tools-handin--invalid "%s" (string-join (nreverse bad) "\n"))
           (let ((task (and (harness-method-exists-p 'task/for-session)
@@ -382,16 +406,18 @@ the session's branch is built on has to be in it first."
                                     (no-merge "Handed in; nothing to merge")
                                     (t "Handed in for review")))
                 (harness-tool-ok
-                 (cond
-                  (cannot
-                   (format "Recorded: this task cannot continue. %s\n\nThe task goes to Requires your input for the user's decision, and nothing merges; this turn ends."
-                           (harness-first-line summary 200)))
-                  (no-merge
-                   (format "Handed in (nothing to merge): %s\n\n%d piece%s of evidence; the task waits for the user's review, and verifying it completes it without merging."
-                           (harness-first-line summary 200) (length items) (if (= 1 (length items)) "" "s")))
-                  (t
-                   (format "Handed in: %s\n\n%d piece%s of evidence; the task now waits for the user's review, and this turn ends."
-                           (harness-first-line summary 200) (length items) (if (= 1 (length items)) "" "s"))))
+                 (harness-tools-with-note
+                  (cond
+                   (cannot
+                    (format "Recorded: this task cannot continue. %s\n\nThe task goes to Requires your input for the user's decision, and nothing merges; this turn ends."
+                            (harness-first-line summary 200)))
+                   (no-merge
+                    (format "Handed in (nothing to merge): %s\n\n%d piece%s of evidence; the task waits for the user's review, and verifying it completes it without merging."
+                            (harness-first-line summary 200) (length items) (if (= 1 (length items)) "" "s")))
+                   (t
+                    (format "Handed in: %s\n\n%d piece%s of evidence; the task now waits for the user's review, and this turn ends."
+                            (harness-first-line summary 200) (length items) (if (= 1 (length items)) "" "s"))))
+                  (and notes (string-join (delete-dups (nreverse notes)) "\n")))
                  :end-turn t
                  ;; The report rides the result, so the transcript can draw
                  ;; the review the task view draws, after it left review too.
@@ -399,7 +425,7 @@ the session's branch is built on has to be in it first."
 
 (harness-define-tool "hand_in"
   :label "Hand in the finished work"
-  :description "Hand the finished work in and stop: the turn ends and the task waits for the user's review, with your summary and evidence in front of them. Call it once, when you are sure the task is complete, instead of replying normally. problem is required: a short summary of what must be fixed and how to see it, which the review shows at the top, where the task's name alone would not remind the user what it was about. summary is your final message, in markdown. reproduction is optional: how to see the problem, or the steps to check the fix, for the review. If the task cannot be finished, call it with cannot_continue true and say what blocks it in summary: it goes to the user's input instead of review and nothing merges. If the work needs no merge -- an informational task, or one that changed nothing -- pass no_merge true: verifying it completes without merging. evidence is required and holds at least one item; an item is an object with exactly one of: image or video (a path to a file you made, such as a screenshot); file (a path); code (with language); note (markdown text); or tool_call (an earlier call of yours, which the user then sees as a link to that call in the session). Show, do not tell: when the work has anything to see -- a UI, a rendering, a chart, a layout, anything a screenshot can show -- an image, or a video for motion, is required, not just nice to have; take the screenshot with bash first. Quote the tool call that proves a claim (the tests pass, the command's output) as a tool_call item. A file, code or note is evidence only when nothing visual applies. caption says what the item shows. A tool_call may name the call by its tool's name (the newest call of that tool, e.g. \"bash\"), by `#N` or `<tool>#N` as an earlier hand_in error listed it (1 = newest), or by its call or node id."
+  :description "Hand the finished work in and stop: the turn ends and the task waits for the user's review, with your summary and evidence in front of them. Call it once, when you are sure the task is complete, instead of replying normally. problem is required: a short summary of what must be fixed and how to see it, which the review shows at the top, where the task's name alone would not remind the user what it was about. summary is your final message, in markdown. reproduction is optional: how to see the problem, or the steps to check the fix, for the review. If the task cannot be finished, call it with cannot_continue true and say what blocks it in summary: it goes to the user's input instead of review and nothing merges. If the work needs no merge -- an informational task, or one that changed nothing -- pass no_merge true: verifying it completes without merging. evidence is required and holds at least one item; an item is an object with exactly one of: image or video (a path to a file you made, such as a screenshot); file (a path); code (with language); note (markdown text); or tool_call (an earlier call of yours, which the user then sees as a link to that call in the session). Show, do not tell: when the work has anything to see -- a UI, a rendering, a chart, a layout, anything a screenshot can show -- an image, or a video for motion, is required, not just nice to have; take the screenshot with bash first. Quote the tool call that proves a claim (the tests pass, the command's output) as a tool_call item. A file, code or note is evidence only when nothing visual applies. caption says what the item shows. A tool_call may name the call by its tool's name (the newest call of that tool, e.g. \"bash\"), by `#N` or `<tool>#N` as an earlier hand_in error listed it (1 = newest), or by its call or node id. The summary, problem, reproduction and notes can link those calls too, and messages and sessions: [the test run](harness:call/bash#2), as the system prompt says."
   :schema '(:type "object"
             :properties (:problem (:type "string"
                                   :description "A short summary of what must be fixed and how to see it, in markdown. The review shows it at the top: with many tasks going on, the title alone does not say what the work was for. Say what the user must check, not the task prompt again.")

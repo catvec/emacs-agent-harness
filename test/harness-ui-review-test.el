@@ -711,6 +711,45 @@ the call's text opens the sub-agent."
                 (should (equal "kid12345" (open-at (match-end 0) (kbd "RET"))))
                 (should (equal "kid12345" (open-at (match-end 0) [mouse-1])))))))))))
 
+(ert-deftest harness-ui-review-report-links-the-session-ids-its-text-holds ()
+  "A session id the cache knows, written in the summary or the problem of a
+report -- the agent's own words -- is the shared session link, as it is in
+the chat's messages; the one in a code span, or an unknown one, is text."
+  (harness-test-with-temp-state
+    (harness-test-reset-bus)
+    (let ((harness-acp--server-enabled nil))
+      (dolist (m '(acp ui ui-compose ui-markdown ui-popout ui-tasks ui-report))
+        (harness-test-load-module m)))
+    (let* ((harness-ui--sessions (make-hash-table :test 'equal))
+           (known "0a1b2c3d-1111-4111-8111-111111111111")
+           (unknown "7f7f7f7f-4444-4444-8444-444444444444")
+           (task (list :id "t-ids" :session "s-ids" :state "review"
+                       :report (list :summary (format "The worker %s found it, not `%s`, nor %s." known known unknown)
+                                     :problem (format "See %s." known)
+                                     :at 1.0 :evidence (list "a note"))))
+           (opened nil))
+      (puthash known (list :id known :name "Subject") harness-ui--sessions)
+      (cl-letf (((symbol-function 'harness-ui-visit-session)
+                 (lambda (id &rest _) (setq opened id))))
+        (with-temp-buffer
+          (harness-ui-report--insert task)
+          (let ((linked-p (lambda (pos)
+                            (memq 'harness-ui-session-link-face (ensure-list (get-text-property pos 'face))))))
+            ;; The problem and the summary each name it once, plainly.
+            (goto-char (point-min))
+            (search-forward "See ")
+            (should (funcall linked-p (point)))
+            (call-interactively (lookup-key (get-text-property (point) 'keymap) (kbd "RET")))
+            (should (equal known opened))
+            (search-forward "The worker ")
+            (should (funcall linked-p (point)))
+            ;; In code it is meant literally, and an unknown id is no link.
+            (search-forward "not ")
+            (should (memq 'harness-md-code (ensure-list (get-text-property (point) 'face))))
+            (should-not (funcall linked-p (point)))
+            (search-forward "nor ")
+            (should-not (funcall linked-p (point)))))))))
+
 (ert-deftest harness-ui-review-report-leads-with-the-problem ()
   "A report shows the problem, and its reproduction, above the work.
 They come first, rendered as markdown, so the user remembers what the

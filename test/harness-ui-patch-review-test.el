@@ -14,6 +14,7 @@
 
 (require 'harness-test-helpers)
 (require 'harness-acp)
+(require 'harness-links)
 (require 'harness-ui)
 (require 'harness-ui-patch-review)
 ;; Loaded up front, so the comment command's own `(require ...)' is a no-op
@@ -50,6 +51,9 @@
 (defvar harness-ui-popout--max-height)
 (defvar harness-ui-popout-min-height)
 (defvar harness-patch-review--sets)
+(defvar harness-ui-linking-handlers)
+(defvar harness-ui-linking-context-functions)
+(declare-function harness-ui-linking-follow "harness-ui-linking" (url))
 (declare-function harness-tasks "harness-ui-tasks")
 (declare-function harness-tasks--set "harness-tasks")
 (declare-function harness-ui-tasks-submit "harness-ui-tasks")
@@ -4381,6 +4385,177 @@ marks it reviewed."
         (should-not (change-review-thread-unreviewed-p set thread))
         (harness-ui-patch-review-test--wait-text popout "Yes: nothing else is needed\\." t)
         (should (string-match-p "0 open, 2 closed \\[Threads\\]" (harness-ui-patch-review-test--text popout)))))))
+
+;;;; A link to a thread
+
+(defun harness-ui-patch-review-test--at-thread-p (buffer id)
+  "Non-nil when point in BUFFER is on the thread ID, at its header."
+  (with-current-buffer buffer
+    (and (equal id (get-text-property (point) 'change-review-thread))
+         (get-text-property (point) 'change-review-thread-start))))
+
+(ert-deftest harness-ui-patch-review-shows-a-thread-from-a-link ()
+  "A link to a thread opens the task's report with point on the thread, whether
+the report was open or not, and the thread may be named by the start of its id."
+  (harness-ui-patch-review-test-with-task
+    (let* ((popout (harness-ui-patch-review-test--changes board id))
+           (review (gethash id harness-ui-patch-review--reviews))
+           (two (harness-ui-patch-review-test--comment-on review "a.el" '(:new . 2) "Why two?"))
+           (eighteen (harness-ui-patch-review-test--comment-on review "a.el" '(:new . 18) "Why eighteen?"))
+           (thread-id (change-review-thread-id (harness-ui-patch-review-test--thread-of review eighteen))))
+      (ignore two)
+      (harness-ui-patch-review-test--wait-harness-threads id 2)
+      (harness-ui-patch-review-test--wait-text popout "Why eighteen\?")
+      ;; The report open, with point at its top.
+      (with-current-buffer popout (goto-char (point-min)))
+      (harness-ui-patch-review-show-thread id thread-id)
+      (harness-test-wait (lambda () (harness-ui-patch-review-test--at-thread-p popout thread-id))
+                         15 "point on the thread")
+      ;; The report gone, the link opens it again, at the thread: by the start of its id.
+      (harness-ui-popout-close (list 'report id))
+      (should-not (harness-ui-popout-buffer (list 'report id)))
+      (harness-ui-patch-review-show-thread id (substring thread-id 0 4))
+      (let ((opened (harness-test-wait (lambda () (harness-ui-popout-buffer (list 'report id)))
+                                       5 "the report to open")))
+        (harness-test-wait (lambda () (harness-ui-patch-review-test--at-thread-p opened thread-id))
+                           15 "point on the thread in the report that opened")
+        (should (eq opened (window-buffer (get-buffer-window opened t))))
+        (with-current-buffer opened
+          (should (string-match-p "line 18" (buffer-substring-no-properties
+                                             (point) (line-end-position)))))))))
+
+(ert-deftest harness-ui-patch-review-shows-a-closed-thread-the-filter-hides ()
+  "The report starts on the open threads; a link to a closed one shows it."
+  (harness-ui-patch-review-test-with-task
+    (let* ((popout (harness-ui-patch-review-test--changes board id))
+           (review (gethash id harness-ui-patch-review--reviews))
+           (set (harness-ui-patch-review--r-set review))
+           (b3 (harness-ui-patch-review-test--comment-on review "b.el" '(:old . 3) "Who used b3?"))
+           (thread (harness-ui-patch-review-test--thread-of review b3)))
+      (ignore (harness-ui-patch-review-test--comment-on review "a.el" '(:new . 2) "Why two?"))
+      (change-review-close set thread)
+      (harness-ui-patch-review-test--wait-harness-threads id 2)
+      (harness-ui-patch-review-test--wait-text popout "Who used b3\?" t)
+      (with-current-buffer popout (should (eq 'open change-review-ui--filter)))
+      (harness-ui-patch-review-show-thread id (change-review-thread-id thread))
+      (harness-test-wait (lambda () (harness-ui-patch-review-test--at-thread-p popout (change-review-thread-id thread)))
+                         15 "point on the closed thread")
+      (with-current-buffer popout
+        (should (eq 'all change-review-ui--filter)))
+      (should (string-search "Who used b3?" (harness-ui-patch-review-test--text popout))))))
+
+(ert-deftest harness-ui-patch-review-says-when-a-link-names-no-thread ()
+  "A thread the review does not have is said so in the echo area, and the
+report opens all the same: it is what the link was about."
+  (harness-ui-patch-review-test-with-task
+    (let* ((popout (harness-ui-patch-review-test--changes board id))
+           (review (gethash id harness-ui-patch-review--reviews)))
+      (ignore (harness-ui-patch-review-test--comment-on review "a.el" '(:new . 2) "Why two?"))
+      (harness-ui-patch-review-test--wait-harness-threads id 1)
+      (harness-ui-popout-close (list 'report id))
+      (harness-ui-patch-review-show-thread id "t-nothing")
+      (harness-test-wait (lambda () (harness-ui-popout-buffer (list 'report id))) 5 "the report to open")
+      (should (string-match-p "has no thread t-nothing"
+                              (with-current-buffer "*Messages*" (buffer-string))))
+      ;; A task that is not there either.
+      (harness-ui-patch-review-show-thread "t-nobody" "t-nothing")
+      (harness-test-wait (lambda () (string-match-p "Could not read the task t-nobody"
+                                                    (with-current-buffer "*Messages*" (buffer-string))))
+                         5 "the echo area to say the task is not there")
+      (ignore popout))))
+
+(ert-deftest harness-ui-patch-review-shows-a-thread-in-the-threads-view-without-the-changes ()
+  "Where the report draws no changes -- the task has no branch -- the library's
+threads view shows the thread, all of them, point on it; the comments link to
+files as the task's directory has them."
+  (harness-ui-patch-review-test-with-task
+    (let* ((task (harness-call 'task/get id))
+           (review (harness-ui-patch-review--review-for task))
+           (set (harness-ui-patch-review--r-set review)))
+      (should-not (harness-ui-patch-review--report-shows-p review))
+      (change-review-comment set "Overall: fine." :author (change-review-user "Noah" "noah@example.org"))
+      (let ((whole (change-review-comment set "A second point."
+                                          :author (change-review-user "Noah" "noah@example.org"))))
+        (harness-ui-patch-review-test--wait-harness-threads id 2)
+        (harness-ui-patch-review-show-thread
+         id (change-review-thread-id (harness-ui-patch-review-test--thread-of review whole)))
+        (let ((view (harness-test-wait
+                     (lambda () (cl-find-if (lambda (b) (eq 'change-review-threads-mode
+                                                            (buffer-local-value 'major-mode b)))
+                                            (buffer-list)))
+                     10 "the threads view")))
+          (harness-test-wait
+           (lambda () (harness-ui-patch-review-test--at-thread-p
+                       view (change-review-thread-id (harness-ui-patch-review-test--thread-of review whole))))
+           10 "point on the thread in the threads view")
+          ;; The links in its comments are written in the task's session.
+          (with-current-buffer view
+            (should (equal (plist-get task :session) (harness-ui-patch-review--link-context)))
+            (kill-buffer view)))
+        (should-not (harness-ui-popout-buffer (list 'report id)))))))
+
+(ert-deftest harness-ui-patch-review-opens-a-linked-thread ()
+  "ui-linking opens a link to a thread with the handler this module registers,
+whichever of the two loads first, and the registration goes with the module."
+  (harness-ui-patch-review-test-with-task
+    (let ((popout (harness-ui-patch-review-test--changes board id))
+          (harness-ui-linking-handlers nil)
+          (harness-ui-linking-context-functions nil))
+      (ignore popout)
+      (harness-test-load-module 'ui-linking)
+      (should (eq #'harness-ui-patch-review--follow-thread
+                  (cdr (assoc "thread" harness-ui-linking-handlers))))
+      (should (memq #'harness-ui-patch-review--link-context harness-ui-linking-context-functions))
+      (let* ((review (gethash id harness-ui-patch-review--reviews))
+             (eighteen (harness-ui-patch-review-test--comment-on review "a.el" '(:new . 18) "Why eighteen?"))
+             (thread-id (change-review-thread-id (harness-ui-patch-review-test--thread-of review eighteen)))
+             (resolve (lambda (method params callback &optional on-error)
+                        (ignore method params on-error)
+                        (funcall callback (list :kind "thread" :task id :thread thread-id)))))
+        (harness-ui-patch-review-test--wait-harness-threads id 1)
+        (harness-ui-popout-close (list 'report id))
+        ;; Only the harness's resolving is faked; the report is real.
+        (let ((call (symbol-function 'harness-ui-call)))
+          (cl-letf (((symbol-function 'harness-ui-call)
+                     (lambda (method params callback &optional on-error)
+                       (if (equal method "_harness/link/resolve")
+                           (funcall resolve method params callback on-error)
+                         (funcall call method params callback on-error)))))
+            (harness-ui-linking-follow (harness-links-thread-url id thread-id))))
+        (let ((opened (harness-test-wait (lambda () (harness-ui-popout-buffer (list 'report id)))
+                                         5 "the report to open")))
+          (harness-test-wait (lambda () (harness-ui-patch-review-test--at-thread-p opened thread-id))
+                             15 "point on the thread"))
+        ;; Off, the module takes its handler away and leaves the others.
+        (setf (alist-get "session" harness-ui-linking-handlers nil nil #'equal) #'ignore)
+        (harness-module-disable 'ui-patch-review)
+        (should-not (assoc "thread" harness-ui-linking-handlers))
+        (should (assoc "session" harness-ui-linking-handlers))
+        (should-not (memq #'harness-ui-patch-review--link-context harness-ui-linking-context-functions))))))
+
+(ert-deftest harness-ui-patch-review-links-a-session-id-in-a-comment ()
+  "The id of a session the UI knows, in a comment's Markdown, is a link to it,
+as in the chat; the one in code is not."
+  (harness-ui-patch-review-test-with-task
+    (let* ((popout (harness-ui-patch-review-test--changes board id))
+           (review (gethash id harness-ui-patch-review--reviews)))
+      (ignore (harness-ui-patch-review-test--comment-on
+               review "a.el" '(:new . 2) (format "See %s for details, not `%s`." sid sid)))
+      (harness-ui-patch-review-test--wait-text popout "for details")
+      (with-current-buffer popout
+        (goto-char (point-min))
+        (re-search-forward (format "See %s" (regexp-quote sid)))
+        (let ((at (- (point) 4)))
+          (should (memq 'harness-ui-session-link-face (ensure-list (get-text-property at 'face))))
+          (should (keymapp (get-text-property at 'keymap)))
+          (should (equal (format "mouse-1, RET: open the session %s"
+                                 (harness-ui-session-name sid))
+                         (get-text-property at 'help-echo))))
+        ;; The comment wraps at its width, so the id may start a line of its own.
+        (re-search-forward (format "not[ \n┃]+%s" (regexp-quote sid)))
+        (should (memq 'harness-md-code (ensure-list (get-text-property (- (point) 4) 'face))))
+        (should-not (memq 'harness-ui-session-link-face
+                          (ensure-list (get-text-property (- (point) 4) 'face))))))))
 
 (ert-deftest harness-ui-patch-review-is-known-only-to-its-halves ()
   "No other file of the harness names the review of a task's changes but its

@@ -98,6 +98,7 @@ The loop is entirely event driven: nothing here waits.
 
 ### Methods it calls
 
+- `link/canonicalize` ([linking](linking.md)), when it is loaded
 - `project/name` ([project](project.md)), when it is loaded
 - `provider/capabilities` ([provider](provider.md))
 - `provider/complete` ([provider](provider.md))
