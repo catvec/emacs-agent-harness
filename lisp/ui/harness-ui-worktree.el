@@ -400,6 +400,7 @@ dropped: a reload clears the cache, so it would carry stale data."
     ;; Everything is fetched again: nothing the list missed is left to catch up on.
     (setq harness-ui-worktree--loading t harness-ui-worktree--error nil
           harness-ui-worktree--stale nil)
+    (harness-ui-view-drawn)
     (harness-ui-worktree--redraw)
     (let ((root harness-ui-worktree--root))
       (harness-ui-call
@@ -462,6 +463,8 @@ dropped: a reload clears the cache, so it would carry stale data."
   (setq harness-ui-worktree--status (make-hash-table :test 'equal))
   (add-hook 'tabulated-list-revert-hook #'harness-ui-worktree--refresh-entries nil t)
   (add-hook 'window-buffer-change-functions #'harness-ui-worktree--shown nil t)
+  ;; Says [Suspended: resume] if a window shows it before it caught up.
+  (harness-ui-view-adopt #'harness-ui-worktree--shown)
   (tabulated-list-init-header))
 
 ;; The list's keys in the harness menu, behind `.'.
@@ -833,11 +836,12 @@ Unless no window shows BUFFER: it is left as it is, and
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
       (cond
-       ((not (get-buffer-window buffer t))
+       ((not (harness-ui-view-follow-p buffer))
         (setq harness-ui-worktree--stale
               (harness-ui-worktree--more harness-ui-worktree--stale kind)))
        (t
         (setq harness-ui-worktree--stale nil)
+        (harness-ui-view-drawn)
         (pcase kind
           ('reload (harness-ui-worktree--load buffer))
           ('redraw (harness-ui-worktree--redraw))
@@ -863,6 +867,8 @@ missed: no timer is started for a list nobody looks at."
 On `window-buffer-change-functions', buffer-locally.  Redisplay runs
 this, so the work waits for a timer."
   (when harness-ui-worktree--stale
+    ;; The catch-up is on its way: the mark of a suspended view is not due.
+    (harness-ui-view-drawn)
     (harness-ui-worktree--update-soon (current-buffer) harness-ui-worktree--stale)))
 
 (defun harness-ui-worktree--on-assumed (&rest _)
@@ -905,7 +911,8 @@ this, so the work waits for a timer."
   ;; by a mode function that did not know this hook.
   (when-let* ((buf (harness-ui-worktree--buffer)))
     (with-current-buffer buf
-      (add-hook 'window-buffer-change-functions #'harness-ui-worktree--shown nil t)))
+      (add-hook 'window-buffer-change-functions #'harness-ui-worktree--shown nil t)
+      (harness-ui-view-adopt #'harness-ui-worktree--shown)))
   (define-key harness-ui-map (kbd "w") #'harness-worktrees))
 
 (harness-define-module 'ui-worktree

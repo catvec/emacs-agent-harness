@@ -72,9 +72,22 @@
 ;; these two filters are on.
 ;;
 ;; The list follows the sessions as they change, a few times a second
-;; while a model streams.  P pauses that, and so does the [Pause] button
-;; in the mode line (`harness-ui-sessions-toggle-pause'): a paused list
-;; holds still until it is resumed or reloaded with g.  Changes, output
+;; while a model streams, while a window shows it.  A list no window
+;; shows notes what it missed and draws once when a window shows it
+;; again (`harness-ui-view-install'): a thousand rows take a good part
+;; of a second to draw, and the sessions change much oftener than that.
+;; Should a window show it before it caught up, its mode line says
+;; [Suspended: resume], as that of every such view does, and a click on
+;; it wakes the list (`harness-ui-view-wake').
+;; Even a shown list leaves Emacs the time it takes to draw, four times
+;; over, between one redraw and the next that follows the sessions by
+;; itself (`harness-ui-sessions--cost-factor'), so it never takes more
+;; than a fifth of it; and the tooltips of the figures are made when
+;; they are hovered, not for every row at every redraw
+;; (`harness-ui-session-help-function').  P pauses the following, and so
+;; does the [Pause] button in the mode line
+;; (`harness-ui-sessions-toggle-pause'): a paused list holds still until
+;; it is resumed or reloaded with g, shown or not.  Changes, output
 ;; rates, token counts and a reload of the UI leave it alone; its own
 ;; commands -- the filter, the scope, the toggles -- still redraw it,
 ;; with what changed meanwhile.
@@ -313,13 +326,16 @@ model, status, kind and permission mode."
   "Return matching sessions as (DEPTH . SESSION), parents before children."
   (let* ((all (harness-ui-sessions))
          (matching (cl-remove-if-not #'harness-ui-sessions--matches-p all))
-         (by-id (make-hash-table :test 'equal))
+         (listed (make-hash-table :test 'equal :size (length matching)))
          (children (make-hash-table :test 'equal))
          (out nil))
-    (dolist (s all) (puthash (plist-get s :id) s by-id))
+    ;; A session hangs under its parent when the parent is listed too; a
+    ;; table of the listed ids says so at once, where a search of the
+    ;; list for each of a thousand sessions took a tenth of the redraw.
+    (dolist (s matching) (puthash (plist-get s :id) t listed))
     (dolist (s matching)
       (let ((pid (plist-get s :parent-id)))
-        (if (and pid (gethash pid by-id) (cl-member pid matching :key (lambda (x) (plist-get x :id)) :test #'equal))
+        (if (and pid (gethash pid listed))
             (push s (gethash pid children))
           (push s (gethash :roots children)))))
     (cl-labels ((walk (s depth)
@@ -423,20 +439,26 @@ level and the command that changes it, `harness-set-thinking'."
                                              level))
       "")))
 
+(defun harness-ui-sessions--last-message-help (s)
+  "Return the tooltip of session S's Last msg cell: the time, and what it is."
+  (let ((time (harness-ui-sessions--last-message s)))
+    (cond ((plist-get s :last-message)
+           (format "Last user or assistant message: %s"
+                   (format-time-string "%F %H:%M" time)))
+          ((plist-get s :updated)
+           (format "No message time is recorded for this session; its last change of any kind: %s"
+                   (format-time-string "%F %H:%M" time)))
+          (t "No time is recorded for this session"))))
+
 (defun harness-ui-sessions--last-message-cell (s &optional _depth)
   "Return the Last msg cell of session S: how long ago its last message came.
 The tooltip gives the time, and says when it is the last change of any
 kind instead, which a session recorded before the harness kept the time
-of its messages has."
-  (let ((time (harness-ui-sessions--last-message s)))
-    (propertize (harness-relative-time time)
-                'help-echo (cond ((plist-get s :last-message)
-                                  (format "Last user or assistant message: %s"
-                                          (format-time-string "%F %H:%M" time)))
-                                 ((plist-get s :updated)
-                                  (format "No message time is recorded for this session; its last change of any kind: %s"
-                                          (format-time-string "%F %H:%M" time)))
-                                 (t "No time is recorded for this session")))))
+of its messages has.  It is made when it is hovered
+\(`harness-ui-session-help-function')."
+  (propertize (harness-relative-time (harness-ui-sessions--last-message s))
+              'help-echo (harness-ui-session-help-function
+                          s #'harness-ui-sessions--last-message-help)))
 
 (defconst harness-ui-sessions--columns
   (list (list :name "" :width 2 :sort t :always t
@@ -455,14 +477,16 @@ of its messages has."
                       (if-let* ((m (plist-get s :permission-mode))) (harness-ui-permission-mode-label m) "")))
         (list :name "Priority" :width 9 :sort #'harness-ui-sessions--priority<
               :cell #'harness-ui-sessions--priority-cell)
+        ;; The tooltips of these four are made when they are hovered, not
+        ;; for every row at every redraw (`harness-ui-session-help-function').
         (list :name "Context" :width 13 :sort (harness-ui-sessions--tokens< :context) :right-align t
-              :cell (lambda (s _depth) (harness-ui-format-context s)))
+              :cell (lambda (s _depth) (harness-ui-format-context s t)))
         (list :name "Output" :width 7 :sort (harness-ui-sessions--tokens< :output) :right-align t
-              :cell (lambda (s _depth) (or (harness-ui-format-output s t) "")))
+              :cell (lambda (s _depth) (or (harness-ui-format-output s t t) "")))
         (list :name "Avg tok/s" :width 9 :sort #'harness-ui-sessions--average-rate< :right-align t
-              :cell (lambda (s _depth) (or (harness-ui-format-average-rate s t) "")))
+              :cell (lambda (s _depth) (or (harness-ui-format-average-rate s t t) "")))
         (list :name "Cost" :width 12 :sort #'harness-ui-sessions--spend< :right-align t
-              :cell (lambda (s _depth) (harness-ui-format-spend s)))
+              :cell (lambda (s _depth) (harness-ui-format-spend s nil nil t)))
         (list :name "Last msg" :width 9 :sort #'harness-ui-sessions--last-message<
               :cell #'harness-ui-sessions--last-message-cell)
         (list :name "Project" :width 30 :sort t :all-projects t
@@ -538,12 +562,13 @@ plist, and DEPTH."
   (vconcat (mapcar (lambda (column) (funcall (plist-get column :cell) session (or depth 0)))
                    columns)))
 
-(defun harness-ui-sessions--entry (depth s)
+(defun harness-ui-sessions--entry (depth s &optional columns)
   "Return the entry of session S in `tabulated-list-entries'.
-Its cells are those of the columns shown now, in order; its name is
+Its cells are those of the columns shown now, in order, or of COLUMNS
+when the caller has them (they are the same for every row); its name is
 indented DEPTH levels under its parents."
   (list (plist-get s :id)
-        (harness-ui-sessions-cells (harness-ui-sessions--shown-columns) s depth)))
+        (harness-ui-sessions-cells (or columns (harness-ui-sessions--shown-columns)) s depth)))
 
 (defun harness-ui-sessions--show-columns ()
   "Give the list the format of the columns it shows now.
@@ -601,8 +626,10 @@ The marks of sessions the cache no longer has are dropped
     (setq harness-ui-sessions--depths (make-hash-table :test 'equal))
     (dolist (cell ordered)
       (puthash (plist-get (cdr cell) :id) (car cell) harness-ui-sessions--depths))
-    (setq tabulated-list-entries
-          (mapcar (lambda (cell) (harness-ui-sessions--entry (car cell) (cdr cell))) ordered)))
+    (let ((columns (harness-ui-sessions--shown-columns)))
+      (setq tabulated-list-entries
+            (mapcar (lambda (cell) (harness-ui-sessions--entry (car cell) (cdr cell) columns))
+                    ordered))))
   (setq mode-line-process (harness-ui-sessions--mode-line)))
 
 ;;;; What a blocked session waits on
@@ -694,6 +721,22 @@ wrap in a narrow window."
 ;; pushing the next cell further; one that runs over by more cannot be,
 ;; as a space only ever moves what follows it forward.
 
+(defvar harness-ui-sessions--spaces (make-hash-table :test 'eql)
+  "The aligning spaces of the rows, by how many they are and the column they reach.")
+
+(defun harness-ui-sessions--space (count align-to)
+  "Return COUNT spaces that stretch to column ALIGN-TO.
+Every cell of every row ends in one, and the rows of a list have a
+handful of different ones, so each is made once: a thousand rows made
+thirteen thousand of them at every redraw.  The string is only inserted,
+never changed."
+  (if (and (integerp count) (integerp align-to) (<= 0 count 99999) (<= 0 align-to 99999))
+      (let ((key (+ (* count 100000) align-to)))
+        (or (gethash key harness-ui-sessions--spaces)
+            (puthash key (propertize (make-string count ?\s) 'display `(space :align-to ,align-to))
+                     harness-ui-sessions--spaces)))
+    (propertize (make-string count ?\s) 'display `(space :align-to ,align-to))))
+
 (defun harness-ui-sessions--print-cell (format n desc x)
   "Insert cell N of a row at point, from its descriptor DESC, at column X.
 FORMAT is the vector of the columns (`harness-ui-sessions-format').
@@ -714,7 +757,6 @@ room."
                       ((eq (car desc) 'image) " ")
                       (t (car desc))))
          (label-width (string-width label))
-         (help-echo (concat name ": " label))
          (last-column (= (1+ n) (length format)))
          (start (point)))
     ;; A cell is cut to its column, with an ellipsis, the last one apart:
@@ -726,15 +768,19 @@ room."
     ;; A right-aligned cell starts after the room its label leaves.
     (when (and right-align (> width label-width))
       (let ((shift (- width label-width)))
-        (insert (propertize (make-string shift ?\s) 'display `(space :align-to ,(+ x shift))))
+        (insert (harness-ui-sessions--space shift (+ x shift)))
         (setq width (- width shift)
               x (+ x shift))))
+    ;; A cell with a tooltip of its own keeps it; the others say what they
+    ;; are, which is put on the text once it is in the buffer, as the
+    ;; label need not be copied for it.
     (cond ((stringp desc)
-           (insert (if (get-text-property 0 'help-echo label)
-                       label
-                     (propertize label 'help-echo help-echo))))
+           (let ((at (point)))
+             (insert label)
+             (unless (get-text-property 0 'help-echo label)
+               (put-text-property at (point) 'help-echo (concat name ": " label)))))
           ((eq (car desc) 'image)
-           (insert (propertize " " 'display desc 'help-echo help-echo)))
+           (insert (propertize " " 'display desc 'help-echo (concat name ": " label))))
           (t (apply #'insert-text-button label (cdr desc))))
     (let ((next-x (+ x pad-right width)))
       ;; The last cell needs nothing after it.  The others end in one
@@ -742,8 +788,8 @@ room."
       ;; stretches up to the next column: nothing at all (zero width) when
       ;; the label already reaches it.
       (unless last-column
-        (insert (propertize (make-string (max 1 (+ pad-right (- width (min width label-width)))) ?\s)
-                            'display `(space :align-to ,next-x))))
+        (insert (harness-ui-sessions--space (max 1 (+ pad-right (- width (min width label-width))))
+                                            next-x)))
       (put-text-property start (point) 'tabulated-list-column-name name)
       next-x)))
 
@@ -880,8 +926,12 @@ filter above or the footer under: they go in here."
 (defun harness-ui-sessions-redraw ()
   "Print the session list again, when it exists, as the sessions are now.
 For a module whose `harness-ui-sessions-footer-functions' would draw
-something else now.  Each window keeps its point on its session."
-  (harness-ui-sessions--redraw))
+something else now.  Each window keeps its point on its session.  A
+list no window shows is not printed: it is when a window shows it
+\(`harness-ui-view-follow-p'), and the footer is drawn then as well."
+  (when-let* ((buf (get-buffer harness-ui-sessions--buffer-name)))
+    (when (harness-ui-view-follow-p buf)
+      (harness-ui-sessions--redraw))))
 
 (defun harness-ui-sessions--position (id)
   "Return where the row of session ID starts, else the first row, else `point-min'."
@@ -957,6 +1007,9 @@ setting commands, such as `harness-set-model' and
   ;; An overview: the list can take the fullscreen layout (F).
   (setq-local harness-ui-overview-function #'harness-ui-sessions--overview-session)
   (add-hook 'tabulated-list-revert-hook #'harness-ui-sessions--refresh nil t)
+  ;; Followed only while a window shows it; drawn once when it is shown
+  ;; again after the changes it missed (`harness-ui-sessions--following-p').
+  (harness-ui-view-install #'harness-ui-sessions--catch-up)
   (tabulated-list-init-header))
 
 ;; The list's keys in the harness menu, behind `.'.  The harness's setting
@@ -1014,30 +1067,53 @@ aside, even when the list shows them: they are not conversations to read."
                        (or (null best) (> updated newest)))
               (setq best (car entry) newest updated)))))))
 
+(defconst harness-ui-sessions--cost-factor 4
+  "How many times as long as a redraw took the list waits to follow again.
+A redraw that takes a tenth of a second is followed by at least four
+tenths in which Emacs reads its keys and draws its frames, so the list
+never takes more than a fifth of Emacs's time however many rows it has
+and however fast the sessions change (`harness-ui-sessions--redraw-live').")
+
+(defvar-local harness-ui-sessions--due 0.0
+  "The time, as `float-time' has it, before which the list follows no change.
+Set by every redraw to its end plus `harness-ui-sessions--cost-factor'
+times what it took, wall clock, the collection of garbage it caused
+included.")
+
 (defun harness-ui-sessions--redraw ()
   "Redraw the list buffer if it exists, keeping point on the same session.
 Each window showing the list keeps its point on its session too; one
-whose session is gone goes to the first row."
+whose session is gone goes to the first row.  How long it took sets how
+soon the list follows the sessions again (`harness-ui-sessions--due')."
   (when-let* ((buf (get-buffer harness-ui-sessions--buffer-name)))
     (with-current-buffer buf
       (let ((id (tabulated-list-get-id))
             (windows (mapcar (lambda (w) (cons w (tabulated-list-get-id (window-point w))))
-                             (get-buffer-window-list buf nil t))))
+                             (get-buffer-window-list buf nil t)))
+            (start (float-time)))
         (harness-ui-sessions--refresh)
         (harness-ui-sessions--print)
         (goto-char (harness-ui-sessions--position id))
         (pcase-dolist (`(,window . ,at) windows)
           (unless (eq window (selected-window))
-            (set-window-point window (harness-ui-sessions--position at))))))))
+            (set-window-point window (harness-ui-sessions--position at))))
+        (harness-ui-view-drawn)
+        (let ((end (float-time)))
+          (setq harness-ui-sessions--due
+                (+ end (* harness-ui-sessions--cost-factor (- end start)))))))))
 
 ;;;; Following the sessions, and pausing that
 ;;
 ;; The list redraws by itself as the harness reports changes: sessions,
 ;; output rates, token figures that grow, requests answered, a reload.
 ;; Those paths redraw through `harness-ui-sessions--redraw-live', which
-;; leaves a paused list as it is.  What the user asks of the list -- a
-;; filter, a toggle, `g' -- calls `harness-ui-sessions--redraw' and
-;; redraws a paused list too.
+;; leaves a paused list as it is, and a list no window shows: it notes
+;; what it missed and draws once when a window shows it again
+;; (`harness-ui-view-install').  Drawn from timers on the one thread that
+;; reads the keys, a list of a thousand rows that nobody looked at took
+;; Emacs's time almost whole.  What the user asks of the list -- a filter,
+;; a toggle, `g' -- calls `harness-ui-sessions--redraw' and redraws a
+;; paused or hidden list too.
 
 (defun harness-ui-sessions--paused-p ()
   "Non-nil when the list exists and is paused.
@@ -1046,28 +1122,66 @@ is current: the hooks that follow the sessions run in any."
   (when-let* ((buf (get-buffer harness-ui-sessions--buffer-name)))
     (buffer-local-value 'harness-ui-sessions--paused buf)))
 
-(defun harness-ui-sessions--redraw-live ()
-  "Redraw the list for a change that came by itself, unless it is paused."
-  (unless (harness-ui-sessions--paused-p)
-    (harness-ui-sessions--redraw)))
-
-(defun harness-ui-sessions--on-changed ()
-  "Redraw the list shortly, once for a burst of changes.
-A paused list is not redrawn, and no redraw is scheduled for it."
-  (unless (harness-ui-sessions--paused-p)
-    (harness-debounce 'harness-ui-sessions 0.15 #'harness-ui-sessions--redraw-live)))
-
-(defun harness-ui-sessions--on-rate (_id _rate)
-  "Redraw the list, whose average rates name the current output rate on hover.
-A paused list is not redrawn."
-  (when (get-buffer harness-ui-sessions--buffer-name)
-    (harness-ui-sessions--on-changed)))
+(defun harness-ui-sessions--following-p ()
+  "Non-nil when the list should follow the sessions now.
+That is when it exists, is not paused and a window shows it.  A list no
+window shows is left as it is and notes that it missed the change
+\(`harness-ui-view-follow-p'): `harness-ui-sessions--catch-up' draws it
+when a window shows it again.  A paused list holds still, shown or not."
+  (when-let* ((buf (get-buffer harness-ui-sessions--buffer-name)))
+    (and (not (buffer-local-value 'harness-ui-sessions--paused buf))
+         (harness-ui-view-follow-p buf))))
 
 (defconst harness-ui-sessions--live-interval 0.5
   "Least seconds between two redraws of the list for growing token figures.")
 
 (defvar harness-ui-sessions--live-timer nil
-  "Timer of the redraw the list's growing token figures wait for, or nil.")
+  "Timer of the redraw the list is waiting for, or nil.
+The growing token figures start it (`harness-ui-sessions--on-live'), and
+so does a redraw that came before `harness-ui-sessions--due'.")
+
+(defun harness-ui-sessions--catch-up ()
+  "Draw the list for what it missed while no window showed it, unless it is paused.
+Called when a window shows it again (`harness-ui-view-install').  A
+paused list holds still: resuming it draws it."
+  (unless harness-ui-sessions--paused
+    (harness-ui-sessions--redraw)))
+
+(defun harness-ui-sessions--redraw-live ()
+  "Redraw the list for a change that came by itself, if it should follow it.
+Not while it is paused or no window shows it
+\(`harness-ui-sessions--following-p')."
+  (when (harness-ui-sessions--following-p)
+    (harness-ui-sessions--redraw)))
+
+(defun harness-ui-sessions--redraw-spaced ()
+  "Redraw the list for a change among those that come all the time.
+As `harness-ui-sessions--redraw-live', but not before
+`harness-ui-sessions--due': a redraw that came too soon after one that
+took long waits for a timer, one at a time, and draws everything that
+changed meanwhile."
+  (when (harness-ui-sessions--following-p)
+    (let ((wait (- (buffer-local-value 'harness-ui-sessions--due
+                                       (get-buffer harness-ui-sessions--buffer-name))
+                   (float-time))))
+      (cond ((<= wait 0) (harness-ui-sessions--redraw))
+            ((not (timerp harness-ui-sessions--live-timer))
+             (setq harness-ui-sessions--live-timer
+                   (run-at-time wait nil #'harness-ui-sessions--live-redraw)))))))
+
+(defun harness-ui-sessions--on-changed ()
+  "Redraw the list shortly, once for a burst of changes.
+A paused list is not redrawn, nor one no window shows
+\(`harness-ui-sessions--following-p'), and no redraw is scheduled for
+either."
+  (when (harness-ui-sessions--following-p)
+    (harness-debounce 'harness-ui-sessions 0.15 #'harness-ui-sessions--redraw-spaced)))
+
+(defun harness-ui-sessions--on-rate (_id _rate)
+  "Redraw the list, whose average rates name the current output rate on hover.
+A paused list is not redrawn, nor one no window shows."
+  (when (get-buffer harness-ui-sessions--buffer-name)
+    (harness-ui-sessions--on-changed)))
 
 (defun harness-ui-sessions--tokens-shown-p (id)
   "Non-nil when the list shows session ID's token figures as they are.
@@ -1088,9 +1202,10 @@ shows count: with both hidden there is nothing to redraw for."
                     '("Context" "Output"))))))
 
 (defun harness-ui-sessions--live-redraw ()
-  "Redraw the list for the token figures that grew, unless it is paused."
+  "Redraw the list for the token figures that grew, unless it is paused or hidden.
+The timer of `harness-ui-sessions--live-timer' runs this."
   (setq harness-ui-sessions--live-timer nil)
-  (harness-ui-sessions--redraw-live))
+  (harness-ui-sessions--redraw-spaced))
 
 (defun harness-ui-sessions--on-live (id _live)
   "Redraw the list soon if session ID's token figures read otherwise now.
@@ -1098,10 +1213,11 @@ They grow a few times a second while its turn streams; the list redraws
 for them at most every `harness-ui-sessions--live-interval' seconds, all
 the sessions that grew meanwhile at once.  ID nil, after every session's
 figures were fetched again, redraws it as well.  A paused list is not
-redrawn, and no redraw is scheduled for it."
+redrawn, nor one no window shows (`harness-ui-sessions--following-p'),
+and no redraw is scheduled for either."
   (when (and (get-buffer harness-ui-sessions--buffer-name)
-             (not (harness-ui-sessions--paused-p))
              (not (timerp harness-ui-sessions--live-timer))
+             (harness-ui-sessions--following-p)
              (or (null id) (not (harness-ui-sessions--tokens-shown-p id))))
     (setq harness-ui-sessions--live-timer
           (run-at-time harness-ui-sessions--live-interval nil #'harness-ui-sessions--live-redraw))))
@@ -1181,7 +1297,8 @@ With BLOCKED-ONLY it shows only the sessions waiting for you, as
       (let ((id (tabulated-list-get-id)))
         (harness-ui-sessions--refresh)
         (harness-ui-sessions--print)
-        (goto-char (harness-ui-sessions--position id))))
+        (goto-char (harness-ui-sessions--position id))
+        (harness-ui-view-drawn)))
     (harness-ui-refresh-sessions (lambda (_) (harness-ui-sessions--redraw)))
     (harness-ui-sessions--fetch-tasks t)
     (harness-ui-display-view buf position)))
@@ -2162,6 +2279,12 @@ it."
   ;; After a reload or reconnect the tasks may be another harness's.
   (add-hook 'harness-ui-redraw-hook #'harness-ui-sessions--fetch-tasks)
   (add-hook 'harness-ui-event-functions #'harness-ui-sessions--on-event)
+  ;; A list that exists already, when the harness reloads, was started by
+  ;; a mode function that did not know to catch up when shown.
+  (when-let* ((buf (get-buffer harness-ui-sessions--buffer-name)))
+    (with-current-buffer buf
+      (when (derived-mode-p 'harness-ui-sessions-mode)
+        (harness-ui-view-install #'harness-ui-sessions--catch-up))))
   (define-key harness-ui-map (kbd "l") #'harness-sessions))
 
 (harness-define-module 'ui-sessions

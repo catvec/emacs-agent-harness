@@ -195,6 +195,35 @@ the turn's end takes it out again."
       (harness-emit 'agent/turn-ended sid 'end-turn)
       (harness-ui-access-test-wait-text "granted for this turn" t))))
 
+(ert-deftest harness-ui-access-says-it-is-suspended-until-it-caught-up ()
+  "A view no window shows is marked suspended when it misses a change; a click wakes it.
+The mark is the one every view that follows the harness only while shown
+has (`harness-ui-view-indicator'): it comes with the missed change, goes
+when the view is fetched and drawn again, and a click on it does that."
+  (harness-ui-access-test-with
+    (let* ((extra (harness-test-temp-dir))
+           (buffer (harness-ui-access-test-open sid))
+           (elsewhere (get-buffer-create " *harness-ui-access-test-elsewhere*")))
+      (cl-flet ((mark () (substring-no-properties (with-current-buffer buffer (harness-ui-view-indicator)))))
+        (unwind-protect
+            (progn
+              (should (equal "" (mark)))
+              (dolist (w (get-buffer-window-list buffer nil t)) (set-window-buffer w elsewhere))
+              (set-window-buffer (selected-window) elsewhere)
+              (should-not (get-buffer-window buffer t))
+              ;; A grant made elsewhere: the view is left alone, and says so.
+              (harness-call 'permission/allow-dir sid extra)
+              (harness-test-wait (lambda () (buffer-local-value 'harness-ui-access--stale buffer))
+                                 5 "the view to note the grant")
+              (should (equal "[Suspended: resume]" (mark)))
+              (should-not (with-current-buffer buffer (string-match-p "granted to this session" (harness-ui-access-test-text))))
+              ;; A click wakes it: fetched and drawn, the mark gone.
+              (set-window-buffer (selected-window) buffer)
+              (with-current-buffer buffer (harness-ui-view-wake))
+              (should (equal "" (mark)))
+              (with-current-buffer buffer (harness-ui-access-test-wait-text "granted to this session")))
+          (kill-buffer elsewhere))))))
+
 (ert-deftest harness-ui-access-move-and-keys ()
   "m moves the session, and the view follows; q buries the view; j and d
 open it from the harness keys."

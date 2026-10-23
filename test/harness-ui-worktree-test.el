@@ -807,6 +807,9 @@ worktrees that did."
               (dotimes (_ 5) (run-hooks 'harness-ui-sessions-changed-hook))
               (should-not (pending))
               (should (eq 'sessions (stale)))
+              ;; It says it is suspended, as every such view does, until it is shown.
+              (should (equal "[Suspended: resume]"
+                             (substring-no-properties (with-current-buffer buf (harness-ui-view-indicator)))))
               (harness-ui-worktree--on-assumed)
               (should-not (pending))
               (should (eq 'redraw (stale)))
@@ -817,6 +820,7 @@ worktrees that did."
               (show)
               (harness-test-wait (lambda () (>= redraws 1)) 10 "the redraw of a list shown again")
               (should-not (stale))
+              (should (equal "" (with-current-buffer buf (harness-ui-view-indicator))))
               (harness-ui-worktree-test--settle buf)
               (should (= 0 loads))
               ;; A worktree event, a merge, a reconnect while hidden: a reload is owed,

@@ -831,6 +831,7 @@ says why above it."
     (let ((generation (cl-incf harness-ui-slots--generation)))
       ;; Whatever it missed while hidden, this answer has.
       (setq harness-ui-slots--stale nil)
+      (harness-ui-view-drawn)
       (unless harness-ui-slots--data (setq harness-ui-slots--loading t))
       (harness-ui-slots--fetch
        harness-ui-slots--dir
@@ -888,7 +889,7 @@ task's, and orders the queue."
   "Have the page BUFFER catch up with an event.
 Shown, it asks the harness again soon, once for a burst of events;
 hidden, it is marked stale, to ask when it shows again."
-  (if (harness-ui-slots--shown-p buffer)
+  (if (harness-ui-view-follow-p buffer)
       (harness-ui-slots--refetch-soon buffer)
     (with-current-buffer buffer (setq harness-ui-slots--stale t))))
 
@@ -905,6 +906,8 @@ it are drawn anew by `harness-ui-slots--on-resize' as it shows."
   (let ((buffer (window-buffer window)))
     (when (and (buffer-live-p buffer)
                (buffer-local-value 'harness-ui-slots--stale buffer))
+      ;; The catch-up is on its way: the mark of a suspended view is not due.
+      (harness-ui-view-drawn buffer)
       (harness-ui-slots--refetch-soon buffer 0.1))))
 
 (defconst harness-ui-slots--pending-delay 0.15
@@ -967,7 +970,9 @@ answer a permission request on its line, as in the session list;
   (setq-local harness-ui-session-at-point-function #'harness-ui-slots--session-at-point)
   (add-hook 'window-configuration-change-hook #'harness-ui-slots--on-resize nil t)
   ;; Shown again after events it missed, it asks again.
-  (add-hook 'window-buffer-change-functions #'harness-ui-slots--on-window-change nil t))
+  (add-hook 'window-buffer-change-functions #'harness-ui-slots--on-window-change nil t)
+  ;; Says [Suspended: resume] if a window shows it before it did.
+  (harness-ui-view-adopt (lambda () (harness-ui-slots--load (current-buffer)))))
 
 ;; The page's keys in the harness menu, behind `.'.
 (put 'harness-ui-slots-mode 'harness-menu-group

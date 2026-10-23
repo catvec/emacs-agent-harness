@@ -436,7 +436,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `project-find-functions` |  | `worktree-assume.el` |
 | `string-edit-mode-hook` | `change-review-ui.el` |  |
 | `tabulated-list-revert-hook` |  | [ui-sessions](ui-sessions.md), [ui-worktree](ui-worktree.md) |
-| `window-buffer-change-functions` |  | [ui-access](ui-access.md), [ui-chat](ui-chat.md), [ui-slots](ui-slots.md), [ui-tasks](ui-tasks.md), [ui-worktree](ui-worktree.md) |
+| `window-buffer-change-functions` |  | [ui](ui.md), [ui-access](ui-access.md), [ui-chat](ui-chat.md), [ui-slots](ui-slots.md), [ui-tasks](ui-tasks.md), [ui-worktree](ui-worktree.md) |
 | `window-configuration-change-hook` |  | [ui-insights](ui-insights.md), [ui-slots](ui-slots.md), [ui-tree](ui-tree.md), [ui-usage](ui-usage.md) |
 | `window-scroll-functions` |  | [ui-chat](ui-chat.md) |
 | `window-size-change-functions` |  | [ui-chat](ui-chat.md), [ui-compose](ui-compose.md), [ui-patch-review](ui-patch-review.md), [ui-pet](ui-pet.md), [ui-tasks](ui-tasks.md) |

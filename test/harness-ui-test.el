@@ -3507,5 +3507,216 @@ session pass; without it every session, seeds included, is offered."
       (should (equal "worker" displayed))
       (should (= 1 (length seen))))))
 
+;;;; Views that follow the harness only while a window shows them
+
+(defun harness-ui-test--spin (seconds)
+  "Let the timers due within SECONDS run."
+  (let ((deadline (+ (float-time) seconds)))
+    (while (< (float-time) deadline)
+      (accept-process-output nil 0.02))))
+
+(defmacro harness-ui-test-with-view (&rest body)
+  "Run BODY with `view', a live buffer shown in the selected window.
+`other' is another buffer.  Both are killed after."
+  (declare (indent 0))
+  `(let ((view (generate-new-buffer " *harness-ui-test-view*"))
+         (other (generate-new-buffer " *harness-ui-test-other*"))
+         (shown (window-buffer (selected-window))))
+     (unwind-protect
+         (progn (set-window-buffer (selected-window) view) ,@body)
+       (set-window-buffer (selected-window) shown)
+       (mapc #'kill-buffer (list view other)))))
+
+(ert-deftest harness-ui-view-follows-a-buffer-only-while-a-window-shows-it ()
+  "`harness-ui-view-follow-p' says yes for a shown buffer and notes the change it skips otherwise.
+A change a hidden view skipped is noted in `harness-ui-view-stale',
+which only drawing the view clears (`harness-ui-view-drawn'): that a
+window shows it again does not."
+  (harness-ui-test-with-view
+    (should (harness-ui-view-shown-p view))
+    (should (harness-ui-view-follow-p view))
+    (should-not (buffer-local-value 'harness-ui-view-stale view))
+    ;; Hidden: no, and the change is noted, in the view and not in the others.
+    (set-window-buffer (selected-window) other)
+    (should-not (harness-ui-view-shown-p view))
+    (should-not (harness-ui-view-follow-p view))
+    (should (buffer-local-value 'harness-ui-view-stale view))
+    (should-not (buffer-local-value 'harness-ui-view-stale other))
+    ;; Shown again it follows, and is as stale as it was until it is drawn.
+    (set-window-buffer (selected-window) view)
+    (should (harness-ui-view-follow-p view))
+    (should (buffer-local-value 'harness-ui-view-stale view))
+    (harness-ui-view-drawn view)
+    (should-not (buffer-local-value 'harness-ui-view-stale view))
+    ;; The current buffer is the default, and a dead buffer follows nothing.
+    (with-current-buffer view (should (harness-ui-view-shown-p)) (should (harness-ui-view-follow-p)))
+    (let ((dead (generate-new-buffer " *dead*")))
+      (kill-buffer dead)
+      (should-not (harness-ui-view-shown-p dead))
+      (should-not (harness-ui-view-follow-p dead)))))
+
+(ert-deftest harness-ui-view-catches-up-once-when-shown-after-missing-a-change ()
+  "A view that missed a change catches up, once, soon after a window shows it.
+Nothing is done for a view that missed nothing, or for a hook run because
+a window stopped showing it, and the catch-up runs in the view's buffer
+with the view no longer stale."
+  (harness-ui-test-with-view
+    (let ((calls nil))
+      (cl-flet ((install ()
+                  (with-current-buffer view
+                    (harness-ui-view-install
+                     (lambda () (push (list (current-buffer) harness-ui-view-stale) calls))))))
+        (install)
+        (should (memq #'harness-ui-view--shown
+                      (buffer-local-value 'window-buffer-change-functions view)))
+        ;; Installed again, as a reload does it, the view is hooked once.
+        (install)
+        (should (= 1 (cl-count #'harness-ui-view--shown
+                               (buffer-local-value 'window-buffer-change-functions view)))))
+      ;; Not stale: showing it does nothing.
+      (with-current-buffer view (harness-ui-view--shown (selected-window)))
+      (harness-ui-test--spin 0.2)
+      (should-not calls)
+      ;; Stale and hidden: the hook runs for the window that left, and does nothing.
+      (set-window-buffer (selected-window) other)
+      (harness-ui-view-follow-p view)
+      (with-current-buffer view (harness-ui-view--shown (selected-window)))
+      (harness-ui-test--spin 0.2)
+      (should-not calls)
+      (should (buffer-local-value 'harness-ui-view-stale view))
+      ;; Shown, however often the hook runs: one catch-up, in the view, not stale.
+      (set-window-buffer (selected-window) view)
+      (with-current-buffer view
+        (harness-ui-view--shown (selected-window))
+        (harness-ui-view--shown (selected-window)))
+      (should-not calls)                ; redisplay runs the hook: the work waits
+      ;; The catch-up is on its way: the mark of a suspended view does not flash.
+      (should (equal "" (with-current-buffer view (harness-ui-view-indicator))))
+      (harness-test-wait (lambda () calls) 5 "the view to catch up")
+      (harness-ui-test--spin 0.2)
+      (should (equal (list (list view nil)) calls))
+      (should-not (buffer-local-value 'harness-ui-view-stale view))
+      ;; Hidden again before the timer ran: nothing is drawn for nobody, and
+      ;; the view, still behind, is marked once more.
+      (setq calls nil)
+      (set-window-buffer (selected-window) other)
+      (harness-ui-view-follow-p view)
+      (set-window-buffer (selected-window) view)
+      (with-current-buffer view (harness-ui-view--shown (selected-window)))
+      (set-window-buffer (selected-window) other)
+      (harness-ui-test--spin 0.2)
+      (should-not calls)
+      (should (equal "[Suspended: resume]"
+                     (substring-no-properties (with-current-buffer view (harness-ui-view-indicator))))))))
+
+(ert-deftest harness-ui-view-says-it-is-suspended-and-wakes-on-a-click ()
+  "A view that missed changes says so in its mode line, the same in every view, and a click wakes it.
+Should a window show it without the catch-up having run, the mark
+\[Suspended: resume] is drawn from `mode-line-misc-info', which every
+view that `harness-ui-view-install's has, once; clicking it, or RET
+with point on it, brings the view up to date and takes the mark away."
+  (harness-ui-test-with-view
+    (let ((woken 0) (other-view other))
+      (cl-flet ((install (buffer)
+                  (with-current-buffer buffer
+                    (harness-ui-view-install (lambda () (cl-incf woken)))))
+                (indicator (buffer) (with-current-buffer buffer (harness-ui-view-indicator))))
+        (install view)
+        (install other-view)
+        (install view)                  ; as a reload does it
+        ;; The same element, once, in each view's own mode line, and no other buffer's.
+        (dolist (buffer (list view other-view))
+          (should (= 1 (cl-count harness-ui-view--mode-line
+                                 (buffer-local-value 'mode-line-misc-info buffer) :test #'equal)))
+          (should (equal "" (indicator buffer))))
+        (should-not (member harness-ui-view--mode-line (default-value 'mode-line-misc-info)))
+        ;; A buffer that is no view has no mark, though a stale flag is set in it.
+        (with-temp-buffer
+          (setq harness-ui-view-stale t)
+          (should (equal "" (harness-ui-view-indicator))))
+        ;; Missed changes: the mark, whoever looks, until the view is drawn.
+        (set-window-buffer (selected-window) other)
+        (should-not (harness-ui-view-follow-p view))
+        (set-window-buffer (selected-window) view)
+        (let ((mark (indicator view)))
+          (should (equal "[Suspended: resume]" (substring-no-properties mark)))
+          (should (eq 'harness-ui-view-suspended-face (get-text-property 0 'face mark)))
+          (should (eq 'mode-line-highlight (get-text-property 0 'mouse-face mark)))
+          (should (string-match-p "Click" (get-text-property 0 'help-echo mark)))
+          (should (equal "" (indicator other-view)))
+          ;; A click on it wakes the view: caught up, not stale, no mark.
+          (let ((event (list 'mouse-1 (list (selected-window) 1 '(0 . 0) 0))))
+            (funcall (lookup-key (get-text-property 0 'local-map mark) [mode-line mouse-1]) event))
+          (should (= 1 woken))
+          (should-not (buffer-local-value 'harness-ui-view-stale view))
+          (should (equal "" (indicator view))))
+        ;; Drawn by other means, the mark goes too.
+        (set-window-buffer (selected-window) other)
+        (harness-ui-view-follow-p view)
+        (should (equal "[Suspended: resume]" (substring-no-properties (indicator view))))
+        (harness-ui-view-drawn view)
+        (should (equal "" (indicator view)))
+        (should (= 1 woken))
+        ;; The command is the click's, and only for a view.
+        (with-current-buffer view (harness-ui-view-follow-p view) (harness-ui-view-wake))
+        (should (= 2 woken))
+        (with-temp-buffer (should-error (harness-ui-view-wake) :type 'user-error))))))
+
+(ert-deftest harness-ui-session-help-function-makes-the-tooltip-when-asked-for ()
+  "A tooltip made on hover reads the session as the cache has it then.
+Not before it is asked for, and with the snapshot it was made from when
+the cache has lost the session or the session has no id."
+  (let ((harness-ui--sessions (make-hash-table :test 'equal))
+        (calls 0))
+    (harness-ui-cache-session (list :id "s" :name "first"))
+    (let ((help (harness-ui-session-help-function
+                 (harness-ui-session "s")
+                 (lambda (session) (cl-incf calls) (plist-get session :name)))))
+      (should (functionp help))
+      (should (= 0 calls))
+      (should (equal "first" (funcall help nil nil 0)))
+      (harness-ui-cache-session (list :id "s" :name "second"))
+      (should (equal "second" (funcall help (selected-window) (current-buffer) 7)))
+      (should (= 2 calls))
+      ;; The cache lost it: the session as it was.
+      (remhash "s" harness-ui--sessions)
+      (should (equal "first" (funcall help nil nil 0))))
+    ;; A session standing for several has no id to look up.
+    (let ((help (harness-ui-session-help-function (list :name "total")
+                                                  (lambda (session) (plist-get session :name)))))
+      (should (equal "total" (funcall help nil nil 0))))))
+
+(ert-deftest harness-ui-formatters-make-a-tooltip-on-hover-when-lazy ()
+  "With LAZY the figure is the same and its tooltip is a function making the same text.
+The context, output, average rate and spend figures, which a session
+list draws a thousand of at every redraw."
+  (let ((harness-ui--sessions (make-hash-table :test 'equal))
+        (harness-ui--live (make-hash-table :test 'equal)))
+    (harness-ui-cache-session
+     (list :id "s" :name "work" :model "demo:scripted" :context-window 200000 :status "idle"
+           :usage (list :cost 1.5 :context 41000 :last-output 900 :output 7000
+                        :stream-output 6000 :stream-seconds 100.0)))
+    (let ((s (harness-ui-session "s")))
+      (cl-flet ((help (string)
+                  (let ((help (get-text-property 0 'help-echo string)))
+                    (if (functionp help) (funcall help (selected-window) (current-buffer) 0) help))))
+        (dolist (case (list (list (harness-ui-format-context s) (harness-ui-format-context s t))
+                            (list (harness-ui-format-output s) (harness-ui-format-output s nil t))
+                            (list (harness-ui-format-average-rate s) (harness-ui-format-average-rate s nil t))
+                            (list (harness-ui-format-spend s) (harness-ui-format-spend s nil nil t))
+                            (list (harness-ui-format-spend s nil "This task")
+                                  (harness-ui-format-spend s nil "This task" t))))
+          (let ((eager (nth 0 case)) (lazy (nth 1 case)))
+            (should (stringp (get-text-property 0 'help-echo eager)))
+            (should (functionp (get-text-property 0 'help-echo lazy)))
+            (should (equal (substring-no-properties eager) (substring-no-properties lazy)))
+            (should (equal (get-text-property 0 'face eager) (get-text-property 0 'face lazy)))
+            (should (equal (help eager) (help lazy)))))
+        ;; The hover reads the figures it finds then, the text what it was drawn with.
+        (let ((lazy (harness-ui-format-context s t)))
+          (harness-ui--store-live "s" '(:context 150000 :output 9000 :estimated 0))
+          (should (equal "41.9k/200k" (substring-no-properties lazy)))
+          (should (string-match-p "in use: 150k of" (help lazy))))))))
+
 (provide 'harness-ui-test)
 ;;; harness-ui-test.el ends here

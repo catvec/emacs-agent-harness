@@ -2756,10 +2756,19 @@ fitting's shape (`harness-ui-tasks--fit-shape'): a button held down is
 as wide as it was."
   (harness-ui-tasks--release-stale)
   (list harness-ui-tasks--tasks
-        (mapcar (lambda (session)
-                  (list (plist-get session :id) (plist-get session :name) (plist-get session :status)
-                        (plist-get session :todos) (plist-get session :pending)))
-                (harness-ui-user-sessions))
+        ;; In the cache's own order: sorted by when each changed last, as
+        ;; `harness-ui-user-sessions' has them, the key would differ after
+        ;; every change of any session (it moves up), and the board would be
+        ;; drawn again for changes that none of its cards show; and sorting
+        ;; a thousand sessions costs more than the rest of the key.
+        (let (figures)
+          (maphash (lambda (id session)
+                     (unless (harness-ui-internal-session-p session)
+                       (push (list id (plist-get session :name) (plist-get session :status)
+                                   (plist-get session :todos) (plist-get session :pending))
+                             figures)))
+                   harness-ui--sessions)
+          figures)
         (truncate (float-time) 5)
         (harness-ui-tasks--window)
         (and (harness-ui-tasks--window) (window-body-height (harness-ui-tasks--window) t))
@@ -4060,10 +4069,14 @@ QUIET refreshes in the background, without the loading indicator."
 
 (defun harness-ui-tasks--schedule-render (buffer)
   "Redraw the board BUFFER soon, once a burst of calls for it settles.
-It is drawn 0.1 seconds after the last call, if it is still a board."
-  (harness-debounce (list 'harness-ui-tasks buffer) 0.1
-                    (lambda () (when (harness-ui-tasks--board-p buffer)
-                                 (with-current-buffer buffer (harness-ui-tasks--render))))))
+It is drawn 0.1 seconds after the last call, if it is still a board.  A
+board no window shows is not drawn for them: the session cache changes
+many times a second while agents work, and a window that shows the
+board again loads it anew (`harness-ui-tasks--catch-up')."
+  (when (harness-ui-view-follow-p buffer)
+    (harness-debounce (list 'harness-ui-tasks buffer) 0.1
+                      (lambda () (when (harness-ui-tasks--board-p buffer)
+                                   (with-current-buffer buffer (harness-ui-tasks--render)))))))
 
 (defconst harness-ui-tasks--refresh-events
   '("merge/queued" "merge/started" "merge/conflict" "merge/finished"
@@ -4083,9 +4096,20 @@ board (`harness-ui-internal-event-p'): the harness makes one for every
 model call of its own, and none moves a task.")
 
 (defun harness-ui-tasks--refresh-soon (buffer)
-  "Reload BUFFER's tasks in the background, once a burst of events settles."
-  (harness-debounce (list 'harness-ui-tasks-refresh buffer) 0.3
-                    (lambda () (when (harness-ui-tasks--board-p buffer) (harness-ui-tasks--fetch buffer t)))))
+  "Reload BUFFER's tasks in the background, once a burst of events settles.
+Not a board no window shows, which asks the harness for its tasks anew
+when a window shows it again (`harness-ui-tasks--catch-up'): until then
+it would ask, and draw what it got, for every burst of events of any
+project."
+  (when (harness-ui-view-follow-p buffer)
+    (harness-debounce (list 'harness-ui-tasks-refresh buffer) 0.3
+                      (lambda () (when (harness-ui-tasks--board-p buffer) (harness-ui-tasks--fetch buffer t))))))
+
+(defun harness-ui-tasks--catch-up ()
+  "Reload this board, which missed changes while no window showed it.
+Called when a window shows it again, or when it is woken
+\(`harness-ui-view-install')."
+  (harness-ui-tasks--refresh-soon (current-buffer)))
 
 (defun harness-ui-tasks--on-window-change (window)
   "Reload the board shown in WINDOW, which may have missed events while hidden."
@@ -4285,6 +4309,9 @@ act on from there.
   (setq-local header-line-format '(:eval (harness-ui-tasks--header)))
   (add-hook 'window-buffer-change-functions #'harness-ui-tasks--on-window-change nil t)
   (add-hook 'window-size-change-functions #'harness-ui-tasks--on-resize nil t)
+  ;; Not drawn or reloaded while no window shows it (`harness-ui-tasks--schedule-render'),
+  ;; so it says it is suspended if a window shows it before it catches up.
+  (harness-ui-view-install #'harness-ui-tasks--catch-up)
   (setq harness-ui-setting-target-function #'harness-ui-tasks--setting-target)
   ;; What the session at point waits on (the popout), from the card at point.
   (setq-local harness-ui-session-at-point-function
@@ -5730,6 +5757,11 @@ notifier's other segments, such as the version page's nag."
   (when (timerp harness-ui-tasks--timer) (cancel-timer harness-ui-tasks--timer))
   (setq harness-ui-tasks--timer (run-with-timer harness-ui-tasks--tick-interval harness-ui-tasks--tick-interval #'harness-ui-tasks--tick))
   (define-key harness-ui-map (kbd "a") #'harness-tasks)
+  ;; The boards that exist already, when the harness reloads, were started
+  ;; by a mode function that did not know to catch up when shown.
+  (dolist (board (harness-ui-tasks--buffers))
+    (with-current-buffer board
+      (harness-ui-view-install #'harness-ui-tasks--catch-up)))
   (when (harness-ui-connected-p)
     (harness-ui-tasks--fetch-review)))
 

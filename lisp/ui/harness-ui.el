@@ -19,6 +19,12 @@
 ;;   session, or a group of them such as a board's tasks, cost: a price
 ;;   when it is billed per token, the plan's name and quota when a
 ;;   subscription pays for it; and those that show budgets;
+;; - the helpers of views that follow the harness only while a window
+;;   shows them (`harness-ui-view-follow-p'), which mark themselves
+;;   [Suspended: resume] in the mode line when a window shows them
+;;   before they caught up, and of tooltips made when they are hovered
+;;   (`harness-ui-session-help-function'), which keep a long list off
+;;   the UI thread while nobody looks at it;
 ;; - faces and icons;
 ;; - window positions: one session per preset position, replacing, and
 ;;   the fullscreen layout, an overview such as the task board on the
@@ -1523,6 +1529,19 @@ They are the 5-hour and weekly ones, and any other that is at least
         (and name (format "the %s plan" name)))
       "the subscription"))
 
+(defun harness-ui-session-help-function (session fn)
+  "Return a `help-echo' function that makes SESSION's tooltip when it is asked for.
+FN, called with the session as the session cache has it then (SESSION
+itself when the cache has none of that id), returns the tooltip.  A
+view that draws a row for every session, a thousand of them, would
+otherwise make the text of every tooltip at every redraw, a great deal of
+string work for tooltips almost nobody reads; made on hover, the text is
+also never older than the hover (as the task board's card titles are,
+`harness-ui-tasks--title-help')."
+  (let ((id (plist-get session :id)))
+    (lambda (&rest _)
+      (funcall fn (or (and id (harness-ui-session id)) session)))))
+
 (defun harness-ui-spend-help (session &optional subject)
   "Return the tooltip that explains what SESSION cost and who pays for it.
 SUBJECT names what cost it, \"This session\" by default.  One line, so
@@ -1557,14 +1576,15 @@ showing it in the echo area moves nothing."
              (list "mouse-1: usage and plan quota")))
       "\n"))))
 
-(defun harness-ui-format-spend (session &optional with-quota subject)
+(defun harness-ui-format-spend (session &optional with-quota subject lazy)
   "Return what SESSION cost, saying when a subscription pays for it.
 Per-token billing shows the cost (\"$1.20\").  When a plan pays, its
 name shows instead (\"Max\"), after any cost billed as extra usage
 \(\"$0.40+Max\").  WITH-QUOTA appends the plan's headline quota windows
 \(\"Max · 5h 9% · 7d 57%\").  The tooltip has the details, where
 SUBJECT names what cost it (see `harness-ui-spend-help').  SESSION may
-stand for several (`harness-ui-sessions-total')."
+stand for several (`harness-ui-sessions-total').  With LAZY the tooltip
+is made when it is asked for (`harness-ui-session-help-function')."
   (let* ((usage (plist-get session :usage))
          (billing (harness-ui-session-billing session))
          (cost (float (or (plist-get usage :cost) 0)))
@@ -1577,7 +1597,12 @@ stand for several (`harness-ui-sessions-total')."
                      (t name)))
          (windows (and with-quota planned (harness-ui-quota-headline-windows quota))))
     (propertize (concat text (mapconcat (lambda (w) (concat " · " (harness-ui-format-window w))) windows ""))
-                'help-echo (harness-ui-spend-help session subject))))
+                'help-echo (if lazy
+                               (harness-ui-session-help-function
+                                session (if subject
+                                            (lambda (s) (harness-ui-spend-help s subject))
+                                          #'harness-ui-spend-help))
+                             (harness-ui-spend-help session subject)))))
 
 (defun harness-ui-sessions-total (sessions &optional model)
   "Return SESSIONS taken together, as a session for the spend helpers.
@@ -2055,37 +2080,51 @@ the session of the buffer or of the item at point."
     map)
   "Keymap of the token figure: a click changes its session's context limit.")
 
-(defun harness-ui-format-context (session)
+(defun harness-ui--context-help (session)
+  "Return the tooltip of SESSION's context figure."
+  (harness-ui-context-limit-help
+   session (harness-ui-model-context-window (plist-get session :model))))
+
+(defun harness-ui-format-context (session &optional lazy)
   "Return \"12.3k/200k\" for SESSION with the warning face applied.
 The tokens in use are the size of SESSION's conversation.  While it runs
 they grow as its model streams; \"~\" marks a figure partly estimated
 from what streamed since its provider last reported usage.  The figure
 is a button: a click changes SESSION's context window limit (see
-`harness-set-context-limit')."
+`harness-set-context-limit').  With LAZY the tooltip is made when it is
+asked for (`harness-ui-session-help-function')."
   (let* ((tokens (harness-ui-session-tokens session))
          (context (plist-get tokens :context))
          (window (plist-get session :context-window)))
     (propertize (format "%s%s/%s" (if (> (plist-get tokens :estimated) 0) "~" "")
                         (harness-format-tokens context) (harness-format-tokens window))
                 'face (harness-ui-context-face context window)
-                'help-echo (harness-ui-context-limit-help
-                            session (harness-ui-model-context-window (plist-get session :model)))
+                'help-echo (if lazy
+                               (harness-ui-session-help-function session #'harness-ui--context-help)
+                             (harness-ui--context-help session))
                 'mouse-face 'highlight
                 'keymap harness-ui-context-limit-map
                 'harness-context-session (plist-get session :id))))
 
-(defun harness-ui-format-output (session &optional bare)
+(defun harness-ui--output-help (session)
+  "Return the tooltip of SESSION's output figure."
+  (harness-ui-tokens-help (harness-ui-session-tokens session)))
+
+(defun harness-ui-format-output (session &optional bare lazy)
   "Return SESSION's output tokens as \"3.4k out\", or nil when it wrote none.
 BARE leaves out the unit.  While SESSION runs the figure grows as its
 model streams; \"~\" marks it partly estimated, as in
-`harness-ui-format-context'."
+`harness-ui-format-context'.  With LAZY the tooltip is made when it is
+asked for (`harness-ui-session-help-function')."
   (let* ((tokens (harness-ui-session-tokens session))
          (output (plist-get tokens :output)))
     (when (> output 0)
       (propertize (concat (if (> (plist-get tokens :estimated) 0) "~" "")
                           (harness-format-tokens output)
                           (if bare "" " out"))
-                  'help-echo (harness-ui-tokens-help tokens)))))
+                  'help-echo (if lazy
+                                 (harness-ui-session-help-function session #'harness-ui--output-help)
+                               (harness-ui-tokens-help tokens))))))
 
 (defun harness-ui-format-model-window (model)
   "Return the context window of catalogue entry MODEL as text: \"200k\".
@@ -2162,16 +2201,24 @@ the current rate while SESSION runs and else as the last one measured
                  (harness-ui-rate-help measured live)
                "Waiting for the first token and running tools do not count.")))))
 
-(defun harness-ui-format-average-rate (session &optional bare)
+(defun harness-ui--average-rate-help (session)
+  "Return the tooltip of SESSION's average output rate, or nil without one."
+  (when-let* ((rate (harness-ui-session-average-rate session)))
+    (harness-ui-average-rate-help session rate)))
+
+(defun harness-ui-format-average-rate (session &optional bare lazy)
   "Return how fast SESSION's model wrote on average, as \"48 tok/s avg\".
 Nil when it has no average yet (`harness-ui-session-average-rate').
 BARE leaves out the unit.  Unlike `harness-ui-format-rate' this is the
 rate over the whole session, not the current one, so it is not dimmed
 once the session is idle; the tooltip says what it is and gives the
-current rate beside it."
+current rate beside it.  With LAZY the tooltip is made when it is asked
+for (`harness-ui-session-help-function')."
   (when-let* ((rate (harness-ui-session-average-rate session)))
     (propertize (concat (harness-ui-format-rate-number rate) (if bare "" " tok/s avg"))
-                'help-echo (harness-ui-average-rate-help session rate))))
+                'help-echo (if lazy
+                               (harness-ui-session-help-function session #'harness-ui--average-rate-help)
+                             (harness-ui-average-rate-help session rate)))))
 
 (defun harness-ui--prettify-model-name (name)
   "Return a readable form of model slug NAME, or nil when it has no known shape.
@@ -2303,6 +2350,169 @@ unless NOERROR when there is none."
            (funcall harness-ui-session-at-point-function))
       harness-ui-session-id
       (unless noerror (user-error "No session here"))))
+
+;;;; Views that follow the harness only while a window shows them
+;;
+;; The session cache changes many times a second while agents work, and
+;; so do the live token counts, the output rates and the requests that
+;; sessions wait on.  A view that draws again for each of them draws for
+;; nobody once no window shows it, on the one thread that also reads the
+;; keys: a session list of a thousand rows took over half a second a
+;; redraw, back to back, from a buffer in no window at all.  Emacs's own
+;; views do what is done here -- Proced updates its buffers only while a
+;; window shows them (`proced-auto-update-flag' `visible') -- and so do
+;; the chat, the worktree list, the access page and the slots page, each
+;; by a copy of its own, which only draw the mark below
+;; (`harness-ui-view-adopt'); the session list and the task boards use
+;; the whole of this (`harness-ui-view-install').
+;;
+;; A view asks `harness-ui-view-follow-p' before it draws for a change that
+;; came by itself.  With no window on it the answer is no, and the view
+;; only notes that it missed something (`harness-ui-view-stale').
+;; `harness-ui-view-install' has it catch up, once, when a window next
+;; shows it.  What the user asks of a view -- a command in it, `g' -- is no
+;; change that came by itself, and draws whether the view is shown or not.
+;;
+;; Should a window show a view that missed changes without that catch-up
+;; having run, the view says so, in the same place in each: a [Suspended:
+;; resume] in its mode line (`harness-ui-view-indicator', put in
+;; `mode-line-misc-info' by `harness-ui-view-install'), which a click or
+;; RET on wakes (`harness-ui-view-wake').
+
+(defvar-local harness-ui-view-stale nil
+  "Non-nil when this view missed a change because no window showed it.
+`harness-ui-view-follow-p' sets it; drawing the view clears it
+\(`harness-ui-view-drawn'); `harness-ui-view-install' has the view catch
+up when a window shows it while it is set, and its mode line says it is
+suspended meanwhile (`harness-ui-view-indicator').")
+
+(defvar-local harness-ui-view-catch-up nil
+  "Function of no arguments that brings this view up to date, or nil.
+It runs in the view's buffer, soon after a window showed the view that
+had missed changes (`harness-ui-view-install'), or when it is woken
+\(`harness-ui-view-wake').")
+
+(defface harness-ui-view-suspended-face '((t :inherit (warning bold)))
+  "Face of the mode line's mark of a view that is suspended and out of date."
+  :group 'harness-ui)
+
+(defun harness-ui-view-shown-p (&optional buffer)
+  "Non-nil when a window, on any frame, shows BUFFER, by default the current one."
+  (let ((buffer (or buffer (current-buffer))))
+    (and (buffer-live-p buffer) (get-buffer-window buffer t) t)))
+
+(defun harness-ui-view-note-stale (&optional buffer)
+  "Note that BUFFER, a view, missed a change, by default the current one.
+Its mode line says it is suspended until it is drawn (`harness-ui-view-drawn')."
+  (with-current-buffer (or buffer (current-buffer))
+    (unless harness-ui-view-stale
+      (setq harness-ui-view-stale t)
+      (force-mode-line-update))))
+
+(defun harness-ui-view-follow-p (&optional buffer)
+  "Non-nil when BUFFER, a view, should draw for a change now.
+That is when a window shows it.  When none does it is left as it is and
+notes that it missed the change (`harness-ui-view-stale'), for
+`harness-ui-view-install' to catch up on."
+  (let ((buffer (or buffer (current-buffer))))
+    (when (buffer-live-p buffer)
+      (or (harness-ui-view-shown-p buffer)
+          (progn (harness-ui-view-note-stale buffer)
+                 nil)))))
+
+(defun harness-ui-view-drawn (&optional buffer)
+  "Note that BUFFER, a view, was drawn as the harness is now."
+  (with-current-buffer (or buffer (current-buffer))
+    (when harness-ui-view-stale
+      (setq harness-ui-view-stale nil)
+      (force-mode-line-update))))
+
+(defvar-local harness-ui-view--catching-up nil
+  "Non-nil while the catch-up a window's showing the view asked for is on its way.
+The mark of a suspended view waits for it (`harness-ui-view-indicator'),
+so that it does not flash at every window that shows a view as it should.")
+
+(defun harness-ui-view--catch-up (buffer)
+  "Bring BUFFER, a view, up to date now, and note that it is."
+  (with-current-buffer buffer
+    (setq harness-ui-view-stale nil
+          harness-ui-view--catching-up nil)
+    (force-mode-line-update)
+    (funcall harness-ui-view-catch-up)))
+
+(defun harness-ui-view--shown (&rest _)
+  "Catch the current buffer up when a window shows it after changes it missed.
+On `window-buffer-change-functions', buffer-locally.  Redisplay runs
+this, so the drawing waits for a timer.  Emacs runs it too for a window
+that stops showing the buffer; nothing is drawn then."
+  (when (and harness-ui-view-stale harness-ui-view-catch-up)
+    (let ((buffer (current-buffer)))
+      (setq harness-ui-view--catching-up t)
+      (harness-debounce (list 'harness-ui-view-catch-up buffer) 0.05
+                        (lambda ()
+                          (when (buffer-live-p buffer)
+                            (if (and (buffer-local-value 'harness-ui-view-stale buffer)
+                                     (harness-ui-view-shown-p buffer))
+                                (harness-ui-view--catch-up buffer)
+                              (with-current-buffer buffer
+                                (setq harness-ui-view--catching-up nil)))))))))
+
+(defun harness-ui-view-wake ()
+  "Bring the current view up to date now, though no window showed it for a while.
+What `harness-ui-view-install' has done when a window shows a view that
+missed changes, for the view whose mark says it is suspended
+\(`harness-ui-view-indicator') and a window showed it without that."
+  (interactive)
+  (unless harness-ui-view-catch-up
+    (user-error "This buffer is not a view that suspends while it is hidden"))
+  (harness-ui-view--catch-up (current-buffer)))
+
+(defvar harness-ui-view--indicator-map nil
+  "Keymap of the mark of a suspended view, made once: a click or RET wakes it.")
+
+(defun harness-ui-view-indicator ()
+  "Return the mode line's mark of a view that missed changes, or \"\".
+It reads [Suspended: resume], and a click on it, or RET with point
+there, wakes the view (`harness-ui-view-wake'), as the pause button of
+the session list resumes it.  Every view that uses
+`harness-ui-view-install' has it in `mode-line-misc-info', so it is in
+the same place in each."
+  (if (and harness-ui-view-stale harness-ui-view-catch-up (not harness-ui-view--catching-up))
+      (propertize "[Suspended: resume]"
+                  'face 'harness-ui-view-suspended-face
+                  'mouse-face 'mode-line-highlight
+                  'help-echo "This view missed changes while no window showed it, and is out of date.  Click, or press RET here, to bring it up to date now."
+                  'local-map (or harness-ui-view--indicator-map
+                                 (setq harness-ui-view--indicator-map
+                                       (harness-ui-mouse-keymap #'harness-ui-view-wake))))
+    ""))
+
+(defconst harness-ui-view--mode-line '(:eval (harness-ui-view-indicator))
+  "The element of `mode-line-misc-info' that draws `harness-ui-view-indicator'.")
+
+(defun harness-ui-view-adopt (wake)
+  "Give the current buffer, a view, the mark of a suspended view.
+For a view that catches up in a way of its own when a window shows it
+again, as the chat, the worktree list, the access page and the task
+slots page do: it calls `harness-ui-view-note-stale' when it misses a
+change, and `harness-ui-view-drawn' once it is drawn, and its mode line
+says [Suspended: resume] meanwhile (`harness-ui-view-indicator').  WAKE,
+called without arguments in the view's buffer when the mark is clicked,
+does what the view does when a window shows it after missed changes."
+  (setq harness-ui-view-catch-up wake)
+  (unless (member harness-ui-view--mode-line mode-line-misc-info)
+    (setq-local mode-line-misc-info (cons harness-ui-view--mode-line mode-line-misc-info))))
+
+(defun harness-ui-view-install (catch-up)
+  "Have the current buffer, a view, call CATCH-UP when a window shows it again.
+Only after it missed a change (`harness-ui-view-follow-p'), and soon
+after the window shows it.  CATCH-UP is called without arguments in the
+view's buffer, which is not stale any more by then; it draws the view
+as the harness is now, or leaves it alone, as a paused view does.  The
+view's mode line says [Suspended: resume] meanwhile
+\(`harness-ui-view-indicator'), which wakes it if clicked."
+  (add-hook 'window-buffer-change-functions #'harness-ui-view--shown nil t)
+  (harness-ui-view-adopt catch-up))
 
 ;;;; Drawing helpers shared by the views
 ;;

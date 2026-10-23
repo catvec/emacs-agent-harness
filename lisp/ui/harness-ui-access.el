@@ -199,6 +199,7 @@ BUFFER is the current buffer by default."
       (when (timerp harness-ui-access--timer) (cancel-timer harness-ui-access--timer))
       (setq harness-ui-access--timer nil
             harness-ui-access--stale nil)
+      (harness-ui-view-drawn)
       (if harness-ui-access--deleted
           (harness-ui-access--render)
         (harness-ui-access--fetch buffer)))))
@@ -246,7 +247,7 @@ BUFFER is the current buffer by default."
   "Fetch BUFFER again soon, or once a window shows it."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
-      (if (not (get-buffer-window buffer t))
+      (if (not (harness-ui-view-follow-p buffer))
           (setq harness-ui-access--stale t)
         (unless (timerp harness-ui-access--timer)
           (setq harness-ui-access--timer
@@ -261,6 +262,8 @@ BUFFER is the current buffer by default."
   "Fetch the buffer again when it is shown after changes it missed.
 On `window-buffer-change-functions', buffer-locally."
   (when harness-ui-access--stale
+    ;; The catch-up is on its way: the mark of a suspended view is not due.
+    (harness-ui-view-drawn)
     (harness-ui-access--schedule (current-buffer))))
 
 ;;;; Drawing: helpers
@@ -1363,7 +1366,9 @@ requests it waits on and the judgements of its calls, and changes them.
 \\{harness-ui-access-mode-map}"
   (setq truncate-lines t)
   (setq header-line-format '(:eval (harness-ui-access--header)))
-  (add-hook 'window-buffer-change-functions #'harness-ui-access--shown nil t))
+  (add-hook 'window-buffer-change-functions #'harness-ui-access--shown nil t)
+  ;; Says [Suspended: resume] if a window shows it before it caught up.
+  (harness-ui-view-adopt #'harness-ui-access-refresh))
 
 ;; The view's keys in the harness menu, behind `.'.
 (put 'harness-ui-access-mode 'harness-menu-group

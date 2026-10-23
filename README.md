@@ -3179,6 +3179,17 @@ moves it to another directory (see
   list alone, while its own commands -- the filter, the scope, the
   toggles -- still redraw it. The mode line says so, and a mark shows at
   once even on a paused list.
+- **Only while shown.** The list follows the sessions only while a window
+  shows it. Hidden, it draws nothing however many sessions change, and
+  draws once, with all it missed, when a window shows it again (a thousand
+  rows take a good part of a second to draw, and the sessions change much
+  oftener). If a window shows it before it caught up, its mode line says
+  `[Suspended: resume]`, and a click on that wakes it
+  (`harness-ui-view-wake`); the task boards, the chat, the worktree list,
+  the access page and the slots page say the same in the same place. The
+  tooltips of the figures are made when you hover them, and a redraw is
+  followed by four times as long without one, so the list takes a fifth
+  of Emacs's time at most.
 
 `SPC` pops out what a blocked session waits on, with `y` and `n` to
 allow or deny a permission request, and `F` gives the list the

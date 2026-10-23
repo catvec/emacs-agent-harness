@@ -306,6 +306,120 @@ it once was every half second."
         (dolist (task (harness-call 'task/list default-directory))
           (harness-call 'task/cancel (plist-get task :id)))))))
 
+(defun harness-ui-tasks-test--scheduled-p (key board)
+  "Non-nil when a debounced KEY (`render' or `refresh') is waiting for BOARD."
+  (and (gethash (list (pcase key
+                        ('render 'harness-ui-tasks)
+                        ('refresh 'harness-ui-tasks-refresh))
+                      board)
+                harness--debounce-timers)
+       t))
+
+(ert-deftest harness-ui-tasks-board-key-ignores-the-order-sessions-change-in ()
+  "What the board draws is the same when sessions only change their order.
+The key was sorted by when each session changed last, so every change of
+any session, which moves it up, made the board draw again for nothing a
+card shows.  A name, a status, todos, what a session waits on, and a new
+session do change it, and the harness's own internal sessions do not."
+  (harness-ui-tasks-test-with
+    (clrhash harness-ui--sessions)
+    (harness-ui-cache-session (list :id "a" :name "first" :status "idle" :updated 100.0))
+    (harness-ui-cache-session (list :id "b" :name "second" :status "idle" :updated 200.0))
+    (with-current-buffer board
+      (let ((key (harness-ui-tasks--board-key)))
+        ;; b changes in a way no card shows, and moves above a; then a does.
+        (harness-ui-cache-session (list :id "b" :name "second" :status "idle" :updated 300.0
+                                        :usage (list :output 5)))
+        (harness-ui-cache-session (list :id "a" :name "first" :status "idle" :updated 400.0))
+        (should (equal key (harness-ui-tasks--board-key)))
+        ;; The internal records come and go with every model call.
+        (harness-ui-cache-session (list :id "judge" :kind "internal" :status "running" :updated 500.0))
+        (should (equal key (harness-ui-tasks--board-key)))
+        ;; What a card shows does change it.
+        (harness-ui-cache-session (list :id "a" :name "first" :status "running" :updated 600.0))
+        (should-not (equal key (harness-ui-tasks--board-key)))
+        (setq key (harness-ui-tasks--board-key))
+        (harness-ui-cache-session (list :id "a" :name "renamed" :status "running" :updated 700.0))
+        (should-not (equal key (harness-ui-tasks--board-key)))
+        (setq key (harness-ui-tasks--board-key))
+        (harness-ui-cache-session (list :id "c" :name "third" :status "idle" :updated 800.0))
+        (should-not (equal key (harness-ui-tasks--board-key)))))))
+
+(ert-deftest harness-ui-tasks-leaves-a-board-nobody-looks-at-alone ()
+  "A board no window shows is neither drawn nor reloaded as sessions and events come.
+The session cache changes many times a second while agents work, and
+each change drew every board of every project, and each burst of events
+reloaded them from the harness, whether a window showed it or not.  A
+board a window shows again loads its tasks anew, which draws it."
+  (harness-ui-tasks-test-with
+    (let ((window (get-buffer-window board))
+          (elsewhere (get-buffer-create " *harness-ui-tasks-test-elsewhere*"))
+          (drawn 0)
+          (fetched 0))
+      (unwind-protect
+          (cl-letf (((symbol-function 'harness-ui-tasks--render) (lambda (&rest _) (cl-incf drawn)))
+                    ((symbol-function 'harness-ui-tasks--fetch) (lambda (&rest _) (cl-incf fetched))))
+           (cl-flet ((scheduled (key) (harness-ui-tasks-test--scheduled-p key board))
+                    (settle () (let ((deadline (+ (float-time) 0.6)))
+                                 (while (< (float-time) deadline) (accept-process-output nil 0.05)))))
+            (should (window-live-p window))
+            ;; A board with tasks draws as the sessions change.
+            (with-current-buffer board (setq harness-ui-tasks--tasks (list (list :id "t-1" :prompt "Task"))))
+            (settle)
+            (setq drawn 0 fetched 0)
+            ;; Shown, the board follows the sessions and the events.
+            (harness-ui-tasks--on-sessions-changed)
+            (should (scheduled 'render))
+            (harness-ui--run-event-functions "session/status" (list "some-session" "running"))
+            (should (scheduled 'refresh))
+            (settle)
+            (should-not (scheduled 'render))
+            (should-not (scheduled 'refresh))
+            (should (>= drawn 1))
+            (should (>= fetched 1))
+            (setq drawn 0 fetched 0)
+            ;; Hidden, it follows nothing, and no timer is started for it.
+            (set-window-buffer window elsewhere)
+            (should-not (get-buffer-window board t))
+            (should (equal "" (with-current-buffer board (harness-ui-view-indicator))))
+            (harness-ui-tasks--on-sessions-changed)
+            (harness-ui--run-event-functions "session/status" (list "some-session" "running"))
+            (harness-ui--run-event-functions "merge/finished" nil)
+            (harness-ui-tasks--schedule-render board)
+            (harness-ui-tasks--refresh-soon board)
+            (should-not (scheduled 'render))
+            (should-not (scheduled 'refresh))
+            (settle)
+            (should (= 0 drawn))
+            (should (= 0 fetched))
+            ;; It notes what it missed, and says it is suspended if a window
+            ;; shows it before it has caught up; a click wakes it.
+            (should (buffer-local-value 'harness-ui-view-stale board))
+            (set-window-buffer window board)
+            (should (equal "[Suspended: resume]"
+                           (substring-no-properties (with-current-buffer board (harness-ui-view-indicator)))))
+            (with-current-buffer board (harness-ui-view-wake))
+            (should-not (buffer-local-value 'harness-ui-view-stale board))
+            (should (scheduled 'refresh))
+            (settle)
+            (should (= 1 fetched))
+            ;; Shown again as redisplay does it, it asks the harness for its tasks anew, once.
+            (setq fetched 0)
+            (set-window-buffer window elsewhere)
+            (harness-ui-tasks--schedule-render board)
+            (should (buffer-local-value 'harness-ui-view-stale board))
+            (set-window-buffer window board)
+            (harness-ui-tasks--on-window-change window)
+            (with-current-buffer board (harness-ui-view--shown window))
+            (should (scheduled 'refresh))
+            (settle)
+            (should-not (scheduled 'refresh))
+            (should-not (buffer-local-value 'harness-ui-view-stale board))
+            (should (= 1 fetched))))
+        (when (window-live-p window) (set-window-buffer window board))
+        (with-current-buffer board (setq harness-ui-tasks--tasks nil))
+        (kill-buffer elsewhere)))))
+
 (ert-deftest harness-ui-tasks-stopped-task-needs-input ()
   (harness-ui-tasks-test-with
     (let ((harness-provider-demo-script-override

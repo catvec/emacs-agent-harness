@@ -1307,6 +1307,9 @@ Once for a burst of them, a moment after the last; others ask nothing."
         (sleep-for 0.2)
         (should (= before (length harness-ui-slots-test--requests)))
         (should (buffer-local-value 'harness-ui-slots--stale buffer))
+        ;; The page says it is suspended, as every such view does.
+        (should (equal "[Suspended: resume]"
+                       (substring-no-properties (with-current-buffer buffer (harness-ui-view-indicator)))))
         ;; The page watches for a window to show it.
         (should (memq #'harness-ui-slots--on-window-change
                       (buffer-local-value 'window-buffer-change-functions buffer)))
@@ -1314,6 +1317,7 @@ Once for a burst of them, a moment after the last; others ask nothing."
           (harness-ui-slots--on-window-change (selected-window))
           (should (= 1 (harness-ui-slots-test--asked-again before)))
           (should-not (buffer-local-value 'harness-ui-slots--stale buffer))
+          (should (equal "" (with-current-buffer buffer (harness-ui-view-indicator))))
           ;; Shown again with nothing missed, it asks nothing.
           (harness-ui-slots--on-window-change (selected-window))
           (sleep-for 0.2)

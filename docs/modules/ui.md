@@ -29,6 +29,12 @@ connection tells it.  This file provides:
   session, or a group of them such as a board's tasks, cost: a price
   when it is billed per token, the plan's name and quota when a
   subscription pays for it; and those that show budgets;
+- the helpers of views that follow the harness only while a window
+  shows them (`harness-ui-view-follow-p`), which mark themselves
+  [Suspended: resume] in the mode line when a window shows them
+  before they caught up, and of tooltips made when they are hovered
+  (`harness-ui-session-help-function`), which keep a long list off
+  the UI thread while nobody looks at it;
 - faces and icons;
 - window positions: one session per preset position, replacing, and
   the fullscreen layout, an overview such as the task board on the
@@ -83,6 +89,7 @@ connection tells it.  This file provides:
 - `harness-ui-context-limit-click` — Change the context limit of the session whose token figure EVENT clicked.
 - `harness-ui-quit-view` — Put this view out of sight, bringing back what its window showed before.
 - `harness-ui-show-usage` — Show the usage dashboard: costs, the plan's quota and the budgets.
+- `harness-ui-view-wake` — Bring the current view up to date now, though no window showed it for a while.
 
 ### Options
 
@@ -133,4 +140,5 @@ connection tells it.  This file provides:
 - `harness-corporate-mode-change-hook` → `harness-ui--corporate-mode-changed`
 - `harness-describe-modules-functions` → `harness-ui--harness-modules`
 - `kill-emacs-hook` → `harness-ui--stop-server`
+- `window-buffer-change-functions` → `harness-ui-view--shown`
 

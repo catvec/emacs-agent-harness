@@ -82,9 +82,22 @@ calls -- the permission and session judges, auto-naming and the like
 these two filters are on.
 
 The list follows the sessions as they change, a few times a second
-while a model streams.  P pauses that, and so does the [Pause] button
-in the mode line (`harness-ui-sessions-toggle-pause`): a paused list
-holds still until it is resumed or reloaded with g.  Changes, output
+while a model streams, while a window shows it.  A list no window
+shows notes what it missed and draws once when a window shows it
+again (`harness-ui-view-install`): a thousand rows take a good part
+of a second to draw, and the sessions change much oftener than that.
+Should a window show it before it caught up, its mode line says
+[Suspended: resume], as that of every such view does, and a click on
+it wakes the list (`harness-ui-view-wake`).
+Even a shown list leaves Emacs the time it takes to draw, four times
+over, between one redraw and the next that follows the sessions by
+itself (`harness-ui-sessions--cost-factor`), so it never takes more
+than a fifth of it; and the tooltips of the figures are made when
+they are hovered, not for every row at every redraw
+(`harness-ui-session-help-function`).  P pauses the following, and so
+does the [Pause] button in the mode line
+(`harness-ui-sessions-toggle-pause`): a paused list holds still until
+it is resumed or reloaded with g, shown or not.  Changes, output
 rates, token counts and a reload of the UI leave it alone; its own
 commands -- the filter, the scope, the toggles -- still redraw it,
 with what changed meanwhile.

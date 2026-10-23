@@ -1642,10 +1642,13 @@ cost the UI as much for chats nobody looked at as for the one it showed."
         (should (equal '("n-hidden") harness-chat--stale))
         (should (= 0 (hash-table-count harness-chat--render-timers)))
         (should (harness-ui-chat-test-find buf "Hello **world**"))
+        ;; It says it is suspended, as every such view does, until it is shown.
+        (should (equal "[Suspended: resume]" (substring-no-properties (harness-ui-view-indicator))))
         ;; Shown, it is rendered.
         (set-window-buffer w buf)
         (harness-chat--on-window-buffer-change w)
         (should-not harness-chat--stale)
+        (should (equal "" (harness-ui-view-indicator)))
         (should-not (harness-ui-chat-test-find buf "**"))
         (should (harness-ui-chat-test-face-at (1- (harness-ui-chat-test-find buf "world")) 'bold))
         ;; Streaming on while shown re-renders as before.
@@ -7084,11 +7087,15 @@ once, even when nothing showed it, whenever the model catalogue came."
         (should (equal loads (list shown)))
         (should (buffer-local-value 'harness-chat--redraw-pending hidden))
         (should-not (buffer-local-value 'harness-chat--redraw-pending shown))
+        (should (equal "[Suspended: resume]"
+                       (substring-no-properties (with-current-buffer hidden (harness-ui-view-indicator)))))
+        (should (equal "" (with-current-buffer shown (harness-ui-view-indicator))))
         ;; Shown, the other is rebuilt, from a timer (Emacs is redisplaying).
         (set-window-buffer w hidden)
         (with-current-buffer hidden
           (harness-chat--on-window-buffer-change w)
-          (should-not harness-chat--redraw-pending))
+          (should-not harness-chat--redraw-pending)
+          (should (equal "" (harness-ui-view-indicator))))
         (should (equal loads (list shown)))
         (harness-test-wait (lambda () (memq hidden loads)) 5 "the hidden chat to be rebuilt")
         (harness-test-wait (lambda () (not (buffer-local-value 'harness-chat--loading hidden))) 5 "its load")

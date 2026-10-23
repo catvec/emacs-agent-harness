@@ -143,7 +143,11 @@ recorded in `harness-ui-sessions-test--requests'."
            (cl-letf (((symbol-function 'harness-ui-refresh-sessions)
                       (lambda (&optional callback) (when callback (funcall callback nil))))
                      ((symbol-function 'harness-ui-request) #'harness-ui-sessions-test--request)
-                     ((symbol-function 'harness-ui-display-view) #'ignore))
+                     ;; The list shows in the selected window, as it does when
+                     ;; it is opened: a list no window shows is not followed
+                     ;; (`harness-ui-sessions-test--hide' hides it).
+                     ((symbol-function 'harness-ui-display-view)
+                      (lambda (buffer &rest _) (set-window-buffer (selected-window) buffer))))
              (let ((harness-ui-sessions-test--tasks nil)
                    (harness-ui-sessions-test--replies nil)
                    (harness-ui-sessions-test--requests nil))
@@ -192,9 +196,13 @@ Nil when the row has no such column, as when the list hides it."
       (and at (aref columns at)))))
 
 (defun harness-ui-sessions-test--help (id column)
-  "Return the tooltip of COLUMN in session ID's row, or nil without one."
+  "Return the tooltip of COLUMN in session ID's row, or nil without one.
+A tooltip made when it is hovered is a function; it is asked as Emacs asks it."
   (when-let* ((cell (harness-ui-sessions-test--raw-cell id column)))
-    (get-text-property 0 'help-echo cell)))
+    (let ((help (get-text-property 0 'help-echo cell)))
+      (if (functionp help)
+          (funcall help (selected-window) harness-ui-sessions--buffer-name 0)
+        help))))
 
 (defun harness-ui-sessions-test--column (name)
   "Return the format entry of column NAME, or nil when the list hides it."
@@ -284,6 +292,23 @@ That is the pause button, then what it says of the scope and the filters."
   (let ((deadline (+ (float-time) seconds)))
     (while (< (float-time) deadline)
       (accept-process-output nil 0.02))))
+
+(defun harness-ui-sessions-test--hide ()
+  "Show another buffer wherever the list shows, so no window shows the list."
+  (dolist (window (get-buffer-window-list harness-ui-sessions--buffer-name nil t))
+    (set-window-buffer window (get-buffer-create " *harness-ui-sessions-test-other*"))))
+
+(defun harness-ui-sessions-test--show ()
+  "Show the list in the selected window, and do what showing it does.
+Redisplay does not run in a batch test, so the hook that a window which
+got a buffer makes it run (`window-buffer-change-functions', the list's
+own, `harness-ui-view--shown') is run by hand, once it is seen to be
+there."
+  (let ((buffer (get-buffer harness-ui-sessions--buffer-name)))
+    (set-window-buffer (selected-window) buffer)
+    (with-current-buffer buffer
+      (should (memq #'harness-ui-view--shown window-buffer-change-functions))
+      (harness-ui-view--shown (selected-window)))))
 
 (defmacro harness-ui-sessions-test--counting-redraws (var &rest body)
   "Run BODY with VAR counting the calls of `harness-ui-sessions--redraw'."
@@ -1382,6 +1407,288 @@ coalesce them -- and in none while the list is paused."
             (harness-ui-sessions-toggle-pause)
             (should (= 1 redraws))
             (should (= count (length (harness-ui-sessions-test--shown))))))))))
+
+;;;; Following only what a window shows
+
+(defun harness-ui-sessions-test--pending-redraw-p ()
+  "Non-nil when the list has a redraw scheduled: a burst's or the token figures'."
+  (and (or (timerp harness-ui-sessions--live-timer)
+           (gethash 'harness-ui-sessions harness--debounce-timers))
+       t))
+
+(ert-deftest harness-ui-sessions-leaves-a-list-nobody-looks-at-alone ()
+  "A list no window shows is not redrawn for the changes that come by themselves.
+The session cache changes many times a second while agents work, and
+the list, a thousand rows of a project with a worktree for each task,
+took over half a second of the UI thread to redraw, whether a window
+showed it or not.  Hidden, the sessions that change, their output rates
+and growing token figures, the requests they wait on, the tasks, a
+reload of the UI and the pet's footer start no timer and draw nothing;
+the list notes what it missed and draws once when a window shows it
+again, with all of it."
+  (harness-ui-sessions-test-with-repo
+    (harness-ui-sessions-test--with-init
+      (let ((harness-ui--live (make-hash-table :test 'equal))
+            (harness-ui--rates (make-hash-table :test 'equal)))
+        (harness-ui-sessions-test--add "busy" root :status "running" :updated 300
+                                       :usage (list :cost 0 :context 1000 :last-output 200 :output 300))
+        (harness-ui-sessions-test--add "quiet" root :updated 200)
+        (let ((default-directory root)) (harness-sessions))
+        (let ((buf (get-buffer harness-ui-sessions--buffer-name)))
+          (should (memq #'harness-ui-view--shown (buffer-local-value 'window-buffer-change-functions buf)))
+          (harness-ui-sessions-test--counting-redraws redraws
+            (cl-flet ((stale () (buffer-local-value 'harness-ui-view-stale buf)))
+              ;; Shown, it follows a burst of changes with one redraw.
+              (should-not (stale))
+              (dotimes (_ 5) (harness-ui-sessions--on-changed))
+              (should (harness-ui-sessions-test--pending-redraw-p))
+              (harness-test-wait (lambda () (= 1 redraws)) 5 "the list to follow the changes")
+              (harness-ui-sessions-test--spin 0.3)
+              (should (= 1 redraws))
+              (should-not (stale))
+              ;; Hidden, everything that follows the sessions is left undone.
+              (harness-ui-sessions-test--hide)
+              (should-not (get-buffer-window buf t))
+              (setq redraws 0)
+              (harness-ui-sessions-test--add "quiet" root :updated 200 :name "Renamed")
+              (dotimes (_ 5) (harness-ui-sessions--on-changed))
+              (harness-ui-sessions--on-rate "busy" '(:rate 40.0))
+              (harness-ui-sessions--on-pending "busy")
+              (harness-ui-sessions--on-live "busy" nil)
+              (harness-ui-sessions--on-live nil nil)
+              (harness-ui--store-live "busy" '(:context 6000 :output 1100 :estimated 0))
+              (harness-ui--store-rate "busy" (list :rate 42.0 :output 600 :seconds 14.0 :calls 1
+                                                   :at 1000.0 :model "demo:scripted"))
+              (harness-ui-cache-session (append (list :status "idle") (harness-ui-session "busy")))
+              (setq harness-ui-sessions-test--tasks
+                    (list (list :id "t-1" :session "quiet" :state "active" :prompt "Rename it")))
+              (run-hook-with-args 'harness-ui-event-functions "task/changed"
+                                  (list (car harness-ui-sessions-test--tasks)))
+              (run-hooks 'harness-ui-redraw-hook)
+              (harness-ui-sessions--redraw-live)
+              (harness-ui-sessions--redraw-spaced)
+              (harness-ui-sessions--live-redraw)
+              (harness-ui-sessions-redraw)
+              (should-not (harness-ui-sessions-test--pending-redraw-p))
+              (harness-ui-sessions-test--spin 0.4)
+              (should (= 0 redraws))
+              (should (stale))
+              ;; It shows what it showed.
+              (should (equal "1.2k/200k" (harness-ui-sessions-test--cell "busy" "Context")))
+              (should (equal '("quiet" "") (harness-ui-sessions-test--row "quiet")))
+              ;; Its own commands still draw it: that is not a change that came by itself.
+              (harness-ui-sessions-filter "")
+              (should (= 1 redraws))
+              (should-not (stale))
+              (setq redraws 0)
+              ;; Missed again, shown at last: it draws once, with all it missed.
+              (harness-ui-sessions--on-changed)
+              (should (stale))
+              (harness-ui-sessions-test--show)
+              (should-not (harness-ui-sessions-test--pending-redraw-p))
+              (should (= 0 redraws))    ; redisplay runs the hook: the draw waits for a timer
+              (harness-test-wait (lambda () (= 1 redraws)) 5 "the list to catch up")
+              (should-not (stale))
+              (should (equal "6.0k/200k" (harness-ui-sessions-test--cell "busy" "Context")))
+              (should (equal '("Renamed" "task") (harness-ui-sessions-test--row "quiet")))
+              (harness-ui-sessions-test--spin 0.3)
+              (should (= 1 redraws))
+              ;; Shown again after missing nothing, it draws nothing.
+              (setq redraws 0)
+              (harness-ui-sessions-test--hide)
+              (harness-ui-sessions-test--show)
+              (harness-ui-sessions-test--spin 0.3)
+              (should (= 0 redraws)))))))))
+
+(ert-deftest harness-ui-sessions-hidden-and-paused-holds-still-when-shown ()
+  "A paused list that is hidden misses changes as a hidden one does, but a window does not wake it.
+Pausing holds the list still; showing it draws nothing until it is
+resumed, which draws it once, with what changed meanwhile."
+  (harness-ui-sessions-test-with-repo
+    (harness-ui-sessions-test--with-init
+      (harness-ui-sessions-test--add "one" root :updated 300)
+      (let ((default-directory root)) (harness-sessions))
+      (harness-ui-sessions-test--counting-redraws redraws
+        (harness-ui-sessions-toggle-pause)
+        (harness-ui-sessions-test--spin 0.05) ; pausing drops the redraws it had scheduled
+        (harness-ui-sessions-test--hide)
+        (harness-ui-sessions-test--add "one" root :updated 300 :name "Renamed")
+        (harness-ui-sessions--on-changed)
+        (should-not (harness-ui-sessions-test--pending-redraw-p))
+        (harness-ui-sessions-test--show)
+        (harness-ui-sessions-test--spin 0.4)
+        (should (= 0 redraws))
+        (should (equal '("one" "") (harness-ui-sessions-test--row "one")))
+        ;; Shown and paused, the sessions still do not draw it.
+        (harness-ui-sessions--on-changed)
+        (should-not (harness-ui-sessions-test--pending-redraw-p))
+        (harness-ui-sessions-toggle-pause)
+        (should (= 1 redraws))
+        (should (equal '("Renamed" "") (harness-ui-sessions-test--row "one")))))))
+
+(ert-deftest harness-ui-sessions-says-it-is-suspended-and-wakes-on-a-click ()
+  "A list a window shows without catching up says it is suspended, and a click redraws it.
+The mark is the same one every view that follows the harness only while
+shown has (`harness-ui-view-indicator'), in the mode line's misc info.
+It is there while the list has missed changes, and a paused list, which
+misses none, has none."
+  (harness-ui-sessions-test-with-repo
+    (harness-ui-sessions-test--with-init
+      (harness-ui-sessions-test--add "one" root :updated 300)
+      (let ((default-directory root)) (harness-sessions))
+      (let ((buf (get-buffer harness-ui-sessions--buffer-name)))
+        (harness-ui-sessions-test--counting-redraws redraws
+          (cl-flet ((mark () (with-current-buffer buf (substring-no-properties (harness-ui-view-indicator)))))
+            (should (member harness-ui-view--mode-line (buffer-local-value 'mode-line-misc-info buf)))
+            (should (equal "" (mark)))
+            ;; Hidden, it misses a change and is marked.
+            (harness-ui-sessions-test--hide)
+            (harness-ui-sessions-test--add "one" root :updated 300 :name "Renamed")
+            (harness-ui-sessions--on-changed)
+            (should (equal "[Suspended: resume]" (mark)))
+            ;; A window shows it, and the catch-up does not run: it says so still.
+            (set-window-buffer (selected-window) buf)
+            (harness-ui-sessions-test--spin 0.3)
+            (should (= 0 redraws))
+            (should (equal "[Suspended: resume]" (mark)))
+            (should (equal '("one" "") (harness-ui-sessions-test--row "one")))
+            ;; A click on the mark wakes it: drawn, and the mark is gone.
+            (let ((event (list 'mouse-1 (list (selected-window) 1 '(0 . 0) 0))))
+              (funcall (lookup-key (get-text-property 0 'local-map
+                                                      (with-current-buffer buf (harness-ui-view-indicator)))
+                                   [mode-line mouse-1])
+                       event))
+            (should (= 1 redraws))
+            (should (equal "" (mark)))
+            (should (equal '("Renamed" "") (harness-ui-sessions-test--row "one")))
+            ;; A redraw of any kind takes the mark away.
+            (harness-ui-sessions-test--hide)
+            (harness-ui-sessions--on-changed)
+            (should (equal "[Suspended: resume]" (mark)))
+            (with-current-buffer buf (harness-ui-sessions--redraw))
+            (should (equal "" (mark)))
+            ;; Paused, it holds still and misses nothing: no mark.
+            (harness-ui-sessions-toggle-pause)
+            (harness-ui-sessions-test--spin 0.05)
+            (harness-ui-sessions--on-changed)
+            (should (equal "" (mark)))))))))
+
+(ert-deftest harness-ui-sessions-wait-as-long-as-their-redraws-cost ()
+  "The changes that come all the time wait for the cost of the last redraw.
+A redraw is followed by four times as long as it took before the
+sessions draw the list again, one redraw for everything that changed
+meanwhile, however many changes come.  That bounds the share of Emacs's
+time the list takes, a fifth, whatever it costs and however fast the
+sessions change.  A reload of the UI does not wait."
+  (harness-ui-sessions-test-with-repo
+    (harness-ui-sessions-test--with-init
+      (harness-ui-sessions-test--add "one" root :updated 300)
+      (let ((default-directory root)) (harness-sessions))
+      (let ((buf (get-buffer harness-ui-sessions--buffer-name))
+            (refresh (symbol-function 'harness-ui-sessions--refresh)))
+        (harness-ui-sessions-test--counting-redraws redraws
+          ;; A slow redraw (a thousand rows, a collection of garbage).
+          (cl-letf (((symbol-function 'harness-ui-sessions--refresh)
+                     (lambda () (sleep-for 0.05) (funcall refresh))))
+            (let ((before (float-time)))
+              (harness-ui-sessions--redraw)
+              (should (>= (buffer-local-value 'harness-ui-sessions--due buf)
+                          (+ before 0.05 (* 4 0.05))))))
+          ;; The next redraw is not due yet: changes wait, in one timer.
+          (with-current-buffer buf (setq harness-ui-sessions--due (+ (float-time) 0.4)))
+          (setq redraws 0)
+          (dotimes (_ 5) (harness-ui-sessions--redraw-spaced))
+          (harness-ui-sessions--on-changed)
+          (harness-ui-sessions-test--spin 0.25)    ; the burst's debounce has fired
+          (should (= 0 redraws))
+          (should (timerp harness-ui-sessions--live-timer))
+          (let ((timer harness-ui-sessions--live-timer))
+            (harness-ui-sessions--redraw-spaced)
+            (harness-ui-sessions--on-live nil nil)
+            (should (eq timer harness-ui-sessions--live-timer)))
+          (harness-test-wait (lambda () (= 1 redraws)) 5 "the redraw that waited")
+          (should-not harness-ui-sessions--live-timer)
+          (harness-ui-sessions-test--spin 0.3)
+          (should (= 1 redraws))
+          ;; Due, a change draws the list at once.
+          (with-current-buffer buf (setq harness-ui-sessions--due 0.0))
+          (setq redraws 0)
+          (harness-ui-sessions--redraw-spaced)
+          (should (= 1 redraws))
+          ;; A reload of the UI does not wait for it: it draws the list as
+          ;; it is reloaded, and again as the tasks come.
+          (with-current-buffer buf (setq harness-ui-sessions--due (+ (float-time) 60)))
+          (setq redraws 0)
+          (run-hooks 'harness-ui-redraw-hook)
+          (should (= 2 redraws))
+          (should-not harness-ui-sessions--live-timer))))))
+
+(ert-deftest harness-ui-sessions-make-tooltips-when-they-are-hovered ()
+  "The tooltips of the token, rate, cost and time cells are made on hover.
+Making them for every row at every redraw, a thousand rows of string
+work per redraw, was most of what a redraw cost.  A redraw makes none;
+asked, a tooltip says what the eager formatter says, of the session as
+the cache has it then."
+  (harness-ui-sessions-test-with-repo
+    (let ((harness-ui--live (make-hash-table :test 'equal))
+          (harness-ui-sessions-hidden-columns nil)
+          (made 0))
+      (harness-ui-sessions-test--add "busy" root :status "running" :last-message 1000.0
+                                     :usage (list :cost 1.5 :context 1000 :last-output 200 :output 300
+                                                  :stream-output 900 :stream-seconds 30.0))
+      (let ((counters '(harness-ui-context-limit-help harness-ui-tokens-help harness-ui-spend-help
+                        harness-ui-average-rate-help harness-ui-sessions--last-message-help)))
+        (dolist (fn counters)
+          (advice-add fn :before (lambda (&rest _) (cl-incf made)) '((name . harness-ui-sessions-test-made))))
+        (unwind-protect
+            (progn
+              (let ((default-directory root)) (harness-sessions))
+              (harness-ui-sessions--redraw)
+              (should (= 0 made))
+              (dolist (column '("Context" "Output" "Avg tok/s" "Cost" "Last msg"))
+                (should (functionp (get-text-property 0 'help-echo
+                                                      (harness-ui-sessions-test--raw-cell "busy" column))))
+                (should (stringp (harness-ui-sessions-test--help "busy" column))))
+              (should (> made 0)))
+          (dolist (fn counters)
+            (advice-remove fn 'harness-ui-sessions-test-made))))
+      (let ((session (harness-ui-session "busy")))
+        (should (equal (get-text-property 0 'help-echo (harness-ui-format-context session))
+                       (harness-ui-sessions-test--help "busy" "Context")))
+        (should (equal (get-text-property 0 'help-echo (harness-ui-format-output session t))
+                       (harness-ui-sessions-test--help "busy" "Output")))
+        (should (equal (get-text-property 0 'help-echo (harness-ui-format-average-rate session t))
+                       (harness-ui-sessions-test--help "busy" "Avg tok/s")))
+        (should (equal (get-text-property 0 'help-echo (harness-ui-format-spend session))
+                       (harness-ui-sessions-test--help "busy" "Cost"))))
+      (should (string-prefix-p "Last user or assistant message:"
+                               (harness-ui-sessions-test--help "busy" "Last msg")))
+      ;; Never older than the hover: the count grows, the row is not drawn
+      ;; again, and the tooltip says the new figure over the old text.
+      (harness-ui--store-live "busy" '(:context 90000 :output 5000 :estimated 0))
+      (should (equal "1.2k/200k" (harness-ui-sessions-test--cell "busy" "Context")))
+      (should (string-match-p "in use: 90\\.0k of" (harness-ui-sessions-test--help "busy" "Context"))))))
+
+(ert-deftest harness-ui-sessions-reload-gives-an-existing-list-the-show-hook ()
+  "A list that was made before the harness reloaded catches up when shown too.
+The mode function installs the catch-up, and an old list never ran this
+version's; the module's init gives it, once however often it runs."
+  (harness-ui-sessions-test-with-repo
+    (harness-ui-sessions-test--with-init
+      (harness-ui-sessions-test--add "one" root)
+      (let ((default-directory root)) (harness-sessions))
+      (let ((buf (get-buffer harness-ui-sessions--buffer-name)))
+        (with-current-buffer buf
+          (remove-hook 'window-buffer-change-functions #'harness-ui-view--shown t)
+          (setq harness-ui-view-catch-up nil))
+        (harness-ui-sessions--init)
+        (should (= 1 (cl-count #'harness-ui-view--shown
+                               (buffer-local-value 'window-buffer-change-functions buf))))
+        (should (eq #'harness-ui-sessions--catch-up
+                    (buffer-local-value 'harness-ui-view-catch-up buf)))
+        (harness-ui-sessions--init)
+        (should (= 1 (cl-count #'harness-ui-view--shown
+                               (buffer-local-value 'window-buffer-change-functions buf))))))))
 
 ;;;; Marks
 

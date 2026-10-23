@@ -13343,6 +13343,25 @@ redraw for it, and pausing drops those already scheduled.  What the user
 asks of the list (the filter, the scope, the toggles) and `g` redraw it
 anyway, with what changed meanwhile, and resuming redraws it once.
 
+A list no window shows is left alone the same way
+(`harness-ui-sessions--following-p`): it notes what it missed
+(`harness-ui-view-stale`, set by `harness-ui-view-follow-p`) and a
+buffer-local `window-buffer-change-functions` function draws it once,
+soon after a window shows it (`harness-ui-view-install`; the idiom is
+Proced's `visible` auto-update).  A window that shows it without that
+having run finds `[Suspended: resume]` in its mode line
+(`harness-ui-view-indicator`, in `mode-line-misc-info`, the same in
+every view that uses the helper: the task boards, and the chat,
+worktree list, access page and slots page, which keep their own
+catch-up and only draw the mark through `harness-ui-view-adopt`); a click
+or RET on it calls `harness-ui-view-wake`.  The changes that come all the
+time (the 0.15 s debounce, the token figures' timer) draw the list no
+sooner than four times what its last redraw took after that redraw
+(`harness-ui-sessions--due`), one timer at a time, and the tooltips of
+the Context, Output, Avg tok/s, Cost and Last msg cells are `help-echo`
+functions made when hovered (`harness-ui-session-help-function`).
+`docs/analysis/ui-thread-blocking-2026-10-23.md` has the measurements.
+
 In the fullscreen layout (`F`) the session beside the list is the one at
 point, else the most recently updated one listed, where a BTW
 conversation and a session of a hidden kind are passed over even when

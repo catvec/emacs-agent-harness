@@ -829,23 +829,33 @@ to; this forces one redraw exactly when the notice changes.  Runs from
     (harness-chat--pin w))
   (force-mode-line-update))
 
+(defun harness-chat--wake ()
+  "Bring this buffer up to date after the changes it missed while hidden.
+The buffer is rebuilt when a redraw passed it by as it was hidden (see
+`harness-chat--redraw-all'), else the blocks that streamed in meanwhile
+are rendered.  A window showing it does this
+\(`harness-chat--on-window-buffer-change'), and so does a click on the
+[Suspended: resume] of its mode line (`harness-ui-view-adopt')."
+  (cond (harness-chat--redraw-pending
+         (setq harness-chat--redraw-pending nil)
+         ;; From a timer: this runs as Emacs redisplays, and a harness in
+         ;; this Emacs answers the requests of a load right away.
+         (let ((buf (current-buffer)))
+           (harness-run-soon (lambda ()
+                               (when (buffer-live-p buf)
+                                 (with-current-buffer buf (harness-chat--load t)))))))
+        (harness-chat--stale (harness-chat--catch-up)))
+  (harness-ui-view-drawn))
+
 (defun harness-chat--on-window-buffer-change (window)
   "Bring this buffer up to date for WINDOW, which just started showing it.
 The buffer is rebuilt when a redraw passed it by as it was hidden (see
 `harness-chat--redraw-all'), else the blocks that streamed in meanwhile
-are rendered.  Then WINDOW is pinned to the newest messages: without
-this Emacs centres point (the compose box) on first display and the
-next streamed chunk snaps it to the bottom."
+are rendered (`harness-chat--wake').  Then WINDOW is pinned to the
+newest messages: without this Emacs centres point (the compose box) on
+first display and the next streamed chunk snaps it to the bottom."
   (when (and (window-live-p window) (eq (window-buffer window) (current-buffer)))
-    (cond (harness-chat--redraw-pending
-           (setq harness-chat--redraw-pending nil)
-           ;; From a timer: this runs as Emacs redisplays, and a harness in
-           ;; this Emacs answers the requests of a load right away.
-           (let ((buf (current-buffer)))
-             (harness-run-soon (lambda ()
-                                 (when (buffer-live-p buf)
-                                   (with-current-buffer buf (harness-chat--load t)))))))
-          (harness-chat--stale (harness-chat--catch-up)))
+    (harness-chat--wake)
     (when (and harness-chat--transcript-end
                (>= (window-point window) harness-chat--transcript-end))
       (harness-chat--pin window))))
@@ -2890,7 +2900,8 @@ a window does (see `harness-chat--catch-up')."
       (remhash id harness-chat--render-timers)
       (when-let* ((block (gethash id harness-chat--blocks)))
         (if (null (harness-chat--windows))
-            (cl-pushnew id harness-chat--stale :test #'equal)
+            (progn (cl-pushnew id harness-chat--stale :test #'equal)
+                   (harness-ui-view-note-stale))
           (let ((start (float-time)))
             (harness-chat--rerender block)
             (setq harness-chat--render-cost (- (float-time) start))))))))
@@ -4191,6 +4202,7 @@ end afterwards."
          (gen (cl-incf harness-chat--generation)))
     (harness-compose-capture)
     (setq harness-chat--loading t harness-chat--deferred nil harness-chat--redraw-pending nil)
+    (harness-ui-view-drawn)
     ;; Only an empty buffer shows "loading…": blanking a full one would
     ;; flash the top of the buffer before the windows find their place again.
     (unless harness-chat--order (harness-chat--render-nodes nil))
@@ -4294,6 +4306,7 @@ pending module report on (`harness-chat--on-session')."
                  (if (harness-chat--windows)
                      (harness-chat--load (harness-chat--at-bottom-p))
                    (setq harness-chat--redraw-pending t)
+                   (harness-ui-view-note-stale)
                    (harness-chat--fetch-session)))))
            harness-chat--buffers))
 
@@ -6117,6 +6130,8 @@ the id of a session written in a message is a link to it.
               harness-ui-pending-send-function #'harness-chat-send)
   (add-hook 'post-command-hook #'harness-chat--post-command nil t)
   (add-hook 'window-buffer-change-functions #'harness-chat--on-window-buffer-change nil t)
+  ;; Says [Suspended: resume] if a window shows it before it caught up.
+  (harness-ui-view-adopt #'harness-chat--wake)
   (add-hook 'window-scroll-functions #'harness-chat--schedule-history nil t)
   (add-hook 'window-scroll-functions #'harness-chat--update-notice nil t)
   (add-hook 'window-size-change-functions #'harness-chat--on-window-size nil t)
@@ -6223,6 +6238,12 @@ Point moved onto an option of a question with diagrams shows its diagram."
   (add-hook 'harness-ui-decision-functions #'harness-chat--on-decision)
   ;; The region of any buffer starts a message: C-c h > (see
   ;; `harness-prompt-region'); the harness menu has it too.
+  ;; The chats that exist already, when the harness reloads, were started
+  ;; by a mode function that did not know the mark of a suspended view.
+  (maphash (lambda (_ buf)
+             (when (buffer-live-p buf)
+               (with-current-buffer buf (harness-ui-view-adopt #'harness-chat--wake))))
+           harness-chat--buffers)
   (define-key harness-ui-map (kbd ">") #'harness-prompt-region)
   (define-key harness-ui-map (kbd "<") #'harness-thread-region)
   (define-key harness-ui-map (kbd "o") #'harness-open-latest-session)
