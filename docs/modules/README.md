@@ -365,7 +365,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `after-change-functions` |  | [ui-compose](ui-compose.md) |
 | `after-load-functions` |  | [ui-quick-search](ui-quick-search.md) |
 | `before-change-functions` |  | [ui-compose](ui-compose.md) |
-| `change-review-changed-functions` | `change-review.el` | [patch-review](patch-review.md), `change-review-ui.el` |
+| `change-review-changed-functions` | `change-review.el` | [patch-review](patch-review.md), [ui-patch-review](ui-patch-review.md), `change-review-ui.el` |
 | `completion-at-point-functions` |  | [ui-compose](ui-compose.md) |
 | `compose-quote-insert-hook` | `compose-quote.el` | [ui-compose](ui-compose.md) |
 | `dbus-event-error-functions` | `harness-notifications-desktop.el` | `harness-notifications-desktop.el` |

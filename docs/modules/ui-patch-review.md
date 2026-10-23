@@ -53,8 +53,10 @@ what that branch did since -- or the diff the reviewer chooses instead
 files, and below it the threads:
 
   a file      its status, its name, the lines it adds and deletes,
-              a mark once it was looked at in Ediff and a firmer one
-              once it was approved, how many threads it has, open and
+              a dim ✓ once it was looked at in Ediff and a bold green
+              ✔ once it was approved -- only the approved are
+              skipped, as the hint under the files and the row's
+              tooltip say --, how many threads it has, open and
               closed -- and how many of those the agent closed that the
               reviewer has not looked at yet, "to review" -- and
               whether it changed since the reviewer's
@@ -95,15 +97,27 @@ key (s and u), in Ediff's help, in the harness menu, and an option:
               on from file to file -- n and p on the rows, N and P in
               Ediff, n at the last difference, the row point lands on
               when Ediff ends -- steps over the files already
-              approved, and says how many it went over.  RET on one
-              still compares it.
+              approved, and says how many it went over: n at the last
+              difference says it will ("..., skipping 2 approved
+              files"), and once the next file is up, last, so that
+              nothing Ediff says covers it, so does the note that it
+              did.  RET on one still compares it.
   auto-approve    (`harness-ui-patch-review-auto-approve`, on): leaving
               a file in Ediff approves it when the reviewer was at its
               last difference -- went through what it changes -- and
-              has no draft on it and no open thread they wrote in.  A
-              file with a comment of yours is not settled, one with a
-              thread the agent started and you did not answer is.
-              The approval is the one a makes, kept by the harness.
+              has no draft on it, no open thread they wrote in and no
+              reply in a thread waiting in the report's box (C-c > on
+              lines of a version starts one, a card there that is no
+              thread of the review until the feedback is sent, and it
+              counts before any word is written under it).  A file with
+              a comment of yours is not settled, one with a thread the
+              agent started and you did not answer is.  The approval
+              is the one a makes, kept by the harness.  A file with a
+              new comment is not an approved one, however it got to be
+              approved: a draft you write on an approved file -- a
+              comment, a reply in the agent's thread, a reply card --
+              takes the approval off it (the file stays viewed), and an
+              approval you give after the comment, with a, stands.
               What you decide by hand stands: a file whose approval
               you took off (a again) while you compared it stays not
               approved as you leave it, though you went through it.
@@ -133,7 +147,8 @@ bottom, else the diff's -- so the next file is the one on the next row.
               next or previous file,
               q comes back to where Ediff began, point on the next
               file to review.  n is Ediff's next difference, and at
-              the last one says the next difference is the next file:
+              the last one says the next difference is the next file
+              -- and how many approved files it steps over:
               n again opens it.
   threads     c reads a comment and starts a thread with it, a draft,
               under the line it is about: in the control panel on the
@@ -444,6 +459,7 @@ it takes its part of the report and the banner out.
 
 ### Hooks it adds to
 
+- `change-review-changed-functions` → `harness-ui-patch-review--on-comment`
 - `ediff-after-quit-hook-internal` → `lambda`
 - `ediff-select-hook` → `harness-ui-patch-review--note-difference`
 - `harness-chat-mode-hook` → `harness-ui-patch-review--setup-chat`

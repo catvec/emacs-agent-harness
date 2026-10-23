@@ -3639,8 +3639,9 @@ with), `recap` writes the recaps on the cards,
   merge base with the branch it was made from, as a tree of the
   directories that hold them (`t` shows them flat, `TAB` folds a
   directory), a row each, with its status, what changed (`+3 −1`), a
-  check mark once you looked at it, a firmer one once you approved it
-  (`a`, and on a directory its files; `A` approves them all: a file the
+  dim check mark (`✓`) once you looked at it, a bold green one (`✔`) once
+  you approved it (`a`, and on a directory its files; `A` approves them
+  all: a file the
   branch changes again is reviewed anew), and how many threads of
   comments it has, open and closed. The marks are kept with the review,
   so they survive a restart; `V` takes every file as viewed but those the
@@ -3668,15 +3669,20 @@ with), `recap` writes the recaps on the cards,
   it off. **Skip approved** (`harness-ui-patch-review-skip-approved`):
   `n` and `p` on the files, `N` and `P` in Ediff, `n` at the last
   difference and the row point lands on when Ediff ends go to the next
-  file that is not approved, and say how many they went over; `RET` on an
-  approved file still compares it. **Auto-approve**
+  file that is not approved (only a `✔` file is skipped, not a `✓` one),
+  and say how many they went over -- `n` at the last difference before it
+  goes ("..., skipping 2 approved files"), the others once the next file
+  is up; `RET` on an approved file still compares it. **Auto-approve**
   (`harness-ui-patch-review-auto-approve`): a file you look through to its
-  last difference in Ediff, and leave without a draft on it or an open
-  thread of yours, is approved as you leave it -- by `n` past its last
-  difference, `N`, `P` or `q` -- as if you had pressed `a`. A file you
-  commented on is not settled, and is not approved for you; nor is a file
-  whose approval you took off with `a` while you compared it: what you
-  decide by hand stands when you leave.
+  last difference in Ediff, and leave without a draft on it, an open
+  thread of yours or a reply in a thread (`C-c >`) waiting in the box,
+  is approved as you leave it -- by `n` past its last difference, `N`,
+  `P` or `q` -- as if you had pressed `a`. A file you commented on is not
+  settled, and is not approved for you; nor is a file whose approval you
+  took off with `a` while you compared it: what you decide by hand
+  stands when you leave. A comment you write on a file that is approved
+  takes its approval off, and an approval you give after the comment
+  stands.
 
   What the files are of is yours to choose, from the `Diff` line under
   the heading -- three buttons -- or with `d`: **task branch against

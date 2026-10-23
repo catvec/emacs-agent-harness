@@ -14000,9 +14000,15 @@ a button with its state in the settings line and in Ediff's help:
 
 - `harness-ui-patch-review-skip-approved` (on): the neighbor of a file
   leaves out the approved ones, and a step that went over some says how
-  many ("Skipped 2 files already approved; s stops skipping them"), one
-  that finds only approved files that way says so and stays.  RET on an
-  approved file compares it all the same.
+  many ("Skipped 2 files already approved; s stops skipping them" --
+  said once the next file is up, since Ediff's own messages and
+  "Reading…" would cover it; and by n at the last difference before it
+  goes: ", skipping 2 approved files", `harness-ui-patch-review--skipping-text`),
+  one that finds only approved files that way says so and stays.  RET on
+  an approved file compares it all the same.  Only an approved file is
+  skipped, not one that was only seen: the approved mark is a bold
+  green ✔, the seen mark a dim ✓, and the hint under the files and the
+  row's tooltip say which is which.
 - `harness-ui-patch-review-auto-approve` (on): when an Ediff of a file
   ends -- q, N, P, n past the last difference, whatever ends it, in
   `harness-ui-patch-review--ediff-ended` -- the file is approved, as a
@@ -14010,11 +14016,22 @@ a button with its state in the settings line and in Ediff's help:
   and made no comment on it.  Went through: the control panel's
   `ediff-select-hook` noted that the current difference was the last
   (`:reached` in the Ediff's state), or the file has no differences.
-  No comment: the user has no draft on the file and no open thread they
-  wrote in (`harness-ui-patch-review--commented-p`); a thread they
-  closed is settled, and one an agent started and they did not answer is
-  the agent's.  It says so in the echo area, with the key that turns it
-  off.  What the reviewer decided by hand stands: taking the approval off
+  No comment: the user has no draft on the file, no open thread they
+  wrote in and no reply in a thread waiting in the report's box
+  (`harness-ui-patch-review--commented-p`; C-c > on lines of a version
+  starts one, a card in the box that is no thread of the set until the
+  feedback is sent, `harness-ui-patch-review--box-reply-p`); a thread
+  they closed is settled, and one an agent started and they did not
+  answer is the agent's.  It says so in the echo area, with the key
+  that turns it off.  The other way round, a file with a new comment is
+  not an approved one: a draft the user adds to a thread of the file --
+  a comment, a reply in the agent's thread, anything that reaches
+  `change-review-changed-functions` as an `add-comment` -- or a reply
+  card started with C-c > takes the approval off
+  (`harness-ui-patch-review--on-comment`,
+  `harness-ui-patch-review--withdraw-approval`); the file stays seen,
+  and an approval given after the comment stands.
+  What the reviewer decided by hand stands: taking the approval off
   the file under comparison -- a in the control panel, its [Approve]
   button, a on its row or its directory's in the tree beside Ediff; every
   one ends in `harness-ui-patch-review--approve` -- notes `:unapproved` in

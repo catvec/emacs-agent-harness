@@ -727,6 +727,304 @@ on to it in Ediff."
             (should (= 0 ediff-current-difference))
             (harness-ui-patch-review-ediff-quit)))))))
 
+;;;; Approving and skipping while going from file to file
+
+(defun harness-ui-patch-review-test--press-n (control &optional previous)
+  "Press n in the Ediff control panel CONTROL, as a key does.
+PREVIOUS is the command the key before it ran: n twice in a row at the
+last difference goes on to the next file."
+  (with-current-buffer control
+    (let ((this-command #'harness-ui-patch-review-next-difference)
+          (last-command (or previous 'self-insert-command)))
+      (call-interactively #'harness-ui-patch-review-next-difference))))
+
+(defun harness-ui-patch-review-test--reply-card (review &optional words)
+  "In the Ediff of REVIEW under way, start a reply in a thread with C-c >.
+It is on the first line of the branch's version: the card lands in the
+report's box.  WORDS, when given, are written under it."
+  (let ((new (nth 2 (harness-ui-patch-review--ediff-buffers review)))
+        (popout (harness-ui-patch-review--r-popout review)))
+    (with-current-buffer new
+      (setq-local transient-mark-mode t)
+      (goto-char (point-min))
+      (push-mark (point) t t)
+      (end-of-line)
+      (call-interactively #'harness-ui-patch-review-thread-reply))
+    (when words
+      (with-current-buffer popout
+        (goto-char harness-compose-end)
+        (insert words)))))
+
+(ert-deftest harness-ui-patch-review-a-reply-card-keeps-a-file-from-being-approved ()
+  "A comment started with C-c > on lines of a version is a card in the report's
+box, with the words under it: no thread of the review until the feedback is
+sent.  It is a comment of the reviewer's all the same, so leaving the file --
+n n past its last difference, N, or q -- does not approve it, though the
+reviewer went through it.  A card with no words yet counts, and one about
+another file does not."
+  (harness-ui-patch-review-test-with-task
+    (let* ((popout (harness-ui-patch-review-test--changes board id))
+           (review (gethash id harness-ui-patch-review--reviews))
+           (harness-ui-patch-review-auto-approve t)
+           (harness-ui-patch-review-skip-approved nil)
+           (file (lambda (path) (harness-ui-patch-review-test--file review path)))
+           (approved (lambda (path) (harness-ui-patch-review--approved-p review (funcall file path))))
+           (seen (lambda (path) (harness-ui-patch-review--seen-p review (funcall file path))))
+           (said nil))
+      (cl-letf (((symbol-function 'message)
+                 (lambda (format-string &rest args) (push (apply #'format format-string args) said))))
+        ;; a.el, left with n n from its last difference, the card with words.
+        (harness-ui-patch-review-ediff review 0)
+        (let ((control (harness-ui-patch-review-test--control review 0)))
+          (harness-ui-patch-review-test--press-n control)
+          (should (plist-get (harness-ui-patch-review--r-ediff review) :reached))
+          (should-not (harness-ui-patch-review--commented-p review (funcall file "a.el")))
+          (harness-ui-patch-review-test--reply-card review "Why a symbol?")
+          (should (harness-ui-patch-review--commented-p review (funcall file "a.el")))
+          (should-not (harness-ui-patch-review--commented-p review (funcall file "new.el")))
+          (harness-ui-patch-review-test--press-n control)
+          (harness-ui-patch-review-test--press-n control #'harness-ui-patch-review-next-difference))
+        (with-current-buffer (harness-ui-patch-review-test--control review 1)
+          (call-interactively #'harness-ui-patch-review-ediff-quit))
+        (should (funcall seen "a.el"))
+        (should-not (funcall approved "a.el"))
+        (should-not (member "Approved a.el: you went through it and made no comment on it; u stops that" said))
+        ;; d.el has one difference, so it is gone through as it opens: a card
+        ;; with no words, left with N.
+        (harness-ui-patch-review-ediff review 2)
+        (with-current-buffer (harness-ui-patch-review-test--control review 2)
+          (should (plist-get (harness-ui-patch-review--r-ediff review) :reached))
+          (harness-ui-patch-review-test--reply-card review)
+          (call-interactively #'harness-ui-patch-review-ediff-next-file))
+        (harness-ui-patch-review-test--control review 3)
+        (should (funcall seen "d.el"))
+        (should-not (funcall approved "d.el"))
+        ;; é.txt, in Ediff now: a card, words under it, left with q.
+        (with-current-buffer (harness-ui-patch-review-test--control review 3)
+          (harness-ui-patch-review-test--reply-card review "A caption?")
+          (call-interactively #'harness-ui-patch-review-ediff-quit))
+        (should (funcall seen "docs/é.txt"))
+        (should-not (funcall approved "docs/é.txt"))
+        ;; The card gone -- taken out of the box -- the file is settled again,
+        ;; and a file of the card's is still its own.
+        (with-current-buffer popout (harness-compose-clear))
+        (should-not (harness-ui-patch-review--commented-p review (funcall file "docs/é.txt")))
+        (harness-ui-patch-review-ediff review 3)
+        (with-current-buffer (harness-ui-patch-review-test--control review 3)
+          (call-interactively #'harness-ui-patch-review-ediff-quit))
+        (should (funcall approved "docs/é.txt"))))))
+
+(ert-deftest harness-ui-patch-review-a-new-comment-takes-the-approval-off ()
+  "A draft the user writes on an approved file -- a comment, a reply in a
+thread of the agent's -- takes the approval off it, from wherever it comes: a
+file with a new comment is not approved.  The file stays viewed.  What the
+agent writes, and a comment already sent, do not.  An approval given after
+the comment stands, until the next comment."
+  (harness-ui-patch-review-test-with-repo
+    (let* ((review (harness-ui-patch-review-test--review repo))
+           (set (harness-ui-patch-review--r-set review))
+           (change-review-changed-functions
+            (cons #'harness-ui-patch-review--on-comment change-review-changed-functions))
+           (file (lambda (path) (harness-ui-patch-review-test--file review path)))
+           (approved (lambda (path) (harness-ui-patch-review--approved-p review (funcall file path))))
+           (agent (change-review-agent "Claude" :session "sess-1" :tool-call "toolu_1"))
+           (said nil))
+      (harness-ui-patch-review-test--approve-paths review "a.el" "b.el" "d.el" "new.el" "docs/é.txt")
+      (cl-letf (((symbol-function 'message)
+                 (lambda (format-string &rest args) (push (apply #'format format-string args) said))))
+        ;; The user's draft on a.el: not approved any more, said, still viewed.
+        (harness-ui-patch-review-test--comment-on review "a.el" '(:new . 2) "Why two?")
+        (should-not (funcall approved "a.el"))
+        (should (harness-ui-patch-review--seen-p review (funcall file "a.el")))
+        (should (member "No longer approved a.el: you commented on it" said))
+        ;; What the agent writes is not the user's comment.
+        (change-review-comment set "I did this because the loop needs it." :author agent
+                               :sent (float-time)
+                               :location (harness-ui-patch-review--location (funcall file "b.el") nil))
+        (should (funcall approved "b.el"))
+        ;; Nor is what was sent in an earlier round.
+        (harness-ui-patch-review-test--comment-on review "d.el" nil "Rename it" :sent (float-time))
+        (should (funcall approved "d.el"))
+        ;; A reply of the user's in a thread of the agent's is their comment.
+        (let ((root (change-review-comment
+                     set "Why is that?" :author agent :sent (float-time)
+                     :location (harness-ui-patch-review--location (funcall file "new.el") nil))))
+          (should (funcall approved "new.el"))
+          (change-review-reply set root "Then explain it."
+                               :author (change-review-user "Noah" "noah@example.org")))
+        (should-not (funcall approved "new.el"))
+        ;; A comment on the change as a whole is on no file.
+        (change-review-comment set "Overall fine" :author (change-review-user "Noah" "noah@example.org"))
+        (should (funcall approved "docs/é.txt"))
+        ;; Approved after the comment, a.el stays so; a comment after that
+        ;; takes it off again.
+        (harness-ui-patch-review--approve review (funcall file "a.el") t t)
+        (should (funcall approved "a.el"))
+        (harness-ui-patch-review-test--comment-on review "a.el" '(:new . 18) "And this one?")
+        (should-not (funcall approved "a.el"))
+        ;; The diff the report shows may be a part of the change: a file the
+        ;; branch changes and the report does not show loses its approval too.
+        (let* ((shown (harness-ui-patch-review--r-files review))
+               (hidden (cl-find "docs/é.txt" (harness-ui-patch-review--r-branch-files review)
+                                :key #'change-review-file-path :test #'equal)))
+          (should (harness-ui-patch-review--approved-p review hidden))
+          (setf (harness-ui-patch-review--r-files review) (list (funcall file "a.el")))
+          (change-review-comment set "A caption?" :author (change-review-user "Noah" "noah@example.org")
+                                 :location (harness-ui-patch-review--location hidden nil))
+          (setf (harness-ui-patch-review--r-files review) shown)
+          (should-not (harness-ui-patch-review--approved-p review hidden)))))))
+
+(ert-deftest harness-ui-patch-review-a-reply-card-takes-the-approval-off ()
+  "C-c > on lines of an approved file, in Ediff, takes its approval off, and
+the echo area says so with the rest of what it says about the box."
+  (harness-ui-patch-review-test-with-task
+    (let* ((popout (harness-ui-patch-review-test--changes board id))
+           (review (gethash id harness-ui-patch-review--reviews))
+           (harness-ui-patch-review-auto-approve nil)
+           (file (harness-ui-patch-review-test--file review "a.el"))
+           (said nil))
+      (ignore popout)
+      (harness-ui-patch-review-test--approve-paths review "a.el")
+      (cl-letf (((symbol-function 'message)
+                 (lambda (format-string &rest args) (push (apply #'format format-string args) said))))
+        (harness-ui-patch-review-ediff review 0)
+        (with-current-buffer (harness-ui-patch-review-test--control review 0)
+          (should (harness-ui-patch-review--approved-p review file))
+          (should (string-search "1 approved" (harness-ui-patch-review-test--text (current-buffer))))
+          (harness-ui-patch-review-test--reply-card review "Why a symbol?")
+          (should-not (harness-ui-patch-review--approved-p review file))
+          (should (string-search "a.el is no longer approved" (car said)))
+          ;; The control panel counts the files approved: it follows.
+          (should-not (string-search "1 approved" (harness-ui-patch-review-test--text (current-buffer))))
+          (call-interactively #'harness-ui-patch-review-ediff-quit))
+        (should-not (harness-ui-patch-review--approved-p review file))))))
+
+(ert-deftest harness-ui-patch-review-says-what-going-on-skips ()
+  "n at the last difference says how many approved files the next n steps over,
+and the note that they were skipped comes once the next file is up, last, where
+Ediff's own messages and \"Reading…\" cannot cover it.  Where nothing is
+skipped, or with skipping off, the offer says no more than it did."
+  (harness-ui-patch-review-test-with-task
+    (let* ((popout (harness-ui-patch-review-test--changes board id))
+           (review (gethash id harness-ui-patch-review--reviews))
+           (harness-ui-patch-review-skip-approved t)
+           (harness-ui-patch-review-auto-approve nil)
+           (said nil))
+      (ignore popout)
+      (harness-ui-patch-review-test--approve-paths review "b.el" "d.el")
+      (cl-letf (((symbol-function 'message)
+                 (lambda (format-string &rest args) (push (apply #'format format-string args) said))))
+        (harness-ui-patch-review-ediff review 0)
+        (let ((control (harness-ui-patch-review-test--control review 0)))
+          (harness-ui-patch-review-test--press-n control)
+          ;; Skipping off: the next file is b.el, nothing to say of skipping.
+          (let ((harness-ui-patch-review-skip-approved nil))
+            (harness-ui-patch-review-test--press-n control)
+            (should (equal "Last difference; n again goes to the next file" (car said))))
+          ;; On: two files are stepped over, and the offer says so.
+          (harness-ui-patch-review-test--press-n control)
+          (should (equal "Last difference; n again goes to the next file, skipping 2 approved files"
+                         (car said)))
+          (harness-ui-patch-review-test--press-n control #'harness-ui-patch-review-next-difference))
+        (harness-ui-patch-review-test--control review 3)
+        (should (equal "Skipped 2 files already approved; s stops skipping them" (car said)))
+        (with-current-buffer (harness-ui-patch-review-test--control review 3)
+          (call-interactively #'harness-ui-patch-review-ediff-quit))))))
+
+(defun harness-ui-patch-review-test--finish-file (control)
+  "Go through the file of the Ediff control panel CONTROL with n, and on.
+n to the last difference, n at it says another file follows, and n again
+goes to it, as the reviewer does; the next file may not come."
+  (with-current-buffer control
+    (while (< ediff-current-difference (1- ediff-number-of-differences))
+      (harness-ui-patch-review-test--press-n control)))
+  (harness-ui-patch-review-test--press-n control)
+  (harness-ui-patch-review-test--press-n control #'harness-ui-patch-review-next-difference))
+
+(ert-deftest harness-ui-patch-review-a-second-pass-skips-what-the-first-approved ()
+  "Going through the files with n approves those with no comment on them, and
+going through them again, from the first, steps over every one of them: n at
+the last difference finds no file left to review (Ediff cannot compare the
+binary one), N says so, and q puts point on the one file nothing approved.
+With skipping off, n goes on to the very next file."
+  (harness-ui-patch-review-test-with-task
+    (let* ((popout (harness-ui-patch-review-test--changes board id))
+           (review (gethash id harness-ui-patch-review--reviews))
+           (harness-ui-patch-review-skip-approved t)
+           (harness-ui-patch-review-auto-approve t)
+           (approved (lambda ()
+                       (cl-loop for file in (harness-ui-patch-review--r-files review)
+                                when (harness-ui-patch-review--approved-p review file)
+                                collect (change-review-file-path file))))
+           (said nil))
+      (cl-letf (((symbol-function 'message)
+                 (lambda (format-string &rest args) (push (apply #'format format-string args) said))))
+        ;; The first pass: a.el, b.el, d.el, é.txt, and new.el -- img.bin is
+        ;; binary, which Ediff cannot compare -- each approved as it is left.
+        (harness-ui-patch-review-ediff review 0)
+        (cl-loop for (from to) in '((0 1) (1 2) (2 3) (3 5))
+                 do (harness-ui-patch-review-test--finish-file
+                     (harness-ui-patch-review-test--control review from))
+                 (harness-ui-patch-review-test--control review to))
+        (with-current-buffer (harness-ui-patch-review-test--control review 5)
+          (call-interactively #'harness-ui-patch-review-ediff-quit))
+        (should (equal '("a.el" "b.el" "d.el" "docs/é.txt" "new.el") (funcall approved)))
+        ;; The second pass: nothing is left to review, and n and N say so.
+        (harness-ui-patch-review-ediff review 0)
+        (let ((control (harness-ui-patch-review-test--control review 0)))
+          (with-current-buffer control
+            (harness-ui-patch-review-test--press-n control)
+            (setq said nil)
+            (harness-ui-patch-review-test--press-n control)
+            (should (equal "Last difference of the last file to review; q goes back to the report"
+                           (car said)))
+            (harness-ui-patch-review-test--press-n control #'harness-ui-patch-review-next-difference)
+            (should (equal "Last difference of the last file to review; q goes back to the report"
+                           (car said)))
+            (setq said nil)
+            (call-interactively #'harness-ui-patch-review-ediff-next-file)
+            (should (equal "No file left to review that way, the ones after this one approved; q goes back to the report"
+                           (car said)))
+            ;; Skipping off: the next file, whatever it is.
+            (let ((harness-ui-patch-review-skip-approved nil))
+              (harness-ui-patch-review-test--press-n control)
+              (harness-ui-patch-review-test--press-n control #'harness-ui-patch-review-next-difference))))
+        (harness-ui-patch-review-test--control review 1)
+        (with-current-buffer (harness-ui-patch-review-test--control review 1)
+          (call-interactively #'harness-ui-patch-review-ediff-quit))
+        ;; q puts point on the next file to review: img.bin, the one file no
+        ;; approval covers, which Ediff cannot compare but the reviewer may look at.
+        (with-current-buffer popout
+          (should (eql 4 (cdr (harness-ui-patch-review--at-point)))))))))
+
+(ert-deftest harness-ui-patch-review-marks-approved-apart-from-seen ()
+  "A file only viewed shows a dim check mark, one approved a bold one, and the
+row's tooltip and the hint under the changes say which is which, so a file
+that was looked at is not taken for one that was approved."
+  (harness-ui-patch-review-test-with-repo
+    (let* ((review (harness-ui-patch-review-test--review repo))
+           (file (lambda (path) (harness-ui-patch-review-test--file review path)))
+           (row (lambda (path)
+                  (let ((file (funcall file path)))
+                    (harness-ui-patch-review--row review file 0 12 nil))))
+           (face-at (lambda (text char)
+                      (let ((pos (string-search char text)))
+                        (get-text-property pos 'face text)))))
+      (harness-ui-patch-review--approve review (funcall file "a.el") t t)
+      (harness-ui-patch-review--mark-seen review (funcall file "d.el"))
+      (let ((approved (funcall row "a.el"))
+            (viewed (funcall row "d.el"))
+            (untouched (funcall row "new.el")))
+        (should (eq 'harness-ui-patch-review-approved-face (funcall face-at approved "✔")))
+        (should (eq 'harness-ui-patch-review-seen-face (funcall face-at viewed "✓")))
+        (should (eq 'shadow (face-attribute 'harness-ui-patch-review-seen-face :inherit nil)))
+        (should (eq 'bold (face-attribute 'harness-ui-patch-review-approved-face :weight nil)))
+        (should-not (string-match-p "[✓✔]" untouched))
+        (should (string-search "approved" (get-text-property 0 'help-echo approved)))
+        (should (string-search "viewed, not approved" (get-text-property 0 'help-echo viewed)))
+        (should (string-search "not viewed yet" (get-text-property 0 'help-echo untouched))))
+      (should (string-search "✔ approved, ✓ only viewed" harness-ui-patch-review--hint)))))
+
 (ert-deftest harness-ui-patch-review-opens-from-a-sessions-history ()
   "C-c C-d in a task's session shows its report with the changes, and the
 open report of a task done since still shows them."
@@ -3122,7 +3420,10 @@ review, an approval or a thread."
       (harness-ui-patch-review-test--comment-on review "a.el" '(:new . 2) "Why two?")
       (harness-ui-patch-review-test--wait-text chat "^    ┃      Why two\\?$")
       (should (string-match-p "^Threads  \\[open 1\\]" (harness-ui-patch-review-test--text chat)))
-      (should (string-match-p "^  ✔ M  a\\.el .*   1 open   1 draft" (harness-ui-patch-review-test--text chat)))
+      ;; The draft is a new comment on a.el, which takes its approval off: the
+      ;; banner shows it viewed only, with its thread.
+      (should (string-match-p "^  ✓ M  a\\.el .*   1 open   1 draft" (harness-ui-patch-review-test--text chat)))
+      (should-not (harness-ui-patch-review--approved-p review (harness-ui-patch-review-test--file review "a.el")))
       ;; The compose box keeps what was typed in it as the banner draws again.
       (with-current-buffer chat
         (goto-char harness-compose-end)

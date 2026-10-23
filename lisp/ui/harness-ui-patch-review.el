@@ -43,8 +43,10 @@
 ;; files, and below it the threads:
 ;;
 ;;   a file      its status, its name, the lines it adds and deletes,
-;;               a mark once it was looked at in Ediff and a firmer one
-;;               once it was approved, how many threads it has, open and
+;;               a dim ✓ once it was looked at in Ediff and a bold green
+;;               ✔ once it was approved -- only the approved are
+;;               skipped, as the hint under the files and the row's
+;;               tooltip say --, how many threads it has, open and
 ;;               closed -- and how many of those the agent closed that the
 ;;               reviewer has not looked at yet, "to review" -- and
 ;;               whether it changed since the reviewer's
@@ -85,15 +87,27 @@
 ;;               on from file to file -- n and p on the rows, N and P in
 ;;               Ediff, n at the last difference, the row point lands on
 ;;               when Ediff ends -- steps over the files already
-;;               approved, and says how many it went over.  RET on one
-;;               still compares it.
+;;               approved, and says how many it went over: n at the last
+;;               difference says it will ("..., skipping 2 approved
+;;               files"), and once the next file is up, last, so that
+;;               nothing Ediff says covers it, so does the note that it
+;;               did.  RET on one still compares it.
 ;;   auto-approve    (`harness-ui-patch-review-auto-approve', on): leaving
 ;;               a file in Ediff approves it when the reviewer was at its
 ;;               last difference -- went through what it changes -- and
-;;               has no draft on it and no open thread they wrote in.  A
-;;               file with a comment of yours is not settled, one with a
-;;               thread the agent started and you did not answer is.
-;;               The approval is the one a makes, kept by the harness.
+;;               has no draft on it, no open thread they wrote in and no
+;;               reply in a thread waiting in the report's box (C-c > on
+;;               lines of a version starts one, a card there that is no
+;;               thread of the review until the feedback is sent, and it
+;;               counts before any word is written under it).  A file with
+;;               a comment of yours is not settled, one with a thread the
+;;               agent started and you did not answer is.  The approval
+;;               is the one a makes, kept by the harness.  A file with a
+;;               new comment is not an approved one, however it got to be
+;;               approved: a draft you write on an approved file -- a
+;;               comment, a reply in the agent's thread, a reply card --
+;;               takes the approval off it (the file stays viewed), and an
+;;               approval you give after the comment, with a, stands.
 ;;               What you decide by hand stands: a file whose approval
 ;;               you took off (a again) while you compared it stays not
 ;;               approved as you leave it, though you went through it.
@@ -123,7 +137,8 @@
 ;;               next or previous file,
 ;;               q comes back to where Ediff began, point on the next
 ;;               file to review.  n is Ediff's next difference, and at
-;;               the last one says the next difference is the next file:
+;;               the last one says the next difference is the next file
+;;               -- and how many approved files it steps over:
 ;;               n again opens it.
 ;;   threads     c reads a comment and starts a thread with it, a draft,
 ;;               under the line it is about: in the control panel on the
@@ -477,7 +492,9 @@ switches it for the review at point."
 N and P in Ediff, n at the last difference, n and p on the rows of the
 changes, and the row point lands on when Ediff ends all go to the next
 file that is not approved: an approved file need not be looked at again
-unless the branch changes it.  RET or a click on an approved file still
+unless the branch changes it.  Only an approved file (the bold ✔) is
+skipped, not one that was only looked at (the dim ✓).  The steps say how
+many files they went over.  RET or a click on an approved file still
 compares it.  \\<harness-ui-patch-review--row-map>\\[harness-ui-patch-review-toggle-skip-approved] switches it, for every review, wherever the
 changes show and in Ediff."
   :type 'boolean)
@@ -486,10 +503,12 @@ changes show and in Ediff."
   "Whether a file you looked through and made no comment on is approved.
 Leaving a file in Ediff -- n past its last difference, N, P or q --
 approves it when you reached its last difference, so went through what
-it changes, and you have no draft on it and no open thread you wrote in:
-a file with a comment of yours is not settled.  The approval is the
-firm check mark, kept by the harness like one you made with
+it changes, and you have no draft on it, no open thread you wrote in and
+no reply in a thread waiting in the report's box (C-c > on lines of a
+version): a file with a comment of yours is not settled.  The approval is
+the firm check mark, kept by the harness like one you made with
 \\<harness-ui-patch-review--row-map>\\[harness-ui-patch-review-approve].
+A comment you write on a file that is approved takes its approval off.
 A file whose approval you took off while you compared it, with that
 key, is not approved again as you leave it: what you decided by hand
 stands.  \\[harness-ui-patch-review-toggle-auto-approve] switches this off and on, for every review, wherever the changes
@@ -529,8 +548,19 @@ Markdown."
   "Counts of added lines, and the status of an added file, in a report.")
 (defface harness-ui-patch-review-minus-face '((t :inherit diff-indicator-removed))
   "Counts of deleted lines, and the status of a deleted file, in a report.")
-(defface harness-ui-patch-review-seen-face '((t :inherit success))
-  "The mark of a file seen in Ediff, in a report.")
+(defface harness-ui-patch-review-seen-face '((t :inherit shadow))
+  "The mark of a file seen in Ediff but not approved, in a report.
+Dim, beside the approved mark's bold green: looking at a file is not
+approving it, and only an approved file is skipped.")
+;; The harness updates by reloading in place, and a `defface' that is
+;; defined already is not read again: the face stays as it was (green, as
+;; the approved mark) until Emacs restarts.  The dim mark is the default
+;; now, so it is set here too, unless the user customized the face.
+(unless (or (get 'harness-ui-patch-review-seen-face 'customized-face)
+            (get 'harness-ui-patch-review-seen-face 'saved-face)
+            (get 'harness-ui-patch-review-seen-face 'theme-face))
+  (face-spec-set 'harness-ui-patch-review-seen-face '((t :inherit shadow))
+                 'face-defface-spec))
 (defface harness-ui-patch-review-approved-face '((t :inherit success :weight bold))
   "The mark of a file approved for this review, in a report.")
 (defface harness-ui-patch-review-comments-face '((t :inherit bold))
@@ -1707,17 +1737,44 @@ ends, whatever auto-approve says (`harness-ui-patch-review--note-unapproved')."
                (and author (eq (change-review-author-kind author) 'user))))
            (change-review-thread-comments thread)))
 
+(defun harness-ui-patch-review--file-path-p (path file)
+  "Non-nil when PATH is where FILE is, or where it was before a rename."
+  (and (stringp path)
+       (or (equal path (change-review-file-path file))
+           (and (change-review-file-old-path file)
+                (equal path (change-review-file-old-path file))))))
+
+(defun harness-ui-patch-review--box-reply-p (review file)
+  "Non-nil when the box of REVIEW's report holds a reply about FILE.
+C-c > on lines of a version in Ediff starts a reply in a thread
+\(`harness-ui-patch-review-thread-reply'): a card in the box, the words
+under it the comment.  It is no thread of the review until the feedback
+is sent, but it is a comment of the reviewer's on the file all the same,
+whether or not the words are written yet."
+  (let ((popout (harness-ui-patch-review--r-popout review)))
+    (and (buffer-live-p popout)
+         (cl-some (lambda (attachment)
+                    (cl-some (lambda (ref)
+                               (and (equal (harness-thread-ref-kind ref) "diff")
+                                    (harness-ui-patch-review--file-path-p (plist-get ref :file) file)))
+                             (harness-thread-refs (plist-get attachment :thread))))
+                  (buffer-local-value 'harness-compose-attachments popout))
+         t)))
+
 (defun harness-ui-patch-review--commented-p (review file)
   "Non-nil when the user has a comment on FILE of REVIEW that is not settled.
 That is a draft, or an open thread the user wrote in: one the user
 closed, or the agent did, is done, and a thread the agent started and
-the user did not answer is the agent's.  A file with such a comment is
+the user did not answer is the agent's.  A reply in a thread waiting in
+the report's box counts too, as a draft does
+\(`harness-ui-patch-review--box-reply-p').  A file with such a comment is
 not one the reviewer is through with."
-  (cl-some (lambda (thread)
-             (or (change-review-thread-drafts thread)
-                 (and (change-review-thread-open-p thread)
-                      (harness-ui-patch-review--user-wrote-p thread))))
-           (harness-ui-patch-review--file-threads review file)))
+  (or (cl-some (lambda (thread)
+                 (or (change-review-thread-drafts thread)
+                     (and (change-review-thread-open-p thread)
+                          (harness-ui-patch-review--user-wrote-p thread))))
+               (harness-ui-patch-review--file-threads review file))
+      (harness-ui-patch-review--box-reply-p review file)))
 
 (defun harness-ui-patch-review--auto-approve (review file reached &optional unapproved)
   "Approve FILE of REVIEW, which the reviewer is leaving in Ediff, if it is due.
@@ -1755,6 +1812,49 @@ That is every surface of the changes, and the help of Ediff's control
 panel, which counts the files approved."
   (harness-ui-patch-review--refresh review)
   (harness-ui-patch-review--redraw-ediff-help review))
+
+(defun harness-ui-patch-review--withdraw-approval (review file &optional quiet)
+  "Take the approval off FILE of REVIEW, the reviewer having commented on it.
+A file with a new comment is not one the reviewer is through with, however
+it came to be approved: by going through it, by a, or before the comment
+was made.  The file stays viewed, the harness keeps the approval off, and
+the changes show it.  Unless QUIET, the echo area says so.  Return non-nil
+when FILE was approved.  An approval the reviewer gives after the comment
+\(a) is theirs, and stands until the next one."
+  (when (and file (harness-ui-patch-review--approved-p review file))
+    (harness-ui-patch-review--approve review file nil)
+    (harness-ui-patch-review--refresh-approvals review)
+    (unless quiet
+      (message "No longer approved %s: you commented on it" (change-review-file-path file)))
+    t))
+
+(defun harness-ui-patch-review--on-comment (set op)
+  "Take the approval off the file a new draft of the user's is on.
+On `change-review-changed-functions': OP is the operation that changed
+SET.  Only a comment the user adds that waits to be sent counts -- a
+comment, or a reply in a thread of the agent's: what the agent writes,
+and what was sent in an earlier round, are no new comment of the
+reviewer's.  The file is where the thread is, the root's place for a
+reply; a comment on the change as a whole is on no file."
+  (when (and (harness-ui-patch-review--set-p set)
+             (equal (format "%s" (plist-get op :op)) "add-comment"))
+    (harness-ignore-errors-logged "patch review: the approval of a file commented on"
+      (when-let* ((review (harness-ui-patch-review--set-review set))
+                  ((harness-ui-patch-review--review-p review))
+                  ((not (harness-ui-patch-review--r-snapshot review)))
+                  (found (change-review-find-comment set (plist-get (plist-get op :comment) :id)))
+                  (thread (car found))
+                  (comment (cdr found))
+                  ((change-review-comment-draft-p comment))
+                  (author (change-review-comment-author comment))
+                  ((eq (change-review-author-kind author) 'user)))
+        ;; The files the report shows, and the branch's whole change: the
+        ;; diff shown may be a part of it, and the approval is by the file's
+        ;; path and blob either way.
+        (dolist (file (append (harness-ui-patch-review--r-files review)
+                              (harness-ui-patch-review--r-branch-files review)))
+          (when (harness-ui-patch-review--thread-file-p thread file)
+            (harness-ui-patch-review--withdraw-approval review file)))))))
 
 (defun harness-ui-patch-review--approve-directory (review path)
   "Approve every file of REVIEW under the directory PATH, or stop approving them.
@@ -1825,8 +1925,9 @@ whether it is on."
 (defun harness-ui-patch-review-toggle-auto-approve ()
   "Switch whether a file you looked through and made no comment on is approved.
 On, leaving a file in Ediff -- n past its last difference, N, P or q --
-approves it when you were at its last difference and have no draft on it
-and no open thread of yours; off, only a does.  It is
+approves it when you were at its last difference and have no draft on it,
+no open thread of yours and no reply in a thread waiting in the report's
+box; off, only a does.  It is
 `harness-ui-patch-review-auto-approve', for every review: the heading of
 the changes and the help of Ediff show whether it is on."
   (interactive)
@@ -2539,8 +2640,20 @@ On the name of a file above its threads: compare that file."
     ("D" 'harness-ui-patch-review-minus-face)
     (_ 'bold)))
 
+(defun harness-ui-patch-review--state-text (review file)
+  "Return where FILE of REVIEW stands, in words.
+Approved, viewed only, or not viewed yet.  Only an approved file is
+skipped (`harness-ui-patch-review-skip-approved')."
+  (cond ((harness-ui-patch-review--approved-p review file)
+         (if harness-ui-patch-review-skip-approved
+             "approved, so going on from file to file steps over it" "approved"))
+        ((harness-ui-patch-review--seen-p review file) "viewed, not approved")
+        (t "not viewed yet")))
+
 (defun harness-ui-patch-review--mark (review file)
-  "Return the mark of FILE of REVIEW: approved, else seen in Ediff, else a space."
+  "Return the mark of FILE of REVIEW: approved, else seen in Ediff, else a space.
+The two check marks differ in weight and colour, the approved one bold and
+green, the seen one dim: a file looked at is not an approved one."
   (cond ((harness-ui-patch-review--approved-p review file)
          (propertize "✔" 'face 'harness-ui-patch-review-approved-face))
         ((harness-ui-patch-review--seen-p review file)
@@ -2608,8 +2721,9 @@ threads are open on it.  CURRENT marks the row of the file Ediff compares."
                          (list 'harness-ui-patch-review-file index
                                'harness-ui-patch-review-task (harness-ui-patch-review--r-id review)
                                'mouse-face 'highlight
-                               'help-echo (format "%s\nRET or a click: compare it in Ediff; a approves it"
-                                                  (harness-ui-patch-review--path-label file))
+                               'help-echo (format "%s: %s\nRET or a click: compare it in Ediff; a approves it"
+                                                  (harness-ui-patch-review--path-label file)
+                                                  (harness-ui-patch-review--state-text review file))
                                'keymap harness-ui-patch-review--row-map)
                          row)
     row))
@@ -3231,7 +3345,7 @@ its key.  COMPACT uses shorter words."
       (_ (format "The branch changes nothing against %s." (harness-ui-patch-review--r-base review))))))
 
 (defconst harness-ui-patch-review--hint
-  "RET or a click compares a file in Ediff (a directory: folds it), n and p move between files, a approves one, A all of them, V takes the files the newest commit left alone as viewed; s and u switch skipping the approved files and approving those you go through without a comment, t the tree, d chooses the diff shown, T goes to the threads, e on a thread edits one of its drafts, k deletes one and K the thread when it is only drafts, m marks a thread the agent closed as reviewed (M all of them).  In Ediff c comments, r replies, e edits a draft or goes to the box, k deletes a draft and K a thread of drafts, N and P go to the next and previous file, q comes back."
+  "RET or a click compares a file in Ediff (a directory: folds it), n and p move between files, a approves one (✔ approved, ✓ only viewed: only the approved are skipped), A all of them, V takes the files the newest commit left alone as viewed; s and u switch skipping the approved files and approving those you go through without a comment, t the tree, d chooses the diff shown, T goes to the threads, e on a thread edits one of its drafts, k deletes one and K the thread when it is only drafts, m marks a thread the agent closed as reviewed (M all of them).  In Ediff c comments, r replies, e edits a draft or goes to the box, k deletes a draft and K a thread of drafts, N and P go to the next and previous file, q comes back."
   "What the report says under the changes.")
 
 (defun harness-ui-patch-review--tree-width (&optional frame)
@@ -3972,8 +4086,11 @@ or the branch's -- the lines and the revision, with the lines themselves.
 It starts in the box of the feedback, as a card, and the words written
 under it are the reply: sent with the feedback it is a comment in a thread
 of the review, on those lines, which the agent answers.  Point goes to the
-box.  Without a region, or with text of a comment selected with the mouse,
-this is the library's quote reply (\\[change-review-ui-quote-reply])."
+box.  The file has a comment of yours now, so it is not approved: a file
+that was is no longer (`harness-ui-patch-review--withdraw-approval'), and
+leaving it in Ediff does not approve it.  Without a region, or with text of
+a comment selected with the mouse, this is the library's quote reply
+\(\\[change-review-ui-quote-reply])."
   (interactive)
   (if (or (not (use-region-p)) (change-review-ui--overlay-selection))
       (call-interactively #'change-review-ui-quote-reply)
@@ -3986,7 +4103,13 @@ this is the library's quote reply (\\[change-review-ui-quote-reply])."
                     (lambda (_data ref) (harness-ui-patch-review--show-ref review ref)))
         (goto-char harness-compose-end)
         (harness-compose-add-thread (list ref)))
-      (harness-ui-patch-review-edit-feedback "A reply in a thread is waiting for your words."))))
+      ;; A file with a comment of the reviewer's is not an approved one.
+      (let ((file (and (integerp harness-ui-patch-review--index)
+                       (nth harness-ui-patch-review--index (harness-ui-patch-review--r-files review)))))
+        (harness-ui-patch-review-edit-feedback
+         (concat "A reply in a thread is waiting for your words."
+                 (and (harness-ui-patch-review--withdraw-approval review file t)
+                      (format " %s is no longer approved." (change-review-file-path file)))))))))
 
 (defun harness-ui-patch-review-toggle-thread ()
   "Close the thread at the current difference, or at point, or open it again."
@@ -4895,8 +5018,9 @@ the report, which closes as the Ediff ends."
 (defun harness-ui-patch-review--ediff-ended (review index)
   "Tidy up after the Ediff of REVIEW's file at INDEX.
 Its two versions go and the file is seen, approved too when the reviewer
-went through it and has no comment on it, unless they took its approval
-off meanwhile \(`harness-ui-patch-review--auto-approve').  Unless another
+went through it and has no comment on it, a reply waiting in the report's
+box included, unless they took its approval off meanwhile
+\(`harness-ui-patch-review--auto-approve').  Unless another
 comparison takes its place, the frame gets its windows back, the report
 among them, drawn again, with point on the next file to review."
   (let* ((state (harness-ui-patch-review--r-ediff review))
@@ -4963,8 +5087,10 @@ is on; nil when there is none that way."
 (defun harness-ui-patch-review-next-difference (&optional arg)
   "Move to the next difference in this Ediff, ARG times.
 At the last difference it first says the next difference is the next
-file; pressing n again goes on to it, in Ediff.  So the reviewer need
-not know before the last difference that another file follows."
+file, and how many approved files that skips while
+`harness-ui-patch-review-skip-approved' is on; pressing n again goes on to
+it, in Ediff.  So the reviewer need not know before the last difference
+that another file follows."
   (interactive "p")
   (let ((last (1- ediff-number-of-differences)))
     (cond
@@ -4975,30 +5101,56 @@ not know before the last difference that another file follows."
       (setq harness-ui-patch-review--next-file-offer nil)
       (harness-ui-patch-review-ediff-next-file))
      ((>= ediff-current-difference last)
-      (if (harness-ui-patch-review--comparable (harness-ui-patch-review--current)
-                                               harness-ui-patch-review--index 1)
-          (progn (setq harness-ui-patch-review--next-file-offer t)
-                 (message "Last difference; n again goes to the next file"))
-        (setq harness-ui-patch-review--next-file-offer nil)
-        (message "Last difference of the last file to review; q goes back to the report")))
+      (let* ((review (harness-ui-patch-review--current))
+             (target (harness-ui-patch-review--comparable review harness-ui-patch-review--index 1)))
+        (if target
+            (progn (setq harness-ui-patch-review--next-file-offer t)
+                   (message "Last difference; n again goes to the next file%s"
+                            (harness-ui-patch-review--skipping-text review harness-ui-patch-review--index target)))
+          (setq harness-ui-patch-review--next-file-offer nil)
+          (message "Last difference of the last file to review; q goes back to the report"))))
      (t
       (setq harness-ui-patch-review--next-file-offer nil)
       (ediff-next-difference arg)))))
 
+(defun harness-ui-patch-review--skipped-count (review from to)
+  "Return how many approved files going from FROM to TO skips.
+FROM and TO are indices of REVIEW's files.  Nothing is skipped, so 0,
+while `harness-ui-patch-review-skip-approved' is off."
+  (if harness-ui-patch-review-skip-approved
+      (harness-ui-patch-review--between review from to)
+    0))
+
+(defun harness-ui-patch-review--skipping-text (review from to)
+  "Return \", skipping 2 approved files\" for going from FROM to TO, or \"\" for none.
+FROM and TO are indices of REVIEW's files.  It ends the sentence that says
+where the next n goes, so the reviewer sees the approved files are stepped
+over before they are."
+  (let ((skipped (harness-ui-patch-review--skipped-count review from to)))
+    (if (> skipped 0)
+        (format ", skipping %s" (harness-ui-patch-review--plural skipped "approved file"))
+      "")))
+
 (defun harness-ui-patch-review--ediff-step (step)
   "Compare the file STEP files on in Ediff, in place of this one.
 The next file to review: one that is not approved while
-`harness-ui-patch-review-skip-approved' is on."
+`harness-ui-patch-review-skip-approved' is on.  The approved files stepped
+over are said once the next file is up: Ediff's own messages, and
+\"Reading…\", would cover it before."
   (let* ((review (harness-ui-patch-review--current))
          (index harness-ui-patch-review--index)
          (target (harness-ui-patch-review--comparable review index step)))
     (cond
      (target
-      (let ((skipped (harness-ui-patch-review--between review index target)))
-        (when (and (> skipped 0) harness-ui-patch-review-skip-approved)
-          (message "Skipped %s already approved; s stops skipping them"
-                   (harness-ui-patch-review--plural skipped "file"))))
-      (harness-ui-patch-review--compare review target))
+      (let ((skipped (harness-ui-patch-review--skipped-count review index target))
+            (shown (harness-ui-patch-review--compare review target)))
+        (when (> skipped 0)
+          (harness-then shown
+                        (lambda (_)
+                          (when (eql target (plist-get (harness-ui-patch-review--r-ediff review) :index))
+                            (message "Skipped %s already approved; s stops skipping them"
+                                     (harness-ui-patch-review--plural skipped "file"))))))
+        shown))
      ((> (harness-ui-patch-review--remaining review index step) 0)
       (message "No file left to review that way, the %s after this one approved; q goes back to the report"
                (if (> step 0) "ones" "ones before")))
@@ -5488,6 +5640,8 @@ the review again."
   ;; verified or sent back.
   (add-hook 'harness-ui-report-panel-functions #'harness-ui-patch-review--panel -10)
   (add-hook 'harness-ui-event-functions #'harness-ui-patch-review--on-event)
+  ;; A comment the reviewer writes on an approved file takes the approval off.
+  (add-hook 'change-review-changed-functions #'harness-ui-patch-review--on-comment)
   (with-eval-after-load 'harness-ui-review
     (add-hook 'harness-ui-review-pending-functions #'harness-ui-patch-review--pending-p)
     (add-hook 'harness-ui-review-changes-functions #'harness-ui-patch-review--banner-panel))
@@ -5505,6 +5659,7 @@ the review again."
   (setq harness-ui-patch-review--active nil)
   (remove-hook 'harness-ui-report-panel-functions #'harness-ui-patch-review--panel)
   (remove-hook 'harness-ui-event-functions #'harness-ui-patch-review--on-event)
+  (remove-hook 'change-review-changed-functions #'harness-ui-patch-review--on-comment)
   (remove-hook 'harness-ui-review-pending-functions #'harness-ui-patch-review--pending-p)
   (remove-hook 'harness-ui-review-changes-functions #'harness-ui-patch-review--banner-panel)
   (remove-hook 'harness-chat-mode-hook #'harness-ui-patch-review--setup-chat)
