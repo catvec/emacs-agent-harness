@@ -94,7 +94,7 @@ ui-tasks); `(setq harness-enabled-modules t)` loads every module.
 | [cache-compact](cache-compact.md) |  | [session](session.md), [compaction](compaction.md), [cache](cache.md), [cowboy](cowboy.md) | Compacts a conversation just before its prompt cache lapses, while it is still hot in it, as the user saved for a cold cache and where they would not be asked. |
 | [cache-warm](cache-warm.md) |  | [session](session.md), [provider](provider.md), [agent](agent.md), [cache](cache.md) | Keeps a session's prompt cache warm while its user is around or a tool runs: reads it again just before it lapses, for as long as that costs less than sending the conversation again. |
 | [commit-msg](commit-msg.md) |  | [config](config.md), [worktree](worktree.md) | A commit-msg hook stripping Claude attribution, in the repositories that turn it on. |
-| [compaction](compaction.md) | by default | [session](session.md), [provider](provider.md), [agent](agent.md) | Summarise the transcript when it nears the context window; queue or interrupt one while a turn runs. |
+| [compaction](compaction.md) | by default | [session](session.md), [provider](provider.md), [agent](agent.md) | Summarise the transcript when it nears the context window, before a turn or in the middle of one; queue or interrupt one while a turn runs. |
 | [config](config.md) | by default | [project](project.md) | Layered settings through customize and dir-locals. |
 | [cost-compare](cost-compare.md) |  | [usage](usage.md), [provider](provider.md) | What the recorded usage would have cost at other models' prices. |
 | [cowboy](cowboy.md) |  | [session](session.md), [agent](agent.md), [compaction](compaction.md) | Ask what goes first when a message meets a session whose prompt cache went cold. |
@@ -332,7 +332,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `agent/hold` | [agent](agent.md) | [compaction](compaction.md) (50) |
 | `agent/message` | [agent](agent.md) | [cache](cache.md) (90), [patch-review](patch-review.md) (40), [tasks](tasks.md) (50) |
 | `agent/outstanding` | [agent](agent.md) | [supervisor](supervisor.md) (50), [tools-agent](tools-agent.md) (50), [tools-events](tools-events.md) (50), [tools-sessions](tools-sessions.md) (50) |
-| `agent/step` | [agent](agent.md) | [compaction](compaction.md) (12), [handoff](handoff.md) (10), [merge](merge.md) (30), [usage](usage.md) (30) |
+| `agent/step` | [agent](agent.md) | [compaction](compaction.md) (12, 35), [handoff](handoff.md) (10), [merge](merge.md) (30), [usage](usage.md) (30) |
 | `agent/step-error` | [agent](agent.md) | [fallback](fallback.md) (50), [retry](retry.md) (60) |
 | `agent/stop` | [agent](agent.md) | [supervisor](supervisor.md) (50), [tasks](tasks.md) (50) |
 | `agent/stop-outstanding` | [agent](agent.md) | [supervisor](supervisor.md) (50), [tools-agent](tools-agent.md) (50) |

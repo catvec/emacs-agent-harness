@@ -12,12 +12,14 @@ The compact tool: an agent compacts its own conversation, on a running turn by q
 ## About
 
 A conversation that nears its model's context window is compacted on
-its own (harness-compaction.el), and a person can compact one by hand
+its own (harness-compaction.el), before a turn and, once it is over its
+limit, in the middle of one, and a person can compact one by hand
 from the UI (`harness-compact`).  Neither helps an agent that sees the
-context filling up mid-task: it can neither ask the user in time nor
-wait for `agent/before-turn`.  This module gives it the `compact`
-tool, which calls the one core path (`compaction/compact`), so what
-the tool does is exactly what compacting by hand does.
+context filling up mid-task and wants it compacted now, at a point of
+its own, with a kind of its own, before the limit: it can neither ask
+the user in time nor wait for `agent/before-turn`.  This module gives it
+the `compact` tool, which calls the one core path (`compaction/compact`),
+so what the tool does is exactly what compacting by hand does.
 
 The turn the tool runs in is the reason for `mode`: the session is
 always running one when the agent calls it, and a compaction must not

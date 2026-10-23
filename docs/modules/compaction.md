@@ -2,7 +2,7 @@
 
 # compaction
 
-Summarise the transcript when it nears the context window; queue or interrupt one while a turn runs.
+Summarise the transcript when it nears the context window, before a turn or in the middle of one; queue or interrupt one while a turn runs.
 
 - **Runs in:** the harness process
 - **Source:** [lisp/modules/harness-compaction.el](../../lisp/modules/harness-compaction.el)
@@ -68,9 +68,19 @@ it, the compaction one more message of it, and so would save
 nothing: its provider state goes (`session/set-provider-state`), and
 its next request starts a new conversation that the compaction opens.
 
-Automatic compaction hangs on the `agent/before-turn` filter: when
-the last request's context exceeds window minus reserve, the turn
-waits for the compaction and then proceeds.  Providers that report
+Automatic compaction hangs on two filters, and in both the context
+that counts is the last request's: when it exceeds window minus
+reserve, the turn waits for the compaction and then proceeds.
+`agent/before-turn` compacts before a turn starts.  `agent/step`,
+the boundary between two steps of a turn that runs, compacts in the
+middle of one (`harness-compaction-mid-turn`, on unless turned off):
+a turn of many tool calls -- an unattended task's -- can outgrow the
+window long before it ends, and would otherwise run on past the limit
+until the next message.  Such a compaction ends in a note telling the
+model its work is not finished, so it carries on from the summary.  A
+compaction that did not bring the context under the limit, or failed,
+is not made again at once (`harness-compaction--mid-turn-due-p`): it
+would repeat at every step.  Providers that report
 `:compaction hosted` compact on their own side and are left alone.
 A compaction asked for while a turn runs (`compaction/compact` OPTS
 `:queue` or `:interrupt`) is recorded in `harness-compaction--pending`
@@ -135,6 +145,7 @@ the token count progressively.
 
 - `harness-compaction-brief-model` — Model that writes a brief summary, as PROVIDER:NAME, or `auto`.
 - `harness-compaction-kind` — How a conversation that nears its model's context window is compacted.
+- `harness-compaction-mid-turn` — Non-nil to compact in the middle of a turn that outgrew its context limit.
 
 ## Uses
 
@@ -175,6 +186,8 @@ the token count progressively.
 
 - `agent/before-turn` at 20 → `harness-compaction--before-turn`
 - `agent/before-turn` at 12 → `harness-compaction--gate`
+- `agent/step` at 35 → `harness-compaction--before-step`
+=======
 - `agent/before-turn` at 11 → `harness-compaction--wait-gate`
 - `agent/hold` → `harness-compaction--on-hold`
 - `agent/step` at 12 → `harness-compaction--gate`

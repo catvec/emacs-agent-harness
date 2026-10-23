@@ -5078,6 +5078,36 @@ a cold cache does.  Every other compaction reads as it did."
           (should (= 2 (how-many "before the prompt cache lapsed" (point-min) (point-max))))
           (should (= 1 (how-many "the prompt cache being cold" (point-min) (point-max)))))))))
 
+(ert-deftest harness-ui-chat-compaction-says-when-it-was-made-in-the-middle-of-a-turn ()
+  "A compaction made in the middle of a turn that outgrew its limit says so in its header.
+Whatever its kind is: a summary, or a brief one that names its writer.
+One that is marked as made at another time does not, and every other
+compaction reads as it did."
+  (harness-ui-chat-test-with
+    (let ((sid (harness-ui-chat-test-session)))
+      (harness-call 'session/append sid '(:kind user :content "fix the parser"))
+      (harness-call 'session/append sid
+                    (list :kind 'compaction :content "The parser needs fixing."
+                          :meta (list :compaction "summary" :mid-turn t)))
+      (harness-call 'session/append sid
+                    (list :kind 'compaction :content "Still the parser."
+                          :meta (list :compaction "brief" :model "demo:scripted" :mid-turn t)))
+      (harness-call 'session/append sid
+                    (list :kind 'compaction :content "Cold." :meta (list :compaction "fresh" :mid-turn :false)))
+      (harness-call 'session/append sid
+                    (list :kind 'compaction :content "Plain." :meta (list :compaction "summary")))
+      (let ((buf (harness-ui-chat-test-open sid))
+            (scripted (harness-ui-model-label "demo:scripted")))
+        (should (harness-ui-chat-test-find
+                 buf "context compacted, in the middle of a turn (4 words)"))
+        (should (harness-ui-chat-test-find
+                 buf (format "context compacted into a brief summary by %s, in the middle of a turn (3 words)"
+                             scripted)))
+        (should (harness-ui-chat-test-find buf "context compacted to start afresh (1 words)"))
+        (should (harness-ui-chat-test-find buf "context compacted (1 words)"))
+        (with-current-buffer buf
+          (should (= 2 (how-many "in the middle of a turn" (point-min) (point-max)))))))))
+
 (ert-deftest harness-ui-chat-tool-result-names-its-decision ()
   "A call a lasting decision's rule refused names the decision, above the fold.
 The line follows the decision: [Undo], then [Redo] with the text struck

@@ -1668,10 +1668,10 @@ its answer where it wanted to move.
 ### Compacting a conversation
 
 A conversation that nears its model's context window is compacted
-before the next turn, unless its provider compacts on its own side, as
-Claude Code does: something much smaller stands in for it from then on,
-and the earlier messages stay in the conversation tree. There are five
-kinds:
+before the next turn, and in the middle of a turn that outgrows it (see
+below), unless its provider compacts on its own side, as Claude Code
+does: something much smaller stands in for it from then on, and the
+earlier messages stay in the conversation tree. There are five kinds:
 
 - **Summary**: the session's model summarises the whole conversation.
   It reads all of it again, from the prompt cache while that lasts.
@@ -1709,7 +1709,26 @@ The first three kinds are the ways a switch to another provider can hand the
 conversation over (see [Switching model or provider](#switching-model-or-provider)),
 here on the session's own model. Automatic compaction makes the kind
 `harness-compaction-kind` says, a summary by default; the settings page
-has both under **Compaction**.
+has it under **Compaction**, with the model that writes a brief summary.
+
+A turn of many tool calls, an unattended task's, can outgrow its
+context window long before it ends, so the conversation is compacted in
+the middle of a turn too. At the first step boundary after the context
+went over the limit (the window less a reserve for the summary; a
+task's window is capped, see `harness-tasks-context-limit`), the turn
+waits for the compaction, of the kind `harness-compaction-kind` says,
+and goes on from it, no matter what it was in the middle of. The
+compaction ends in a note telling the model that its work is not
+finished, so it carries on from the summary without waiting for you, and
+the chat header says "in the middle of a turn". A message you send while
+the summary is being written is carried over after it, so the model
+reads it. A compaction that did not bring the context under the limit,
+or that failed, is not made again at every step: the next try waits
+three steps, then six, and so on. This is on by default; turn off
+`harness-compaction-mid-turn` (**Compaction** on the settings page) to
+compact only before the next turn, as it used to be, and the turn then
+runs on past the limit until it is over. A provider that compacts on
+its own side is left alone either way.
 
 With the `ui-compact` module (`:ui compact`), `C-c h C` (`M-x
 harness-compact`, or Compact context in the menu) compacts the current
@@ -3359,9 +3378,11 @@ with), `recap` writes the recaps on the cards,
   when the agent hands in, the provider stops it (an error, or the
   model hitting its output limit), a merge hold pauses it at a step
   boundary, or you cancel it from its session. Automatic compaction
-  (above) runs between turns, so a turn that outgrows the model's
-  window reaches the provider's own error; budgets still refuse *new*
-  turns once they are spent.
+  (above) also runs in the middle of a turn, at a step boundary, so a
+  turn that outgrows its context limit is compacted and goes on
+  (`harness-compaction-mid-turn`, on unless you turn it off; with it
+  off, a turn that outgrows the model's window reaches the provider's
+  own error); budgets still refuse *new* turns once they are spent.
 - Finished work waits in *Ready for review*. Press `v` to verify it
   (its branch merges and the task is done) or `R` to send it back to
   its session with feedback. Any message you send to a task waiting
@@ -4292,8 +4313,8 @@ model, the models of a plan's tiers, the step budget, the fork limit),
 thinking levels they run at, see [Model tiers](#model-tiers)),
 **Spending** (the
 budget, one for all sessions together), **Compaction** (what stands in
-for a conversation that grew too long, and which model writes a brief
-summary), **Files and safety** (directory access,
+for a conversation that grew too long, whether a turn is compacted in
+its middle, and which model writes a brief summary), **Files and safety** (directory access,
 sandbox policy, standing permission rules), **Task board** (what task
 sessions start with, and when their work counts as done), **Commits**
 (whether commits lose the lines crediting Claude, see [Commit messages

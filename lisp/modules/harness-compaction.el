@@ -58,9 +58,19 @@
 ;; nothing: its provider state goes (`session/set-provider-state'), and
 ;; its next request starts a new conversation that the compaction opens.
 ;;
-;; Automatic compaction hangs on the `agent/before-turn' filter: when
-;; the last request's context exceeds window minus reserve, the turn
-;; waits for the compaction and then proceeds.  Providers that report
+;; Automatic compaction hangs on two filters, and in both the context
+;; that counts is the last request's: when it exceeds window minus
+;; reserve, the turn waits for the compaction and then proceeds.
+;; `agent/before-turn' compacts before a turn starts.  `agent/step',
+;; the boundary between two steps of a turn that runs, compacts in the
+;; middle of one (`harness-compaction-mid-turn', on unless turned off):
+;; a turn of many tool calls -- an unattended task's -- can outgrow the
+;; window long before it ends, and would otherwise run on past the limit
+;; until the next message.  Such a compaction ends in a note telling the
+;; model its work is not finished, so it carries on from the summary.  A
+;; compaction that did not bring the context under the limit, or failed,
+;; is not made again at once (`harness-compaction--mid-turn-due-p'): it
+;; would repeat at every step.  Providers that report
 ;; `:compaction hosted' compact on their own side and are left alone.
 ;; A compaction asked for while a turn runs (`compaction/compact' OPTS
 ;; `:queue' or `:interrupt') is recorded in `harness-compaction--pending'
@@ -178,6 +188,20 @@ nil uses the session's own model."
   :safe (lambda (v) (or (memq v '(auto nil)) (stringp v)))
   :group 'harness)
 
+(defcustom harness-compaction-mid-turn t
+  "Non-nil to compact in the middle of a turn that outgrew its context limit.
+A turn that makes many tool calls -- an unattended task's -- can grow its
+context past the limit (the window less the reserve; a task's window is
+capped by `harness-tasks-context-limit') long before it ends.  With this
+on, the default, the conversation is compacted as `harness-compaction-kind'
+says at the first step boundary after the context went over the limit, no
+matter what the turn is in the middle of: the turn waits for the
+compaction and carries on from it, its model told that its work is not
+finished.  With nil the conversation is compacted only before the next
+turn, so a turn runs on past the limit until it is over.  A provider that
+compacts on its own side (Claude Code, Copilot) is left alone either way."
+  :type 'boolean :safe #'booleanp :group 'harness)
+
 (defconst harness-compaction--system-prompt
   "You are writing a handoff summary so that a fresh agent can continue this work without access to the conversation above.
 
@@ -244,6 +268,32 @@ of the window; the rest, oldest first, are dropped.")
   "Session id -> the compaction waiting for that session's next boundary.
 A plist (:opts OPTS :interrupt BOOL :running PROMISE), `:running' set
 once it is under way.")
+
+(defconst harness-compaction--mid-turn-note
+  "Harness note: this compaction was made in the middle of your turn, because the conversation reached its context limit while you were working, so the work it describes is not finished.  Carry on with it from where it stood, without waiting for the user; check the files and the state first if you are unsure where you were."
+  "Ends a compaction made in the middle of a turn (`harness-compaction-mid-turn').
+Nothing follows it in what the model is sent next, a message of the
+user's being what ends a compaction before a turn, so it is told to go
+on rather than to wait to be asked.")
+
+(defconst harness-compaction--mid-turn-cooldown 3
+  "Step boundaries a turn lets pass after a mid-turn compaction that did not help.
+A compaction in the middle of a turn that left the context over the
+limit, or failed, is not tried again at the very next boundary: a
+conversation that stays over a small limit would be compacted at every
+step, and a summariser that keeps failing asked every time.  It is
+tried again at the third boundary over the limit after it, the sixth
+after a second try that did not help, and so on, up to the twenty-fourth;
+a boundary that finds the context under the limit starts it over
+\(`harness-compaction--mid-turn-due-p').")
+
+(defvar harness-compaction--mid-turn (make-hash-table :test 'equal)
+  "Session id -> how the running turn's compactions in its middle went.
+A plist (:tries N :since N): how many tries in a row left the context
+over the limit or failed, and how many step boundaries over the limit
+have passed since the latest.  Gone once a boundary finds the context
+under the limit, and when the turn ends.  Kept beside the other tables
+of this module.")
 
 (defun harness-compaction-busy-p (session-id)
   "Non-nil while a compaction of SESSION-ID is under way."
@@ -899,11 +949,17 @@ the summariser was given (see `compaction/compact'), KIND one of
 `harness-compaction-kinds' \(`summary' by default), META more for
 the node's `:meta': a transcript's `:file', a handoff's `:handoff', and
 KEEP nodes to append after the compaction node, verbatim, before
-TRAILING.  The conversation starts over from the node
+TRAILING.  META `:mid-turn' says it was made in the middle of a turn
+\(`harness-compaction-mid-turn'): the content then ends in the note
+telling the model to carry on (`harness-compaction--mid-turn-note').
+The conversation starts over from the node
 \(`harness-compaction--start-over')."
   (let* ((kind (or kind 'summary))
          (keep (append keep nil))
          (content (harness-compaction--with-history session-id content kind))
+         (content (if (harness-json-true-p (plist-get meta :mid-turn))
+                      (concat content "\n\n" harness-compaction--mid-turn-note)
+                    content))
          (node (harness-call 'session/append session-id
                              (list :kind 'compaction :content content
                                    :meta (append (list :compacted-head old-head :model model
@@ -1133,7 +1189,11 @@ KIND is the kind of summary (`summary' or `brief'), CAVEAT a note to
 end it with, or nil, and META more for the node's `:meta' (see
 `harness-compaction--finish').  The node's content keeps the
 conversation's first and last messages verbatim around the summary
-\(`harness-compaction--with-verbatim-ends')."
+\(`harness-compaction--with-verbatim-ends').  The unanswered user
+messages carried over after it are those there are when the summary
+is in, not when it was asked for: one sent to the turn meanwhile, which
+a summary of a long conversation takes a while to write, lies before
+the compaction node otherwise, where the model never reads it."
   (let* ((old-head (plist-get session :head))
          (path (harness-call 'session/nodes session-id))
          (trailing (harness-compaction--trailing-user-nodes path))
@@ -1176,7 +1236,8 @@ conversation's first and last messages verbatim around the summary
                               (and (plist-get usage :input)
                                    (+ (plist-get usage :input) (or (plist-get usage :cache-read) 0)))
                               estimate)
-                          trailing context kind meta))
+                          (harness-compaction--trailing-user-nodes (harness-call 'session/nodes session-id))
+                          context kind meta))
                       (error (harness-compaction--fail session-id promise err))))))
                (_ nil)))))))
 
@@ -1210,11 +1271,14 @@ returns its promise."
                                                                       (plist-get opts :caveat) meta))
                                    (_ (harness-compaction--transcript session-id session meta))))
               (error (harness-compaction--fail session-id promise err)))
-          (harness-call 'session/hint session-id
-                        (if (eq kind 'brief)
-                            (format "Compacting context: a brief summary by %s…"
-                                    (harness-compaction--model-label model))
-                          "Compacting context…"))
+          (let ((where (if (harness-json-true-p (plist-get meta :mid-turn))
+                           " in the middle of the turn"
+                         "")))
+            (harness-call 'session/hint session-id
+                          (if (eq kind 'brief)
+                              (format "Compacting context%s: a brief summary by %s…"
+                                      where (harness-compaction--model-label model))
+                            (format "Compacting context%s…" where))))
           (harness-then (if (eq context 'sample)
                             ;; A sample is the point: do not hand the
                             ;; summariser the whole conversation on a fork.
@@ -1387,7 +1451,9 @@ filters: the step that goes on must find the compaction in its messages."
 (defun harness-compaction--on-turn-ended (session-id &rest _)
   "Run the compaction that waited for SESSION-ID's turn, now that it is over.
 A turn interrupted by a queued compaction ends `cancelled', so it runs
-then too."
+then too.  What the turn learned of compacting in its middle goes with
+it (`harness-compaction--mid-turn')."
+  (remhash session-id harness-compaction--mid-turn)
   (when (gethash session-id harness-compaction--pending)
     (harness-run-soon
      (lambda ()
@@ -1398,6 +1464,7 @@ then too."
 
 (defun harness-compaction--on-deleted (session-id &rest _)
   "Forget the compaction of SESSION-ID, which is gone."
+  (remhash session-id harness-compaction--mid-turn)
   (remhash session-id harness-compaction--pending))
 
 ;;;; A message that comes while a compaction runs
@@ -1478,6 +1545,79 @@ The compaction is of `harness-compaction-kind'."
                     (lambda (_err) (funcall next value)))))
   nil)
 
+;;;; Automatic compaction in the middle of a turn
+
+(defun harness-compaction--note-activity (session-id phase)
+  "Show SESSION-ID's running turn as doing PHASE, or as waiting for the model.
+PHASE is a symbol such as `compacting', or nil for the turn's usual
+wait for its model.  The chat says what the turn does while it takes
+no step (`agent/activity'); a turn that is not running shows nothing,
+and a failure to note it is logged, never raised."
+  (when (harness-method-exists-p 'agent/note-activity)
+    (condition-case err
+        (harness-call 'agent/note-activity session-id (and phase (list :phase phase)))
+      (error (harness-log 'warn "compaction: could not note the activity of %s: %s"
+                          session-id (harness-error-short-message err))))))
+
+(defun harness-compaction--mid-turn-due-p (session-id)
+  "Say whether the boundary SESSION-ID's turn is at is due a compaction.
+Called at a step boundary where the context is over its limit, and so
+counts it.  The first compaction of a turn is due at once.  One that
+did not help -- the context is over the limit again at the next
+boundary -- or failed is tried again only after
+`harness-compaction--mid-turn-cooldown' boundaries, twice as many after
+a second try that did not help and so on up to eight times as many:
+otherwise a conversation that stays over a small limit would be
+compacted at every step, and a summariser that keeps failing asked
+every time, with a note of its failure each.  A boundary that finds the
+context under the limit forgets all that (`harness-compaction--before-step')."
+  (let* ((state (gethash session-id harness-compaction--mid-turn))
+         (tries (or (plist-get state :tries) 0))
+         (since (1+ (or (plist-get state :since) 0)))
+         (pause (* harness-compaction--mid-turn-cooldown (expt 2 (min (max (1- tries) 0) 3))))
+         (due (or (zerop tries) (>= since pause))))
+    (puthash session-id
+             (if due (list :tries (1+ tries) :since 0) (list :tries tries :since since))
+             harness-compaction--mid-turn)
+    due))
+
+(defun harness-compaction--before-step (value next session)
+  "Compact SESSION in the middle of its turn when the context is over its limit.
+VALUE and NEXT are the `agent/step' filter arguments, the step being the
+turn's next request to its model, after the results of the tools the
+last one asked for are in.  The `agent/before-turn' gate only looks
+when a turn starts, and a turn of many tool calls can outgrow the window
+long before it ends.  So, with `harness-compaction-mid-turn' on, a
+context over the limit (`harness-compaction-needed-p') has the step wait
+for a compaction of `harness-compaction-kind', and goes on from it: the
+node tells the model its work is not finished.  Whatever the turn is
+doing, nothing else decides: not the cache, not who is waiting.  A
+provider that compacts on its own side is left alone, as before a turn,
+and a compaction that failed or did not help is not repeated at every
+step (`harness-compaction--mid-turn-due-p').  The step goes on whether
+the compaction was made or not.  SESSION is read again first: a handler
+earlier in the chain may have changed its model."
+  (let* ((id (plist-get session :id))
+         (session (or (ignore-errors (harness-call 'session/get id)) session)))
+    (cond
+     ((or (not (plist-get value :proceed)) (not harness-compaction-mid-turn))
+      (funcall next value))
+     ((not (harness-compaction-needed-p session))
+      (remhash id harness-compaction--mid-turn)
+      (funcall next value))
+     ((or (harness-compaction-hosted-p session)
+          (not (harness-compaction--mid-turn-due-p id)))
+      (funcall next value))
+     (t
+      (harness-compaction--note-activity id 'compacting)
+      (let ((carry-on (lambda (&rest _)
+                        (harness-compaction--note-activity id nil)
+                        (funcall next value))))
+        (harness-then (harness-call 'compaction/compact id
+                                    (list :kind harness-compaction-kind :meta (list :mid-turn t)))
+                      carry-on carry-on)))))
+  nil)
+
 (defun harness-compaction--init ()
   "Hook automatic and queued compaction into the turn loop."
   ;; A compaction under way holds a turn at 11, beside the one a cache
@@ -1491,6 +1631,11 @@ The compaction is of `harness-compaction-kind'."
   (harness-add-filter 'agent/before-turn #'harness-compaction--gate 12)
   (harness-add-filter 'agent/step #'harness-compaction--gate 12)
   (harness-add-filter 'agent/before-turn #'harness-compaction--before-turn 20)
+  ;; In the middle of a turn after the gates that may refuse the step or
+  ;; hold it (the budget's and the merge queue's, 30): a step that is
+  ;; not taken is not compacted for, and a hold ends before the context
+  ;; is looked at.
+  (harness-add-filter 'agent/step #'harness-compaction--before-step 35)
   (harness-on 'agent/turn-ended #'harness-compaction--on-turn-ended)
   (harness-on 'session/deleted #'harness-compaction--on-deleted))
 
@@ -1500,7 +1645,7 @@ The compaction is of `harness-compaction-kind'."
 (harness-declare-event 'compaction/failed "(SESSION-ID MESSAGE) when a compaction fails.")
 
 (harness-define-module 'compaction
-  :doc "Summarise the transcript when it nears the context window; queue or interrupt one while a turn runs."
+  :doc "Summarise the transcript when it nears the context window, before a turn or in the middle of one; queue or interrupt one while a turn runs."
   :requires '(session provider agent)
   :init #'harness-compaction--init)
 

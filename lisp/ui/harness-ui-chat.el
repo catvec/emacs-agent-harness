@@ -2436,7 +2436,9 @@ to open the file, a fresh start says so, and a cut old context says the
 oldest of it went.  One made because a message met a cold prompt cache
 \(harness-cowboy.el) says that too, and one made while the prompt cache
 still held the conversation, just before it lapsed
-\(harness-cache-compact.el, its `:meta' `:precompact'), says that."
+\(harness-cache-compact.el, its `:meta' `:precompact'), says that.  So does
+one made in the middle of a turn that outgrew its context limit
+\(harness-compaction.el, its `:meta' `:mid-turn')."
   (let* ((id (harness-chat-block-id block))
          (node (harness-chat-block-node block))
          (content (or (plist-get node :content) ""))
@@ -2464,6 +2466,8 @@ still held the conversation, just before it lapsed
                                                     ", the prompt cache being cold")
                                                    ((consp (plist-get meta :precompact))
                                                     ", before the prompt cache lapsed")
+                                                   ((harness-json-true-p (plist-get meta :mid-turn))
+                                                    ", in the middle of a turn")
                                                    (t ""))
                                              (harness-chat--words content))
                                      'face 'harness-summary-face)

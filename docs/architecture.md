@@ -4165,7 +4165,8 @@ decisions.
   it.  A turn cancelled while the chain held it does not start;
   `:proceed` nil ends it `blocked`, with the hint "Turn not started:
   REASON"; async filter `agent/step` at every step
-  boundary (same value shape) — merge holds pause here; async filter
+  boundary (same value shape) — merge holds pause here, and compaction
+  (35) compacts a turn that outgrew its context limit; async filter
   `agent/step-error` when a provider request fails (value `(:retry
   nil)`, args session and FAILURE `(:error TEXT :error-kind KIND
   :resets FLOAT :model MODEL-ID :step N)`, the `done` event's keys plus
@@ -4211,9 +4212,12 @@ decisions.
   A turn has no step limit: long unattended work is the point, and the
   loop ends when the model stops, the provider errors or hits its
   output limit, the user cancels, or an `agent/step` filter (a merge
-  hold) pauses it at a boundary.  Automatic compaction runs between
-  turns (`agent/before-turn'), not inside one, so a native-provider
-  turn that outgrows the window reaches the provider's own error;
+  hold) pauses it at a boundary.  Automatic compaction runs before a
+  turn (`agent/before-turn`) and, unless `harness-compaction-mid-turn`
+  is turned off, at a step boundary inside one (`agent/step`), so a
+  native-provider turn that outgrows its context limit is compacted and
+  goes on from the compaction; with the setting off, such a turn
+  reaches the provider's own error;
   a hard budget spent mid-turn ends the turn at the next step boundary
   (see "usage" below), and one already spent refuses a new turn.
 - Images a tool returns for the model (`:images` of its result, see
@@ -4946,7 +4950,8 @@ and tools.
   cache warm weighs one against the other (cache-warm).
 - Settings (section "Compaction"): `harness-compaction-kind`, the kind
   automatic compaction makes (`summary`; any of the kinds, `truncate`
-  included), and `harness-compaction-brief-model`.
+  included), `harness-compaction-mid-turn` (on) and
+  `harness-compaction-brief-model`.
 - Auto: `agent/before-turn` compacts, as `harness-compaction-kind`
   says, when the context comes within
   `harness-compaction--context-reserve` of the window unless the provider
@@ -4957,6 +4962,41 @@ and tools.
   earlier (`harness-tasks-context-limit', 384k tokens by default).
   It judges the session as it is then, read again: the fallback,
   earlier in the chain, may have moved it to another model.
+- Auto, in the middle of a turn: the `agent/step` filter
+  `harness-compaction--before-step` (priority 35: after a handoff's 10
+  and a queued compaction's 12, so the fresh context is what it sees,
+  and after the budget's and the merge hold's 30, so that a step they
+  refuse is not compacted for and a hold has ended before the context
+  is looked at) does the same at every step boundary of a running turn,
+  while `harness-compaction-mid-turn` is on (the default), whatever the
+  turn is in the middle of, with the same conditions (the gate goes on,
+  `harness-compaction-needed-p`, the provider does not compact
+  on its own side).  A turn of many tool calls, an unattended task's,
+  would otherwise outgrow the window long before it ends.  The step
+  waits for `compaction/compact` of `harness-compaction-kind`, asked
+  with OPTS `:meta` `(:mid-turn t)`, and goes on whether it was made
+  or failed.  `:mid-turn` is kept on the node's `:meta`: the content then
+  ends in `harness-compaction--mid-turn-note`, telling the model the work
+  it describes is not finished and to carry on without waiting for the
+  user (nothing follows the compaction in what the model is sent next,
+  where a message of the user's ends a compaction made before a turn),
+  the "Compacting context" hint says "in the middle of the turn", and
+  the chat's header says ", in the middle of a turn".  While it runs the
+  turn's activity is `compacting` (`agent/note-activity`), and `waiting`
+  again once it is done.  A compaction that did not bring the context
+  under the limit, or failed, is not tried at every step: at a boundary
+  over the limit the first try is due at once, the next after three
+  more boundaries over the limit, then six, twelve and twenty-four
+  (`harness-compaction--mid-turn-due-p`, state in
+  `harness-compaction--mid-turn`: `(:tries N :since N)`), and a boundary
+  under the limit starts it over; the state goes when the turn ends or
+  the session is deleted.  The unanswered user messages a compaction
+  carries over after its node are those there are when the summary is
+  in (`harness-compaction--request`), not when it was asked for: a
+  message the user sends to the turn while a long summary is written
+  would lie before the node, where the model never reads it.  A carried
+  copy of such a steering message is marked `:delivered-after` the
+  compaction node, so a chat shows it delivered, not queued for good.
 
 ### cowboy
 

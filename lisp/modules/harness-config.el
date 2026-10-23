@@ -203,8 +203,8 @@ reader of the layers skips it (see `harness-config--layered-keys').")
      :keys (harness-budget))
     (compaction
      :title "Compaction"
-     :doc "What stands in for a conversation that grew too long, and which model writes a brief summary of one.  Compacting by hand offers every kind, with what each costs."
-     :keys (harness-compaction-kind harness-compaction-brief-model))
+     :doc "What stands in for a conversation that grew too long, whether a turn that outgrows its context limit is compacted in its middle or only before the next one, and which model writes a brief summary.  Compacting by hand offers every kind, with what each costs."
+     :keys (harness-compaction-kind harness-compaction-mid-turn harness-compaction-brief-model))
     (cowboy
      :title "Cold cache"
      :doc "What a message to a session whose prompt cache went cold does first.  A provider caches a conversation for a while after each request; a message after that sends all of it again, uncached.  The session asks, with what each choice costs, unless asking is off or it never waits for you: then the default goes first.  Answering \"always\" with a choice makes it the default and stops the asking."

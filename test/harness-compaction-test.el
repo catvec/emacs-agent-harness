@@ -13,6 +13,9 @@
 (defvar harness-compaction--pending)
 (defvar harness-compaction-kind)
 (defvar harness-compaction-brief-model)
+(defvar harness-compaction-mid-turn)
+(defvar harness-compaction--mid-turn)
+(defvar harness-compaction--mid-turn-note)
 (defvar harness-compaction--request-text)
 (defvar harness-compaction--summary-output)
 (defvar harness-cache-ttl)
@@ -36,6 +39,7 @@
      (clrhash harness-agent--turns)
      (clrhash harness-compaction--running)
      (clrhash harness-compaction--pending)
+     (clrhash harness-compaction--mid-turn)
      (let ((harness-provider-demo--delay 0.005)
            (harness-provider-demo-script-override nil)
            (harness-compaction--context-reserve 1000)
@@ -1100,6 +1104,371 @@ compaction once the turn is over, however it ended."
       (harness-compaction-test--running id)
       (should-error (harness-await (harness-call 'compaction/compact id '(:kind "transcript" :idle t)))
                     :type 'harness-error))))
+
+;;;; In the middle of a turn
+
+(defun harness-compaction-test-define-echo ()
+  "Define the tool `echo', which the turns of the tests below call."
+  (harness-define-tool "echo" :label "Echo" :description "echo" :kind 'read
+                       :handler (lambda (input _ctx) (format "echoed %s" (plist-get input :text)))))
+
+(defun harness-compaction-test-requests-of (thunk)
+  "Call THUNK; return the provider requests made meanwhile, oldest first."
+  (let ((requests nil))
+    (cl-letf* ((orig (symbol-function 'harness-method/provider/complete))
+               ((symbol-function 'harness-method/provider/complete)
+                (lambda (req) (push req requests) (funcall orig req))))
+      (funcall thunk))
+    (nreverse requests)))
+
+(defun harness-compaction-test-summary-request-p (request)
+  "Non-nil when REQUEST asks a model for the summary of a compaction."
+  (string-match-p "handoff summary" (or (plist-get request :system) "")))
+
+(defun harness-compaction-test-tool-turn (contexts &optional on-summary)
+  "Return a demo script for a turn that calls the tool `echo' at every step but its last.
+CONTEXTS lists the context each model call of the turn reports -- the
+size of its prompt -- the last one answering instead of calling a tool.
+A request for the summary of a compaction gets one (SUMMARY TEXT), after
+ON-SUMMARY, a function of no arguments, was called when it is given."
+  (let ((step 0))
+    (lambda (request)
+      (if (harness-compaction-test-summary-request-p request)
+          (progn (when on-summary (funcall on-summary))
+                 harness-compaction-test-script)
+        (let ((context (nth step contexts)))
+          (cl-incf step)
+          (if (= step (length contexts))
+              `((:type text :delta "All done.")
+                (:type usage :input 10 :output 5 :context ,context)
+                (:type done :stop-reason end-turn))
+            `((:type text :delta ,(format "Step %d." step))
+              (:type usage :input 10 :output 5 :context ,context)
+              (:type tool-call :id ,(format "call-%d" step) :name "echo"
+                     :input (:text ,(format "%d" step))))))))))
+
+(defun harness-compaction-test-step-gate (id &optional value)
+  "Run the `agent/step' gate of session ID, VALUE the gate so far; return what it lets through."
+  (harness-await (harness-run-filter-async 'agent/step (or value (list :proceed t))
+                                           (harness-call 'session/get id))))
+
+(defun harness-compaction-test-compaction-count (id)
+  "Return how many compactions session ID's transcript holds."
+  (cl-count 'compaction (harness-compaction-test-kinds id)))
+
+(ert-deftest harness-compaction-mid-turn-compacts-between-the-steps ()
+  "A turn whose context went over the limit is compacted before its next step.
+The first step reports a context of 7500 tokens, over the 7000 an 8000
+window leaves.  The boundary after its tool call has the conversation
+summarised, and the second step goes on from the summary, told that its
+work is not finished: one turn throughout, ended by its model."
+  (harness-compaction-test-with
+    (harness-compaction-test-define-echo)
+    (let* ((id (harness-compaction-test-session))
+           (harness-provider-demo-script-override (harness-compaction-test-tool-turn '(7500 600)))
+           (steps nil) (phases nil) (done nil))
+      (should harness-compaction-mid-turn)
+      (harness-on 'agent/step-started (lambda (_ n) (push n steps)))
+      (harness-on 'agent/activity-changed (lambda (_ activity) (push (plist-get activity :phase) phases)))
+      (harness-on 'compaction/done (lambda (sid node) (push (list sid (plist-get node :id)) done)))
+      (let ((requests (harness-compaction-test-requests-of
+                       (lambda ()
+                         (should (eq 'end-turn (plist-get (harness-await (harness-call 'agent/prompt id "go"))
+                                                          :stop-reason)))))))
+        ;; The turn's first step, the summary, the step that goes on from it.
+        (should (= 3 (length requests)))
+        (should (plist-get (nth 0 requests) :tools))
+        (should (harness-compaction-test-summary-request-p (nth 1 requests)))
+        (should (null (plist-get (nth 1 requests) :tools)))
+        (should (plist-get (nth 2 requests) :tools))
+        ;; That step sends the summary alone: the work before it is in it.
+        (let* ((messages (plist-get (nth 2 requests) :messages))
+               (blocks (plist-get (car messages) :content))
+               (text (plist-get (car blocks) :text)))
+          (should (= 1 (length messages)))
+          (should (= 1 (length blocks)))
+          (should (eq 'user (plist-get (car messages) :role)))
+          (should (string-prefix-p "Summary of the conversation so far:\n\nSUMMARY TEXT" text))
+          (should (string-suffix-p harness-compaction--mid-turn-note text))))
+      ;; Two steps of one turn, the compaction between them.
+      (should (equal '(2 1) steps))
+      (should (equal '(user assistant user assistant tool-call tool-result hint compaction hint assistant)
+                     (harness-compaction-test-kinds id)))
+      (let ((node (car (harness-compaction-test-compactions id))))
+        (should (equal "summary" (harness-node-compaction-kind node)))
+        (should (eq t (plist-get (plist-get node :meta) :mid-turn)))
+        (should (string-suffix-p harness-compaction--mid-turn-note (plist-get node :content)))
+        (should (equal (list (list id (plist-get node :id))) done)))
+      (let ((hints (harness-compaction-test-hints id)))
+        (should (equal "Compacting context in the middle of the turn…" (car hints)))
+        (should (string-match-p "\\`Compacted: [0-9.k]+ tokens → summary\\'" (cadr hints))))
+      ;; The chat is told the turn compacts, and then that it waits for its model again.
+      (should (equal '(compacting waiting) (cl-subseq (member 'compacting (reverse phases)) 0 2)))
+      (should-not (harness-agent-running-p id))
+      (should (eq 'idle (plist-get (harness-call 'session/get id) :status)))
+      (should (= 600 (plist-get (plist-get (harness-call 'session/get id) :usage) :context)))
+      ;; What the turn learned of compacting goes with it.
+      (should-not (gethash id harness-compaction--mid-turn)))))
+
+(ert-deftest harness-compaction-mid-turn-can-be-turned-off ()
+  "With `harness-compaction-mid-turn' nil a turn runs on past the limit, as it did.
+Its conversation is compacted before the next turn all the same."
+  (harness-compaction-test-with
+    (harness-compaction-test-define-echo)
+    (let* ((id (harness-compaction-test-session))
+           (harness-compaction-mid-turn nil)
+           (harness-provider-demo-script-override (harness-compaction-test-tool-turn '(7500 7600)))
+           (requests (harness-compaction-test-requests-of
+                      (lambda () (harness-await (harness-call 'agent/prompt id "go"))))))
+      ;; Two steps and no summary: the second sends everything again.
+      (should (= 2 (length requests)))
+      (should (cl-every (lambda (request) (plist-get request :tools)) requests))
+      (should (= 5 (length (plist-get (cadr requests) :messages))))
+      (should (equal '(user assistant user assistant tool-call tool-result assistant)
+                     (harness-compaction-test-kinds id)))
+      (should-not (gethash id harness-compaction--mid-turn))
+      ;; The next turn meets the context before it starts.
+      (setq harness-provider-demo-script-override harness-compaction-test-script)
+      (harness-await (harness-call 'agent/prompt id "and now?"))
+      (let ((nodes (harness-compaction-test-compactions id)))
+        (should (= 1 (length nodes)))
+        (should-not (plist-get (plist-get (car nodes) :meta) :mid-turn))
+        (should-not (string-search harness-compaction--mid-turn-note (plist-get (car nodes) :content)))))))
+
+(ert-deftest harness-compaction-mid-turn-leaves-a-turn-under-its-limit-alone ()
+  "A turn that stays under its limit is not compacted in its middle."
+  (harness-compaction-test-with
+    (harness-compaction-test-define-echo)
+    (let* ((id (harness-compaction-test-session))
+           (harness-provider-demo-script-override (harness-compaction-test-tool-turn '(3000 6999)))
+           (requests (harness-compaction-test-requests-of
+                      (lambda () (harness-await (harness-call 'agent/prompt id "go"))))))
+      (should (= 2 (length requests)))
+      (should-not (harness-compaction-test-compactions id)))))
+
+(ert-deftest harness-compaction-mid-turn-step-gate-needs-the-turn-to-go-on-and-the-limit-passed ()
+  "The step gate compacts only a step that goes on, the option on, the context over its limit."
+  (harness-compaction-test-with
+    (let ((id (harness-compaction-test-session))
+          (harness-provider-demo-script-override harness-compaction-test-script))
+      ;; Under the limit: nothing to do.
+      (harness-call 'session/usage-add id '(:context 6999))
+      (should (plist-get (harness-compaction-test-step-gate id) :proceed))
+      (should (= 0 (harness-compaction-test-compaction-count id)))
+      ;; Over it, but another gate refused the step already: the refusal stands.
+      (harness-call 'session/usage-add id '(:context 7500))
+      (let ((gate (harness-compaction-test-step-gate id '(:proceed nil :reason "no money"))))
+        (should-not (plist-get gate :proceed))
+        (should (equal "no money" (plist-get gate :reason))))
+      (should (= 0 (harness-compaction-test-compaction-count id)))
+      ;; The option is off.
+      (let ((harness-compaction-mid-turn nil))
+        (should (plist-get (harness-compaction-test-step-gate id) :proceed)))
+      (should (= 0 (harness-compaction-test-compaction-count id)))
+      ;; Over the limit, the step goes on: compacted first.
+      (should (plist-get (harness-compaction-test-step-gate id) :proceed))
+      (should (= 1 (harness-compaction-test-compaction-count id)))
+      (should (eq t (plist-get (plist-get (car (harness-compaction-test-compactions id)) :meta) :mid-turn))))))
+
+(ert-deftest harness-compaction-mid-turn-is-not-made-for-a-step-another-gate-refuses ()
+  "A step the budget's gate refuses is not compacted for, which would only spend money.
+The gate that looks at hard budgets (priority 30) comes before the
+compaction in the middle of a turn: a step it refuses ends the turn
+`blocked', and the summary of a conversation it never sends on would
+be a request made over the budget.  The gate that holds a step for a
+merge works the same way, and a hold is over when the context is looked at."
+  (harness-compaction-test-with
+    (let* ((id (harness-compaction-test-session))
+           (harness-provider-demo-script-override harness-compaction-test-script)
+           (refuse (lambda (value next _session)
+                     (funcall next (if (plist-get value :proceed)
+                                       (list :proceed nil :reason "the budget is spent")
+                                     value))))
+           (chain (lambda () (mapcar #'car (cl-remove-if-not (lambda (f) (memq (cdr f) '(harness-compaction--before-step)))
+                                                              (gethash 'agent/step harness--filters)))))
+           (requests 0))
+      (harness-call 'session/usage-add id '(:context 7500))
+      (should (equal '(35) (funcall chain)))
+      (harness-add-filter 'agent/step refuse 30)
+      (unwind-protect
+          (cl-letf* ((orig (symbol-function 'harness-method/provider/complete))
+                     ((symbol-function 'harness-method/provider/complete)
+                      (lambda (req) (cl-incf requests) (funcall orig req))))
+            (let ((gate (harness-compaction-test-step-gate id)))
+              (should-not (plist-get gate :proceed))
+              (should (equal "the budget is spent" (plist-get gate :reason))))
+            (should (= 0 requests))
+            (should (= 0 (harness-compaction-test-compaction-count id))))
+        (harness-remove-filter 'agent/step refuse))
+      ;; Without the refusal the same boundary compacts.
+      (should (plist-get (harness-compaction-test-step-gate id) :proceed))
+      (should (= 1 (harness-compaction-test-compaction-count id))))))
+
+(ert-deftest harness-compaction-mid-turn-leaves-hosted-providers-alone ()
+  "A provider that compacts on its own side is not compacted in the middle of a turn."
+  (harness-compaction-test-with
+    (let ((completes 0))
+      (harness-define-provider 'hostedfake
+        :label "Hosted fake"
+        :complete (lambda (req)
+                    (cl-incf completes)
+                    (let ((on-event (plist-get req :on-event)))
+                      (run-at-time 0.005 nil
+                                   (lambda ()
+                                     (funcall on-event '(:type text :delta "ok"))
+                                     (funcall on-event '(:type done :stop-reason end-turn)))))
+                    (list :cancel #'ignore))
+        :capabilities '(:hosted-loop t :compaction hosted))
+      (let ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)
+                                         :model "hostedfake:m" :context-window 8000)
+                           :id)))
+        (harness-call 'session/append id '(:kind user :content "please refactor the parser"))
+        (harness-call 'session/append id '(:kind assistant :content "Done: parser.el rewritten"))
+        (harness-call 'session/usage-add id '(:context 7500))
+        (should (harness-compaction-needed-p (harness-call 'session/get id)))
+        (should (harness-compaction-hosted-p (harness-call 'session/get id)))
+        (should (plist-get (harness-compaction-test-step-gate id) :proceed))
+        (should (= 0 completes))
+        (should (equal '(user assistant) (harness-compaction-test-kinds id)))
+        (should-not (gethash id harness-compaction--mid-turn))))))
+
+(ert-deftest harness-compaction-mid-turn-is-not-repeated-at-every-step ()
+  "A compaction that left the context over the limit waits some steps for the next.
+A conversation that stays over a small limit would otherwise be
+summarised at every step.  Each try that does not help waits twice as
+long, and a boundary that finds the context under the limit starts over."
+  (harness-compaction-test-with
+    (let ((id (harness-compaction-test-session))
+          (harness-provider-demo-script-override harness-compaction-test-script))
+      (cl-flet ((boundary (context)
+                  ;; The step before it reported CONTEXT as its prompt.
+                  (harness-call 'session/usage-add id (list :context context))
+                  (should (plist-get (harness-compaction-test-step-gate id) :proceed))
+                  (harness-compaction-test-compaction-count id)))
+        ;; Tried at once, then at the third boundary over the limit after
+        ;; it, then at the sixth after that.
+        (should (equal '(1 1 1 2 2 2 2 2 2 3)
+                       (cl-loop repeat 10 collect (boundary 7500))))
+        ;; Under the limit the tries start over: the next is due at once,
+        ;; and the one after it waits three boundaries again.
+        (boundary 100)
+        (should-not (gethash id harness-compaction--mid-turn))
+        (should (equal '(4 4 4 5) (cl-loop repeat 4 collect (boundary 7500))))))))
+
+(ert-deftest harness-compaction-mid-turn-failure-goes-on-and-is-not-asked-again-at-once ()
+  "A compaction that fails lets the step go on, and is tried again later, not at every step."
+  (harness-compaction-test-with
+    (let ((id (harness-compaction-test-session))
+          (harness-provider-demo-script-override '((:type done :stop-reason error :error "boom")))
+          (failed nil))
+      (harness-on 'compaction/failed (lambda (_sid msg) (push msg failed)))
+      (cl-flet ((boundary ()
+                  (harness-call 'session/usage-add id '(:context 7500))
+                  (should (plist-get (harness-compaction-test-step-gate id) :proceed))
+                  (length failed)))
+        (should (equal '(1 1 1 2) (cl-loop repeat 4 collect (boundary)))))
+      (should (equal '("boom" "boom") failed))
+      (should (equal '("Compaction failed: boom" "Compaction failed: boom")
+                     (cl-remove-if-not (lambda (hint) (string-prefix-p "Compaction failed" hint))
+                                       (harness-compaction-test-hints id))))
+      (should-not (harness-compaction-test-compactions id))
+      ;; Gone with the turn, and with the session.
+      (should (gethash id harness-compaction--mid-turn))
+      (harness-emit 'agent/turn-ended id 'end-turn)
+      (should-not (gethash id harness-compaction--mid-turn))
+      (puthash id (list :tries 2 :since 1) harness-compaction--mid-turn)
+      (harness-emit 'session/deleted id)
+      (should-not (gethash id harness-compaction--mid-turn)))))
+
+(ert-deftest harness-compaction-mid-turn-carries-over-a-message-sent-meanwhile ()
+  "A message sent to the turn while its summary is written reaches the model.
+The summary of a long conversation takes a while.  A message the user
+sends meanwhile lies before the compaction node on the path, which the
+model never reads, so it is carried over after it, as an unanswered
+message at the end of a conversation is: once, and delivered already,
+not queued for good."
+  (harness-compaction-test-with
+    (harness-compaction-test-define-echo)
+    (let* ((id (harness-compaction-test-session))
+           (harness-provider-demo-script-override
+            (harness-compaction-test-tool-turn
+             '(7500 600) (lambda () (harness-call 'agent/prompt id "also check the lexer"))))
+           (requests (harness-compaction-test-requests-of
+                      (lambda ()
+                        (should (eq 'end-turn (plist-get (harness-await (harness-call 'agent/prompt id "go"))
+                                                         :stop-reason)))))))
+      (should (= 3 (length requests)))
+      ;; The step after the summary reads the message once, after the summary.
+      (let* ((messages (plist-get (nth 2 requests) :messages))
+             (texts (mapcar (lambda (b) (plist-get b :text)) (plist-get (car messages) :content))))
+        (should (= 1 (length messages)))
+        (should (string-prefix-p "Summary of the conversation so far:" (car texts)))
+        (should (equal '("also check the lexer") (cdr texts))))
+      ;; The message was held while the summary was written: it is not
+      ;; before the compaction, but once, as a user message after it.
+      (let* ((nodes (harness-call 'session/nodes id))
+             (compaction (car (harness-compaction-test-compactions id)))
+             (pos (cl-position (plist-get compaction :id) nodes :key (lambda (n) (plist-get n :id)) :test #'equal))
+             (texts (lambda (ns) (delq nil (mapcar (lambda (n) (and (eq (plist-get n :kind) 'user) (plist-get n :content))) ns)))))
+        (should-not (member "also check the lexer" (funcall texts (cl-subseq nodes 0 pos))))
+        (should (equal '("also check the lexer") (funcall texts (nthcdr pos nodes))))))))
+
+(ert-deftest harness-compaction-mid-turn-makes-the-configured-kind ()
+  "A compaction in the middle of a turn is of `harness-compaction-kind', and tells the model to go on.
+A transcript asks no model, so the turn makes two requests, and the
+note that points at the file ends in the one that says the work goes on."
+  (harness-compaction-test-with
+    (harness-compaction-test-define-echo)
+    (let* ((id (harness-compaction-test-session))
+           (harness-compaction-kind 'transcript)
+           (harness-provider-demo-script-override (harness-compaction-test-tool-turn '(7500 600)))
+           (requests (harness-compaction-test-requests-of
+                      (lambda () (harness-await (harness-call 'agent/prompt id "go"))))))
+      (should (= 2 (length requests)))
+      (let* ((first (car (plist-get (cadr requests) :messages)))
+             (text (plist-get (car (plist-get first :content)) :text)))
+        (should (= 1 (length (plist-get (cadr requests) :messages))))
+        (should (string-prefix-p "The conversation so far was compacted into a file" text))
+        (should (string-suffix-p harness-compaction--mid-turn-note text)))
+      (let ((node (car (harness-compaction-test-compactions id))))
+        (should (equal "transcript" (harness-node-compaction-kind node)))
+        (should (eq t (plist-get (plist-get node :meta) :mid-turn)))
+        (should (file-exists-p (plist-get (plist-get node :meta) :file)))))))
+
+(ert-deftest harness-compaction-mid-turn-names-its-brief-summary ()
+  "The hint of a brief summary made in the middle of a turn says so, and who writes it."
+  (harness-compaction-test-with
+    (harness-compaction-test-tiered-provider)
+    (let ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)
+                                       :model "tiered:big" :context-window 8000)
+                         :id))
+          (harness-compaction-kind 'brief))
+      (harness-call 'session/append id '(:kind user :content "please refactor the parser"))
+      (harness-call 'session/usage-add id '(:context 7500))
+      (should (plist-get (harness-compaction-test-step-gate id) :proceed))
+      (should (equal "Compacting context in the middle of the turn: a brief summary by Small…"
+                     (car (harness-compaction-test-hints id))))
+      (should (equal "brief" (harness-node-compaction-kind (car (harness-compaction-test-compactions id))))))))
+
+(ert-deftest harness-compaction-mid-turn-is-a-setting ()
+  "The settings page offers the switch, in the compaction section, on by default."
+  (harness-compaction-test-with
+    (let* ((saved nil)
+           (setting (lambda ()
+                      (cl-find "harness-compaction-mid-turn"
+                               (plist-get (harness-call 'config/describe default-directory) :settings)
+                               :key (lambda (s) (plist-get s :key)) :test #'equal))))
+      (should (eq t (default-value 'harness-compaction-mid-turn)))
+      (should (equal "compaction" (plist-get (funcall setting) :section)))
+      (should (equal "t" (plist-get (funcall setting) :value)))
+      (should (eq :false (plist-get (funcall setting) :layered)))
+      (cl-letf (((symbol-function 'harness-save-user-option)
+                 (lambda (symbol value) (set symbol value) (push (cons symbol value) saved))))
+        (let ((harness-compaction-mid-turn harness-compaction-mid-turn))
+          (harness-call 'config/set 'harness-compaction-mid-turn "nil" :printed t :scope 'global)
+          (should (equal '((harness-compaction-mid-turn)) saved))
+          (should-not harness-compaction-mid-turn)
+          (should (equal "nil" (plist-get (funcall setting) :value))))))))
 
 ;;;; A message that comes while a compaction runs
 
