@@ -709,7 +709,8 @@ to the compose box, including `?`, so open the menu with `C-c h ?` or
 the `[menu]` button in the header line. A region selected in the
 transcript is dropped on the way, not deleted. On a request's panel the
 panel's own keys answer it instead: a question's digits, up to its
-number of options, and a permission's `y`, `s`, `a`, `n` and `N`,
+number of options (they tick an option instead, when the question
+allows several), and a permission's `y`, `s`, `a`, `n` and `N`,
 `<` and `>` when it lists what a lasting answer can cover (a narrower
 or a wider cover), and `e` when it has a pattern to edit. In the compose
 box those keys type,
@@ -718,7 +719,7 @@ so `C-c .` is how you aim a key at a panel from there (see
 
 | Key | Action |
 |---|---|
-| `C-c C-c` | Send the message; while the agent is working, it steers the current turn |
+| `C-c C-c` | Send the message; while the agent is working, it steers the current turn. With a question waiting, the box is the answer; when the question allows several options, the ones ticked go first, and with the box empty they are the answer |
 | `C-c C-q` | Queue the message for the next turn |
 | `e` / `d` / `s` on a queued message | With point on a message that says `queued`: edit it (it comes back into the box), delete it, or, for a message of the queue, send it now. A message sent while the agent works is queued until the model has it. From the box, `C-c .` and the key |
 | `RET` | Insert a newline |
@@ -1322,6 +1323,20 @@ and show one at a time. Switch between them with the tabs above the
 area, `n` and `p` on the panel, `C-c C-f` and `C-c C-b` anywhere in the
 buffer, or by moving point onto an option.
 
+Some questions let you pick several options (the agent asks with
+`allow_multiple`: the features to build, the files to change). Their
+options are check boxes: a digit, a click or `RET` on an option ticks it
+or unticks it, and answers nothing yet. `C-c C-c`, from the box or from
+the panel, or the panel's `[Send answer]` sends what is ticked, in the
+order the options were given, a line each; what you typed in the box
+goes after them, as a note, and with the box empty the options alone
+are the answer. The agent reads one option to a line. What is ticked
+belongs to the question, so the chat and a popout of it show the same
+boxes, and options with diagrams show the diagram of the one ticked
+last. Try it with the demo provider's `multi` prompt (`multi diagram`
+gives each option a diagram too). The phone app draws such a question
+with check boxes too.
+
 An image is a file the agent made, usually an SVG it wrote or a cropped
 screenshot of a mockup, in its session's temporary directory. Images
 are drawn black on white, as a browser shows them, so a drawing made
@@ -1445,7 +1460,8 @@ panel, `C-c .` and then the key says so, the same way everywhere: the
 dot is the one the harness menu already puts before a view's plain keys
 (`. F`).
 
-- `C-c . 1` picks the first option of the question above the box,
+- `C-c . 1` picks the first option of the question above the box (it
+  ticks it, when the question allows several),
   `C-c . y` allows the permission request, `C-c . F` starts the
   fullscreen layout from the task board's box, and `C-c . e` or
   `C-c . d` edits or deletes the queued message above it. Point comes

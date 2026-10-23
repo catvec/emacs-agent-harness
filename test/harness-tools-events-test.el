@@ -349,6 +349,25 @@ classifier reads them."
                (should (equal (list child) (plist-get record :sessions)))
                (should (string-match-p "finished: merged" summary))))))))))
 
+(ert-deftest harness-tools-events-a-question-says-when-several-options-may-be-picked ()
+  "The details of a question the user may tick several options of say so.
+An agent that watches for it and answers with session_control, one
+option to a line, has to know; an ordinary question says nothing."
+  (harness-tools-events-test-with
+    (let* ((child (harness-tools-events-test--session :name "Child"))
+           (details (lambda (payload)
+                      (plist-get (harness-tools-events--record
+                                  "question/asked" (float-time)
+                                  (list child (list :id "q1" :kind 'question :payload payload)))
+                                 :details))))
+      (should (eq t (plist-get (funcall details '(:question "Which?" :options ("A" "B") :allow-multiple t))
+                               :multiple)))
+      (should-not (plist-member (funcall details '(:question "Which?" :options ("A" "B"))) :multiple))
+      (should-not (plist-member (funcall details '(:question "Which?" :options ("A" "B") :allow-multiple :false))
+                                :multiple))
+      ;; Nothing to pick among.
+      (should-not (plist-member (funcall details '(:question "Which?" :allow-multiple t)) :multiple)))))
+
 ;;;; Deciding
 
 (ert-deftest harness-tools-events-a-decision-wakes-the-session ()

@@ -115,6 +115,15 @@ class InteractionRequest {
       [for (final option in asList(params['options'])) asStringOr(option, '')]
         ..removeWhere((option) => option.isEmpty);
 
+  /// Whether the person may tick several of the options (`allow_multiple`
+  /// of `ask_user`) rather than pick one.  Only a question that has options
+  /// is one; any value but `true` is a question of one choice, which is what
+  /// a harness that does not know the flag asks.
+  bool get allowMultiple =>
+      isQuestion &&
+      params['allowMultiple'] == true &&
+      questionOptions.isNotEmpty;
+
   List<JsonMap> get diagrams => asMapList(params['diagrams']);
 
   String? get questionId => asString(params['requestId']);
@@ -136,4 +145,26 @@ class InteractionRequest {
     'answer': answer,
     if (attachments.isNotEmpty) 'attachments': attachments,
   };
+}
+
+/// The answer to a question of several choices
+/// ([InteractionRequest.allowMultiple]): the labels of the options that were
+/// [ticked] (indices into [options]), in the order the options were given,
+/// one to a line, then what was [typed], if anything, as the last lines.  An
+/// index that is no option is left out.  Nothing ticked is the typed words
+/// alone, as for any question; nothing of either is the empty string, which
+/// is no answer.
+String multipleAnswer(
+  List<String> options,
+  Iterable<int> ticked,
+  String typed,
+) {
+  final picked = ticked.toSet();
+  final lines = <String>[
+    for (var index = 0; index < options.length; index++)
+      if (picked.contains(index)) options[index],
+  ];
+  final note = typed.trim();
+  if (note.isNotEmpty) lines.add(note);
+  return lines.join('\n');
 }

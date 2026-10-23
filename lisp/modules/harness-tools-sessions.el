@@ -866,7 +866,7 @@ INPUT is the tool call's input plist and CTX its context."
                          :action (:type "string" :enum ("cancel" "resume" "close" "rename" "answer"))
                          :name (:type "string" :description "New name, for rename.")
                          :question_id (:type "string" :description "Question to answer, for answer.")
-                         :answer (:type "string" :description "The answer, for answer."))
+                         :answer (:type "string" :description "The answer, for answer. A question that allows several options takes the ones picked, one to a line."))
             :required ("session_id" "action"))
   :kind 'meta
   :subject (lambda (input) (string-trim (format "%s %s" (or (plist-get input :action) "")

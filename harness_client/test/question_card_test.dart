@@ -9,6 +9,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harness_client/app.dart';
 import 'package:harness_client/src/state/app_controller.dart';
+import 'package:harness_client/src/state/interaction.dart';
 import 'package:harness_client/src/state/settings_controller.dart';
 import 'package:harness_client/src/ui/widgets/interaction_card.dart';
 import 'package:harness_client/src/ui/widgets/message_composer.dart';
@@ -138,6 +139,23 @@ Finder get _field =>
 Finder get _sendAnswer => find.text('Send answer');
 Finder get _sendTyped => find.byTooltip('Send typed answer');
 
+/// The button that sends the options picked or ticked, whatever it says
+/// (`Send answer`, `Send answer (2)`).
+Finder get _sendButton => find.ancestor(
+  of: find.textContaining('Send answer'),
+  matching: find.byType(FilledButton),
+);
+
+/// Whether the button that sends the answer can be pressed.
+bool _canSend(WidgetTester tester) =>
+    tester.widget<FilledButton>(_sendButton).onPressed != null;
+
+/// The options of a question of several choices.
+const _features = ['Dark mode', 'Offline sync', 'Notifications', 'Widgets'];
+
+/// A question of several choices, with check boxes: how many are ticked.
+int _ticks() => find.byIcon(Icons.check_box_rounded).evaluate().length;
+
 /// Whether the part of [finder] the screen shows is all of it.
 void _expectInSight(
   WidgetTester tester,
@@ -232,6 +250,51 @@ void main() {
           await tester.tap(_sendTyped);
           await _settle(tester, 6);
           expect(await reply, {'answer': 'In tabs, folded away'});
+        });
+
+        testWidgets('a question of several choices is answered with the '
+            'options ticked', (tester) async {
+          final rig = await _rig();
+          await _open(tester, rig, phone);
+          final reply = rig.harness.askUser(
+            's1',
+            question: _longQuestion,
+            options: _layouts,
+            diagrams: _diagrams,
+            allowMultiple: true,
+          );
+          await _settle(tester, 8);
+          if (typing) await _keyboard(tester, phone, keyboard);
+          final visible = _visible(phone, keyboard);
+
+          // As room as for a question of one choice: the card is whole, the
+          // field is in sight, and so is the button, with nothing to send.
+          _expectInSight(tester, _card, visible, 'the card');
+          _expectInSight(tester, _field, visible, 'the field of the answer');
+          await tester.ensureVisible(_sendAnswer);
+          await tester.pump();
+          _expectInSight(tester, _sendAnswer, visible, 'the Send answer button');
+          expect(_canSend(tester), isFalse, reason: 'nothing is ticked');
+
+          // Two of the three, in the order they come, the last one first.
+          for (final option in ['One long list', 'A sidebar on the left']) {
+            await tester.ensureVisible(find.text(option));
+            await tester.pump();
+            await tester.tap(find.text(option));
+            await tester.pump();
+          }
+          expect(_ticks(), 2);
+          final send = find.text('Send answer (2)');
+          await tester.ensureVisible(send);
+          await tester.pump();
+          _expectInSight(tester, send, visible, 'the Send answer button');
+          expect(_canSend(tester), isTrue);
+          await tester.tap(send);
+          await _settle(tester, 6);
+          expect(await reply, {
+            'answer': 'A sidebar on the left\nOne long list',
+          });
+          expect(_card, findsNothing);
         });
       });
     }
@@ -533,6 +596,612 @@ void main() {
       await tester.tap(_sendAnswer);
       await _settle(tester, 8);
       expect(rig.harness.isPending('s1', 'q-fail'), isFalse);
+    });
+  });
+
+  group('a question of several choices', () {
+    const question = 'Which features should it have?';
+
+    testWidgets('shows check boxes, and has nothing to send until one is '
+        'ticked', (tester) async {
+      final rig = await _rig();
+      await _open(tester, rig, _pixel);
+      final reply = rig.harness.askUser(
+        's1',
+        question: question,
+        options: _features,
+        allowMultiple: true,
+      );
+      await _settle(tester, 8);
+      expect(
+        find.byIcon(Icons.check_box_outline_blank_rounded),
+        findsNWidgets(4),
+      );
+      expect(find.byIcon(Icons.check_box_rounded), findsNothing);
+      // Not radio buttons: nothing is the one picked.
+      expect(find.byIcon(Icons.radio_button_checked_rounded), findsNothing);
+      expect(find.byIcon(Icons.radio_button_unchecked_rounded), findsNothing);
+      expect(_canSend(tester), isFalse, reason: 'nothing is ticked');
+      expect(find.text('Send answer'), findsOneWidget);
+
+      // The arrow of the field, and the keyboard's send key, send nothing.
+      await tester.tap(_field);
+      await tester.pump();
+      await tester.testTextInput.receiveAction(TextInputAction.send);
+      await _settle(tester, 4);
+      await tester.tap(_sendTyped);
+      await _settle(tester, 4);
+      expect(_card, findsOneWidget, reason: 'still waits for an answer');
+      expect(rig.harness.questionAnswers, isEmpty);
+
+      // It is answered all the same.
+      await tester.tap(find.text('Widgets'));
+      await tester.pump();
+      await tester.tap(find.text('Send answer (1)'));
+      await _settle(tester, 6);
+      expect(await reply, {'answer': 'Widgets'});
+    });
+
+    testWidgets('are ticked by a tap, and a tap on a tick takes it back', (
+      tester,
+    ) async {
+      final rig = await _rig();
+      await _open(tester, rig, _pixel);
+      rig.harness.askUser(
+        's1',
+        question: question,
+        options: _features,
+        allowMultiple: true,
+      );
+      await _settle(tester, 8);
+      await tester.tap(find.text('Offline sync'));
+      await tester.pump();
+      expect(_ticks(), 1);
+      await tester.tap(find.text('Dark mode'));
+      await tester.pump();
+      expect(_ticks(), 2);
+      expect(find.text('Send answer (2)'), findsOneWidget);
+      // The one ticked first is the one that was not ticked a moment ago.
+      await tester.tap(find.text('Offline sync'));
+      await tester.pump();
+      expect(_ticks(), 1);
+      expect(find.text('Send answer (1)'), findsOneWidget);
+      await tester.tap(find.text('Dark mode'));
+      await tester.pump();
+      expect(_ticks(), 0);
+      expect(find.text('Send answer'), findsOneWidget);
+      expect(_canSend(tester), isFalse);
+      expect(rig.harness.questionAnswers, isEmpty);
+    });
+
+    testWidgets('say whether they are ticked to a screen reader', (
+      tester,
+    ) async {
+      final handle = tester.ensureSemantics();
+      final rig = await _rig();
+      await _open(tester, rig, _pixel);
+      rig.harness.askUser(
+        's1',
+        question: question,
+        options: _features,
+        allowMultiple: true,
+      );
+      await _settle(tester, 8);
+      // The widget that says what the option is to a screen reader.
+      final option = find.byWidgetPredicate(
+        (widget) =>
+            widget is Semantics && widget.properties.label == 'Offline sync',
+      );
+      expect(
+        tester.getSemantics(option),
+        matchesSemantics(
+          label: 'Offline sync',
+          hasCheckedState: true,
+          isChecked: false,
+          isFocusable: true,
+          hasTapAction: true,
+          hasFocusAction: true,
+        ),
+      );
+      await tester.tap(find.text('Offline sync'));
+      await tester.pump();
+      expect(
+        tester.getSemantics(option),
+        matchesSemantics(
+          label: 'Offline sync',
+          hasCheckedState: true,
+          isChecked: true,
+          isFocusable: true,
+          hasTapAction: true,
+          hasFocusAction: true,
+        ),
+      );
+      handle.dispose();
+    });
+
+    testWidgets('are sent in the order they were given, not ticked', (
+      tester,
+    ) async {
+      final rig = await _rig();
+      await _open(tester, rig, _pixel);
+      final reply = rig.harness.askUser(
+        's1',
+        question: question,
+        options: _features,
+        allowMultiple: true,
+      );
+      await _settle(tester, 8);
+      for (final option in ['Notifications', 'Dark mode', 'Widgets']) {
+        await tester.tap(find.text(option));
+        await tester.pump();
+      }
+      await tester.tap(find.text('Send answer (3)'));
+      await _settle(tester, 6);
+      expect(await reply, {'answer': 'Dark mode\nNotifications\nWidgets'});
+      expect(_card, findsNothing);
+      expect(rig.harness.isPending('s1', 'q-ask'), isFalse);
+    });
+
+    testWidgets('are sent with what was typed, after them', (tester) async {
+      final rig = await _rig();
+      await _open(tester, rig, _pixel);
+      final reply = rig.harness.askUser(
+        's1',
+        question: question,
+        options: _features,
+        allowMultiple: true,
+      );
+      await _settle(tester, 8);
+      await tester.tap(find.text('Offline sync'));
+      await tester.pump();
+      await tester.tap(find.text('Widgets'));
+      await tester.pump();
+      await tester.enterText(_field, '  but only on Android  ');
+      await tester.pump();
+      // The words are a note to what is ticked.
+      expect(find.text('Add a note'), findsOneWidget);
+      await tester.tap(find.text('Send answer (2)'));
+      await _settle(tester, 6);
+      expect(await reply, {
+        'answer': 'Offline sync\nWidgets\nbut only on Android',
+      });
+    });
+
+    testWidgets('are sent by the arrow of the field and by the keyboard too', (
+      tester,
+    ) async {
+      final rig = await _rig();
+      await _open(tester, rig, _pixel);
+      final first = rig.harness.askUser(
+        's1',
+        question: question,
+        options: _features,
+        allowMultiple: true,
+        requestId: 'q-arrow',
+      );
+      await _settle(tester, 8);
+      await tester.tap(find.text('Dark mode'));
+      await tester.pump();
+      await tester.enterText(_field, 'please');
+      await tester.pump();
+      await tester.tap(_sendTyped);
+      await _settle(tester, 6);
+      expect(await first, {'answer': 'Dark mode\nplease'});
+
+      final second = rig.harness.askUser(
+        's1',
+        question: question,
+        options: _features,
+        allowMultiple: true,
+        requestId: 'q-key',
+      );
+      await _settle(tester, 8);
+      await tester.tap(find.text('Notifications'));
+      await tester.pump();
+      await tester.tap(_field);
+      await tester.pump();
+      await tester.testTextInput.receiveAction(TextInputAction.send);
+      await _settle(tester, 6);
+      expect(await second, {'answer': 'Notifications'});
+    });
+
+    testWidgets('may be answered by typing alone, as any question is', (
+      tester,
+    ) async {
+      final rig = await _rig();
+      await _open(tester, rig, _pixel);
+      final reply = rig.harness.askUser(
+        's1',
+        question: question,
+        options: _features,
+        allowMultiple: true,
+      );
+      await _settle(tester, 8);
+      expect(_canSend(tester), isFalse);
+      await tester.enterText(_field, 'None of them');
+      await tester.pump();
+      // There is something to send now, and the button says so.
+      expect(_canSend(tester), isTrue);
+      expect(find.text('Send answer'), findsOneWidget);
+      await tester.tap(find.text('Send answer'));
+      await _settle(tester, 6);
+      expect(await reply, {'answer': 'None of them'});
+    });
+
+    testWidgets('show the diagram of the option tapped last, ticked or not', (
+      tester,
+    ) async {
+      final rig = await _rig();
+      await _open(tester, rig, _pixel);
+      rig.harness.askUser(
+        's1',
+        question: 'Which layouts?',
+        options: _layouts,
+        diagrams: _diagrams,
+        allowMultiple: true,
+      );
+      await _settle(tester, 8);
+      // The first option's, as for any question with diagrams.
+      expect(find.textContaining('nav'), findsOneWidget);
+      expect(find.textContaining('a | b | c'), findsNothing);
+      await tester.tap(find.text('Tabs along the top'));
+      await tester.pump();
+      expect(find.textContaining('a | b | c'), findsOneWidget);
+      expect(find.textContaining('nav'), findsNothing);
+      expect(_ticks(), 1);
+      // Taken back, the option is no longer ticked, and its diagram stays:
+      // it is the one the person looks at.
+      await tester.tap(find.text('Tabs along the top'));
+      await tester.pump();
+      expect(_ticks(), 0);
+      expect(find.textContaining('a | b | c'), findsOneWidget);
+      // What is ticked stays ticked while another diagram is looked at.
+      await tester.tap(find.text('One long list'));
+      await tester.pump();
+      await tester.tap(find.text('A sidebar on the left'));
+      await tester.pump();
+      expect(_ticks(), 2);
+      expect(find.textContaining('nav'), findsOneWidget);
+      expect(find.text('Send answer (2)'), findsOneWidget);
+    });
+
+    testWidgets('start with nothing ticked when another question comes', (
+      tester,
+    ) async {
+      final rig = await _rig();
+      await _open(tester, rig, _pixel);
+      final first = rig.harness.askUser(
+        's1',
+        question: 'Which features should it have?',
+        options: _features,
+        allowMultiple: true,
+        requestId: 'q-first',
+      );
+      final second = rig.harness.askUser(
+        's1',
+        question: 'Which platforms?',
+        options: ['Android', 'iOS', 'Web'],
+        allowMultiple: true,
+        requestId: 'q-second',
+      );
+      await _settle(tester, 8);
+      expect(find.text('Which features should it have?'), findsOneWidget);
+      await tester.tap(find.text('Widgets'));
+      await tester.pump();
+      await tester.tap(find.text('Dark mode'));
+      await tester.pump();
+      await tester.tap(find.text('Send answer (2)'));
+      await _settle(tester, 8);
+      expect(await first, {'answer': 'Dark mode\nWidgets'});
+
+      // The next question is its own: its options are not ticked.
+      expect(find.text('Which platforms?'), findsOneWidget);
+      expect(_ticks(), 0);
+      expect(find.text('Send answer'), findsOneWidget);
+      expect(_canSend(tester), isFalse);
+      await tester.tap(find.text('iOS'));
+      await tester.pump();
+      await tester.tap(find.text('Send answer (1)'));
+      await _settle(tester, 6);
+      expect(await second, {'answer': 'iOS'});
+    });
+
+    testWidgets('keep their ticks as the keyboard comes up and goes', (
+      tester,
+    ) async {
+      final rig = await _rig();
+      await _open(tester, rig, _pixel);
+      rig.harness.askUser(
+        's1',
+        question: question,
+        options: _features,
+        allowMultiple: true,
+      );
+      await _settle(tester, 8);
+      await tester.tap(find.text('Offline sync'));
+      await tester.pump();
+      expect(_ticks(), 1);
+      // The card is laid out again, in less room and in more.
+      await _keyboard(tester, _pixel, 300);
+      expect(_ticks(), 1);
+      await _keyboard(tester, _pixel, 0);
+      expect(_ticks(), 1);
+      expect(find.text('Send answer (1)'), findsOneWidget);
+    });
+
+    testWidgets('keep their ticks when the request the harness held is asked '
+        'of this device', (tester) async {
+      // The card is made from what the harness holds, and is ticked; then the
+      // harness asks this device the same question, and the request takes the
+      // place of the one found: the same card, with what was ticked.
+      final rig = await _rig();
+      await _open(tester, rig, _pixel);
+      rig.harness.leavePendingQuestion(
+        's1',
+        question: question,
+        options: _features,
+        requestId: 'q-same',
+        announce: true,
+        allowMultiple: true,
+      );
+      await tester.pump(const Duration(seconds: 2));
+      await _settle(tester, 4);
+      expect(find.text(question), findsOneWidget);
+      await tester.tap(find.text('Offline sync'));
+      await tester.pump();
+      expect(_ticks(), 1);
+
+      final reply = rig.harness.askUser(
+        's1',
+        question: question,
+        options: _features,
+        allowMultiple: true,
+        requestId: 'q-same',
+      );
+      await _settle(tester, 6);
+      expect(tester.widgetList(_card), hasLength(1));
+      expect(_ticks(), 1);
+      await tester.tap(find.text('Send answer (1)'));
+      await _settle(tester, 6);
+      // As the reply to the request, which this device was asked.
+      expect(await reply, {'answer': 'Offline sync'});
+    });
+
+    testWidgets('that the harness holds are ticked and answered through it', (
+      tester,
+    ) async {
+      final rig = await _rig();
+      rig.harness.leavePendingQuestion(
+        's1',
+        question: question,
+        options: _features,
+        requestId: 'q-held',
+        allowMultiple: true,
+      );
+      await _open(tester, rig, _pixel);
+      expect(find.text(question), findsOneWidget);
+      expect(
+        find.byIcon(Icons.check_box_outline_blank_rounded),
+        findsNWidgets(4),
+      );
+      await tester.tap(find.text('Widgets'));
+      await tester.pump();
+      await tester.tap(find.text('Offline sync'));
+      await tester.pump();
+      await tester.enterText(_field, 'soon');
+      await tester.pump();
+      await tester.tap(find.text('Send answer (2)'));
+      await _settle(tester, 8);
+      expect(rig.harness.questionAnswers, [
+        {'answer': 'Offline sync\nWidgets\nsoon'},
+      ]);
+      expect(rig.harness.isPending('s1', 'q-held'), isFalse);
+      expect(_card, findsNothing);
+    });
+
+    testWidgets('that the harness announces are shown with check boxes, and '
+        'asked of this device later, are the same card', (tester) async {
+      final rig = await _rig();
+      await _open(tester, rig, _pixel);
+      final reply = rig.harness.askUser(
+        's1',
+        question: question,
+        options: _features,
+        allowMultiple: true,
+        requestId: 'q-once',
+      );
+      await tester.pump(const Duration(seconds: 3));
+      await _settle(tester, 6);
+      expect(tester.widgetList(_card), hasLength(1));
+      expect(
+        find.byIcon(Icons.check_box_outline_blank_rounded),
+        findsNWidgets(4),
+      );
+      await tester.tap(find.text('Dark mode'));
+      await tester.pump();
+      await tester.tap(find.text('Send answer (1)'));
+      await _settle(tester, 6);
+      // The reply to the request, as for any question asked of this device.
+      expect(await reply, {'answer': 'Dark mode'});
+      expect(rig.harness.questionAnswers, hasLength(1));
+    });
+
+    testWidgets('an answer the harness did not take is shown again, ticked', (
+      tester,
+    ) async {
+      final rig = await _rig();
+      rig.harness.leavePendingQuestion(
+        's1',
+        question: question,
+        options: _features,
+        requestId: 'q-fail',
+        allowMultiple: true,
+      );
+      await _open(tester, rig, _pixel);
+      await tester.tap(find.text('Dark mode'));
+      await tester.pump();
+      rig.harness.failQuestionAnswers = true;
+      await tester.tap(find.text('Send answer (1)'));
+      await _settle(tester, 8);
+      expect(find.text('The harness could not take the answer'), findsOneWidget);
+      expect(find.text(question), findsOneWidget);
+      // Answerable again, with the option still ticked.
+      rig.harness.failQuestionAnswers = false;
+      expect(_ticks(), 1);
+      await tester.tap(find.text('Send answer (1)'));
+      await _settle(tester, 8);
+      expect(rig.harness.isPending('s1', 'q-fail'), isFalse);
+    });
+  });
+
+  group('a question of one choice', () {
+    testWidgets('is as it was: radio buttons, the first option picked', (
+      tester,
+    ) async {
+      final rig = await _rig();
+      await _open(tester, rig, _pixel);
+      final reply = rig.harness.askUser(
+        's1',
+        question: 'Which database?',
+        options: ['sqlite', 'postgres', 'mysql'],
+      );
+      await _settle(tester, 8);
+      expect(find.byIcon(Icons.check_box_rounded), findsNothing);
+      expect(find.byIcon(Icons.check_box_outline_blank_rounded), findsNothing);
+      expect(find.byIcon(Icons.radio_button_checked_rounded), findsOneWidget);
+      expect(
+        find.byIcon(Icons.radio_button_unchecked_rounded),
+        findsNWidgets(2),
+      );
+      expect(find.text('Or type an answer'), findsOneWidget);
+      // A tap picks the other; the button sends the one picked.
+      await tester.tap(find.text('mysql'));
+      await tester.pump();
+      expect(find.byIcon(Icons.radio_button_checked_rounded), findsOneWidget);
+      expect(_canSend(tester), isTrue);
+      await tester.tap(_sendAnswer);
+      await _settle(tester, 6);
+      expect(await reply, {'answer': 'mysql'});
+    });
+
+    testWidgets('asked as one of several to a harness that does not know them '
+        'is not ticked, whatever it says', (tester) async {
+      final rig = await _rig();
+      await _open(tester, rig, _pixel);
+      // Only `true` ticks: the flag is a word, not a switch.
+      final reply = rig.harness.askUser(
+        's1',
+        question: 'Which database?',
+        options: ['sqlite', 'postgres'],
+        extraParams: {'allowMultiple': 'yes'},
+      );
+      await _settle(tester, 8);
+      expect(find.byIcon(Icons.check_box_outline_blank_rounded), findsNothing);
+      expect(find.byIcon(Icons.radio_button_checked_rounded), findsOneWidget);
+      await tester.tap(find.text('postgres'));
+      await tester.pump();
+      await tester.tap(_sendAnswer);
+      await _settle(tester, 6);
+      expect(await reply, {'answer': 'postgres'});
+    });
+  });
+
+  group('the answer to a question of several choices', () {
+    InteractionRequest asked(Map<String, Object?> params) => InteractionRequest(
+      method: '_harness/ask_user',
+      sessionId: 's1',
+      params: {'question': 'Which?', ...params},
+    );
+
+    test('is the options ticked, one to a line, in the order given', () {
+      const options = ['A', 'B', 'C', 'D'];
+      expect(multipleAnswer(options, {2, 0}, ''), 'A\nC');
+      expect(multipleAnswer(options, [3], ''), 'D');
+      expect(multipleAnswer(options, [1, 1, 1], ''), 'B');
+    });
+
+    test('ends with what was typed, trimmed', () {
+      const options = ['A', 'B', 'C'];
+      expect(
+        multipleAnswer(options, {0, 2}, '  but later \n'),
+        'A\nC\nbut later',
+      );
+      expect(multipleAnswer(options, {1}, 'two\nlines'), 'B\ntwo\nlines');
+    });
+
+    test('is the typed words alone when nothing is ticked, as for any '
+        'question, and nothing when there is nothing', () {
+      const options = ['A', 'B'];
+      expect(multipleAnswer(options, <int>{}, ' words '), 'words');
+      expect(multipleAnswer(options, <int>{}, '  '), '');
+      expect(multipleAnswer(const [], <int>{}, ''), '');
+    });
+
+    test('leaves out an index that is no option', () {
+      const options = ['A', 'B'];
+      expect(multipleAnswer(options, {-1, 1, 2, 40}, ''), 'B');
+    });
+
+    test('is asked for by `allowMultiple: true`, and only with options', () {
+      expect(
+        asked({
+          'options': ['a', 'b'],
+          'allowMultiple': true,
+        }).allowMultiple,
+        isTrue,
+      );
+      expect(
+        asked({
+          'options': ['a', 'b'],
+        }).allowMultiple,
+        isFalse,
+      );
+      expect(
+        asked({
+          'options': ['a', 'b'],
+          'allowMultiple': false,
+        }).allowMultiple,
+        isFalse,
+      );
+      expect(
+        asked({
+          'options': ['a', 'b'],
+          'allowMultiple': null,
+        }).allowMultiple,
+        isFalse,
+      );
+      expect(
+        asked({
+          'options': ['a', 'b'],
+          'allowMultiple': 'true',
+        }).allowMultiple,
+        isFalse,
+      );
+      expect(
+        asked({
+          'options': ['a', 'b'],
+          'allowMultiple': 1,
+        }).allowMultiple,
+        isFalse,
+      );
+      // Several of nothing is no question of several choices.
+      expect(
+        asked({'options': <String>[], 'allowMultiple': true}).allowMultiple,
+        isFalse,
+      );
+      expect(asked({'allowMultiple': true}).allowMultiple, isFalse);
+    });
+
+    test('is never asked by a permission request', () {
+      final permission = InteractionRequest(
+        method: 'session/request_permission',
+        sessionId: 's1',
+        params: {
+          'options': ['a', 'b'],
+          'allowMultiple': true,
+        },
+      );
+      expect(permission.allowMultiple, isFalse);
     });
   });
 }

@@ -56,6 +56,13 @@ about a path outside the allowed directories lists the patterns around
 its own.  A click on a line, or < and >, picks the one the answers hold
 for; the least permissive stays one step away.
 
+A question that allows several options (`:allow-multiple`, ask_user's
+`allow_multiple`) draws its options as check boxes.  A digit or a
+click ticks or unticks one instead of answering; the options ticked
+are the request's own state, so a chat and a popout of it agree, and
+are answered with C-c C-c (or the panel's [Send answer]), together with
+what the box holds: the options ticked, a line each, then the words.
+
 ## Provides
 
 ### Hooks

@@ -44,6 +44,13 @@
 ;; about a path outside the allowed directories lists the patterns around
 ;; its own.  A click on a line, or < and >, picks the one the answers hold
 ;; for; the least permissive stays one step away.
+;;
+;; A question that allows several options (`:allow-multiple', ask_user's
+;; `allow_multiple') draws its options as check boxes.  A digit or a
+;; click ticks or unticks one instead of answering; the options ticked
+;; are the request's own state, so a chat and a popout of it agree, and
+;; are answered with C-c C-c (or the panel's [Send answer]), together with
+;; what the box holds: the options ticked, a line each, then the words.
 
 ;;; Code:
 
@@ -66,12 +73,21 @@
 (harness-ui-define-icon harness-icon-radio-off "radio-off" "○" "( )"
                         "A choice that is not picked: a ring.")
 
+;; The same for an option of a question that allows several: a box with
+;; a check in it, and an empty one.
+(harness-ui-define-icon harness-icon-check-on "check-on" "☑" "[x]"
+                        "An option that is ticked: a box with a check in it.")
+(harness-ui-define-icon harness-icon-check-off "check-off" "☐" "[ ]"
+                        "An option that is not ticked: an empty box.")
+
 (declare-function harness-ui-popout-show "harness-ui-popout")
 (declare-function harness-ui-popout-refresh "harness-ui-popout")
 (declare-function harness-ui-popout-close "harness-ui-popout")
 (declare-function harness-ui-popout-buffer "harness-ui-popout")
 (declare-function harness-ui-popout-pixel-width "harness-ui-popout" (&optional window))
 (declare-function harness-ui-popout-pixel-height "harness-ui-popout" (&optional lines))
+(declare-function harness-ui-popout-submit "harness-ui-popout")
+(declare-function harness-chat--buffer-for "harness-ui-chat" (session-id))
 
 ;;;; The store
 
@@ -87,7 +103,8 @@ about, `:cwd' where a shell command runs, `:pattern' the glob the
 answer holds for, and `:edited-pattern' the one the user typed;
 `:commands' are the command patterns a shell call's lasting answers
 hold for, and `:covers' words them for the panel), `:question'
-`:options' `:diagrams' for a question.  A permission also has the
+`:options' `:diagrams' for a question, and `:allow-multiple' when the
+user may tick several of its options.  A permission also has the
 `:call-id' of the tool call that waits on it, and, when the harness
 worked out what its lasting answers could cover, a `:ladder' of covers
 \(plists of `:id' and `:label', narrowest first), the id of the one they
@@ -97,6 +114,13 @@ start on, `:cover', and the id the user picked instead, `:picked-cover'.")
   "Session id -> (PID . INDEX) of the diagram its panel shows.
 The state belongs to the request, not to the buffer drawing it, so a
 chat and a popout showing the same question show the same diagram.")
+
+(defvar harness-ui-pending--picked (make-hash-table :test 'equal)
+  "Session id -> alist of (PID . INDICES), the options ticked of its questions.
+Only a question that allows several options has any (`:allow-multiple');
+INDICES count from 0, smallest first.  Like the diagram shown, they
+belong to the request, so a chat and a popout showing the same question
+show the same boxes ticked, and answer with the same options.")
 
 (defvar harness-ui-pending--expanded (make-hash-table :test 'equal)
   "Session id -> the ids of its permission requests whose input shows whole.
@@ -143,10 +167,11 @@ such as the access view (harness-ui-access.el), sets this to nil.")
 
 (defun harness-ui-pending--forget-all ()
   "Forget every request, its diagrams and the answers just given.
-Which requests show their input whole, and the images fetched for
-them, are forgotten too."
+Which requests show their input whole, the options ticked and the
+images fetched for them, are forgotten too."
   (clrhash harness-ui-pending--requests)
   (clrhash harness-ui-pending--diagrams)
+  (clrhash harness-ui-pending--picked)
   (clrhash harness-ui-pending--expanded)
   (clrhash harness-ui-pending--answered)
   (clrhash harness-ui-pending--images))
@@ -196,7 +221,19 @@ opening it."
       (puthash session-id records harness-ui-pending--requests)
     (remhash session-id harness-ui-pending--requests))
   (harness-ui-pending--forget-images session-id records)
+  (harness-ui-pending--forget-picks session-id records)
   (harness-ui-pending--changed session-id))
+
+(defun harness-ui-pending--forget-picks (session-id records)
+  "Forget the options ticked of the questions of SESSION-ID not in RECORDS."
+  (when-let* ((picks (gethash session-id harness-ui-pending--picked)))
+    (let ((kept (cl-remove-if-not
+                 (lambda (cell)
+                   (cl-find (car cell) records :key (lambda (r) (plist-get r :id)) :test #'equal))
+                 picks)))
+      (if kept
+          (puthash session-id kept harness-ui-pending--picked)
+        (remhash session-id harness-ui-pending--picked)))))
 
 (defun harness-ui-pending--forget-images (session-id records)
   "Forget the images fetched for the requests of SESSION-ID not in RECORDS."
@@ -264,7 +301,8 @@ ITEM is (:id :kind :payload) in the wire shape."
     (if (equal kind "question")
         (list :id (plist-get item :id) :kind "question" :created (float-time)
               :question (plist-get payload :question) :options (plist-get payload :options)
-              :diagrams (plist-get payload :diagrams) :cowboy (plist-get payload :cowboy))
+              :diagrams (plist-get payload :diagrams) :cowboy (plist-get payload :cowboy)
+              :allow-multiple (and (harness-json-true-p (plist-get payload :allow-multiple)) t))
       (list :id (plist-get item :id) :kind "permission" :created (float-time)
             :title (or (plist-get payload :title) (plist-get payload :tool) "tool call")
             :call-id (plist-get payload :call-id)
@@ -493,6 +531,101 @@ all."
          (harness-acp-open-p connection)
          ;; Nil when it could not go out after all (see `harness-acp-set-handler').
          (funcall respond value))))
+
+;;;; A question that allows several options
+;;
+;; The options ticked are kept per request (`harness-ui-pending--picked')
+;; and drawn as check boxes.  The answer is made of them and of the words
+;; typed in a box: the labels of the options ticked, in the order the
+;; options were given, a line each, then the words.  That is text like any
+;; other answer, which is all the harness, the model and the other
+;; clients have to know of it.
+
+(defun harness-ui-pending-multiple-p (r)
+  "Non-nil when request record R lets the user tick several of its options."
+  (and (equal (plist-get r :kind) "question")
+       (plist-get r :allow-multiple)
+       (plist-get r :options)
+       t))
+
+(defun harness-ui-pending-picked (session-id pid)
+  "Return the indices of the options ticked of question PID of SESSION-ID.
+They count from 0, smallest first.  That is nil when none is ticked, and
+for a question that takes one answer."
+  (let ((r (harness-ui-pending-record session-id pid)))
+    (when (harness-ui-pending-multiple-p r)
+      (let ((count (length (plist-get r :options))))
+        (cl-remove-if-not (lambda (i) (< -1 i count))
+                          (cdr (assoc pid (gethash session-id harness-ui-pending--picked))))))))
+
+(defun harness-ui-pending-picked-labels (session-id pid)
+  "Return the labels of the options ticked of question PID of SESSION-ID.
+They are in the order the options were given."
+  (let ((options (append (plist-get (harness-ui-pending-record session-id pid) :options) nil)))
+    (mapcar (lambda (i) (nth i options)) (harness-ui-pending-picked session-id pid))))
+
+(defun harness-ui-pending-compose-answer (session-id r text)
+  "Return the answer that TEXT, typed in a box, makes to question record R.
+R is a question of SESSION-ID.  That is TEXT itself, unless R allows
+several options and some are ticked: then it is their labels, a line
+each, and TEXT after them when it says anything."
+  (let ((labels (and (harness-ui-pending-multiple-p r)
+                     (harness-ui-pending-picked-labels session-id (plist-get r :id))))
+        (text (if (stringp text) text "")))
+    (if (null labels)
+        text
+      (string-join (append labels (unless (string-blank-p text) (list (string-trim text)))) "\n"))))
+
+(defun harness-ui-pending-toggle-option (session-id pid index)
+  "Tick option INDEX, from 0, of question PID of SESSION-ID, or untick it.
+Only for a question that allows several options.  Where the options
+have diagrams, the diagram shown is the option's.  Every panel showing
+the question is drawn again in place, so that point and the windows stay."
+  (let ((r (harness-ui-pending-record session-id pid)))
+    (unless r (user-error "That question was answered already"))
+    (unless (harness-ui-pending-multiple-p r) (user-error "This question takes one answer"))
+    (unless (and (natnump index) (< index (length (plist-get r :options))))
+      (user-error "No such option"))
+    (let* ((picked (harness-ui-pending-picked session-id pid))
+           (ticked (not (memq index picked)))
+           (now (if ticked (sort (cons index picked) #'<) (remq index picked))))
+      (setf (alist-get pid (gethash session-id harness-ui-pending--picked) nil t #'equal) now)
+      ;; The option just ticked is the one to look at, where options have diagrams.
+      (when (harness-ui-pending--diagrams r)
+        (setf (alist-get pid (gethash session-id harness-ui-pending--diagrams) nil nil #'equal) index))
+      (harness-ui-pending--redraw-everywhere session-id r)
+      ;; Pressed from the box, the panel may be out of sight.
+      (message "%s %s: %s" (if ticked "Ticked" "Unticked") (elt (plist-get r :options) index)
+               (if now (format "%d of %d ticked" (length now) (length (plist-get r :options))) "none ticked")))))
+
+(defvar-local harness-ui-pending-send-function nil
+  "The command that sends the compose box of this buffer, or nil.
+The chat and the popout set it (C-c C-c in both).  The panel of a
+question that allows several options has a [Send answer] button, which
+runs it, so that it does what the key does.")
+
+(defun harness-ui-pending-send-picked (session-id pid)
+  "Answer question PID of SESSION-ID with the options ticked, and the box's words.
+This is what [Send answer] on the panel does.  The newest question is
+the one the box answers, so for it the button runs the command that
+sends the box (`harness-ui-pending-send-function'), with the options
+ticked; any other question gets the options ticked alone."
+  (let ((r (harness-ui-pending-record session-id pid)))
+    (unless r (user-error "That question was answered already"))
+    (let ((typed (and (harness-compose-live-p) (not (string-blank-p (harness-compose-text))))))
+      (cond
+       ((not (or typed (harness-ui-pending-picked session-id pid)))
+        (user-error "Tick an option, or type an answer, first"))
+       ((and harness-ui-pending-send-function
+             (equal pid (plist-get (harness-ui-pending-question session-id) :id)))
+        (call-interactively harness-ui-pending-send-function))
+       (t (harness-ui-pending-answer-question
+           session-id pid (harness-ui-pending-compose-answer session-id r "")))))))
+
+(defun harness-ui-pending-picked-any-p (session-id)
+  "Non-nil when the newest question of SESSION-ID has options ticked."
+  (when-let* ((q (harness-ui-pending-question session-id)))
+    (and (harness-ui-pending-picked session-id (plist-get q :id)) t)))
 
 ;;;; Patterns a prompt about paths is answered for
 ;;
@@ -1014,16 +1147,21 @@ Its `e' has no pattern to edit there, so it types, into the compose box
 (put 'harness-ui-pending-edit-pattern 'harness-compose-acts-p #'harness-ui-pending--pattern-here-p)
 
 (defun harness-ui-pending--question-command (n)
-  "Return a command answering the question at point with its Nth option."
+  "Return a command answering the question at point with its Nth option.
+On the panel of a question that allows several options it ticks the
+option, or unticks it, instead: the answer is sent when the user says
+so (`harness-ui-pending-send-picked')."
   (lambda ()
     (interactive)
     (let* ((session-id (harness-ui-pending--session))
            (pid (harness-ui-pending-at-point))
            (r (and pid (harness-ui-pending-record session-id pid)))
            (option (nth n (plist-get r :options))))
-      (if (and r (equal (plist-get r :kind) "question") option)
-          (harness-ui-pending-answer-question session-id pid option)
-        (user-error "No such option")))))
+      (cond ((not (and r (equal (plist-get r :kind) "question") option))
+             (user-error "No such option"))
+            ((harness-ui-pending-multiple-p r)
+             (harness-ui-pending-toggle-option session-id pid n))
+            (t (harness-ui-pending-answer-question session-id pid option))))))
 
 (defun harness-ui-pending--option-here-p (n)
   "Nil when point is on the panel of a question with no option N (from 0).
@@ -1036,8 +1174,8 @@ compose box (`harness-compose-acts-p')."
 
 (defvar harness-ui-pending-question-map (make-sparse-keymap)
   "Keys active while point is on a question panel.
-A digit answers with that option; one beyond the options types, into
-the compose box.")
+A digit answers with that option, or ticks it when the question allows
+several; one beyond the options types, into the compose box.")
 
 (defvar harness-ui-pending-diagram-map (make-sparse-keymap)
   "Keys active while point is on the panel of a question with diagrams.
@@ -1049,8 +1187,9 @@ The question's digits, and n and p to switch whose diagram shows.")
   (let ((command (intern (format "harness-ui-pending-answer-%d" (1+ i)))))
     (defalias command (harness-ui-pending--question-command i)
       (format "Answer the question at point with its option %d.
-On the panel of a question with fewer options the key types instead,
-into the compose box." (1+ i)))
+On the panel of a question that allows several options it ticks that
+option, or unticks it, instead.  On the panel of a question with
+fewer options the key types, into the compose box." (1+ i)))
     (put command 'harness-compose-acts-p (lambda () (harness-ui-pending--option-here-p i)))
     (define-key harness-ui-pending-question-map (kbd (number-to-string (1+ i))) command)))
 (set-keymap-parent harness-ui-pending-diagram-map harness-ui-pending-question-map)
@@ -1424,7 +1563,10 @@ and a line to spare."
                   (apply #'+ (mapcar (lambda (line) (max 1 (ceiling (+ indent (string-width line)) (float columns))))
                                      (split-string (format "%s" (or text "")) "\n"))))))
     (+ 1 (funcall lines (plist-get r :question) 3)
-       1 (apply #'+ (mapcar (lambda (option) (funcall lines option 7)) (plist-get r :options)))
+       1 (apply #'+ (mapcar (lambda (option) (funcall lines option (if (harness-ui-pending-multiple-p r) 9 7)))
+                            (plist-get r :options)))
+       ;; The line with [Send answer] of a question that allows several.
+       (if (harness-ui-pending-multiple-p r) 1 0)
        2 3 2 1)))
 
 (defun harness-ui-pending--image-box (r)
@@ -1573,33 +1715,68 @@ It shows option SHOWN's diagram."
      "\n"
      (harness-ui-pending--diagram-string session-id r shown))))
 
-(defun harness-ui-pending--option-line (session-id pid option i shown)
+(defun harness-ui-pending--option-line (session-id pid option i shown &optional multiple ticked)
   "Return the line of OPTION, the Ith of question PID of SESSION-ID.
-SHOWN is non-nil when its diagram shows."
-  (propertize
-   (concat (propertize "   " 'wrap-prefix "       ")
-           (if (< i 9) (harness-ui-kbd (format " %d " (1+ i))) "   ")
-           " "
-           (propertize (harness-ui-action-button option
-                                                 (lambda () (harness-ui-pending-answer-question session-id pid option))
-                                                 :face (if shown 'bold 'default)
-                                                 :help (if (< i 9) (format "Answer with this option (%d)" (1+ i))
-                                                         "Answer with this option"))
-                       'wrap-prefix "       ")
-           "\n")
-   'harness-ui-pending-option i))
+SHOWN is non-nil when its diagram shows.  MULTIPLE non-nil says the
+question allows several options: the line starts with a check box, ticked
+when TICKED, and a digit or a click on the line ticks or unticks the
+option instead of answering with it."
+  (let* ((box (and multiple (harness-ui-icon (if ticked 'harness-icon-check-on 'harness-icon-check-off))))
+         ;; A wrapped line goes under the label, not under the box.
+         (wrap (make-string (+ 7 (if box (1+ (string-width box)) 0)) ?\s)))
+    (propertize
+     (concat (propertize "   " 'wrap-prefix wrap)
+             (if (< i 9) (harness-ui-kbd (format " %d " (1+ i))) "   ")
+             " "
+             (propertize
+              (harness-ui-action-button
+               (if box (concat box " " option) option)
+               (if multiple
+                   (lambda () (harness-ui-pending-toggle-option session-id pid i))
+                 (lambda () (harness-ui-pending-answer-question session-id pid option)))
+               :face (if shown 'bold 'default)
+               :help (cond (multiple (if (< i 9)
+                                         (format "%s this option (%d)" (if ticked "Untick" "Tick") (1+ i))
+                                       (format "%s this option" (if ticked "Untick" "Tick"))))
+                           ((< i 9) (format "Answer with this option (%d)" (1+ i)))
+                           (t "Answer with this option")))
+              'wrap-prefix wrap)
+             "\n")
+     'harness-ui-pending-option i)))
+
+(defun harness-ui-pending--send-line (session-id pid picked count)
+  "Return the line with [Send answer] under the options of question PID.
+SESSION-ID is the question's session, PICKED the indices of the options
+ticked and COUNT the number of options.  It says how many are ticked,
+and the key that sends them, where the panel is in a buffer with a box."
+  (concat (propertize "   " 'wrap-prefix "     ")
+          (harness-ui-action-button "[Send answer]"
+                                    (lambda () (harness-ui-pending-send-picked session-id pid))
+                                    :help "Send the options ticked, and what the box holds with them (C-c C-c)")
+          (if harness-ui-pending-box-hints (concat " " (harness-ui-kbd "C-c C-c")) "")
+          (propertize (if picked (format "  %d of %d ticked" (length picked) count) "  none ticked")
+                      'face 'harness-dim-face)
+          "\n"))
 
 (defun harness-ui-pending-question-body (session-id r)
   "Return the options of question record R of SESSION-ID, then its diagram area.
-The text is marked `harness-ui-pending-question-body', so that switching
-the diagram redraws it alone (`harness-ui-pending--redraw-question')."
+A question that allows several options has its [Send answer] line
+between them.  The text is marked `harness-ui-pending-question-body', so
+that switching the diagram, or ticking an option, redraws it alone
+\(`harness-ui-pending--redraw-question')."
   (let* ((pid (plist-get r :id))
+         (options (plist-get r :options))
+         (multiple (harness-ui-pending-multiple-p r))
+         (picked (and multiple (harness-ui-pending-picked session-id pid)))
          (shown (and (harness-ui-pending--diagrams r)
-                     (harness-ui-pending--shown-index session-id pid (length (plist-get r :options))))))
+                     (harness-ui-pending--shown-index session-id pid (length options)))))
     (propertize
-     (concat (apply #'concat (seq-map-indexed (lambda (option i)
-                                                (harness-ui-pending--option-line session-id pid option i (eql i shown)))
-                                              (plist-get r :options)))
+     (concat (apply #'concat (seq-map-indexed
+                              (lambda (option i)
+                                (harness-ui-pending--option-line session-id pid option i (eql i shown)
+                                                                 multiple (and (memq i picked) t)))
+                              options))
+             (if multiple (harness-ui-pending--send-line session-id pid picked (length options)) "")
              (if shown (concat "\n" (harness-ui-pending--diagram-area session-id r shown)) ""))
      'harness-ui-pending-question-body pid)))
 
@@ -1632,16 +1809,20 @@ Options with diagrams get the area showing one of them under them."
     (when (plist-get r :options)
       (insert "\n" (harness-ui-pending-question-body session-id r)))
     ;; The digits above type in the compose box: the hint says how to press one there.
-    (insert (cond ((not (plist-get r :options))
-                   (propertize "   type your answer below\n" 'face 'harness-dim-face))
-                  ((harness-ui-pending--diagrams r)
-                   (concat "\n   " (harness-ui-kbd "C-c C-f")
-                           (propertize " next diagram, " 'face 'harness-dim-face)
-                           (harness-ui-kbd "C-c C-b")
-                           (propertize " previous\n   or type another answer below · " 'face 'harness-dim-face)
-                           (harness-compose-panel-hint "1") "\n"))
-                  (t (concat (propertize "\n   or type another answer below · " 'face 'harness-dim-face)
-                             (harness-compose-panel-hint "1") "\n"))))
+    ;; A question that allows several options says what the words typed are for.
+    (let ((typed (if (harness-ui-pending-multiple-p r)
+                     "or type a note below, sent with the options ticked · "
+                   "or type another answer below · ")))
+      (insert (cond ((not (plist-get r :options))
+                     (propertize "   type your answer below\n" 'face 'harness-dim-face))
+                    ((harness-ui-pending--diagrams r)
+                     (concat "\n   " (harness-ui-kbd "C-c C-f")
+                             (propertize " next diagram, " 'face 'harness-dim-face)
+                             (harness-ui-kbd "C-c C-b")
+                             (propertize (concat " previous\n   " typed) 'face 'harness-dim-face)
+                             (harness-compose-panel-hint "1") "\n"))
+                    (t (concat (propertize (concat "\n   " typed) 'face 'harness-dim-face)
+                               (harness-compose-panel-hint "1") "\n")))))
     (harness-ui-pending--decorate start (point) pid (harness-ui-pending--question-map r))))
 
 (defvar harness-ui-pending-panel-functions nil
@@ -1712,6 +1893,19 @@ buffer, as in a popout, which draws itself whole again instead."
           (when-let* ((pos (and nav (text-property-any from end 'harness-ui-pending-diagram-nav nav))))
             (goto-char pos)))))))
 
+(defun harness-ui-pending--redraw-everywhere (session-id r)
+  "Draw the options and diagram area of question record R again, wherever shown.
+R is a question of SESSION-ID.  The buffer drawing the panel -- this one,
+else the session's chat -- redraws it in place, and a popout of the same
+request, which draws itself whole, is refreshed.  What the panels show of
+a request is the request's (the diagram shown, the options ticked), so
+they follow each other."
+  (harness-ui-pending--redraw-question r)
+  (when-let* ((chat (and (fboundp 'harness-chat--buffer-for) (harness-chat--buffer-for session-id))))
+    (unless (eq chat (current-buffer))
+      (with-current-buffer chat (harness-ui-pending--redraw-question r))))
+  (harness-ui-pending--popout-changed session-id))
+
 (defun harness-ui-pending-show-diagram (session-id pid index)
   "Show the diagram of option INDEX of question PID of SESSION-ID, counting round."
   (let ((r (harness-ui-pending-record session-id pid)))
@@ -1720,10 +1914,7 @@ buffer, as in a popout, which draws itself whole again instead."
     (let ((i (mod index (length (plist-get r :options)))))
       (unless (= i (harness-ui-pending-shown-diagram session-id pid))
         (setf (alist-get pid (gethash session-id harness-ui-pending--diagrams) nil nil #'equal) i)
-        ;; The buffer drawing the panel redraws it in place; a popout of the
-        ;; same request, which draws itself whole, is refreshed here.
-        (harness-ui-pending--redraw-question r)
-        (harness-ui-pending--popout-changed session-id)))))
+        (harness-ui-pending--redraw-everywhere session-id r)))))
 
 (defun harness-ui-pending-step-diagram (session-id pid n)
   "Show the diagram N options after the one question PID of SESSION-ID shows.
@@ -1766,7 +1957,8 @@ clients, or the session's own pending list, answer it."
        (list :id (or (plist-get params :requestId) (harness-short-id 6)) :kind "question" :respond respond
              :connection harness-ui-connection :created (float-time)
              :question (plist-get params :question) :options (plist-get params :options)
-             :diagrams (plist-get params :diagrams) :cowboy (plist-get params :cowboy)))
+             :diagrams (plist-get params :diagrams) :cowboy (plist-get params :cowboy)
+             :allow-multiple (and (harness-json-true-p (plist-get params :allowMultiple)) t)))
       t)))
 
 (defvar harness-ui-pending-drawn-predicates nil
@@ -1798,19 +1990,27 @@ request is answered from the session's pending list instead.")
   "Return what the popout box of SESSION-ID sends with, or nil for no box.
 A question is answered with the typed text and the files attached to
 it, a screenshot the text names by its token among them, which reach
-the model with the answer; otherwise there is no box."
+the model with the answer; otherwise there is no box.  For a question
+that allows several options the options ticked come first, a line each."
   (when (harness-ui-pending-question session-id)
     (lambda (text atts)
       (let ((q (harness-ui-pending-question session-id)))
         (if q
             ;; An answer mentioning a file with @ goes as the text it is.
-            (harness-ui-pending-answer-question session-id (plist-get q :id) text nil
+            (harness-ui-pending-answer-question session-id (plist-get q :id)
+                                                (harness-ui-pending-compose-answer session-id q text) nil
                                                 (harness-compose-without-references atts text))
           (user-error "No question is waiting"))))))
 
+(defvar harness-ui-popout-empty-ok-function)
+
 (defun harness-ui-pending--popout-render (session-id)
-  "Draw the content of the popout of SESSION-ID at point."
-  (setq-local harness-ui-pending-session-id session-id)
+  "Draw the content of the popout of SESSION-ID at point.
+An empty box may be sent while options are ticked: they are the answer."
+  (setq-local harness-ui-pending-session-id session-id
+              harness-ui-pending-send-function #'harness-ui-popout-submit
+              harness-ui-popout-empty-ok-function
+              (lambda () (harness-ui-pending-picked-any-p session-id)))
   (harness-ui-pending-insert-panels session-id))
 
 (defun harness-ui-pending-popout (session-id &optional keep-pos)
@@ -1908,10 +2108,14 @@ so.  Signal a user error when it waits on no permission request."
   "Answer the question SESSION-ID waits on first with ANSWER.
 ON-ERROR is as for `harness-ui-pending-answer-first-permission'.  Signal
 a user error when it waits on no question.  ATTACHMENTS go with the
-answer (see `harness-ui-pending-answer-question')."
-  (let ((r (harness-ui-pending--first-of-kind session-id "question")))
+answer (see `harness-ui-pending-answer-question').  The options ticked
+of a question that allows several come before ANSWER
+\(`harness-ui-pending-compose-answer')."
+  (let* ((r (harness-ui-pending--first-of-kind session-id "question"))
+         ;; The options ticked of a question that allows several go first.
+         (answer (harness-ui-pending-compose-answer session-id r answer)))
     (harness-ui-pending-answer-question session-id (plist-get r :id) answer on-error attachments)
-    (message "Answered: %s" answer)))
+    (message "Answered: %s" (string-replace "\n" " / " answer))))
 
 (defconst harness-ui-pending-view-answers '("allow-once" "deny-once")
   "The permission answers a view offers beside a blocked session.

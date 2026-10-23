@@ -4,10 +4,15 @@
 
 ;; `ask_user' blocks the turn on a pending question and resolves when a
 ;; UI answers it through `question/answer'.  Its options may each have
-;; a diagram (ASCII art or an image), all of them or none.  An answer
-;; may carry files the user attached to it, a screenshot its text names
-;; as [image 1]: they reach the model with the answer, as a message of
-;; the user's the waiting turn takes as steering.
+;; a diagram (ASCII art or an image), all of them or none.  With
+;; `allow_multiple' the user may pick several options: a UI shows them
+;; as check boxes, and its answer lists those picked, in the order the
+;; options were given, one to a line, then what the user typed.  That
+;; is an answer of text like any other, so nothing between the UI and
+;; the model has to know of it.  An answer may carry files the user
+;; attached to it, a screenshot its text names as [image 1]: they
+;; reach the model with the answer, as a message of the user's the
+;; waiting turn takes as steering.
 ;; `question/ask' asks the same kind of question for the harness
 ;; itself, with no tool call behind it (the cowboy module asks what to
 ;; do about a cold prompt cache this way).
@@ -141,7 +146,9 @@ is malformed, or when only some options have a diagram."
 (defun harness-tools-question--ask-user (input ctx)
   "Handler of the ask_user tool: block on a pending question from INPUT in CTX.
 A malformed call (see `harness-tools-question--options') returns an error
-saying what to fix, and asks nothing."
+saying what to fix, and asks nothing.  `allow_multiple' puts
+`:allow-multiple' in the pending payload, for a question that has
+options to pick among."
   (let* ((sid (plist-get ctx :session-id))
          ;; The question may link what it is about; written out in full, in
          ;; the terms of this session before this call, the links mean the
@@ -151,7 +158,9 @@ saying what to fix, and asks nothing."
                    (harness-json-true-p (plist-get input :allow_free_text))
                  t))
          (parsed (catch 'harness-tools-question--invalid
-                   (harness-tools-question--options input ctx))))
+                   (harness-tools-question--options input ctx)))
+         (multiple (and (consp parsed) (car parsed)
+                        (harness-json-true-p (plist-get input :allow_multiple)))))
     (if (stringp parsed)
         (harness-tool-error parsed)
       (harness-with-promise (resolve reject)
@@ -160,6 +169,7 @@ saying what to fix, and asks nothing."
                                  (list :kind 'question
                                        :payload (append (list :question question :options (car parsed))
                                                         (and (cdr parsed) (list :diagrams (cdr parsed)))
+                                                        (and multiple (list :allow-multiple t))
                                                         (list :allow-free-text free
                                                               :call-id (plist-get ctx :call-id)))))))
           (puthash pid (list :session-id sid :resolve resolve) harness-tools-question--questions)
@@ -238,11 +248,14 @@ when a continuation was waiting."
 ANSWER is a string or a plist (:answer STRING), with `:blocks' for the
 files the user attached to the answer: content blocks as `agent/prompt'
 takes them, an image's with its base64 `:data' and the `:label' its
-token in the text names (image 1 for [image 1]).  The waiting ask_user
-call returns the text as its result, and the files reach the model
-with it, as a message of the user's that holds them, which the turn
-takes with the answer (`harness-tools-question--deliver-blocks').  A
-question the harness asked (`question/ask') gets the text alone.
+token in the text names (image 1 for [image 1]).  For a question that
+allows several options (`:allow-multiple' in its payload) the text lists
+the options picked, one to a line, then what the user typed.  The
+waiting ask_user call returns the text as its result, and the files
+reach the model with it, as a message of the user's that holds them,
+which the turn takes with the answer
+\(`harness-tools-question--deliver-blocks').  A question the harness
+asked (`question/ask') gets the text alone.
 Return non-nil when a question was waiting."
   (harness-tools-question--settle-question session-id pid answer))
 
@@ -259,10 +272,12 @@ model, wants to know something before it goes on.  REQUEST is
 \(:question TEXT :options LABELS :allow-free-text BOOL . MORE), as
 ask_user's pending payload is; MORE goes into the payload as it is,
 for the clients that know what it means (the cowboy module's `:cowboy',
-say) -- the others show an ordinary question.  The question is pending
-on SESSION-ID, which is blocked on it, and is answered as any other is,
-with `question/answer' (UIs, ACP clients) or dismissed with
-`question/cancel'.  ON-ANSWER is called once, then, with the answer's
+say; `:allow-multiple', to let the user pick several of the options,
+as ask_user's `allow_multiple' does) -- the others show an ordinary
+question.  The question is pending on SESSION-ID, which is blocked on
+it, and is answered as any other is, with `question/answer' (UIs, ACP
+clients) or dismissed with `question/cancel'.  ON-ANSWER is called
+once, then, with the answer's
 text and a flag that is non-nil when the question was dismissed rather
 than answered.  A question still waiting when the harness stops is gone
 with the process, as an ask_user call's is."
@@ -317,7 +332,7 @@ or the file cannot be read or is larger than
 
 (harness-define-tool "ask_user"
   :label "Question"
-  :description "Ask the user a question and wait for the answer. Use it when only the user can decide (ambiguous requirements, destructive choices, credentials). Offer options when there is a small set of sensible answers; the user may also type a free-form answer unless allow_free_text is false. When the options are easier to tell apart seen than described (layouts, architectures, data flows, UI sketches), give each option a diagram: ASCII art in diagram, or an image file in image. If one option has a diagram, every option must have one; the user flips between them in one place before answering. An image shows what ASCII art cannot, such as a mockup of a page or a chart: write an SVG with write_file, or save a screenshot of a mockup cropped to what differs between the options, in your temporary directory rather than the working directory, so it stays out of the work. Each image is shown at most about 400 pixels high, less in a small window, drawn on white as a browser shows it: draw about 600x400 with large text, and give an SVG a viewBox."
+  :description "Ask the user a question and wait for the answer. Use it when only the user can decide (ambiguous requirements, destructive choices, credentials). Offer options when there is a small set of sensible answers; the user may also type a free-form answer unless allow_free_text is false. The user picks one option by default; set allow_multiple when more than one can apply at once (features to build, files to change): the user then ticks any number of the options, and the answer lists each option ticked on a line of its own, followed by anything the user typed. When the options are easier to tell apart seen than described (layouts, architectures, data flows, UI sketches), give each option a diagram: ASCII art in diagram, or an image file in image. If one option has a diagram, every option must have one; the user flips between them in one place before answering. An image shows what ASCII art cannot, such as a mockup of a page or a chart: write an SVG with write_file, or save a screenshot of a mockup cropped to what differs between the options, in your temporary directory rather than the working directory, so it stays out of the work. Each image is shown at most about 400 pixels high, less in a small window, drawn on white as a browser shows it: draw about 600x400 with large text, and give an SVG a viewBox."
   :schema '(:type "object"
             :properties (:question (:type "string" :description "The question to ask.")
                          ;; Plain objects: the schema reaches every provider
@@ -331,7 +346,9 @@ or the file cannot be read or is larger than
                                            :required ("label"))
                                    :description "Optional list of suggested answers, each with a label and, to compare them by sight, a diagram or an image illustrating it; a plain string is an option without one. If one option has a diagram or image, every option must have one.")
                          :allow_free_text (:type "boolean"
-                                           :description "Whether a free-form answer is acceptable (default true)."))
+                                           :description "Whether a free-form answer is acceptable (default true).")
+                         :allow_multiple (:type "boolean"
+                                          :description "Whether the user may pick several options (default false: one). The answer then has each option picked on a line of its own, in the order the options were given, followed by anything the user typed. Needs options."))
             :required ("question"))
   :kind 'meta
   :timeout 86400

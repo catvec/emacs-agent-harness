@@ -279,10 +279,14 @@ The details hold the start of the session's last reply."
           :summary (format "%s asks the user: %s"
                            (harness-tools-events--cap (harness-tools-events--session-label session-id))
                            (harness-tools-events--line question 160))
-          :details (list :pending (plist-get pending :id)
-                         :question (harness-tools-events--line question)
-                         :options (mapcar (lambda (o) (harness-tools-events--line o 60))
-                                          (seq-take (append (plist-get payload :options) nil) 6))))))
+          :details (append (list :pending (plist-get pending :id)
+                                 :question (harness-tools-events--line question)
+                                 :options (mapcar (lambda (o) (harness-tools-events--line o 60))
+                                                  (seq-take (append (plist-get payload :options) nil) 6)))
+                           ;; The user may tick several of the options.
+                           (and (plist-get payload :options)
+                                (harness-json-true-p (plist-get payload :allow-multiple))
+                                (list :multiple t))))))
 
 (defun harness-tools-events--permission (session-id pending &rest _)
   "Return the record of `permission/requested': SESSION-ID asks the user PENDING."

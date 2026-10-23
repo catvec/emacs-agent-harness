@@ -2314,23 +2314,36 @@ class FakeHarness {
   /// clients what the session waits on, and asks them the question, as
   /// `_harness/ask_user`.  The answer comes back with the future (the
   /// `result` of the client's reply).
+  ///
+  /// With [allowMultiple] the person may tick several of the options
+  /// (`allow_multiple` of the tool): the harness holds that in the payload of
+  /// the pending question as `allow-multiple`, and asks it of a client as
+  /// `allowMultiple`.  [extraParams] go into the request as they are, for a
+  /// harness that says more, or something else, than this one does.
   Future<Map<String, Object?>> askUser(
     String sid, {
     required String question,
     List<Object?> options = const [],
     List<Object?>? diagrams,
     String requestId = 'q-ask',
+    bool allowMultiple = false,
+    Map<String, Object?> extraParams = const {},
   }) async {
     final payload = <String, Object?>{
       'question': question,
       'options': options,
       if (diagrams != null) 'diagrams': diagrams,
+      if (allowMultiple) 'allow-multiple': true,
     };
     _hold(sid, requestId, payload);
     final response = await _requestClient('_harness/ask_user', {
       'sessionId': sid,
       'requestId': requestId,
-      ...payload,
+      'question': question,
+      'options': options,
+      if (diagrams != null) 'diagrams': diagrams,
+      if (allowMultiple) 'allowMultiple': true,
+      ...extraParams,
     });
     final result = asMap(response['result']);
     // Another client may have answered it first, as the harness takes the
@@ -2345,7 +2358,7 @@ class FakeHarness {
   /// A question the agent of session [sid] asked that no client heard: the
   /// harness holds it as pending on the session, and tells the clients so
   /// ([announce]), but asks none of them.  A client finds it with
-  /// `question/pending`.
+  /// `question/pending`.  [allowMultiple] is as for [askUser].
   void leavePendingQuestion(
     String sid, {
     required String question,
@@ -2353,17 +2366,14 @@ class FakeHarness {
     List<Object?>? diagrams,
     String requestId = 'q-left',
     bool announce = false,
+    bool allowMultiple = false,
   }) {
-    _hold(
-      sid,
-      requestId,
-      {
-        'question': question,
-        'options': options,
-        if (diagrams != null) 'diagrams': diagrams,
-      },
-      announce: announce,
-    );
+    _hold(sid, requestId, {
+      'question': question,
+      'options': options,
+      if (diagrams != null) 'diagrams': diagrams,
+      if (allowMultiple) 'allow-multiple': true,
+    }, announce: announce);
   }
 
   /// The question [id] of session [sid] was answered somewhere else (in

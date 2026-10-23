@@ -64,6 +64,10 @@ const _diagrams = [
   },
 ];
 
+const _foldQuestion = 'Which sections should the settings page fold away?';
+
+const _foldable = ['Labs', 'About', 'Backups', 'Integrations', 'Language'];
+
 class _Case {
   const _Case(
     this.file,
@@ -75,6 +79,8 @@ class _Case {
     this.diagrams,
     this.type,
     this.apple = false,
+    this.multiple = false,
+    this.tick = const <String>[],
   });
   final String file;
   final double width;
@@ -83,6 +89,18 @@ class _Case {
   final String question;
   final List<String> options;
   final List<Object?>? diagrams;
+
+  /// Several of the options may be ticked (`allow_multiple`), and the ones
+  /// named in [tick] are tapped, in turn: one named twice is ticked and
+  /// taken back, and is where the diagram is looked at.
+  final bool multiple;
+  final List<String> tick;
+
+  /// The options that are ticked once [tick] is done.
+  Set<String> get ticked => {
+    for (final option in tick.toSet())
+      if (tick.where((other) => other == option).length.isOdd) option,
+  };
 
   /// What is typed in the field of the card, if anything.
   final String? type;
@@ -145,6 +163,61 @@ const _cases = [
     keyboard: 300,
     question: _question,
     type: 'In tabs, and fold Labs and About away',
+    apple: true,
+  ),
+  // A question of several choices: check boxes, two ticked, and the button
+  // that says how many it sends.
+  _Case(
+    'question-multiple',
+    360,
+    800,
+    question: _foldQuestion,
+    options: _foldable,
+    multiple: true,
+    tick: ['Labs', 'Backups'],
+  ),
+  // With diagrams, which show the option tapped last, ticked or not: here
+  // one that was ticked and taken back, outlined, the other one ticked.
+  _Case(
+    'question-multiple-diagrams',
+    360,
+    800,
+    question: 'Which layouts should the settings page offer?',
+    options: _options,
+    diagrams: _diagrams,
+    multiple: true,
+    tick: [
+      'A sidebar on the left, as on a tablet',
+      'Tabs along the top, which scroll',
+      'Tabs along the top, which scroll',
+    ],
+  ),
+  // The same on a small phone, with the keyboard up and a note typed after
+  // the ticks.
+  _Case(
+    'question-multiple-diagrams-keyboard',
+    360,
+    640,
+    keyboard: 260,
+    question: 'Which layouts should the settings page offer?',
+    options: _options,
+    diagrams: _diagrams,
+    multiple: true,
+    tick: [
+      'A sidebar on the left, as on a tablet',
+      'Tabs along the top, which scroll',
+    ],
+    type: 'the sidebar only on tablets',
+  ),
+  // The same, in the style of an iPhone.
+  _Case(
+    'question-multiple-ios',
+    390,
+    844,
+    question: _foldQuestion,
+    options: _foldable,
+    multiple: true,
+    tick: ['About', 'Integrations', 'Language'],
     apple: true,
   ),
 ];
@@ -247,9 +320,17 @@ Future<void> main() async {
         question: shot.question,
         options: shot.options,
         diagrams: shot.diagrams,
+        allowMultiple: shot.multiple,
       );
       for (var i = 0; i < 8; i++) {
         await tester.pump(const Duration(milliseconds: 120));
+      }
+      for (final option in shot.tick) {
+        await tester.tap(find.text(option));
+        // The row takes its colours on over a moment, and the ripple of the
+        // tap fades: both are let go by.
+        await tester.pump();
+        await tester.pump(const Duration(seconds: 1));
       }
       if (shot.keyboard > 0) {
         keyboardUp.value = true;
@@ -271,6 +352,20 @@ Future<void> main() async {
         await tester.pump();
         for (var i = 0; i < 4; i++) {
           await tester.pump(const Duration(milliseconds: 120));
+        }
+      }
+
+      // What was ticked is ticked, and the button says how many.
+      if (shot.multiple) {
+        expect(
+          find.byIcon(Icons.check_box_rounded),
+          findsNWidgets(shot.ticked.length),
+        );
+        if (shot.ticked.isNotEmpty) {
+          expect(
+            find.text('Send answer (${shot.ticked.length})'),
+            findsOneWidget,
+          );
         }
       }
 

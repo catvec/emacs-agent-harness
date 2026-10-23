@@ -8593,7 +8593,7 @@ TRAMP prefixes come from the session host):
 | `web_search` | Web search | query, count | net |
 | `web_fetch` | Fetch page | url, max_chars | net |
 | `emacs_messages` | Emacs messages | count | read (needs no approval: `harness-perms--inspection-tools`) |
-| `ask_user` | Question | question, options (strings, or `{label, diagram}` / `{label, image}` objects: every option has a diagram or none does), allow_free_text | meta (answered with `question/answer SID PID ANSWER`, the files attached to the answer going to the model with it; event `question/asked`; the harness asks its own questions the same way, with no tool call, through `question/ask`) |
+| `ask_user` | Question | question, options (strings, or `{label, diagram}` / `{label, image}` objects: every option has a diagram or none does), allow_free_text, allow_multiple (the user may tick several options: the answer lists those ticked, a line each, then what was typed) | meta (answered with `question/answer SID PID ANSWER`, the files attached to the answer going to the model with it; event `question/asked`; the harness asks its own questions the same way, with no tool call, through `question/ask`) |
 | `request_directory_access` | Request access | path, reason | meta (perms module; decided only by the user's answer to a directory prompt, in every mode) |
 | `request_escalation` | Request escalation | attribute (directory, read_directory, writes, network, tool, permission_mode, non_interactive, capability), value (the directory, tool, mode or Linux capability: `CAP_SYS_PTRACE`, `CAP_NET_RAW`...), reason | meta (access module; decided only by the user's answer, in every mode, yolo included; refused at once in a non-interactive session; a capability is refused at once, with a hint, where the jail cannot enforce it, for a name the user does not let agents ask for, or in a read-only session; see access) |
 | `drop_access` | Drop access | attribute (directory, writes, network, tool, permission_mode, non_interactive, capability), value (the directory, tool, less permissive mode, or Linux capability: a name or `all`), keep_read (a directory: give up writing only), reason | meta (access module; always allowed, never asks, in every mode and session, read-only ones included) |
@@ -9167,6 +9167,19 @@ set up; `always`; or `never`.  The session then has no `web_search` of
 the harness's, and the provider's searches show as `web_search` calls.
 Corporate mode leaves both searches on and turns `web_fetch` off (see
 tools).
+
+A question the user may tick several options of (`allow_multiple`, with
+options to pick among: `:allow-multiple t` in the pending payload, so
+the session's pending list, `question/pending` and the event carry it)
+has an answer that is text like any other, which is why nothing between
+a UI and the model has to know of it: the labels of the options ticked,
+in the order the options were given, a line each, then what the user
+typed, if anything, as the last lines.  Each client composes it (the
+chat, the popout and the task board's box through
+`harness-ui-pending-compose-answer`, the app with its own
+`multipleAnswer`), and an agent answering with `session_control` writes
+the options one to a line; the `tools-events` record of `question/asked`
+says `multiple`.  `question/ask`'s MORE takes `:allow-multiple` too.
 
 An answer may carry the files the user attached to it, a screenshot its
 text names by its token (`[image 1]`) say: `question/answer`'s ANSWER is
@@ -9942,7 +9955,7 @@ outside the allowed directories for another glob pattern than its
 `_harness:{cover}` when it lets the user choose the cover of a lasting
 answer, the id of a step of `_harness.ladder` (any other, or none, is the
 step the request started on),
-and `_harness/ask_user {sessionId, requestId, question, options, diagrams, cowboy}` → `{answer}`,
+and `_harness/ask_user {sessionId, requestId, question, options, diagrams, allowMultiple, cowboy}` → `{answer}`,
 or `{answer, attachments}` when the user attached files to the answer:
 `attachments` are ACP content blocks, as a `session/prompt`'s `prompt`
 holds them (an image's bytes in base64 `data`, the label its token in
@@ -9952,7 +9965,11 @@ model with the answer; a client answering over
 `_harness/question/answer` instead sends `{answer, blocks}`, those
 blocks.  The bytes go, not a path, so a client on another machine
 answers with a screenshot too.
-Its `options` are the answers' labels; `cowboy`, on the harness's own
+Its `options` are the answers' labels; `allowMultiple`, present (true)
+only when the user may tick several of them, says to draw check boxes
+and to answer with the labels ticked, a line each, then the words
+typed (a client that does not know it draws an ordinary question,
+which its user can still answer in words); `cowboy`, on the harness's own
 question about a cold prompt cache (see cowboy), says what each choice
 costs, for a client that draws more than the question; `diagrams`, present when the
 options have them, holds one per option, `{type: "ascii", text}` or
@@ -10896,6 +10913,25 @@ was deleted says so and fetches nothing more.  The buffers that look for a sessi
 chat (the merge, children, tasks and review views) take only a buffer
 in `harness-chat-mode`, so the access view, which has a session id too,
 is never taken for one.
+The panel of a question the user may tick several options of
+(`:allow-multiple`) draws the options as check boxes
+(`harness-icon-check-on`, `harness-icon-check-off`) with a line under
+them, `[Send answer] C-c C-c` and how many are ticked.  A digit, or a
+click or RET on an option, ticks it or unticks it instead of answering,
+and where the options have diagrams the diagram shown is the option's.
+The options ticked are the request's own state
+(`harness-ui-pending--picked`, forgotten with the request), as the
+diagram shown is, so every panel showing the question draws the same
+boxes: the one ticked in is redrawn in place and the session's chat and
+a popout of it follow (`harness-ui-pending--redraw-everywhere`).  C-c
+C-c in the chat, or in a popout's box, answers with the options ticked
+and, after them, the box's words (`harness-ui-pending-compose-answer`);
+with the box empty the options alone are the answer (a popout takes an
+empty box then, `harness-ui-popout-empty-ok-function`), and with none
+ticked the words are the answer, as for any question.  `[Send answer]`
+runs the buffer's own send command (`harness-ui-pending-send-function`,
+the chat's and the popout's), for the newest question, and answers any
+other question with its options alone.
 The panel of a question whose options have diagrams shows one diagram
 at a time, in an area under the options; its tabs, `n` and `p` on the
 panel, `C-c C-f` and `C-c C-b`, and point moving onto an option switch

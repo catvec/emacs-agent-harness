@@ -13,10 +13,15 @@ The Question tool (ask_user), and the questions the harness asks the user itself
 
 `ask_user` blocks the turn on a pending question and resolves when a
 UI answers it through `question/answer`.  Its options may each have
-a diagram (ASCII art or an image), all of them or none.  An answer
-may carry files the user attached to it, a screenshot its text names
-as [image 1]: they reach the model with the answer, as a message of
-the user's the waiting turn takes as steering.
+a diagram (ASCII art or an image), all of them or none.  With
+`allow_multiple` the user may pick several options: a UI shows them
+as check boxes, and its answer lists those picked, in the order the
+options were given, one to a line, then what the user typed.  That
+is an answer of text like any other, so nothing between the UI and
+the model has to know of it.  An answer may carry files the user
+attached to it, a screenshot its text names as [image 1]: they
+reach the model with the answer, as a message of the user's the
+waiting turn takes as steering.
 `question/ask` asks the same kind of question for the harness
 itself, with no tool call behind it (the cowboy module asks what to
 do about a cold prompt cache this way).
@@ -36,7 +41,7 @@ in a `defvar` so a reload does not lose them.
 
 ### Tools
 
-- `ask_user` — Ask the user a question and wait for the answer. Use it when only the user can decide (ambiguous requirements, destructive choices, credentials). Offer options when there is a small set of sensible answers; the user may also type a free-form answer unless allow_free_text is false. When the options are easier to tell apart seen than described (layouts, architectures, data flows, UI sketches), give each option a diagram: ASCII art in diagram, or an image file in image. If one option has a diagram, every option must have one; the user flips between them in one place before answering. An image shows what ASCII art cannot, such as a mockup of a page or a chart: write an SVG with write_file, or save a screenshot of a mockup cropped to what differs between the options, in your temporary directory rather than the working directory, so it stays out of the work. Each image is shown at most about 400 pixels high, less in a small window, drawn on white as a browser shows it: draw about 600x400 with large text, and give an SVG a viewBox.
+- `ask_user` — Ask the user a question and wait for the answer. Use it when only the user can decide (ambiguous requirements, destructive choices, credentials). Offer options when there is a small set of sensible answers; the user may also type a free-form answer unless allow_free_text is false. The user picks one option by default; set allow_multiple when more than one can apply at once (features to build, files to change): the user then ticks any number of the options, and the answer lists each option ticked on a line of its own, followed by anything the user typed. When the options are easier to tell apart seen than described (layouts, architectures, data flows, UI sketches), give each option a diagram: ASCII art in diagram, or an image file in image. If one option has a diagram, every option must have one; the user flips between them in one place before answering. An image shows what ASCII art cannot, such as a mockup of a page or a chart: write an SVG with write_file, or save a screenshot of a mockup cropped to what differs between the options, in your temporary directory rather than the working directory, so it stays out of the work. Each image is shown at most about 400 pixels high, less in a small window, drawn on white as a browser shows it: draw about 600x400 with large text, and give an SVG a viewBox.
 
 ### Events
 

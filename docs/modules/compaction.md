@@ -186,9 +186,8 @@ the token count progressively.
 
 - `agent/before-turn` at 20 → `harness-compaction--before-turn`
 - `agent/before-turn` at 12 → `harness-compaction--gate`
-- `agent/step` at 35 → `harness-compaction--before-step`
-=======
 - `agent/before-turn` at 11 → `harness-compaction--wait-gate`
 - `agent/hold` → `harness-compaction--on-hold`
+- `agent/step` at 35 → `harness-compaction--before-step`
 - `agent/step` at 12 → `harness-compaction--gate`
 

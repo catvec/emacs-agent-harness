@@ -54,7 +54,14 @@ time it opens. It asks again only when the harness does.
   *Always deny*; a path glob can be edited before a lasting answer is given.
   Harness `_harness/ask_user` questions become a choice with optional ASCII or
   image diagrams, a free-text answer, and the harness's cold-cache cost note
-  when it sends one. A question can always be answered, on a small phone with
+  when it sends one. A question the agent lets you tick several options of
+  (`allowMultiple`, from `allow_multiple` of the tool) has check boxes instead
+  of radio buttons: *Send answer (2)* sends the labels of the ticked options,
+  in the order the options were given, one to a line, with what was typed in
+  the field after them as a note; with nothing ticked and nothing typed there
+  is nothing to send, and the field's own send key and arrow send the same.
+  The diagram shown is the one of the option tapped last, ticked or not. A
+  question can always be answered, on a small phone with
   the keyboard up too: the card takes the room the screen has left and no more,
   the question is read in full in its body (Markdown drawn, scrolling when it
   is long), and the answer stays in a footer that does not scroll away -- the
@@ -468,7 +475,11 @@ Everything beyond that is under `_harness/` and is optional.
 - Server: `harness/version`, `harness/modules`, `insights/projects`,
   `project/mains`, `provider/list`, `provider/models`, `config/describe`.
 - Questions: `_harness/ask_user` request, `question/pending`,
-  `question/answer`, `question/cancel`, `question/image`; permission answers
+  `question/answer`, `question/cancel`, `question/image`; a question of several
+  choices comes with `allowMultiple: true` in the request, and as
+  `allow-multiple` in the payload of the pending question, and is answered in
+  text like any other: the ticked labels, one to a line, then the typed words;
+  permission answers
   are the standard `{outcome: {outcome: "selected", optionId}}` reply, with an
   optional `_harness.pattern`.
 
@@ -701,7 +712,14 @@ The widget tests drive the real `AcpClient` against an in-memory ACP server
   when nothing was, the composer gives way and comes back, and a question the
   harness holds without having asked this device is found (when the
   conversation opens, and while it is open), is not shown twice, goes when it
-  is answered elsewhere, and is not lost when the harness took no answer
+  is answered elsewhere, and is not lost when the harness took no answer; a
+  question of several choices has check boxes (also when the harness holds it,
+  and for a screen reader), nothing to send until one is ticked or something
+  typed, sends the ticked labels in the order given, with the typed note after
+  them, from the button, the arrow or the keyboard's send key, shows the
+  diagram of the option tapped last, starts again with nothing ticked for the
+  next question and keeps its ticks while the card is laid out again, and is
+  as whole on those phones as a question of one choice
   (`test/question_task_board_test.dart`: the task board's *Answer* opens that
   conversation; `test/question_screenshots_test.dart`: pictures of the card,
   drawn with the fonts of a phone, written where `HARNESS_SHOTS` says)

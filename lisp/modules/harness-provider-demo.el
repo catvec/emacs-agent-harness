@@ -16,6 +16,9 @@
 ;;   "diagram"     calls ask_user with an ASCII diagram for each option
 ;;   "images"      calls ask_user with an image for each option: SVG
 ;;                 mockups written to the session's temporary directory
+;;   "multi"       calls ask_user with allow_multiple, so several of the
+;;                 options may be picked; "multi diagram" gives each
+;;                 option an ASCII diagram too
 ;;   "debug"       describes find-file in the user's Emacs, finds its
 ;;                 definition and traces find-file-noselect
 ;;   "status"      looks at the task board with task_list (a BTW over it)
@@ -101,6 +104,10 @@ generic script, so a demo session under `auto' is judged like any other.")
 |               [ Save ]               |
 +--------------------------------------+"))
   "Options of the demo `diagram' question: (LABEL . ASCII-DIAGRAM).")
+
+(defconst harness-provider-demo--features
+  '("Dark mode" "Offline sync" "Push notifications" "Export to PDF")
+  "Options of the demo `multi' question: features to pick several of.")
 
 (defconst harness-provider-demo--layout-images
   '((left . "layout-sidebar-left.svg") (right . "layout-sidebar-right.svg") (top . "layout-tabs.svg"))
@@ -295,6 +302,20 @@ else the last user message picks one (see the Commentary)."
         (:type text :delta "Open a file with `C-x C-f`: each call is recorded in `*trace-output*`, with the functions that led to it.")
         (:type usage :input 1100 :output 90 :cost 0.0021 :context 1400)
         (:type done :stop-reason end-turn)))
+     ((string-match-p "\\bmulti\\b" text)
+      `((:type text :delta "Several of these can go together; tick each one you want.\n")
+        (:type tool-call :id "demo-m" :name "ask_user"
+               :input (:question ,(if (string-match-p "\\bdiagrams?\\b" text)
+                                      "Which layouts should the settings page offer?"
+                                    "Which features should I build first?")
+                       :options ,(if (string-match-p "\\bdiagrams?\\b" text)
+                                     (mapcar (lambda (layout) (list :label (car layout) :diagram (cdr layout)))
+                                             harness-provider-demo--layouts)
+                                   harness-provider-demo--features)
+                       :allow_multiple t))
+        (:type text :delta "Thanks, noted.")
+        (:type usage :input 600 :output 120 :cost 0.0013 :context 800)
+        (:type done :stop-reason end-turn)))
      ((string-match-p "\\bimages?\\b" text)
       `((:type text :delta "I drew the layouts that would work; have a look at each.\n")
         (:type tool-call :id "demo-i" :name "ask_user"
@@ -343,7 +364,7 @@ else the last user message picks one (see the Commentary)."
      ((string-match-p "\\bstream\\b" text)
       (harness-provider-demo--stream request))
      (t
-      `((:type text :delta ,(format "You said: *%s*\n\nThis is the demo provider; try `tour`, `tools`, `ask`, `diagram`, `images`, `debug` or `stream`." text))
+      `((:type text :delta ,(format "You said: *%s*\n\nThis is the demo provider; try `tour`, `tools`, `ask`, `multi`, `diagram`, `images`, `debug` or `stream`." text))
         (:type usage :input 400 :output 30 :cost 0.0008 :context 450)
         (:type done :stop-reason end-turn))))))
 

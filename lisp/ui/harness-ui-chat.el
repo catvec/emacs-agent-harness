@@ -3849,6 +3849,8 @@ own.  The BTW module says what a side conversation is for with it.")
 (defun harness-chat--placeholder ()
   "Return the hint for the empty compose box."
   (cond (harness-chat--dead "session deleted")
+        ((harness-ui-pending-multiple-p (harness-chat--active-question))
+         "tick options above and press C-c C-c, or type a note first")
         ((harness-chat--active-question) "type an answer and press C-c C-c")
         (harness-chat--inactive "Message\N{U+2026} (sending resumes this session)")
         ((stringp harness-chat-placeholder) harness-chat-placeholder)
@@ -4415,11 +4417,15 @@ While the agent is running the message steers the current turn.  An
 answer takes the box's attachments with it: a screenshot its text names
 by its token, [image 1], reaches the model with the answer.  The files
 its @ references name stay references in its text, as an answer's do.
+A question that allows several options is answered with the options
+ticked, a line each, and the box's words after them; with the box
+empty, with the options alone.
 A module showing something of its own in this buffer
 \(`harness-chat-send-function') gets the box instead of the session."
   (interactive)
-  (let ((question (harness-chat--active-question))
-        (typed (string-trim (harness-compose-text))))
+  (let* ((question (harness-chat--active-question))
+         (typed (string-trim (harness-compose-text)))
+         (picked (and question (harness-ui-pending-picked harness-ui-session-id (plist-get question :id)))))
     (cond
      ((and question (not (string-empty-p typed)))
       ;; Taken, so the tokens and the images agree and no download is
@@ -4427,10 +4433,17 @@ A module showing something of its own in this buffer
       ;; An answer is words: a card of a reply in a thread is its quote
       ;; and the words under it.
       (pcase-let ((`(,text . ,atts) (harness-chat--take-message)))
-        (harness-chat--answer-question (plist-get question :id) (harness-chat--answer-text text atts)
+        (harness-chat--answer-question (plist-get question :id)
+                                       (harness-ui-pending-compose-answer
+                                        harness-ui-session-id question (harness-chat--answer-text text atts))
                                        (cl-remove-if #'harness-compose--thread-attachment-p
                                                      harness-compose-attachments)))
       (harness-chat--clear-compose))
+     ;; Nothing typed, but the options of a question that allows several
+     ;; are ticked: they are the answer.
+     ((and question picked)
+      (harness-chat--answer-question (plist-get question :id)
+                                     (harness-ui-pending-compose-answer harness-ui-session-id question "")))
      ;; A module whose panel owns the box takes its text.
      (harness-chat-send-function
       (let ((send harness-chat-send-function))
@@ -6099,7 +6112,9 @@ the id of a session written in a message is a link to it.
                          :bottom t)
   (setq-local compose-quote-function #'harness-chat--quote-at-point
               harness-compose-thread-open-function #'harness-chat--open-thread
-              harness-compose-commands (mapcar #'car harness-chat-commands))
+              harness-compose-commands (mapcar #'car harness-chat-commands)
+              ;; A question's [Send answer] button does what C-c C-c does.
+              harness-ui-pending-send-function #'harness-chat-send)
   (add-hook 'post-command-hook #'harness-chat--post-command nil t)
   (add-hook 'window-buffer-change-functions #'harness-chat--on-window-buffer-change nil t)
   (add-hook 'window-scroll-functions #'harness-chat--schedule-history nil t)

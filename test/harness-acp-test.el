@@ -1122,9 +1122,35 @@ One that does not, answers as before."
         (should (equal "Which colour?" (plist-get params :question)))
         (should (equal '("red" "green") (plist-get params :options)))
         (should-not (plist-member params :diagrams))
+        ;; An ordinary question says nothing of several options.
+        (should-not (plist-member params :allowMultiple))
         (funcall (nth 2 m) (list :answer "green")))
       (harness-test-wait (lambda () recorded))
       (should (equal (list (list sid "q1" "green")) recorded))
+      ;; A question whose options may be ticked together says so, and
+      ;; its answer, the picked options one to a line, goes back as text.
+      (harness-emit 'question/asked sid
+                    (list :id "q3" :kind 'question
+                          :payload (list :question "Which features?" :options '("dark" "sync" "push")
+                                         :allow-multiple t)))
+      (harness-test-wait (lambda () (cl-find-if (lambda (m) (equal "q3" (plist-get (nth 1 m) :requestId)))
+                                                harness-acp-test-messages)))
+      (let ((m (cl-find-if (lambda (m) (equal "q3" (plist-get (nth 1 m) :requestId)))
+                           harness-acp-test-messages)))
+        (should (eq t (plist-get (nth 1 m) :allowMultiple)))
+        (should (equal '("dark" "sync" "push") (plist-get (nth 1 m) :options)))
+        (funcall (nth 2 m) (list :answer "dark\npush")))
+      (harness-test-wait (lambda () (cl-find "q3" recorded :key #'cadr :test #'equal)))
+      (should (equal (list sid "q3" "dark\npush") (cl-find "q3" recorded :key #'cadr :test #'equal)))
+      ;; A flag the JSON false stands for is no flag.
+      (harness-emit 'question/asked sid
+                    (list :id "q4" :kind 'question
+                          :payload (list :question "Which one?" :options '("a" "b") :allow-multiple :false)))
+      (harness-test-wait (lambda () (cl-find-if (lambda (m) (equal "q4" (plist-get (nth 1 m) :requestId)))
+                                                harness-acp-test-messages)))
+      (should-not (plist-member (nth 1 (cl-find-if (lambda (m) (equal "q4" (plist-get (nth 1 m) :requestId)))
+                                                   harness-acp-test-messages))
+                                :allowMultiple))
       ;; Diagrams of the options go along, one per option.
       (let ((diagrams '((:type "ascii" :text "[A]") (:type "image" :path "/tmp/b.png" :mime "image/png"))))
         (harness-emit 'question/asked sid

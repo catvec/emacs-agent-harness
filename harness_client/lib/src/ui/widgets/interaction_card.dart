@@ -23,7 +23,13 @@ class _InteractionCardState extends State<InteractionCard> {
   final _answer = TextEditingController();
   final _scroll = ScrollController();
   String? _currentKey;
+
+  /// The option picked of a question of one choice; of one of several, the
+  /// option last tapped, whose diagram is shown.
   int _selectedQuestion = 0;
+
+  /// The options ticked of a question of several choices.
+  final Set<int> _ticked = <int>{};
   String? _pattern;
   bool _busy = false;
   String? _selectedPattern;
@@ -85,6 +91,7 @@ class _InteractionCardState extends State<InteractionCard> {
       _answer.clear();
       _busy = false;
       _selectedQuestion = 0;
+      _ticked.clear();
       // Another request: its pictures are not the last one's, and it is
       // read from its first line.
       _images.clear();
@@ -444,8 +451,10 @@ class _InteractionCardState extends State<InteractionCard> {
     final theme = Theme.of(context);
     final accent = theme.colorScheme.primary;
     final options = request.questionOptions;
+    final multiple = request.allowMultiple;
     final diagrams = request.diagrams;
     if (_selectedQuestion >= options.length) _selectedQuestion = 0;
+    _ticked.removeWhere((index) => index >= options.length);
     final selectedDiagram =
         diagrams.isNotEmpty && _selectedQuestion < diagrams.length
         ? diagrams[_selectedQuestion]
@@ -454,13 +463,34 @@ class _InteractionCardState extends State<InteractionCard> {
     // options scroll; anything longer is read in the body, whole.
     final question = request.title;
     final short = isShortQuestion(question);
-    Widget sendAnswer() => HarnessPrimaryButton(
-      label: 'Send answer',
-      icon: Icons.check_rounded,
-      expand: true,
-      busy: _busy,
-      onPressed: _busy ? null : () => _question(options[_selectedQuestion]),
-    );
+    // One choice: the option picked is what is sent.  Several: what is
+    // ticked and what is typed, so there is something to send once either
+    // holds anything -- the field is listened to, for the button to know.
+    Widget sendAnswer() => multiple
+        ? ListenableBuilder(
+            listenable: _answer,
+            builder: (context, _) => HarnessPrimaryButton(
+              label: _ticked.isEmpty
+                  ? 'Send answer'
+                  : 'Send answer (${_ticked.length})',
+              icon: Icons.check_rounded,
+              expand: true,
+              busy: _busy,
+              onPressed:
+                  _busy || (_ticked.isEmpty && _answer.text.trim().isEmpty)
+                  ? null
+                  : _sendTyped,
+            ),
+          )
+        : HarnessPrimaryButton(
+            label: 'Send answer',
+            icon: Icons.check_rounded,
+            expand: true,
+            busy: _busy,
+            onPressed: _busy
+                ? null
+                : () => _question(options[_selectedQuestion]),
+          );
     return _shell(
       context: context,
       accent: accent,
@@ -485,11 +515,26 @@ class _InteractionCardState extends State<InteractionCard> {
                 padding: const EdgeInsets.only(bottom: 6),
                 child: _QuestionChoice(
                   label: options[index],
-                  selected: index == _selectedQuestion,
+                  multiple: multiple,
+                  selected: multiple
+                      ? _ticked.contains(index)
+                      : index == _selectedQuestion,
+                  // The diagram shown is the one of the option tapped last,
+                  // ticked or not: outlined, when there are diagrams to tell
+                  // which of the options it is the diagram of.
+                  focused:
+                      multiple &&
+                      diagrams.isNotEmpty &&
+                      index == _selectedQuestion,
                   hasDiagram: index < diagrams.length,
                   onTap: _busy
                       ? null
-                      : () => setState(() => _selectedQuestion = index),
+                      : () => setState(() {
+                          _selectedQuestion = index;
+                          if (multiple && !_ticked.add(index)) {
+                            _ticked.remove(index);
+                          }
+                        }),
                 ),
               ),
             if (selectedDiagram != null)
@@ -534,8 +579,11 @@ class _InteractionCardState extends State<InteractionCard> {
                   child: HarnessTextField(
                     key: const Key('question-answer-field'),
                     controller: _answer,
+                    // Beside what is ticked the words are a note to it.
                     hint: options.isEmpty
                         ? 'Type an answer'
+                        : multiple && _ticked.isNotEmpty
+                        ? 'Add a note'
                         : 'Or type an answer',
                     maxLines: 3,
                     minLines: 1,
@@ -560,9 +608,15 @@ class _InteractionCardState extends State<InteractionCard> {
     );
   }
 
-  /// Answer with what was typed, if anything was.
+  /// Answer with what was typed, if anything was; for a question of several
+  /// choices, with the options ticked too (see [multipleAnswer]).  Nothing
+  /// is sent when there is nothing to send.
   void _sendTyped() {
-    final text = _answer.text.trim();
+    final request = widget.controller.currentInteraction;
+    final typed = _answer.text.trim();
+    final text = request != null && request.allowMultiple
+        ? multipleAnswer(request.questionOptions, _ticked, typed)
+        : typed;
     if (text.isNotEmpty) _question(text);
   }
 }
@@ -577,25 +631,37 @@ bool isShortQuestion(String question) {
       !RegExp(r'[`*#>\[\]|]|\b_|_\b').hasMatch(text);
 }
 
+/// An option of a question: the one picked, a radio button, when only one may
+/// be; one of several that may be [multiple], a check box, ticked when
+/// [selected].  The option whose diagram shows is [focused], outlined, when
+/// it is not ticked and has no other mark to say so.
 class _QuestionChoice extends StatelessWidget {
   const _QuestionChoice({
     required this.label,
     required this.selected,
     required this.hasDiagram,
     required this.onTap,
+    this.multiple = false,
+    this.focused = false,
   });
 
   final String label;
   final bool selected;
   final bool hasDiagram;
   final VoidCallback? onTap;
+  final bool multiple;
+  final bool focused;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final outlined = focused && !selected;
     return Semantics(
-      button: true,
-      selected: selected,
+      // A check box says whether it is ticked; a radio button, whether it is
+      // the one picked.
+      button: !multiple,
+      selected: multiple ? null : selected,
+      checked: multiple ? selected : null,
       label: label,
       child: HarnessTap(
         onTap: onTap,
@@ -611,16 +677,22 @@ class _QuestionChoice extends StatelessWidget {
             border: Border.all(
               color: selected
                   ? theme.colorScheme.primary
+                  : outlined
+                  ? theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.7)
                   : theme.colorScheme.outlineVariant,
-              width: selected ? 1.3 : 1,
+              width: selected || outlined ? 1.3 : 1,
             ),
           ),
           child: Row(
             children: [
               Icon(
-                selected
-                    ? Icons.radio_button_checked_rounded
-                    : Icons.radio_button_unchecked_rounded,
+                multiple
+                    ? (selected
+                          ? Icons.check_box_rounded
+                          : Icons.check_box_outline_blank_rounded)
+                    : (selected
+                          ? Icons.radio_button_checked_rounded
+                          : Icons.radio_button_unchecked_rounded),
                 size: 17,
                 color: selected
                     ? theme.colorScheme.primary
@@ -628,11 +700,14 @@ class _QuestionChoice extends StatelessWidget {
               ),
               const SizedBox(width: 9),
               Expanded(
-                child: Text(
-                  label,
-                  style: HarnessText.body(context).copyWith(
-                    fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
-                    height: 1.3,
+                // The label is said once: by the option, above.
+                child: ExcludeSemantics(
+                  child: Text(
+                    label,
+                    style: HarnessText.body(context).copyWith(
+                      fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
+                      height: 1.3,
+                    ),
                   ),
                 ),
               ),

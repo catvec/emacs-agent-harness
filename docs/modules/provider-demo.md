@@ -25,6 +25,9 @@ The script is chosen from the last user message:
   "diagram"     calls ask_user with an ASCII diagram for each option
   "images"      calls ask_user with an image for each option: SVG
                 mockups written to the session's temporary directory
+  "multi"       calls ask_user with allow_multiple, so several of the
+                options may be picked; "multi diagram" gives each
+                option an ASCII diagram too
   "debug"       describes find-file in the user's Emacs, finds its
                 definition and traces find-file-noselect
   "status"      looks at the task board with task_list (a BTW over it)

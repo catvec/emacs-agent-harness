@@ -98,6 +98,59 @@ the labels as its options and the diagrams beside them, one per option."
         (should (equal '("red" "green") (plist-get payload :options)))
         (should-not (plist-member payload :diagrams))))))
 
+(ert-deftest harness-tools-question-ask-user-allow-multiple ()
+  "allow_multiple lets the user pick several options.
+The pending question says so; the answer, the options picked one to a
+line, is the call's result as it comes, and a plain question is what it
+was: no flag, however it is left out or switched off."
+  (harness-tools-question-test-with
+    (let* ((sid (harness-tools-question-test-session))
+           (answer (lambda (text)
+                     (harness-call 'question/answer sid
+                                   (plist-get (car (harness-call 'question/pending sid)) :id) text))))
+      (let* ((p (harness-tools-question-test-run
+                 sid "ask_user" '(:question "Which features?" :options ("Dark mode" "Offline sync" "Push")
+                                  :allow_multiple t)))
+             (payload (progn (harness-test-wait (lambda () (harness-call 'question/pending sid)) 5 "pending question")
+                             (plist-get (car (harness-call 'question/pending sid)) :payload))))
+        (should (eq t (plist-get payload :allow-multiple)))
+        (should (equal '("Dark mode" "Offline sync" "Push") (plist-get payload :options)))
+        ;; Free text stays on beside it, as it is by default.
+        (should (eq t (plist-get payload :allow-free-text)))
+        (should (funcall answer "Dark mode\nPush"))
+        (let ((result (harness-test-await p)))
+          (should (equal "Dark mode\nPush" (plist-get result :content)))
+          (should-not (plist-get result :is-error))))
+      ;; Diagrams and several options go together.
+      (let ((payload (harness-tools-question-test-asked
+                      sid '(:question "Which layouts?"
+                            :options ((:label "A" :diagram "[A]") (:label "B" :diagram "[B]"))
+                            :allow_multiple t))))
+        (should (eq t (plist-get payload :allow-multiple)))
+        (should (= 2 (length (plist-get payload :diagrams))))
+        (funcall answer "A\nB"))
+      ;; No flag when it is left out, false (a JSON false too), or there
+      ;; is nothing to pick among.
+      (dolist (input `((:question "One?" :options ("a" "b"))
+                       (:question "One?" :options ("a" "b") :allow_multiple nil)
+                       (:question "One?" :options ("a" "b") :allow_multiple :false)
+                       (:question "One?" :allow_multiple t)
+                       (:question "One?" :options [] :allow_multiple t)))
+        (let ((payload (harness-tools-question-test-asked sid input)))
+          (should-not (plist-member payload :allow-multiple))
+          (funcall answer "a")))
+      (should-not (harness-call 'question/pending sid)))))
+
+(ert-deftest harness-tools-question-ask-user-allow-multiple-is-in-the-schema ()
+  "The model is told of allow_multiple: a boolean in the schema, and in the words."
+  (harness-tools-question-test-with
+    (let* ((tool (harness-call 'tools/get "ask_user"))
+           (property (plist-get (plist-get (plist-get tool :schema) :properties) :allow_multiple)))
+      (should (equal "boolean" (plist-get property :type)))
+      (should (string-match-p "allow_multiple" (plist-get tool :description)))
+      (should (string-match-p "one option by default" (plist-get tool :description)))
+      (should-not (member "allow_multiple" (plist-get (plist-get tool :schema) :required))))))
+
 (ert-deftest harness-tools-question-ask-user-diagrams-all-or-none ()
   "A call where only some options have a diagram, or with a malformed
 option, is an error saying what to fix, and asks nothing."
@@ -204,6 +257,35 @@ temporary directory and asks with one per option, as a model is told to."
                                                   diagrams)))))
         (harness-call 'question/answer sid (plist-get item :id) "Tabs across the top"))
       (should (eq 'end-turn (plist-get (harness-test-await p) :stop-reason))))))
+
+(ert-deftest harness-tools-question-demo-multi-script ()
+  "The demo provider's `multi' script asks a question the user may tick
+several options of; `multi diagram' gives each option a diagram too.
+The model's next step is the answer the user gave, the options a line each."
+  (harness-tools-question-test-with
+    (let* ((sid (harness-tools-question-test-session))
+           (p (harness-call 'agent/prompt sid "multi")))
+      (harness-test-wait (lambda () (harness-call 'question/pending sid)) 5 "the multiple-choice question")
+      (let* ((item (car (harness-call 'question/pending sid)))
+             (payload (plist-get item :payload)))
+        (should (eq t (plist-get payload :allow-multiple)))
+        (should (equal '("Dark mode" "Offline sync" "Push notifications" "Export to PDF")
+                       (plist-get payload :options)))
+        (should-not (plist-member payload :diagrams))
+        (harness-call 'question/answer sid (plist-get item :id) "Dark mode\nPush notifications"))
+      (should (eq 'end-turn (plist-get (harness-test-await p) :stop-reason)))
+      (let ((result (cl-find-if (lambda (n) (eq (plist-get n :kind) 'tool-result)) (harness-call 'session/nodes sid))))
+        (should (equal "Dark mode\nPush notifications" (plist-get result :output))))
+      ;; With diagrams.
+      (let ((p (harness-call 'agent/prompt sid "multi diagram")))
+        (harness-test-wait (lambda () (harness-call 'question/pending sid)) 5 "the question with diagrams")
+        (let* ((item (car (harness-call 'question/pending sid)))
+               (payload (plist-get item :payload)))
+          (should (eq t (plist-get payload :allow-multiple)))
+          (should (= 3 (length (plist-get payload :options))))
+          (should (= 3 (length (plist-get payload :diagrams))))
+          (harness-call 'question/answer sid (plist-get item :id) "Tabs across the top"))
+        (should (eq 'end-turn (plist-get (harness-test-await p) :stop-reason)))))))
 
 (ert-deftest harness-tools-question-ask-user-string-answer-and-cancel ()
   (harness-tools-question-test-with

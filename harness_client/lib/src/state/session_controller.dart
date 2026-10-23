@@ -599,6 +599,10 @@ class SessionController extends ChangeNotifier {
         'options': payload['options'],
         'diagrams': payload['diagrams'],
         'cowboy': payload['cowboy'],
+        // Several options may be ticked (`ask_user`'s allow_multiple): the
+        // harness holds it in the payload as `allow-multiple`, and asks it
+        // of a client as `allowMultiple`.
+        'allowMultiple': payload['allow-multiple'],
       },
     );
   }

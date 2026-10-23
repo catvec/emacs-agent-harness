@@ -1834,7 +1834,11 @@ with it; without, the text alone, as it always was."
 `diagrams', when the options have them, holds one per option:
 {type: \"ascii\", text} or {type: \"image\", path, mime}.  PATH is a file
 here, on the harness's machine: a client that cannot read it asks for
-the image with `_harness/question/image' (`question/image').  `cowboy'
+the image with `_harness/question/image' (`question/image').
+`allowMultiple' is true when the user may pick several of the options:
+the reply's answer then lists those picked, one to a line, then what
+the user typed; a client that does not know it shows an ordinary
+question, which its user can still answer in words.  `cowboy'
 marks the harness's question about a cold prompt cache and says what
 each choice costs (see harness-cowboy.el); a client that knows it
 draws its own panel, any other shows the question and its options.
@@ -1848,6 +1852,7 @@ to it (see `harness-acp--question-answer')."
                    :question (plist-get payload :question)
                    :options (plist-get payload :options))
              (and (plist-get payload :diagrams) (list :diagrams (plist-get payload :diagrams)))
+             (and (harness-json-true-p (plist-get payload :allow-multiple)) (list :allowMultiple t))
              (and (plist-get payload :cowboy) (list :cowboy (plist-get payload :cowboy))))
      (lambda (result)
        (harness-acp--call-safely 'question/answer sid pid (harness-acp--question-answer result))))))

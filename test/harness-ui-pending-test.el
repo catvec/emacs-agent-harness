@@ -1449,6 +1449,344 @@ the request's id."
           (should (funcall face-p (- (point) 3) 'harness-dim-face))
           (should (funcall face-p (point) 'harness-ui-key-face)))))))
 
+;;;; A question that allows several options
+
+;; ask_user's `allow_multiple': the options are check boxes.  A digit or a
+;; click ticks one instead of answering, and C-c C-c (or [Send answer])
+;; answers with the options ticked, a line each, and the box's words
+;; after them.
+
+(defun harness-ui-pending-test-multiple (sid &optional id)
+  "Make SID wait on a question that allows several options; return its id."
+  (let ((id (or id "m1")))
+    (harness-ui-pending-sync
+     sid (list (list :id id :kind "question"
+                     :payload (list :question "Which features?"
+                                    :options '("Dark mode" "Offline sync" "Push notifications")
+                                    :allow-multiple t))))
+    id))
+
+(defun harness-ui-pending-test-box (ticked)
+  "Return the check box the panels draw, ticked when TICKED, as text."
+  (substring-no-properties (harness-ui-icon (if ticked 'harness-icon-check-on 'harness-icon-check-off))))
+
+(defun harness-ui-pending-test-press-on (label key)
+  "Press KEY with point on the first LABEL in the current buffer."
+  (goto-char (point-min))
+  (search-forward label)
+  (call-interactively (key-binding (kbd key))))
+
+(ert-deftest harness-ui-pending-several-options-draw-as-check-boxes ()
+  "A question that allows several options draws its options as check boxes.
+It says none is ticked, offers [Send answer] and says what the words
+typed below are for; an ordinary question is drawn as it was."
+  (harness-ui-pending-test-with
+    (let ((sid (harness-ui-pending-test-session "Ticker")))
+      (harness-ui-pending-test-multiple sid "m1")
+      (harness-ui-pending-test-question sid "q1")
+      (should (harness-ui-pending-multiple-p (harness-ui-pending-record sid "m1")))
+      (should-not (harness-ui-pending-multiple-p (harness-ui-pending-record sid "q1")))
+      (with-temp-buffer
+        (let ((harness-ui-session-id sid))
+          (harness-ui-pending-insert-panels sid))
+        (let ((multiple (harness-ui-pending-test-panel-text "m1"))
+              (single (harness-ui-pending-test-panel-text "q1"))
+              (off (harness-ui-pending-test-box nil)))
+          (dolist (label '("Dark mode" "Offline sync" "Push notifications"))
+            (should (string-search (concat off " " label) multiple)))
+          (should (string-search "[Send answer]" multiple))
+          (should (string-search "none ticked" multiple))
+          (should (string-search "or type a note below, sent with the options ticked · from the box: C-c . 1"
+                                 multiple))
+          ;; An ordinary question: no boxes, no button, its hint as before.
+          (should-not (string-search off single))
+          (should-not (string-search "[Send answer]" single))
+          (should (string-search "or type another answer below · from the box: C-c . 1" single)))))))
+
+(ert-deftest harness-ui-pending-the-flag-is-read-as-the-wire-gives-it ()
+  "Only a true flag, and only with options to pick among, allows several.
+The session's pending list gives JSON, whose false is `:false'; an ACP
+request gives it in camelCase."
+  (harness-ui-pending-test-with
+    (let ((sid (harness-ui-pending-test-session "Flags"))
+          (drawn (list "drawn")))
+      (harness-ui-pending-sync
+       sid (list (list :id "t" :kind "question"
+                       :payload (list :question "?" :options '("a" "b") :allow-multiple t))
+                 (list :id "f" :kind "question"
+                       :payload (list :question "?" :options '("a" "b") :allow-multiple :false))
+                 (list :id "n" :kind "question"
+                       :payload (list :question "?" :options '("a" "b")))
+                 (list :id "w" :kind "question"
+                       :payload (list :question "?" :options nil :allow-multiple t))))
+      (should (equal '(t nil nil nil)
+                     (mapcar (lambda (pid) (harness-ui-pending-multiple-p (harness-ui-pending-record sid pid)))
+                             '("t" "f" "n" "w"))))
+      (add-hook 'harness-ui-pending-drawn-predicates (lambda (id) (member id drawn)))
+      (unwind-protect
+          (progn
+            (should (harness-ui-pending--on-question
+                     (list :sessionId "drawn" :requestId "a" :question "?" :options '("x" "y") :allowMultiple t)
+                     #'ignore))
+            (should (harness-ui-pending--on-question
+                     (list :sessionId "drawn" :requestId "b" :question "?" :options '("x" "y") :allowMultiple :false)
+                     #'ignore))
+            (should (harness-ui-pending--on-question
+                     (list :sessionId "drawn" :requestId "c" :question "?" :options '("x" "y"))
+                     #'ignore))
+            (should (equal '(t nil nil)
+                           (mapcar (lambda (pid) (harness-ui-pending-multiple-p (harness-ui-pending-record "drawn" pid)))
+                                   '("a" "b" "c")))))
+        (remove-hook 'harness-ui-pending-drawn-predicates (lambda (id) (member id drawn)))))))
+
+(ert-deftest harness-ui-pending-digits-and-clicks-tick-the-options ()
+  "On the panel a digit, or a click on an option, ticks it or unticks it.
+It answers nothing.  The panel draws the box ticked, and how many are, in
+place, with point where it was; the options ticked are kept in the
+order the question gave them."
+  (harness-ui-pending-test-with
+    (let* ((sid (harness-ui-pending-test-session "Ticker"))
+           (buf (harness-ui-pending-test-chat sid))
+           (on (harness-ui-pending-test-box t))
+           (off (harness-ui-pending-test-box nil)))
+      (harness-ui-pending-test-record-answers)
+      (harness-ui-pending-test-multiple sid "m1")
+      (with-current-buffer buf
+        ;; A digit with point on the panel: the third option.
+        (goto-char (point-min))
+        (search-forward "Offline sync")
+        (let ((line (line-number-at-pos)) (column (current-column)) said)
+          ;; The echo area says what happened: the panel may be out of sight.
+          (cl-letf (((symbol-function 'message)
+                     (lambda (format-string &rest args) (setq said (apply #'format format-string args)))))
+            (call-interactively (key-binding (kbd "3"))))
+          (should (equal "Ticked Push notifications: 1 of 3 ticked" said))
+          (should (equal '(2) (harness-ui-pending-picked sid "m1")))
+          (should (string-search (concat on " Push notifications") (buffer-string)))
+          (should (string-search (concat off " Offline sync") (buffer-string)))
+          (should (string-search "1 of 3 ticked" (buffer-string)))
+          ;; Drawn in place: point is on the line it was on.
+          (should (= line (line-number-at-pos)))
+          (should (= column (current-column))))
+        ;; A click on the first option; the order is the question's.
+        (goto-char (point-min))
+        (search-forward "Dark mode")
+        (harness-ui-action-push)
+        (should (equal '(0 2) (harness-ui-pending-picked sid "m1")))
+        (should (equal '("Dark mode" "Push notifications") (harness-ui-pending-picked-labels sid "m1")))
+        (should (string-search "2 of 3 ticked" (buffer-string)))
+        ;; Unticking, with the digit.
+        (harness-ui-pending-test-press-on "Push notifications" "3")
+        (should (equal '(0) (harness-ui-pending-picked sid "m1")))
+        (let (said)
+          (cl-letf (((symbol-function 'message)
+                     (lambda (format-string &rest args) (setq said (apply #'format format-string args)))))
+            (harness-ui-pending-test-press-on "Dark mode" "1"))
+          (should (equal "Unticked Dark mode: none ticked" said)))
+        (should-not (harness-ui-pending-picked sid "m1"))
+        (should (string-search "none ticked" (buffer-string)))
+        ;; A digit beyond the options is no option.
+        (goto-char (point-min))
+        (search-forward "Dark mode")
+        (should (eq 'user-error (car (should-error (call-interactively (key-binding (kbd "5")))
+                                                   :type 'user-error)))))
+      ;; None of it answered anything.
+      (should-not harness-ui-pending-test-answers)
+      (should (harness-ui-pending-record sid "m1")))))
+
+(ert-deftest harness-ui-pending-several-options-are-answered-with-c-c-c ()
+  "The options ticked answer the question, with the box's words after them.
+They come in the order of the question, a line each.  With the box empty
+the options are the answer; a box with words and no option ticked
+answers with the words, as for any question; with nothing, nothing is
+sent."
+  (harness-ui-pending-test-with
+    (let* ((sid (harness-ui-pending-test-session "Ticker"))
+           (buf (harness-ui-pending-test-chat sid)))
+      (harness-ui-pending-test-record-answers)
+      (harness-ui-pending-test-multiple sid "m1")
+      (with-current-buffer buf
+        (should (string-search "tick options above and press C-c C-c" (harness-chat--placeholder)))
+        ;; Ticked from the box, as a panel's key is pressed from there.
+        (harness-ui-pending-test-panel-key "3")
+        (harness-ui-pending-test-panel-key "1")
+        (should (equal '(0 2) (harness-ui-pending-picked sid "m1")))
+        (goto-char harness-compose-end)
+        (insert "but dark mode first")
+        (harness-chat-send)
+        (should (equal "" (harness-compose-text))))
+      (harness-test-wait (lambda () harness-ui-pending-test-answers) 5 "the answer over ACP")
+      (should (equal (list 'question sid "m1" "Dark mode\nPush notifications\nbut dark mode first")
+                     (car harness-ui-pending-test-answers)))
+      (should-not (harness-ui-pending-items sid))
+      ;; What was ticked goes with the question.
+      (should-not (gethash sid harness-ui-pending--picked))
+      ;; With the box empty: the options alone.
+      (harness-ui-pending-test-multiple sid "m2")
+      (with-current-buffer buf
+        (harness-ui-pending-test-panel-key "2")
+        (should (equal "" (string-trim (harness-compose-text))))
+        (harness-chat-send))
+      (harness-test-wait (lambda () (= 2 (length harness-ui-pending-test-answers))) 5 "the options alone")
+      (should (equal (list 'question sid "m2" "Offline sync") (car harness-ui-pending-test-answers)))
+      ;; Nothing ticked: the words are the answer, as for any question.
+      (harness-ui-pending-test-multiple sid "m3")
+      (with-current-buffer buf
+        (goto-char harness-compose-end)
+        (insert "none of them")
+        (harness-chat-send))
+      (harness-test-wait (lambda () (= 3 (length harness-ui-pending-test-answers))) 5 "the words alone")
+      (should (equal (list 'question sid "m3" "none of them") (car harness-ui-pending-test-answers))))))
+
+(ert-deftest harness-ui-pending-send-answer-button-does-what-c-c-c-does ()
+  "[Send answer] on the panel sends the options ticked and the box's words.
+Without an option ticked or a word typed there is nothing to send, and
+it says so."
+  (harness-ui-pending-test-with
+    (let* ((sid (harness-ui-pending-test-session "Ticker"))
+           (buf (harness-ui-pending-test-chat sid)))
+      (harness-ui-pending-test-record-answers)
+      (harness-ui-pending-test-multiple sid "m1")
+      (with-current-buffer buf
+        (goto-char (point-min))
+        (search-forward "[Send answer]")
+        (should (equal "Tick an option, or type an answer, first"
+                       (cadr (should-error (harness-ui-action-push) :type 'user-error))))
+        (should-not harness-ui-pending-test-answers)
+        (harness-ui-pending-test-press-on "Offline sync" "2")
+        (goto-char (point-min))
+        (search-forward "[Send answer]")
+        (backward-char 3)
+        (harness-ui-action-push))
+      (harness-test-wait (lambda () harness-ui-pending-test-answers) 5 "the answer over ACP")
+      (should (equal (list 'question sid "m1" "Offline sync") (car harness-ui-pending-test-answers))))))
+
+(ert-deftest harness-ui-pending-an-older-question-is-sent-by-its-own-button ()
+  "The box answers the newest question, so [Send answer] of an older one sends its options alone.
+What is typed in the box stays for the question it belongs to."
+  (harness-ui-pending-test-with
+    (let* ((sid (harness-ui-pending-test-session "Ticker"))
+           (buf (harness-ui-pending-test-chat sid)))
+      (harness-ui-pending-test-record-answers)
+      (harness-ui-pending-test-multiple sid "m1")
+      (harness-ui-pending-test-multiple sid "m2")
+      (should (equal '("m1" "m2") (mapcar (lambda (r) (plist-get r :id)) (harness-ui-pending-items sid))))
+      (with-current-buffer buf
+        (harness-ui-pending-toggle-option sid "m1" 0)
+        (goto-char harness-compose-end)
+        (insert "a note for the second")
+        ;; The first panel is the older question's.
+        (goto-char (point-min))
+        (search-forward "[Send answer]")
+        (backward-char 3)
+        (should (equal "m1" (get-text-property (point) 'harness-ui-pending)))
+        (harness-ui-action-push)
+        (should (equal "a note for the second" (harness-compose-text))))
+      (harness-test-wait (lambda () harness-ui-pending-test-answers) 5 "the older question answered")
+      (should (equal (list 'question sid "m1" "Dark mode") (car harness-ui-pending-test-answers)))
+      (should (equal '("m2") (mapcar (lambda (r) (plist-get r :id)) (harness-ui-pending-items sid))))
+      ;; The newest one takes the box, with nothing ticked: the words alone.
+      (with-current-buffer buf
+        (harness-chat-send))
+      (harness-test-wait (lambda () (= 2 (length harness-ui-pending-test-answers))) 5 "the newest question answered")
+      (should (equal (list 'question sid "m2" "a note for the second") (car harness-ui-pending-test-answers))))))
+
+(ert-deftest harness-ui-pending-the-popout-ticks-and-sends-too ()
+  "A popout of the question ticks with its digits and sends with its box.
+An empty box sends the options ticked; words typed go after them.  The
+chat of the session follows what the popout ticks."
+  (harness-ui-pending-test-with
+    (let* ((sid (harness-ui-pending-test-session "Ticker"))
+           (chat (harness-ui-pending-test-chat sid))
+           (key (list 'pending sid))
+           (on (harness-ui-pending-test-box t)))
+      (harness-ui-pending-test-record-answers)
+      (harness-ui-pending-test-multiple sid "m1")
+      (harness-ui-pending-popout sid)
+      (let ((popout (harness-ui-popout-buffer key)))
+        (with-current-buffer popout
+          (should (string-search "[Send answer]" (buffer-string)))
+          (harness-ui-pending-test-press-on "Dark mode" "1")
+          (harness-ui-pending-test-press-on "Push notifications" "3")
+          (should (string-search (concat on " Dark mode") (buffer-string))))
+        ;; The chat shows the same boxes ticked.
+        (with-current-buffer chat
+          (should (string-search (concat on " Dark mode") (buffer-string)))
+          (should (string-search (concat on " Push notifications") (buffer-string)))
+          (should (string-search "2 of 3 ticked" (buffer-string))))
+        ;; Ticked in the chat, the popout follows.
+        (with-current-buffer chat
+          (harness-ui-pending-test-press-on "Push notifications" "3"))
+        (with-current-buffer popout
+          (should (string-search "1 of 3 ticked" (buffer-string)))
+          (harness-ui-pending-test-press-on "Offline sync" "2")
+          (goto-char harness-compose-end)
+          (insert "  plus a note ")
+          (harness-ui-popout-submit)))
+      (harness-test-wait (lambda () harness-ui-pending-test-answers) 5 "the answer from the popout")
+      (should (equal (list 'question sid "m1" "Dark mode\nOffline sync\nplus a note")
+                     (car harness-ui-pending-test-answers)))
+      ;; The options alone, the box empty.
+      (harness-ui-pending-test-multiple sid "m2")
+      (harness-ui-pending-popout sid)
+      (with-current-buffer (harness-ui-popout-buffer key)
+        (should (functionp harness-ui-popout-empty-ok-function))
+        (should-not (funcall harness-ui-popout-empty-ok-function))
+        (should-error (harness-ui-popout-submit) :type 'user-error)
+        (harness-ui-pending-test-press-on "Offline sync" "2")
+        (should (funcall harness-ui-popout-empty-ok-function))
+        (harness-ui-popout-submit))
+      (harness-test-wait (lambda () (= 2 (length harness-ui-pending-test-answers))) 5 "the options alone")
+      (should (equal (list 'question sid "m2" "Offline sync") (car harness-ui-pending-test-answers))))))
+
+(ert-deftest harness-ui-pending-a-request-owned-over-acp-answers-the-lines-in-its-reply ()
+  "A question a client owns (the ACP request) is answered through its RESPOND.
+The reply is the options ticked, a line each, as the harness reads it."
+  (harness-ui-pending-test-with
+    (let* ((sid (harness-ui-pending-test-session "Owner"))
+           (drawn-p (lambda (id) (equal id sid)))
+           (answers nil))
+      (add-hook 'harness-ui-pending-drawn-predicates drawn-p)
+      (unwind-protect
+          (progn
+            (should (harness-ui-pending--on-question
+                     (list :sessionId sid :requestId "q9" :question "Which?" :options '("a" "b" "c")
+                           :allowMultiple t)
+                     (lambda (reply) (push reply answers) t)))
+            (harness-ui-pending-toggle-option sid "q9" 2)
+            (harness-ui-pending-toggle-option sid "q9" 0)
+            (should (equal "a\nc" (harness-ui-pending-compose-answer sid (harness-ui-pending-record sid "q9") "")))
+            (harness-ui-pending-answer-question
+             sid "q9" (harness-ui-pending-compose-answer sid (harness-ui-pending-record sid "q9") "later"))
+            (should (equal '((:answer "a\nc\nlater")) answers)))
+        (remove-hook 'harness-ui-pending-drawn-predicates drawn-p)))))
+
+(ert-deftest harness-ui-pending-views-answer-with-the-options-ticked ()
+  "A view that answers with words (the task board's box) puts the options ticked first.
+Ticking is for a question that allows several: it refuses any other, a
+question gone, and an option it has not."
+  (harness-ui-pending-test-with
+    (let ((sid (harness-ui-pending-test-session "Viewer")))
+      (harness-ui-pending-test-record-answers)
+      (harness-ui-pending-test-multiple sid "m1")
+      (harness-ui-pending-toggle-option sid "m1" 1)
+      (harness-ui-pending-answer-first-question sid "maybe tomorrow")
+      (harness-test-wait (lambda () harness-ui-pending-test-answers) 5 "the answer over ACP")
+      (should (equal (list 'question sid "m1" "Offline sync\nmaybe tomorrow")
+                     (car harness-ui-pending-test-answers)))
+      ;; The refusals.
+      (harness-ui-pending-test-question sid "q1")
+      (harness-ui-pending-test-multiple sid "m2")
+      (should (equal "This question takes one answer"
+                     (cadr (should-error (harness-ui-pending-toggle-option sid "q1" 0) :type 'user-error))))
+      (should (equal "No such option"
+                     (cadr (should-error (harness-ui-pending-toggle-option sid "m2" 3) :type 'user-error))))
+      (should (equal "That question was answered already"
+                     (cadr (should-error (harness-ui-pending-toggle-option sid "gone" 0) :type 'user-error))))
+      ;; An ordinary question's digits still answer, whatever the flag says of others.
+      (should-not (harness-ui-pending-picked sid "q1"))
+      (should (equal "words" (harness-ui-pending-compose-answer sid (harness-ui-pending-record sid "q1") "words"))))))
+
 ;;;; What the lasting answers cover
 
 (defconst harness-ui-pending-test-options
