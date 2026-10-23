@@ -13134,9 +13134,10 @@ comment under a bar that runs the thread's length: its place in the
 thread (`2/3`), its author (marked "you" or "agent"), the time (exact,
 and relative), the revision it was written against, a "draft" mark, the
 comment it answers when that is not the one above (`↳ re 1/3`), for a
-draft an `[Edit]` button, a `▸
+draft an `[Edit]` button and a `[Delete]` one, a `▸
 where` button that shows where the comment was made, and for an agent's
-comment `↗ conversation`, then the text.  The text is drawn by the kind
+comment `↗ conversation`, then the text.  The header of a thread that is
+nothing but drafts has one more button, `[Delete thread]`.  The text is drawn by the kind
 of set: as it was typed, its lines wrapped under the bar, for a plain one,
 and as a markup does where the kind of set says its comments are one --
 `change-review-ui-body-lines` gives the lines of a comment, as wide as
@@ -13145,11 +13146,14 @@ the room under the bar, with their faces, and
 thread drawn collapsed or as a row.  No line of it is wider than
 the width it is drawn to (by default the columns of the window that
 shows the buffer, `change-review-ui-current-width`): a header that would
-be says less in steps -- for a closed thread how long ago it was closed
-for the date, and who closed it only if it was not the user; then who
-alone; then neither; the count of comments; the buttons.  For a comment
-the date for how long ago, the revision, the words of its links, the
-time, the marks -- and is cut only when it has given everything up.  Under a line of a diff a thread
+be says less in steps -- the `[Delete thread]` button first (each draft
+has the button that deletes it); for a closed thread how long ago it was
+closed for the date, and who closed it only if it was not the user; then
+who alone; then neither; the count of comments; the buttons.  For a
+comment the date for how long ago, the revision, the words of its links,
+the time, the marks, the links, and last the comment it answers, so that
+the buttons of a draft outlast all but that -- and is cut only when it has
+given everything up.  Under a line of a diff a thread
 also folds (`:fold`): a closed thread is one line, `▸ ✓ 3f9a1c · 3 comments
 · closed 2h ago  “Why eighteen?…”`, no wider than 100 columns and the first
 words of what its root says rather than of what that quotes
@@ -13173,7 +13177,7 @@ threads under the lines of Ediff's two versions and of the library's own
 diff view (`change-review-open-diff`) all call them, and the keys on a
 thread are
 the library's whichever view it is in: r replies, x closes it or opens
-it, m marks one the agent closed reviewed (M every one that waits), s sets a status, e edits a draft, k deletes one, o follows an
+it, m marks one the agent closed reviewed (M every one that waits), s sets a status, e edits a draft, k deletes one and K a thread that is nothing but drafts, o follows an
 agent's comment to the point of its conversation, RET (TAB in the
 threads view) shows where its comment was made -- the file and line, the
 revision, the lines of the diff it was made on, the session and tool
@@ -13215,6 +13219,23 @@ keeps it with `change-review-edit` -- unless the text is blank, or the
 comment was sent while it was written, from the feedback box say: what
 was delivered was read, so it stays as it was and the text goes to the
 kill ring.
+
+A draft is the author's alone, and can be taken back.  `[Delete]` beside
+its `[Edit]`, and k, delete it after asking (`change-review-ui-delete-comment`);
+the thread of drafts only (`change-review-thread-draft-p`) is deleted whole by
+`[Delete thread]` in its header and K (`change-review-ui-delete-thread`,
+`change-review-ui-delete-draft-thread`: the thread point is on, else one of
+the threads of drafts under the line, `change-review-ui-choose-thread` asking
+which when there are several), after asking how many drafts go.  A thread
+has its place from its first comment (`change-review-thread-location`), so
+the first draft of a thread that has more cannot go alone, and its question
+is whether to delete the thread.  The question is asked again after the user
+answers -- the feedback may have been sent from its box meanwhile, or the
+thread deleted by another view -- and what was sent stays: no comment of
+a thread with one is deleted (`change-review-delete-thread` signals before it
+performs anything).  The deletion is a `delete-comment` operation for each
+draft, the newest first, so that a set which keeps its threads elsewhere
+has nothing new to know, and the thread goes with its last comment.
 
 WHAT THE AGENT CLOSED.  A thread someone other than the user closed is
 TO REVIEW until the user looked at it (`change-review-thread-unreviewed-p`;
@@ -13728,7 +13749,15 @@ draft of yours under point -- the only one, or the one chosen of the
 several there -- or, with none, selects the window with point at the end
 of the box: the box is the popout's, so editing it is typing, and C-c
 C-c sends it.  On a thread's row in the report e is the library's
-`change-review-ui-edit-draft`: a draft of that thread.
+`change-review-ui-edit-draft`: a draft of that thread.  k and K
+(`harness-ui-patch-review-delete-comment` and `-delete-thread`, labelled
+"[Delete draft]" and "[Delete thread]" in the control panel) find their draft
+or thread of drafts where e finds its draft (`harness-ui-patch-review--ediff-threads-here`)
+and ask what the library's commands ask; with none there they say so, and
+do not go to the box.  In the report's threads k and K are the library's.
+The versions' keymap (`harness-ui-patch-review-lines-mode-map`) is filled at
+top level, as the library's are, so a harness that updates by reloading gives
+the Ediff it runs these keys too.
 `harness-ui-patch-review-open` on C-c C-d, which the review's minor mode
 now has in the report too, selects the control panel of the Ediff beside
 the report instead of opening it.  When the task's `:feedback` gets a

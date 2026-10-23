@@ -3799,7 +3799,7 @@ through."
            (index (cl-position "acme/app.py" files :key #'change-review-file-path :test #'equal))
            (set (harness-ui-patch-review--r-set review))
            (rename (cl-find-if (lambda (thread)
-                                 (string-search "Why rename application"
+                                 (string-search "Why rename `application`"
                                                 (change-review-comment-body (change-review-thread-root thread))))
                                (change-review-set-threads set))))
       (harness-ui-patch-review-ediff review index

@@ -218,6 +218,18 @@ version has no files, as a version a program has not read yet."
         (and (get-text-property 0 'button string)
              (string-prefix-p label (substring-no-properties string 0)) 0))))
 
+(defun change-review-ui-test--buttons (string label)
+  "Return where the buttons labelled LABEL start in STRING, in order."
+  (let (starts (pos 0))
+    (when (and (get-text-property 0 'button string)
+               (string-prefix-p label (substring-no-properties string 0)))
+      (push 0 starts))
+    (while (setq pos (next-single-property-change pos 'button string))
+      (when (and (get-text-property pos 'button string)
+                 (string-prefix-p label (substring-no-properties string pos)))
+        (push pos starts)))
+    (sort starts #'<)))
+
 (defun change-review-ui-test--press-nth (string label n)
   "Press the Nth (from 0) button labelled LABEL in STRING, as a click would."
   (let (starts (pos 0))
@@ -287,8 +299,9 @@ whether it is a draft, and where it is in the thread."
                      (nth 4 lines)))
       (should (equal "┃      Because the retry loop needs it." (nth 5 lines)))
       ;; The third answers the first, not the one before it, and is a draft.
-      ;; (and the one comment that can still be changed has its button.)
-      (should (equal "┃ 3/3  Noah (you) · 2026-10-14 17:45 · second · draft · ↳ re 1/3  [Edit]  ▸ where"
+      ;; (and the one comment that can still be changed or taken back has
+      ;; its buttons.)
+      (should (equal "┃ 3/3  Noah (you) · 2026-10-14 17:45 · second · draft · ↳ re 1/3  [Edit] [Delete]  ▸ where"
                      (nth 6 lines)))
       (should (equal "┃      Then say so in a comment." (nth 7 lines)))
       (should (= 8 (length lines))))))
@@ -427,7 +440,7 @@ This one the agent closed, so it waits for the user's review as well."
       (should (= 3 (length headers)))
       (should-not (string-search "[Edit]" (nth 0 headers)))
       (should-not (string-search "[Edit]" (nth 1 headers)))
-      (should (string-match-p "· draft · ↳ re 1/3  \\[Edit\\]  ▸ where\\'" (nth 2 headers)))
+      (should (string-match-p "· draft · ↳ re 1/3  \\[Edit\\] \\[Delete\\]  ▸ where\\'" (nth 2 headers)))
       ;; One button, on the line of the draft, which says what it does.
       (let ((pos (change-review-ui-test--button string "[Edit]")))
         (should pos)
@@ -549,6 +562,326 @@ the default, and what is chosen is the draft."
       (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "something else")))
         (should-error (change-review-ui-choose-draft set (list (cons a a3) (cons d d1)))
                       :type 'user-error)))))
+
+;; A draft can be taken back as well as changed: [Delete] on the draft,
+;; [Delete thread] on the header of a thread that is nothing but drafts.
+
+(ert-deftest change-review-ui-draws-a-delete-button-on-a-draft-only ()
+  "A draft has [Delete] beside [Edit], a comment that was sent has neither;
+the two stay when the room is too short for the other links."
+  (change-review-ui-test--drawing
+    (let* ((set (change-review-ui-test--set))
+           (thread (car (change-review-ui-test--populate set)))
+           (string (change-review-ui-thread-string set thread :width 90))
+           (headers (cl-remove-if-not (lambda (line) (string-match-p "\\`┃ [0-9]/" line))
+                                      (change-review-ui-test--lines string))))
+      (should-not (string-search "[Delete]" (nth 0 headers)))
+      (should-not (string-search "[Delete]" (nth 1 headers)))
+      (should (string-match-p "\\[Edit\\] \\[Delete\\]  ▸ where\\'" (nth 2 headers)))
+      ;; One button, on the line of the draft, which says what it does.
+      (let ((pos (change-review-ui-test--button string "[Delete]")))
+        (should pos)
+        (should (equal "Delete this draft" (get-text-property pos 'help-echo string)))
+        (should (equal (change-review-comment-id (change-review-thread-last-comment thread))
+                       (get-text-property pos 'change-review-comment string)))
+        (should-not (change-review-ui-test--button (substring string (1+ pos)) "[Delete]")))
+      ;; One line: nothing to press, the thread is read, not changed.
+      (should-not (string-search "[Delete]" (change-review-ui-thread-string
+                                             set thread :width 90 :collapsed t)))
+      ;; The links go, the buttons of the draft stay: to the last column they fit in.
+      (let ((header (lambda (width)
+                      (cl-find-if (lambda (line) (string-search "draft" line))
+                                  (change-review-ui-test--lines
+                                   (change-review-ui-thread-string set thread :width width))))))
+        (should (equal "┃ 3/3  Noah · draft · ↳ re 1/3  [Edit] [Delete]" (funcall header 48)))
+        ;; Narrower still, the comment it answers is given up, not a button.
+        (should (equal "┃ 3/3  Noah · draft  [Edit] [Delete]" (funcall header 40)))
+        (should (equal "┃ 3/3  Noah · draft  [Edit] [Delete]" (funcall header 36)))))))
+
+(ert-deftest change-review-ui-says-what-the-delete-button-of-a-first-draft-takes ()
+  "The draft that starts a thread with more comments in it has the thread
+go with it, and its button says so."
+  (change-review-ui-test--drawing
+    (let* ((set (change-review-ui-test--set))
+           (root (change-review-comment set "Why?" :author (change-review-ui-test--author)))
+           (thread (change-review-find-thread set (change-review-comment-thread root)))
+           (help (lambda ()
+                   (let ((string (change-review-ui-thread-string set thread :width 90)))
+                     (mapcar (lambda (pos) (get-text-property pos 'help-echo string))
+                             (change-review-ui-test--buttons string "[Delete]"))))))
+      ;; Alone, it is a draft like any other.
+      (should (equal '("Delete this draft") (funcall help)))
+      (change-review-reply set root "And why not?" :author (change-review-ui-test--author))
+      ;; With another after it, the first says the thread goes; the second does not.
+      (let ((helps (funcall help)))
+        (should (= 2 (length helps)))
+        (should (string-match-p "it starts the thread" (nth 0 helps)))
+        (should (equal "Delete this draft" (nth 1 helps)))))))
+
+(ert-deftest change-review-ui-draws-a-delete-thread-button-on-a-thread-of-drafts-only ()
+  "[Delete thread] is in the header of a thread that is nothing but drafts,
+after the other buttons; a thread with one comment that was sent has none,
+and it is the first thing a header gives up when the room is short."
+  (change-review-ui-test--drawing
+    (let* ((set (change-review-ui-test--set))
+           (threads (change-review-ui-test--populate set))
+           (a (nth 0 threads)) (b (nth 1 threads)) (c (nth 2 threads)) (d (nth 3 threads))
+           (head (lambda (thread width &rest args)
+                   (car (change-review-ui-test--lines
+                         (apply #'change-review-ui-thread-string set thread :width width args))))))
+      ;; D is one draft: the button is last, [Diff] before it in the threads view.
+      (should (string-match-p "· 1 comment · open +\\[Reply\\] \\[Close\\] \\[Diff\\] \\[Delete thread\\]\\'"
+                              (funcall head d 120)))
+      (should (string-match-p "· 1 comment · open +\\[Reply\\] \\[Close\\] \\[Delete thread\\]\\'"
+                              (funcall head d 120 :view 'diff)))
+      ;; A has two comments that were sent, B and C one each.
+      (dolist (thread (list a b c))
+        (should-not (string-search "[Delete thread]" (funcall head thread 120))))
+      ;; It says what it does, and finds its thread when pressed.
+      (let* ((string (change-review-ui-thread-string set d :width 120))
+             (pos (change-review-ui-test--button string "[Delete thread]")))
+        (should (string-match-p "nothing in it was sent" (get-text-property pos 'help-echo string)))
+        (should (equal (change-review-thread-id d) (get-text-property pos 'change-review-thread string))))
+      ;; Short of room it goes first: the count of comments and the other
+      ;; buttons are still there.
+      (let ((narrow (funcall head d 62)))
+        (should-not (string-search "[Delete thread]" narrow))
+        (should (string-search "1 comment" narrow))
+        (should (string-search "[Reply] [Close]" narrow)))
+      ;; A draft thread that was closed is a draft thread still, and so is one
+      ;; with a reply; one comment of it sent ends that, drafts after it or not.
+      (change-review-close set d)
+      (should (string-search "[Delete thread]" (funcall head d 160)))
+      (let ((reply (change-review-reply set (change-review-thread-root d) "Another."
+                                        :author (change-review-ui-test--author))))
+        (should (string-search "[Delete thread]" (funcall head d 160)))
+        (change-review-mark-sent set (list (change-review-thread-root d)))
+        (should-not (string-search "[Delete thread]" (funcall head d 160)))
+        (should (change-review-comment-draft-p reply))))))
+
+(ert-deftest change-review-ui-delete-button-deletes-that-draft ()
+  "[Delete] deletes the draft it is on, asking first: the second of two as
+well as the first, whatever point is on; the other draft and the comments
+that were sent stay."
+  (change-review-ui-test--drawing
+    (let* ((set (change-review-ui-test--set))
+           (thread (car (change-review-ui-test--populate set)))
+           (first (change-review-thread-last-comment thread))
+           (second (change-review-reply set first "And name the test."
+                                        :author (change-review-ui-test--author)
+                                        :time (- change-review-ui-test--now 30)))
+           (asked nil) (answer nil))
+      (cl-letf (((symbol-function 'y-or-n-p) (lambda (prompt) (push prompt asked) answer))
+                ((symbol-function 'message) #'ignore))
+        ;; No: nothing is deleted.
+        (change-review-ui-test--press-nth (change-review-ui-thread-string set thread :width 90) "[Delete]" 1)
+        (should (equal '("Delete this draft? ") asked))
+        (should (= 4 (length (change-review-thread-comments thread))))
+        ;; Yes: the second draft, the button of the second.
+        (setq answer t)
+        (change-review-ui-test--press-nth (change-review-ui-thread-string set thread :width 90) "[Delete]" 1)
+        (should (equal '("Why 'two?\nSecond line of the question."
+                         "Because the retry loop needs it."
+                         "Then say so in a comment.")
+                       (mapcar #'change-review-comment-body (change-review-thread-comments thread))))
+        (should-not (memq second (change-review-thread-comments thread)))
+        ;; The thread has one draft left, answering the first comment: that goes
+        ;; too, and the comments that were sent are the thread.
+        (change-review-ui-test--press (change-review-ui-thread-string set thread :width 90) "[Delete]")
+        (should (equal '("Why 'two?\nSecond line of the question." "Because the retry loop needs it.")
+                       (mapcar #'change-review-comment-body (change-review-thread-comments thread))))
+        (should (memq thread (change-review-set-threads set)))
+        (should-not (change-review-thread-drafts thread))
+        ;; No draft is left to press.
+        (should-not (change-review-ui-test--button (change-review-ui-thread-string set thread :width 90)
+                                                   "[Delete]"))))))
+
+(ert-deftest change-review-ui-deleting-the-only-draft-of-a-thread-deletes-the-thread ()
+  "A thread whose one comment is a draft is gone with it; the other threads stay."
+  (change-review-ui-test--drawing
+    (let* ((set (change-review-ui-test--set))
+           (threads (change-review-ui-test--populate set))
+           (d (nth 3 threads)))
+      (should (memq d (change-review-set-threads set)))
+      (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) t))
+                ((symbol-function 'message) #'ignore))
+        (change-review-ui-test--press (change-review-ui-thread-string set d :width 90) "[Delete]"))
+      (should-not (memq d (change-review-set-threads set)))
+      (should (= 3 (length (change-review-set-threads set))))
+      (should (equal (list (nth 0 threads) (nth 1 threads) (nth 2 threads))
+                     (change-review-set-threads set))))))
+
+(ert-deftest change-review-ui-deleting-the-first-draft-of-a-bigger-thread-asks-about-the-thread ()
+  "The thread has its place from its first comment, so a first draft that
+others follow cannot go alone: the question is whether the thread goes, with
+its drafts.  No leaves everything as it was."
+  (change-review-ui-test--drawing
+    (let* ((set (change-review-ui-test--set))
+           (author (change-review-ui-test--author))
+           (root (change-review-comment set "Why?" :author author
+                                        :location (change-review-diff-location
+                                                   (car (change-review-version-files
+                                                         (change-review-latest-version set)))
+                                                   'new 3)))
+           (second (change-review-reply set root "And why not?" :author author))
+           (third (change-review-reply set second "And what else?" :author author))
+           (other (change-review-comment set "Elsewhere." :author author))
+           (thread (change-review-find-thread set (change-review-comment-thread root)))
+           (asked nil) (answer nil))
+      (cl-letf (((symbol-function 'y-or-n-p) (lambda (prompt) (push prompt asked) answer))
+                ((symbol-function 'message) #'ignore))
+        (change-review-ui-test--press (change-review-ui-thread-string set thread :width 90) "[Delete]")
+        (should (equal (list (format "This draft starts thread %s: delete the thread, with the 2 drafts after it? "
+                                     (change-review-ui-thread-short-id set thread)))
+                       asked))
+        (should (equal (list root second third) (change-review-thread-comments thread)))
+        (setq answer t)
+        (change-review-ui-test--press (change-review-ui-thread-string set thread :width 90) "[Delete]")
+        (should-not (memq thread (change-review-set-threads set)))
+        (should (equal (list (change-review-comment-thread other))
+                       (mapcar #'change-review-thread-id (change-review-set-threads set))))))))
+
+(ert-deftest change-review-ui-a-first-draft-with-comments-that-were-sent-after-it-stays ()
+  "Whatever was sent is not deleted, nor the draft that gives its thread the place."
+  (change-review-ui-test--drawing
+    (let* ((set (change-review-ui-test--set))
+           (author (change-review-ui-test--author))
+           (root (change-review-comment set "Why?" :author author))
+           (second (change-review-reply set root "Because." :author author))
+           (thread (change-review-find-thread set (change-review-comment-thread root))))
+      (change-review-mark-sent set (list second))
+      (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) (ert-fail "asked")))
+                ((symbol-function 'message) #'ignore))
+        (should-error (change-review-ui-delete-comment set thread root) :type 'user-error)
+        (should-error (change-review-ui-delete-comment set thread second) :type 'user-error)
+        (should-error (change-review-ui-delete-thread set thread) :type 'user-error))
+      (should (equal (list root second) (change-review-thread-comments thread))))))
+
+(ert-deftest change-review-ui-delete-thread-button-deletes-the-thread-of-drafts ()
+  "[Delete thread] asks how many drafts go, and deletes them with the thread."
+  (change-review-ui-test--drawing
+    (let* ((set (change-review-ui-test--set))
+           (threads (change-review-ui-test--populate set))
+           (d (nth 3 threads))
+           (extra (change-review-reply set (change-review-thread-root d) "Say more."
+                                       :author (change-review-ui-test--author)))
+           (asked nil) (answer nil) (said nil))
+      (ignore extra)
+      (cl-letf (((symbol-function 'y-or-n-p) (lambda (prompt) (push prompt asked) answer))
+                ((symbol-function 'message) (lambda (&rest args) (setq said (apply #'format args)))))
+        (change-review-ui-test--press (change-review-ui-thread-string set d :width 120) "[Delete thread]")
+        (should (equal (list (format "Delete thread %s with its 2 drafts? "
+                                     (change-review-ui-thread-short-id set d)))
+                       asked))
+        (should (= 2 (length (change-review-thread-comments d))))
+        (should (memq d (change-review-set-threads set)))
+        (setq answer t)
+        (let ((short (change-review-ui-thread-short-id set d)))
+          (change-review-ui-test--press (change-review-ui-thread-string set d :width 120) "[Delete thread]")
+          (should (equal (format "Thread %s deleted" short) said)))
+        (should-not (memq d (change-review-set-threads set)))
+        (should (= 3 (length (change-review-set-threads set))))
+        ;; The others have a comment that was sent: no button, and none is deleted.
+        (should-not (string-search "[Delete thread]"
+                                   (change-review-ui-thread-string set (nth 0 threads) :width 120)))
+        (should-error (change-review-ui-delete-thread set (nth 0 threads)) :type 'user-error)
+        (should (= 3 (length (change-review-set-threads set))))))))
+
+(ert-deftest change-review-ui-delete-thread-finds-its-thread-by-id ()
+  "A set read again since the drawing has other structs for the same threads:
+the button finds the thread it is on by its id, and one that is gone says so."
+  (change-review-ui-test--drawing
+    (let* ((set (change-review-ui-test--set))
+           (threads (change-review-ui-test--populate set))
+           (d (nth 3 threads))
+           (string (change-review-ui-thread-string set d :width 120))
+           (said nil))
+      ;; Read again: the same data in new structs.
+      (change-review-set-from-data (change-review-set-to-data set) set)
+      (should-not (memq d (change-review-set-threads set)))
+      (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) t))
+                ((symbol-function 'message) (lambda (&rest args) (setq said (apply #'format args)))))
+        (change-review-ui-test--press string "[Delete thread]"))
+      (should (= 3 (length (change-review-set-threads set))))
+      (should-not (change-review-find-thread set (change-review-thread-id d)))
+      ;; Gone: pressed again, it says so.
+      (let ((error (should-error (change-review-ui-test--press string "[Delete thread]")
+                                 :type 'user-error)))
+        (should (equal "That thread is gone" (cadr error)))))))
+
+(ert-deftest change-review-ui-deleting-asks-again-what-changed-while-it-asked ()
+  "The question is open while the set may change -- the feedback sent from
+its box, say -- so a draft sent meanwhile stays, and one deleted meanwhile is
+not deleted twice."
+  (change-review-ui-test--drawing
+    (let* ((set (change-review-ui-test--set))
+           (author (change-review-ui-test--author))
+           (root (change-review-comment set "Why?" :author author))
+           (thread (change-review-find-thread set (change-review-comment-thread root)))
+           (extra (change-review-reply set root "Also." :author author))
+           (said nil))
+      (cl-letf (((symbol-function 'message) (lambda (&rest args) (setq said (apply #'format args)))))
+        ;; The second is sent while the question is open.
+        (cl-letf (((symbol-function 'y-or-n-p)
+                   (lambda (&rest _) (change-review-mark-sent set (list extra)) t)))
+          (let ((error (should-error (change-review-ui-delete-comment set thread extra) :type 'user-error)))
+            (should (string-match-p "sent meanwhile" (cadr error)))))
+        (should (equal (list root extra) (change-review-thread-comments thread)))
+        ;; The thread is sent while the question is open.
+        (cl-letf (((symbol-function 'y-or-n-p)
+                   (lambda (&rest _) (change-review-mark-sent set (list root)) t)))
+          (let ((error (should-error (change-review-ui-delete-thread set thread) :type 'user-error)))
+            (should (string-match-p "has a comment that was sent" (cadr error)))))
+        (should (equal (list root extra) (change-review-thread-comments thread))))
+      ;; Another thread: deleted by someone else while the question is open.
+      (let* ((lone (change-review-comment set "Lonely." :author author))
+             (lone-thread (change-review-find-thread set (change-review-comment-thread lone))))
+        (cl-letf (((symbol-function 'message) (lambda (&rest args) (setq said (apply #'format args))))
+                  ((symbol-function 'y-or-n-p)
+                   (lambda (&rest _) (change-review-delete set lone) t)))
+          (change-review-ui-delete-comment set lone-thread lone)
+          (should (equal "That draft is gone already" said))
+          (setq said nil))
+        (let ((lone (change-review-comment set "Lonely again." :author author)))
+          (setq lone-thread (change-review-find-thread set (change-review-comment-thread lone)))
+          (cl-letf (((symbol-function 'message) (lambda (&rest args) (setq said (apply #'format args))))
+                    ((symbol-function 'y-or-n-p)
+                     (lambda (&rest _) (change-review-delete-thread set lone-thread) t)))
+            (change-review-ui-delete-thread set lone-thread)
+            (should (equal "That thread is gone already" said))))))))
+
+(ert-deftest change-review-ui-chooses-a-thread-of-drafts-among-several ()
+  "The only thread is the one to act on, without a question; of several, the
+prompt lists them in order by id, place, how many drafts and first words, the
+newest being the default."
+  (change-review-ui-test--drawing
+    (let* ((set (change-review-ui-test--set))
+           (author (change-review-ui-test--author))
+           (one (change-review-comment set "First thread." :author author))
+           (two (change-review-comment set "Second thread.\nWith a second line." :author author))
+           (_ (change-review-reply set two "Reply." :author author))
+           (a (change-review-find-thread set (change-review-comment-thread one)))
+           (b (change-review-find-thread set (change-review-comment-thread two)))
+           (asked nil))
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (&rest _) (ert-fail "asked which of one"))))
+        (should (eq a (change-review-ui-choose-thread set (list a))))
+        (should-not (change-review-ui-choose-thread set nil)))
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (prompt table _predicate _require _initial _hist default &rest _)
+                   (setq asked (list prompt (all-completions "" table)
+                                     (completion-metadata "" table nil) default))
+                   (car (all-completions "" table)))))
+        (should (eq a (change-review-ui-choose-thread set (list a b) "Delete")))
+        (should (equal (format "Delete which thread (default %s): " (nth 3 asked)) (nth 0 asked)))
+        (should (equal (list (format "%s  the change  1 draft  First thread." (change-review-ui-thread-short-id set a))
+                             (format "%s  the change  2 drafts  Second thread. With a second line."
+                                     (change-review-ui-thread-short-id set b)))
+                       (nth 1 asked)))
+        (should (eq 'identity (alist-get 'display-sort-function (cdr (nth 2 asked)))))
+        (should (equal (nth 1 (nth 1 asked)) (nth 3 asked))))
+      (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "something else")))
+        (should-error (change-review-ui-choose-thread set (list a b)) :type 'user-error)))))
 
 (ert-deftest change-review-ui-draws-a-thread-as-a-line ()
   "A thread in a list is a line: mark, id, line, who wrote it and the first
@@ -1065,12 +1398,24 @@ words thirty columns, or the room they need; no line is wider than a hundred."
           (should (<= (string-width (funcall one width)) (min width 100))))
         ;; Words that need less than they want leave the rest of the line empty.
         (let* ((short (change-review-comment
-                       set "Fine." :author (change-review-ui-test--author) :time change-review-ui-test--now))
-               (thread (change-review-find-thread set (change-review-comment-thread short))))
+                       set "Fine." :author (change-review-ui-test--author) :time change-review-ui-test--now
+                       :sent change-review-ui-test--now))
+               (thread (change-review-find-thread set (change-review-comment-thread short)))
+               (line (lambda (thread width)
+                       (car (change-review-ui-test--lines
+                             (change-review-ui-thread-string set thread :view 'diff :width width
+                                                             :fold 'collapsed))))))
           (should (string-match-p "· 1 comment · open   \\[Reply\\] \\[Close\\]  “Fine\\.”\\'"
-                                  (car (change-review-ui-test--lines
-                                        (change-review-ui-thread-string set thread :view 'diff :width 80
-                                                                        :fold 'collapsed))))))))))
+                                  (funcall line thread 80)))
+          ;; A thread of drafts has one more button, which is the first to go
+          ;; when the room is short: the words keep theirs.
+          (let* ((draft (change-review-comment
+                         set "Draft." :author (change-review-ui-test--author) :time change-review-ui-test--now))
+                 (thread (change-review-find-thread set (change-review-comment-thread draft))))
+            (should (string-match-p "· 1 comment · open   \\[Reply\\] \\[Close\\] \\[Delete thread\\]  “Draft\\.”\\'"
+                                    (funcall line thread 80)))
+            (should (string-match-p "· 1 comment · open   \\[Reply\\] \\[Close\\]  “Draft\\.”\\'"
+                                    (funcall line thread 60)))))))))
 
 ;;;; The threads view
 
@@ -1416,6 +1761,76 @@ what is no thread is none.  k finds a draft the same way."
         (should (= (1- count) (length (change-review-set-threads set))))
         (should-not (memq d (change-review-set-threads set)))))))
 
+(ert-deftest change-review-ui-threads-view-deletes-a-thread-of-drafts ()
+  "K deletes the thread at point when it is nothing but drafts, after asking;
+a thread with a comment that was sent is not, whether point is on its header
+or on a draft in it, and what is no thread says so."
+  (change-review-ui-test--threads-view
+    (should (eq #'change-review-ui-delete-draft (key-binding "k")))
+    (should (eq #'change-review-ui-delete-draft-thread (key-binding "K")))
+    (let* ((a (nth 0 threads)) (d (nth 3 threads))
+           (asked nil)
+           (header (lambda (thread)
+                     (goto-char (point-min))
+                     (search-forward (change-review-ui-thread-short-id set thread))
+                     (beginning-of-line)))
+           (count (length (change-review-set-threads set))))
+      ;; Thread A has two comments that were sent and a draft: nothing goes.
+      (funcall header a)
+      (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) (ert-fail "asked"))))
+        (let ((error (should-error (change-review-ui-delete-draft-thread) :type 'user-error)))
+          (should (string-match-p "only a thread of drafts is deleted whole" (cadr error))))
+        (goto-char (point-min))
+        (search-forward "Then say so")
+        (should-error (call-interactively #'change-review-ui-delete-draft-thread) :type 'user-error)
+        ;; Neither is text that is no thread's.
+        (goto-char (point-min))
+        (let ((error (should-error (change-review-ui-delete-draft-thread) :type 'user-error)))
+          (should (equal "No thread here" (cadr error)))))
+      (should (= count (length (change-review-set-threads set))))
+      ;; Thread D is one draft: no, then yes.
+      (funcall header d)
+      (cl-letf (((symbol-function 'y-or-n-p) (lambda (prompt) (push prompt asked) nil)))
+        (change-review-ui-delete-draft-thread))
+      (should (equal (list (format "Delete thread %s with its draft? " (change-review-ui-thread-short-id set d)))
+                     asked))
+      (should (= count (length (change-review-set-threads set))))
+      (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) t))
+                ((symbol-function 'message) #'ignore))
+        (call-interactively #'change-review-ui-delete-draft-thread))
+      (should (= (1- count) (length (change-review-set-threads set))))
+      (change-review-ui-flush)
+      (should-not (string-match-p "What about a4" (change-review-ui-test--text))))))
+
+(ert-deftest change-review-ui-threads-view-deletes-the-first-draft-of-a-thread-with-its-thread ()
+  "k on the first of several drafts is a question about the whole thread,
+as the [Delete] button of that draft asks it; on a later one, about itself."
+  (change-review-ui-test--threads-view
+    (let* ((d (nth 3 threads))
+           (root (change-review-thread-root d))
+           (later (change-review-reply set root "Say more." :author (change-review-ui-test--author)))
+           (asked nil))
+      (change-review-ui-flush)
+      (cl-letf (((symbol-function 'y-or-n-p) (lambda (prompt) (push prompt asked) nil)))
+        (goto-char (point-min))
+        (search-forward "What about a4?")
+        (change-review-ui-delete-draft)
+        (goto-char (point-min))
+        (search-forward "Say more.")
+        (change-review-ui-delete-draft))
+      ;; The newest question first.
+      (should (equal (list "Delete this draft? "
+                           (format "This draft starts thread %s: delete the thread, with the draft after it? "
+                                   (change-review-ui-thread-short-id set d)))
+                     asked))
+      (should (equal (list root later) (change-review-thread-comments d)))
+      ;; Yes to the later one: it alone goes, the first and its thread stay.
+      (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) t))
+                ((symbol-function 'message) #'ignore))
+        (change-review-ui-delete-draft))
+      (should (equal (list root) (change-review-thread-comments d)))
+      (should (memq d (change-review-set-threads set))))))
+
 (ert-deftest change-review-ui-threads-view-follows-an-agent ()
   "o on a comment of an agent follows it to its conversation; on the thread
 of a user alone, it says there is none."
@@ -1539,6 +1954,75 @@ The [Edit] buttons of the drawing name one directly."
         (change-review-ui-add-thread-overlay set b (line-end-position) :view 'diff :width 70)
         (let ((error (should-error (call-interactively #'change-review-ui-edit-draft) :type 'user-error)))
           (should (equal "No draft in this thread" (cadr error))))))))
+
+(ert-deftest change-review-ui-lines-mode-deletes-the-drafts-and-the-threads-under-the-line ()
+  "Where threads are drawn under one line, point is on none: k asks which of
+their drafts to delete and K which of the threads that are nothing but
+drafts, and each button of the drawing names its own."
+  (change-review-ui-test--drawing
+    (let* ((set (change-review-ui-test--set))
+           (threads (change-review-ui-test--populate set))
+           (a (nth 0 threads)) (b (nth 1 threads)) (d (nth 3 threads))
+           (a3 (change-review-thread-last-comment a))
+           (e (change-review-comment-thread
+               (change-review-comment set "Another draft thread." :author (change-review-ui-test--author))))
+           (e (change-review-find-thread set e))
+           (asked nil))
+      (with-temp-buffer
+        (insert "one\ntwo\nthree\n")
+        (setq change-review-ui--set set)
+        (change-review-ui-lines-mode 1)
+        (goto-char (point-min))
+        (forward-line 1)
+        (dolist (thread (list a b d e))
+          (change-review-ui-add-thread-overlay set thread (line-end-position) :view 'diff :width 70))
+        (should (eq #'change-review-ui-delete-draft (key-binding "k")))
+        (should (eq #'change-review-ui-delete-draft-thread (key-binding "K")))
+        (cl-letf (((symbol-function 'message) #'ignore)
+                  ((symbol-function 'y-or-n-p) (lambda (prompt) (push prompt asked) t)))
+          ;; K: of the four threads under the line, D and E are drafts only; asked
+          ;; which, and the first is taken.
+          (let (candidates)
+            (cl-letf (((symbol-function 'completing-read)
+                       (lambda (prompt table &rest _)
+                         (setq candidates (cons prompt (all-completions "" table)))
+                         (car (all-completions "" table)))))
+              (call-interactively #'change-review-ui-delete-draft-thread))
+            (should (string-prefix-p "Delete which thread (default " (car candidates)))
+            (should (= 2 (length (cdr candidates)))))
+          (should-not (memq d (change-review-set-threads set)))
+          (should (memq e (change-review-set-threads set)))
+          (should (memq a (change-review-set-threads set)))
+          ;; One thread of drafts left under the line: no question which.
+          (cl-letf (((symbol-function 'completing-read)
+                     (lambda (&rest _) (ert-fail "asked which of one"))))
+            (change-review-ui-clear-overlays)
+            (dolist (thread (list a b e))
+              (change-review-ui-add-thread-overlay set thread (line-end-position) :view 'diff :width 70))
+            (call-interactively #'change-review-ui-delete-draft-thread))
+          (should-not (memq e (change-review-set-threads set)))
+          ;; Then none: a and b were sent, in part or whole.
+          (change-review-ui-clear-overlays)
+          (change-review-ui-add-thread-overlay set a (line-end-position) :view 'diff :width 70)
+          (let ((error (should-error (call-interactively #'change-review-ui-delete-draft-thread)
+                                     :type 'user-error)))
+            (should (string-match-p "only a thread of drafts" (cadr error))))
+          (change-review-ui-add-thread-overlay set b (line-end-position) :view 'diff :width 70)
+          (let ((error (should-error (call-interactively #'change-review-ui-delete-draft-thread)
+                                     :type 'user-error)))
+            (should (string-match-p "No thread of drafts here" (cadr error))))
+          ;; k finds the one draft there is under the line, A's third comment.
+          (let ((count (length asked)))
+            (call-interactively #'change-review-ui-delete-draft)
+            (should (= (1+ count) (length asked))))
+          (should-not (memq a3 (change-review-thread-comments a)))
+          (should (= 2 (length (change-review-thread-comments a))))
+          ;; The buttons of the drawing delete what they are on, wherever point is.
+          (let* ((mine (change-review-comment set "Mine." :author (change-review-ui-test--author)))
+                 (mine-thread (change-review-find-thread set (change-review-comment-thread mine))))
+            (change-review-ui-test--press (change-review-ui-thread-string set mine-thread :width 100)
+                                          "[Delete thread]")
+            (should-not (memq mine-thread (change-review-set-threads set)))))))))
 
 (ert-deftest change-review-ui-keeps-the-face-of-the-last-newline-under-a-line ()
   "The buffer's own newline ends the last line of a thread under a line, so a
@@ -2072,6 +2556,42 @@ line with a thread that was sent only, it says there is no draft."
     (end-of-line)
     (let ((error (should-error (call-interactively #'change-review-ui-edit-draft) :type 'user-error)))
       (should (equal "No draft in this thread" (cadr error))))))
+
+(ert-deftest change-review-ui-diff-view-deletes-the-draft-and-the-thread-under-the-line ()
+  "k on the line a draft's thread is drawn under deletes the draft, and K the
+thread when it is nothing but drafts; under a thread with a comment that was
+sent K says no, and the drawing is drawn again without what went."
+  (change-review-ui-test--diff-view
+    (should (eq #'change-review-ui-delete-draft (key-binding "k")))
+    (should (eq #'change-review-ui-delete-draft-thread (key-binding "K")))
+    (let ((asked nil))
+      (cl-letf (((symbol-function 'y-or-n-p) (lambda (prompt) (push prompt asked) t))
+                ((symbol-function 'message) #'ignore))
+        ;; Under (setq a3 3) is thread A, with a draft that answers: K is no.
+        (change-review-ui-test--goto "^ (setq a3 3)")
+        (end-of-line)
+        (let ((thread (change-review-ui--thread-at-point)))
+          (should-error (call-interactively #'change-review-ui-delete-draft-thread) :type 'user-error)
+          (should (= 3 (length (change-review-thread-comments thread))))
+          (call-interactively #'change-review-ui-delete-draft)
+          (should (= 2 (length (change-review-thread-comments thread)))))
+        ;; Under (setq a4 4) is thread D, one draft: K takes the thread.
+        (change-review-ui-test--goto "^ (setq a4 4)")
+        (end-of-line)
+        (let ((thread (change-review-ui--thread-at-point)))
+          (should (equal "What about a4?" (change-review-comment-body (change-review-thread-root thread))))
+          (call-interactively #'change-review-ui-delete-draft-thread)
+          (should-not (memq thread (change-review-set-threads set))))
+        (change-review-ui-flush)
+        (should-not (cl-some (lambda (o) (string-match-p "What about a4" (or (overlay-get o 'after-string) "")))
+                             (overlays-in (point-min) (point-max))))
+        (should (= 2 (length asked)))
+        ;; Under b.el's line, a thread that was sent only: nothing to delete.
+        (change-review-ui-test--goto "^\\+(setq b2 'two)")
+        (end-of-line)
+        (should-error (call-interactively #'change-review-ui-delete-draft) :type 'user-error)
+        (should-error (call-interactively #'change-review-ui-delete-draft-thread) :type 'user-error)
+        (should (= 2 (length asked)))))))
 
 (ert-deftest change-review-ui-diff-view-moves-between-threads ()
   "C-c C-n and C-c C-p move between the lines that have a thread."

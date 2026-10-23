@@ -883,8 +883,11 @@ point on the next one.  The box stays in sight under Ediff."
           ;; library draws a thread, the draft marked.
           (should (string-match-p "^Threads  \\[open 2\\]" text))
           (should (string-match-p "^  ▾ a\\.el +1 thread$" text))
+          ;; In this window there is no room for the button that deletes a
+          ;; thread of drafts, which is the first thing a header gives up; the
+          ;; draft has the buttons that edit it and delete it.
           (should (string-match-p "^    ● [^ ]+ · line 2 · 1 comment · open +\\[Reply\\] \\[Close\\] \\[Diff\\]$" text))
-          (should (string-match-p "^    ┃ 1/1  .* · draft  \\[Edit\\]  ▸ where$" text))
+          (should (string-match-p "^    ┃ 1/1  .* · draft  \\[Edit\\] \\[Delete\\]  ▸ where$" text))
           (should (string-match-p "^    ┃      Why two\\?$" text))))
       ;; The review stays, for Ediff again.
       (should (eq review (gethash id harness-ui-patch-review--reviews))))))
@@ -1516,6 +1519,179 @@ default; and e on a thread's row in the report edits one of its drafts."
             (call-interactively #'change-review-ui-edit-draft)))
         (should (equal "Overall: where are the tests?" (funcall body whole))))))))
 
+(ert-deftest harness-ui-patch-review-deletes-drafts-and-threads-of-drafts ()
+  "A draft is taken back where it was made: K in the report's threads deletes
+a thread of drafts; in Ediff each draft has a [Delete] button, k in the
+control panel and in a version asks which draft of those at the difference or
+under the line, and K which thread of drafts; the first draft of a thread that
+has more takes the thread with it.  What the user deleted is gone from the
+harness's copy too, and a thread with a comment that was sent is never deleted."
+  (let ((change-review-ui-max-thread-lines nil))
+  (harness-ui-patch-review-test-with-task
+    (let* ((popout (harness-ui-patch-review-test--changes board id))
+           (review (gethash id harness-ui-patch-review--reviews))
+           (set (harness-ui-patch-review--r-set review))
+           (noah (change-review-user "Noah" "noah@example.org"))
+           (first (harness-ui-patch-review-test--comment-on review "a.el" '(:new . 2) "Why two?"))
+           (thread (harness-ui-patch-review-test--thread-of review first))
+           (second (change-review-reply set first "And the second." :author noah))
+           (third (change-review-reply set first "And the third." :author noah))
+           (other (harness-ui-patch-review-test--comment-on review "a.el" '(:new . 2) "Also this line."))
+           (other-thread (harness-ui-patch-review-test--thread-of review other))
+           (far (harness-ui-patch-review-test--comment-on review "a.el" '(:new . 10) "Elsewhere."))
+           (far-thread (harness-ui-patch-review-test--thread-of review far))
+           (asked nil)
+           (short (lambda (th) (change-review-ui-thread-short-id set th)))
+           (bodies (lambda (th) (mapcar #'change-review-comment-body (change-review-thread-comments th))))
+           (yes (lambda (prompt) (push prompt asked) t))
+           (no (lambda (prompt) (push prompt asked) nil)))
+      (should (= 5 (length (change-review-drafts set))))
+      (harness-ui-patch-review-test--wait-text popout "Elsewhere\\.")
+      ;; The report: k and K are the library's, on the thread or the comment at point.
+      (with-current-buffer popout
+        (goto-char (point-min))
+        (re-search-forward "Elsewhere\\.")
+        (should (eq #'change-review-ui-delete-draft (key-binding "k")))
+        (should (eq #'change-review-ui-delete-draft-thread (key-binding "K")))
+        (cl-letf (((symbol-function 'y-or-n-p) yes)
+                  ((symbol-function 'message) #'ignore))
+          (call-interactively #'change-review-ui-delete-draft-thread)))
+      (should (equal (list (format "Delete thread %s with its draft? " (funcall short far-thread))) asked))
+      (should-not (memq far-thread (change-review-set-threads set)))
+      (harness-ui-patch-review-test--wait-text popout "Elsewhere\\." t)
+      (setq asked nil)
+      ;; Ediff, on the first difference: line 2 of the branch.
+      (harness-ui-patch-review-ediff review 0)
+      (let* ((control (harness-ui-patch-review-test--control review 0))
+             (new (nth 2 (harness-ui-patch-review--ediff-buffers review)))
+             (drawing (harness-ui-patch-review-test--thread-string new thread))
+             (choose (lambda (which)
+                       (lambda (prompt table _predicate _require _initial _hist default &rest _)
+                         (push (list prompt (all-completions "" table) default) asked)
+                         (pcase which
+                           ('first (car (all-completions "" table)))
+                           ('default default)
+                           ((pred integerp) (nth which (all-completions "" table))))))))
+        ;; A [Delete] on each draft of the drawing: three in the thread, one in the other.
+        (should (= 3 (harness-ui-patch-review-test--count "[Delete]" drawing)))
+        (should (= 1 (harness-ui-patch-review-test--count
+                      "[Delete]" (harness-ui-patch-review-test--thread-string new other-thread))))
+        (with-current-buffer control
+          (should (eq #'harness-ui-patch-review-delete-comment (key-binding "k")))
+          (should (eq #'harness-ui-patch-review-delete-thread (key-binding "K"))))
+        (should (string-search "[Delete draft] k" (harness-ui-patch-review-test--text control)))
+        (should (string-search "[Delete thread] K" (harness-ui-patch-review-test--text control)))
+        (with-current-buffer new
+          (should (eq #'harness-ui-patch-review-delete-comment (key-binding "k")))
+          (should (eq #'harness-ui-patch-review-delete-thread (key-binding "K"))))
+        ;; The second button deletes the second draft, whatever point is on; the
+        ;; first asks about the thread, and no leaves everything as it was.
+        (with-current-buffer new (goto-char (point-max)))
+        (cl-letf (((symbol-function 'y-or-n-p) yes) ((symbol-function 'message) #'ignore))
+          (harness-ui-patch-review-test--press-nth drawing "[Delete]" 1))
+        (should (equal '("Why two?" "And the third.") (funcall bodies thread)))
+        (should (equal '("Delete this draft? ") asked))
+        (setq asked nil)
+        (cl-letf (((symbol-function 'y-or-n-p) no) ((symbol-function 'message) #'ignore))
+          (harness-ui-patch-review-test--press-nth drawing "[Delete]" 0))
+        (should (equal (list (format "This draft starts thread %s: delete the thread, with the draft after it? "
+                                     (funcall short thread)))
+                       asked))
+        (should (equal '("Why two?" "And the third.") (funcall bodies thread)))
+        (setq asked nil)
+        ;; In the control panel: three drafts at the difference, asked which, in
+        ;; the order the threads draw them; the newest, the other thread's, goes
+        ;; with its thread.
+        (with-current-buffer control
+          (cl-letf (((symbol-function 'completing-read) (funcall choose 'default))
+                    ((symbol-function 'y-or-n-p) yes)
+                    ((symbol-function 'message) #'ignore))
+            (call-interactively #'harness-ui-patch-review-delete-comment)))
+        (should (equal (list (format "%s 1/2  Why two?" (funcall short thread))
+                             (format "%s 2/2  And the third." (funcall short thread))
+                             (format "%s 1/1  Also this line." (funcall short other-thread)))
+                       (nth 1 (nth 1 asked))))
+        (should (equal (format "Delete which draft (default %s): " (nth 2 (nth 1 asked))) (nth 0 (nth 1 asked))))
+        (should-not (memq other-thread (change-review-set-threads set)))
+        (should (eq thread (car (change-review-set-threads set))))
+        (setq asked nil)
+        ;; In the version, with point on the line: two drafts of the thread; the
+        ;; second, which is no first, goes alone.
+        (with-current-buffer new
+          (goto-char (point-min))
+          (forward-line 1)
+          (cl-letf (((symbol-function 'completing-read) (funcall choose 1))
+                    ((symbol-function 'y-or-n-p) yes)
+                    ((symbol-function 'message) #'ignore))
+            (call-interactively #'harness-ui-patch-review-delete-comment)))
+        (should (equal '("Why two?") (funcall bodies thread)))
+        (setq asked nil)
+        ;; K in the panel: the one thread at the difference is a draft thread; no
+        ;; question which, only whether.
+        (with-current-buffer control
+          (cl-letf (((symbol-function 'completing-read)
+                     (lambda (&rest _) (ert-fail "asked which of one thread")))
+                    ((symbol-function 'y-or-n-p) yes)
+                    ((symbol-function 'message) #'ignore))
+            (call-interactively #'harness-ui-patch-review-delete-thread)))
+        (should (equal (list (format "Delete thread %s with its draft? " (funcall short thread))) asked))
+        (should-not (change-review-set-threads set))
+        ;; Nothing left to delete at the difference: it says so, and does not
+        ;; go to the feedback box, as e does.
+        (let ((selected (selected-window)))
+          (with-current-buffer control
+            (let ((error (should-error (call-interactively #'harness-ui-patch-review-delete-comment)
+                                       :type 'user-error)))
+              (should (equal "No draft of yours here" (cadr error))))
+            (let ((error (should-error (call-interactively #'harness-ui-patch-review-delete-thread)
+                                       :type 'user-error)))
+              (should (equal "No thread here" (cadr error)))))
+          (should (eq selected (selected-window)))
+          (should-not (eq (selected-window) (get-buffer-window popout t))))
+        ;; A thread with a comment that was sent is never deleted.
+        (let* ((sent (harness-ui-patch-review-test--comment-on review "a.el" '(:new . 2) "Sent one."))
+               (sent-thread (harness-ui-patch-review-test--thread-of review sent)))
+          (change-review-apply set (list :op 'mark-sent :time (float-time)
+                                         :comments (list (change-review-comment-id sent))))
+          (with-current-buffer control
+            (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) (ert-fail "asked"))))
+              (let ((error (should-error (call-interactively #'harness-ui-patch-review-delete-comment)
+                                         :type 'user-error)))
+                (should (equal "No draft of yours here" (cadr error))))
+              (let ((error (should-error (call-interactively #'harness-ui-patch-review-delete-thread)
+                                         :type 'user-error)))
+                (should (string-match-p "every one has a comment that was sent" (cadr error))))))
+          (should (memq sent-thread (change-review-set-threads set))))
+        (with-current-buffer control (call-interactively #'harness-ui-patch-review-ediff-quit)))
+      ;; The button in the header of a thread of drafts, where the window has
+      ;; room for it: both drafts go, and the harness hears of each.
+      (let* ((mine (harness-ui-patch-review-test--comment-on review "a.el" '(:new . 12) "Mine."))
+             (mine-thread (harness-ui-patch-review-test--thread-of review mine))
+             (more (change-review-reply set mine "More of mine." :author noah)))
+        (ignore more)
+        (should (= 2 (length (change-review-thread-comments mine-thread))))
+        (cl-letf (((symbol-function 'y-or-n-p) yes) ((symbol-function 'message) #'ignore))
+          (setq asked nil)
+          (harness-ui-patch-review-test--press-nth
+           (change-review-ui-thread-string set mine-thread :width 160) "[Delete thread]" 0))
+        (should (equal (list (format "Delete thread %s with its 2 drafts? " (funcall short mine-thread))) asked))
+        (should-not (memq mine-thread (change-review-set-threads set))))
+      ;; The harness has what the user made of the drafts: each deletion went to
+      ;; it as an operation, and it keeps only the thread that was sent.
+      (let ((kept (lambda ()
+                    (sort (mapcar (lambda (c) (plist-get c :body))
+                                  (cl-loop for th in (harness-ui-patch-review-test--harness-threads id)
+                                           append (plist-get th :comments)))
+                          #'string<))))
+        (harness-test-wait (lambda ()
+                             (equal (funcall kept)
+                                    (sort (mapcar (lambda (c) (change-review-comment-body c))
+                                                  (harness-ui-patch-review-test--comments set))
+                                          #'string<)))
+                           5 "the harness to keep what is left of the drafts")
+        (should (equal '("Sent one.") (funcall kept))))
+      (ignore second third)))))
+
 (ert-deftest harness-ui-patch-review-hears-the-agents-comments ()
   "A comment the agent made with its tool comes from the harness as an
 operation and shows at once in the report and in Ediff, its author an
@@ -1833,7 +2009,7 @@ between buttons when it does not fit."
           (harness-ui-patch-review-test--comment "Why two?")
           (call-interactively #'harness-ui-patch-review-approve-ediff)
           ;; The help: in one line where it fits, cut between buttons where not.
-          (cl-letf (((symbol-function 'window-width) (lambda (&rest _) 300)))
+          (cl-letf (((symbol-function 'window-width) (lambda (&rest _) 400)))
             (should-not (string-search "\n" (harness-ui-patch-review--ediff-help))))
           (cl-letf (((symbol-function 'window-width) (lambda (&rest _) 60)))
             (let ((help (harness-ui-patch-review--ediff-help)))

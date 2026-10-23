@@ -195,7 +195,7 @@ OpenAI-compatible APIs and AWS Bedrock.
 
 | ![The session of a task in review: its banner shows the changes -- the files as a tree with their marks, the threads of comments by file under them -- with [Verify] and [Send back] below](docs/media/review-banner.png) | ![A task in review, its report at the changes: the files as a tree, the threads below them in the same buffer, the drafts waiting to be sent](docs/media/review.png) |
 | The review banner: the changes where the work is handed in, with no click first | The same changes in the report: the files, and the threads below them |
-| ![The threads of that review, a section of its report: each comment with who wrote it, when, its version and its place in the thread, one with where it was made and the lines of the diff, the agent's answer linking to its conversation](docs/media/review-threads.png) | ![Ediff on a file of that review: the files as a tree on the left, the two versions and the control panel, the threads drawn under their lines in the branch's version, the report with its box at the bottom](docs/media/review-ediff.png) |
+| ![The threads of that review, a section of its report: each comment with who wrote it, when, its version and its place in the thread, one with where it was made and the lines of the diff, the agent's answer linking to its conversation, a draft with its Edit and Delete buttons and its thread's Delete thread](docs/media/review-threads.png) | ![Ediff on a file of that review: the files as a tree on the left, the two versions and the control panel, the threads drawn under their lines in the branch's version, the control panel offering to delete a draft or a thread of drafts, the report with its box at the bottom](docs/media/review-ediff.png) |
 | The threads: sender, when, content and place in the thread; where a comment was made | Ediff: the tree of the files and the threads beside it, the threads under their lines |
 | ![The same report with the diff chosen since the last review: the Diff line marks it, one file changed since, with the threads below](docs/media/review-diff.png) | |
 | The diff of your choice: the branch against main, since the last review, or any revisions | |
@@ -3507,7 +3507,28 @@ with), `recap` writes the recaps on the cards,
   the one you choose of several -- or goes to the box when there is none.
   A draft has an `[Edit]` button too, which edits that very draft whatever
   point is on, and `e` on a thread's row in the report edits one of its
-  drafts. A comment is
+  drafts.
+
+  **A draft is yours to take back.** A comment the feedback has not sent
+  yet is a draft, and a thread of nothing but drafts -- the one you started
+  in Ediff by mistake -- can go whole. A draft has a `[Delete]` button
+  beside its `[Edit]`, and the header of a thread of drafts a `[Delete
+  thread]` one; each asks first, saying how many drafts go. `k` deletes a
+  draft by where point is, as `e` edits one: under the line in either
+  version, at the current difference in Ediff's control panel (asking
+  which when there are several, and saying so when there is none, where
+  `e` goes to the box), on a thread's header or a comment in the threads.
+  `K` deletes a thread of drafts: the one at point, or the one you choose
+  of those under the line. The first draft of a thread that has more
+  cannot go alone, as the thread has its place from it, so its `[Delete]`
+  and `k` ask about the thread. A comment that was sent is never deleted,
+  nor is a thread with one in it: the agent has read it. The harness keeps
+  the threads and hears of every deletion, so the drafts are gone there too.
+  A narrow window gives up `[Delete thread]` first of the buttons of a
+  header and the buttons of a draft last; a thread of one draft has that
+  draft's `[Delete]` all the same.
+
+  A comment is
   Markdown -- yours, typed in the buffer, and the agent's, from its
   tool call -- and every view draws it rendered, as the chat draws a
   message: emphasis, `code`, fenced blocks, lists, quotes, tables and

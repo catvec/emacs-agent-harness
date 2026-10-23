@@ -142,14 +142,26 @@
 ;;               the control panel it quotes what is selected in a version,
 ;;               else the last comment of the thread at the current
 ;;               difference.  The reply is a draft, as r's.
-;;   drafts      A draft is yours to change until the feedback sends it:
-;;               it has an [Edit] button, which edits that draft, and e
-;;               edits one by where point is: under the line in a
-;;               version, at the current difference in the control
-;;               panel (the only draft there, or the one chosen of
-;;               several), on a thread's row in the report, on a
-;;               thread's header or a comment in the threads list.
-;;               e with no draft in Ediff goes to the report's box.
+;;   drafts      A draft is yours to change or to take back until the
+;;               feedback sends it: it has an [Edit] button, which edits
+;;               that draft, a [Delete] button, which deletes it after
+;;               asking, and e and k do the same to one found by where
+;;               point is: under the line in a version, at the current
+;;               difference in the control panel (the only draft there,
+;;               or the one chosen of several), on a thread's row in the
+;;               report, on a thread's header or a comment in the
+;;               threads list.  e with no draft in Ediff goes to the
+;;               report's box; k says there is none.  A thread that is
+;;               nothing but drafts has a [Delete thread] button in its
+;;               header, and K deletes it, found the same way: the
+;;               thread you commented in by mistake goes whole, with
+;;               its drafts.  The first draft of a thread that has more
+;;               cannot go alone, so k and its [Delete] ask about the
+;;               thread.  What the feedback sent is not a draft any
+;;               more, and stays.  A deletion is the library's
+;;               `delete-comment' operation, one for each draft, sent
+;;               to the harness like any other (`patch-review/apply'),
+;;               which keeps the threads: the draft is gone there too.
 ;;   folds       A closed thread is one line under its line, the
 ;;               first words of what it says, no wider than the window
 ;;               shows; so is any thread folded.  TAB on its line (in
@@ -2346,6 +2358,7 @@ again.  The library's commands act on the thread or the comment at point.")
   (define-key map (kbd "o") #'change-review-ui-follow-author)
   (define-key map (kbd "e") #'change-review-ui-edit-draft)
   (define-key map (kbd "k") #'change-review-ui-delete-draft)
+  (define-key map (kbd "K") #'change-review-ui-delete-draft-thread)
   (define-key map (kbd "n") #'change-review-ui-next-comment)
   (define-key map (kbd "p") #'change-review-ui-previous-comment)
   (define-key map (kbd "N") #'change-review-ui-next-thread)
@@ -2353,7 +2366,7 @@ again.  The library's commands act on the thread or the comment at point.")
   (define-key map (kbd "f") #'change-review-ui-cycle-filter))
 
 (defconst harness-ui-patch-review--thread-hint
-  "RET compares the file at the thread's line or shows where a comment was made, r replies, x closes a thread or opens it again, o follows an agent's comment, c comments on the change as a whole, f changes which threads show."
+  "RET compares the file at the thread's line or shows where a comment was made, r replies, e edits a draft, k deletes one and K a thread of drafts, x closes a thread or opens it again, o follows an agent's comment, c comments on the change as a whole, f changes which threads show."
   "What the changes say under the heading of the threads.")
 
 (defun harness-ui-patch-review--text-width (&optional margin)
@@ -3165,7 +3178,7 @@ its key.  COMPACT uses shorter words."
       (_ (format "The branch changes nothing against %s." (harness-ui-patch-review--r-base review))))))
 
 (defconst harness-ui-patch-review--hint
-  "RET or a click compares a file in Ediff (a directory: folds it), n and p move between files, a approves one, A all of them, V takes the files the newest commit left alone as viewed; s and u switch skipping the approved files and approving those you go through without a comment, t the tree, d chooses the diff shown, T goes to the threads, e on a thread edits one of its drafts, m marks a thread the agent closed as reviewed (M all of them).  In Ediff c comments, r replies, e edits a draft or goes to the box, N and P go to the next and previous file, q comes back."
+  "RET or a click compares a file in Ediff (a directory: folds it), n and p move between files, a approves one, A all of them, V takes the files the newest commit left alone as viewed; s and u switch skipping the approved files and approving those you go through without a comment, t the tree, d chooses the diff shown, T goes to the threads, e on a thread edits one of its drafts, k deletes one and K the thread when it is only drafts, m marks a thread the agent closed as reviewed (M all of them).  In Ediff c comments, r replies, e edits a draft or goes to the box, k deletes a draft and K a thread of drafts, N and P go to the next and previous file, q comes back."
   "What the report says under the changes.")
 
 (defun harness-ui-patch-review--tree-width (&optional frame)
@@ -3958,6 +3971,51 @@ The [Edit] button of a draft edits that one, wherever point is."
       (pcase-let ((`(,thread . ,comment) (change-review-ui-choose-draft set drafts "Edit")))
         (change-review-ui-edit-comment set thread comment)))))
 
+(defun harness-ui-patch-review--ediff-threads-here ()
+  "Return (SET . THREADS) for the reviewer's place in this Ediff.
+SET is the review's change set, THREADS the threads about the file at the
+current difference, in the control panel, or at the line at point, in a
+version (`harness-ui-patch-review--ediff-threads'); none, maybe."
+  (let* ((review (harness-ui-patch-review--current))
+         (file (and (integerp harness-ui-patch-review--index)
+                    (nth harness-ui-patch-review--index (harness-ui-patch-review--r-files review)))))
+    (cons (harness-ui-patch-review--r-set review)
+          (and file (harness-ui-patch-review--ediff-threads review file)))))
+
+(defun harness-ui-patch-review-delete-comment ()
+  "Delete a draft of yours under point in Ediff, after asking.
+Found as \\[harness-ui-patch-review-edit-comment] finds one: in a version, a draft in the threads
+under the line at point; in the control panel, in the threads at the
+current difference.  The only draft there is asked about at once; of
+several, which one is asked, the newest the default.  With no draft there
+it says so, and does not go to the feedback box.  The [Delete] button of
+a draft deletes that one, wherever point is.  The first draft of a thread
+that has more is deleted with the thread (`change-review-ui-delete-comment')."
+  (interactive)
+  (pcase-let* ((`(,set . ,threads) (harness-ui-patch-review--ediff-threads-here))
+               (drafts (change-review-ui-draft-candidates threads)))
+    (unless drafts
+      (user-error "No draft of yours here"))
+    (pcase-let ((`(,thread . ,comment) (change-review-ui-choose-draft set drafts "Delete")))
+      (change-review-ui-delete-comment set thread comment))))
+
+(defun harness-ui-patch-review-delete-thread ()
+  "Delete a thread that is nothing but drafts, under point in Ediff, after asking.
+In a version, one of the threads under the line at point; in the control
+panel, one of the threads at the current difference.  The only one there
+is asked about at once; of several, which one is asked, the newest the
+default.  A thread with a comment that was sent is not deleted.  The
+[Delete thread] button in the header of a thread of drafts deletes that
+thread, wherever point is."
+  (interactive)
+  (pcase-let* ((`(,set . ,threads) (harness-ui-patch-review--ediff-threads-here))
+               (drafts (cl-remove-if-not #'change-review-thread-draft-p threads)))
+    (unless drafts
+      (user-error (if threads
+                      "No thread of drafts here: every one has a comment that was sent"
+                    "No thread here")))
+    (change-review-ui-delete-thread set (change-review-ui-choose-thread set drafts "Delete"))))
+
 ;;;; The tree beside Ediff
 
 ;; While Ediff compares a file, the changes show on the left of the frame
@@ -4188,20 +4246,25 @@ Return a promise of the review."
        (message "Could not read %s: %s" (change-review-file-path file) (harness-error-message err))
        nil))))
 
-(defvar harness-ui-patch-review-lines-mode-map
-  (let ((map (make-sparse-keymap)))
-    (set-keymap-parent map change-review-ui-lines-mode-map)
-    (define-key map (kbd "c") #'harness-ui-patch-review-comment-line)
-    (define-key map (kbd "a") #'harness-ui-patch-review-approve-ediff)
-    (define-key map (kbd "e") #'harness-ui-patch-review-edit-comment)
-    (define-key map (kbd "T") #'harness-ui-patch-review-threads)
-    (define-key map (kbd "s") #'harness-ui-patch-review-toggle-skip-approved)
-    (define-key map (kbd "u") #'harness-ui-patch-review-toggle-auto-approve)
-    (define-key map (kbd "t") #'harness-ui-patch-review-toggle-ediff-tree)
-    map)
+(defvar harness-ui-patch-review-lines-mode-map (make-sparse-keymap)
   "Keys in the two versions Ediff compares: c comments on the line at point.
 Those of the library's threads under a line -- r, C-c >, x, m, o, RET --
 are its.")
+
+;; Filled at top level, not in the `defvar', so that loading this file
+;; again, as a reload does, gives the keymap an Emacs that runs on has the
+;; keys the new version binds.
+(let ((map harness-ui-patch-review-lines-mode-map))
+  (set-keymap-parent map change-review-ui-lines-mode-map)
+  (define-key map (kbd "c") #'harness-ui-patch-review-comment-line)
+  (define-key map (kbd "a") #'harness-ui-patch-review-approve-ediff)
+  (define-key map (kbd "e") #'harness-ui-patch-review-edit-comment)
+  (define-key map (kbd "k") #'harness-ui-patch-review-delete-comment)
+  (define-key map (kbd "K") #'harness-ui-patch-review-delete-thread)
+  (define-key map (kbd "T") #'harness-ui-patch-review-threads)
+  (define-key map (kbd "s") #'harness-ui-patch-review-toggle-skip-approved)
+  (define-key map (kbd "u") #'harness-ui-patch-review-toggle-auto-approve)
+  (define-key map (kbd "t") #'harness-ui-patch-review-toggle-ediff-tree))
 
 (define-minor-mode harness-ui-patch-review-lines-mode
   "Keys to review one of the two versions Ediff compares.
@@ -4216,6 +4279,7 @@ its own.
 \\[change-review-ui-show-source] shows the code the comment under the line was written on, as it was then.
 \\[harness-ui-patch-review-approve-ediff] approves the file.
 \\[harness-ui-patch-review-edit-comment] edits a draft of yours there, or goes to the feedback box.
+\\[harness-ui-patch-review-delete-comment] deletes a draft of yours there, \\[harness-ui-patch-review-delete-thread] a thread of drafts.
 \\[harness-ui-patch-review-threads] goes to the threads, beside the files.
 \\[harness-ui-patch-review-toggle-skip-approved] switches skipping the approved files,
 \\[harness-ui-patch-review-toggle-auto-approve] approving the files you went through,
@@ -4476,6 +4540,8 @@ approving those gone through without a comment, the tree beside Ediff."
                      (harness-ui-patch-review--help-button "[Reply]" #'harness-ui-patch-review-reply "r")
                      (harness-ui-patch-review--help-button "[Threads]" #'harness-ui-patch-review-threads "T")
                      (harness-ui-patch-review--help-button "[Edit draft/box]" #'harness-ui-patch-review-edit-comment "e")
+                     (harness-ui-patch-review--help-button "[Delete draft]" #'harness-ui-patch-review-delete-comment "k")
+                     (harness-ui-patch-review--help-button "[Delete thread]" #'harness-ui-patch-review-delete-thread "K")
                      (harness-ui-patch-review--help-button "[Approve]" #'harness-ui-patch-review-approve-ediff "a")))
          (elsewhere (list (harness-ui-patch-review--help-button "[Fold thread]" #'harness-ui-patch-review-cycle-fold "TAB")
                           (harness-ui-patch-review--help-button "[Next file]" #'harness-ui-patch-review-ediff-next-file "N")
@@ -4611,6 +4677,8 @@ It gets the review's keys and help, and gives the report back as it ends."
     (define-key map "T" #'harness-ui-patch-review-threads)
     (define-key map (kbd "TAB") #'harness-ui-patch-review-cycle-fold)
     (define-key map "e" #'harness-ui-patch-review-edit-comment)
+    (define-key map "k" #'harness-ui-patch-review-delete-comment)
+    (define-key map "K" #'harness-ui-patch-review-delete-thread)
     (define-key map "a" #'harness-ui-patch-review-approve-ediff)
     (define-key map "s" #'harness-ui-patch-review-toggle-skip-approved)
     (define-key map "u" #'harness-ui-patch-review-toggle-auto-approve)

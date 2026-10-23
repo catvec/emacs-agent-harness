@@ -152,14 +152,26 @@ bottom, else the diff's -- so the next file is the one on the next row.
               the control panel it quotes what is selected in a version,
               else the last comment of the thread at the current
               difference.  The reply is a draft, as r's.
-  drafts      A draft is yours to change until the feedback sends it:
-              it has an [Edit] button, which edits that draft, and e
-              edits one by where point is: under the line in a
-              version, at the current difference in the control
-              panel (the only draft there, or the one chosen of
-              several), on a thread's row in the report, on a
-              thread's header or a comment in the threads list.
-              e with no draft in Ediff goes to the report's box.
+  drafts      A draft is yours to change or to take back until the
+              feedback sends it: it has an [Edit] button, which edits
+              that draft, a [Delete] button, which deletes it after
+              asking, and e and k do the same to one found by where
+              point is: under the line in a version, at the current
+              difference in the control panel (the only draft there,
+              or the one chosen of several), on a thread's row in the
+              report, on a thread's header or a comment in the
+              threads list.  e with no draft in Ediff goes to the
+              report's box; k says there is none.  A thread that is
+              nothing but drafts has a [Delete thread] button in its
+              header, and K deletes it, found the same way: the
+              thread you commented in by mistake goes whole, with
+              its drafts.  The first draft of a thread that has more
+              cannot go alone, so k and its [Delete] ask about the
+              thread.  What the feedback sent is not a draft any
+              more, and stays.  A deletion is the library's
+              `delete-comment` operation, one for each draft, sent
+              to the harness like any other (`patch-review/apply`),
+              which keeps the threads: the draft is gone there too.
   folds       A closed thread is one line under its line, the
               first words of what it says, no wider than the window
               shows; so is any thread folded.  TAB on its line (in
@@ -356,6 +368,8 @@ it takes its part of the report and the banner out.
 - `harness-ui-patch-review-comment` — Comment on the current difference with TEXT.
 - `harness-ui-patch-review-comment-line` — Comment on the line at point in the version Ediff shows.
 - `harness-ui-patch-review-cycle-fold` — Fold the threads of the current difference: one line, conversation, all.
+- `harness-ui-patch-review-delete-comment` — Delete a draft of yours under point in Ediff, after asking.
+- `harness-ui-patch-review-delete-thread` — Delete a thread that is nothing but drafts, under point in Ediff, after asking.
 - `harness-ui-patch-review-ediff` — Compare the file of the row at point in Ediff, before the change and after.
 - `harness-ui-patch-review-ediff-next-file` — On to the next file of the task's changes, in Ediff.
 - `harness-ui-patch-review-ediff-previous-file` — On to the previous file of the task's changes, in Ediff.

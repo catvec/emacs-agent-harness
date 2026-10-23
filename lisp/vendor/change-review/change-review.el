@@ -67,6 +67,13 @@
 ;; of time: a close missed for two rounds is still waiting.
 ;; `change-review-thread-unreviewed-p' says which threads wait.
 ;;
+;; A DRAFT is a comment not delivered yet, only its author's.  Its author
+;; may change it (`edit-comment') or take it back (`delete-comment';
+;; the thread goes with its last comment), and a thread that is nothing
+;; but drafts (`change-review-thread-draft-p') may be taken back whole
+;; (`change-review-delete-thread').  What was delivered was read, and
+;; stays.
+;;
 ;; Everything that changes a set is an OPERATION, a plist of plain
 ;; data: `add-comment', `set-status', `add-version', `mark-sent',
 ;; `edit-comment', `delete-comment', `mark-reviewed',
@@ -555,6 +562,14 @@ waits: there is nothing of someone else's to look at."
 (defun change-review-thread-drafts (thread)
   "Return the comments of THREAD that are drafts, in order."
   (cl-remove-if-not #'change-review-comment-draft-p (change-review-thread-comments thread)))
+
+(defun change-review-thread-draft-p (thread)
+  "Return non-nil when THREAD is a draft: it has comments and all are drafts.
+Nothing in it was delivered, so it is only its author's, and it can be
+deleted whole (`change-review-delete-thread').  A thread with a comment
+that was sent is not, whatever else is a draft in it."
+  (let ((comments (change-review-thread-comments thread)))
+    (and comments (cl-every #'change-review-comment-draft-p comments) t)))
 
 (defun change-review-thread-last-comment (thread)
   "Return the newest comment of THREAD."
@@ -1192,6 +1207,32 @@ A thread left with no comment goes too."
   (change-review-dispatch
    set (list :op 'delete-comment
              :comment (if (change-review-comment-p comment) (change-review-comment-id comment) comment))))
+
+(defun change-review-delete-thread (set thread)
+  "Delete THREAD of SET, a thread or its id, when it is a draft.
+That is when every comment in it is a draft (`change-review-thread-draft-p'):
+what was delivered was read, so a thread with a comment that was sent
+cannot be deleted, and nothing of it is -- `change-review-error' is
+signaled before anything changes.
+
+The comments go newest first, each by an operation of its own
+\(`change-review-delete'): the thread is then never without the comment
+that gives it its place until the last one goes, and with it the thread.
+So no operation is needed that a set kept elsewhere does not know.
+Return non-nil when something was deleted.  A thread that is gone
+already -- its id names none -- is deleted again to no effect, as a
+comment that is gone is."
+  (let ((thread (if (change-review-thread-p thread) thread (change-review-find-thread set thread))))
+    (when thread
+      (unless (cl-every #'change-review-comment-draft-p (change-review-thread-comments thread))
+        (signal 'change-review-error
+                (list "A thread with a comment that was sent cannot be deleted")))
+      (let (changed)
+        ;; A copy to walk: each deletion takes the comment out of the thread's list.
+        (dolist (comment (reverse (change-review-thread-comments thread)))
+          (when (change-review-delete set comment)
+            (setq changed t)))
+        changed))))
 
 ;;;; Plain data and files
 

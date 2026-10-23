@@ -24,7 +24,7 @@ Threads  [open 2]  closed 1   all 3
   ┃      Why eighteen? The tests only ever use 17.
   ┃ 2/3  Claude (agent) · 2026-10-19 22:10 (1h ago) · 3f9a1c2  ↗ conversation
   ┃      Because the retry loop needs one more.
-  ┃ 3/3  Noah Huppert (you) · draft · ↳ re 2/3
+  ┃ 3/3  Noah Huppert (you) · draft · ↳ re 2/3  [Edit] [Delete]
   ┃      Then say so in a comment.
 ```
 
@@ -85,7 +85,10 @@ thread's length, with its place in the thread (`2/3`), its author (marked
 "you" or "agent"), the time, the revision it was written against, a
 mark when it is still a draft, the comment it answers when that is not
 the one above (`↳ re 1/3`), for a draft an `[Edit]` button that edits
-it, a `▸ where` button that shows where it was made, and for an agent's comment `↗ conversation`, then its text.
+it and a `[Delete]` button that takes it back, a `▸ where` button that
+shows where it was made, and for an agent's comment `↗ conversation`,
+then its text. The header of a thread that is nothing but drafts has a
+`[Delete thread]` button too.
 
 **Where a comment was made** is where it was made, not where its thread
 is now. The answer to a comment changes the code it is about, so the
@@ -116,8 +119,10 @@ that would be wider says less until it fits: a closed thread says how
 long ago instead of the date and drops who closed it unless it was
 someone else, a comment's header gives up the date for how long ago, then
 the revision, the words of its links, the time and the "(you)" and
-"(agent)" marks, and the header of a thread the count of its comments and
-at last its buttons. So a thread in a narrow window, a side-by-side
+"(agent)" marks, its links and at last the comment it answers -- a
+draft's `[Edit]` and `[Delete]` outlast all but that -- and the header
+of a thread first the `[Delete thread]` button, then the count of its
+comments and at last its buttons. So a thread in a narrow window, a side-by-side
 comparison say, does not wrap.
 
 **The threads view**, `change-review-open-threads`, lists all the
@@ -136,19 +141,23 @@ or all. Point is on a comment, and the keys act on it:
 | `m` / `M` | Mark the thread someone else closed reviewed, or make it wait again / mark every thread that waits. |
 | `d` / `D` | Show the thread in the diff view of the newest version / the code the comment was written on, in the version it was written against (`change-review-visit`). |
 | `o` | Follow an agent's comment to the conversation it came from. |
-| `e` `k` | Edit / delete a draft: the comment at point, or on a thread's header one of the thread's drafts (asking which when there are several). |
+| `e` `k` | Edit / delete a draft: the comment at point, or on a thread's header one of the thread's drafts (asking which when there are several). Asks before it deletes. |
+| `K` | Delete the thread at point when it is nothing but drafts, after asking. |
 | `c` | Comment on the change as a whole. |
 | `f` `F` | Cycle / set the filter: open, to review, closed, all. |
 | `C-c C-c` `I` | Send the drafts / read the comments out of a reply. |
 | `g` | Draw again. |
 
 **The diff view**, `change-review-open-diff`, shows the files of a
-version as the unified diff (it is a `diff-mode`, so its own keys work),
-with the threads of each line under it, drawn by the same function. `c`
-comments on the line at point, or the region's lines; `r`, `C-c >`, `x`, `m`, `o`, `e`
+version as the unified diff (it is a `diff-mode`, so its own keys work, but
+for `k` and `K`, which delete drafts here and not hunks and files of the
+view), with the threads of each line under it, drawn by the same function. `c`
+comments on the line at point, or the region's lines; `r`, `C-c >`, `x`, `m`, `o`, `e`, `k`, `K`
 and `RET` act on the thread under point as they do in the threads view
-(for `e`, a draft of it, asking which when several threads under the line
-have one; the `[Edit]` button of a draft names it);
+(for `e` and `k`, a draft of it, asking which when several threads under
+the line have one, and for `K` a thread of drafts, asking likewise; the
+`[Edit]` and `[Delete]` buttons of a draft and the `[Delete thread]` of a
+thread name theirs);
 `C-c C-n` and `C-c C-p` move between threads, `C-c C-t` lists them,
 `C-c C-f` changes which show.
 
@@ -200,14 +209,30 @@ at, to draw again when the window gives the threads another.
 thread from code.
 
 Point cannot be on a thread drawn under a line, so `e` there edits a draft
-of the threads under the line, and asks which when there are several. A
+of the threads under the line, and asks which when there are several; `k`
+deletes one the same way, and `K` a thread of drafts. A
 view that finds its threads its own way -- by where a side-by-side
 comparison is, say -- does the same with the pieces:
 `change-review-ui-draft-candidates` lists the drafts of some threads as
 `(THREAD . COMMENT)`, `change-review-ui-choose-draft` returns the only one
-or asks which, and `change-review-ui-edit-comment` reads a new text for
-one and keeps it. Each draft's `[Edit]` button edits that draft, whatever
-point is on.
+or asks which, `change-review-ui-choose-thread` does so for threads,
+`change-review-ui-edit-comment` reads a new text for one and keeps it, and
+`change-review-ui-delete-comment` and `change-review-ui-delete-thread`
+delete a draft or a thread of drafts, after asking. Each draft's `[Edit]`
+and `[Delete]` buttons act on that draft, whatever point is on, and the
+`[Delete thread]` button of a thread on that thread.
+
+**Taking a draft back.** A draft is only its author's, so it can go:
+`[Delete]` on it, or `k`. A thread that is nothing but drafts
+(`change-review-thread-draft-p`), the one started by mistake, goes whole
+with `[Delete thread]` in its header, or `K`. Both ask first, and say how
+many drafts go. What was sent is never deleted, nor is a thread with a
+comment that was sent in it: it was read. A thread has its place from its
+first comment, so the first draft of a thread that has more cannot go
+alone: its `[Delete]` and `k` ask about the whole thread instead. The
+deleting is by operations of the set, one `delete-comment` for each draft,
+the newest first (`change-review-delete-thread`), so a set that keeps its
+threads elsewhere needs nothing new to know.
 
 ### Replying with a quote
 
@@ -306,7 +331,7 @@ data, performed by `change-review-apply`:
 | `add-version` | `:version` | Adds a version. |
 | `mark-sent` | `:comments`, `:time`, `:meta` | Marks drafts as delivered. |
 | `edit-comment` | `:comment`, `:body` | Replaces the text of a comment. |
-| `delete-comment` | `:comment` | Deletes a draft. |
+| `delete-comment` | `:comment` | Deletes a draft; a thread left with no comment goes with it. |
 | `mark-reviewed` | `:thread`, `:status-id`, `:time` | The user reviewed the close of a thread: the change of status that closed it, named by its id, gets the time. |
 | `unmark-reviewed` | `:thread`, `:status-id` | The close is to review again. |
 
@@ -317,8 +342,10 @@ sending them again. The functions that make the operations are
 `change-review-comment`, `change-review-reply`,
 `change-review-update-status` (`change-review-close`,
 `change-review-reopen`), `change-review-add-version`,
-`change-review-mark-sent`, `change-review-edit`, `change-review-delete`,
-`change-review-mark-reviewed` and `change-review-unmark-reviewed`; they
+`change-review-mark-sent`, `change-review-edit`, `change-review-delete`
+(and `change-review-delete-thread`, one `delete-comment` for each draft of
+a thread that is nothing but drafts), `change-review-mark-reviewed` and
+`change-review-unmark-reviewed`; they
 hand the operation to
 `change-review-dispatch` (below). Whatever changes a set by one calls
 `change-review-changed-functions` with the set and the operation, which
@@ -327,6 +354,7 @@ is how the views stay current.
 Queries: `change-review-threads` (by status: `open`, `closed`, or
 `unreviewed`), `change-review-threads-by-file`,
 `change-review-thread-counts`, `change-review-drafts`,
+`change-review-thread-draft-p` (nothing in the thread was sent),
 `change-review-find-thread` (by id or the start of one),
 `change-review-find-comment`, `change-review-latest-version`,
 `change-review-thread-closing` (the change of status that closed a

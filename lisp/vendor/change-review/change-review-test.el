@@ -575,6 +575,83 @@ is sent; a thread with no comment left goes."
       (change-review-delete set lonely)
       (should (= 1 (length (change-review-set-threads set)))))))
 
+(ert-deftest change-review-a-thread-is-a-draft-when-nothing-in-it-was-sent ()
+  "A thread is a draft when it has comments and every one is: one sent
+comment, however many drafts follow it, makes it a thread to keep."
+  (let* ((set (change-review-test--set))
+         (root (change-review-comment set "root" :time 1))
+         (thread (change-review-find-thread set (change-review-comment-thread root))))
+    (should (change-review-thread-draft-p thread))
+    (change-review-reply set root "and more" :time 2)
+    (should (change-review-thread-draft-p thread))
+    ;; The first sent, the second not: it is not a draft thread any more.
+    (change-review-mark-sent set (list root) :time 3)
+    (should (= 1 (length (change-review-thread-drafts thread))))
+    (should-not (change-review-thread-draft-p thread))
+    ;; A thread with no comment at all is no draft either.
+    (should-not (change-review-thread-draft-p (change-review-make-thread :id "t-empty")))))
+
+(ert-deftest change-review-a-thread-of-drafts-is-deleted-whole ()
+  "A thread that is nothing but drafts goes with all its comments, one
+`delete-comment' operation each, the newest first so that the root, which
+gives the thread its place, is the last to go.  The other threads stay."
+  (let* ((set (change-review-test--set))
+         (where (change-review-make-location :file "a.el" :line 7))
+         (root (change-review-comment set "root" :time 1 :location where))
+         (second (change-review-reply set root "second" :time 2))
+         (third (change-review-reply set second "third" :time 3))
+         (other (change-review-comment set "other thread" :time 4))
+         (thread (change-review-find-thread set (change-review-comment-thread root)))
+         (ops nil)
+         (hook (lambda (_set op) (push op ops))))
+    (add-hook 'change-review-changed-functions hook)
+    (unwind-protect
+        (progn
+          (should (= 2 (length (change-review-set-threads set))))
+          (should (change-review-delete-thread set thread))
+          ;; One operation each, the newest first, the root last.
+          (should (equal (mapcar (lambda (comment) (list 'delete-comment (change-review-comment-id comment)))
+                                 (list third second root))
+                         (mapcar (lambda (op) (list (plist-get op :op) (plist-get op :comment)))
+                                 (reverse ops))))
+          ;; Only the other thread is left, with its comment.
+          (should (equal (list (change-review-comment-thread other))
+                         (mapcar #'change-review-thread-id (change-review-set-threads set))))
+          (should-not (change-review-find-comment set (change-review-comment-id root)))
+          (should (change-review-find-comment set (change-review-comment-id other)))
+          ;; Deleted again, by the thread or by its id: nothing happens, and no
+          ;; operation is performed for it.
+          (setq ops nil)
+          (should-not (change-review-delete-thread set thread))
+          (should-not (change-review-delete-thread set (change-review-comment-thread root)))
+          (should-not ops))
+      (remove-hook 'change-review-changed-functions hook))))
+
+(ert-deftest change-review-a-thread-with-a-comment-that-was-sent-is-not-deleted ()
+  "What was delivered was read: a thread with one sent comment is kept whole,
+its drafts too, and nothing of it is performed before the error."
+  (let* ((set (change-review-test--set))
+         (root (change-review-comment set "sent" :time 1))
+         (draft (change-review-reply set root "not sent" :time 2))
+         (thread (change-review-find-thread set (change-review-comment-thread root)))
+         (calls 0)
+         (hook (lambda (_set _op) (cl-incf calls))))
+    (change-review-mark-sent set (list root) :time 3)
+    (add-hook 'change-review-changed-functions hook)
+    (unwind-protect
+        (progn
+          (should-error (change-review-delete-thread set thread) :type 'change-review-error)
+          (should-error (change-review-delete-thread set (change-review-thread-id thread))
+                        :type 'change-review-error)
+          (should (= 0 calls))
+          (should (equal (list root draft) (change-review-thread-comments thread)))
+          ;; The draft alone can go; then the thread is what was sent.
+          (should (change-review-delete set draft))
+          (should (equal (list root) (change-review-thread-comments thread)))
+          (should-error (change-review-delete-thread set thread) :type 'change-review-error))
+      (remove-hook 'change-review-changed-functions hook))))
+
+
 ;;;; Queries
 
 (defun change-review-test--populate (set)
@@ -765,6 +842,22 @@ its own user; a plain set does neither."
   (should-error (change-review-follow-author (change-review-make-set) (change-review-test--bot))
                 :type 'user-error)
   (should-not (change-review-file-text (change-review-make-set) nil "a.el" 'new)))
+
+(ert-deftest change-review-deleting-a-thread-sends-the-set-that-keeps-it-one-operation-each ()
+  "A set that keeps its threads elsewhere is sent the `delete-comment' of each
+comment of a thread of drafts, as it is for any deletion: it has nothing new
+to know, and no operation is lost on the way."
+  (let* ((set (make-change-review-test--remote :id "r"))
+         (root (change-review-comment set "root" :time 1))
+         (reply (change-review-reply set root "reply" :time 2))
+         (thread (change-review-find-thread set (change-review-comment-thread root))))
+    (setf (change-review-test--remote-sent set) nil)
+    (should (change-review-delete-thread set thread))
+    (should (equal (list (list 'delete-comment (change-review-comment-id reply))
+                         (list 'delete-comment (change-review-comment-id root)))
+                   (mapcar (lambda (op) (list (plist-get op :op) (plist-get op :comment)))
+                           (reverse (change-review-test--remote-sent set)))))
+    (should-not (change-review-set-threads set))))
 
 ;;;; The library compiles
 
