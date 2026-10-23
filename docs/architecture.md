@@ -13972,14 +13972,14 @@ harness to take every file as viewed but those the newest commit changed
 -- with a prefix argument, from a commit asked for -- after a question,
 and replaces the marks with the answer; the heading says that files were
 taken as viewed and not looked at ("unchanged since 7ec4f03 taken as
-viewed").  a approves the file at point, A every file; the heading
-counts those viewed and those approved, the threads ("3 open, 2
-closed", with the key that goes to them, T, and, when the agent closed
-some the reviewer has not looked at, a button "[2 to review]" that
-shows the threads filtered to those) and the drafts that wait for
-the feedback.  A file's row counts its threads and says whether it
-changed since the reviewer's last comment on it or stayed the same; it
-says how many of its closed threads are to review ("1 closed (1 to
+viewed").  a approves the file at point, or stops approving it, A every
+file; the heading counts those viewed and those approved, the threads
+("3 open, 2 closed", with the key that goes to them, T, and, when the
+agent closed some the reviewer has not looked at, a button "[2 to
+review]" that shows the threads filtered to those) and the drafts that
+wait for the feedback.  A file's row counts its threads and says whether
+it changed since the reviewer's last comment on it or stayed the same;
+it says how many of its closed threads are to review ("1 closed (1 to
 review)").  m on a thread (or in Ediff) marks one the agent closed
 reviewed, M every one that waits.
 Under the heading is the line of the settings, a button for each with
@@ -14014,7 +14014,16 @@ a button with its state in the settings line and in Ediff's help:
   wrote in (`harness-ui-patch-review--commented-p`); a thread they
   closed is settled, and one an agent started and they did not answer is
   the agent's.  It says so in the echo area, with the key that turns it
-  off.
+  off.  What the reviewer decided by hand stands: taking the approval off
+  the file under comparison -- a in the control panel, its [Approve]
+  button, a on its row or its directory's in the tree beside Ediff; every
+  one ends in `harness-ui-patch-review--approve` -- notes `:unapproved` in
+  the Ediff's state (`harness-ui-patch-review--note-unapproved`), and
+  `--ediff-ended` then passes it to `--auto-approve`, which approves
+  nothing.  It holds for that comparison: going through the file in
+  another is another pass.  The control panel's help counts the files
+  viewed and approved, so a, A and a on a directory draw it again
+  (`harness-ui-patch-review--refresh-approvals`).
 
 THE THREADS, a section below the files and not a view of their own: the
 heading is the library's (`change-review-ui-threads-heading`: the three

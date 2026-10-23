@@ -562,6 +562,16 @@ A file the branch changes again is not approved, so it is reviewed again."
     (list (mapcar (lambda (file) (plist-get file :path)) (plist-get data :seen))
           (mapcar (lambda (file) (plist-get file :path)) (plist-get data :approved)))))
 
+(defun harness-ui-patch-review-test--viewed-told (id)
+  "Return the files the harness keeps viewed in task ID's review, as it was told.
+\(SEEN APPROVED) paths, asked over the UI's own connection: the harness
+answers after the requests the UI sent before this one, so what it
+answers is the result of every mark the UI made so far."
+  (let ((data (harness-test-await
+               (harness-ui-request "_harness/patch-review/viewed" (list :task-id id)))))
+    (list (mapcar (lambda (file) (plist-get file :path)) (plist-get data :seen))
+          (mapcar (lambda (file) (plist-get file :path)) (plist-get data :approved)))))
+
 (ert-deftest harness-ui-patch-review-keeps-the-files-viewed-with-the-harness ()
   "A file seen, or approved, is kept by the harness by its path and blob: a
 report opened again shows the marks, un-approving takes the mark off there
@@ -2684,6 +2694,239 @@ with a."
       (should (funcall approved "docs/é.txt"))
       (with-current-buffer (harness-ui-patch-review-test--control review 5)
         (call-interactively #'harness-ui-patch-review-ediff-quit)))))
+
+(ert-deftest harness-ui-patch-review-ediff-keeps-an-approval-taken-off ()
+  "a in Ediff on an approved file stops approving it, and leaving Ediff -- q or N --
+does not approve it again, though the reviewer went through the file and made no
+comment on it: what they decided by hand stands over auto-approve.  The harness
+keeps the approval off, and the file stays seen.  Going through the file in
+another comparison is another pass, which auto-approve takes up again."
+  (harness-ui-patch-review-test-with-task
+    (let* ((popout (harness-ui-patch-review-test--changes board id))
+           (review (gethash id harness-ui-patch-review--reviews))
+           (harness-ui-patch-review-auto-approve t)
+           (harness-ui-patch-review-skip-approved nil)
+           (file (lambda (path) (harness-ui-patch-review-test--file review path)))
+           (approved (lambda (path) (harness-ui-patch-review--approved-p review (funcall file path))))
+           (seen (lambda (path) (harness-ui-patch-review--seen-p review (funcall file path))))
+           (said nil))
+      (ignore popout)
+      ;; d.el is approved, and the harness keeps it so.
+      (harness-ui-patch-review--approve review (funcall file "d.el") t)
+      (should (equal '(("d.el") ("d.el")) (harness-ui-patch-review-test--viewed-told id)))
+      (cl-letf (((symbol-function 'message)
+                 (lambda (format-string &rest args) (push (apply #'format format-string args) said))))
+        ;; It has one difference, so it is gone through as Ediff opens it.
+        (harness-ui-patch-review-ediff review 2)
+        (with-current-buffer (harness-ui-patch-review-test--control review 2)
+          (should (plist-get (harness-ui-patch-review--r-ediff review) :reached))
+          (should (eq #'harness-ui-patch-review-approve-ediff (key-binding "a")))
+          (call-interactively (key-binding "a"))
+          (should (member "No longer approved d.el" said))
+          (should-not (funcall approved "d.el"))
+          (call-interactively #'harness-ui-patch-review-ediff-quit))
+        ;; Left, it is not approved for the reviewer: not in the review, not in the
+        ;; harness, and nothing said it was.  Still seen.
+        (should-not (funcall approved "d.el"))
+        (should (funcall seen "d.el"))
+        (should-not (cl-some (lambda (text) (string-prefix-p "Approved d.el" text)) said))
+        (should (equal '(("d.el") nil) (harness-ui-patch-review-test--viewed-told id)))
+        ;; Another comparison is another pass: gone through again, the file is
+        ;; approved as the reviewer leaves it.
+        (harness-ui-patch-review-ediff review 2)
+        (with-current-buffer (harness-ui-patch-review-test--control review 2)
+          (should (plist-get (harness-ui-patch-review--r-ediff review) :reached))
+          (should-not (plist-get (harness-ui-patch-review--r-ediff review) :unapproved))
+          (call-interactively #'harness-ui-patch-review-ediff-quit))
+        (should (funcall approved "d.el"))
+        (should (cl-some (lambda (text) (string-prefix-p "Approved d.el: you went through it" text)) said))
+        (should (equal '(("d.el") ("d.el")) (harness-ui-patch-review-test--viewed-told id)))
+        ;; N leaves the file as q does: the approval taken off stays off, and
+        ;; the next file's comparison starts.
+        (setq said nil)
+        (harness-ui-patch-review-ediff review 2)
+        (with-current-buffer (harness-ui-patch-review-test--control review 2)
+          (call-interactively (key-binding "a"))
+          (should-not (funcall approved "d.el"))
+          (call-interactively #'harness-ui-patch-review-ediff-next-file))
+        (with-current-buffer (harness-ui-patch-review-test--control review 3)
+          (should-not (funcall approved "d.el"))
+          (call-interactively #'harness-ui-patch-review-ediff-quit))
+        (should-not (funcall approved "d.el"))
+        (should-not (cl-some (lambda (text) (string-prefix-p "Approved d.el" text)) said))
+        ;; The next file was gone through and left: approved, as it should be.
+        (should (funcall approved "docs/é.txt"))
+        (should (equal '("docs/é.txt") (cadr (harness-ui-patch-review-test--viewed-told id))))))))
+
+(ert-deftest harness-ui-patch-review-ediff-approving-then-not-leaves-it-unapproved ()
+  "The reviewer's last word on a file stands as they leave it: a file approved by
+a and then not by a again is not approved for them, though they went through it;
+one approved by a stays approved.  A word on another file is no word on this one."
+  (harness-ui-patch-review-test-with-task
+    (let* ((popout (harness-ui-patch-review-test--changes board id))
+           (review (gethash id harness-ui-patch-review--reviews))
+           (harness-ui-patch-review-auto-approve t)
+           (harness-ui-patch-review-skip-approved nil)
+           (file (lambda (path) (harness-ui-patch-review-test--file review path)))
+           (approved (lambda (path) (harness-ui-patch-review--approved-p review (funcall file path)))))
+      (ignore popout)
+      ;; Not approved yet; a, then a again.
+      (harness-ui-patch-review-ediff review 2)
+      (with-current-buffer (harness-ui-patch-review-test--control review 2)
+        (should (plist-get (harness-ui-patch-review--r-ediff review) :reached))
+        (call-interactively (key-binding "a"))
+        (should (funcall approved "d.el"))
+        (call-interactively (key-binding "a"))
+        (should-not (funcall approved "d.el"))
+        (call-interactively #'harness-ui-patch-review-ediff-quit))
+      (should-not (funcall approved "d.el"))
+      (should (equal '(("d.el") nil) (harness-ui-patch-review-test--viewed-told id)))
+      ;; a once: approved, and so it stays.
+      (harness-ui-patch-review-ediff review 2)
+      (with-current-buffer (harness-ui-patch-review-test--control review 2)
+        (call-interactively (key-binding "a"))
+        (call-interactively #'harness-ui-patch-review-ediff-quit))
+      (should (funcall approved "d.el"))
+      ;; Taking the approval off another file than the one compared says nothing
+      ;; of the one compared: it is approved as it is left.
+      (harness-ui-patch-review-ediff review 3)
+      (with-current-buffer (harness-ui-patch-review-test--control review 3)
+        (harness-ui-patch-review--approve review (funcall file "d.el") nil)
+        (should-not (plist-get (harness-ui-patch-review--r-ediff review) :unapproved))
+        (call-interactively #'harness-ui-patch-review-ediff-quit))
+      (should-not (funcall approved "d.el"))
+      (should (funcall approved "docs/é.txt"))
+      ;; The harness was told all of it: d.el's approval is off, the other's on.
+      (should (equal '("docs/é.txt") (cadr (harness-ui-patch-review-test--viewed-told id)))))))
+
+(ert-deftest harness-ui-patch-review-ediff-tree-takes-the-approval-off-too ()
+  "a on the row of the file compared, in the tree beside Ediff, or on the row of
+its directory, takes the approval off as a does in Ediff, and leaving Ediff does
+not approve the file again; the [Approve] button of the control panel does the
+same as the key."
+  (harness-ui-patch-review-test-with-task
+    (let* ((popout (harness-ui-patch-review-test--changes board id))
+           (review (gethash id harness-ui-patch-review--reviews))
+           (harness-ui-patch-review-auto-approve t)
+           (harness-ui-patch-review-skip-approved nil)
+           (harness-ui-patch-review-ediff-tree t)
+           (file (lambda (path) (harness-ui-patch-review-test--file review path)))
+           (approved (lambda (path) (harness-ui-patch-review--approved-p review (funcall file path)))))
+      (ignore popout)
+      (harness-ui-patch-review-test--approve-paths review "d.el" "docs/é.txt")
+      ;; The row of the file compared.
+      (harness-ui-patch-review-ediff review 2)
+      (let* ((control (harness-ui-patch-review-test--control review 2))
+             (tree (harness-ui-patch-review--r-tree-buffer review)))
+        (should (buffer-live-p tree))
+        (with-current-buffer tree
+          (goto-char (harness-ui-patch-review--row-start id 2))
+          (call-interactively (key-binding "a")))
+        (should-not (funcall approved "d.el"))
+        (should (plist-get (harness-ui-patch-review--r-ediff review) :unapproved))
+        (with-current-buffer control (call-interactively #'harness-ui-patch-review-ediff-quit)))
+      (should-not (funcall approved "d.el"))
+      ;; The row of its directory: docs/é.txt is the only file there.
+      (harness-ui-patch-review-ediff review 3)
+      (let* ((control (harness-ui-patch-review-test--control review 3))
+             (tree (harness-ui-patch-review--r-tree-buffer review)))
+        (with-current-buffer tree
+          (goto-char (point-min))
+          (re-search-forward "^  ▾ docs/")
+          (beginning-of-line)
+          (call-interactively (key-binding "a")))
+        (should-not (funcall approved "docs/é.txt"))
+        (with-current-buffer control (call-interactively #'harness-ui-patch-review-ediff-quit)))
+      (should-not (funcall approved "docs/é.txt"))
+      ;; The [Approve] button of the panel, clicked: the key's command.
+      (harness-ui-patch-review-test--approve-paths review "d.el")
+      (harness-ui-patch-review-ediff review 2)
+      (let ((control (harness-ui-patch-review-test--control review 2)))
+        (with-current-buffer control
+          (goto-char (point-min))
+          (search-forward "[Approve]")
+          (let ((last-input-event ?\r))
+            (call-interactively
+             (lookup-key (get-text-property (match-beginning 0) 'keymap) (kbd "RET"))))
+          (should-not (funcall approved "d.el"))
+          (call-interactively #'harness-ui-patch-review-ediff-quit)))
+      (should-not (funcall approved "d.el"))
+      (should (equal '(nil) (cdr (harness-ui-patch-review-test--viewed-told id)))))))
+
+(ert-deftest harness-ui-patch-review-ediff-panel-follows-the-approvals ()
+  "The control panel of Ediff counts the files viewed and approved, and follows a,
+A and a on a directory: approving a file adds it to the count, taking the
+approval off takes it away, so the panel never says a file is approved that is
+not (a file stays viewed when its approval goes)."
+  (harness-ui-patch-review-test-with-task
+    (let* ((popout (harness-ui-patch-review-test--changes board id))
+           (review (gethash id harness-ui-patch-review--reviews))
+           (harness-ui-patch-review-auto-approve nil)
+           (harness-ui-patch-review-skip-approved nil)
+           (harness-ui-patch-review-ediff-tree t))
+      (ignore popout)
+      (harness-ui-patch-review-test--approve-paths review "d.el")
+      (harness-ui-patch-review-ediff review 2)
+      (let* ((control (harness-ui-patch-review-test--control review 2))
+             (tree (harness-ui-patch-review--r-tree-buffer review))
+             ;; (VIEWED . APPROVED), as the panel's first line says them.
+             (panel (lambda ()
+                      (let ((text (harness-ui-patch-review-test--text control)))
+                        (should (string-match "File [0-9]+ of 6 · \\([0-9]+\\) viewed · \\(?:\\([0-9]+\\) approved · \\)?"
+                                              text))
+                        (cons (string-to-number (match-string 1 text))
+                              (string-to-number (or (match-string 2 text) "0"))))))
+             (dir-row (lambda ()
+                        (with-current-buffer tree
+                          (goto-char (point-min))
+                          (re-search-forward "^  ▾ docs/")
+                          (beginning-of-line)
+                          (call-interactively (key-binding "a"))))))
+        (should (equal '(1 . 1) (funcall panel)))
+        ;; a takes d.el's approval off: the panel stops counting it; it is viewed still.
+        (with-current-buffer control (call-interactively (key-binding "a")))
+        (should (equal '(1 . 0) (funcall panel)))
+        (with-current-buffer control (call-interactively (key-binding "a")))
+        (should (equal '(1 . 1) (funcall panel)))
+        ;; a on the row of a directory in the tree beside Ediff, and again.
+        (funcall dir-row)
+        (should (equal '(2 . 2) (funcall panel)))
+        (funcall dir-row)
+        (should (equal '(2 . 1) (funcall panel)))
+        ;; A approves every file.
+        (with-current-buffer control (call-interactively #'harness-ui-patch-review-approve-all))
+        (should (equal '(6 . 6) (funcall panel)))
+        (with-current-buffer control (call-interactively #'harness-ui-patch-review-ediff-quit)))
+      ;; Nothing is left in flight to the harness as the test ends.
+      (harness-ui-patch-review-test--viewed-told id))))
+
+(ert-deftest harness-ui-patch-review-auto-approve-leaves-an-approval-taken-off ()
+  "A file whose approval the reviewer took off while Ediff compared it is not
+approved as they leave it, though they went through it; the approval taken off
+a file Ediff does not compare, or with no Ediff under way, notes nothing."
+  (harness-ui-patch-review-test-with-repo
+    (let* ((review (harness-ui-patch-review-test--review repo))
+           (harness-ui-patch-review-auto-approve t)
+           (a (harness-ui-patch-review-test--file review "a.el"))
+           (b (harness-ui-patch-review-test--file review "b.el")))
+      ;; No Ediff: taking an approval off starts no state of one.
+      (harness-ui-patch-review--approve review a t t)
+      (harness-ui-patch-review--approve review a nil t)
+      (should-not (harness-ui-patch-review--r-ediff review))
+      ;; An Ediff on a.el, the first file: b.el's approval taken off is not a.el's.
+      (setf (harness-ui-patch-review--r-ediff review) (list :index 0))
+      (harness-ui-patch-review--approve review b t t)
+      (harness-ui-patch-review--approve review b nil t)
+      (should-not (plist-get (harness-ui-patch-review--r-ediff review) :unapproved))
+      (harness-ui-patch-review--approve review a nil t)
+      (should (plist-get (harness-ui-patch-review--r-ediff review) :unapproved))
+      (setf (harness-ui-patch-review--r-ediff review) nil)
+      ;; Gone through, no comment, and nothing said: approved; with the
+      ;; approval taken off, not.
+      (should-not (harness-ui-patch-review--auto-approve review a t t))
+      (should-not (harness-ui-patch-review--approved-p review a))
+      (should (harness-ui-patch-review--auto-approve review a t))
+      (should (harness-ui-patch-review--approved-p review a)))))
 
 (ert-deftest harness-ui-patch-review-ediff-goes-on-to-files-not-approved ()
   "N and P go on to the next and previous file that is not approved, q puts point

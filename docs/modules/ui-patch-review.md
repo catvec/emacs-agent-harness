@@ -104,6 +104,9 @@ key (s and u), in Ediff's help, in the harness menu, and an option:
               file with a comment of yours is not settled, one with a
               thread the agent started and you did not answer is.
               The approval is the one a makes, kept by the harness.
+              What you decide by hand stands: a file whose approval
+              you took off (a again) while you compared it stays not
+              approved as you leave it, though you went through it.
 
 THE ORDER of the files is the one they show in -- the tree from top to
 bottom, else the diff's -- so the next file is the one on the next row.
@@ -125,8 +128,9 @@ bottom, else the diff's -- so the next file is the one on the next row.
               comments on the current difference, r replies to the
               thread there, TAB folds the threads of the difference
               (see below), T goes to the threads, e goes to the
-              report's box, a approves the file, s and u switch the
-              settings, N and P go on to the next or previous file,
+              report's box, a approves the file or takes its approval
+              off, s and u switch the settings, N and P go on to the
+              next or previous file,
               q comes back to where Ediff began, point on the next
               file to review.  n is Ediff's next difference, and at
               the last one says the next difference is the next file:

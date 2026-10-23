@@ -3658,8 +3658,9 @@ with), `recap` writes the recaps on the cards,
   directory, `t` hides the tree or shows it again
   (`harness-ui-patch-review-ediff-tree`). In Ediff `n` goes to the next
   difference and, at the last one, to the next file, `N` and `P` go on to
-  the next or previous file, `a` approves the file and `q` comes back to
-  where you were, point on the next file to review.
+  the next or previous file, `a` approves the file, or takes its approval
+  off again, and `q` comes back to where you were, point on the next file
+  to review.
 
   Going through the files has two settings, each a button beside the
   files and a key -- `s` and `u`, in the session, the report, the tree
@@ -3673,7 +3674,9 @@ with), `recap` writes the recaps on the cards,
   last difference in Ediff, and leave without a draft on it or an open
   thread of yours, is approved as you leave it -- by `n` past its last
   difference, `N`, `P` or `q` -- as if you had pressed `a`. A file you
-  commented on is not settled, and is not approved for you.
+  commented on is not settled, and is not approved for you; nor is a file
+  whose approval you took off with `a` while you compared it: what you
+  decide by hand stands when you leave.
 
   What the files are of is yours to choose, from the `Diff` line under
   the heading -- three buttons -- or with `d`: **task branch against
