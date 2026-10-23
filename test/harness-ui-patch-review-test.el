@@ -24,6 +24,7 @@
 (defvar ediff-current-difference)
 (defvar ediff-number-of-differences)
 (defvar ediff-brief-help-message-function)
+(defvar ediff-split-window-function)
 (defvar harness-provider-demo-script-override)
 (defvar harness-provider-demo--delay)
 (defvar harness-naming-auto)
@@ -2140,6 +2141,8 @@ window, once; those two are the windows Ediff leaves be
     (should (window-live-p tree-window))
     (should (eq 'left (window-parameter tree-window 'window-side)))
     (should (window-parameter tree-window 'no-delete-other-windows))
+    ;; The tree shows once: no second window on it, in the versions' place.
+    (should (equal (list tree-window) (get-buffer-window-list tree nil (selected-frame))))
     (should (= 5 (length windows)))
     (dolist (buffer ediff)
       (should (get-buffer-window buffer)))
@@ -2147,60 +2150,149 @@ window, once; those two are the windows Ediff leaves be
       (should (memq (window-buffer window) ediff))
       (should-not (window-parameter window 'no-delete-other-windows)))))
 
-(ert-deftest harness-ui-patch-review-next-file-opens-no-second-report ()
-  "N and P, going on from file to file, show the report in its box alone.
+(defun harness-ui-patch-review-test--go-between-files (board popout review first)
+  "Go on from file to file in REVIEW's Ediff, a hook restoring the windows.
 Doom Emacs sets back, at the end of an Ediff (`ediff-quit-hook'), the
 window configuration it saved before Ediff began
 \(`ediff-before-setup-hook'), which undoes what the end of the Ediff under
 way does to the windows.  The configuration `save-window-excursion' sets
 back after that has windows again for the buffers that were killed, and
-Emacs shows in them the first buffer of its list but the current one: the
-report's, used last after the board's.  The first of those windows was taken
-for the report's box and kept by Ediff, so every file after it had the
-report a second time, in the right split.  q gives the frame back as it
-was."
+Emacs shows in them the first buffer of its list but the current one.
+FIRST, a function, returns that buffer, which the test has come first
+while the next file is read: the report POPOUT, or the tree beside Ediff,
+used last after the BOARD's.  N twice, P once and RET on a file of the
+tree go on, each file in Ediff with the report and the tree in the
+windows of their own alone; q gives the frame back as it was."
+  (require 'ediff)
+  (let* ((id (harness-ui-patch-review--r-id review))
+         (layout (harness-ui-patch-review-test--layout))
+         ;; Every file in turn: none skipped as approved, none approved as left.
+         (harness-ui-patch-review-skip-approved nil)
+         (harness-ui-patch-review-auto-approve nil)
+         (saved nil)
+         (save (lambda () (setq saved (current-window-configuration))))
+         (restore (lambda () (when (window-configuration-p saved) (set-window-configuration saved))))
+         ;; The two versions side by side, as Doom has them.
+         (ediff-split-window-function #'split-window-horizontally)
+         ;; Emacs shows `other-buffer' of the current buffer in a window it re-creates for
+         ;; a killed buffer: the first of the buffer list but that one.  Have it the one
+         ;; asked for, next to the board in the main window, as the review leaves them.
+         (first-in-list (lambda (start &rest args)
+                          (let ((keep (funcall first)))
+                            (dolist (buffer (buffer-list))
+                              (unless (eq buffer keep) (bury-buffer buffer))))
+                          (with-current-buffer board
+                            (apply start args)))))
+    (add-hook 'ediff-before-setup-hook save)
+    (add-hook 'ediff-quit-hook restore t)
+    (advice-add 'harness-ui-patch-review--start-ediff :around first-in-list)
+    (unwind-protect
+        (progn
+          (harness-ui-patch-review-ediff review 0)
+          (let* ((control (harness-ui-patch-review-test--control review 0))
+                 (tree (harness-ui-patch-review--r-tree-buffer review))
+                 (tree-window (get-buffer-window tree)))
+            (harness-ui-patch-review-test--only-ediff-and-box review popout)
+            ;; N twice, then P: each file in Ediff, the report only in its box and the
+            ;; tree only in its own window, the same one all along.
+            (dolist (step '((1 . harness-ui-patch-review-ediff-next-file)
+                            (2 . harness-ui-patch-review-ediff-next-file)
+                            (1 . harness-ui-patch-review-ediff-previous-file)))
+              (with-current-buffer control (call-interactively (cdr step)))
+              (setq control (harness-ui-patch-review-test--control review (car step)))
+              (harness-ui-patch-review-test--only-ediff-and-box review popout)
+              (should (eq tree (harness-ui-patch-review--r-tree-buffer review)))
+              (should (eq tree-window (get-buffer-window tree))))
+            ;; RET on a file of the tree goes on as well, the tree its own window still.
+            (with-current-buffer tree
+              (goto-char (harness-ui-patch-review--row-start id 3 tree))
+              (call-interactively (key-binding (kbd "RET"))))
+            (setq control (harness-ui-patch-review-test--control review 3))
+            (harness-ui-patch-review-test--only-ediff-and-box review popout)
+            (should (eq tree (harness-ui-patch-review--r-tree-buffer review)))
+            (should (eq tree-window (get-buffer-window tree)))
+            ;; The box is the report's: the same buffer, one window.
+            (should (eq popout (harness-ui-popout-buffer (list 'report id))))
+            (with-current-buffer control (call-interactively #'harness-ui-patch-review-ediff-quit)))
+          (should-not (harness-ui-patch-review--r-ediff review))
+          (should (equal layout (harness-ui-patch-review-test--layout)))
+          (should (= 1 (length (get-buffer-window-list popout nil (selected-frame)))))
+          (should (eq popout (window-buffer (selected-window)))))
+      (advice-remove 'harness-ui-patch-review--start-ediff first-in-list)
+      (remove-hook 'ediff-before-setup-hook save)
+      (remove-hook 'ediff-quit-hook restore))))
+
+(ert-deftest harness-ui-patch-review-next-file-opens-no-second-report ()
+  "N and P, going on from file to file, show the report in its box alone.
+The windows a restored window configuration has again for the buffers that
+were killed show the report, used last after the board's.  The first of
+those windows was taken for the report's box and kept by Ediff, so every
+file after it had the report a second time, in the right split."
+  (harness-ui-patch-review-test-with-task
+    (let* ((popout (harness-ui-patch-review-test--changes board id))
+           (review (gethash id harness-ui-patch-review--reviews)))
+      (harness-ui-patch-review-test--go-between-files board popout review (lambda () popout)))))
+
+(ert-deftest harness-ui-patch-review-next-file-opens-no-second-tree ()
+  "N and P, going on from file to file, show the tree of the files in its own
+window alone.  The windows a restored window configuration has again for the
+buffers that were killed show the tree beside Ediff when it was used last
+after the board's.  The first of those windows was taken for the tree's and
+kept by Ediff, so every file after it had the tree once more, in the place of
+a version, the window and its mark staying for the file after that."
+  (harness-ui-patch-review-test-with-task
+    (let* ((popout (harness-ui-patch-review-test--changes board id))
+           (review (gethash id harness-ui-patch-review--reviews)))
+      (harness-ui-patch-review-test--go-between-files
+       board popout review (lambda () (harness-ui-patch-review--r-tree-buffer review))))))
+
+(ert-deftest harness-ui-patch-review-hidden-tree-stays-hidden-between-files ()
+  "t hides the tree beside Ediff, and the files after it have none, though a
+hook of `ediff-quit-hook' sets back the window configuration saved while the
+tree showed: its window, dedicated to a buffer that is gone, is not brought
+back.  t shows the tree again, in a window of its own."
+  (require 'ediff)
   (harness-ui-patch-review-test-with-task
     (let* ((popout (harness-ui-patch-review-test--changes board id))
            (review (gethash id harness-ui-patch-review--reviews))
-           (layout (harness-ui-patch-review-test--layout))
-           ;; Every file in turn: none skipped as approved, none approved as left.
            (harness-ui-patch-review-skip-approved nil)
            (harness-ui-patch-review-auto-approve nil)
+           (harness-ui-patch-review-ediff-tree t)
+           (ediff-split-window-function #'split-window-horizontally)
            (saved nil)
            (save (lambda () (setq saved (current-window-configuration))))
            (restore (lambda () (when (window-configuration-p saved) (set-window-configuration saved))))
-           ;; Emacs shows `other-buffer' of the current buffer in a window it re-creates for
-           ;; a killed buffer: the first of the buffer list but that one.  Have it the
-           ;; report, next to the board in the main window, as the review leaves them.
-           (report-first (lambda (start &rest args)
-                           (dolist (buffer (buffer-list))
-                             (unless (eq buffer popout) (bury-buffer buffer)))
-                           (with-current-buffer board
-                             (apply start args)))))
-      (require 'ediff)
+           (windows-without-tree
+            (lambda ()
+              ;; The control panel, the two versions and the report's box.
+              (let ((windows (window-list nil 'nomini)))
+                (should (= 4 (length windows)))
+                (should-not (cl-find 'left windows :key (lambda (w) (window-parameter w 'window-side))))
+                (should-not (cl-some (lambda (w)
+                                       (string-prefix-p "*Review files" (buffer-name (window-buffer w))))
+                                     windows))))))
       (add-hook 'ediff-before-setup-hook save)
       (add-hook 'ediff-quit-hook restore t)
-      (advice-add 'harness-ui-patch-review--start-ediff :around report-first)
       (unwind-protect
           (progn
             (harness-ui-patch-review-ediff review 0)
             (let ((control (harness-ui-patch-review-test--control review 0)))
               (harness-ui-patch-review-test--only-ediff-and-box review popout)
-              ;; N twice, then P: each file in Ediff, the report only in its box.
-              (dolist (step '((1 . harness-ui-patch-review-ediff-next-file)
-                              (2 . harness-ui-patch-review-ediff-next-file)
-                              (1 . harness-ui-patch-review-ediff-previous-file)))
-                (with-current-buffer control (call-interactively (cdr step)))
-                (setq control (harness-ui-patch-review-test--control review (car step)))
-                (harness-ui-patch-review-test--only-ediff-and-box review popout))
-              ;; The box is the report's: the same buffer, one window.
-              (should (eq popout (harness-ui-popout-buffer (list 'report id))))
-              (with-current-buffer control (call-interactively #'harness-ui-patch-review-ediff-quit)))
-            (should-not (harness-ui-patch-review--r-ediff review))
-            (should (equal layout (harness-ui-patch-review-test--layout)))
-            (should (= 1 (length (get-buffer-window-list popout nil (selected-frame)))))
-            (should (eq popout (window-buffer (selected-window)))))
-        (advice-remove 'harness-ui-patch-review--start-ediff report-first)
+              (with-current-buffer control (call-interactively #'harness-ui-patch-review-toggle-ediff-tree))
+              (should-not harness-ui-patch-review-ediff-tree)
+              (funcall windows-without-tree)
+              (dolist (index '(1 2))
+                (with-current-buffer control (call-interactively #'harness-ui-patch-review-ediff-next-file))
+                (setq control (harness-ui-patch-review-test--control review index))
+                (should-not (harness-ui-patch-review--r-tree-buffer review))
+                (funcall windows-without-tree))
+              (with-current-buffer control (call-interactively #'harness-ui-patch-review-toggle-ediff-tree))
+              (should harness-ui-patch-review-ediff-tree)
+              (harness-ui-patch-review-test--only-ediff-and-box review popout)
+              (with-current-buffer control (call-interactively #'harness-ui-patch-review-ediff-next-file))
+              (setq control (harness-ui-patch-review-test--control review 3))
+              (harness-ui-patch-review-test--only-ediff-and-box review popout)
+              (with-current-buffer control (call-interactively #'harness-ui-patch-review-ediff-quit))))
         (remove-hook 'ediff-before-setup-hook save)
         (remove-hook 'ediff-quit-hook restore)))))
 
@@ -2226,6 +2318,50 @@ layout takes it like any other window."
       (should (window-parameter box 'no-delete-other-windows))
       (should-not (window-parameter stray 'no-delete-other-windows))
       ;; Ediff then takes the frame but for the box: the report shows there alone.
+      (harness-ui-patch-review-ediff review 0)
+      (harness-ui-patch-review-test--control review 0)
+      (harness-ui-patch-review-test--only-ediff-and-box review popout)
+      (with-current-buffer (harness-ui-patch-review-test--control review 0)
+        (call-interactively #'harness-ui-patch-review-ediff-quit)))))
+
+(ert-deftest harness-ui-patch-review-keeps-the-trees-own-window-for-its-tree ()
+  "The tree Ediff leaves be is the tree's own side window.  Another window
+showing the tree, one a window configuration put back has, is not: it is not
+kept, and one that carries the mark and the dedication from earlier loses them,
+so that Ediff's layout takes it like any other window."
+  (harness-ui-patch-review-test-with-task
+    (let* ((popout (harness-ui-patch-review-test--changes board id))
+           (review (gethash id harness-ui-patch-review--reviews))
+           (harness-ui-patch-review-ediff-tree t)
+           (side (harness-ui-patch-review--keep-tree review))
+           (tree (harness-ui-patch-review--r-tree-buffer review))
+           (main (get-buffer-window board))
+           ;; Before the tree in the order of the windows from the main window's, as
+           ;; a stray in its place is.
+           (stray (split-window main nil 'right)))
+      (should (eq 'left (window-parameter side 'window-side)))
+      (should (eq side (harness-ui-patch-review--tree-window review)))
+      (set-window-buffer stray tree)
+      (set-window-parameter stray 'no-delete-other-windows t)
+      (set-window-dedicated-p stray t)
+      ;; Where the review is made, in the main window: the stray comes first.
+      (select-window main)
+      (should (eq stray (get-buffer-window tree (selected-frame))))
+      (should (eq side (harness-ui-patch-review--tree-window review)))
+      (should (eq side (harness-ui-patch-review--keep-tree review)))
+      (should (window-parameter side 'no-delete-other-windows))
+      (should (window-dedicated-p side))
+      (should-not (window-parameter stray 'no-delete-other-windows))
+      (should-not (window-dedicated-p stray))
+      ;; Without the side window, a new one is made, not the stray taken.
+      (let ((ignore-window-parameters t)) (delete-window side))
+      (should-not (harness-ui-patch-review--tree-window review))
+      (let ((made (harness-ui-patch-review--keep-tree review)))
+        (should (window-live-p made))
+        (should-not (eq stray made))
+        (should (eq 'left (window-parameter made 'window-side))))
+      ;; Ediff then takes the frame but for the tree and the box: the tree shows
+      ;; there alone.
       (harness-ui-patch-review-ediff review 0)
       (harness-ui-patch-review-test--control review 0)
       (harness-ui-patch-review-test--only-ediff-and-box review popout)

@@ -14097,7 +14097,21 @@ change, and keeps point on its row where the reader is in it, else
 shows the row of the file under comparison.  RET or a click on a file
 there starts the Ediff of that file in place of the one under way, the
 windows kept; q ends Ediff; t in the control panel hides the tree or
-shows it again, and ending Ediff kills the buffer.
+shows it again, and ending Ediff kills the buffer.  The window is the
+side window the tree shows in (`harness-ui-patch-review--tree-window`),
+never another window that shows the same buffer, as the report's box is
+(below): N and P, and RET on a file of the tree, end the Ediff under way
+within `save-window-excursion`, and when a hook of `ediff-quit-hook` sets
+another window configuration back meanwhile -- Doom Emacs restores the
+one it saved before Ediff began -- the configuration that returns has
+windows again for the buffers that were killed, each showing the first
+buffer of the buffer list but the current one, which may be the tree's.
+Taking such a window for the tree's kept it through Ediff's own
+`delete-other-windows` (it was given the mark `no-delete-other-windows`
+and the dedication that `harness-ui-patch-review--keep-tree` gives the
+window it keeps), and every file after had one more tree, in the place of
+a version; now it is no tree's, loses the mark and the dedication if it
+has them, and Ediff takes it like any other window.
 
 THE THREADS IN EDIFF.  The threads of the file show in both versions
 under their lines, as an overlay's `after-string` at the end of the

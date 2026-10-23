@@ -4085,7 +4085,12 @@ thread, wherever point is."
 ;; under them the threads, in a buffer of their own.  RET or a click on a
 ;; file compares it in place of the one under way; TAB folds a directory.
 ;; The window is kept as the report's box is, for Ediff to leave be
-;; (`no-delete-other-windows'), and goes when Ediff ends.
+;; (`no-delete-other-windows'), and goes when Ediff ends.  It is the
+;; tree's own side window and no other window that shows the buffer
+;; (`harness-ui-patch-review--tree-window'): going on to the next file ends
+;; the Ediff under way within `save-window-excursion', and a restored window
+;; configuration has windows again for the killed buffers, which may show
+;; the tree; kept by Ediff, each would be one more tree beside the versions.
 
 (defvar harness-ui-patch-review-tree-mode-map
   (let ((map (make-sparse-keymap)))
@@ -4177,16 +4182,33 @@ sight."
    (or harness-ui-patch-review--review (user-error "No review here"))))
 
 (defun harness-ui-patch-review--tree-window (review)
-  "Return the window that shows the tree beside Ediff of REVIEW, or nil."
+  "Return the window that shows the tree beside Ediff of REVIEW, or nil.
+It is looked for in the selected frame.  That is the side window the tree
+is shown in (`harness-ui-patch-review--keep-tree'), its own.  A window of
+any other kind that shows the same buffer is not: a window configuration
+set back puts the buffer that comes first among the others in every
+window it re-creates for one that was killed, and the end of the Ediff
+under way, to go on to the next file, sets one back within
+`save-window-excursion' (`harness-ui-patch-review--end-ediff') -- twice,
+under a hook of `ediff-quit-hook' that restores the configuration saved
+before Ediff.  The tree is not in those windows to be read; taken for the
+tree's, each would be kept by Ediff, and every file after it would have
+the tree once more."
   (let ((buffer (harness-ui-patch-review--r-tree-buffer review)))
-    (and (buffer-live-p buffer) (get-buffer-window buffer (selected-frame)))))
+    (and (buffer-live-p buffer)
+         (cl-find-if (lambda (window) (window-parameter window 'window-side))
+                     (get-buffer-window-list buffer nil (selected-frame))))))
 
 (defun harness-ui-patch-review--keep-tree (review)
   "Show the tree beside Ediff of REVIEW on the left of the selected frame.
-Its window is returned: the one it has, else a side window made for it
+Its window is returned: the side window it has
+\(`harness-ui-patch-review--tree-window'), else a new one made for it
 `harness-ui-patch-review-ediff-tree-width' wide; either way it is one
-Ediff leaves be (`no-delete-other-windows').  Nil when the option
-`harness-ui-patch-review-ediff-tree' is off."
+Ediff leaves be (`no-delete-other-windows').  The tree alone is kept:
+another window showing it is Ediff's like any other, and loses the mark
+and the dedication if it has them from earlier, so that Ediff's layout
+takes it.  Nil when the option `harness-ui-patch-review-ediff-tree' is
+off."
   (when harness-ui-patch-review-ediff-tree
     (let* ((buffer (harness-ui-patch-review--tree-buffer review))
            (window (or (harness-ui-patch-review--tree-window review)
@@ -4195,6 +4217,10 @@ Ediff leaves be (`no-delete-other-windows').  Nil when the option
                                  (window-width . ,(harness-ui-patch-review--tree-width))
                                  (preserve-size . (t . nil)))))))
       (when (window-live-p window)
+        (dolist (other (get-buffer-window-list buffer nil (window-frame window)))
+          (unless (eq other window)
+            (set-window-parameter other 'no-delete-other-windows nil)
+            (set-window-dedicated-p other nil)))
         (set-window-parameter window 'no-delete-other-windows t)
         (set-window-dedicated-p window t)
         (harness-ui-patch-review--draw-tree review)
