@@ -17,7 +17,8 @@ markdown rendering can be exercised in a live Emacs without cost.
 The script is chosen from the last user message:
 
   "tour"        thinking, text, a read_file call, markdown
-  "tools"       two coalescable tool calls, then a bash call
+  "tools"       two searches, then a bash call: a run of three calls
+                that fold into one summary
   "work"        a todo list worked through with tool calls (task mode);
                 in a worktree it also writes and commits notes/ID.md
   "ask"         calls ask_user

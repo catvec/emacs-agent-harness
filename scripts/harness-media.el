@@ -79,6 +79,7 @@ layout: half the frame keeps the board's cards whole.")
 (defvar harness-ui-tasks-search--state)
 (defvar harness-quick-search--state)
 (defvar harness-chat--blocks)
+(defvar harness-chat--groups)
 (defvar harness-chat--loading)
 (defvar harness-chat--order)
 (defvar harness-sessions)
@@ -104,6 +105,10 @@ layout: half the frame keeps the board's cards whole.")
 (declare-function harness-ui-display-session "harness-ui")
 (declare-function harness-menu "harness-ui")
 (declare-function harness-chat-toggle-block "harness-ui-chat")
+(declare-function harness-chat-toggle-group "harness-ui-chat")
+(declare-function harness-chat-block-group "harness-ui-chat")
+(declare-function harness-chat-group-id "harness-ui-chat")
+(declare-function harness-chat-group-expanded "harness-ui-chat")
 (declare-function harness-chat-scroll-to-bottom "harness-ui-chat")
 (declare-function harness-access "harness-ui-access")
 (declare-function harness-ui-access--find-anchor "harness-ui-access")
@@ -1853,7 +1858,9 @@ Show it from its first line matching the regexp FROM, else from its start."
     buffer))
 
 (defun harness-media--expand (buffer tool)
-  "Expand the newest call of TOOL in the chat BUFFER."
+  "Expand the newest call of TOOL in the chat BUFFER.
+A call that folds into a run of calls (bash does, as the reads do) sits
+in a group that is closed until opened, so the group is opened too."
   (with-current-buffer buffer
     (let (found)
       (maphash (lambda (id block)
@@ -1861,6 +1868,9 @@ Show it from its first line matching the regexp FROM, else from its start."
                    (push (cons id block) found)))
                harness-chat--blocks)
       (when-let* ((newest (car (sort found (lambda (a b) (string> (car a) (car b)))))))
+        (when-let* ((group (gethash (harness-chat-block-group (cdr newest)) harness-chat--groups))
+                    ((not (harness-chat-group-expanded group))))
+          (harness-chat-toggle-group (harness-chat-group-id group)))
         (when (harness-chat-block-collapsed (cdr newest))
           (harness-chat-toggle-block (car newest)))))))
 

@@ -867,6 +867,16 @@ the user sent; the drafts are the user's, and stay out."
         (should (string-search "No open threads" open))
         (should (string-search (car sent) closed))))))
 
+(ert-deftest harness-patch-review-folds-the-reading-tool-and-not-the-writing-one ()
+  "In the chat review_threads folds with the reads around it; review_comment stays in view.
+The first only lists what is there.  Without its flag the call stood as
+a line of its own between two summaries of reads, cutting their run
+in two; the second writes what the user reads next, and a summary line
+would hide it."
+  (harness-patch-review-test-with
+    (should (eq t (plist-get (harness-call 'tools/get "review_threads") :coalescable)))
+    (should-not (plist-get (harness-call 'tools/get "review_comment") :coalescable))))
+
 (ert-deftest harness-patch-review-offers-its-tools-to-task-sessions-only ()
   "A session that is no task's has no review to read or answer."
   (harness-patch-review-test-with

@@ -29,6 +29,18 @@
 
 ;;;; bash
 
+(ert-deftest harness-tools-shell-bash-folds-in-the-chat ()
+  "A bash call folds into the run of calls around it in the chat.
+The chat folds only the calls of the tools that say `:coalescable', and
+bash was not one of them, so a stretch of looking around was cut in
+pieces by every command and left a line of its own for each."
+  (harness-tools-shell-test--setup)
+  ;; The spec `tools/list' gives is what the chat reads.
+  (let ((bash (cl-find "bash" (harness-call 'tools/list)
+                       :key (lambda (spec) (plist-get spec :name)) :test #'equal)))
+    (should bash)
+    (should (eq t (plist-get bash :coalescable)))))
+
 (ert-deftest harness-tools-shell-bash-skips-the-login-profile ()
   "A command runs without the user's login profile.
 A profile's side effects go wrong there: one that started an ssh-agent

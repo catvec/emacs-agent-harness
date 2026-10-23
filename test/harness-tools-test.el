@@ -138,6 +138,46 @@ array), as OpenAI did for hand_in, whose evidence item requires no key."
         (let ((json (harness-json-encode (plist-get spec :schema))))
           (should-not (string-match-p "\"required\":null" json)))))))
 
+(defconst harness-tools-test--reads-kept-in-view
+  '("session_wait" "task_wait" "watch_events" "unwatch_events")
+  "The tools of kind read whose calls the chat keeps in view, never folded.
+A wait says what it waits on in a note under its call while it runs, and
+a watch is set to wake the session later: a summary line would hide them.")
+
+(ert-deftest harness-tools-reads-fold-unless-they-wait-or-watch ()
+  "A tool that only reads is on the allow list of calls the chat folds into a summary.
+The chat folds the calls of the tools that say `:coalescable', so a
+read nobody put on the list stands as a line of its own in the middle
+of a run, and cuts the run in two.  The tools that wait on sessions,
+tasks or events stay in view on purpose, and are named here: a read
+that is neither folded nor named fails, so adding one is a decision."
+  (harness-test-with-temp-state
+    (harness-test-reset-bus)
+    (dolist (m '(store project config provider provider-demo tools))
+      (harness-test-load-module m))
+    (clrhash harness-tools)
+    (dolist (m '(session agent skills perms tasks merge notifications))
+      (harness-test-load-module m))
+    (dolist (file (directory-files (expand-file-name "lisp/modules" harness-test-root)
+                                   nil "\\`harness-\\(tools-.*\\)\\.el\\'"))
+      (harness-test-load-module (intern (substring file 8 -3))))
+    (let ((reads nil) (not-folded nil) (folded-though-kept nil))
+      (dolist (spec (harness-call 'tools/list))
+        (when (eq 'read (plist-get spec :kind))
+          (let ((name (plist-get spec :name))
+                (folds (plist-get spec :coalescable)))
+            (push name reads)
+            (cond ((member name harness-tools-test--reads-kept-in-view)
+                   (when folds (push name folded-though-kept)))
+                  ((not folds) (push name not-folded))))))
+      ;; The loop met the tools it is about, those named here among them.
+      (should (member "read_file" reads))
+      (should (member "session_read" reads))
+      (dolist (name harness-tools-test--reads-kept-in-view)
+        (should (member name reads)))
+      (should (equal nil (sort not-folded #'string<)))
+      (should (equal nil (sort folded-though-kept #'string<))))))
+
 ;; Claude Code 2.1.289 refuses a tools/list holding such a schema, and
 ;; then offers the model none of the harness's tools.
 (ert-deftest harness-tools-registry-drops-empty-required ()

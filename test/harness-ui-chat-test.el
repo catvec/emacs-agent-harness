@@ -64,8 +64,13 @@
          (harness-define-tool name :label label :description name :kind 'read :coalescable t
                               :subject (lambda (input) (or (plist-get input :path) (plist-get input :pattern)))
                               :handler (lambda (input _ctx) (format "%s of %s" name (plist-get input :path)))))
-       (harness-define-tool "bash" :label "Bash" :description "bash" :kind 'exec
+       ;; As the harness has them: bash folds into runs, as the reads do;
+       ;; an edit is off the list of tools that fold, so it ends a run.
+       (harness-define-tool "bash" :label "Bash" :description "bash" :kind 'exec :coalescable t
                             :handler (lambda (input _ctx) (format "ran %s" (plist-get input :command))))
+       (harness-define-tool "edit_file" :label "Edit file" :description "edit" :kind 'write
+                            :subject (lambda (input) (plist-get input :path))
+                            :handler (lambda (input _ctx) (format "edited %s" (plist-get input :path))))
        (harness-define-tool "ask_user" :label "Question" :description "ask" :kind 'meta
                             :handler (lambda (input _ctx) (format "answer to %s: red" (plist-get input :question))))
        (harness-test-load-module 'ui)
@@ -4533,7 +4538,9 @@ a cold cache does.  Every other compaction reads as it did."
   "A call a lasting decision's rule refused names the decision, above the fold.
 The line follows the decision: [Undo], then [Redo] with the text struck
 through, then how it ended.  The harness may name the decision as the
-result is written or just after."
+result is written or just after.  Bash calls fold into a run like any
+other, so the line is in the call's block under the summary, which
+counts the refusals, until the user opens the group."
   (harness-ui-chat-test-with-decisions
     (let* ((sid (harness-ui-chat-test-session))
            (buf (harness-ui-chat-test-open sid))
@@ -4556,6 +4563,13 @@ result is written or just after."
       (harness-test-wait (lambda () (let ((first (harness-ui-chat-test-find buf line)))
                                       (and first (harness-ui-chat-test-find buf line first))))
                          5 "both calls naming the decision")
+      ;; Both calls are bash calls, so one group holds them, its summary
+      ;; counting the refusals; the user opens it to read the decision.
+      (with-current-buffer buf
+        (should (= 1 (hash-table-count harness-chat--groups)))
+        (should (harness-ui-chat-test-find buf (concat (harness-ui-icon 'harness-icon-caution) " 2 denied")))
+        (should (invisible-p (1- (harness-ui-chat-test-find buf "decided by:"))))
+        (harness-chat-toggle-group (car (hash-table-keys harness-chat--groups))))
       (with-current-buffer buf
         (let ((calls (harness-ui-chat-test-blocks buf "tool-call")))
           (should (= 2 (length calls)))
@@ -5292,7 +5306,8 @@ opening it where images cannot show or the file is remote."
         (harness-ui-chat-test-prompt buf "read things"))
       (with-current-buffer buf
         (should (member "read_file" harness-chat--coalescable))
-        (should-not (member "bash" harness-chat--coalescable))
+        (should (member "bash" harness-chat--coalescable))
+        (should-not (member "edit_file" harness-chat--coalescable))
         (should (= 1 (hash-table-count harness-chat--groups)))
         (let* ((group (car (hash-table-values harness-chat--groups)))
                ;; Tools are counted by their labels.
@@ -5323,19 +5338,99 @@ opening it where images cannot show or the file is remote."
         (should (< (harness-ui-chat-test-find buf "Reading around")
                    (harness-ui-chat-test-find buf "5 tool calls")
                    (harness-ui-chat-test-find buf "Done reading"))))
-      ;; glob and grep coalesce into their own run; the bash call after
-      ;; them is not coalescable and does not join it.
+      ;; glob and grep coalesce into a run of their own, a new turn's, and
+      ;; the bash call after them joins it: a command folds as a read does.
       (harness-ui-chat-test-prompt buf "run the tools")
       (with-current-buffer buf
         (should (= 2 (hash-table-count harness-chat--groups)))
         (should (= 8 (length (harness-ui-chat-test-blocks buf "tool-call"))))
         (should (harness-ui-chat-test-find buf "echo hello from bash"))
-        (should (harness-ui-chat-test-find buf "2 tool calls: Find files, Search files"))
+        (should (harness-ui-chat-test-find buf "3 tool calls: Find files, Search files, Bash"))
+        (should (invisible-p (harness-ui-chat-test-find buf "echo hello from bash")))
         ;; A redraw computes the same grouping over the fetched history.
         (harness-chat-redraw)
         (harness-test-wait (lambda () (not harness-chat--loading)) 5 "redrawn")
         (should (= 2 (hash-table-count harness-chat--groups)))
         (should (harness-ui-chat-test-find buf "5 tool calls: Read file ×3, Search files, Find files"))))))
+
+(defun harness-ui-chat-test-append-call (sid tool call-id title input)
+  "Append to SID the call CALL-ID of TOOL, titled TITLE, with INPUT, and its result."
+  (harness-call 'session/append sid
+                (list :kind 'tool-call :tool tool :call-id call-id :title title :input input))
+  (harness-call 'session/append sid
+                (list :kind 'tool-result :call-id call-id :output "done")))
+
+(defun harness-ui-chat-test-run-shape (buf)
+  "Return how BUF's groups and loose calls read, oldest first.
+A group is a list of its calls' tools, a call outside every group is
+its tool's name."
+  (with-current-buffer buf
+    (let ((seen nil) (shape nil))
+      (dolist (id (reverse harness-chat--order))
+        (let* ((block (gethash id harness-chat--blocks))
+               (gid (harness-chat-block-group block)))
+          (cond
+           (gid (unless (member gid seen)
+                  (push gid seen)
+                  (push (mapcar (lambda (b) (plist-get (harness-chat-block-node b) :tool))
+                                (harness-chat--group-calls (gethash gid harness-chat--groups)))
+                        shape)))
+           ((equal (harness-chat-block-kind block) "tool-call")
+            (push (plist-get (harness-chat-block-node block) :tool) shape)))))
+      (nreverse shape))))
+
+(ert-deftest harness-ui-chat-folds-a-stretch-of-looking-around-into-one-summary ()
+  "Reads, review threads and commands fold into one summary; an edit ends the run.
+The reported chat -- Session history, Review threads, Session history
+x4, Session info, Bash, Read file x2 -- was three summaries and two
+lines of their own: review_threads and bash were not on the allow list
+of tools that fold (their tools never said `:coalescable'), and a call
+off the list ends the run it meets.  The tools here are the harness's
+own, not this suite's stand-ins: what folds is what their modules say.
+A load groups the transcript, and so does a call arriving live, the same
+way."
+  (harness-ui-chat-test-with
+    (dolist (m '(tools-fs tools-shell tools-session-info tools-review))
+      (harness-test-load-module m))
+    (harness-ui--forget-tools)
+    (let ((sid (harness-ui-chat-test-session "Looking around")))
+      (harness-call 'session/append sid '(:kind user :content "What is going on in the review?"))
+      (harness-ui-chat-test-append-call sid "session_info" "c1" "Session info" nil)
+      (harness-ui-chat-test-append-call sid "review_threads" "c2" "Review threads" nil)
+      (harness-ui-chat-test-append-call sid "session_info" "c3" "Session info" nil)
+      (let ((buf (harness-ui-chat-test-open sid)))
+        (with-current-buffer buf
+          (dolist (tool '("session_info" "review_threads" "bash" "read_file"))
+            (should (member tool harness-chat--coalescable)))
+          ;; Off the list: what writes.
+          (dolist (tool '("review_comment" "edit_file" "write_file"))
+            (should-not (member tool harness-chat--coalescable))))
+        ;; Loaded: the three calls are one run.
+        (should (equal '(("session_info" "review_threads" "session_info"))
+                       (harness-ui-chat-test-run-shape buf)))
+        (should (harness-ui-chat-test-find buf "3 tool calls: Session info ×2, Review threads"))
+        ;; Live: the command and the reads after it join the run.
+        (harness-ui-chat-test-append-call sid "bash" "c4" "Bash: ls docs/tasks/" '(:command "ls docs/tasks/"))
+        (harness-ui-chat-test-append-call sid "read_file" "c5" "Read file: a.el" '(:path "a.el"))
+        (harness-ui-chat-test-append-call sid "read_file" "c6" "Read file: b.el" '(:path "b.el"))
+        (harness-test-wait (lambda () (harness-ui-chat-test-call-block buf "c6")) 5 "the live calls")
+        (should (equal '(("session_info" "review_threads" "session_info" "bash" "read_file" "read_file"))
+                       (harness-ui-chat-test-run-shape buf)))
+        (should (harness-ui-chat-test-find
+                 buf "6 tool calls: Session info ×2, Review threads, Bash, Read file ×2"))
+        ;; An edit is off the list: it ends the run, and the call after it
+        ;; opens another.
+        (harness-ui-chat-test-append-call sid "edit_file" "c7" "Edit file: a.el" '(:path "a.el"))
+        (harness-ui-chat-test-append-call sid "review_threads" "c8" "Review threads" nil)
+        (harness-test-wait (lambda () (harness-ui-chat-test-call-block buf "c8")) 5 "the live calls")
+        (let ((shape '(("session_info" "review_threads" "session_info" "bash" "read_file" "read_file")
+                       "edit_file" ("review_threads"))))
+          (should (equal shape (harness-ui-chat-test-run-shape buf)))
+          ;; A redraw groups the whole transcript anew, and gets the same.
+          (with-current-buffer buf
+            (harness-chat-redraw)
+            (harness-test-wait (lambda () (not harness-chat--loading)) 5 "redrawn"))
+          (should (equal shape (harness-ui-chat-test-run-shape buf))))))))
 
 (ert-deftest harness-ui-chat-denied-call-offers-approval ()
   "A call the permission system refused offers [Approve] where it reads
@@ -5363,6 +5458,14 @@ linked to the one it was denied as."
                                            :is-error t :meta (list :denied t)))
                        :id))
       (harness-test-wait (lambda () (harness-ui-chat-test-find buf "[Approve]")) 5 "the [Approve] button")
+      ;; A bash call folds into a run, as a read does: its summary says
+      ;; one call was denied, and the button waits under it until the
+      ;; user opens the group.
+      (with-current-buffer buf
+        (should (harness-ui-chat-test-find buf (concat (harness-ui-icon 'harness-icon-caution) " 1 denied")))
+        (should (invisible-p (1- (harness-ui-chat-test-find buf "[Approve]"))))
+        (harness-chat-toggle-group (car (hash-table-keys harness-chat--groups)))
+        (should-not (invisible-p (1- (harness-ui-chat-test-find buf "[Approve]")))))
       (with-current-buffer buf
         (let ((pos (harness-ui-chat-test-find buf "[Approve]")))
           (should (harness-ui-chat-test-face-at (1- pos) 'button))
@@ -5448,8 +5551,9 @@ A model that thinks before every call made runs of none."
                (:type tool-call :id "r3" :name "grep" :input (:pattern "defun" :path ,cwd))
                (:type thinking :delta "And the files.")
                (:type tool-call :id "r4" :name "glob" :input (:pattern "*.el" :path ,cwd))
-               (:type thinking :delta "Time to run it.")
-               (:type tool-call :id "r5" :name "bash" :input (:command "echo ran"))
+               (:type thinking :delta "Time to change it.")
+               ;; An edit is no read: off the list of tools that fold, it ends the run.
+               (:type tool-call :id "r5" :name "edit_file" :input (:path "a.el"))
                (:type text :delta "Done.")
                (:type done :stop-reason end-turn))))
         (harness-ui-chat-test-prompt buf "read things"))
@@ -5472,7 +5576,7 @@ A model that thinks before every call made runs of none."
                       (dolist (b (list (nth 1 thoughts) (nth 2 thoughts) (nth 3 thoughts) (nth 0 calls) (nth 3 calls)))
                         (should (invisible-p (harness-chat-block-start b))))
                       ;; The thinking that opens the turn and the one before
-                      ;; the bash call stay out, around the summary.
+                      ;; the edit stay out, around the summary.
                       (dolist (b (list (nth 0 thoughts) (nth 4 thoughts) (nth 4 calls)))
                         (should-not (harness-chat-block-group b))
                         (should-not (invisible-p (harness-chat-block-start b))))
@@ -5517,8 +5621,8 @@ between them."
                               harness-chat--groups))))
           (read-call "n-r1" "c1" "a.el")
           (read-call "n-r2" "c2" "b.el")
-          (node :id "n-b" :kind "tool-call" :tool "bash" :call-id "c3" :input '(:command "ls") :title "bash ls")
-          ;; The two reads form their own run, which the bash call breaks.
+          (node :id "n-b" :kind "tool-call" :tool "edit_file" :call-id "c3" :input '(:path "a.el") :title "edit_file a.el")
+          ;; The two reads form their own run, which the edit breaks.
           ;; The first read's result comes later still.
           (node :id "n-r1-out" :kind "tool-result" :call-id "c1" :output "a")
           (should (= 1 (hash-table-count harness-chat--groups)))
@@ -5705,9 +5809,19 @@ A call the run cannot take, one that is not coalescable, stays outside."
           (should (harness-ui-chat-test-find buf "2 tool calls: Read file ×2"))
           (should-not (harness-ui-chat-test-find buf "1 tool call"))
           ;; A non-coalescable call does not join the run.
-          (call "c3" "bash" "ls")
+          (call "c3" "edit_file" "a.el")
           (should (= 1 (hash-table-count harness-chat--groups)))
-          (should-not (harness-chat-block-group (gethash "c3" harness-chat--blocks))))))))
+          (should-not (harness-chat-block-group (gethash "c3" harness-chat--blocks)))
+          ;; A command folds as a read does: it opens the run after the
+          ;; edit, and the read after it joins that run, not the first.
+          (call "c4" "bash" "ls")
+          (should (= 2 (hash-table-count harness-chat--groups)))
+          (should (equal '("c4") (members-of "c4")))
+          (should (harness-ui-chat-test-find buf "1 tool call: Bash ls"))
+          (call "c5" "read_file" "c.el")
+          (should (= 2 (hash-table-count harness-chat--groups)))
+          (should (equal '("c4" "c5") (members-of "c4")))
+          (should (equal '("c1" "c2") (members-of "c1"))))))))
 
 (ert-deftest harness-ui-chat-does-not-count-while-blocked ()
   "The mode-line clock stops while the session waits on an answer."
@@ -6171,9 +6285,10 @@ calls around it regroup."
                       (should (eq 'harness-success-face
                                   (car (harness-ui-chat-test-faces-in bash (concat success "\n")))))
                       (should (memq 'harness-tool-face (harness-ui-chat-test-faces-in bash "Bash")))
-                      ;; glob and grep fold into a group whose summary counts both.
+                      ;; All three fold into a group, bash with the others, whose
+                      ;; summary counts the failed one and the denied one.
                       (should (= 1 (hash-table-count harness-chat--groups)))
-                      (let ((summary (harness-ui-chat-test-find buf "2 tool calls: Find files, Search files")))
+                      (let ((summary (harness-ui-chat-test-find buf "3 tool calls: Find files, Search files, Bash")))
                         (should summary)
                         (should (harness-ui-chat-test-find buf (concat failure " 1 failed") summary))
                         (should (harness-ui-chat-test-find buf (concat caution " 1 denied") summary))

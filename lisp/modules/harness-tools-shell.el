@@ -54,6 +54,13 @@
 ;;   remote process on a pty that never passes the end of input on, so
 ;;   a command reading its input would wait for its timeout.
 ;;
+;;   In the chat its calls fold under one summary line with the reads
+;;   around them (`:coalescable', see harness-tools.el), so that a
+;;   stretch of looking around, commands included, is one line to open
+;;   when it matters.  A command still running notes itself under its
+;;   call, which a folded call hides; the activity line under the
+;;   transcript says what runs and its latest line.
+;;
 ;; - `elisp' evaluates Emacs Lisp, the Emacs-native alternative to a
 ;;   shell: the value of the last form, anything printed to
 ;;   `standard-output' and any `message' calls come back.  It evaluates
@@ -385,6 +392,7 @@ opens the latest line under that."
                          :cwd (:type "string" :description "Directory to run in, relative to the working directory. Default: the working directory"))
             :required ("command"))
   :kind 'exec
+  :coalescable t
   :timeout 3700
   :paths (lambda (input) (list (or (plist-get input :cwd) ".")))
   :subject (lambda (input) (harness-first-line (plist-get input :command) 70))

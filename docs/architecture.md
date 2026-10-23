@@ -10413,6 +10413,37 @@ the block starts folded, and a line added to the hint draws it again
 where it stands, as open or closed as the user left it
 (`harness-chat--render-folded-hint`).  With one line it is the plain
 note it would have been, which has nothing to fold.
+Only the calls of tools on an allow list fold: the tools that say
+`:coalescable` (see tools), which the UI reads from `tools/list`.  It
+holds the quiet reads: `read_file`, `grep`, `glob`, `list_dir`,
+`file_info`, the lookups of sessions and tasks (`session_read`,
+`session_list`, `session_search`, `session_history`, `session_info`,
+`task_list`), `review_threads`, `skill_search`, `skill_load`, the tools
+that inspect the user's Emacs (`emacs_buffers`, `emacs_buffer`,
+`emacs_windows`, `emacs_open`, `emacs_describe`,
+`emacs_find_definition`, `emacs_messages`), `notification_providers`
+and `todo_write`; and `bash`, so that a stretch of looking around,
+commands among the reads, is one summary and not a line of its own for
+each command.  A command still running notes itself under its call,
+which a folded call hides: the activity line under the transcript says
+what runs and its latest line.  A command that waits on the user stays
+out of its run until answered (below), and one that was refused or
+failed is counted in the summary; its reason and [Approve] show once
+the group is opened.
+The calls the user should see stay out of the list: the other tools
+that run things (`elisp`, `ssh`, `emacs_eval`), what writes
+(`edit_file`, `write_file`, `review_comment`), what acts on other
+sessions or tasks (`spawn_agent`, `session_send`, `task_submit`), what
+waits or watches (`ask_user`, `session_wait`, `task_wait`,
+`watch_events`) and what reaches the web (`web_search`, `web_fetch`).
+A call of a tool off the list is a block of its own and ends the run it
+meets: the calls before it fold into one summary and the calls after it
+into another, so an `edit_file` call among reads leaves two summaries
+with its own line between them.  A tool that only reads says
+`:coalescable t`, or its calls cut every run they stand in, as
+`review_threads` did until it said so; a test holds each tool of kind
+`read` to that, but for the waits and the watches
+(`harness-tools-reads-fold-unless-they-wait-or-watch`).
 A run folds from its first call: a lone call is a run of one under its
 summary, which names the call as its header does ("1 tool call: Read
 file x.el"), and each later call of the run, with the thinking between,

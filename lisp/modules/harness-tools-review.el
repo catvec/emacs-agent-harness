@@ -24,6 +24,15 @@
 ;;
 ;; Both are offered to task sessions: a session that is no task's has no
 ;; review (the filter `agent/tools' removes them), unless it names a task.
+;;
+;; In the chat, runs of calls fold under one summary line, but only the
+;; calls of tools on an explicit allow list (`:coalescable', see
+;; harness-tools.el), so that a call the user should see stays in view.
+;; `review_threads' is on it, with `session_read', `read_file' and the
+;; other reads: it lists what is there and changes nothing, so its call
+;; joins the run of reads around it instead of cutting that run in two.
+;; `review_comment' is not: it writes what the user reads next, and its
+;; call stays in view.
 
 ;;; Code:
 
@@ -121,6 +130,7 @@ not from the session the comment was written in."
                          :task (:type "string"
                                 :description "A task id, to read another task's review. Default: your own.")))
   :kind 'meta
+  :coalescable t
   :subject (lambda (input) (plist-get input :status))
   :handler #'harness-tools-review--threads)
 
