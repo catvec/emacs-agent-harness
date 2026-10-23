@@ -35,6 +35,24 @@
   "Return the steering messages recorded in session ID."
   (cl-remove-if-not (lambda (n) (plist-get (plist-get n :meta) :steering)) (harness-call 'session/nodes id)))
 
+(defun harness-agent-test-waiting (id)
+  "Return the items of the messages session ID lists as waiting for its turn.
+Those are the messages sent to the running turn that it has not taken
+yet: they are no nodes until it does (`session/set-steering')."
+  (plist-get (harness-call 'session/get id) :steering))
+
+(defun harness-agent-test-waiting-texts (id)
+  "Return the texts of the messages session ID lists as waiting for its turn."
+  (mapcar (lambda (item) (plist-get item :text)) (harness-agent-test-waiting id)))
+
+(defun harness-agent-test-ts-in-order-p (id)
+  "Non-nil when the nodes of session ID, in the order it keeps them, are in time order.
+A node is stamped when it is recorded and recorded after the nodes
+before it, so the order the transcript has and the times the nodes
+carry agree."
+  (let ((stamps (mapcar (lambda (n) (plist-get n :ts)) (harness-call 'session/nodes id))))
+    (equal stamps (sort (copy-sequence stamps) #'<))))
+
 ;;;; A hosted loop
 
 (defvar harness-agent-test-prompts nil
@@ -1126,9 +1144,10 @@ short (this would have ended at 200 steps before)."
 
 (ert-deftest harness-agent-steering-after-last-tool-call-hosted ()
   "A hosted loop gets steering sent after its last tool call once, as its next message.
-Sent while the model was thinking, the message lands before the answer
-in the transcript.  It used to stay pending, so the next request had no
-user message after that answer: \"No user message to send\"."
+Sent while the model was thinking, the message is read after the answer
+the model was writing, and stands after it in the transcript.  It used
+to stay pending, so the next request had no user message after that
+answer: \"No user message to send\"."
   (harness-agent-test-with
     (let ((id (harness-agent-test-hosted-session)))
       (harness-agent-test-define-hosted
@@ -1152,10 +1171,11 @@ user message after that answer: \"No user message to send\"."
       (should-not (cl-find-if (lambda (n) (and (eq (plist-get n :kind) 'hint)
                                                (string-match-p "No user message" (plist-get n :content))))
                               (harness-call 'session/nodes id)))
-      ;; The transcript keeps the order things happened in...
-      (should (equal '(user tool-call tool-result thinking user assistant tool-call tool-result assistant)
+      ;; The transcript keeps the order the model read things in: the
+      ;; message stands after the answer it did not interrupt...
+      (should (equal '(user tool-call tool-result thinking assistant user tool-call tool-result assistant)
                      (harness-agent-test-kinds id)))
-      ;; ...while the model reads the message after the answer it interrupted.
+      ;; ...and that is the order of the requests to the model too.
       (let ((msgs (harness-call 'session/messages id)))
         (should (equal '(user assistant user assistant user assistant user assistant)
                        (mapcar (lambda (m) (plist-get m :role)) msgs)))
@@ -1188,21 +1208,24 @@ user message after that answer: \"No user message to send\"."
 
 (ert-deftest harness-agent-withdraw-takes-back-a-message-the-model-has-not-got ()
   "A steering message the turn has not delivered can be taken back; the model never gets it.
-It leaves what the turn will deliver and the transcript, `session/nodes-removed'
-says so, and the node it was is returned.  Another message sent with it
-is delivered as it would have been."
+It leaves what the turn will deliver and the list of messages the
+session shows as waiting (`session/steering-changed' says so), and the
+node it would have been is returned.  Another message sent with it is
+delivered as it would have been, and is a node from then on."
   (harness-agent-test-with
     (let ((id (harness-agent-test-hosted-session))
-          (removed nil)
-          (taken nil))
-      (harness-on 'session/nodes-removed (lambda (_sid ids) (push ids removed)))
+          (changes nil)
+          (taken nil)
+          (left :unset))
+      (harness-on 'session/steering-changed
+                  (lambda (_sid items) (push (mapcar (lambda (item) (plist-get item :text)) items) changes)))
       (harness-define-tool "slow" :label "Slow" :description "slow" :kind 'read
                            :handler (lambda (_input _ctx)
                                       (harness-call 'agent/prompt id "wait, no")
                                       (harness-call 'agent/prompt id "change of plan")
                                       (setq taken (harness-call 'agent/withdraw id
-                                                                (plist-get (car (harness-agent-test-steering-nodes id))
-                                                                           :id)))
+                                                                (plist-get (car (harness-agent-test-waiting id)) :id))
+                                            left (harness-agent-test-waiting-texts id))
                                       "slow output"))
       (harness-agent-test-define-hosted
        (lambda (_prompt)
@@ -1211,15 +1234,20 @@ is delivered as it would have been."
            (:type done :stop-reason end-turn))))
       (should (eq 'end-turn (plist-get (harness-test-await (harness-call 'agent/prompt id "go")) :stop-reason)))
       (should (equal "wait, no" (plist-get taken :content)))
-      (should (equal (list (list (plist-get taken :id))) removed))
+      (should (eq 'user (plist-get taken :kind)))
+      (should (equal '("change of plan") left))
+      ;; Two waited, one was taken back, the other was delivered.
+      (should (equal '(nil ("change of plan") ("wait, no" "change of plan") ("wait, no")) changes))
+      (should-not (harness-agent-test-waiting id))
       ;; The result carries the other message, and not the one taken back.
       (should (equal "slow output\n\n<user_message>\nchange of plan\n</user_message>"
                      (nth 0 harness-agent-test-results)))
       (should (equal '("change of plan") (mapcar (lambda (n) (plist-get n :content))
                                                  (harness-agent-test-steering-nodes id))))
       (should (plist-get (plist-get (car (harness-agent-test-steering-nodes id)) :meta) :delivered-after))
-      ;; The message that stayed stands where it was sent, as always.
-      (should (equal '(user tool-call user tool-result assistant) (harness-agent-test-kinds id)))
+      ;; The message that stayed stands where the model got it, after the result.
+      (should (equal '(user tool-call tool-result user assistant) (harness-agent-test-kinds id)))
+      (should-not (harness-call 'session/node id (plist-get taken :id)))
       (should-not (cl-some (lambda (m) (string-match-p "wait, no" (format "%S" (plist-get m :content))))
                            (harness-call 'session/messages id))))))
 
@@ -1232,7 +1260,7 @@ is delivered as it would have been."
       (harness-define-tool "slow" :label "Slow" :description "slow" :kind 'read
                            :handler (lambda (_input _ctx)
                                       (harness-call 'agent/prompt id "change of plan")
-                                      (setq node-id (plist-get (car (harness-agent-test-steering-nodes id)) :id))
+                                      (setq node-id (plist-get (car (harness-agent-test-waiting id)) :id))
                                       "slow output"))
       (harness-define-tool "late" :label "Late" :description "late" :kind 'read
                            :handler (lambda (_input _ctx)
@@ -1253,7 +1281,163 @@ is delivered as it would have been."
       (should (string-match-p "already" (cadr refused)))
       (should (equal '("change of plan") (mapcar (lambda (n) (plist-get n :content))
                                                  (harness-agent-test-steering-nodes id))))
+      ;; The id it waited under is the id of the node it became.
+      (should (equal node-id (plist-get (car (harness-agent-test-steering-nodes id)) :id)))
       (should (plist-get (plist-get (car (harness-agent-test-steering-nodes id)) :meta) :delivered-after)))))
+
+(ert-deftest harness-agent-a-message-sent-mid-turn-is-recorded-where-the-model-gets-it-hosted ()
+  "A message sent while a tool runs is no node of the transcript until the model gets it.
+Until then the session lists it as waiting, with the id of the node it
+becomes.  A hosted loop gets it with the result of the tool that ran
+meanwhile, so it is recorded right after that result -- before the call
+the model made reading it and the answer to it -- stamped when it was
+delivered, not when it was sent: the transcript reads, and is stamped,
+in the order the model read things."
+  (harness-agent-test-with
+    (let ((id (harness-agent-test-hosted-session))
+          (while-it-runs nil))
+      (harness-define-tool "slow" :label "Slow" :description "slow" :kind 'read
+                           :handler (lambda (_input _ctx)
+                                      (harness-call 'agent/prompt id "change of plan")
+                                      ;; Time passes between sending and delivering.
+                                      (sleep-for 0.02)
+                                      (setq while-it-runs (list (harness-agent-test-kinds id)
+                                                                (harness-agent-test-waiting id)))
+                                      "slow output"))
+      (harness-agent-test-define-hosted
+       (lambda (_prompt)
+         '((:type tool-call :id "h1" :name "slow" :input (:n 1))
+           (:type tool-call :id "h2" :name "list_dir" :input (:path "/b"))
+           (:type text :delta "Done.")
+           (:type done :stop-reason end-turn))))
+      (should (eq 'end-turn (plist-get (harness-test-await (harness-call 'agent/prompt id "go")) :stop-reason)))
+      ;; While the tool ran: a message that waits, and no node of it.
+      (should (equal '(user tool-call) (car while-it-runs)))
+      (should (equal '("change of plan") (mapcar (lambda (item) (plist-get item :text)) (cadr while-it-runs))))
+      (should (floatp (plist-get (car (cadr while-it-runs)) :ts)))
+      ;; Nothing waits any more, and the message is where the model got it.
+      (should-not (harness-agent-test-waiting id))
+      (should (equal '(user tool-call tool-result user tool-call tool-result assistant)
+                     (harness-agent-test-kinds id)))
+      (let* ((nodes (harness-call 'session/nodes id))
+             (message (nth 3 nodes))
+             (sent (plist-get (car (cadr while-it-runs)) :ts)))
+        (should (equal (plist-get (car (cadr while-it-runs)) :id) (plist-get message :id)))
+        (should (equal "change of plan" (plist-get message :content)))
+        (should (plist-get (plist-get message :meta) :steering))
+        (should (equal (plist-get (nth 2 nodes) :id) (plist-get (plist-get message :meta) :delivered-after)))
+        ;; Stamped when delivered; when it was sent is kept beside it.
+        (should (> (plist-get message :ts) sent))
+        (should (equal sent (plist-get (plist-get message :meta) :sent-at)))
+        (should (harness-agent-test-ts-in-order-p id)))
+      ;; The model's own view reads the same: the result, then the message.
+      (let ((msgs (harness-call 'session/messages id)))
+        (should (equal '("tool_result" "text") (mapcar (lambda (b) (plist-get b :type)) (plist-get (nth 2 msgs) :content)))))
+      ;; Reloaded from what was written, the order is the same, and so are the times.
+      (let ((ids (mapcar (lambda (n) (plist-get n :id)) (harness-call 'session/nodes id))))
+        (harness-session-flush)
+        (clrhash harness-sessions)
+        (harness-session--load-all)
+        (should (equal ids (mapcar (lambda (n) (plist-get n :id)) (harness-call 'session/nodes id))))
+        (should (equal '(user tool-call tool-result user tool-call tool-result assistant)
+                       (harness-agent-test-kinds id)))
+        (should (harness-agent-test-ts-in-order-p id))
+        (should-not (harness-agent-test-waiting id))))))
+
+(ert-deftest harness-agent-a-message-sent-mid-turn-is-recorded-where-the-model-gets-it-native ()
+  "A native loop reads a message sent while a tool ran in its next request.
+That request carries the results of every call of the step, so the
+message is recorded after them, as the newest user message, and the
+list of the messages that wait is empty by then."
+  (harness-agent-test-with
+    (let* ((id (harness-agent-test-session))
+           (requests nil)
+           (harness-provider-demo--delay 0.005)
+           (harness-provider-demo-script-override
+            (lambda (request)
+              (push request requests)
+              '((:type tool-call :id "n1" :name "slow" :input (:n 1))
+                (:type text :delta "Done.")
+                (:type done :stop-reason end-turn))))
+           (while-it-runs nil))
+      (harness-define-tool "slow" :label "Slow" :description "slow" :kind 'read
+                           :handler (lambda (_input _ctx)
+                                      (harness-call 'agent/prompt id "change of plan")
+                                      (setq while-it-runs (list (harness-agent-test-kinds id)
+                                                                (harness-agent-test-waiting-texts id)))
+                                      "slow output"))
+      (should (eq 'end-turn (plist-get (harness-test-await (harness-call 'agent/prompt id "go")) :stop-reason)))
+      (should (equal '((user tool-call) ("change of plan")) while-it-runs))
+      (should-not (harness-agent-test-waiting id))
+      (should (equal '(user tool-call tool-result user assistant) (harness-agent-test-kinds id)))
+      (should (harness-agent-test-ts-in-order-p id))
+      ;; The second request is the one that carried the message: the
+      ;; result first, the message after it, in one user message.
+      (let ((last (car (last (plist-get (car requests) :messages)))))
+        (should (eq 'user (plist-get last :role)))
+        (should (equal '("tool_result" "text") (mapcar (lambda (b) (plist-get b :type)) (plist-get last :content))))
+        (should (equal "change of plan" (plist-get (cadr (plist-get last :content)) :text)))))))
+
+(ert-deftest harness-agent-a-turn-that-ends-first-records-the-message-the-model-never-got ()
+  "A message waiting when the turn is cancelled is recorded as the turn ends.
+The model never got it, so it carries no `:delivered-after'; it stands
+where the transcript ends, and the next turn reads it with the next
+message of the user's."
+  (harness-agent-test-with
+    (let* ((id (harness-agent-test-session))
+           (hold (harness-make-promise))
+           (harness-provider-demo-script-override
+            '((:type tool-call :id "n1" :name "hold" :input (:n 1))
+              (:type text :delta "Done.")
+              (:type done :stop-reason end-turn))))
+      (harness-define-tool "hold" :label "Hold" :description "hold" :kind 'read
+                           :handler (lambda (_input _ctx) (harness-then hold (lambda (_) "held"))))
+      (let ((p (harness-call 'agent/prompt id "go")))
+        (harness-test-wait (lambda () (memq 'tool-call (harness-agent-test-kinds id))) 5 "the turn in its tool")
+        (harness-call 'agent/prompt id "forget that")
+        (should (equal '("forget that") (harness-agent-test-waiting-texts id)))
+        (should (equal '(user tool-call) (harness-agent-test-kinds id)))
+        (harness-call 'agent/cancel id)
+        (harness-resolve hold t)
+        (should (eq 'cancelled (plist-get (harness-test-await p 10) :stop-reason))))
+      (should-not (harness-agent-test-waiting id))
+      (let ((message (car (last (harness-call 'session/nodes id)))))
+        (should (equal "forget that" (plist-get message :content)))
+        (should (plist-get (plist-get message :meta) :steering))
+        (should-not (plist-get (plist-get message :meta) :delivered-after)))
+      (should (harness-agent-test-ts-in-order-p id))
+      ;; The next turn reads it, before the message that starts that turn.
+      (let ((harness-provider-demo-script-override '((:type text :delta "Fine.") (:type done :stop-reason end-turn))))
+        (harness-test-await (harness-call 'agent/prompt id "start again")))
+      (should (equal '("go" "forget that" "start again")
+                     (mapcar (lambda (n) (plist-get n :content)) (harness-agent-test-user-nodes id)))))))
+
+(ert-deftest harness-agent-a-message-the-transcript-refuses-is-dropped-after-a-few-boundaries ()
+  "A message that cannot be recorded waits for the next boundary, a few times.
+It is not delivered, so the model reads only what the transcript has; and
+once it has failed `harness-agent--max-record-tries' times it is dropped,
+or a model that stopped would step again for ever to deliver it."
+  (harness-agent-test-with
+    (let* ((id (harness-agent-test-session))
+           (turn (make-harness-agent-turn :session-id id)))
+      (harness-call 'session/append id '(:kind user :content "go"))
+      (harness-agent--record-steering turn (list (list :type "text" :text "change of plan")) nil)
+      (should (equal '("change of plan") (harness-agent-test-waiting-texts id)))
+      (cl-letf (((symbol-function 'harness-agent--deliver-entry)
+                 (lambda (&rest _) (error "The disk is full"))))
+        (dotimes (_ (1- harness-agent--max-record-tries))
+          (should-not (harness-agent--take-pending turn))
+          (should (harness-agent-turn-steering turn))
+          (should (equal '("change of plan") (harness-agent-test-waiting-texts id))))
+        (should-not (harness-agent--take-pending turn))
+        (should-not (harness-agent-turn-steering turn)))
+      (should-not (harness-agent-test-waiting id))
+      (should-not (harness-agent-test-steering-nodes id))
+      ;; A message recorded all right is delivered once, and no more.
+      (harness-agent--record-steering turn (list (list :type "text" :text "and this")) nil)
+      (should (equal '("and this") (mapcar (lambda (p) (plist-get p :text)) (harness-agent--take-pending turn))))
+      (should-not (harness-agent--take-pending turn))
+      (should (equal '("and this") (mapcar (lambda (n) (plist-get n :content)) (harness-agent-test-steering-nodes id)))))))
 
 (ert-deftest harness-agent-withdraw-needs-a-turn-that-holds-the-message ()
   "Only a steering message a running turn has yet to deliver can be taken back.
@@ -2463,9 +2647,12 @@ at, so a message sent to it steers it, whatever `agent/hold' says."
       (harness-test-wait (lambda () (eq 'running (plist-get (harness-call 'session/get id) :status))))
       (should-not (gethash (harness-agent-turn-for id) harness-agent--gated))
       (should (eq turn (harness-call 'agent/prompt id "also check the tests")))
-      (should (= 1 (length (harness-agent-test-steering-nodes id))))
+      ;; It steers: it waits for the next step with the messages that wait.
+      (should (equal '("also check the tests") (harness-agent-test-waiting-texts id)))
       (should (zerop (hash-table-count harness-agent--held)))
-      (harness-test-await turn 20))))
+      (harness-test-await turn 20)
+      (should (= 1 (length (harness-agent-test-steering-nodes id))))
+      (should-not (harness-agent-test-waiting id)))))
 
 (ert-deftest harness-agent-note-activity-can-show-the-session-running ()
   "A gate that holds a turn says it works, so a client draws the activity.

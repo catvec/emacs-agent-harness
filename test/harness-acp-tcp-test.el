@@ -175,9 +175,13 @@
       ;; (and the answer, the turn's result, comes when the turn ends).
       (let ((steered (harness-acp-request conn "_harness/agent/prompt"
                                           (list :session-id sid :blocks "steer now" :opts (list :queue :false)))))
-        (harness-test-wait (lambda () (cl-find-if (lambda (n) (plist-get (plist-get n :meta) :steering))
-                                                  (harness-call 'session/nodes sid)))
+        ;; It waits for the turn's next step, listed on the session and no
+        ;; node of the transcript until the turn takes it.
+        (harness-test-wait (lambda () (plist-get (harness-call 'session/get sid) :steering))
                            5 "the steering message")
+        (should (equal '("steer now") (mapcar (lambda (it) (plist-get it :text))
+                                              (plist-get (harness-call 'session/get sid) :steering))))
+        (should-not (cl-find-if (lambda (n) (plist-get (plist-get n :meta) :steering)) (harness-call 'session/nodes sid)))
         (should (= 1 (length (plist-get (harness-call 'session/get sid) :queue))))
         (should (harness-agent-running-p sid))
         (harness-resolve gate t)

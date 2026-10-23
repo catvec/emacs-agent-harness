@@ -220,6 +220,101 @@ void main() {
       expect(transcript.items.where((item) => item.isUser), hasLength(1));
     });
 
+    test('a message sent while the agent works stands where it is read', () {
+      final transcript = TranscriptState();
+      transcript.apply({
+        'sessionUpdate': 'user_message_chunk',
+        'content': {'type': 'text', 'text': 'go'},
+        '_harness': {'nodeId': 'u1'},
+      });
+      transcript.apply({
+        'sessionUpdate': 'tool_call',
+        'toolCallId': 'c1',
+        'title': 'Run tests',
+        'status': 'in_progress',
+        'rawInput': {'command': 'flutter test'},
+        '_harness': {'nodeId': 't1', 'tool': 'bash'},
+      });
+      // Typed while the tool runs: shown at once, and the agent goes on.
+      transcript.addLocalUser('also check the docs');
+      transcript.apply({
+        'sessionUpdate': 'tool_call_update',
+        'toolCallId': 'c1',
+        'status': 'completed',
+        'rawOutput': 'All good',
+        '_harness': {'nodeId': 'r1'},
+      });
+      transcript.apply({
+        'sessionUpdate': 'agent_message_chunk',
+        'content': {'type': 'text', 'text': 'The tests pass.'},
+        '_harness': {'nodeId': 'a1'},
+      });
+      // The harness echoes the message once the model read it, after that
+      // work: that is where the transcript has it, and before its reply.
+      transcript.apply({
+        'sessionUpdate': 'user_message_chunk',
+        'content': {'type': 'text', 'text': 'also check the docs'},
+        '_harness': {'nodeId': 'u2'},
+      });
+      transcript.apply({
+        'sessionUpdate': 'agent_message_chunk',
+        'content': {'type': 'text', 'text': 'Checking the docs.'},
+        '_harness': {'nodeId': 'a2'},
+      });
+      expect(
+        transcript.items.map((item) => item.isTool ? '(tool call)' : item.text),
+        [
+          'go',
+          '(tool call)',
+          'The tests pass.',
+          'also check the docs',
+          'Checking the docs.',
+        ],
+      );
+      final message = transcript.items[3];
+      expect(message.isUser, isTrue);
+      expect(message.nodeId, 'u2');
+      expect(message.localEcho, isFalse);
+      // Echoed again, it is the same message, which stays where it is.
+      transcript.apply({
+        'sessionUpdate': 'user_message_chunk',
+        'content': {'type': 'text', 'text': 'also check the docs'},
+        '_harness': {'nodeId': 'u2'},
+      });
+      expect(transcript.items.where((item) => item.isUser), hasLength(2));
+      expect(transcript.items[3], same(message));
+    });
+
+    test('two messages sent while the agent works keep their order', () {
+      final transcript = TranscriptState();
+      transcript.apply({
+        'sessionUpdate': 'user_message_chunk',
+        'content': {'type': 'text', 'text': 'go'},
+        '_harness': {'nodeId': 'u1'},
+      });
+      transcript.addLocalUser('first');
+      transcript.addLocalUser('second');
+      transcript.apply({
+        'sessionUpdate': 'agent_message_chunk',
+        'content': {'type': 'text', 'text': 'Working.'},
+        '_harness': {'nodeId': 'a1'},
+      });
+      for (final (id, text) in [('u2', 'first'), ('u3', 'second')]) {
+        transcript.apply({
+          'sessionUpdate': 'user_message_chunk',
+          'content': {'type': 'text', 'text': text},
+          '_harness': {'nodeId': id},
+        });
+      }
+      expect(transcript.items.map((item) => item.text), [
+        'go',
+        'Working.',
+        'first',
+        'second',
+      ]);
+      expect(transcript.items.any((item) => item.localEcho), isFalse);
+    });
+
     test('a final node replaces streamed text', () {
       final transcript = TranscriptState();
       transcript.apply({

@@ -22,6 +22,7 @@ class SessionSummary {
     this.todos = const [],
     this.pending = const [],
     this.queue = const [],
+    this.steering = const [],
     this.worktree,
     this.head,
     this.plan,
@@ -50,6 +51,7 @@ class SessionSummary {
       todos: TodoItem.listFrom(info['todos']),
       pending: PendingRequest.listFrom(info['pending']),
       queue: QueueItem.listFrom(info['queue']),
+      steering: QueueItem.listFrom(info['steering']),
       worktree: asString(info['worktree']),
       head: asString(info['head']),
       plan: asString(info['plan']),
@@ -84,6 +86,7 @@ class SessionSummary {
       todos: TodoItem.listFrom(wire['todos']),
       pending: PendingRequest.listFrom(wire['pending']),
       queue: QueueItem.listFrom(wire['queue']),
+      steering: QueueItem.listFrom(wire['steering']),
       worktree: asString(wire['worktree']),
       head: asString(wire['head']),
       plan: asString(wire['plan']),
@@ -109,6 +112,11 @@ class SessionSummary {
   final List<TodoItem> todos;
   final List<PendingRequest> pending;
   final List<QueueItem> queue;
+
+  /// The messages sent to the running turn that it has not taken yet.  They
+  /// are no node of the transcript until it does: it reads in the order the
+  /// model got things.
+  final List<QueueItem> steering;
   final String? worktree;
   final String? head;
   final String? plan;
@@ -161,6 +169,7 @@ class SessionSummary {
         todos: todos,
         pending: pending,
         queue: queue,
+        steering: steering,
         worktree: worktree,
         head: head,
         plan: plan,
@@ -188,6 +197,7 @@ class SessionSummary {
       todos: newer.todos.isNotEmpty ? newer.todos : todos,
       pending: newer.pending.isNotEmpty ? newer.pending : pending,
       queue: newer.queue.isNotEmpty ? newer.queue : queue,
+      steering: newer.steering.isNotEmpty ? newer.steering : steering,
       worktree: newer.worktree ?? worktree,
       head: newer.head ?? head,
       plan: newer.plan ?? plan,
@@ -324,16 +334,21 @@ class PendingRequest {
 }
 
 class QueueItem {
-  const QueueItem({required this.id, required this.text});
+  const QueueItem({required this.id, required this.text, this.from});
 
   static List<QueueItem> listFrom(Object? value) => [
     for (final item in asMapList(value))
       QueueItem(
         id: asStringOr(item['id'], ''),
         text: asStringOr(item['text'], ''),
+        from: item['from'],
       ),
   ];
 
   final String id;
   final String text;
+
+  /// Who sent the message when the person did not: the harness's sender
+  /// plist, as it came.
+  final Object? from;
 }

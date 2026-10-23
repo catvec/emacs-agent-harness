@@ -187,7 +187,10 @@ in go by (see the priority plugin)."
      (if (and level (not (eq level harness-priority-default)))
          (format ", priority %s" level) "")
      (if (plist-get s :parent-id) (format ", parent %s" (harness-tools-sessions--short (plist-get s :parent-id))) "")
-     (if (plist-get s :queue) (format ", %d queued" (length (plist-get s :queue))) "")
+     ;; The messages the session has not read: queued for its next turn, or
+     ;; sent to the turn that runs and not taken yet.
+     (let ((waiting (+ (length (plist-get s :queue)) (length (plist-get s :steering)))))
+       (if (> waiting 0) (format ", %d queued" waiting) ""))
      (if pending (format "\n    waiting on the user: %s" pending) ""))))
 
 (defun harness-tools-sessions--node-text (node)

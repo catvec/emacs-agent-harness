@@ -298,6 +298,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `session/redacted` | [session](session.md) | [redact](redact.md) | [ui-secrets](ui-secrets.md) | yes |
 | `session/resumed` | [session](session.md) | [session](session.md) |  |  |
 | `session/status` | [session](session.md) | [session](session.md) | [tasks](tasks.md), [tools](tools.md), [tools-sessions](tools-sessions.md) | yes |
+| `session/steering-changed` | [session](session.md) | [session](session.md) |  | yes |
 | `session/todos` | [session](session.md) | [session](session.md) | [acp](acp.md), [todo-sync](todo-sync.md) |  |
 | `session/updated` | [session](session.md) | [session](session.md) | [access](access.md), [acp](acp.md), [cache-warm](cache-warm.md), [fallback](fallback.md), [perms](perms.md), [pet](pet.md) |  |
 | `session/usage` | [session](session.md) | [session](session.md) | [cache-warm](cache-warm.md), [tools](tools.md), [usage](usage.md) |  |

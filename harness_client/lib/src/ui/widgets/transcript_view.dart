@@ -447,7 +447,8 @@ class _UserBubble extends StatelessWidget {
             Padding(
               padding: const EdgeInsets.only(right: 4, bottom: 4),
               child: Text(
-                sender,
+                // A message the turn has not read yet waits, and says so.
+                item.pending ? '$sender · Queued' : sender,
                 style: HarnessText.meta(context).copyWith(
                   color: fromSomeoneElse
                       ? theme.colorScheme.onSurfaceVariant

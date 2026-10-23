@@ -57,7 +57,7 @@ transcript.
 The conversation and its cache.  Only a session whose nodes (the node
 log, or the nodes in memory) or whose provider's own log held the
 secret starts a new conversation.  A hit only in its record (queue,
-name, todos, plan, ext, pending, move) was sent to no provider
+steering, name, todos, plan, ext, pending, move) was sent to no provider
 conversation, and a new one is made from the nodes, so it resets
 nothing.  A reset costs the prompt cache: a hosted provider (Claude
 Code, Copilot) caches the conversation it keeps, and the new one opens

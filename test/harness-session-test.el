@@ -1208,14 +1208,15 @@ its transcript; one made at its parent's head goes on."
   (harness-session-test-with
     (let* ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir) :name "old") :id))
            (s (gethash id harness-sessions))
-           ;; Made before the last four slots: provider-node, move, ext
-           ;; and last-message.
-           (old (apply #'record (cl-loop for i below (- (length s) 4) collect (aref s i)))))
+           ;; Made before the last five slots: provider-node, move, ext,
+           ;; last-message and steering.
+           (old (apply #'record (cl-loop for i below (- (length s) 5) collect (aref s i)))))
       (puthash id old harness-sessions)
       (should-error (harness-session-provider-node old))
       (should-error (harness-session-move old))
       (should-error (harness-session-ext old))
       (should-error (harness-session-last-message old))
+      (should-error (harness-session-steering old))
       (harness-session--upgrade-records)
       (let ((new (gethash id harness-sessions)))
         (should (= (length s) (length new)))
@@ -1224,6 +1225,7 @@ its transcript; one made at its parent's head goes on."
         (should-not (harness-session-move new))
         (should-not (harness-session-ext new))
         (should-not (harness-session-last-message new))
+        (should-not (harness-session-steering new))
         (should (equal "old" (plist-get (harness-call 'session/get id) :name)))
         ;; The slots are there to use.
         (harness-call 'session/set-ext id :supervisor t)
@@ -2135,6 +2137,98 @@ record of the compaction in between changes nothing."
           (should (equal '(user assistant user assistant user) (funcall roles msgs)))
           (should (equal '("thinking") (funcall types (nth 3 msgs))))
           (should (equal "steer two" (plist-get (car (plist-get (nth 4 msgs) :content)) :text))))))))
+
+(ert-deftest harness-session-messages-hold-the-results-before-a-message-recorded-between-them ()
+  "A steering message the turn recorded between the results of a batch follows them all.
+A hosted loop gets it with the first result, so it is a node between
+the results; a request holds every result first, and the words after
+them, in the order the messages were recorded."
+  (harness-session-test-with
+    (let* ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id))
+           (add (lambda (node) (plist-get (harness-call 'session/append id node) :id)))
+           (types (lambda (msg) (mapcar (lambda (b) (plist-get b :type)) (plist-get msg :content)))))
+      (funcall add '(:kind user :content "go"))
+      (funcall add '(:kind tool-call :tool "t" :call-id "c1" :input (:n 1)))
+      (funcall add '(:kind tool-call :tool "t" :call-id "c2" :input (:n 2)))
+      (funcall add '(:kind tool-call :tool "t" :call-id "c3" :input (:n 3)))
+      (funcall add '(:kind tool-result :call-id "c1" :output "A"))
+      (funcall add '(:kind user :content "steer one" :meta (:steering t)))
+      (funcall add '(:kind user :content "steer two" :meta (:steering t)))
+      (funcall add '(:kind tool-result :call-id "c2" :output "B"))
+      (funcall add '(:kind tool-result :call-id "c3" :output "C"))
+      (funcall add '(:kind assistant :content "Done."))
+      (let ((msgs (harness-call 'session/messages id)))
+        (should-not (harness-session-test-unpaired msgs))
+        (should (equal '(user assistant user assistant) (mapcar (lambda (m) (plist-get m :role)) msgs)))
+        (should (equal '("tool_result" "tool_result" "tool_result" "text" "text") (funcall types (nth 2 msgs))))
+        (should (equal '("A" "B" "C" "steer one" "steer two")
+                       (mapcar (lambda (b) (or (plist-get b :content) (plist-get b :text)))
+                               (plist-get (nth 2 msgs) :content)))))
+      ;; Recorded after the last result, or where no result follows, nothing moves.
+      (funcall add '(:kind user :content "steer three" :meta (:steering t)))
+      (funcall add '(:kind user :content "plain" :meta (:steering nil)))
+      (let ((msgs (harness-call 'session/messages id)))
+        (should (equal '("steer three" "plain")
+                       (mapcar (lambda (b) (plist-get b :text)) (plist-get (car (last msgs)) :content))))))))
+
+(ert-deftest harness-session-steering-is-listed-and-announced-when-it-changes ()
+  "The messages a running turn has not taken are the session's `:steering'.
+`session/set-steering' replaces the list, `session/steering-changed' says
+so, and a list that is the one the session has already says nothing."
+  (harness-session-test-with
+    (let* ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id))
+           (seen nil)
+           (item '(:id "n-1" :text "change of plan" :ts 100.0)))
+      (harness-on 'session/steering-changed (lambda (sid items) (push (cons sid items) seen)))
+      (should-not (plist-get (harness-call 'session/get id) :steering))
+      (should (equal (list item) (harness-call 'session/set-steering id (list item))))
+      (should (equal (list item) (plist-get (harness-call 'session/get id) :steering)))
+      ;; The same list changes nothing and tells nobody.
+      (harness-call 'session/set-steering id (list (copy-sequence item)))
+      (should (equal (list (cons id (list item))) seen))
+      (harness-call 'session/set-steering id nil)
+      (should-not (plist-get (harness-call 'session/get id) :steering))
+      (should (equal (list (list id) (cons id (list item))) seen))
+      (should-error (harness-call 'session/set-steering "nope" nil) :type 'harness-error))))
+
+(ert-deftest harness-session-load-queues-again-the-messages-a-turn-never-took ()
+  "A harness that stops while a turn has messages waiting gives them back in the queue.
+The turn ended with the process, and no other will take them; the
+record kept them, and the next start queues them again (only their text
+survives), to be sent when the user is ready.  A message that is a node
+already -- recorded before the harness stopped, the record written too
+late -- is not sent twice, and a session loaded by a reload keeps what
+its turn holds."
+  (harness-session-test-with
+    (let* ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id))
+           (other (harness-sender-session '(:id "s-other" :name "Other"))))
+      (harness-call 'session/append id '(:kind user :content "go"))
+      (harness-call 'session/append id '(:kind user :id "n-done" :content "already here" :meta (:steering t)))
+      (harness-call 'session/set-steering
+                    id (list (list :id "n-1" :text "change of plan" :ts 100.0)
+                             (list :id "n-done" :text "already here" :ts 101.0)
+                             (list :id "n-2" :text "from elsewhere" :ts 102.0 :from other)))
+      (harness-session-flush)
+      ;; A reload does not touch a session that is loaded.
+      (harness-session--load-all)
+      (should (= 3 (length (plist-get (harness-call 'session/get id) :steering))))
+      (should-not (plist-get (harness-call 'session/get id) :queue))
+      ;; A start does.
+      (clrhash harness-sessions)
+      (harness-session--load-all)
+      (let ((session (harness-call 'session/get id)))
+        (should-not (plist-get session :steering))
+        (should (equal '("change of plan" "from elsewhere") (mapcar (lambda (it) (plist-get it :text))
+                                                                    (plist-get session :queue))))
+        ;; Who sent it survives the record, a symbol read back from a string.
+        (should (eq 'session (harness-sender-kind (plist-get (cadr (plist-get session :queue)) :from))))
+        (should (equal "s-other" (plist-get (plist-get (cadr (plist-get session :queue)) :from) :id))))
+      ;; Saved so too.
+      (harness-session-flush)
+      (clrhash harness-sessions)
+      (harness-session--load-all)
+      (should-not (plist-get (harness-call 'session/get id) :steering))
+      (should (= 2 (length (plist-get (harness-call 'session/get id) :queue)))))))
 
 (ert-deftest harness-session-messages-answer-every-call ()
   "Every tool call is answered in the message right after it, whatever

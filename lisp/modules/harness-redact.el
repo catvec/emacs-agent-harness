@@ -49,7 +49,7 @@
 ;; The conversation and its cache.  Only a session whose nodes (the node
 ;; log, or the nodes in memory) or whose provider's own log held the
 ;; secret starts a new conversation.  A hit only in its record (queue,
-;; name, todos, plan, ext, pending, move) was sent to no provider
+;; steering, name, todos, plan, ext, pending, move) was sent to no provider
 ;; conversation, and a new one is made from the nodes, so it resets
 ;; nothing.  A reset costs the prompt cache: a hosted provider (Claude
 ;; Code, Copilot) caches the conversation it keeps, and the new one opens
@@ -696,7 +696,7 @@ comes with it, as `:secret-counts': conses of a fingerprint and a count."
     ;; The nodes are what a new conversation is made from, and what a
     ;; provider conversation may hold: when the node log or the nodes in
     ;; memory held the secret, it starts over.  A hit only in the record
-    ;; (queue, name, todos, plan, ext, pending, move) is no reason: no
+    ;; (queue, steering, name, todos, plan, ext, pending, move) is no reason: no
     ;; provider conversation was sent those, and a new one is made from the
     ;; nodes, so a reset would only throw the conversation and its prompt
     ;; cache away for nothing.

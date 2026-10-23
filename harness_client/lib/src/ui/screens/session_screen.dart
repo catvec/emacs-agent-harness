@@ -450,7 +450,7 @@ class _SessionScreenState extends State<SessionScreen> {
                             ),
                           )
                         : TranscriptView(
-                            items: controller.transcript.items,
+                            items: controller.transcript.displayItems,
                             showThinking: _app.settings.showThinking,
                             streaming: controller.promptInFlight,
                             scrollTick: _scrollTick,

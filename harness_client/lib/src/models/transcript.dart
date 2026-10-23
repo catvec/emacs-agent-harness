@@ -120,6 +120,7 @@ class TranscriptItem {
     this.tool,
     this.node,
     this.localEcho = false,
+    this.pending = false,
   });
 
   String key;
@@ -135,6 +136,12 @@ class TranscriptItem {
 
   /// A message shown optimistically before the server echoes it.
   bool localEcho;
+
+  /// A message the harness holds for the running turn, which takes it at its
+  /// next step.  It is no part of the conversation until then -- the model
+  /// has not read it -- so it is shown last, queued, and stands where it was
+  /// read once the turn takes it (see [TranscriptState.syncPending]).
+  bool pending;
 
   bool get isUser => kind == TranscriptKind.user;
   bool get isAssistant => kind == TranscriptKind.assistant;
@@ -196,6 +203,56 @@ class TranscriptState {
     if (item.localEcho) items.remove(item);
   }
 
+  /// What the screen shows, top to bottom: the transcript, then the messages
+  /// the turn has not taken yet ([TranscriptItem.pending]), pinned last.
+  List<TranscriptItem> get displayItems {
+    if (!items.any((item) => item.pending)) return items;
+    return [
+      ...items.where((item) => !item.pending),
+      ...items.where((item) => item.pending),
+    ];
+  }
+
+  /// Take [held], the messages the harness says it holds for the running
+  /// turn's next step.  A message sent while the agent works is no node of
+  /// the transcript until the turn takes it, which is when the harness
+  /// echoes it as a message of the user's (`_applyUserChunk`): the
+  /// transcript reads in the order the model got things.  So until then it
+  /// is [TranscriptItem.pending], shown last.  The message the person sent
+  /// from here and showed at once ([TranscriptItem.localEcho]) is the first
+  /// of them, whether or not its words are quite the ones the harness
+  /// holds (it may have changed them).  A message that is pending and no
+  /// longer held was taken back, and goes.  [sender] is the name of whoever
+  /// sent a message that the person did not, as `formatSender` reads it.
+  void syncPending(List<({String id, String text, String? sender})> held) {
+    final ids = {for (final message in held) message.id};
+    items.removeWhere((item) => item.pending && !ids.contains(item.nodeId));
+    for (final message in held) {
+      if (itemForNode(message.id) != null) continue;
+      final index = items.indexWhere((item) => item.localEcho);
+      if (index >= 0) {
+        final local = items[index];
+        local
+          ..nodeId = message.id
+          ..text = message.text.isNotEmpty ? message.text : local.text
+          ..sender = message.sender ?? local.sender ?? 'You'
+          ..localEcho = false
+          ..pending = true;
+      } else {
+        items.add(
+          TranscriptItem(
+            key: 'node-${message.id}',
+            nodeId: message.id,
+            kind: TranscriptKind.user,
+            text: message.text,
+            sender: message.sender ?? 'You',
+            pending: true,
+          ),
+        );
+      }
+    }
+  }
+
   TranscriptItem? itemForNode(String? nodeId) {
     if (nodeId == null) return null;
     for (final item in items) {
@@ -247,6 +304,19 @@ class TranscriptState {
     }
   }
 
+  /// Put [item], a message the harness has just echoed, last.
+  ///
+  /// The harness echoes a message when the model reads it, and the transcript
+  /// is in the order the model got things.  A message sent while the agent
+  /// worked was shown where it was sent, with what the agent did after that
+  /// below it; it stands after all of it now, where the reply to it comes.
+  void _standAtEnd(TranscriptItem item) {
+    if (items.isEmpty || identical(items.last, item)) return;
+    items
+      ..remove(item)
+      ..add(item);
+  }
+
   void _applyUserChunk(
     JsonMap update,
     String? nodeId,
@@ -260,6 +330,12 @@ class TranscriptState {
       existing.text = text.isNotEmpty ? text : existing.text;
       existing.sender = sender ?? existing.sender;
       existing.streaming = false;
+      if (existing.pending) {
+        // The turn took the message the harness held: it stands where the
+        // model read it.
+        existing.pending = false;
+        _standAtEnd(existing);
+      }
       return;
     }
     if (nodeId == null) {
@@ -273,6 +349,7 @@ class TranscriptState {
           ..nodeId = null
           ..localEcho = false
           ..sender = sender ?? 'You';
+        _standAtEnd(local);
         return;
       }
       items.add(
@@ -297,6 +374,7 @@ class TranscriptState {
         ..text = text.isNotEmpty ? text : local.text
         ..localEcho = false
         ..sender = sender ?? 'You';
+      _standAtEnd(local);
       return;
     }
     items.add(
@@ -443,6 +521,11 @@ class TranscriptState {
             ..sender = sender ?? existing.sender
             ..localEcho = false
             ..settled = true;
+          if (existing.pending) {
+            // The turn took the message: it stands where the model read it.
+            existing.pending = false;
+            _standAtEnd(existing);
+          }
         } else {
           items.add(
             TranscriptItem(

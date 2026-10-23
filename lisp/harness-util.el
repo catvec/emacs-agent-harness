@@ -976,10 +976,17 @@ ITEM is a message waiting in a session's queue (`session/queue'): its
 message (`harness-blocks-text'), and its `:from' when the user did not
 write it.  The node has ITEM's `:id'.  The images of messages sent
 together are numbered across them as they go (`agent/send-queue'):
-ITEM alone keeps its own numbers, as the user wrote them."
+ITEM alone keeps its own numbers, as the user wrote them.
+
+ITEM may also be a message that waits for the running turn's next step
+\(`session/set-steering'), which holds its content blocks as `:blocks'
+when it is more than text: the node then has those, as the turn will
+record them."
   (let* ((text (or (plist-get item :text) ""))
-         (blocks (append (unless (harness-string-blank-p text) (list (list :type "text" :text text)))
-                         (harness-attachments-to-blocks (plist-get item :attachments))))
+         (blocks (or (let ((given (plist-get item :blocks)))
+                       (and given (append given nil)))
+                     (append (unless (harness-string-blank-p text) (list (list :type "text" :text text)))
+                             (harness-attachments-to-blocks (plist-get item :attachments)))))
          (from (plist-get item :from)))
     (append (list :id (plist-get item :id) :kind 'user :content (harness-blocks-text blocks)
                   ;; As the agent's node: the blocks, unless they are all text.

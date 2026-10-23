@@ -110,6 +110,26 @@
       (should (string-match-p (regexp-quote other)
                               (harness-tools-sessions-test-ok me "session_list" '(:name "parser")))))))
 
+(ert-deftest harness-tools-sessions-list-counts-the-messages-a-session-has-not-read ()
+  "A session lists how many messages wait for it: queued for its next turn, or
+sent to the turn that runs and not taken yet."
+  (harness-tools-sessions-test-with
+    (let* ((me (harness-tools-sessions-test-session :name "Me"))
+           (other (harness-tools-sessions-test-session :name "Parser fixer"))
+           (line (lambda ()
+                   (let ((text (harness-tools-sessions-test-ok me "session_list" nil)))
+                     (car (cl-remove-if-not (lambda (l) (string-match-p (regexp-quote other) l))
+                                            (split-string text "\n")))))))
+      (should-not (string-match-p "queued" (funcall line)))
+      (harness-call 'session/queue other "for later")
+      (should (string-match-p ", 1 queued" (funcall line)))
+      (harness-call 'session/set-steering other (list (list :id "n-1" :text "change of plan" :ts 1.0)))
+      (should (string-match-p ", 2 queued" (funcall line)))
+      (harness-call 'session/queue-take other)
+      (should (string-match-p ", 1 queued" (funcall line)))
+      (harness-call 'session/set-steering other nil)
+      (should-not (string-match-p "queued" (funcall line))))))
+
 (ert-deftest harness-tools-sessions-internal-sessions-stay-aside ()
   "The records of the harness's own model calls are listed only for kind
 internal and never searched, and a name finds one only when it finds no

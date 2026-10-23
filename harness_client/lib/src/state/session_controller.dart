@@ -144,6 +144,9 @@ class SessionController extends ChangeNotifier {
         }
       }
       await refreshInfo();
+      // The messages the turn has not taken are no node of the transcript:
+      // the session says which they are.
+      transcript.syncPending(_held(summary?.steering));
       transcript.finish();
       _syncPlan();
       promptInFlight = summary?.isRunning == true;
@@ -178,6 +181,15 @@ class SessionController extends ChangeNotifier {
       // Not fatal: the transcript is still live.
     }
   }
+
+  /// The messages the harness holds for the running turn, as the transcript
+  /// takes them ([TranscriptState.syncPending]).
+  List<({String id, String text, String? sender})> _held(
+    List<QueueItem>? steering,
+  ) => [
+    for (final item in steering ?? const <QueueItem>[])
+      (id: item.id, text: item.text, sender: formatSender(item.from)),
+  ];
 
   /// Read the harness's tools (the api keeps them for the connection, so a
   /// second conversation asks nobody).  An empty answer, which a harness that
@@ -275,9 +287,11 @@ class SessionController extends ChangeNotifier {
   /// again by itself and reads the conversation again, which shows what the
   /// harness has; what matters here is a message it does not have, which
   /// must not be lost with the connection.  The harness echoes a message as
-  /// soon as it takes it, so one that was never echoed ([echo] still local)
-  /// never got there: it goes back to the composer.  One that was echoed is
-  /// the harness's, and its turn goes on there.
+  /// soon as it takes it -- or, one sent while the agent works, says it holds
+  /// it for the turn's next step (`session/steering-changed`) -- so one that
+  /// was never echoed ([echo] still local) never got there: it goes back to
+  /// the composer.  One that was echoed is the harness's, and its turn goes
+  /// on there.
   void _interrupted(TranscriptItem echo, String text, int images) {
     if (!echo.localEcho) return;
     transcript.removeLocalEcho(echo);
@@ -792,6 +806,14 @@ class SessionController extends ChangeNotifier {
       case 'session/status':
       case 'session/queue-changed':
         unawaited(refreshInfo());
+      case 'session/steering-changed':
+        // (session id, the messages the running turn has not taken yet): the
+        // harness has a message sent while the agent works, and says so as
+        // it takes it.  It waits there, last, until the turn reads it.
+        transcript.syncPending(
+          _held(QueueItem.listFrom(args.length > 1 ? args[1] : null)),
+        );
+        _notify();
       case 'session/pending-changed':
         // (session id, what is pending now)
         if (args.length > 1) _dropUnheld(args[1]);

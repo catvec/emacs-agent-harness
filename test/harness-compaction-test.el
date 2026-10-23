@@ -1563,8 +1563,13 @@ to it steers it, as it always did."
       (harness-test-wait (lambda () (harness-call 'agent/running id)))
       (should-not (harness-compaction--on-hold nil id))
       (harness-call 'agent/prompt id "and this")
-      (should (= 1 (length (harness-compaction-test-steering id))))
+      ;; It steers: it waits for the turn's next step, listed on the session,
+      ;; and is a node where the model reads it.
+      (should (equal '("and this") (mapcar (lambda (item) (plist-get item :text))
+                                           (plist-get (harness-call 'session/get id) :steering))))
       (harness-test-await turn 10)
+      (should (= 1 (length (harness-compaction-test-steering id))))
+      (should-not (plist-get (harness-call 'session/get id) :steering))
       (should-not (memq 'compaction (harness-compaction-test-kinds id))))))
 
 (ert-deftest harness-compaction-says-it-holds-a-turn-only-while-it-runs ()

@@ -793,8 +793,10 @@ Once the turn ends the message runs as a turn of its own."
 
 (ert-deftest harness-acp-local-send-one-queued-message-now ()
   "What `harness-chat-send-queued' sends steers the running turn with that message alone.
-`:qids' names the queued messages to send; the others stay queued, and
-the update of the steering node tells the client once the turn took it."
+`:qids' names the queued messages to send; the others stay queued.  The
+message waits for the turn's next step, listed on the session and no
+node of the transcript; the client hears it as a message of the user's
+when the turn takes it, which is where the transcript has it."
   (harness-acp-test-with
     (let* ((gate (harness-make-promise))
            (harness-provider-demo-script-override
@@ -822,26 +824,32 @@ the update of the steering node tells the client once the turn took it."
              (qid (plist-get (cadr items) :id))
              (send (harness-acp-request conn "_harness/agent/send-queue"
                                         (list :session-id sid :qids (list qid)))))
-        (harness-test-wait (lambda () (cl-find-if (lambda (n) (plist-get (plist-get n :meta) :steering))
-                                                  (harness-call 'session/nodes sid)))
-                           5 "the steering message")
+        (harness-test-wait (lambda () (plist-get (harness-call 'session/get sid) :steering))
+                           5 "the message waiting for the turn")
         (should (equal '("for later")
                        (mapcar (lambda (it) (plist-get it :text)) (plist-get (harness-call 'session/get sid) :queue))))
-        (should (equal "right now"
-                       (plist-get (cl-find-if (lambda (n) (plist-get (plist-get n :meta) :steering))
-                                              (harness-call 'session/nodes sid))
-                                  :content)))
+        (should (equal '("right now")
+                       (mapcar (lambda (it) (plist-get it :text)) (plist-get (harness-call 'session/get sid) :steering))))
+        ;; No node of it yet: the model has not read it.
+        (should-not (cl-find-if (lambda (n) (plist-get (plist-get n :meta) :steering))
+                                (harness-call 'session/nodes sid)))
+        (should-not (cl-some (lambda (u) (equal "right now" (plist-get (plist-get u :content) :text)))
+                             (harness-acp-test-updates)))
         (harness-resolve gate t)
         (should (equal "end-turn" (plist-get (harness-test-await send) :stop-reason)))
         (should (equal "end_turn" (plist-get (harness-test-await p) :stopReason))))
-      ;; The turn took the message, and the client heard it did.
+      ;; The turn took the message, and the client heard it as a message of
+      ;; the user's, once, as the turn read it.
       (harness-test-wait
        (lambda ()
-         (cl-some (lambda (u) (and (equal (plist-get u :sessionUpdate) "_harness/node")
-                                   (equal (plist-get (plist-get u :node) :content) "right now")
-                                   (plist-get (plist-get (plist-get u :node) :meta) :delivered-after)))
+         (cl-some (lambda (u) (and (equal (plist-get u :sessionUpdate) "user_message_chunk")
+                                   (equal (plist-get (plist-get u :content) :text) "right now")))
                   (harness-acp-test-updates)))
-       5 "the update saying the model has the message")
+       5 "the update with the message")
+      (should (= 1 (cl-count-if (lambda (u) (and (equal (plist-get u :sessionUpdate) "user_message_chunk")
+                                                 (equal (plist-get (plist-get u :content) :text) "right now")))
+                                (harness-acp-test-updates))))
+      (should-not (plist-get (harness-call 'session/get sid) :steering))
       ;; The one left in the queue goes out as a turn of its own.
       (harness-test-wait (lambda () (and (null (plist-get (harness-call 'session/get sid) :queue))
                                          (not (harness-agent-running-p sid))))

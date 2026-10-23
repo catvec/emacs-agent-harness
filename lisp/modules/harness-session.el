@@ -164,7 +164,8 @@ A longer prompt is cut there, with a note saying it was.")
   provider-node                         ; the node its provider conversation reached
   move                                  ; a move waiting for its turn to end, or nil
   ext                                   ; settings modules keep here, a plist, or nil
-  last-message)                         ; time of its latest user or assistant message, or nil
+  last-message                          ; time of its latest user or assistant message, or nil
+  steering)                             ; messages the running turn has not taken yet, or nil
 
 (defvar harness-sessions (make-hash-table :test 'equal)
   "Session id -> `harness-session'.")
@@ -189,8 +190,8 @@ defaults."
 (defconst harness-session--public-keys
   '(:id :name :kind :project :cwd :host :worktree :model :permission-mode :thinking
     :non-interactive :allowed-dirs :status :parent-id :fork-node :created :updated :usage
-    :context-window :context-window-override :context-window-limit :budget :head :queue :pending
-    :todos :plan :provider-state :provider-node :cache :move :ext :last-message))
+    :context-window :context-window-override :context-window-limit :budget :head :queue :steering
+    :pending :todos :plan :provider-state :provider-node :cache :move :ext :last-message))
 
 (defconst harness-session--symbol-keys '(:kind :status :permission-mode)
   "Keys whose values are symbols in memory and strings on disk.")
@@ -231,7 +232,8 @@ moves with messages only."
         :context-window-override (harness-session-context-window s)
         :context-window-limit (harness-session-context-window-limit s)
         :budget (harness-session-budget s) :head (harness-session-head s)
-        :queue (harness-session-queue s) :pending (harness-session-pending s)
+        :queue (harness-session-queue s) :steering (harness-session-steering s)
+        :pending (harness-session-pending s)
         :todos (harness-session-todos s) :plan (harness-session-plan s)
         :provider-state (harness-session-provider-state s)
         :provider-node (harness-session-provider-node s)
@@ -316,6 +318,9 @@ or a plist (keyword keys) of those."
           (harness-session-budget s) (plist-get pl :budget)
           (harness-session-head s) (plist-get pl :head)
           (harness-session-queue s) (plist-get pl :queue)
+          ;; What the turn of a stopped harness had not taken: no turn
+          ;; holds it any more (`harness-session--settle-steering').
+          (harness-session-steering s) (plist-get pl :steering)
           (harness-session-pending s) nil
           (harness-session-todos s) (plist-get pl :todos)
           (harness-session-plan s) (plist-get pl :plan)
@@ -2499,6 +2504,30 @@ is touched only when something was taken."
       (harness-session--touch s))
     items))
 
+(harness-defmethod session/set-steering (id items)
+  "Replace the messages the running turn of session ID has not taken with ITEMS.
+A message sent to a turn that runs waits outside the transcript until
+the turn takes it at its next step, and only then is a node, so that the
+transcript reads in the order the model got things (see `agent/prompt').
+Meanwhile the session carries it in `:steering', for a UI to show it
+with the messages that wait, above the compose box.  Each item is
+\(:id ID :text TEXT :ts TIME): ID is the id of the node the message
+becomes, TEXT what the node will say, TIME when it was sent; `:blocks'
+holds the message when it is more than text, with no bytes of a
+picture, and `:from' who sent it when the user did not.  The turn is
+the one to call this, whenever what it holds changes.  Nothing is
+announced when ITEMS are what the session carries already;
+`session/steering-changed' tells the rest.  The list is kept with the
+record, so a harness that stops with messages waiting can give them back
+after it (`harness-session--settle-steering'); the turn itself ends with
+the process.  Return ITEMS."
+  (let ((s (harness-session--get id)))
+    (unless (equal items (harness-session-steering s))
+      (setf (harness-session-steering s) items)
+      (harness-emit 'session/steering-changed id items)
+      (harness-session--touch s))
+    items))
+
 (defun harness-session--reconcile-status (s)
   "Make S enter or leave `blocked' as its pending requests come and go."
   (let ((id (harness-session-id s)))
@@ -2836,6 +2865,9 @@ A tool_result block is (:type \"tool_result\" :tool_use_id ID :content
 TEXT :is_error BOOL), its content always a string; the images the call
 returned follow as `:images', image blocks that name their files (see
 `harness-session--result-images'), on a block whose call returned any.
+A message sent to a running turn is a node where the model got it, so
+it stands after the tool results it was recorded between, as a user
+message holds results before any words.
 A call the harness recorded, and its result, are left out: the model
 never made it (`harness-outside-node-p')."
   (let* ((s (harness-session--get id))
@@ -2850,19 +2882,31 @@ never made it (`harness-outside-node-p')."
                   (unless (eq role cur-role) (setq cur nil cur-role role))
                   (push block cur))
                 (user (n) (unless (eq cur-role 'user) (flush))
-                      (dolist (b (harness-session--text-blocks n)) (add 'user b))))
+                      (dolist (b (harness-session--text-blocks n)) (add 'user b)))
+                ;; A steering message that comes between the results of a
+                ;; batch of calls: a hosted loop got it with the first of
+                ;; them, and a request holds all the results first.
+                (between-results-p (n)
+                  (and (eq (plist-get n :kind) 'user)
+                       (harness-json-true-p (plist-get (plist-get n :meta) :steering))
+                       (or ready
+                           (and (eq cur-role 'user)
+                                (cl-some (lambda (b) (equal (plist-get b :type) "tool_result")) cur))))))
       (dolist (n path)
         ;; Delivered steering goes in before the next node that is not a
         ;; tool result: tool results come first in the user message.
         (when (and ready (memq (plist-get n :kind) '(user assistant thinking tool-call plan compaction))
-                   (not (harness-outside-node-p n)))
+                   (not (harness-outside-node-p n))
+                   (not (and (null (gethash (plist-get n :id) (car delivered))) (between-results-p n))))
           (mapc #'user ready)
           (setq ready nil))
         (pcase (and (not (gethash (plist-get n :id) (car delivered)))
                     ;; The model never made a call the harness recorded.
                     (not (harness-outside-node-p n))
                     (plist-get n :kind))
-          ('user (user n))
+          ('user (if (between-results-p n)
+                     (setq ready (append ready (list n)))
+                   (user n)))
           ('compaction (flush)
                        (add 'user (list :type "text"
                                         :text (if (member (harness-node-compaction-kind n) '("transcript" "fresh" "truncate"))
@@ -2982,10 +3026,10 @@ into a transcript both write theirs here."
 ;; in an error: what comes back is node ids, kinds, field names, file
 ;; names and counts.
 
-(defconst harness-session--redact-slots '(name queue pending todos plan ext move)
+(defconst harness-session--redact-slots '(name queue steering pending todos plan ext move)
   "Slots of the record whose text `session/redact-text' cleans.
-`name' is what a rename put there, `queue' and `pending' hold the
-messages and requests that wait, `todos' and `plan' what the model
+`name' is what a rename put there, `queue', `steering' and `pending' hold
+the messages and requests that wait, `todos' and `plan' what the model
 wrote, `ext' what other modules keep for the session -- a supervisor's
 plans, with the prompts, results and errors of their steps -- and `move'
 a directory a move waits to make.")
@@ -3422,6 +3466,26 @@ survives."
       (when (and message (not (harness-string-blank-p (plist-get message :text))))
         (harness-call 'session/queue id (plist-get message :text) nil (plist-get message :from))))))
 
+(defun harness-session--settle-steering (s)
+  "Queue again the messages the turn of S never took, saved with it.
+A message sent to a running turn waits for the turn's next step
+\(`session/set-steering'), and the turn ends with the process: what
+the record still lists is a message no turn will take.  It goes back in
+the queue, to be sent when the user is ready, as one a question held
+back does (`harness-session--requeue'); only its text survives.  A
+message that is a node already -- the turn recorded it and the harness
+stopped before the record was written -- is not sent twice."
+  (when-let* ((items (harness-session-steering s)))
+    (let ((id (harness-session-id s)))
+      (setf (harness-session-steering s) nil)
+      (harness-session--load-nodes s)
+      (dolist (item items)
+        (let ((text (plist-get item :text)))
+          (unless (or (gethash (plist-get item :id) (harness-session-nodes s))
+                      (harness-string-blank-p text))
+            (harness-call 'session/queue id text nil (plist-get item :from)))))
+      (harness-session--touch s))))
+
 (defun harness-session--settle (s pending)
   "Close the turn of S that a stopped harness left unfinished.
 S was saved running or blocked, with PENDING the requests it waited on.
@@ -3462,12 +3526,13 @@ Return the tool calls of S answered so, each (:tool NAME :call-id ID)."
 Sessions saved mid-turn are settled with `harness-session--settle', and
 listed in `harness-session--interrupted' for whoever recovers them."
   (setq harness-session--interrupted nil)
-  (let (interrupted)
+  (let (interrupted loaded)
     (dolist (name (harness-call 'store/list "sessions" "\\.json\\'"))
       (let ((pl (harness-call 'store/load name)))
         (when (and pl (plist-get pl :id) (not (gethash (plist-get pl :id) harness-sessions)))
           (let ((s (harness-session--from-plist pl)))
             (puthash (plist-get pl :id) s harness-sessions)
+            (push s loaded)
             (when (member (plist-get pl :status) '("running" "blocked"))
               (push (list s (plist-get pl :pending) (intern (plist-get pl :status))) interrupted))))))
     (dolist (entry interrupted)
@@ -3478,6 +3543,14 @@ listed in `harness-session--interrupted' for whoever recovers them."
                           :text (harness-session--interrupted-text pending))
                     harness-session--interrupted))
           (error (harness-log 'warn "session %s: could not settle its interrupted turn: %S"
+                              (harness-session-id s) err)))))
+    ;; Messages a turn had not taken when the harness stopped: only the
+    ;; sessions loaded now, never one whose turn runs through a reload.
+    (dolist (s loaded)
+      (when (harness-session-steering s)
+        (condition-case err
+            (harness-session--settle-steering s)
+          (error (harness-log 'warn "session %s: could not queue its waiting messages again: %S"
                               (harness-session-id s) err)))))
     ;; A move waiting for a turn that the stop ended.
     (maphash (lambda (id s)
@@ -3575,6 +3648,7 @@ run on in this process."
               (session/head-moved . "(ID NODE-ID)")
               (session/moved . "(ID OLD-CWD NEW-CWD) after the session moved to another working directory")
               (session/queue-changed . "(ID ITEMS)") (session/pending-changed . "(ID ITEMS)")
+              (session/steering-changed . "(ID ITEMS) when the messages the running turn has not taken yet changed (`session/set-steering')")
               (session/pending-resolved . "(ID ITEM ANSWER)")
               (session/usage . "(ID TOTALS RECORD)") (session/todos . "(ID TODOS)") (session/plan . "(ID TEXT)")))
   (harness-declare-event (car ev) (cdr ev)))

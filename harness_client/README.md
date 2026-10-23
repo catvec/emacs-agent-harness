@@ -206,7 +206,12 @@ time it opens. It asks again only when the harness does.
   does to those classes with each version.
 - **Keeps a conversation useful.** Local echo, auto-scroll with a "Latest"
   chip, a collapsible plan strip, a context-window meter, cost per session, and
-  image attachments to prompts.
+  image attachments to prompts. A message sent while the agent works is not
+  part of the conversation yet, for the model has not read it: it waits last,
+  marked *Queued*, and stands in the transcript where the model reads it, after
+  what the agent did before, once the turn takes it (the harness says which
+  messages it holds with `session/steering-changed`, and the session's
+  `steering` list).
 - **Takes pictures with a new task.** The New task sheet attaches up to four
   images to the description, as a message does. A phone can name no file of
   the harness's machine, so the bytes go with `task/submit`
@@ -234,7 +239,8 @@ time it opens. It asks again only when the harness does.
   lists, the tasks and the open transcript are read again, and a permission
   or question that was waiting is offered again. A message sent as the
   connection died, which the harness never got (it echoes a message the
-  moment it takes it), goes back in the box instead of being lost. A phone
+  moment it takes it, or says it holds it for the running turn), goes back in
+  the box instead of being lost. A phone
   that is put away does not keep trying; it connects the moment it is picked
   up. Only a harness that no longer accepts the device's session (it was
   ended in Emacs) needs the person: the app falls back to the sign-in screen,

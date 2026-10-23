@@ -19,13 +19,17 @@ Providers that run their own loop (hosted) hand each tool call to us
 through a `:respond` callback; native providers stop with `tool-use`
 and are called again with the results.  Steering messages sent while
 a turn runs are delivered once, at the next step boundary: with the
-next tool result, or as the next user message when the model stops
-first.  Until then the user can take one back (`agent/withdraw`).
-Queued messages wait for the turn to end and then go out
-together as a turn of their own.  A message is delivered when it
-starts a turn or steers one, a queued one when its queue goes out;
-then, and only then, the `agent/message` filters see it and may
-change it (task mode sends a task waiting for review back this way).
+next tool result of a hosted loop, with the next request of a native
+one, or as the next user message when the model stops first.  Until
+then the message waits outside the transcript, listed on the session
+for a UI to show with the queue, and the user can take it back
+(`agent/withdraw`); it becomes a node when the model gets it, so the
+transcript reads in the order the model read things.  Queued messages
+wait for the turn to end and then go out together as a turn of their
+own.  A message is delivered when it starts a turn or steers one, a
+queued one when its queue goes out; then, and only then, the
+`agent/message` filters see it and may change it (task mode sends a
+task waiting for review back this way).
 A turn can be held before its next request by work that replaces the
 conversation under it -- a compaction (harness-compaction.el), which
 the sync filter `agent/hold` says -- and a message sent to it then
@@ -82,7 +86,7 @@ The loop is entirely event driven: nothing here waits.
 - `agent/running` (&optional session-id) — Return running session ids, or non-nil when SESSION-ID is running.
 - `agent/send-queue` (session-id &optional qids) — Send the queued messages of SESSION-ID as one turn; return its promise.
 - `agent/stop-outstanding` (session-id &optional reason) — Stop what runs for SESSION-ID outside its own turn; return what it stopped.
-- `agent/withdraw` (session-id node-id) — Take back the steering message NODE-ID of SESSION-ID; return the node it was.
+- `agent/withdraw` (session-id node-id) — Take back the message NODE-ID of SESSION-ID that its turn has not taken yet.
 
 ### Events
 
@@ -143,6 +147,7 @@ The loop is entirely event driven: nothing here waits.
 - `session/set-provider-node` ([session](session.md))
 - `session/set-provider-state` ([session](session.md))
 - `session/set-status` ([session](session.md))
+- `session/set-steering` ([session](session.md))
 - `session/tmp-dir` ([session](session.md))
 - `session/update-node` ([session](session.md))
 - `session/usage-add` ([session](session.md))

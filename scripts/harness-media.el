@@ -3597,6 +3597,9 @@ step after the checks, or with the first request when that has not gone
 out yet (`harness-media--queue-steered' answers it then); either way
 REQUEST's turn holds once it has it."
   (append (list (harness-media--think "A baseline first: what the tests pass to `query` tells me its types.")
+                (harness-media--todos '("Run the tests for a baseline" . "in-progress")
+                                      '("Type acme/db.py" . "pending")
+                                      '("Run mypy and the tests again" . "pending"))
                 (harness-media--tool "bash" :command "python3 -m unittest -v 2>&1 | tail -n 3"))
           (harness-media--queue-steered request)))
 
@@ -3610,14 +3613,18 @@ REQUEST's turn holds once it has it."
 (defun harness-media-shot-chat-queue ()
   "A chat whose turn runs, with messages in every state of their sending.
 One sent while the checks ran steered the turn at its next step: the
-model has it, and it reads as any message, with nothing beside the name.
-One sent since waits for the next step, and says \"queued\", with its
-[edit] and [delete] and the key of each, and the line telling how to press
-them from the box.  Two more are queued for the next turn, each drawn as
-a message of the user's, a dim \"queued\" and its [send now], [edit] and
-[delete] beside the name, above the line saying what the turn does.  The
-session is made here and deleted after, so no other picture shows it,
-and it comes after the usage pictures, which would count its usage."
+model has it, and it stands in the transcript where the model read it,
+after the checks' results, and reads as any message, with nothing beside
+the name.  One sent since waits for the next step, pinned above the
+compose box with the queue and out of the transcript, which reads in the
+order the model got things: it says \"queued\", with its [edit] and
+[delete] and the key of each, and the line telling how to press them from
+the box.  Two more are queued for the next turn, each drawn as a message
+of the user's, a dim \"queued\" and its [send now], [edit] and [delete]
+beside the name, under it and above the line saying what the turn does.
+The agent's todo list is pinned there too, as it always is.
+The session is made here and deleted after, so no other picture shows
+it, and it comes after the usage pictures, which would count its usage."
   (let ((id (harness-media--new-session :name "Type the database module" :model "claude:claude-opus-5-5"
                                         :permission-mode 'auto))
         (steer "Keep the sqlite3.Row factory: the handlers index rows by column name."))

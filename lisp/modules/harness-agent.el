@@ -9,13 +9,17 @@
 ;; through a `:respond' callback; native providers stop with `tool-use'
 ;; and are called again with the results.  Steering messages sent while
 ;; a turn runs are delivered once, at the next step boundary: with the
-;; next tool result, or as the next user message when the model stops
-;; first.  Until then the user can take one back (`agent/withdraw').
-;; Queued messages wait for the turn to end and then go out
-;; together as a turn of their own.  A message is delivered when it
-;; starts a turn or steers one, a queued one when its queue goes out;
-;; then, and only then, the `agent/message' filters see it and may
-;; change it (task mode sends a task waiting for review back this way).
+;; next tool result of a hosted loop, with the next request of a native
+;; one, or as the next user message when the model stops first.  Until
+;; then the message waits outside the transcript, listed on the session
+;; for a UI to show with the queue, and the user can take it back
+;; (`agent/withdraw'); it becomes a node when the model gets it, so the
+;; transcript reads in the order the model read things.  Queued messages
+;; wait for the turn to end and then go out together as a turn of their
+;; own.  A message is delivered when it starts a turn or steers one, a
+;; queued one when its queue goes out; then, and only then, the
+;; `agent/message' filters see it and may change it (task mode sends a
+;; task waiting for review back this way).
 ;; A turn can be held before its next request by work that replaces the
 ;; conversation under it -- a compaction (harness-compaction.el), which
 ;; the sync filter `agent/hold' says -- and a message sent to it then
@@ -88,6 +92,10 @@ Each retry follows a handler's verdict that another try can work (the
 fallback module moves the session to another provider first), so a
 handful covers every provider of a fallback list; the cap only keeps a
 handler that is wrong from looping.")
+
+(defconst harness-agent--max-record-tries 3
+  "Most boundaries a message the transcript refuses waits for, to be recorded.
+After them it is dropped, logged: see `harness-agent--take-pending'.")
 
 (defconst harness-agent--max-stop-continues 3
   "Most times one turn is sent on after its model stopped, for `agent/stop'.
@@ -174,7 +182,7 @@ WHY says what stopped it."
 
 (cl-defstruct (harness-agent-turn (:copier nil))
   session-id promise handle (steps 0) cancelled
-  steering                              ; pending (:node ID :text TEXT [:images IMAGES]), oldest first
+  steering                              ; pending (:node ID :text TEXT :blocks BLOCKS :ts TIME [:from FROM] [:images IMAGES]), oldest first
   text-node text-buf think-node think-buf
   step-nodes                            ; the nodes this step wrote, for a retry
   (pending 0) waiting-done stop-reason error hosted last-usage started
@@ -969,25 +977,87 @@ Each is (:type \"image\" :mime MIME) with `:data', base64, or a `:path'
 to read, and a `:label' when the message's text names it by its token."
   (cl-remove-if-not (lambda (b) (equal (plist-get b :type) "image")) blocks))
 
+;; A message sent to a running turn steers it, and it is a node of the
+;; transcript from the moment the model gets it, not before: the
+;; transcript reads in the order the model got things, so a message sent
+;; while a tool ran stands after that tool's result (or after the answer
+;; the model was writing), where its reply is, not where the user typed
+;; it.  Until then the turn holds it as a pending entry and the session
+;; carries it in `:steering' (`session/set-steering'), which a UI draws
+;; with the queue, above the compose box, for the user to take back
+;; (`agent/withdraw').  The entry is the message as the turn will record
+;; it: the id of its node, its text and blocks, who sent it, when.
+
+(defun harness-agent--display-block (block)
+  "Return BLOCK, a block of a message, as a UI that draws it needs it.
+A picture sent as base64 data (an ACP client's) is drawn from its label
+and type, so the bytes stay with the turn that sends them rather than go
+to every client with the session."
+  (if (plist-get block :data)
+      (harness-plist-remove block :data)
+    block))
+
+(defun harness-agent--steering-item (entry)
+  "Return the item of the session's `:steering' list that stands for ENTRY.
+ENTRY is a pending entry of a turn (`harness-agent--record-steering'):
+the item holds what a UI needs to draw the message
+\(`session/set-steering').  Nil for an entry that is a bare text, which a
+turn running across a reload may still hold."
+  (when (consp entry)
+    (let ((blocks (plist-get entry :blocks)))
+      (append (list :id (plist-get entry :node) :text (plist-get entry :text)
+                    :ts (plist-get entry :ts))
+              (and (plist-get entry :from) (list :from (plist-get entry :from)))
+              (and blocks (not (harness-agent--only-text-p blocks))
+                   (list :blocks (mapcar #'harness-agent--display-block blocks)))))))
+
+(defun harness-agent--publish-steering (turn)
+  "Tell the session which messages TURN holds for its next step.
+Never signals: what a UI shows of the messages that wait must not stop
+the turn from delivering them."
+  (let ((sid (harness-agent-turn-session-id turn)))
+    (when (harness-call 'session/exists-p sid)
+      (harness-agent--try (format "announcing the messages waiting in %s" sid)
+        (harness-call 'session/set-steering sid
+                      (delq nil (mapcar #'harness-agent--steering-item
+                                        (harness-agent-turn-steering turn))))))))
+
 (defun harness-agent--record-steering (turn blocks from)
-  "Record BLOCKS, a message from FROM, as steering of the running TURN.
-The message is a user node marked `:steering' (and `:from', when FROM is
-who sent it: see `agent/prompt') and waits for the next step boundary,
-which delivers it once (`harness-agent--take-steering').  The pending
-entry keeps the message's text and its images, which a hosted loop is
-handed with the tool result that delivers it
-\(`harness-agent--with-steering').  Return the node."
+  "Hold BLOCKS, a message from FROM, for the next step of the running TURN.
+The message is no node yet: it waits as a pending entry, shown to the
+user with the messages that wait (`harness-agent--publish-steering'),
+and the next step boundary delivers it once
+\(`harness-agent--take-pending'), recording it as a user node marked
+`:steering' (and `:from', when FROM is who sent it: see `agent/prompt').
+The entry keeps the id that node will have, the message's text and
+blocks, who sent it, when, and its images, which a hosted loop is handed
+with the tool result that delivers it (`harness-agent--with-steering').
+Return the entry."
   (let* ((text (harness-agent--blocks-text blocks))
          (images (harness-agent--message-images blocks))
-         (node (harness-call 'session/append (harness-agent-turn-session-id turn)
-                             (list :kind 'user :content text
-                                   :blocks (unless (harness-agent--only-text-p blocks) blocks)
-                                   :meta (append (list :steering t) (and from (list :from from)))))))
+         (entry (append (list :node (concat "n-" (harness-short-id 10)) :text text
+                              :blocks blocks :ts (float-time))
+                        (and from (list :from from))
+                        (and images (list :images images)))))
     (setf (harness-agent-turn-steering turn)
-          (append (harness-agent-turn-steering turn)
-                  (list (append (list :node (plist-get node :id) :text text)
-                                (and images (list :images images))))))
-    node))
+          (append (harness-agent-turn-steering turn) (list entry)))
+    (harness-agent--publish-steering turn)
+    entry))
+
+(defun harness-agent--steering-node (entry &optional delivered-after)
+  "Return the user node that ENTRY, a pending message of a turn, becomes.
+It is marked `:steering' beside its sender and the time it was sent
+\(`:sent-at'), and `:delivered-after' DELIVERED-AFTER, the node the model
+got it after, when that is given: the mark is how a UI tells a message the
+model has from one it never got (`harness-agent--flush-steering')."
+  (let* ((blocks (plist-get entry :blocks))
+         (from (plist-get entry :from)))
+    (list :id (plist-get entry :node) :kind 'user :content (plist-get entry :text)
+          :blocks (unless (harness-agent--only-text-p blocks) blocks)
+          :meta (append (list :steering t)
+                        (and from (list :from from))
+                        (and delivered-after (list :delivered-after delivered-after))
+                        (and (plist-get entry :ts) (list :sent-at (plist-get entry :ts)))))))
 
 ;;;; Messages held with a turn
 
@@ -1085,8 +1155,14 @@ gone."
 (harness-defmethod agent/prompt (session-id blocks &optional opts)
   "Send BLOCKS (content blocks, or a string) to SESSION-ID.
 Idle session: start a turn and return a promise of (:stop-reason …).
-Running session: steer — the message is recorded now and delivered at
-the next step boundary, once; the running turn's promise is returned.
+Running session: steer — the message waits for the turn's next step
+boundary, which delivers it once; the running turn's promise is
+returned.  Until then it is no node of the transcript but a message the
+session lists (`:steering'), which the user may take back
+\(`agent/withdraw'); the boundary records it as a user node marked
+`:steering', where the model gets it, so the transcript reads in the
+order the model read things.  A turn that ends first records it as it
+ends, and the next turn reads it.
 A running turn that work holds before its next request -- the sync
 filter `agent/hold' says what, a compaction being the one that does --
 is not steered: the conversation the message would join is about to be
@@ -1308,22 +1384,73 @@ by making it."
         (setf (harness-agent-turn-handle turn) (harness-call 'provider/complete request)))))))
 
 (defun harness-agent--take-pending (turn)
-  "Deliver the pending steering of TURN: clear it and return its entries.
+  "Deliver the pending steering of TURN: record it and return its entries.
 Return nil when nothing is pending.  Every boundary takes it, so a
-message is delivered once.  Each one is recorded as delivered after the
-newest node that is not one of them, which is where `session/messages'
-puts it for the model, rather than where it was sent mid-step.  An
-entry is (:node ID :text TEXT), with `:images' when the message attached
-any (see `harness-agent--record-steering'); a turn running across a
-reload may still hold bare texts."
+message is delivered once.  The boundary is where the model gets the
+message, so that is where it becomes a node: a user message right after
+the newest node there is, marked `:delivered-after' it -- the order
+`session/messages' gives the model, and the transcript's.  An entry is
+\(:node ID :text TEXT :blocks BLOCKS :ts TIME), with `:from' when the user did
+not send the message and `:images' when it attached any (see
+`harness-agent--record-steering'); a turn running across a reload may
+still hold the bare texts and the entries of messages that are nodes
+already, which are only marked delivered.  A message that cannot be
+recorded is logged and stays pending for the next boundary, and is not
+returned: what the model reads is what the transcript has.  It stays
+for `harness-agent--max-record-tries' boundaries at most: a store that
+refuses it would otherwise have a model that stopped step again for
+ever, to deliver it."
+  (when-let* ((pending (harness-agent-turn-steering turn)))
+    (let* ((sid (harness-agent-turn-session-id turn))
+           (anchor (and (harness-call 'session/exists-p sid)
+                        (plist-get (harness-call 'session/get sid) :head)))
+           (taken nil) (kept nil))
+      (dolist (p pending)
+        (if (and anchor (harness-agent--try (format "recording a message for the model of %s" sid)
+                          (harness-agent--deliver-entry sid p anchor)))
+            (push p taken)
+          (let ((tries (1+ (or (and (consp p) (plist-get p :tries)) 0))))
+            (if (and (consp p) (< tries harness-agent--max-record-tries))
+                (push (plist-put (copy-sequence p) :tries tries) kept)
+              (harness-log 'warn "agent: a message to %s could not be recorded, and is dropped" sid)))))
+      (setf (harness-agent-turn-steering turn) (nreverse kept))
+      (harness-agent--publish-steering turn)
+      (nreverse taken))))
+
+(defun harness-agent--deliver-entry (sid entry anchor)
+  "Record ENTRY, a pending message of session SID, as delivered after node ANCHOR.
+Return non-nil.  A bare text is a message of the user's, and the entry
+of a message that is a node already (one a turn held across a reload,
+sent as the harness used to record it) is only marked delivered."
+  (cond ((stringp entry)
+         (harness-call 'session/append sid
+                       (list :kind 'user :content entry
+                             :meta (list :steering t :delivered-after anchor))))
+        ((harness-call 'session/node sid (plist-get entry :node))
+         (harness-agent--mark-delivered sid (list (plist-get entry :node)))
+         t)
+        (t (harness-call 'session/append sid (harness-agent--steering-node entry anchor)))))
+
+(defun harness-agent--flush-steering (turn)
+  "Record the messages TURN never delivered, as it ends.
+A turn that ends before its next boundary -- cancelled, say -- leaves
+the messages sent to it waiting.  The model never got them, and the next
+turn reads them: they become user messages marked `:steering' with no
+`:delivered-after', where the transcript ends, before the next message
+the user sends, and a chat says \"not delivered\" of them.  One that
+cannot be recorded is logged and lost, as a message the store refuses
+always is.  The session stops listing them."
   (when-let* ((pending (harness-agent-turn-steering turn)))
     (setf (harness-agent-turn-steering turn) nil)
-    (condition-case err
-        (harness-agent--mark-delivered (harness-agent-turn-session-id turn)
-                                       (delq nil (mapcar (lambda (p) (and (consp p) (plist-get p :node)))
-                                                         pending)))
-      (error (harness-log 'warn "agent: recording delivered steering failed: %S" err)))
-    pending))
+    (let ((sid (harness-agent-turn-session-id turn)))
+      (when (harness-call 'session/exists-p sid)
+        (dolist (p pending)
+          (harness-agent--try (format "recording a message the model never got in %s" sid)
+            (cond ((stringp p)
+                   (harness-call 'session/append sid (list :kind 'user :content p :meta (list :steering t))))
+                  ((harness-call 'session/node sid (plist-get p :node)))
+                  (t (harness-call 'session/append sid (harness-agent--steering-node p))))))
+        (harness-agent--publish-steering turn)))))
 
 (defun harness-agent--steering-text (pending)
   "Return the text of PENDING, steering entries: one paragraph each."
@@ -1341,11 +1468,12 @@ Return nil when nothing is pending.  See `harness-agent--take-pending'."
 
 (defun harness-agent--mark-delivered (sid ids)
   "Mark the steering nodes IDS of session SID as delivered now.
-They count as delivered after the newest node that is not one of them,
-which is where `session/messages' puts them for the model.  A node
-already after it keeps its place there, and is marked all the same:
-the mark is also how a UI tells a message the model has from one that
-still waits for its next step."
+They are nodes already, recorded when they were sent as an earlier
+harness did, and count as delivered after the newest node that is not
+one of them, which is where `session/messages' puts them for the model.
+A node already after it keeps its place there, and is marked all the
+same: the mark is also how a UI tells a message the model has from one
+that never got it."
   (let* ((nodes (and ids (harness-call 'session/nodes sid)))
          (anchor (cl-find-if-not (lambda (n) (member (plist-get n :id) ids)) nodes :from-end t)))
     (when anchor
@@ -1549,16 +1677,21 @@ ending the turn, and neither may wait on it."
 
 (defun harness-agent--with-steering (turn content &optional sid failed)
   "Return (CONTENT . IMAGES): tool result CONTENT with TURN's pending steering.
-The result is a step boundary, so this delivers that steering: a hosted
-loop reads it in the content, a native one with its next request.
+The result is a step boundary for a hosted loop, which reads the
+steering in the content: this delivers it, recording the messages right
+after the result's node.  A native loop gets nothing here: it reads the
+conversation again at its next step, which delivers them
+\(`harness-agent--take-steering') after the results of all the calls the
+step made, where the model reads them.
 
 SID, the session's id, says the loop is hosted.  Its model then gets
 the images the steering messages attached with the result: IMAGES, in
 the shape `harness-agent--respond' takes, each labelled with the token
 the message's text names it by (see
 `harness-agent--hosted-steering-images'), and CONTENT ends with a note
-of each that could not go.  Without SID IMAGES is nil: a native loop's
-next request carries each message whole, its images with it.
+of each that could not go.  Without SID, for a native loop, there is
+nothing to deliver and IMAGES is nil: its next request carries each
+message whole, its images with it.
 
 FAILED says the call failed.  A provider takes the result of one as
 text, so steering with images waits for the next boundary, whole, when
@@ -1569,8 +1702,9 @@ ends with the messages, their images in them.  Content that is no text
 Never signals: should the steering not be added, CONTENT goes out as it
 is, for the result must reach the provider."
   (or (harness-agent--try "adding steering to a tool result"
-        (if (or (not (or (null content) (stringp content)))
-                (and sid failed (harness-agent--steering-images (harness-agent-turn-steering turn))))
+        (if (or (null sid)
+                (not (or (null content) (stringp content)))
+                (and failed (harness-agent--steering-images (harness-agent-turn-steering turn))))
             (cons content nil)
           (let ((pending (harness-agent--take-pending turn)))
             (if (null pending)
@@ -2232,6 +2366,9 @@ messages next."
       (remhash sid harness-agent--retries)
       (remhash sid harness-agent--stop-continues)
       (harness-agent--clear-activity sid)
+      ;; What the model never got: the next turn reads it.
+      (harness-agent--try (format "recording the messages %s never took" sid)
+        (harness-agent--flush-steering turn))
       (when (harness-call 'session/exists-p sid)
         (harness-call 'session/usage-add sid (list :turns 1))
         (let ((session (harness-call 'session/get sid)))
@@ -2317,32 +2454,30 @@ can tell it from a message written now."
               (harness-agent-turn-steering turn)))
 
 (harness-defmethod agent/withdraw (session-id node-id)
-  "Take back the steering message NODE-ID of SESSION-ID; return the node it was.
+  "Take back the message NODE-ID of SESSION-ID that its turn has not taken yet.
 A message sent while a turn runs waits for the turn's next step, which
 delivers it (`harness-agent--take-pending'): until then it is the
-user's, to delete or to write again.  This removes it from what the turn
-will deliver, so the model never gets it, and from the transcript
-\(`session/discard-nodes', which announces it as `session/nodes-removed').
-It signals when the turn does not hold the message: it was delivered
-at a step boundary meanwhile, the turn is over -- a message it never
-took is read by the next turn -- or NODE-ID is no steering message of the
-session.  Nothing happens then."
+user's, to delete or to write again, and the session lists it among the
+messages that wait (`:steering', `session/set-steering').  NODE-ID is
+its id there, the id of the node it becomes.  This removes it from what
+the turn will deliver, so the model never gets it, and from that list.
+Return the node it would have been, as `harness-queued-message-node'
+reads it.  It signals when the turn does not hold the message: it was
+delivered at a step boundary meanwhile, the turn is over -- a message it
+never took is read by the next turn -- or NODE-ID is no message that
+waits.  Nothing happens then."
   (let* ((turn (gethash session-id harness-agent--turns))
-         (entry (and turn (harness-agent--steering-entry turn node-id)))
-         (pending (and entry (harness-agent-turn-steering turn)))
-         (node (and entry (harness-call 'session/node session-id node-id))))
+         (entry (and turn (harness-agent--steering-entry turn node-id))))
     (unless entry
       (signal 'harness-error (list "The model has this message already: it cannot be taken back")))
-    ;; Off the turn's list first, so no step can deliver it; back on if the
-    ;; transcript refuses to let it go.  A message whose node is gone
-    ;; already has nothing to deliver either.
-    (setf (harness-agent-turn-steering turn) (delq entry (copy-sequence pending)))
-    (when node
-      (condition-case err
-          (harness-call 'session/discard-nodes session-id (list node-id))
-        (error (setf (harness-agent-turn-steering turn) pending)
-               (signal (car err) (cdr err)))))
-    node))
+    (setf (harness-agent-turn-steering turn)
+          (delq entry (copy-sequence (harness-agent-turn-steering turn))))
+    (harness-agent--publish-steering turn)
+    ;; A message a turn held across a reload may be a node already, as an
+    ;; earlier harness recorded it when it was sent.
+    (when (harness-call 'session/node session-id node-id)
+      (harness-call 'session/discard-nodes session-id (list node-id)))
+    (harness-queued-message-node (harness-agent--steering-item entry))))
 
 (harness-defmethod agent/running (&optional session-id)
   "Return running session ids, or non-nil when SESSION-ID is running."

@@ -174,6 +174,7 @@ take it in.  The session list hides internal sessions unless asked.
 - `session/set-provider-node` (id node-id) — Record NODE-ID as the node the provider conversation of session ID reached.
 - `session/set-provider-state` (id state) — Replace the opaque provider state of session ID with STATE.
 - `session/set-status` (id status) — Set the status of session ID to STATUS (idle, running, blocked, inactive).
+- `session/set-steering` (id items) — Replace the messages the running turn of session ID has not taken with ITEMS.
 - `session/set-todos` (id todos) — Replace the todo list of session ID with TODOS.
 - `session/tmp-dir` (id) — Return the temporary directory of session ID, made if missing.
 - `session/tmp-sweep` (&optional dry-run) — Delete the temporary directories of the sessions that are over; return them.
@@ -206,6 +207,7 @@ take it in.  The session list hides internal sessions unless asked.
 - `session/redacted` — (ID RECORD) after a secret was redacted from the session's stores; RECORD is the redaction record: labels, fingerprints and counts, never the secret
 - `session/resumed` — (ID)
 - `session/status` — (ID STATUS)
+- `session/steering-changed` — (ID ITEMS) when the messages the running turn has not taken yet changed (`session/set-steering`)
 - `session/todos` — (ID TODOS)
 - `session/updated` — (ID CHANGES) settings changed
 - `session/usage` — (ID TOTALS RECORD)
@@ -268,6 +270,7 @@ take it in.  The session list hides internal sessions unless asked.
 - `session/queue-changed`
 - `session/resumed`
 - `session/status`
+- `session/steering-changed`
 - `session/todos`
 - `session/updated`
 - `session/usage`

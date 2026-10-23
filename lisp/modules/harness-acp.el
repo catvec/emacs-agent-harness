@@ -202,7 +202,7 @@ pattern it is answered for in `_harness.pattern'; a client that shows
 it can answer for another one.")
 
 (defconst harness-acp--forwarded-events
-  '(session/created session/deleted session/queue-changed session/pending-changed
+  '(session/created session/deleted session/queue-changed session/steering-changed session/pending-changed
     session/status agent/turn-started agent/turn-ended agent/quota
     provider/models-updated provider/quota-updated provider/pricing-warning usage/budget-warning usage/budgets-changed
     usage/reported-changed usage/rate-updated usage/live-updated

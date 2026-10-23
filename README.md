@@ -176,8 +176,8 @@ OpenAI-compatible APIs and AWS Bedrock.
 | The task board: each task has a session and a worktree | The conversation tree of a session, a fork and a BTW |
 | ![A task's report popped out of the board: its chart large, the test run it quotes, and the banner and box to verify it or send it back](docs/media/report.png) | ![The chart of that report shown larger, in a popout of its own](docs/media/report-image.png) |
 | A task's report: verify it or send it back from there | An image of the report, clicked: shown larger |
-| ![A chat whose turn runs: a message sent during it that the model has already reads as any other, one sent since says queued beside your name with edit and delete buttons, each with its key, and two more queued messages, drawn as your messages, say queued with send now, edit and delete buttons, above the line saying what the agent is doing](docs/media/chat-queue.png) | ![A compose box whose message names an image, a file and a task, each reference the same chip: the image's thumbnail, the file's or the task's icon, then its name as a link](docs/media/compose-chips.png) |
-| A message sent mid-turn is queued until the model has it, and can be edited or deleted till then; queued ones send now, one by one | An image, a file and a task, named in the text: one chip, a click opens it |
+| ![A chat whose turn runs: a message sent during it that the model has already reads as any other, after what the agent did before reading it; one sent since is pinned above the box and says queued beside your name with edit and delete buttons, each with its key, and two more queued messages, drawn as your messages, say queued with send now, edit and delete buttons, all of them above the line saying what the agent is doing and the todo list, over the compose box](docs/media/chat-queue.png) | ![A compose box whose message names an image, a file and a task, each reference the same chip: the image's thumbnail, the file's or the task's icon, then its name as a link](docs/media/compose-chips.png) |
+| A message sent mid-turn is pinned above the box, queued, until the model has it, and can be edited or deleted till then; it joins the conversation where the model read it; queued ones send now, one by one | An image, a file and a task, named in the text: one chip, a click opens it |
 | ![The usage dashboard: a month of cost per day, cost by model, the plan's quota, the fallback list and budgets](docs/media/usage.png) | ![The settings page for one project, which overrides two settings](docs/media/settings.png) |
 | Usage: cost per day and model, plan quota, fallback list, budgets | Settings, here as one project overrides them |
 | ![The session list with forks, BTWs and task sessions](docs/media/sessions.png) | ![The worktrees of a project, with their branches and sessions, one assumed as the project](docs/media/worktrees.png) |
@@ -754,20 +754,25 @@ so `C-c .` is how you aim a key at a panel from there (see
 `C-c C-q` queues a message for the next turn. A queued message shows
 just as it will once sent, your name, its text and its attachments, but
 with a dim `queued` beside your name, so it never looks sent, and its
-buttons. The queued messages come last in the conversation, the line
-saying what the agent is doing under them. `[send now]` sends that
-message alone, and the others stay queued: while the agent works it
-gets the message at its next step, otherwise the message starts a turn
-of its own (the tooltip says which). `[edit]` takes a message back into
-the box and `[delete]` drops it. A message sent while a turn runs is
-queued too, until the model takes it at its next step: its line says
-*queued* with `[edit]` and `[delete]`, which take it back before the
-model gets it, so the model never sees a message you took back (one
-with a picture or another attachment can be deleted but not put back in
-the box). Once the model has the message it reads like any other, with
-nothing beside your name. Nothing is said once the turn is over either,
-unless the model never got the message because you cancelled the turn:
-*not delivered*, and the next turn reads it. A message sent while the
+buttons. The queued messages are pinned above the compose box, the line
+saying what the agent is doing under them, as the todo list is, and not
+part of the conversation: a message the model has not read yet does not
+stand in the transcript, which reads in the order the model got things.
+`[send now]` sends that message alone, and the others stay queued: while
+the agent works it gets the message at its next step, otherwise the
+message starts a turn of its own (the tooltip says which). `[edit]`
+takes a message back into the box and `[delete]` drops it. A message
+sent while a turn runs waits there too, until the model takes it at its
+next step, ahead of the queued ones: its line says *queued* with
+`[edit]` and `[delete]`, which take it back before the model gets it, so
+the model never sees a message you took back (one with a picture or
+another attachment can be deleted but not put back in the box). When the
+model takes it, the message moves into the conversation, after the tool
+calls and answers that came before the model read it and before its
+reply, and reads like any other, with nothing beside your name. Nothing
+is said once the turn is over either, unless the model never got the
+message because you cancelled the turn: it is then recorded as the turn
+ends, *not delivered*, and the next turn reads it. A message sent while the
 conversation is being compacted is not queued at all: it waits for the
 compaction and goes to the model right after it, as your next message
 ([below](#compacting-a-conversation)).

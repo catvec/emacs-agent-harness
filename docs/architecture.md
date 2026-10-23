@@ -1639,6 +1639,16 @@ redact).
   them, or with QIDS (a list of item ids, or a vector) only those, the
   others staying queued.  Event `session/queue-changed ID ITEMS` (what
   is left).
+- `session/set-steering ID ITEMS` replaces the session's `:steering`, the
+  messages sent to its running turn that the turn has not taken yet (see
+  `agent/prompt`): `(:id ID :text TEXT :ts TIME)` each, ID the id of the
+  node the message becomes, with `:blocks` when it is more than text
+  (a picture's bytes left out) and `:from` when the user did not send it.
+  Only the turn calls it.  Event `session/steering-changed ID ITEMS`,
+  not sent when the list is as it was.  The list is saved with the
+  record; a harness that stops with messages waiting queues them again
+  when it starts (`session/queue`, their text only), unless a node has
+  their id already.
 - `session/pending-add ID REQUEST` → id; `session/pending-resolve ID PID ANSWER`;
   `session/pending ID`.  Event `session/pending-changed ID ITEMS`.
   Status becomes `blocked` while anything is pending.
@@ -1672,9 +1682,14 @@ redact).
   `session/ext-changed ID KEY VALUE` says which setting changed, KEY
   being the keyword and VALUE nil once it was removed.
 - `session/messages ID` → provider messages (content blocks) built
-  from the path, tool calls paired with results.  A steering message
-  marked `:delivered-after NODE-ID` stands after that node (and the
-  tool results right after it), where the model got it.  Every tool_use
+  from the path, tool calls paired with results.  A steering message is
+  a node where the model got it (see agent), so it stands where it is,
+  except that a request holds the results of one batch of calls before
+  any words: one recorded between the results -- a hosted loop got it
+  with the first -- follows them all.  A transcript an earlier harness
+  recorded has the message where it was sent, marked `:delivered-after
+  NODE-ID` of a node after it; it stands after that node (and the tool
+  results right after it), where the model got it.  Every tool_use
   is answered in the message right after it, whatever the path holds.
   A call whose result is not there gets a stand-in error result
   (`harness-session-missing-result-output`), in a user message of its
@@ -4091,10 +4106,23 @@ decisions.
   it again reads the cache it wrote.
 - `agent/prompt SESSION-ID BLOCKS &optional OPTS` → promise of
   `(:stop-reason …)`.  Idle session: starts a turn.  Running session:
-  steering — the message is queued and injected at the next step boundary
-  (appended to the next tool result, a hosted loop handed its images
-  with that result, or sent as the next user turn if the model stops
-  first), and only once.  A turn held at a boundary by work that
+  steering — the message waits and is injected at the next step boundary
+  (appended to the next tool result of a hosted loop, handed its images
+  with that result; read by a native loop in its next request; or sent
+  as the next user turn if the model stops first), and only once.  It is
+  no node of the transcript until the boundary takes it: the transcript
+  reads in the order the model got things, so the message stands after
+  the tool results and answers that came before the model read it, and
+  before the reply to it.  Meanwhile the turn holds it and the session
+  lists it in `:steering` (`session/set-steering`, announced as
+  `session/steering-changed`): `(:id ID :text TEXT :ts TIME)` per
+  message, ID the id of the node it becomes, with `:blocks` when it is
+  more than text (a picture's bytes left out) and `:from` when the user
+  did not send it.  A turn that ends before its next boundary --
+  cancelled, say -- records what it still holds as the turn ends
+  (`harness-agent--flush-steering`), unmarked as delivered, and the next
+  turn reads it.  A harness that stops with messages waiting queues them
+  again when it starts (`session/queue`, their text only).  A turn held at a boundary by work that
   replaces the conversation under it -- the filter `agent/hold` below,
   a compaction -- is not steered: the message waits with the turn and
   is recorded as an ordinary user message when it goes on (see
@@ -4152,11 +4180,11 @@ decisions.
   (`harness-attachments-to-blocks`).
 - `agent/withdraw SESSION-ID NODE-ID` — takes back a steering message
   the running turn has not delivered yet: it leaves what the turn will
-  deliver and the transcript (`session/discard-nodes`, announced as
-  `session/nodes-removed`), so the model never gets it, and the node is
-  returned.  It signals when the turn does not hold the message (it was
-  delivered at a step boundary meanwhile, the turn is over, or the node
-  is no steering message of the session) and then changes nothing.  The
+  deliver and the session's `:steering` list, so the model never gets
+  it, and the node it would have been is returned (NODE-ID is the id the
+  list gave it).  It signals when the turn does not hold the message (it
+  was delivered at a step boundary meanwhile, the turn is over, or
+  NODE-ID is no message that waits) and then changes nothing.  The
   chat's [delete] and [edit] on a queued message call it.
 - Sync filter `agent/message` (value the message's blocks; args SID
   and `(:from FROM :steering BOOL)`) on every message as it is
@@ -4258,17 +4286,24 @@ decisions.
   message; updated in place); on `tool-call` append a tool-call node, run
   `tools/execute`, append the tool-result node; native loops re-call the
   provider until `end-turn`; hosted loops respond through `:respond`.
-  Steering is drained at every boundary (each tool result and each
-  step), so it is delivered once; a model that stops with steering
-  waiting gets one more step with it as the newest user message.
-  Taking steering marks each of its nodes `:delivered-after` the newest
-  node that is not steering, whether the model's place for the message
-  moves (`session/messages`) or not, which is how a UI tells a message
-  the model has from one that still waits for its next step.  Until
-  then the user can take a message back (`agent/withdraw`).  A message
-  sent to a turn that a compaction holds at a boundary steers nothing:
-  it waits with the turn and is recorded after the compaction
-  (`agent/hold`).
+  Steering is drained at every boundary (each tool result of a hosted
+  loop and each step), so it is delivered once; a model that stops with
+  steering waiting gets one more step with it as the newest user
+  message.  Taking steering records each message as a user node
+  `:steering` then, after the newest node there is, stamped with that
+  moment (`:meta` `:sent-at` keeps when it was sent) and marked
+  `:delivered-after` that node, which is how a UI tells a message the
+  model has from one the turn ended without (`harness-agent--take-pending`).
+  The node has the id the message waited under, so a UI that drew it
+  pending follows it into the transcript.  Until then the user can take
+  a message back (`agent/withdraw`).  A native loop reads the messages
+  at its next step, after the results of every call of the step; a
+  hosted loop reads one with the result of the call that ends first
+  after it was sent, so the node stands between the results of a batch
+  when calls ran in parallel (`session/messages` lists the results first
+  all the same).  A message sent to a turn that a compaction holds at a
+  boundary steers nothing: it waits with the turn and is recorded after
+  the compaction (`agent/hold`).
   A turn has no step limit: long unattended work is the point, and the
   loop ends when the model stops, the provider errors or hits its
   output limit, the user cancels, or an `agent/step` filter (a merge
@@ -4976,11 +5011,12 @@ and tools.
   steps -- waits with the turn and is recorded after the compaction as
   the user's next message, instead of steering it: recorded at once it
   would lie before the compaction node, where nothing reads it.
-  Third, a message that steered a turn and still waited for its step when
-  a compaction began is carried over after it with the other unanswered
-  messages (`:carried-from`), and says it was delivered
-  (`:delivered-after` the compaction node), so a chat does not show
-  it queued for good.
+  Third, a message that steered a turn and was delivered, with no
+  answer yet when a compaction began, is carried over after it with the
+  other unanswered messages (`:carried-from`), and says it was
+  delivered (`:delivered-after` the compaction node).  One that still
+  waits for the turn's next step is no node (see agent): the step that
+  follows the compaction records it, after the summary.
 - `compaction/estimate SESSION-ID` → `(:context :model :model-label
   :messages :cached :carry-on :carry-on-cached :compacting :kind
   :kinds)`: the context the next message sends, how many messages it
@@ -5056,7 +5092,7 @@ and tools.
   message the user sends to the turn while a long summary is written
   would lie before the node, where the model never reads it.  A carried
   copy of such a steering message is marked `:delivered-after` the
-  compaction node, so a chat shows it delivered, not queued for good.
+  compaction node.
 
 ### cowboy
 
@@ -10735,56 +10771,66 @@ holds back node updates, which the fetched nodes carry, but applies
 the session record and the activity as they come: a status, queue or
 prompt that changed meanwhile is not lost.
 
-A message waiting for the next turn is drawn as the user message it
+A message that waits for the model is drawn as the user message it
 will be once sent, by the code that draws the transcript's
-(`harness-chat--render-user`): the session's queue item is read as the
-node the agent will record (`harness-queued-message-node` in
-`harness-util`, which shares the agent's `harness-blocks-text` and
-`harness-attachments-to-blocks`), so its text, references and
-attachments look as they will.  Only its sender line differs: a dim
-"queued", so a waiting message never reads as sent, then `[send now]`
-(`harness-chat-send-queued`, which sends that message alone through
-`agent/send-queue` with its `:qids`), `[edit]` and `[delete]`
-(`harness-chat--queued-note`).  The queued messages come first in the
-tail, the newest of the conversation, and the activity line goes under
-them (`harness-chat--activity-position`); `harness-chat-send-queue`
-sends every one.  The tooltip of `[send now]` says what sending does:
-while a turn runs the message steers it and the model gets it at its
-next step, otherwise it goes out as a turn of its own; the queue is
-drawn again when a turn begins or ends (`harness-chat--queue-stale-p`).
-A long queued message shows a page at a time, as a long message of the
-transcript does (`harness-chat--queued-blocks`).  A sent
-message leaves the queue for the transcript, and while the turn it
-steers goes on and has not taken it, its sender line says "queued"
-again, in the same dim word (`harness-chat--queued-mark`), with `[edit]`
-and `[delete]` (`harness-chat--delivery-note`, its tooltip saying what
-the word means) until the node update marking it `:delivered-after`
-arrives: from then on the message needs no note and reads as any other.
-Once the turn is over the note goes, unless the model never got the
-message (the turn was cancelled) and nothing answered it: "not
-delivered", and the next turn reads it.  `[delete]` and `[edit]` of a
-message the turn has not taken ask the harness to take it back with
-`_harness/agent/withdraw` (`harness-chat-delete-steering`,
+(`harness-chat--render-user`), apart from the transcript and above the
+compose box, as the todo list is: a message the model has not read is
+no part of the conversation yet, and the transcript reads in the order
+the model got things.  Two kinds wait.  A message queued for the next
+turn is read as the node the agent will record (`harness-queued-message-node`
+in `harness-util`, which shares the agent's `harness-blocks-text` and
+`harness-attachments-to-blocks`) from the session's queue item, so its
+text, references and attachments look as they will.  Only its sender
+line differs: a dim "queued", so a waiting message never reads as sent,
+then `[send now]` (`harness-chat-send-queued`, which sends that message
+alone through `agent/send-queue` with its `:qids`), `[edit]` and
+`[delete]` (`harness-chat--queued-note`).  A message sent while a turn
+runs, which the turn takes at its next step, is drawn the same way from
+the session's `:steering` list (`harness-chat--steering`; its items hold
+`:blocks` when the message is more than text, and the node reads them):
+the same dim "queued" with `[edit]` and `[delete]` only, its tooltip
+saying the model gets the message at its next step
+(`harness-chat--steering-note`).  These come first in the tail, the
+steering messages before the queue's because the model gets them first,
+the newest of the conversation, and the activity line goes under them
+(`harness-chat--activity-position`); `harness-chat-send-queue` sends
+every message of the queue.  The tooltip of `[send now]` says what
+sending does: while a turn runs the message steers it and the model gets
+it at its next step -- it then moves from the queue to the steering
+messages, still above the box -- otherwise it goes out as a turn of its
+own; the queue is drawn again when a turn begins or ends
+(`harness-chat--queue-stale-p`).  A long message shows a page at a time,
+as a long message of the transcript does (`harness-chat--queued-blocks`).
+When the turn takes a steering message it records it as a node with the
+id the message waited under, and the chat draws it in the transcript,
+after the tool results and answers that came before, and stops drawing it
+above the box in the same moment (`harness-chat--taken`; a session
+record older than the node, still listing the message, is ignored:
+`harness-chat--waiting-items`).  From then on the message needs no note
+and reads as any other.  A turn that ends without taking a message
+records it as it ends, with no `:delivered-after`: once the turn is over
+the chat says "not delivered" of it, if nothing answered it
+(`harness-chat--delivery-note`), and the next turn reads it.  `[delete]`
+and `[edit]` of a message the turn has not taken ask the harness to take
+it back with `_harness/agent/withdraw` (`harness-chat-delete-steering`,
 `harness-chat-edit-steering`): the harness answers an error when the
 turn took it meanwhile, which the echo area says, and nothing changes;
-otherwise the transcript loses the node (`session/nodes-removed`, which
-`harness-chat--on-nodes-removed` draws away, the head moving back onto
-the last block drawn being no reason to load the transcript again) and
-`[edit]` puts its words, and the files it attached, into the compose
-box above the draft.  A message with a picture, a sound or the text of
-a task attached cannot be put back whole, so it offers `[delete]` only.
-Which blocks may carry a note is worked out from the end of the
-transcript back to the message that began the turn last
+otherwise the message leaves the session's list and `[edit]` puts its
+words, and the files it attached, into the compose box above the draft.
+A message with a picture, a sound or the text of a task attached cannot
+be put back whole, so it offers `[delete]` only.  Which blocks may carry
+the note "not delivered" is worked out from the end of the transcript
+back to the message that began the turn last
 (`harness-chat--sending-candidates`), after a load and when a user
 message arrives or a turn begins or ends, never from a message alone: a
 loaded transcript is not whole until its last block is in.
 
-Each button of a queued message, of the queue or of the transcript, shows
+Each button of a message that waits, queued or waiting for the turn, shows
 its key (`s`, `e`, `d`), bound in a keymap on the message's text
 (`harness-chat-queued-map`, `harness-chat-steering-map`) so that it acts
 with point on the message, and the message is a panel of the compose box
-(`harness-compose-panel`, named by the queue item's or the node's id;
-`harness-chat--queued-panel`): `C-c .` and then the key presses it from
+(`harness-compose-panel`, named by the queue item's or the steering
+item's id; `harness-chat--queued-panel`): `C-c .` and then the key presses it from
 the box (`harness-compose-panel-key`), on the nearest queued message
 above it, the line `from the box: C-c . e` ending the message
 (`harness-chat--queued-hint`, left out where `harness-ui-pending-box-hints`
