@@ -682,10 +682,11 @@ That is the time of the `message_start' of its last request, else of
 the first assistant message that reports one (a CLI that streams no
 partial messages prints only those): a request keeps the prompt cache
 from then on, and the turn's usage says whether it used one at all.
-It goes out with the turn's `usage' event as `:cache-at'.  A sub-agent's
-requests use a cache of their own and leave it, and so do the CLI's
-requests outside a turn.  A turn starts without one.  Kept beside the
-session records, as `harness-provider-claude--blocks' is.")
+It goes out as each request is noted, in a `cache-stamp' event, and again
+with the turn's `usage' event as `:cache-at', the last request's.  A
+sub-agent's requests use a cache of their own and leave it, and so do
+the CLI's requests outside a turn.  A turn starts without one.  Kept
+beside the session records, as `harness-provider-claude--blocks' is.")
 
 (defvar harness-provider-claude--cache-request (make-hash-table :test 'equal)
   "Harness session id -> the id of the message of the turn's last noted request.
@@ -1966,6 +1967,12 @@ five-minute one, nil when it wrote nothing or does not say."
           ((> (harness-provider-claude--tokens (plist-get creation :ephemeral_1h_input_tokens)) 0) 3600)
           ((> (harness-provider-claude--tokens (plist-get creation :ephemeral_5m_input_tokens)) 0) 300))))
 
+(defun harness-provider-claude--cache-used-p (usage)
+  "Non-nil when Anthropic USAGE says its request read or wrote the prompt cache."
+  (> (+ (harness-provider-claude--tokens (plist-get usage :cache_read_input_tokens))
+        (harness-provider-claude--tokens (plist-get usage :cache_creation_input_tokens)))
+     0))
+
 (defun harness-provider-claude--note-cache (entry usage &optional id)
   "Note that ENTRY's main conversation made a request just now.
 The request is message ID, with USAGE: its `message_start''s, or its
@@ -1977,13 +1984,28 @@ fields later, or not at all, and an earlier request's time would leave
 the cache looking older than it is.  The turn's usage, at its end, says
 whether it used the cache (see `session/usage-add').  The time is noted
 only in a turn: a request the CLI makes between turns belongs to none,
-and would be the next turn's."
+and would be the next turn's.
+
+The turn says it as it notes it, with a `cache-stamp' event: when the
+request started, the lifetime known so far (`:ttl'), and whether USAGE
+says it read or wrote the cache (`:used').  The turn's own usage comes
+only when the turn is over, so without this the session's cache would
+read as of the turn before for all the time the turn runs -- lapsed, or
+about to, while every request of the turn reads it -- and as of no
+request at all for a turn the CLI never closed with a result (see
+`session/cache-stamp')."
   (let ((sid (harness-provider-claude-session-id entry)))
-    (when (harness-provider-claude-session-active entry)
-      (puthash sid (float-time) harness-provider-claude--cache-at)
-      (puthash sid id harness-provider-claude--cache-request))
     (when-let* ((ttl (harness-provider-claude--cache-ttl-of usage)))
-      (puthash sid ttl harness-provider-claude--cache-ttl))))
+      (puthash sid ttl harness-provider-claude--cache-ttl))
+    (when (harness-provider-claude-session-active entry)
+      (let ((now (float-time))
+            (ttl (gethash sid harness-provider-claude--cache-ttl)))
+        (puthash sid now harness-provider-claude--cache-at)
+        (puthash sid id harness-provider-claude--cache-request)
+        (harness-provider-claude--emit
+         entry (append (list :type 'cache-stamp :at now
+                             :used (and (harness-provider-claude--cache-used-p usage) t))
+                       (and ttl (list :ttl ttl))))))))
 
 (defun harness-provider-claude--note-assistant (entry message)
   "Note the request assistant MESSAGE of ENTRY's main conversation reports.

@@ -38,6 +38,18 @@
 ;; call still open a result once the provider is done, since a call
 ;; without a result breaks the transcript for providers that pair them.
 ;;
+;; A tool can end the turn (`:end-turn' on its result, as hand_in does):
+;; the provider is cancelled and the turn is over at once, with its
+;; session idle.  A hosted loop (Claude Code) says what the turn used --
+;; its tokens, its cost, the size of the conversation and when its last
+;; request used the prompt cache -- in the message that closes the turn,
+;; which comes after the cancel; the turn that is over takes that one
+;; event all the same (`harness-agent--late-event'), or the session would
+;; read 0 tokens and $0 and have no prompt cache to lapse.  A hosted
+;; loop also says each request as it is made (`cache-stamp'), so the
+;; session's cache is as of the turn's own request while the turn runs,
+;; not as of the turn before.
+;;
 ;; The loop is entirely event driven: nothing here waits.
 
 ;;; Code:
@@ -152,7 +164,7 @@ WHY says what stopped it."
   text-node text-buf think-node think-buf
   step-nodes                            ; the nodes this step wrote, for a retry
   (pending 0) waiting-done stop-reason error hosted last-usage started
-  ending)                               ; a tool ended the turn (hand_in)
+  ending)                               ; a tool ended the turn (hand_in): its provider's usage still counts
 
 (defvar harness-agent--turns (make-hash-table :test 'equal)
   "Session id -> running `harness-agent-turn'.")
@@ -1174,11 +1186,61 @@ still waits for its next step."
                         :meta (plist-put (copy-sequence (plist-get n :meta))
                                          :delivered-after (plist-get anchor :id))))))))
 
+(defun harness-agent--add-usage (sid ev model)
+  "Add the usage EV of a step of session SID, sent to MODEL, to its totals.
+EV is a provider's `usage' event.  The prompt cache stamp it carries
+\(`:cache-at', `:cache-ttl') is the stamp of the session's cache for
+MODEL, the model the request went to, whatever the session's is by now."
+  (harness-call 'session/usage-add sid
+                (list :input (plist-get ev :input) :output (plist-get ev :output)
+                      :cache-read (plist-get ev :cache-read) :cache-write (plist-get ev :cache-write)
+                      :cost (plist-get ev :cost) :list-cost (plist-get ev :list-cost)
+                      :billing (plist-get ev :billing) :plan (plist-get ev :plan)
+                      :context (plist-get ev :context)
+                      ;; A hosted loop's turn says what its last call wrote.
+                      :last-output (plist-get ev :last-output)
+                      ;; The cache the request used is this model's.
+                      :model model
+                      :cache-at (plist-get ev :cache-at) :cache-ttl (plist-get ev :cache-ttl))))
+
+(defun harness-agent--usage-counts-p (ev)
+  "Non-nil when the usage event EV counts a token or a cost."
+  (cl-some (lambda (key)
+             (let ((n (plist-get ev key)))
+               (and (numberp n) (> n 0))))
+           '(:input :output :cache-read :cache-write :cost :list-cost)))
+
+(defun harness-agent--late-event (turn ev model)
+  "Take what is still the session's of EV, an event of TURN, which is over.
+That is the usage of a turn a tool ended (`harness-agent--finish-turn'),
+and nothing else.  Such a turn is over before its provider has said what
+it used: a hosted loop (Claude Code) reports the turn's tokens, its cost,
+how big the conversation is and when its last request used the prompt
+cache in the message that closes the turn, which follows the cancel the
+tool's end sends it.  A session whose turn `hand_in' ended would read 0
+tokens and $0, and have no prompt cache to lapse, if that report were
+dropped with the rest.  MODEL is the model the step went to.  The turn's
+text, its calls and its end stay dropped: they belong to a turn that is
+over, and any other turn took its provider's usage while it ran.  A
+report that counts no token and no cost says nothing, and is left out:
+the session would read a request that used no cache, and drop the
+stamp the turn's own requests made (`cache-stamp')."
+  (when (and (eq (plist-get ev :type) 'usage)
+             (harness-agent-turn-ending turn)
+             (harness-agent--usage-counts-p ev))
+    (let ((sid (harness-agent-turn-session-id turn)))
+      (when (harness-call 'session/exists-p sid)
+        (harness-agent--try (format "recording the usage of the turn a tool ended in %s" sid)
+          (harness-agent--add-usage sid ev model))))))
+
 (defun harness-agent--on-event (turn ev &optional model)
   "Handle EV from TURN's provider; late events of a finished turn are dropped.
 MODEL is the model the step was sent to: the provider state it reports
-is that model's provider's, whatever the session's model is by now."
-  (when (harness-agent--current-p turn)
+is that model's provider's, whatever the session's model is by now.  The
+one thing a finished turn still takes is the usage a tool's end left its
+provider to report (`harness-agent--late-event')."
+  (if (not (harness-agent--current-p turn))
+      (harness-agent--late-event turn ev model)
     (let ((sid (harness-agent-turn-session-id turn)))
       (pcase (plist-get ev :type)
         ('start nil)
@@ -1197,17 +1259,15 @@ is that model's provider's, whatever the session's model is by now."
         ('tool-result (harness-agent--builtin-result turn ev))
         ('usage
          (setf (harness-agent-turn-last-usage turn) ev)
-         (harness-call 'session/usage-add sid
-                       (list :input (plist-get ev :input) :output (plist-get ev :output)
-                             :cache-read (plist-get ev :cache-read) :cache-write (plist-get ev :cache-write)
-                             :cost (plist-get ev :cost) :list-cost (plist-get ev :list-cost)
-                             :billing (plist-get ev :billing) :plan (plist-get ev :plan)
-                             :context (plist-get ev :context)
-                             ;; A hosted loop's turn says what its last call wrote.
-                             :last-output (plist-get ev :last-output)
-                             ;; The cache the request used is this model's.
-                             :model model
-                             :cache-at (plist-get ev :cache-at) :cache-ttl (plist-get ev :cache-ttl))))
+         (harness-agent--add-usage sid ev model))
+        ;; A request of a hosted loop's turn, which read or wrote the
+        ;; prompt cache as it started: the session's cache is as of
+        ;; now, not as of the turn before, until the turn's usage comes.
+        ('cache-stamp
+         (harness-agent--try (format "stamping the prompt cache of %s" sid)
+           (harness-call 'session/cache-stamp sid
+                         (list :at (plist-get ev :at) :ttl (plist-get ev :ttl)
+                               :used (plist-get ev :used) :model model))))
         ;; A model call of a hosted loop's turn, which the turn's `usage'
         ;; counts: announced for the output rate and the live token
         ;; count, recorded nowhere.

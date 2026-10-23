@@ -48,6 +48,18 @@ records them as it records the calls it runs, and gives every such
 call still open a result once the provider is done, since a call
 without a result breaks the transcript for providers that pair them.
 
+A tool can end the turn (`:end-turn` on its result, as hand_in does):
+the provider is cancelled and the turn is over at once, with its
+session idle.  A hosted loop (Claude Code) says what the turn used --
+its tokens, its cost, the size of the conversation and when its last
+request used the prompt cache -- in the message that closes the turn,
+which comes after the cancel; the turn that is over takes that one
+event all the same (`harness-agent--late-event`), or the session would
+read 0 tokens and $0 and have no prompt cache to lapse.  A hosted
+loop also says each request as it is made (`cache-stamp`), so the
+session's cache is as of the turn's own request while the turn runs,
+not as of the turn before.
+
 The loop is entirely event driven: nothing here waits.
 
 ## Provides
@@ -105,6 +117,7 @@ The loop is entirely event driven: nothing here waits.
 - `provider/fork` ([provider](provider.md))
 - `provider/model` ([provider](provider.md))
 - `session/append` ([session](session.md))
+- `session/cache-stamp` ([session](session.md))
 - `session/discard-nodes` ([session](session.md))
 - `session/exists-p` ([session](session.md))
 - `session/get` ([session](session.md))

@@ -211,6 +211,218 @@ calls the cache cold before its time."
           (should (equal model (plist-get cache :model)))
           (should (> (plist-get cache :expires) (float-time))))))))
 
+(ert-deftest harness-agent-cache-stamp-moves-the-cache-while-the-turn-runs ()
+  "A hosted loop says each request as it starts, and the session's cache follows at once.
+Its usage comes with the end of the turn: until then the cache would
+read as of the turn before.  The stamp is the step's model's, the
+turn's own usage, when it comes, sets it for good, and a turn whose
+provider never reports usage keeps what the requests said."
+  (harness-agent-test-with
+    (let ((id nil) (seen nil))
+      (harness-agent-test-define-hosted
+       (lambda (_prompt)
+         (list '(:type cache-stamp :at 5000.0 :ttl 3600 :used t)
+               (lambda () (push (plist-get (harness-call 'session/get id) :cache) seen))
+               '(:type text :delta "hi")
+               '(:type cache-stamp :at 5400.0 :used t)
+               (lambda () (push (plist-get (harness-call 'session/get id) :cache) seen))
+               '(:type done :stop-reason end-turn))))
+      (setq id (harness-agent-test-hosted-session))
+      ;; An earlier turn's usage, stamped at 1000.
+      (harness-call 'session/usage-add id '(:input 10 :output 5 :cache-read 900 :context 915
+                                             :cache-at 1000.0 :cache-ttl 300 :model "hosted:loop"))
+      (harness-await (harness-call 'agent/prompt id "hello"))
+      (should (equal '((:at 5000.0 :ttl 3600 :expires 8600.0 :model "hosted:loop")
+                       (:at 5400.0 :ttl 3600 :expires 9000.0 :model "hosted:loop"))
+                     (reverse seen)))
+      ;; Without a usage of its own the turn leaves it so; it is no request counted.
+      (let ((s (harness-call 'session/get id)))
+        (should (equal '(:at 5400.0 :ttl 3600 :expires 9000.0 :model "hosted:loop") (plist-get s :cache)))
+        (should (= 10 (plist-get (plist-get s :usage) :input)))
+        (should (= 1 (plist-get (plist-get s :usage) :turns)))))))
+
+(ert-deftest harness-agent-cache-stamp-is-the-step-models ()
+  "A request of a step that ends after a switch is the old model's: its cache is stamped for it."
+  (harness-agent-test-with
+    (let ((id nil))
+      (harness-agent-test-define-hosted
+       (lambda (_prompt)
+         (list (lambda () (harness-call 'session/update id :model "demo:scripted" :silent t))
+               '(:type cache-stamp :at 5000.0 :ttl 3600 :used t)
+               '(:type done :stop-reason end-turn))))
+      (setq id (harness-agent-test-hosted-session))
+      (harness-call 'session/usage-add id '(:input 10 :output 5 :cache-read 900 :context 915
+                                             :cache-at 1000.0 :model "hosted:loop"))
+      (harness-await (harness-call 'agent/prompt id "hello"))
+      (should (equal "hosted:loop" (plist-get (plist-get (harness-call 'session/get id) :cache) :model)))
+      (should (= 5000.0 (plist-get (plist-get (harness-call 'session/get id) :cache) :at))))))
+
+;;;; A turn a tool ended
+
+;; `hand_in' ends the turn through its result (`:end-turn'): the provider is
+;; cancelled and the turn is over at once, the session idle and in review.
+;; A hosted loop such as Claude Code reports what the turn used -- its
+;; tokens, its cost, how big the conversation is and when its last request
+;; used the prompt cache -- only in the message that closes the turn,
+;; which comes after the cancel.  That report belongs to the session all
+;; the same: without it a handed-in session reads 0 tokens and $0, has no
+;; prompt cache, and the chat never says it lapsed.
+
+(defvar harness-agent-test-after-cancel nil
+  "The events the `late' provider reports once it is cancelled, oldest first.")
+
+(defvar harness-agent-test-delivered nil
+  "Non-nil once the `late' provider has delivered `harness-agent-test-after-cancel'.")
+
+(defun harness-agent-test-define-late (&optional synchronous)
+  "Define `late', a hosted loop that reports its turn only once it is cancelled.
+It calls the tool `finish', which ends the turn, and answers the cancel
+with `harness-agent-test-after-cancel' -- its turn's usage and its end --
+a moment later, as the CLI answers an interrupt, or at once with
+SYNCHRONOUS; `harness-agent-test-delivered' says when it has.  It also
+defines the tool."
+  (setq harness-agent-test-delivered nil)
+  (harness-define-tool "finish" :label "Finish" :description "hand the work in" :kind 'meta
+                       :handler (lambda (_input _ctx) (harness-tool-ok "Handed in." :end-turn t)))
+  (harness-define-provider 'late
+    :label "Late"
+    :complete
+    (lambda (request)
+      (let ((on-event (plist-get request :on-event)))
+        (funcall on-event '(:type start))
+        (run-at-time 0.005 nil
+                     (lambda ()
+                       (funcall on-event (list :type 'tool-call :id "c1" :name "finish"
+                                               :input '(:why "done") :respond #'ignore))))
+        (list :cancel (lambda ()
+                        (let ((report (lambda ()
+                                        (dolist (ev harness-agent-test-after-cancel)
+                                          (funcall on-event ev))
+                                        (setq harness-agent-test-delivered t))))
+                          (if synchronous (funcall report) (run-at-time 0.05 nil report)))))))
+    :capabilities '(:hosted-loop t)))
+
+(defun harness-agent-test-await-report ()
+  "Wait until the `late' provider has delivered its report of the turn it was cancelled in."
+  (harness-test-wait (lambda () harness-agent-test-delivered) 10 "the provider's report of the turn"))
+
+(defun harness-agent-test-late-session ()
+  "Return the id of a new session on the `late' provider."
+  (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir) :model "late:loop") :id))
+
+(ert-deftest harness-agent-usage-of-a-turn-a-tool-ended-is-recorded ()
+  "The usage a provider reports after a tool ended the turn still counts.
+The session is idle by then, its turn over, and the report still carries
+the turn's tokens, its cost, the size of the conversation and the cache
+stamp: the session's prompt cache is the last request's, and lapses
+when it says."
+  (harness-agent-test-with
+    (setq harness-agent-test-after-cancel
+          '((:type usage :input 10 :output 5 :cache-read 900 :cache-write 0 :cost 0.5
+                   :context 915 :cache-at 1000.0 :cache-ttl 3600)
+            (:type done :stop-reason cancelled)))
+    (harness-agent-test-define-late)
+    (let ((id (harness-agent-test-late-session)))
+      (should (eq 'end-turn (plist-get (harness-await (harness-call 'agent/prompt id "go")) :stop-reason)))
+      (should (eq 'idle (plist-get (harness-call 'session/get id) :status)))
+      ;; The turn is over; the provider's report comes after it.
+      (harness-agent-test-await-report)
+      (let* ((s (harness-call 'session/get id))
+             (usage (plist-get s :usage)))
+        (should (equal '(:at 1000.0 :ttl 3600 :expires 4600.0 :model "late:loop") (plist-get s :cache)))
+        (should (= 10 (plist-get usage :input)))
+        (should (= 5 (plist-get usage :output)))
+        (should (= 915 (plist-get usage :context)))
+        (should (= 0.5 (plist-get usage :cost)))
+        ;; The turn is counted when it ends, not again for its usage.
+        (should (= 1 (plist-get usage :turns)))
+        (should (eq 'idle (plist-get s :status)))))))
+
+(ert-deftest harness-agent-usage-a-tool-ending-the-turn-meets-counts-once ()
+  "A provider that answers the cancel at once is recorded once, while the turn still runs."
+  (harness-agent-test-with
+    (setq harness-agent-test-after-cancel
+          '((:type usage :input 10 :output 5 :cache-read 900 :cache-write 0 :cost 0.5
+                   :context 915 :cache-at 1000.0 :cache-ttl 3600)
+            (:type done :stop-reason cancelled)))
+    (harness-agent-test-define-late t)
+    (let ((id (harness-agent-test-late-session)))
+      (harness-await (harness-call 'agent/prompt id "go"))
+      (harness-agent-test-await-report)
+      (sleep-for 0.1)
+      (let ((usage (plist-get (harness-call 'session/get id) :usage)))
+        (should (= 10 (plist-get usage :input)))
+        (should (= 0.5 (plist-get usage :cost)))
+        (should (= 1 (plist-get usage :turns)))))))
+
+(ert-deftest harness-agent-late-events-of-a-turn-a-tool-ended-are-only-its-usage ()
+  "Nothing but the usage of a turn that is over reaches the session.
+Its text, its tool calls and the end it reports are the turn's, and the
+turn is over: an assistant message written then, a hint, a state of the
+provider would belong to no turn."
+  (harness-agent-test-with
+    (setq harness-agent-test-after-cancel
+          '((:type text :delta "too late")
+            (:type hint :text "too late too")
+            (:type provider-state :state (:conv "late"))
+            (:type usage :input 10 :output 5 :cache-read 900 :cache-write 0
+                   :context 915 :cache-at 1000.0 :cache-ttl 3600)
+            (:type done :stop-reason cancelled)))
+    (harness-agent-test-define-late)
+    (let ((id (harness-agent-test-late-session)))
+      (harness-await (harness-call 'agent/prompt id "go"))
+      (harness-agent-test-await-report)
+      ;; Its usage was taken; the rest of the report was not.
+      (should (plist-get (harness-call 'session/get id) :cache))
+      (should-not (plist-get (harness-call 'session/get id) :provider-state))
+      (should-not (cl-find "too late" (harness-call 'session/nodes id)
+                           :key (lambda (n) (plist-get n :content)) :test #'string-prefix-p)))))
+
+(ert-deftest harness-agent-late-usage-that-counts-nothing-takes-nothing-away ()
+  "A report of a turn a tool ended that counts no token and no cost changes nothing.
+A CLI that answers the cancel with a result whose usage is empty has said
+nothing of the cache: read as a request that used none, it would drop the
+stamp the turn's own requests made (`cache-stamp') and the session's
+tokens stay as they were."
+  (harness-agent-test-with
+    (setq harness-agent-test-after-cancel
+          '((:type usage :input 0 :output 0 :cache-read 0 :cache-write 0 :cost 0.0)
+            (:type done :stop-reason cancelled)))
+    (harness-agent-test-define-late)
+    (let ((id (harness-agent-test-late-session)))
+      (harness-call 'session/usage-add id '(:input 10 :output 5 :cache-read 900 :context 915
+                                             :cache-at 1000.0 :cache-ttl 3600 :model "late:loop"))
+      (harness-await (harness-call 'agent/prompt id "go"))
+      (harness-agent-test-await-report)
+      (let ((s (harness-call 'session/get id)))
+        (should (equal '(:at 1000.0 :ttl 3600 :expires 4600.0 :model "late:loop") (plist-get s :cache)))
+        (should (= 10 (plist-get (plist-get s :usage) :input)))
+        (should (= 915 (plist-get (plist-get s :usage) :context)))))))
+
+(ert-deftest harness-agent-usage-after-a-turn-that-ended-by-itself-is-dropped ()
+  "A turn that ended on its own takes no usage afterwards: it had its own.
+Only a turn a tool ended answers its provider's cancel, whose report is
+the one it never got; any other is complete when its provider is done."
+  (harness-agent-test-with
+    (let ((report nil))
+      (harness-agent-test-define-hosted
+       (lambda (_prompt) '((:type text :delta "hi")
+                           (:type usage :input 10 :output 5 :cache-read 900 :cache-write 0
+                                  :context 915 :cache-at 1000.0 :cache-ttl 3600)
+                           (:type done :stop-reason end-turn))))
+      (let* ((orig (symbol-function 'harness-method/provider/complete))
+             (id (harness-agent-test-hosted-session)))
+        (cl-letf (((symbol-function 'harness-method/provider/complete)
+                   (lambda (request)
+                     (setq report (plist-get request :on-event))
+                     (funcall orig request))))
+          (harness-await (harness-call 'agent/prompt id "hello")))
+        (should (= 10 (plist-get (plist-get (harness-call 'session/get id) :usage) :input)))
+        ;; The same report again, as a provider that says it twice would.
+        (funcall report '(:type usage :input 10 :output 5 :cache-read 900 :cache-write 0
+                                :context 915 :cache-at 1000.0 :cache-ttl 3600))
+        (should (= 10 (plist-get (plist-get (harness-call 'session/get id) :usage) :input)))))))
+
 (ert-deftest harness-agent-step-writes-under-its-own-model ()
   "What a step reports belongs to the model it went to, though the session switched meanwhile.
 A switch applies from the next step: the reply names the model that

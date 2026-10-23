@@ -4105,13 +4105,18 @@ says otherwise once it is not.")
 `warm' while the prompt cache its requests last used is that model's
 and lasts at NOW, `expired' once it lapsed, `other' when it is another
 model's (the session switched since), nil when nothing is known.  See
-`handoff/check''s `:cache'."
+`handoff/check''s `:cache'.  Nothing is known of the cache of a session
+whose turn runs, once its stamp is past: a turn reads the cache with
+every request, and the stamp of a hosted loop (Claude Code) is the turn
+before's until the turn says its next request, so the cache is not
+reported lapsed at a moment before the turn began."
   (let* ((cache (plist-get check :cache))
          (expires (plist-get cache :expires))
          (from (plist-get check :from)))
     (when (numberp expires)
       (cond ((not (equal (or (plist-get cache :model) from) from)) 'other)
             ((< now expires) 'warm)
+            ((harness-json-true-p (plist-get check :running)) nil)
             (t 'expired)))))
 
 (defun harness-ui--handoff-compact-text (checks &optional now)

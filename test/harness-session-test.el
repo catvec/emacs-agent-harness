@@ -1296,6 +1296,127 @@ the turn's tokens say whether the cache was used at all."
       (harness-call 'session/usage-add id '(:input 100 :output 10 :context 5110 :cache-at 3000.0))
       (should-not (funcall cache)))))
 
+(ert-deftest harness-session-cache-stamp-follows-a-turn-request-by-request ()
+  "A hosted loop says each request it makes, and the session's cache moves with it.
+Its usage comes only when the turn is over, so until then the cache
+would read as of the turn before, lapsed or about to, while the turn
+reads it with every request.  A request moves the stamp on, the
+lifetime its provider says goes with it, and the model it went to is
+the cache's; nothing else of the usage changes."
+  (harness-session-test-with
+    (let* ((harness-cache-ttl 300)
+           (harness-cache-ttl-overrides nil)
+           (id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id))
+           (m (plist-get (harness-call 'session/get id) :model))
+           (cache (lambda () (plist-get (harness-call 'session/get id) :cache)))
+           (changed nil))
+      (harness-on 'session/changed (lambda (sid _s) (push sid changed)))
+      (harness-call 'session/usage-add id '(:input 10 :output 10 :cache-read 900 :context 920
+                                             :cache-at 1000.0 :cache-ttl 3600))
+      (let ((before (copy-sequence (plist-get (harness-call 'session/get id) :usage))))
+        (setq changed nil)
+        ;; A request of the next turn, read from the cache.
+        (should (equal `(:at 5000.0 :ttl 3600 :expires 8600.0 :model ,m)
+                       (harness-call 'session/cache-stamp id '(:at 5000.0 :used t))))
+        (should (equal `(:at 5000.0 :ttl 3600 :expires 8600.0 :model ,m) (funcall cache)))
+        (should (equal (list id) changed))
+        ;; Nothing else of what the session used moved.
+        (let ((after (plist-get (harness-call 'session/get id) :usage)))
+          (dolist (key '(:input :output :cache-read :cost :context :turns))
+            (should (equal (plist-get before key) (plist-get after key)))))
+        ;; The lifetime the request says is the cache's; one it does not say stays.
+        (harness-call 'session/cache-stamp id '(:at 5100.0 :ttl 300 :used t))
+        (should (equal `(:at 5100.0 :ttl 300 :expires 5400.0 :model ,m) (funcall cache)))
+        (harness-call 'session/cache-stamp id '(:at 5200.0 :used t))
+        (should (equal `(:at 5200.0 :ttl 300 :expires 5500.0 :model ,m) (funcall cache)))
+        ;; A request that says nothing of the cache moves a cache that exists.
+        (harness-call 'session/cache-stamp id '(:at 5300.0))
+        (should (= 5300.0 (plist-get (funcall cache) :at)))
+        ;; It is kept with the session.
+        (harness-session-flush)
+        (clrhash harness-sessions)
+        (harness-session--load-all)
+        (should (= 5300.0 (plist-get (funcall cache) :at)))))))
+
+(ert-deftest harness-session-cache-stamp-never-takes-the-stamp-back ()
+  "A request older than the stamp changes nothing: the later request is the cache's."
+  (harness-session-test-with
+    (let* ((harness-cache-ttl 300)
+           (harness-cache-ttl-overrides nil)
+           (id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id))
+           (m (plist-get (harness-call 'session/get id) :model))
+           (changed nil))
+      (harness-call 'session/usage-add id '(:input 10 :output 10 :cache-read 900 :context 920
+                                             :cache-at 2000.0))
+      (harness-on 'session/changed (lambda (sid _s) (push sid changed)))
+      (dolist (at '(2000.0 1500.0))
+        (harness-call 'session/cache-stamp id (list :at at :ttl 3600 :used t))
+        (should (equal `(:at 2000.0 :ttl 300 :expires 2300.0 :model ,m)
+                       (plist-get (harness-call 'session/get id) :cache))))
+      (should-not changed))))
+
+(ert-deftest harness-session-cache-stamp-makes-no-cache-of-its-own ()
+  "A request that did not use the cache stamps one only where one exists.
+A session that never had a cache, or none left, is not made to look
+warm by a request whose usage says it read and wrote nothing; one whose
+usage says it did starts one, and a session without a context has none
+to report whatever the stamp says."
+  (harness-session-test-with
+    (let* ((harness-cache-ttl 300)
+           (harness-cache-ttl-overrides nil)
+           (id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id))
+           (m (plist-get (harness-call 'session/get id) :model))
+           (cache (lambda () (plist-get (harness-call 'session/get id) :cache)))
+           (stamp (lambda () (plist-get (plist-get (harness-call 'session/get id) :usage) :cache-at))))
+      (harness-call 'session/usage-add id '(:input 100 :output 10 :context 110))
+      (should-not (harness-call 'session/cache-stamp id '(:at 1000.0)))
+      (should-not (funcall stamp))
+      (should-not (funcall cache))
+      ;; One that used it starts a cache, the first request's.
+      (harness-call 'session/cache-stamp id '(:at 2000.0 :used t))
+      (should (equal `(:at 2000.0 :ttl 300 :expires 2300.0 :model ,m) (funcall cache)))
+      ;; No context, no cache to report.
+      (let ((empty (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id)))
+        (harness-call 'session/cache-stamp empty '(:at 2000.0 :used t))
+        (should (plist-get (plist-get (harness-call 'session/get empty) :usage) :cache-at))
+        (should-not (plist-get (harness-call 'session/get empty) :cache)))
+      ;; A model the request names is the cache's.
+      (harness-call 'session/cache-stamp id '(:at 3000.0 :used t :model "other:model"))
+      (should (equal "other:model" (plist-get (funcall cache) :model)))
+      ;; A session that is gone says so, as the usage does.
+      (should-error (harness-call 'session/cache-stamp "nonesuch" '(:at 1.0 :used t))))))
+
+(ert-deftest harness-session-cache-stamp-is-a-new-cache ()
+  "A request that stamps is a new cache: what a redaction or a compaction marked is cleared.
+A cache a redaction dropped is gone from the drop on; the request that
+follows writes a new one.  A compaction that remembers the cache it
+replaced (`:cache-pending') stamps the first request that follows
+whether or not it says it used the cache."
+  (harness-session-test-with-loop
+    (let* ((harness-cache-ttl 300)
+           (harness-cache-ttl-overrides nil)
+           (m "test-loop:l")
+           (id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir) :model m) :id))
+           (cache (lambda () (plist-get (harness-call 'session/get id) :cache)))
+           (usage (lambda () (plist-get (harness-call 'session/get id) :usage))))
+      (harness-call 'session/usage-add id '(:input 10 :output 10 :cache-read 900 :context 920
+                                             :cache-at 1000.0))
+      ;; Dropped by a redaction's reset of the provider conversation.
+      (cl-letf (((symbol-function 'float-time) (lambda (&optional _) 1100.0)))
+        (harness-call 'session/reset-provider id))
+      (should (equal 1100.0 (plist-get (funcall cache) :dropped)))
+      (harness-call 'session/cache-stamp id '(:at 2000.0 :used t))
+      (should-not (plist-member (funcall usage) :cache-dropped))
+      (should (equal `(:at 2000.0 :ttl 300 :expires 2300.0 :model ,m) (funcall cache)))
+      ;; Compacted: the next request is the new cache, used or not.
+      (harness-call 'session/usage-add id '(:input 900 :output 200 :cache-read 900 :context 200
+                                             :cache-reset t))
+      (should-not (funcall cache))
+      (should (plist-get (funcall usage) :cache-pending))
+      (harness-call 'session/cache-stamp id '(:at 3000.0))
+      (should (equal `(:at 3000.0 :ttl 300 :expires 3300.0 :model ,m) (funcall cache)))
+      (should-not (plist-member (funcall usage) :cache-pending)))))
+
 (ert-deftest harness-session-cache-needs-context ()
   "A session whose usage says no context has nothing cached to lose."
   (harness-session-test-with

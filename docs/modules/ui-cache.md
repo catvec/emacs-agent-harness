@@ -74,6 +74,15 @@ waits on the question of what goes first, the cache being cold
 (harness-cowboy.el, drawn by harness-ui-cowboy.el), and while the
 compaction chosen there runs, the session running its turn.
 
+A session handed in (`hand_in`, which ends a task's turn) shows it like
+any other once its cache lapsed -- the conversation of a task in review
+goes cold as one waiting for the user does, and the feedback that sends
+it back sends the whole context again.  What says so is the session's
+`:cache`, and a hosted loop (Claude Code) gives the session one when
+its turn is over, which the tool's end comes before: the harness takes
+that report after the end (harness-agent.el), and says each request of
+the turn as it is made, so the stamp is the turn's own while it runs.
+
 The panel comes on its own: each chat buffer has one timer, for the
 moment its session's cache lapses, which draws the tail again then
 (`harness-compose-redraw`), the switch banner included.  Nothing

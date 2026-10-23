@@ -127,10 +127,12 @@ Nothing is reported to it then, until the UI connects to a harness again.")
 The result is (:session-id SID :warming BOOL :supported BOOL :tool BOOL
 :until TIME :manual-until TIME :active-at TIME :next TIME :expires TIME
 :ttl SECONDS :refreshes N :max-refreshes N :refresh-cost USD
-:resend-cost USD :blocked TEXT): the booleans t or nil, whatever came
-over JSON; the times, the lifetime and the prices a number or nil; the
-counts natural numbers, `:max-refreshes' nil when the harness names no
-limit; `:blocked' the reason nothing is kept warm, a text, or nil.
+:resend-cost USD :unsupported TEXT :blocked TEXT): the booleans t or
+nil, whatever came over JSON; the times, the lifetime and the prices a
+number or nil; the counts natural numbers, `:max-refreshes' nil when the
+harness names no limit; `:unsupported' why its provider cannot be asked
+to keep the cache warm now, and `:blocked' the reason nothing is kept
+warm, each a text, or nil.
 
 `:until' is where the warming period ends -- the earlier of the end of
 the period and of the refreshes that cost less than sending the
@@ -159,6 +161,8 @@ is none."
           :max-refreshes (let ((n (plist-get state :max-refreshes))) (and (natnump n) n))
           :refresh-cost (harness-ui-cache-warm--number (plist-get state :refresh-cost))
           :resend-cost (harness-ui-cache-warm--number (plist-get state :resend-cost))
+          :unsupported (let ((why (plist-get state :unsupported)))
+                         (and (stringp why) (not (string-blank-p why)) (string-trim why)))
           :blocked (let ((why (plist-get state :blocked)))
                      (and (stringp why) (not (string-blank-p why)) (string-trim why))))))
 
@@ -526,7 +530,11 @@ the harness cannot go through with says why, in the harness's words."
      ((and blocked (not (plist-get state :warming)))
       (format "Not keeping the prompt cache warm: %s" (string-trim-right blocked "[.]+")))
      ((not (plist-get state :supported))
-      "Nothing to keep warm: this session's provider has no way to refresh its prompt cache")
+      ;; Why, in the harness's words: a turn that runs reads the cache
+      ;; itself, which is not a provider with no way to refresh it.
+      (if-let* ((why (plist-get state :unsupported)))
+          (format "Nothing to keep warm now: %s" (string-trim-right why "[.]+"))
+        "Nothing to keep warm: this session's provider has no way to refresh its prompt cache"))
      ((plist-get state :warming)
       (let* ((end (or until (+ now seconds)))
              (refreshes (harness-ui-cache-warm--refreshes (max 0 (- end now)) state))

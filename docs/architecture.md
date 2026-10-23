@@ -758,7 +758,20 @@ record's tokens to say (`:cache-read` or `:cache-write` above 0):
 cache token stamps nothing.  A hosted loop's turn is one record that
 covers several requests, and its `:cache-at` is the time of the last of
 them, the one that kept the cache longest: an older time would have a
-cache that was just renewed look lapsed.  `:cache` is derived from them
+cache that was just renewed look lapsed.  That record comes only when
+the turn is over, so a hosted loop also says each request as the CLI
+makes it (a `cache-stamp` event of the provider, which the agent turns
+into `session/cache-stamp`): the stamp moves with the turn's requests, a
+request older than it changes nothing, and it stamps a cache only where
+the request used one or an earlier request did.  Without that the cache
+would read as of the turn before for as long as the turn runs, and a
+turn the CLI never closed with a result would leave the old stamp.  A
+turn a tool ended (`hand_in`: the provider is cancelled and the turn is
+over at once) still gets its record: the provider's `usage` event that
+comes after the end is taken by the agent all the same, and only that
+event of a turn that is over.  A session handed in would otherwise read
+0 tokens and $0 and have no cache for its chat to say lapsed.  `:cache`
+is derived from them
 each time the session is described, like `:context-window`: `:ttl` from
 `provider/cache-ttl` for the stamp's model (the reported lifetime, else
 the configured one), `:expires` = `:at` + `:ttl` and `:model` the
@@ -1000,7 +1013,11 @@ the text for one that does not (see agent).
   its tokens to say, not for `:cache-at`: the session stamps only a
   record with `:cache-read` or `:cache-write`.  Without them the
   record's own arrival stands for the time, and the configured lifetime
-  for the TTL (see "Session" and `provider/cache-ttl`).
+  for the TTL (see "Session" and `provider/cache-ttl`).  The same time
+  and lifetime go out earlier, one request at a time, as a `cache-stamp`
+  event (`(:type cache-stamp :at FLOAT :ttl N :used BOOL)`), which the
+  agent hands to `session/cache-stamp`: it moves the stamp only, records
+  no usage and counts no request.
 - `:model`, optional, is the model the request was sent to, which a
   step that ends after a switch tells from the session's; the cache the
   request used is that model's.  `:cache-reset`, optional, says the
@@ -1800,6 +1817,9 @@ Events delivered to `:on-event` (one plist each, in order):
        :cache-at FLOAT :cache-ttl N)    ; see Usage record; the last two optional
 (:type call-usage :output N :context N) ; hosted loops: one model call's output, counted by the turn's usage;
                                         ; :context, optional, the size of the call's prompt
+(:type cache-stamp :at FLOAT :ttl N :used BOOL) ; hosted loops: a main-conversation request was made at :at;
+                                        ; :ttl, optional, the lifetime known so far, :used whether its usage
+                                        ; says it read or wrote the prompt cache
 (:type provider-state :state PLIST)     ; persist on the session
 (:type activity :phase PHASE :tool NAME :chars N)  ; what the model is busy with, see below
 (:type quota :windows (…))
@@ -1875,6 +1895,20 @@ count left it.
   call's prompt. Sub-agent calls do not count, because their deltas do
   not stream into the conversation either.
 - Native loops send none: their `usage` event is already per call.
+
+`cache-stamp` says a request of a hosted loop's main conversation was
+made, as it is made, because the turn's `usage` comes only when the turn
+is over and carries just the last request's time.  The agent hands it to
+`session/cache-stamp`, which moves the session's prompt cache stamp and
+records nothing else, so the cache of a session whose turn runs -- a
+long tool call, a question waiting for its answer -- is as of the
+turn's own request, not as of the turn before.  Claude Code sends one
+for each request it notes (`:used` from the request's own usage, `:ttl`
+from the cache writes seen so far); the sub-agents' requests and the
+CLI's own outside a turn send none.  A `usage` event that comes after
+the turn a tool ended (`hand_in`) is taken all the same, unless it
+counts no token and no cost, which would only drop the stamp the turn's
+requests made; no other event of a turn that is over is.
 
 Forking: `provider/fork` returns a new provider state that may be marked
 pending (for the CLI: `(:cli-session-id PARENT :fork-pending t)`); the

@@ -139,7 +139,7 @@ that can be kept warm.  What is no state is nil."
                       :active-at "yesterday" :next 1290.0 :expires 1300.0 :ttl 300 :refreshes 3))))
     (should (equal '(:session-id "s1" :warming t :supported nil :tool nil :until 1500.5 :manual-until 1400
                      :active-at nil :next 1290.0 :expires 1300.0 :ttl 300 :refreshes 3
-                     :max-refreshes nil :refresh-cost nil :resend-cost nil :blocked nil)
+                     :max-refreshes nil :refresh-cost nil :resend-cost nil :unsupported nil :blocked nil)
                    read)))
   (let ((read (harness-ui-cache-warm--read "s9" '(:warming :false :refreshes -1 :ttl "300"))))
     (should (equal "s9" (plist-get read :session-id)))
@@ -691,6 +691,13 @@ for that, and what carrying on would cost; the state is kept."
       (let ((said (harness-ui-cache-warm-test--keep
                    1800 (harness-ui-cache-warm-test--state now :warming :false :supported :false))))
         (should (equal '("Nothing to keep warm: this session's provider has no way to refresh its prompt cache")
+                       said)))
+      ;; One that can, but not while its turn runs: that is no provider without a way.
+      (let ((said (harness-ui-cache-warm-test--keep
+                   1800 (harness-ui-cache-warm-test--state
+                         now :warming :false :supported :false
+                         :unsupported "a turn is running, and its own requests read the prompt cache"))))
+        (should (equal '("Nothing to keep warm now: a turn is running, and its own requests read the prompt cache")
                        said)))
       ;; Ending the period: said, and the state the harness answers with is kept.
       (let ((said (harness-ui-cache-warm-test--keep 0 nil)))

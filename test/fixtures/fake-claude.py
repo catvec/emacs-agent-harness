@@ -10,6 +10,16 @@ path is tested, and it honours an interrupt control request.
 
 Behaviour is chosen by the prompt text:
   "call echo"  -> issues a tools/call for mcp__harness__echo first
+  "call finish"
+               -> issues a tools/call for mcp__harness__finish first, a tool
+                  of the harness that ends the turn as hand_in does: the
+                  harness interrupts the CLI, which closes the turn with its
+                  result all the same
+  "call hand_in"
+               -> issues a tools/call for the harness's own mcp__harness__hand_in
+                  with a summary, a problem and a note as evidence: a task's
+                  session handing its work in, which ends the turn as
+                  "call finish" does
   "call bash"  -> calls the built-in Bash tool first, as if extra
                   arguments had given the model built-in tools
   "call another server"
@@ -929,6 +939,14 @@ class Fake:
         if "call echo" in text or "slow-tool" in text:
             calls.append((self.echo_name() or "mcp__harness__echo", {"text": "ping"}, "toolu_fake_1",
                           "slow-tool" in text))
+        if "call finish" in text:
+            calls.append(("mcp__harness__finish", {"why": "done"}, "toolu_fake_5", False))
+        if "call hand_in" in text:
+            calls.append(("mcp__harness__hand_in",
+                          {"summary": "The work is done: nothing was left to change.",
+                           "problem": "A task whose session handed its work in.",
+                           "evidence": [{"note": "Nothing to show but this note."}]},
+                          "toolu_fake_6", False))
         if "call bash" in text:
             calls.append(("Bash", {"command": "ls"}, "toolu_fake_2", False))
         if "call another server" in text:

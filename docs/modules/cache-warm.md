@@ -64,7 +64,10 @@ smoke test, whoever is around: the request the turn's latest step sent
 (`harness-agent-last-request`) is sent again, which reads the very
 cache that step wrote.  That is done for providers that are sent the
 conversation at every request; one that holds the conversation in a
-process has that process busy with the turn.
+process has that process busy with the turn, whose own requests read
+the cache.  The state says so (`:unsupported`), as it says why a
+provider that has no way to refresh one cannot, so that a session of
+Claude Code mid-turn is not told its provider is unable to.
 
 Keeping a cache warm is worth it only for as long as the refreshes cost
 less than sending the conversation again, uncached, would have: a

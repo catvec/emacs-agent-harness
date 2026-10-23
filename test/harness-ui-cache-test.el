@@ -50,6 +50,8 @@
 (declare-function harness-chat-send "harness-ui-chat")
 (declare-function harness-acp--drop-client "harness-acp")
 (declare-function harness-define-provider "harness-provider")
+(declare-function harness-define-tool "harness-tools")
+(declare-function harness-tool-ok "harness-tools" (content &rest props))
 (declare-function harness-provider--forget "harness-provider" (id))
 
 ;;;; What the panel shows, the clock fixed
@@ -898,6 +900,67 @@ cache lapses again."
       ;; A buffer opened once it lapsed shows it at once.
       (kill-buffer buffer)
       (should (harness-ui-cache-test--shows-p (harness-ui-cache-test--open sid))))))
+
+(ert-deftest harness-ui-cache-panel-shows-for-a-session-whose-turn-a-tool-ended ()
+  "A session handed in (`hand_in' ends its turn) says its cache expired like any.
+Its provider, a hosted loop such as Claude Code, reports what the turn
+used -- and with it when its last request used the cache -- only once
+the turn is over, which the tool's end did before the provider could:
+that report was dropped, and the session read 0 tokens and $0, had no
+cache, and its chat never said the cache lapsed.  Reported after the
+cancel, it stamps the session's cache, and the panel comes when it
+lapses, without any input, as for a session whose turn ended by itself."
+  (harness-ui-cache-test-with
+    (harness-add-filter 'permission/decide
+                        (lambda (_d next &rest _) (funcall next (list :behavior 'allow))) 10)
+    (harness-define-tool "finish" :label "Finish" :description "hand the work in" :kind 'meta
+                         :handler (lambda (_input _ctx) (harness-tool-ok "Handed in." :end-turn t)))
+    (harness-define-provider 'late
+      :label "Late"
+      :complete
+      (lambda (request)
+        (let ((on-event (plist-get request :on-event)))
+          (funcall on-event '(:type start))
+          (run-at-time 0.005 nil
+                       (lambda ()
+                         (funcall on-event (list :type 'tool-call :id "c1" :name "finish"
+                                                 :input '(:why "done") :respond #'ignore))))
+          (list :cancel (lambda ()
+                          ;; What the CLI says once it has answered the interrupt.
+                          (run-at-time 0.05 nil
+                                       (lambda ()
+                                         (funcall on-event (list :type 'usage :input 300 :output 20
+                                                                 :cache-read 84000 :cache-write 200
+                                                                 :context 84500 :cache-at (float-time)
+                                                                 :cache-ttl 3))
+                                         (funcall on-event '(:type done :stop-reason cancelled))))))))
+      :capabilities '(:hosted-loop t))
+    (let* ((sid (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir) :model "late:loop")
+                           :id))
+           (buffer (harness-ui-cache-test--open sid)))
+      (unwind-protect
+          (progn
+            (harness-ui-cache-test--send buffer "hand it in")
+            ;; Its usage, and its cache, arrive after the turn ended.
+            (harness-test-wait (lambda () (plist-get (harness-ui-session sid) :cache)) 10
+                               "the cache of the turn a tool ended")
+            (let* ((session (harness-ui-session sid))
+                   (expires (plist-get (plist-get session :cache) :expires))
+                   (shown (harness-ui-cache-test--shows-p buffer)))
+              (should (= 84500 (plist-get (plist-get session :usage) :context)))
+              (should (= 3 (plist-get (plist-get session :cache) :ttl)))
+              ;; Not before the cache lapses (unless a slow machine took that long).
+              (when (< (float-time) expires)
+                (should-not shown)))
+            ;; The panel comes by itself once the cache lapsed.
+            (harness-test-wait (lambda () (harness-ui-cache-test--shows-p buffer)) 10 "the cache panel")
+            (should (>= (float-time) (plist-get (plist-get (harness-ui-session sid) :cache) :expires)))
+            (should (string-match-p "Prompt cache expired  at [0-9:]+, 3 seconds after its last use"
+                                    (harness-ui-cache-test--text buffer)))
+            (should (string-match-p "Your next message re-sends ~84\\.5k tokens uncached"
+                                    (harness-ui-cache-test--text buffer))))
+        (remhash 'late harness-providers)
+        (harness-provider--forget 'late)))))
 
 (ert-deftest harness-ui-cache-panel-never-shows-without-a-cache ()
   "A new session and one whose requests used no cache never show the

@@ -49,6 +49,14 @@ queue.
 The tool is offered to task sessions only: the filter `agent/tools`
 removes it where there is no task to hand the work in to.
 
+Handing in ends the turn before its provider has said what the turn
+used.  A hosted loop (Claude Code) reports that -- tokens, cost, the
+size of the conversation and when its last request used the prompt
+cache -- in the message that closes the turn, after the harness cancelled
+it as the tool ended the turn; the agent takes that usage all the same
+(`harness-agent--late-event`), so a task in review has its cost and its
+prompt cache, and its chat says when that lapsed.
+
 ## Provides
 
 ### Tools

@@ -122,6 +122,7 @@ take it in.  The session list hides internal sessions unless asked.
 
 - `session/append` (id node) — Append NODE to session ID after the current head; return the stored node.
 - `session/btw` (id &optional name model) — Start a BTW side conversation over session ID; return its session.
+- `session/cache-stamp` (id record) — Note that session ID's conversation made a request while its turn runs.
 - `session/create` (&rest plist) — Create a session.  PLIST needs `:cwd`; see docs/architecture.md for the rest.
 - `session/deactivate` (id) — Mark session ID inactive (not open anywhere).
 - `session/delete` (id) — Delete session ID and its files, its temporary directory included.

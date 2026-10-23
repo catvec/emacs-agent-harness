@@ -684,6 +684,17 @@ for the session, by the user or through `session/update'."
 ;; its next request sends everything again uncached.  All three
 ;; persist with the session.
 ;;
+;; A hosted loop (Claude Code, Copilot) reports what a turn used only when
+;; the turn is over, so the stamp would read as of the turn before for as
+;; long as the turn runs -- a long tool call, a question waiting for its
+;; answer -- and for good when the turn never gets to say it.  The turn
+;; says each request as it is made instead (`session/cache-stamp'), the
+;; stamp moves on with it, and the turn's usage, when it comes, sets it
+;; for good.  That usage comes after the turn's end when a tool ended the
+;; turn (`hand_in'): the agent takes it all the same (harness-agent.el),
+;; or a session handed in would read 0 tokens and $0, and have no cache
+;; for its chat to say lapsed.
+;;
 ;; A cache serves the model that wrote it, no other, so a session
 ;; switched to another model has nothing cached for it whatever the
 ;; stamp says: its `:cache' names the stamp's model, which tells the two
@@ -2315,6 +2326,46 @@ them.  Return the totals."
     ;; A subscriber of the event may have added to the totals meanwhile
     ;; (the streamed output, see `session/usage-note').
     (harness-session-usage s)))
+
+(harness-defmethod session/cache-stamp (id record)
+  "Note that session ID's conversation made a request while its turn runs.
+RECORD is (:at TIME :ttl SECONDS :model MODEL :used BOOL): when the
+request was made, how long its provider keeps the cache it wrote (when
+it says), the model it went to (the session's when unsaid), and whether
+its usage says it read or wrote the prompt cache.  A hosted loop (Claude
+Code) reports what a turn used only when the turn is over, so until then
+the cache would read as of the turn before, lapsed or about to, while
+every request of the turn reads it: this moves the stamp on as each is
+made (see `harness-session--cache-stamp', which the turn's usage then
+sets for good).  Nothing but the stamp changes, no usage is recorded and
+no request counted.
+
+It stamps a cache that exists or a request that used one: a session
+whose last request used none, or that has none yet, is not made to look
+warm by a request that says nothing of the cache; a compaction that
+remembered the cache it replaced (`:cache-pending') stamps the first
+request that follows either way.  A request older than the stamp changes
+nothing, so a late word never takes the cache back, and, as any new
+stamp does, this clears the moment a redaction dropped the cache.  A
+lifetime RECORD does not say leaves the one the stamp had.  Return the
+session's `:cache' (see `harness-session--cache'), nil for none."
+  (let* ((s (harness-session--get id))
+         (u (harness-session-usage s))
+         (at (plist-get record :at))
+         (old (plist-get u :cache-at))
+         (ttl (plist-get record :ttl)))
+    (when (and (numberp at)
+               (or (harness-json-true-p (plist-get record :used))
+                   (numberp old)
+                   (harness-json-true-p (plist-get u :cache-pending)))
+               (or (not (numberp old)) (> at old)))
+      (let* ((u (harness-plist-remove u :cache-pending :cache-dropped))
+             (u (plist-put u :cache-at (float at)))
+             (u (plist-put u :cache-model (or (plist-get record :model) (harness-session-model s))))
+             (u (if (and (numberp ttl) (> ttl 0)) (plist-put u :cache-ttl ttl) u)))
+        (setf (harness-session-usage s) u)
+        (harness-session--touch s)))
+    (harness-session--cache s)))
 
 (harness-defmethod session/usage-note (id record)
   "Add what RECORD says session ID streamed to its usage totals.

@@ -2518,6 +2518,32 @@ ever; the other choices always do."
                               help))
       (should-not (string-match-p "warm cache" help)))))
 
+(ert-deftest harness-ui-handoff-choices-do-not-call-the-cache-of-a-running-turn-expired ()
+  "A session whose turn runs reads its cache with every request: it is not called lapsed.
+The stamp of a hosted loop (Claude Code) is the turn before's until the
+turn says its next request, and a switch made then summarises at the
+turn's next step, from a cache the turn has just used.  The switch
+banner would have said the cache expired at a moment before the turn
+began: a false alarm.  What the stamp says of another model's cache holds
+whatever the turn does, and so does a cache that is warm."
+  (let* ((now 10000.0)
+         (expired '(:from "a:m" :running t :cache (:at 9000.0 :ttl 300 :expires 9300.0 :model "a:m")))
+         (idle (plist-put (copy-sequence expired) :running nil))
+         (other '(:from "a:m" :running t :cache (:at 9900.0 :ttl 300 :expires 10200.0 :model "b:m")))
+         (warm '(:from "a:m" :running t :cache (:at 9900.0 :ttl 300 :expires 10200.0 :model "a:m")))
+         (usual (nth 3 (assq ?c harness-ui--handoff-choices)))
+         (describe (lambda (&rest checks) (nth 3 (assq ?c (harness-ui--handoff-choices-for checks now))))))
+    ;; The same stamp, said of an idle session, is a lapsed cache.
+    (should (equal (format "cache expired at %s: re-reads it all uncached" (harness-ui-format-clock 9300.0 now))
+                   (funcall describe idle)))
+    (should (equal usual (funcall describe expired)))
+    (should (equal usual (funcall describe warm)))
+    (should (equal "cache cold: re-reads it all uncached" (funcall describe other)))
+    ;; A batch counts the lapsed caches of the sessions that wait.
+    (should (equal "re-reads it all uncached where the cache lapsed (1 of 2)"
+                   (funcall describe idle expired)))
+    (should (equal usual (funcall describe expired warm)))))
+
 (ert-deftest harness-ui-handoff-choices-say-when-a-redaction-dropped-the-cache ()
   "A cache a redaction dropped (the check's `:cache' has `:dropped') is not one that lapsed.
 Asked about one session, the choice says when the redaction dropped it, as

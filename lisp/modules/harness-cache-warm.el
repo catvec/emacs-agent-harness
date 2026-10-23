@@ -54,7 +54,10 @@
 ;; (`harness-agent-last-request') is sent again, which reads the very
 ;; cache that step wrote.  That is done for providers that are sent the
 ;; conversation at every request; one that holds the conversation in a
-;; process has that process busy with the turn.
+;; process has that process busy with the turn, whose own requests read
+;; the cache.  The state says so (`:unsupported'), as it says why a
+;; provider that has no way to refresh one cannot, so that a session of
+;; Claude Code mid-turn is not told its provider is unable to.
 ;;
 ;; Keeping a cache warm is worth it only for as long as the refreshes cost
 ;; less than sending the conversation again, uncached, would have: a
@@ -186,27 +189,39 @@ step that follows the tool will send the conversation."
        (harness-method-exists-p 'agent/activity)
        (eq 'tool (plist-get (harness-call 'agent/activity sid) :phase))))
 
-(defun harness-cache-warm--supported-p (session)
-  "Non-nil when SESSION's provider can be asked to read its cache again.
-An API provider is sent the conversation as it is at every request, so
-it can: while the session waits for the user, with a message added, and
-while its turn waits on a tool, with the request of its latest step again
-\(`harness-agent-last-request').  One that holds the conversation itself
-says it can when sending it a message only keeps the cache of that
-conversation warm (`:cache-refresh'), and only while it holds this
-session's and no turn runs: its process is busy with the turn."
+(defun harness-cache-warm--unsupported (session)
+  "Return why SESSION's cache cannot be read again now, or nil when it can.
+That is why its provider cannot be asked to: a few words that follow
+\"Nothing to keep warm now:\".  An API provider is sent the conversation
+as it is at every request, so it can: while the session waits for the
+user, with a message added, and while its turn waits on a tool, with the
+request of its latest step again (`harness-agent-last-request'), which a
+turn that has sent none cannot be asked.  One that holds the
+conversation itself says it can when sending it a message only keeps the
+cache of that conversation warm (`:cache-refresh'), and only while it
+holds this session's and no turn runs: its process is busy with the
+turn, whose own requests read the cache -- which is why its cache is not
+warmed then, and not that its provider is unable to."
   (let* ((sid (plist-get session :id))
          (model (plist-get session :model))
          (running (harness-cache-warm--running-p sid)))
     (if (harness-cache-warm--hosted-p session)
-        (and (not running)
-             (harness-json-true-p (plist-get (ignore-errors (harness-call 'provider/capabilities model))
-                                             :cache-refresh))
-             (harness-method-exists-p 'session/provider-state)
-             (harness-call 'session/provider-state sid model)
-             t)
-      (or (not running)
-          (and (fboundp 'harness-agent-last-request) (harness-agent-last-request sid) t)))))
+        (cond
+         (running "a turn is running, and its own requests read the prompt cache")
+         ((not (harness-json-true-p (plist-get (ignore-errors (harness-call 'provider/capabilities model))
+                                               :cache-refresh)))
+          "its provider has no way to refresh the prompt cache of the conversation it holds")
+         ((not (and (harness-method-exists-p 'session/provider-state)
+                    (harness-call 'session/provider-state sid model)))
+          "its provider holds no conversation of this session's yet"))
+      (and running
+           (not (and (fboundp 'harness-agent-last-request) (harness-agent-last-request sid)))
+           "its turn has sent no request yet"))))
+
+(defun harness-cache-warm--supported-p (session)
+  "Non-nil when SESSION's provider can be asked to read its cache again.
+See `harness-cache-warm--unsupported' for when it cannot."
+  (null (harness-cache-warm--unsupported session)))
 
 (defun harness-cache-warm--economics (sid)
   "Return what keeping session SID's cache warm costs against letting it lapse.
@@ -261,11 +276,14 @@ SESSION is its plist, NOW the time, by default the current one.  The state
 is (:session-id SID :warming BOOL :until TIME :manual-until TIME
 :active-at TIME :next TIME :refreshes N :max-refreshes N :refresh-cost USD
 :resend-cost USD :tool BOOL :ttl SECONDS :expires TIME :supported BOOL
-:blocked WHY).  `:warming' says the cache is being kept alive now: keeping
-caches warm is on, the provider can, nothing stopped it, the user counts as
-around or the turn waits on a tool call, and the session has a cache that
-has not lapsed.  `:until' is the end of the period -- of the user's, or the
-count of refreshes that pay, whichever is first --, `:manual-until' that of
+:unsupported WHY :blocked WHY).  `:warming' says the cache is being kept
+alive now: keeping caches warm is on, the provider can, nothing stopped it,
+the user counts as around or the turn waits on a tool call, and the session
+has a cache that has not lapsed.  `:unsupported' says why the provider
+cannot now, when it cannot (`harness-cache-warm--unsupported'); a hosted
+loop cannot while its turn runs, though its provider can.  `:until' is the
+end of the period -- of the user's, or the count of refreshes that pay,
+whichever is first --, `:manual-until' that of
 the one the user asked for, `:active-at' the last sign of life, `:next'
 when the next refresh is due, `:refreshes' how many were made since the
 session's last request, `:max-refreshes' how many pay, `:refresh-cost' and
@@ -286,7 +304,8 @@ lapses."
              (left (- (plist-get eco :max) count))
              (blocked (or (gethash sid harness-cache-warm--blocked)
                           (gethash sid harness-cache-warm--capped)))
-             (supported (harness-cache-warm--supported-p session))
+             (unsupported (harness-cache-warm--unsupported session))
+             (supported (null unsupported))
              ;; The refreshes that pay end the period, where the user's
              ;; does not come first.
              (cap-until (and expires (> left 0) (+ expires (* (1- left) (- ttl lead)))))
@@ -305,6 +324,7 @@ lapses."
               :refresh-cost (plist-get eco :refresh) :resend-cost (plist-get eco :resend)
               :tool (if tool t :false)
               :ttl ttl :expires expires :supported (if supported t :false)
+              :unsupported unsupported
               :blocked blocked)))))
 
 (defun harness-cache-warm--same-p (a b)
@@ -365,13 +385,16 @@ session that is gone or has none."
 The state is (:session-id SID :warming BOOL :until TIME :manual-until
 TIME :active-at TIME :next TIME :refreshes N :max-refreshes N
 :refresh-cost USD :resend-cost USD :tool BOOL :ttl SECONDS :expires TIME
-:supported BOOL :blocked WHY).  `:warming' says the session's cache is
-being kept alive: keeping caches warm is on (`harness-cache-warm'), its
-provider can be asked to, nothing stopped it, the user counts as around
-\(`cache/presence') or the turn waits on a tool call, and the cache has
-not lapsed.  `:until' is the end of the period, the user's or that of the
-refreshes that cost less than sending the conversation again, whichever
-comes first; `:manual-until' that of the one asked for by hand,
+:supported BOOL :unsupported WHY :blocked WHY).  `:warming' says the
+session's cache is being kept alive: keeping caches warm is on
+\(`harness-cache-warm'), its provider can be asked to, nothing stopped it,
+the user counts as around (`cache/presence') or the turn waits on a tool
+call, and the cache has not lapsed.  `:unsupported' says why its provider
+cannot be asked to now, when it cannot: a turn is running in the process
+that holds a hosted loop's conversation, say.  `:until' is the end of the
+period, the user's or that of the refreshes that cost less than sending
+the conversation again, whichever comes first; `:manual-until' that of
+the one asked for by hand,
 `:active-at' the time of the last sign of life, `:next' when the next
 refresh is due, `:refreshes' how many were made since the session's last
 request, `:max-refreshes' how many pay, `:refresh-cost' and `:resend-cost'

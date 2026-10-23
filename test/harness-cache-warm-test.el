@@ -824,6 +824,48 @@ waits for the user, not while a tool runs."
       (cl-letf (((symbol-function 'harness-cache-warm--running-p) (lambda (_) t)))
         (should-not (harness-cache-warm--supported-p (harness-call 'session/get sid)))))))
 
+(ert-deftest harness-cache-warm-says-why-a-cache-cannot-be-kept-warm ()
+  "A state that says its cache cannot be kept warm says why.
+A hosted loop's cache is not kept warm while its turn runs, and the
+reason is not that its provider cannot: the turn's own requests read the
+cache, and the process that holds the conversation is busy with them.
+Another says it has no way, another that it holds no conversation of
+the session's yet; a cache that can be kept warm has no reason."
+  (harness-cache-warm-test-with
+    (let ((hosted (harness-cache-warm-test-session "hosted:m"))
+          (stubborn (harness-cache-warm-test-session "stubborn:m"))
+          (api (harness-cache-warm-test-session "api:m"))
+          (empty (harness-cache-warm-test-session "hosted:m")))
+      (harness-call 'session/set-provider-state empty nil)
+      (dolist (sid (list hosted stubborn api empty))
+        (harness-call 'cache/active sid))
+      (let ((why (lambda (sid) (plist-get (harness-call 'cache/warm sid) :unsupported))))
+        (dolist (sid (list hosted api))
+          (should (eq t (plist-get (harness-call 'cache/warm sid) :supported)))
+          (should-not (funcall why sid)))
+        (should (eq :false (plist-get (harness-call 'cache/warm stubborn) :supported)))
+        (should (string-match-p "no way to refresh" (funcall why stubborn)))
+        (should (string-match-p "holds no conversation" (funcall why empty)))
+        ;; While its turn runs.
+        (cl-letf (((symbol-function 'harness-cache-warm--running-p) (lambda (sid) (equal sid hosted))))
+          (should (eq :false (plist-get (harness-call 'cache/warm hosted) :supported)))
+          (let ((text (funcall why hosted)))
+            (should (string-match-p "turn is running" text))
+            (should (string-match-p "requests read the prompt cache" text))
+            (should-not (string-match-p "no way" text))))
+        ;; Where it can again, nothing is said.
+        (should-not (funcall why hosted))
+        ;; A provider that is sent the conversation every time can be asked
+        ;; while its turn waits on a tool, but not before the turn sent a request.
+        (cl-letf (((symbol-function 'harness-cache-warm--running-p) (lambda (sid) (equal sid api)))
+                  ((symbol-function 'harness-agent-last-request) (lambda (_sid) nil)))
+          (should (string-match-p "sent no request yet" (funcall why api)))
+          (should (eq :false (plist-get (harness-call 'cache/warm api) :supported))))
+        (cl-letf (((symbol-function 'harness-cache-warm--running-p) (lambda (sid) (equal sid api)))
+                  ((symbol-function 'harness-agent-last-request) (lambda (_sid) '(:model "api:m"))))
+          (should-not (funcall why api))
+          (should (eq t (plist-get (harness-call 'cache/warm api) :supported))))))))
+
 (ert-deftest harness-cache-warm-the-demo-provider-reads-the-cache-for-a-refresh ()
   "The demo provider answers a refresh as one that caches the conversation would:
 it reads all of it from the cache, so a demo session is kept warm like any."
