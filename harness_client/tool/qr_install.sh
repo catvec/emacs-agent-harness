@@ -66,6 +66,12 @@ pub get" does not notice.  The script looks for such packages before the build
 and after a failed one, reinstalls the packages in pubspec.lock with "flutter
 pub cache repair", and builds again.
 
+A build that fails with "cannot find symbol" in GeneratedPluginRegistrant.java
+means a plugin's compiled classes in build/ are left over from an older version
+of it.  android/gradle.properties keeps Kotlin from being compiled on top of an
+older build for that reason, so it should not happen; if it does, "flutter
+clean" throws the build away.
+
 Options:
   --build          build the APK even when it is up to date
   --no-build       never build; fail when the APK is missing
@@ -287,6 +293,11 @@ build_apk() {
     note "that does not exist, a package there lost files that could not be found by" >&2
     note "looking.  Reinstall every package in pubspec.lock with:" >&2
     note "  (cd $project_dir && $flutter pub cache repair)" >&2
+    note "" >&2
+    note "If they say \"cannot find symbol\" in GeneratedPluginRegistrant.java, the compiled" >&2
+    note "classes of a plugin in build/ are left over from an older version of it.  Throw the" >&2
+    note "build away and build again:" >&2
+    note "  (cd $project_dir && $flutter clean)" >&2
   fi
   exit "$status"
 }

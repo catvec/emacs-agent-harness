@@ -63,6 +63,19 @@
   from `git archive HEAD`, and this tree with 2.5.2) and what each leaves of
   those classes in `mapping.txt`, with the merged keep rules.
 
+- `build-check.txt` — the report "flutter builds fail ... make sure tasks which
+  work on the app dont submit a broken build": the release build that stopped
+  in `GeneratedPluginRegistrant.java` with `cannot find symbol ...
+  SharedPreferencesPlugin` is not a defect of the tree (HEAD builds from an
+  empty `build/`) but what raising `shared_preferences_android` from 2.5.0 to
+  2.5.2 does to the `build/` already there, through Kotlin's incremental
+  compiler; reproduced with the real toolchain, mended by
+  `kotlin.incremental=false` in `android/gradle.properties`.  Why tasks hand in
+  apps that do not build (nothing in a sandbox can, and the app's own tests have
+  been red since a layout rewrite: a bisect), and `tool/check_build.sh`, run on
+  the change that broke the build (it fails in the build over the base's build,
+  the clean build passes) and with the fix (it passes and leaves a stamp).
+
 The toolchain pieces above are reproducible: `tool/install_flutter.sh` installs
 the pinned Flutter SDK under `~/.local/share/flutter-versions` and installs the
 `tool/flutter` launcher as `~/.local/bin/flutter`, keeping the previous

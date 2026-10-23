@@ -8345,7 +8345,36 @@ cannot be finished: it goes to the user's input instead of review,
 nothing merges, and evidence may be empty -- the summary says what
 blocks it.  `no_merge' is for work that changes nothing: it still waits
 for review, and verifying it completes the task without the merge
-queue.
+queue.  A project can hold a hand-in that is to be merged to checks of
+its own: before the report is recorded, the async filter
+`task/before-hand-in' (value nil, args TASK and the plist of its session)
+is run, each function called as `(FN REFUSAL NEXT TASK SESSION)' and
+passing on, through `NEXT' or as a promise, REFUSAL as it was or with a
+text that says what to do first added after a blank line.  A refusal
+answers the call as an error with that text and records nothing.  A
+function that signals, or whose promise is rejected, refuses nothing;
+a hand-in that says `cannot_continue' or `no_merge' is not put to the
+filter; the report itself is checked first.  The harness knows no
+project: the filter runs for every session of the process, so a
+function asks first whether the session is one of its project's
+(`plugins/of-session').  This repository's plugin
+(.harness/plugins/dev/harness-client-check.el, module client-check)
+adds one: a task of this repository that changed the Flutter app
+(`harness-client-check--paths', under harness_client/) -- against the
+merge base with the task's `:base', or in the worktree, uncommitted --
+is refused with what to run (`harness_client/tool/check_build.sh')
+unless the stamp that check leaves in the worktree
+(`harness-client-check--stamp') says `pass' for a commit in the
+branch's history, the app's paths are as they were in that commit and
+nothing in them is uncommitted.  It asks git in the background
+(`harness-revision-git'), only reads the stamp, and never runs the
+worktree's script, which the task's agent may have changed, outside the
+sandbox.  What git cannot answer (no base, no repository, a remote
+directory) holds nothing back.  The sessions it asks are those whose
+plugin modules name `client-check', as the repository's directory-local
+variables have them do beside `tools-dev', once the user trusts that
+entry; a session keeps the list it started with, so a task that began
+before that is not asked.
 
 `compact` (`tools-compact`) lets an agent compact its own conversation
 when it sees the context filling up mid-task, and lets the harness ask

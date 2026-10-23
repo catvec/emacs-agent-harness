@@ -3383,6 +3383,15 @@ with), `recap` writes the recaps on the cards,
   your input* instead, and nothing merges. `no_merge` is for
   informational work that changes nothing: it still waits for your
   review, and verifying it completes the task without the merge queue.
+  A project can hold a hand-in to checks of its own (the filter
+  `task/before-hand-in`; see [A project's own
+  plugins](#a-projects-own-plugins)): this repository's plugin refuses a
+  task that changed its Flutter app (`harness_client/`) until the app's
+  build check has passed for the commit (`harness_client/tool/check_build.sh`),
+  and says what to run, so an app that does not build is not what you are
+  asked to review. The harness itself asks nothing of any task, and a
+  task of another project is asked nothing. See
+  [Development](#development).
 - `[Review]` on a card that has a report, or on the banner, pops the
   handed-in summary and evidence out beside the board: images large, as
   wide as the popout, videos as thumbnails, files as buttons, and each
@@ -5244,11 +5253,26 @@ own does:
 - it adds its methods' prefix to `harness-acp-extra-method-prefixes`
   when its UI half calls them;
 - a UI module adds actions to the menu of a task board card through
-  `harness-ui-tasks-action-functions`.
+  `harness-ui-tasks-action-functions`;
+- it holds a task's hand-in to a check of its own by adding a function to
+  the asynchronous filter `task/before-hand-in`, which `hand_in` runs for
+  work that is to be merged (not for a task that cannot continue, or has
+  nothing to merge). The function is called as `(FN REFUSAL NEXT TASK
+  SESSION)` and passes on, as a promise or through `NEXT`, `REFUSAL` as it
+  was or with a text that says what to do first added after a blank line;
+  the hand-in is then answered with that text, as an error, and nothing is
+  recorded. A function that signals refuses nothing. The filter runs for
+  every session of the harness, so the function asks first whether the
+  session is one of its project's (`plugins/of-session` gives the plugin
+  modules a session froze), as the tools of a plugin are offered only to
+  those that name it.
 
 The harness's own repository has one plugin, `.harness/plugins/dev/`,
 which its `.dir-locals.el` loads: the `open_harness` tool and the task
-board's Open harness (see [Development](#development)).
+board's Open harness, and the check a hand-in of its Flutter app is held
+to (see [Development](#development)). None of it is the harness's: a
+user of the harness who does not work on this repository is asked nothing
+of the kind.
 
 Further documentation:
 
@@ -5274,6 +5298,7 @@ scripts/lint.sh [--checkdoc]                 # byte-compile every file out of tr
 scripts/dev.sh start                         # start a clean development Emacs
 scripts/media.sh [NAME...]                   # take the screenshots in docs/media again
 scripts/module-docs.sh [--check]             # write the module pages in docs/modules again
+harness_client/tool/check_build.sh           # build the Flutter app as committed; this repository's hand_in asks for it of an app change
 make -C lisp/vendor/compose-quote test       # a vendored library's own tests, on their own
 make -C lisp/vendor/change-review test
 make -C lisp/vendor/worktree-assume test
@@ -5288,6 +5313,13 @@ module provides or uses, and commit the pages it writes;
 Tests that talk to real models run only when `HARNESS_INTEGRATION=1` is
 set. See [docs/dev-loop.md](docs/dev-loop.md) for the full workflow.
 
+The suites above are about the Emacs side. The Flutter app in `harness_client/`
+has its own check, which builds it (`harness_client/tool/check_build.sh`, see
+[docs/dev-loop.md](docs/dev-loop.md#the-flutter-apps-build-check)): in the
+sessions of this repository a task that changes the app cannot hand in
+without it, because tasks did hand in apps that did not build. That is the
+repository's plugin below, not the harness: no other project's task is asked.
+
 The tools for developing the harness are not part of it. They are this
 repository's own plugin, in `.harness/plugins/dev/` (see
 [A project's own plugins](#a-projects-own-plugins)), which the
@@ -5299,7 +5331,13 @@ They are:
 - the `open_harness` tool, which runs a worktree's harness in an Emacs
   of its own for the agent to try its work in;
 - Open harness, in the menu of a task waiting for review (see
-  [Task board](#task-board)).
+  [Task board](#task-board));
+- the build check of the Flutter app at hand-in
+  (`.harness/plugins/dev/harness-client-check.el`): a task that changed
+  `harness_client/` is refused until `harness_client/tool/check_build.sh` has
+  passed for it. Only the sessions that name `client-check` in
+  `harness-plugin-modules`, as the repository's `.dir-locals.el` has them do
+  beside `tools-dev`, are asked; a session keeps the list it started with.
 
 A development Emacs (`scripts/dev.sh start`) never asks: it leaves out
 the directory-local variables that are not safe as they are, so it

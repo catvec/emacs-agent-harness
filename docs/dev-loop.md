@@ -92,6 +92,90 @@ the suite again costs minutes.  A failing run prints each failing
 suite's log path; quote that log, or the call that ran it, as the
 evidence for what the run showed.
 
+## The Flutter app's build check
+
+`scripts/test.sh` and `scripts/lint.sh` are about Emacs Lisp.  Nothing in
+them builds `harness_client/`, the Flutter app, and a task's sandbox has no
+Flutter, no JDK and no Android SDK of its own, so tasks handed in apps that
+did not compile (`tasks_screen.dart` used a name it had not defined), whose
+own tests failed (31 fail on main today, unseen since a layout rewrite), and
+whose release build died on the phone installer's machine (below).  The first a
+person saw of each was a build that failed.
+
+```sh
+harness_client/tool/check_build.sh --accept-android-licenses   # the check; leaves a stamp
+harness_client/tool/check_build.sh                             # the same, where an Android SDK is installed
+harness_client/tool/check_build.sh --quick                     # analyze + test the working tree
+harness_client/tool/check_build.sh --status                    # does the stamp cover the app as committed?
+harness_client/tool/client_toolchain.sh                        # the toolchain on its own (prints exports)
+```
+
+All of this is **this repository's**, not the harness's: the harness knows
+no Flutter app and asks no task for any of it.  The pieces are
+`harness_client/tool/` (the check and its toolchain) and a plugin,
+`.harness/plugins/dev/harness-client-check.el`, that makes the sessions of
+this repository's `hand_in` ask for it; a task of another project is asked
+nothing, and neither is one that changed nothing of the app.
+
+The check builds what is **committed**, in a copy under
+`scripts/.dev/client-check/work/` (never in the checkout), and runs, in
+order: `flutter pub get --enforce-lockfile` (`pubspec.lock` agrees with
+`pubspec.yaml`), `flutter analyze`, `flutter test`, and `flutter build apk
+--release`, from an empty `build/`, which is what `tool/qr_install.sh`
+installs.  When `pubspec.yaml`, `pubspec.lock`, `.flutter-version` or
+`android/` differ from the base's, it builds the base's tree first and then
+the branch's tree over that `build/`: the build a person makes after
+merging, over the one they made before (a base that does not build itself is
+said, and skipped).  A build from scratch cannot see
+what that finds (`shared_preferences_android` 2.5.0 -> 2.5.2 lost its plugin
+class that way, and the installer's build stopped with `cannot find symbol`
+in `GeneratedPluginRegistrant.java`; `android/gradle.properties` now compiles
+Kotlin from scratch every time).  When `tool/` differs from the base's it runs
+the tools' own tests too.  The whole output of each step is kept in
+`scripts/.dev/client-check/logs/`, one file a step.
+
+The app's tests are compared with the base's by name.  A test that fails
+here and failed at the base too is somebody else's breakage: it is listed
+and held against nobody, so a red main does not stop every branch; a test
+that fails here and passed there fails the check, and so does a test file
+that no longer loads.
+
+When everything passed the check writes
+`scripts/.dev/client-check/stamp.json`, naming the commit.  The plugin
+reads it with git when a task of this repository hands in (it never runs
+the worktree's script outside the sandbox): a task whose branch changed the
+app (the paths in `harness-client-check--paths`) is refused, by the
+filter `task/before-hand-in` that `hand_in` offers any project, unless the
+stamp says `pass` for a commit in its history, the app's paths are as they
+were in that commit, and nothing in them is uncommitted.  Notes, evidence
+and the Emacs side may be committed after the check.  A task that cannot
+continue, or has nothing to merge, is not held to it.  The sessions asked
+are those whose plugin modules name `client-check`, as the repository's
+directory-local variables have them do beside `tools-dev`: after you trust
+that entry (Emacs asks again when the file changes: visit a file of the
+checkout and answer `!`) the sessions that start are asked, and no other
+session is.  A session keeps the list it started with, so a task already
+running when you trust it is not.
+
+The toolchain is the Flutter SDK pinned in `.flutter-version`, a JDK 17 to 21
+and an Android SDK with the components `android/gradle.properties` pins.  A
+machine that has them (`FLUTTER_VERSIONS_DIR`, `JAVA_HOME`, `ANDROID_HOME`)
+uses them; otherwise `tool/client_toolchain.sh` installs them, pinned and
+checksummed, under `.git/harness-client-toolchain` (every worktree of a
+repository shares its `.git`, so only the first task pays for the gigabytes;
+`HARNESS_CLIENT_TOOLCHAIN` moves it).  Installing an Android SDK means
+accepting its licences, which `--accept-android-licenses` does, for that SDK
+only and only when the script has to install one: where an SDK with the
+components is installed already (`ANDROID_HOME`), the flag does nothing and
+no licence is accepted.  A task's sandbox has none, which is why the plugin's
+instructions to a task name the flag.  Pub's and Gradle's caches are the
+toolchain's own, never `~/.pub-cache` (a sandboxed shell that sees part of it
+makes pub delete real files there).
+
+```sh
+python3 harness_client/tool/test_check_build.py   # the check's own tests, with a fake flutter
+```
+
 ## Evidence when there is no display
 
 `scripts/dev.sh shot` exports the frame and that PNG is the evidence

@@ -21,6 +21,12 @@
 # --changed is for the loop while working: it runs the suites the
 # working tree's changes touch.  The full run, with no arguments, is
 # what a task runs once before handing its work in.
+#
+# These are the Emacs suites.  The Flutter app in harness_client/ has its own
+# check, harness_client/tool/check_build.sh, which builds it; a run here that
+# finds the app changed says so at the end, since no suite here would notice
+# an app that does not build, and this repository's hand_in (its plugin,
+# .harness/plugins/dev/harness-client-check.el) refuses an app change without it.
 set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
@@ -56,6 +62,23 @@ if ! mkdir -p "$LOGS"; then
   exit 2
 fi
 
+# Whether the branch has changed what the Flutter app is built from, committed
+# since it left main or not, and whether the app's build check has passed for
+# it: the check knows which paths those are.  No suite here builds the app.
+app_reminder() {
+  local check=harness_client/tool/check_build.sh status
+  [ -x "$check" ] || return 0
+  "$check" --changed >/dev/null 2>&1 || return 0
+  if status=$("$check" --status 2>&1); then
+    echo "The Flutter app (harness_client/) changed on this branch; ${status#check_build: }."
+    return 0
+  fi
+  echo "The Flutter app (harness_client/) changed on this branch, and no suite here builds it:"
+  echo "  ${status%%$'\n'*}"
+  echo "  $check --accept-android-licenses   builds it (minutes; hand_in asks for it)"
+  echo "  $check --quick                     analyze + test the working tree only"
+}
+
 # --changed: the suites the working tree's changes touch.  A test file
 # runs itself; a module runs the suite named after it and every suite
 # that names the module; a test helper, a fixture or harness.el itself
@@ -88,7 +111,7 @@ if [ "$changed" = 1 ]; then
         run_all="${run_all:+$run_all; }$p is a test helper or fixture, which every suite loads" ;;
       harness.el)
         run_all="${run_all:+$run_all; }harness.el loads every module" ;;
-      lisp/*/harness-*.el|lisp/harness-*.el)
+      lisp/*/harness-*.el|lisp/harness-*.el|.harness/plugins/*/harness-*.el)
         base=$(basename "$p" .el)
         short=${base#harness-}
         found=0
@@ -98,9 +121,11 @@ if [ "$changed" = 1 ]; then
         # to run for it: say so, rather than skipping it silently.
         [ "$found" = 1 ] || uncovered+=("$p")
         ;;
+      harness_client/*) ;;   # not Emacs Lisp: app_reminder says what covers it
       *) uncovered+=("$p") ;;
     esac
   done
+  app_reminder
   if [ -n "$run_all" ]; then
     echo "test.sh --changed: running every suite: $run_all"
     files=(test/harness-*-test.el)
@@ -231,5 +256,6 @@ done
 sayf '%s: %d files, %d failed, %ds wall (%d at a time)' \
      "$(basename "$0")" "${#files[@]}" "${#failed[@]}" "$((SECONDS - started))" "$JOBS"
 [ "${#failed[@]}" -eq 0 ] || sayf 'failed: %s' "${failed[*]}"
+app_reminder | while IFS= read -r line; do say "$line"; done
 cp "$REPORT" "$LOGS/last-run.txt"
 exit $fail

@@ -186,17 +186,19 @@ plugin goes, wherever the tests run from."
     (file-name-as-directory dir)))
 
 (ert-deftest harness-tools-dev-repository-names-its-plugin ()
-  "This repository's .dir-locals.el loads the plugin and names tools-dev.
+  "This repository's .dir-locals.el loads the plugin and names its modules.
 Applied as the harness process applies a project's variables, with
 its entries trusted as Emacs's `!' trusts them, the `require' loads the
-plugin's process half -- module tools-dev, a plugin module, started --
-and the sessions of the repository get tools-dev.  Untrusted, nothing
-loads and they get none.  In a checkout nested in another, such as a
-task's worktree, which an agent writes, the entries name tools-dev all
-the same but load nothing: the plugin comes from a main checkout."
+plugin's process half -- modules tools-dev and client-check, plugin
+modules, started -- and the sessions of the repository get both.
+Untrusted, nothing loads and they get none.  In a checkout nested in
+another, such as a task's worktree, which an agent writes, the entries
+name both all the same but load nothing: the plugin comes from a main
+checkout."
   (harness-test-with-temp-state
     (harness-test-reset-bus)
-    (dolist (m '(tools plugins))
+    (dolist (m '(store project config provider provider-demo tools session agent tools-handin
+                       plugins))
       (harness-test-load-module m))
     (let* ((file (expand-file-name ".dir-locals.el" harness-test-root))
            (entries (cdr (assq nil (with-temp-buffer
@@ -208,28 +210,71 @@ the same but load nothing: the plugin comes from a main checkout."
            (enable-local-eval 'maybe)
            (dir-locals-directory-cache nil)
            (dir-locals-class-alist nil))
-      (should (equal '(tools-dev) (cdr (assq 'harness-plugin-modules entries))))
+      (should (equal '(tools-dev client-check) (cdr (assq 'harness-plugin-modules entries))))
       (should (string-search "(require 'harness-dev-plugin" (prin1-to-string (cdr (assq 'eval entries)))))
       (make-directory (expand-file-name ".git" main))
       (with-temp-file (expand-file-name ".git" worktree) (insert "gitdir: " main ".git/worktrees/task\n"))
       ;; As a fresh harness process: neither half has loaded.
-      (setq features (cl-set-difference features '(harness-dev-plugin harness-tools-dev)))
+      (setq features (cl-set-difference features '(harness-dev-plugin harness-tools-dev
+                                                                      harness-client-check)))
       (remhash "open_harness" harness-tools)
       (let ((safe-local-variable-values nil))
         (should-not (harness-plugins--apply main))
         (should-not (featurep 'harness-dev-plugin))
         (should-not (harness-module-get 'tools-dev))
+        (should-not (harness-module-get 'client-check))
         (should-not (harness-tool-get "open_harness")))
       (let ((safe-local-variable-values entries))
-        (should (equal '(tools-dev) (harness-plugins--apply worktree)))
+        (should (equal '(tools-dev client-check) (harness-plugins--apply worktree)))
         (should-not (featurep 'harness-dev-plugin))
+        (should-not (featurep 'harness-client-check))
         (should-not (harness-tool-get "open_harness"))
-        (should (equal '(tools-dev) (harness-plugins--apply main))))
+        (should (equal '(tools-dev client-check) (harness-plugins--apply main))))
       (should (featurep 'harness-tools-dev))
       (should (harness-module-plugin-p 'tools-dev))
       (should (harness-module-ready-p 'tools-dev))
+      ;; The same plugin brings the hand-in check of the app, its other
+      ;; module, which the entries name beside tools-dev: the harness's
+      ;; hand_in consults it for the sessions that name it, those of this
+      ;; repository (harness-client-check-test.el).
+      (should (featurep 'harness-client-check))
+      (should (harness-module-plugin-p 'client-check))
+      (should (harness-module-ready-p 'client-check))
+      (should (cl-find #'harness-client-check--before-hand-in
+                       (gethash 'task/before-hand-in harness--filters) :key #'cdr))
       (should (harness-tool-get "open_harness"))
       (should (eq 'tools-dev (harness-tool-module (harness-tool-get "open_harness")))))))
+
+(ert-deftest harness-tools-dev-repository-sessions-are-asked-for-the-apps-build-check ()
+  "A session in this repository's checkout names client-check; one elsewhere does not.
+The hand-in check of the Flutter app asks the sessions that name its
+module, so the entries the repository's directory-local variables hold,
+once trusted, put its sessions in the check's scope and no other session."
+  (harness-test-with-temp-state
+    (harness-test-reset-bus)
+    (dolist (m '(store project config provider provider-demo tools session agent tools-handin
+                       plugins))
+      (harness-test-load-module m))
+    (clrhash harness-sessions)
+    (let* ((file (expand-file-name ".dir-locals.el" harness-test-root))
+           (entries (cdr (assq nil (with-temp-buffer
+                                     (insert-file-contents file)
+                                     (read (current-buffer))))))
+           (main (harness-tools-dev-test--checkout (harness-test-temp-dir)))
+           (elsewhere (harness-test-temp-dir))
+           (enable-local-variables t)
+           (enable-local-eval 'maybe)
+           (dir-locals-directory-cache nil)
+           (dir-locals-class-alist nil)
+           (safe-local-variable-values entries))
+      (make-directory (expand-file-name ".git" main))
+      (let ((here (plist-get (harness-call 'session/create :cwd main :model "demo:scripted") :id))
+            (there (plist-get (harness-call 'session/create :cwd elsewhere :model "demo:scripted")
+                              :id)))
+        (should (equal '(tools-dev client-check) (harness-call 'plugins/of-session here)))
+        (should-not (harness-call 'plugins/of-session there))
+        (should (harness-client-check--in-scope-p (list :id here)))
+        (should-not (harness-client-check--in-scope-p (list :id there)))))))
 
 (ert-deftest harness-tools-dev-plugin-tells-the-harness-of-its-tool ()
   "Loading the plugin tells the harness what its own modules list for theirs.

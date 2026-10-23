@@ -18,16 +18,24 @@
 ;; - harness-tools-dev.el, module tools-dev: the open_harness tool, in
 ;;   the Emacs where the harness's tools are (the harness process);
 ;; - harness-ui-tools-dev.el, module ui-tools-dev: Open harness on the
-;;   task board, in the Emacs that shows the board (yours).
+;;   task board, in the Emacs that shows the board (yours);
+;; - harness-client-check.el, module client-check: what this repository
+;;   asks of a task before it hands in a change to its Flutter app --
+;;   that the app was built -- in the harness process, where hand_in
+;;   runs.
 ;;
 ;; The sessions that name tools-dev in `harness-plugin-modules', as the
-;; repository's .dir-locals.el does, get the tool; no other does.
+;; repository's .dir-locals.el does, get the tool; no other does.  The
+;; sessions that name client-check, as that file does too, are asked for
+;; the app's build check when they hand in, and no other session is.
 
 ;;; Code:
 
 (let ((dir (file-name-directory (or load-file-name buffer-file-name))))
   (with-eval-after-load 'harness-tools
     (require 'harness-tools-dev (expand-file-name "harness-tools-dev" dir)))
+  (with-eval-after-load 'harness-tools-handin
+    (require 'harness-client-check (expand-file-name "harness-client-check" dir)))
   (with-eval-after-load 'harness-ui-tasks
     (require 'harness-ui-tools-dev (expand-file-name "harness-ui-tools-dev" dir))))
 

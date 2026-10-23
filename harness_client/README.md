@@ -585,7 +585,22 @@ python3 tool/test_qr_tools.py      # QR encoder against qrencode, the phone
                                    # installer (pairing, install, build
                                    # freshness, pub cache repair) with a fake
                                    # adb and flutter, the APK server
+python3 tool/test_check_build.py   # the build check below, with a fake flutter
+tool/check_build.sh                # builds what is committed, as a person
+                                   # will: pub get --enforce-lockfile,
+                                   # analyze, test, release APK, and a build
+                                   # over the base's when dependencies changed
 ```
+
+`tool/check_build.sh` is what a task that changes the app runs before it hands
+in, and this repository's `hand_in` (its dev plugin,
+`.harness/plugins/dev/harness-client-check.el`; the harness itself asks nothing
+of any task) refuses the task without it.  It works in a copy
+of the committed tree, on a toolchain `tool/client_toolchain.sh` finds or
+installs, and its [docs/dev-loop.md](../docs/dev-loop.md) section says what it
+runs and why.  `--quick` analyzes and tests the working tree and builds
+nothing.  Tests that fail at the base too are listed, not held against the
+branch; one that fails only here, or a file that no longer loads, fails it.
 
 The widget tests drive the real `AcpClient` against an in-memory ACP server
 (`test/support/fake_harness.dart`), not mocks of the state layer. They cover:
@@ -763,6 +778,26 @@ this behind: a sandboxed shell sees only the parts of `~/.pub-cache` that were
 mounted into it, so pub tries to reinstall what it cannot see and deletes the
 real files of a directory that was mounted (in such a shell, set `PUB_CACHE`
 to a scratch directory).
+
+A build that stops with
+
+```
+GeneratedPluginRegistrant.java:34: error: cannot find symbol
+  symbol:   class SharedPreferencesPlugin
+  location: package io.flutter.plugins.sharedpreferences
+```
+
+after a dependency was raised is a plugin whose compiled classes are left over
+from its older version: Kotlin's incremental compiler keeps its state in
+`build/`, keyed by the paths of the sources, and a plugin's sources sit in the
+pub cache under a directory named after its version.  Raising
+`shared_preferences_android` from 2.5.0 to 2.5.2 over the `build/` of 2.5.0
+drops `SharedPreferencesPlugin`; the same tree built from an empty `build/` is
+fine.  `android/gradle.properties` sets `kotlin.incremental=false` so that it
+cannot happen (`test/build_config_test.dart` keeps the line there), and the
+build over the base's build in `tool/check_build.sh` is what would have shown
+it before the dependency went in.  `flutter clean` throws a build that is
+already like that away.
 
 In this directory, `flutter pub cache repair` reinstalls the packages in
 `pubspec.lock`. It removes a package whose directory is empty and reports it as

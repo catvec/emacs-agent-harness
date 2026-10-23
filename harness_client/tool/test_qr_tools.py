@@ -1419,6 +1419,19 @@ class PubCacheRepairTest(BuildFixture):
         self.assertIn("pub cache repair", result.stderr)
         self.assertNotIn("Installing", result.stdout)
 
+    def test_a_failed_build_names_flutter_clean_for_stale_plugin_classes(self):
+        # `cannot find symbol` in GeneratedPluginRegistrant.java is a plugin's
+        # compiled classes left over from an older version of it: the build
+        # itself is the only thing that can say so, and a clean one cures it.
+        self.built_before_the_app_changed()
+        result = self.run_install(FAKE_BUILD_FAILS="1")
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertIn("GeneratedPluginRegistrant.java", result.stderr)
+        self.assertIn("cannot find symbol", result.stderr)
+        self.assertIn(self.flutter + " clean", result.stderr)
+        # It is only said, not done: the build is not run twice.
+        self.assertEqual(self.builds(), ["build apk --release"])
+
     def test_a_cache_that_stays_broken_stops_after_one_repair(self):
         self.cached_before_the_first_build()
         self.empty(os.path.join(self.widget_kit, "lib"))
@@ -1446,6 +1459,8 @@ class PubCacheRepairTest(BuildFixture):
                                 text=True, timeout=10)
         self.assertEqual(result.returncode, 0)
         self.assertIn("pub cache repair", result.stdout)
+        self.assertIn("GeneratedPluginRegistrant.java", result.stdout)
+        self.assertIn('"flutter clean"', " ".join(result.stdout.split()))
 
 
 if __name__ == "__main__":

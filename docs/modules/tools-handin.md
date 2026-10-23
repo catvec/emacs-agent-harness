@@ -49,6 +49,23 @@ queue.
 The tool is offered to task sessions only: the filter `agent/tools`
 removes it where there is no task to hand the work in to.
 
+A project can hold a hand-in to checks of its own.  Before the report is
+recorded, the asynchronous filter `task/before-hand-in` runs from nil
+(see `harness-run-filter-async`) with the task and the plist of its
+session.  A function that refuses passes on the text that says why and
+what to do first, after what an earlier function refused with, a blank
+line between; the hand-in is then answered with that text, as an
+error, and nothing is recorded.  A function with nothing to say hands
+on the value it was given.  One that signals, or whose promise is
+rejected, refuses nothing: a check that cannot be made is not a
+reason to keep a task's work from the user.  A hand-in that says it
+cannot continue, or that has nothing to merge, is not put to the
+filter.  Nothing here knows of any project.  What a project asks of
+its tasks is the project's: the harness's own repository asks that its
+Flutter app was built, from its plugin
+(.harness/plugins/dev/harness-client-check.el), which asks only the
+sessions that use that plugin.
+
 Handing in ends the turn before its provider has said what the turn
 used.  A hosted loop (Claude Code) reports that -- tokens, cost, the
 size of the conversation and when its last request used the prompt
@@ -61,7 +78,11 @@ prompt cache, and its chat says when that lapsed.
 
 ### Tools
 
-- `hand_in` — Hand the finished work in and stop: the turn ends and the task waits for the user's review, with your summary and evidence in front of them. Call it once, when you are sure the task is complete, instead of replying normally. problem is required: a short summary of what must be fixed and how to see it, which the review shows at the top, where the task's name alone would not remind the user what it was about. summary is your final message, in markdown. reproduction is optional: how to see the problem, or the steps to check the fix, for the review. If the task cannot be finished, call it with cannot_continue true and say what blocks it in summary: it goes to the user's input instead of review and nothing merges. If the work needs no merge -- an informational task, or one that changed nothing -- pass no_merge true: verifying it completes without merging. evidence is required and holds at least one item; an item is an object with exactly one of: image or video (a path to a file you made, such as a screenshot); file (a path); code (with language); note (markdown text); or tool_call (an earlier call of yours, which the user then sees as a link to that call in the session). Show, do not tell: when the work has anything to see -- a UI, a rendering, a chart, a layout, anything a screenshot can show -- an image, or a video for motion, is required, not just nice to have; take the screenshot with bash first. Quote the tool call that proves a claim (the tests pass, the command's output) as a tool_call item. A file, code or note is evidence only when nothing visual applies. caption says what the item shows. A tool_call may name the call by its tool's name (the newest call of that tool, e.g. "bash"), by `#N` or `<tool>#N` as an earlier hand_in error listed it (1 = newest), or by its call or node id. The summary, problem, reproduction and notes can link those calls too, and messages and sessions: [the test run](harness:call/bash#2), as the system prompt says.
+- `hand_in` — Hand the finished work in and stop: the turn ends and the task waits for the user's review, with your summary and evidence in front of them. Call it once, when you are sure the task is complete, instead of replying normally. problem is required: a short summary of what must be fixed and how to see it, which the review shows at the top, where the task's name alone would not remind the user what it was about. summary is your final message, in markdown. reproduction is optional: how to see the problem, or the steps to check the fix, for the review. If the task cannot be finished, call it with cannot_continue true and say what blocks it in summary: it goes to the user's input instead of review and nothing merges. If the work needs no merge -- an informational task, or one that changed nothing -- pass no_merge true: verifying it completes without merging. A project can refuse a hand-in until a check of its own has passed; the refusal then says what to run first. evidence is required and holds at least one item; an item is an object with exactly one of: image or video (a path to a file you made, such as a screenshot); file (a path); code (with language); note (markdown text); or tool_call (an earlier call of yours, which the user then sees as a link to that call in the session). Show, do not tell: when the work has anything to see -- a UI, a rendering, a chart, a layout, anything a screenshot can show -- an image, or a video for motion, is required, not just nice to have; take the screenshot with bash first. Quote the tool call that proves a claim (the tests pass, the command's output) as a tool_call item. A file, code or note is evidence only when nothing visual applies. caption says what the item shows. A tool_call may name the call by its tool's name (the newest call of that tool, e.g. "bash"), by `#N` or `<tool>#N` as an earlier hand_in error listed it (1 = newest), or by its call or node id. The summary, problem, reproduction and notes can link those calls too, and messages and sessions: [the test run](harness:call/bash#2), as the system prompt says.
+
+### Filter chains it runs
+
+- `task/before-hand-in`
 
 ## Uses
 

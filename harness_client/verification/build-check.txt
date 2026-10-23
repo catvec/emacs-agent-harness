@@ -1,0 +1,228 @@
+The build check: why a task's app build kept failing, and what makes a task prove it builds
+==========================================================================================
+
+Report: "flutter builds fail, and this isn't the first time a task being turned
+in has resulted in a broken app build, figure out what can be done to make sure
+tasks which work on the app dont submit a broken build".  The build that failed
+was tool/qr_install.sh's `flutter build apk --release`, in the main checkout:
+
+  GeneratedPluginRegistrant.java:34: error: cannot find symbol
+        flutterEngine.getPlugins().add(new io.flutter.plugins.sharedpreferences.SharedPreferencesPlugin());
+    symbol:   class SharedPreferencesPlugin
+    location: package io.flutter.plugins.sharedpreferences
+  > Task :app:compileReleaseJavaWithJavac FAILED
+
+1. The cause of that failure
+----------------------------
+
+Not a defect of the tree: a build of HEAD from an empty build/ passes.  It is
+what happens when shared_preferences_android is raised from 2.5.0 to 2.5.2
+(d0c681d, the R8 keep rules) over the build/ a person already has from 2.5.0.
+
+Toolchain, all under scripts/.dev, none of it the machine's: Flutter 3.47.7
+(tool/install_flutter.sh's archive, checksum verified), JDK 21.0.13, Android SDK
+36 with build-tools 36.1.0, NDK 30.0.14904198 and CMake 4.1.2 (the pins of
+android/gradle.properties), Gradle 9.3.1 from the wrapper.
+
+  a. HEAD (fb6fd80), `flutter build apk --release` in an empty directory:
+     built, 59.2 MB.  (pub get printed the same package list as the report:
+     "shared_preferences_android 2.5.2 (2.5.3 available)", "1 package is
+     discontinued", "14 packages have newer versions incompatible".)
+  b. d0c681d^ (2.5.0) built (59.3 MB); then its pubspec.yaml and pubspec.lock
+     replaced by HEAD's (2.5.2); `flutter build apk --release` again in the
+     same directory:
+
+       GeneratedPluginRegistrant.java:34: error: cannot find symbol
+         symbol:   class SharedPreferencesPlugin
+         location: package io.flutter.plugins.sharedpreferences
+       Execution failed for task ':app:compileReleaseJavaWithJavac'.
+       BUILD FAILED in 1m 9s
+
+     The same message, the same line, and "location: package" means the package
+     is on the classpath (the plugin's R class is in it) with the class missing.
+  c. The plugin's Kotlin output after (b), build/shared_preferences_android/
+     tmp/kotlin-classes/release/io/flutter/plugins/sharedpreferences/:
+
+       broken (2.5.0 -> 2.5.2 over the old build/):
+         FlutterError, MessagesAsync_gKt, MessagesAsyncPigeonUtils, Messages_gKt,
+         MessagesPigeonUtils, SharedPreferencesApi*, SharedPreferencesAsyncApi*, ...
+         -- no SharedPreferencesPlugin, LegacySharedPreferencesPlugin,
+            SharedPreferencesBackend, ListEncoder
+       good (a build of 2.5.2 from an empty build/):
+         the same, and LegacySharedPreferencesPlugin, ListEncoder,
+         SharedPreferencesBackend, SharedPreferencesPlugin, SharedPreferencesPluginKt
+
+     Kotlin's incremental compiler keeps its state in build/, keyed by the
+     paths of the sources, and a plugin's sources are in the pub cache under a
+     directory named after its version (shared_preferences_android-2.5.0/ ->
+     -2.5.2/).  Moved sources leave it with half the classes.
+  d. Not it (tried): a plugin file lost from the pub cache.  With
+     SharedPreferencesPlugin.kt removed, Flutter stops before Gradle with "The
+     plugin `shared_preferences_android` doesn't have a main class defined".
+     A stale GeneratedPluginRegistrant.java does not fit either: line 34 is
+     SharedPreferencesPlugin in HEAD's registrant too (five plugins, same order).
+
+The fix: android/gradle.properties says `kotlin.incremental=false`.
+  e. The directory of (b), already broken, with the line added:
+     `flutter build apk --release` built, 59.3 MB.  (It heals a build/ that is
+     already like that.)
+  f. A fresh run of (b) (2.5.0 built without the line; then 2.5.2 and the line
+     together): built in 47 s, all plugin classes present, including
+     SharedPreferencesPlugin.class.
+  test/build_config_test.dart fails when the line is not there (checked by
+  commenting it out).  tool/qr_install.sh's failure message now names "cannot
+  find symbol" in GeneratedPluginRegistrant.java and `flutter clean`.
+
+2. Why tasks keep handing in apps that do not build
+---------------------------------------------------
+
+  * A task's sandbox has no Flutter SDK, no JDK 17-21 and no Android SDK
+    ($HOME is an empty tmpfs; /opt/android-sdk is not mounted), and nothing in
+    scripts/test.sh, scripts/lint.sh, CLAUDE.md or hand_in ever asked for a
+    build of harness_client/.  An earlier task that did build the app made a
+    toolchain by hand under scripts/.dev and left no script behind.
+  * Even a task that builds the app builds it from an empty build/ and so
+    cannot see the failure above.
+  * The app's own tests have been red for seven commits, unseen.  Bisect, each
+    commit exported with git archive and run with `flutter analyze` and
+    `flutter test` (pub get first):
+
+       commit    subject                                       analyze   tests
+       cb68a56   Persist harness client connection credentials   ok      172 pass
+       b0f903b   Show quota status and usage in client app       ok      242 pass
+       0af87aa   Fix compose task menu image attachment          ok      257 pass
+       ec40c3d   Remove stale worktree projects                  ok      271 pass
+       fe5f570   Fix harness client header and footer layout     ERROR   197 pass, 9 files do not load
+                 (tasks_screen.dart: "The getter 'theme' isn't defined for _NewTaskSheetState")
+       0b01823   Fix tasksscreen theme compile error             ok      264 pass, 27 FAIL
+       c43b539   Add interactive / non-interactive toggle        ok      266 pass, 27 FAIL
+       50aec8e   Fix tool call result display                    ok      322 pass, 27 FAIL
+       ff4ea91   Find missing funkyboy and catvec sessions       ok      338 pass, 31 FAIL
+       d0c681d   Fix harness client remembered credentials       ok      350 pass, 31 FAIL
+       fb6fd80   (main)                                          ok      350 pass, 31 FAIL
+
+    fe5f570 (a 27-file layout rewrite) landed with a compile error; 0b01823
+    mended the compile error and left 27 failing tests.  Most of the failures are
+    RenderFlex overflows (23 traced to HarnessScopeBar, lib/src/ui/adaptive/
+    layout_widgets.dart:386, whose row is left 18.8 points by what is at its far
+    end, in the test font), and two are quota tests expecting "$50.0" where the
+    app says "$50.00".  Nobody was told.  The check holds a branch to the tests
+    that pass at its base, so it can be used while main is red; mending these
+    31 is a task of its own.
+
+3. What now stops it
+--------------------
+
+tool/check_build.sh (docs/dev-loop.md, "The Flutter app's build check"):
+pub get --enforce-lockfile, analyze, test, `build apk --release` from an empty
+build/, the build over the base's build when dependencies or android/ changed,
+the tools' own tests when tool/ changed; a stamp for the commit on success.
+.harness/plugins/dev/harness-client-check.el, this repository's plugin: hand_in
+refuses a task of this repository that changed the app unless the stamp covers the
+app as committed (test/harness-client-check-test.el).  The harness itself knows no
+app: lisp/modules/harness-tools-handin.el only runs the async filter
+task/before-hand-in, which any project's plugin may add a function to
+(test/harness-tools-handin-test.el, which also checks that the tool names no
+Flutter, Android, licence or harness_client).
+tool/client_toolchain.sh installs what the sandbox lacks, pinned and checksummed.
+
+Run on the change that broke the build, in a throwaway repository (base: d0c681d^
+with 2.5.0; head: d0c681d, 2.5.2, Kotlin still incremental), with the toolchain
+above, tool scripts added to both commits:
+
+$ harness_client/tool/check_build.sh --accept-android-licenses
+check_build: checking commit 8e1040329875 (branch started at 602448f137a7)
+==> pub-get            flutter pub get --enforce-lockfile
+ok   pub-get            1s
+==> analyze            flutter analyze
+ok   analyze            10s
+==> test               flutter test
+    (running the tests at 602448f137a7 to see which of the failures are old)
+ok   test               65s   381 tests: 350 passed, 31 failed, 0 skipped
+     NOTE: all 31 failing tests already fail at 602448f137a7; this branch adds none.  They are
+     listed in <repo>/scripts/.dev/client-check/logs/03-test.log -- somebody should mend them.
+==> build              flutter build apk --release
+ok   build              77s
+==> upgrade-from       flutter build apk --release
+ok   upgrade-from       84s
+==> upgrade            flutter build apk --release
+FAIL upgrade            exit 1 after 50s; the last of its log, which is <repo>/scripts/.dev/client-check/logs/06-upgrade.log:
+    | <repo>/scripts/.dev/client-check/work/upgrade/harness_client/android/app/src/main/java/io/flutter/plugins/GeneratedPluginRegistrant.java:34: error: cannot find symbol
+    |       flutterEngine.getPlugins().add(new io.flutter.plugins.sharedpreferences.SharedPreferencesPlugin());
+    |   symbol:   class SharedPreferencesPlugin
+    |   location: package io.flutter.plugins.sharedpreferences
+    | BUILD FAILED in 48s
+check_build: FAILED -- the copies stay in <repo>/scripts/.dev/client-check/work, the logs in <repo>/scripts/.dev/client-check/logs
+(exit 1; 4m47s, no stamp)
+
+The build from scratch (`build`) passed, as the task's own build would have; only
+the build over the base's build shows it.  The same head with the one line of the
+fix (kotlin.incremental=false):
+
+check_build: checking commit 1cc76d23747b (branch started at 602448f137a7)
+ok   pub-get            1s
+ok   analyze            10s
+ok   test               59s   381 tests: 350 passed, 31 failed, 0 skipped
+     NOTE: all 31 failing tests already fail at 602448f137a7; this branch adds none.
+ok   build              69s
+ok   upgrade-from       69s
+ok   upgrade            66s
+ok   tool-test_qr_tools 95s
+check_build: PASSED in 370s for commit 1cc76d23747b -- stamp: <repo>/scripts/.dev/client-check/stamp.json
+check_build: release APK 59238635 bytes, sha256 274e8fb99b13410fbd1f6c5237a9dc2fcebf98dcc6baa9fed59b0b880107a332
+(stamp: "result": "pass", "head": "1cc76d23747b778e211920bf63912efabb5fe1b6", "known_test_failures": 31)
+
+4. The toolchain, from an empty sandbox
+---------------------------------------
+
+`HARNESS_CLIENT_TOOLCHAIN=<empty dir> tool/client_toolchain.sh --accept-android-licenses`
+on a machine with no Flutter, a JDK 27 and no Android SDK: 1m26s, and
+Flutter 3.47.7 (2.5 GB), Temurin 21.0.13+9 (346 MB) and an Android SDK with
+platform 36, build-tools 36.1.0, NDK 30.0.14904198, CMake 4.1.2 and
+platform-tools (2.7 GB) were in it; the second run found them all and
+downloaded nothing.  The downloads are pinned to a release and checked against
+the publisher's checksum (Flutter's from tool/install_flutter.sh, Temurin's from
+api.adoptium.net, the command-line tools' SHA-1 from Google's repository2-3.xml).
+
+5. The check's own tests
+------------------------
+
+  python3 tool/test_check_build.py   (a fake flutter in a throwaway git repository)
+  scripts/test.sh test/harness-tools-handin-test.el test/harness-client-check-test.el
+  flutter test test/build_config_test.dart
+
+Each was run with the behaviour it guards broken, and failed:
+  check_build.sh: a ratchet that lets every test through; no second build in the
+  upgrade step; --status that ignores app changes; a failing step that does not
+  stop the check.
+  harness-client-check.el: a gate that never refuses; a stamp that is never read;
+  uncommitted changes ignored.
+
+6. The check on this change itself
+----------------------------------
+
+A task's own flow, from nothing: no toolchain anywhere, no environment variable,
+`harness_client/tool/check_build.sh --accept-android-licenses` in the task's
+worktree (a sandbox whose $HOME is an empty tmpfs).  It installed Flutter, the JDK
+and the Android SDK into .git/harness-client-toolchain (8.8 GB with the pub and
+Gradle caches it filled), then:
+
+  ok   pub-get            13s
+  ok   analyze            14s
+  ok   test               75s   383 tests: 352 passed, 31 failed, 0 skipped
+       NOTE: all 31 failing tests already fail at fb6fd8002c40; this branch adds none.
+  ok   build              217s
+  ok   upgrade-from       158s    (android/gradle.properties differs from main's)
+  ok   upgrade            28s
+  ok   tool-test_qr_tools 95s
+  ok   tool-test_check_build 7s
+  check_build: PASSED in 607s for commit a69a79d3dd72
+  check_build: release APK 59238635 bytes, sha256 237112134b3ea53722e3150fcbec5cfcffd31c1bae1044f069e2fe66a96fc902
+
+(11 min 37 s with the toolchain installed; the next run finds it.)  `check_build.sh
+--status` then says "the build check passed for a69a79d3dd72, and the app is
+unchanged since", and the plugin's gate, asked about that worktree, refuses nothing:
+harness-client-check--refusal => nil.  Committing an app change after the
+check makes it answer "the app changed after the check passed for a69a79d3dd72:
+harness_client/lib/extra.dart" with the command to run.
+

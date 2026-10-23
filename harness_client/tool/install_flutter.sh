@@ -2,10 +2,24 @@
 # Install the Flutter SDK pinned in .flutter-version and, optionally, a
 # ~/.local/bin/flutter launcher that selects it per project.
 #
+#   tool/install_flutter.sh              the SDK, and the launcher
+#   tool/install_flutter.sh --sdk-only   the SDK alone (tool/client_toolchain.sh
+#                                        installs it so, under a cache directory
+#                                        of its own, and touches no launcher)
+#
 # The launcher makes a plain `flutter build apk` use the version this project
 # needs, while other projects keep using the default SDK in
 # ~/.local/share/flutter. Run this script again after changing .flutter-version.
 set -euo pipefail
+
+sdk_only=0
+for arg in "$@"; do
+  case "$arg" in
+    --sdk-only) sdk_only=1 ;;
+    -h|--help) sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | sed -e '$d' -e 's/^# \{0,1\}//'; exit 0 ;;
+    *) echo "install_flutter: unknown option: $arg (try --help)" >&2; exit 2 ;;
+  esac
+done
 
 project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 version_file="$project_dir/.flutter-version"
@@ -46,7 +60,10 @@ if [ ! -x "$sdk/bin/flutter" ]; then
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp"' EXIT
   echo "Downloading Flutter $version ..."
-  curl -fL --retry 3 --progress-bar -o "$tmp/$archive" "$base/$archive"
+  # A progress bar for a person; a log gets no thousand redraws of it.
+  progress=-sS
+  [ ! -t 2 ] || progress=--progress-bar
+  curl -fL --retry 3 "$progress" -o "$tmp/$archive" "$base/$archive"
   echo "$sha256  $tmp/$archive" | sha256sum -c -
   mkdir -p "$versions_dir"
   if [ "$platform" = linux ]; then
@@ -57,6 +74,11 @@ if [ ! -x "$sdk/bin/flutter" ]; then
   rm -rf "$sdk"
   mv "$tmp/flutter" "$sdk"
   echo "Installed Flutter $version at $sdk"
+fi
+
+if [ "$sdk_only" = 1 ]; then
+  "$sdk/bin/flutter" --version
+  exit 0
 fi
 
 # Install the per-project launcher. Back up whatever `flutter` resolved to

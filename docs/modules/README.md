@@ -343,6 +343,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `permission/decide` | [tools](tools.md) | [access](access.md) (4, 5), [perms](perms.md) (5, 6, 7, 10, 20, 30, 40, 90), [readonly](readonly.md) (8), [secrets](secrets.md) (3), [supervisor](supervisor.md) (9, 28), [tasks](tasks.md) (25), [tools-sessions](tools-sessions.md) (6) |
 | `permission/dir-entries` | [perms](perms.md) | [access](access.md) (50) |
 | `session/before-move` | [session](session.md) | [merge](merge.md) (50), [tasks](tasks.md) (50) |
+| `task/before-hand-in` | [tools-handin](tools-handin.md) |  |
 | `tools/output` | [tools](tools.md) | [redact](redact.md) (4), [secrets](secrets.md) (5) |
 | `tools/output-text` | [agent](agent.md), [tools](tools.md) | [redact](redact.md) (4), [secrets](secrets.md) (5) |
 | `tools/result` | [tools](tools.md) | [access](access.md) (95) |

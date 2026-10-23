@@ -40,6 +40,23 @@
 ;; The tool is offered to task sessions only: the filter `agent/tools'
 ;; removes it where there is no task to hand the work in to.
 ;;
+;; A project can hold a hand-in to checks of its own.  Before the report is
+;; recorded, the asynchronous filter `task/before-hand-in' runs from nil
+;; (see `harness-run-filter-async') with the task and the plist of its
+;; session.  A function that refuses passes on the text that says why and
+;; what to do first, after what an earlier function refused with, a blank
+;; line between; the hand-in is then answered with that text, as an
+;; error, and nothing is recorded.  A function with nothing to say hands
+;; on the value it was given.  One that signals, or whose promise is
+;; rejected, refuses nothing: a check that cannot be made is not a
+;; reason to keep a task's work from the user.  A hand-in that says it
+;; cannot continue, or that has nothing to merge, is not put to the
+;; filter.  Nothing here knows of any project.  What a project asks of
+;; its tasks is the project's: the harness's own repository asks that its
+;; Flutter app was built, from its plugin
+;; (.harness/plugins/dev/harness-client-check.el), which asks only the
+;; sessions that use that plugin.
+;;
 ;; Handing in ends the turn before its provider has said what the turn
 ;; used.  A hosted loop (Claude Code) reports that -- tokens, cost, the
 ;; size of the conversation and when its last request used the prompt
@@ -349,6 +366,19 @@ the child's to fix."
                    pending)
            ", ")))
 
+;;;; The project's own checks
+
+(defun harness-tools-handin--refusal (task sid)
+  "Return a promise of the text the project's checks refuse TASK's hand-in with.
+The promise is of nil when none refuses.  The checks are the functions
+of the asynchronous filter `task/before-hand-in', run from nil with
+TASK and the plist of session SID (see the Commentary).  A text that is
+blank refuses nothing."
+  (harness-then
+   (harness-run-filter-async 'task/before-hand-in nil task (harness-call 'session/get sid))
+   (lambda (refusal)
+     (and (stringp refusal) (not (harness-string-blank-p refusal)) refusal))))
+
 (defun harness-tools-handin--hand-in (input ctx)
   "Handler of the hand_in tool: record the report of INPUT and end the turn.
 The report goes on the task of the session in CTX.  A malformed call
@@ -400,40 +430,55 @@ the session's branch is built on has to be in it first."
             (if (not task)
                 (harness-tools-handin--invalid
                  "hand_in is for a task's session, and this session is no task. Finish your turn normally instead.")
-              (let ((report (append (list :summary summary :problem problem)
-                                    (and reproduction (list :reproduction reproduction))
-                                    (list :evidence items :at (float-time))
-                                    ;; The call that handed the work in: the review
-                                    ;; names it as the author of the version.
-                                    (and (plist-get ctx :call-id) (list :call-id (plist-get ctx :call-id)))
-                                    (and cannot (list :cannot-continue t))
-                                    (and no-merge (list :no-merge t)))))
-                (harness-call 'task/hand-in (plist-get task :id) report)
-                (harness-call 'session/hint sid
-                              (cond (cannot "Task cannot continue; it waits for the user")
-                                    (no-merge "Handed in; nothing to merge")
-                                    (t "Handed in for review")))
-                (harness-tool-ok
-                 (harness-tools-with-note
-                  (cond
-                   (cannot
-                    (format "Recorded: this task cannot continue. %s\n\nThe task goes to Requires your input for the user's decision, and nothing merges; this turn ends."
-                            (harness-first-line summary 200)))
-                   (no-merge
-                    (format "Handed in (nothing to merge): %s\n\n%d piece%s of evidence; the task waits for the user's review, and verifying it completes it without merging."
-                            (harness-first-line summary 200) (length items) (if (= 1 (length items)) "" "s")))
-                   (t
-                    (format "Handed in: %s\n\n%d piece%s of evidence; the task now waits for the user's review, and this turn ends."
-                            (harness-first-line summary 200) (length items) (if (= 1 (length items)) "" "s"))))
-                  (and notes (string-join (delete-dups (nreverse notes)) "\n")))
-                 :end-turn t
-                 ;; The report rides the result, so the transcript can draw
-                 ;; the review the task view draws, after it left review too.
-                 :meta (list :report report :task-id (plist-get task :id))))))))))))
+              (let* ((report (append (list :summary summary :problem problem)
+                                     (and reproduction (list :reproduction reproduction))
+                                     (list :evidence items :at (float-time))
+                                     ;; The call that handed the work in: the review
+                                     ;; names it as the author of the version.
+                                     (and (plist-get ctx :call-id) (list :call-id (plist-get ctx :call-id)))
+                                     (and cannot (list :cannot-continue t))
+                                     (and no-merge (list :no-merge t))))
+                     (record
+                      (lambda ()
+                        (harness-call 'task/hand-in (plist-get task :id) report)
+                        (harness-call 'session/hint sid
+                                      (cond (cannot "Task cannot continue; it waits for the user")
+                                            (no-merge "Handed in; nothing to merge")
+                                            (t "Handed in for review")))
+                        (harness-tool-ok
+                         (harness-tools-with-note
+                          (cond
+                          (cannot
+                           (format "Recorded: this task cannot continue. %s\n\nThe task goes to Requires your input for the user's decision, and nothing merges; this turn ends."
+                                   (harness-first-line summary 200)))
+                          (no-merge
+                           (format "Handed in (nothing to merge): %s\n\n%d piece%s of evidence; the task waits for the user's review, and verifying it completes it without merging."
+                                   (harness-first-line summary 200) (length items) (if (= 1 (length items)) "" "s")))
+                          (t
+                           (format "Handed in: %s\n\n%d piece%s of evidence; the task now waits for the user's review, and this turn ends."
+                                   (harness-first-line summary 200) (length items) (if (= 1 (length items)) "" "s"))))
+                          (and notes (string-join (delete-dups (nreverse notes)) "\n")))
+                         :end-turn t
+                         ;; The report rides the result, so the transcript can draw
+                         ;; the review the task view draws, after it left review too.
+                         :meta (list :report report :task-id (plist-get task :id))))))
+                ;; Work that is to be merged is put to the project's own checks
+                ;; (`task/before-hand-in'), when it has any; a task that
+                ;; cannot continue, or has nothing to merge, is not.
+                (if (or cannot no-merge
+                        (not (memq 'task/before-hand-in (harness-filters))))
+                    (funcall record)
+                  (harness-then (harness-tools-handin--refusal task sid)
+                                (lambda (refusal)
+                                  (if refusal
+                                      (harness-tools-handin--invalid "%s" refusal)
+                                    (funcall record)))
+                                ;; A check that cannot be made refuses nothing.
+                                (lambda (_) (funcall record)))))))))))))
 
 (harness-define-tool "hand_in"
   :label "Hand in the finished work"
-  :description "Hand the finished work in and stop: the turn ends and the task waits for the user's review, with your summary and evidence in front of them. Call it once, when you are sure the task is complete, instead of replying normally. problem is required: a short summary of what must be fixed and how to see it, which the review shows at the top, where the task's name alone would not remind the user what it was about. summary is your final message, in markdown. reproduction is optional: how to see the problem, or the steps to check the fix, for the review. If the task cannot be finished, call it with cannot_continue true and say what blocks it in summary: it goes to the user's input instead of review and nothing merges. If the work needs no merge -- an informational task, or one that changed nothing -- pass no_merge true: verifying it completes without merging. evidence is required and holds at least one item; an item is an object with exactly one of: image or video (a path to a file you made, such as a screenshot); file (a path); code (with language); note (markdown text); or tool_call (an earlier call of yours, which the user then sees as a link to that call in the session). Show, do not tell: when the work has anything to see -- a UI, a rendering, a chart, a layout, anything a screenshot can show -- an image, or a video for motion, is required, not just nice to have; take the screenshot with bash first. Quote the tool call that proves a claim (the tests pass, the command's output) as a tool_call item. A file, code or note is evidence only when nothing visual applies. caption says what the item shows. A tool_call may name the call by its tool's name (the newest call of that tool, e.g. \"bash\"), by `#N` or `<tool>#N` as an earlier hand_in error listed it (1 = newest), or by its call or node id. The summary, problem, reproduction and notes can link those calls too, and messages and sessions: [the test run](harness:call/bash#2), as the system prompt says."
+  :description "Hand the finished work in and stop: the turn ends and the task waits for the user's review, with your summary and evidence in front of them. Call it once, when you are sure the task is complete, instead of replying normally. problem is required: a short summary of what must be fixed and how to see it, which the review shows at the top, where the task's name alone would not remind the user what it was about. summary is your final message, in markdown. reproduction is optional: how to see the problem, or the steps to check the fix, for the review. If the task cannot be finished, call it with cannot_continue true and say what blocks it in summary: it goes to the user's input instead of review and nothing merges. If the work needs no merge -- an informational task, or one that changed nothing -- pass no_merge true: verifying it completes without merging. A project can refuse a hand-in until a check of its own has passed; the refusal then says what to run first. evidence is required and holds at least one item; an item is an object with exactly one of: image or video (a path to a file you made, such as a screenshot); file (a path); code (with language); note (markdown text); or tool_call (an earlier call of yours, which the user then sees as a link to that call in the session). Show, do not tell: when the work has anything to see -- a UI, a rendering, a chart, a layout, anything a screenshot can show -- an image, or a video for motion, is required, not just nice to have; take the screenshot with bash first. Quote the tool call that proves a claim (the tests pass, the command's output) as a tool_call item. A file, code or note is evidence only when nothing visual applies. caption says what the item shows. A tool_call may name the call by its tool's name (the newest call of that tool, e.g. \"bash\"), by `#N` or `<tool>#N` as an earlier hand_in error listed it (1 = newest), or by its call or node id. The summary, problem, reproduction and notes can link those calls too, and messages and sessions: [the test run](harness:call/bash#2), as the system prompt says."
   :schema '(:type "object"
             :properties (:problem (:type "string"
                                   :description "A short summary of what must be fixed and how to see it, in markdown. The review shows it at the top: with many tasks going on, the title alone does not say what the work was for. Say what the user must check, not the task prompt again.")
