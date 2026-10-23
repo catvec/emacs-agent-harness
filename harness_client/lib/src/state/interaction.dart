@@ -49,6 +49,15 @@ class InteractionRequest {
   JsonMap get toolCall => asMap(params['toolCall']);
   JsonMap get harness => asMap(params['_harness']);
 
+  /// The id the harness holds this request by, as pending on its session:
+  /// the one the request came with, or was recovered by.  What says whether
+  /// the harness still waits for it, and whether two requests are the same.
+  String? get harnessId {
+    final id = pendingId ?? (isQuestion ? questionId : null) ??
+        asString(harness['pendingId']);
+    return id == null || id.isEmpty ? null : id;
+  }
+
   String get title {
     if (isQuestion) {
       final question = asString(params['question']);

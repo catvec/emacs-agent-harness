@@ -10,6 +10,7 @@ import '../../models/transcript.dart';
 import '../../models/usage.dart';
 import '../../state/app_controller.dart';
 import '../../state/drafts.dart';
+import '../../state/interaction.dart';
 import '../../state/session_controller.dart';
 import '../adaptive/adaptive_widgets.dart';
 import '../adaptive/layout_widgets.dart';
@@ -319,13 +320,16 @@ class _SessionScreenState extends State<SessionScreen> {
     if (!_bound) {
       return const SizedBox.shrink();
     }
+    // Whether the keyboard is up.  Asked here, above the page: the page's
+    // body is given what the keyboard leaves, and is told nothing of it.
+    final typing = MediaQuery.viewInsetsOf(context).bottom > 0;
     return AnimatedBuilder(
       animation: Listenable.merge([_controller, _app.settings, _app]),
       builder: (context, _) {
         final summary =
             _controller.summary ?? _app.summaryFor(widget.sessionId);
         final title = summary?.displayTitle ?? 'Session';
-        final body = _buildBody(context, summary);
+        final body = _buildBody(context, summary, typing);
         // Where the conversation is and what it is doing, under its title.
         final context_ = summary == null
             ? null
@@ -360,7 +364,11 @@ class _SessionScreenState extends State<SessionScreen> {
     );
   }
 
-  Widget _buildBody(BuildContext context, SessionSummary? summary) {
+  Widget _buildBody(
+    BuildContext context,
+    SessionSummary? summary,
+    bool typing,
+  ) {
     final theme = Theme.of(context);
     final controller = _controller;
     if (_controller.deleted) {
@@ -387,6 +395,12 @@ class _SessionScreenState extends State<SessionScreen> {
       );
     }
     final plan = controller.transcript.plan;
+    final interaction = controller.currentInteraction;
+    // A question is answered in its card, which has a field for the answer:
+    // the composer would only take its room (and the keyboard's, where the
+    // answer is typed).  It is kept, not rebuilt, so what was typed in it,
+    // and the images attached, are there when the question is answered.
+    final question = interaction?.isQuestion == true;
     return Column(
       children: [
         // A conversation opened as a page of its own covers the home
@@ -399,79 +413,114 @@ class _SessionScreenState extends State<SessionScreen> {
             actionLabel: 'Retry',
             onAction: () => controller.open(force: true),
           ),
+        // What is above the composer: the conversation, and what waits on
+        // an answer.  A request is given the room this has, which is what
+        // the screen has left once the keyboard and the rest are taken out,
+        // never more: whatever the size of the phone, it can be answered.
         Expanded(
-          child: controller.loading && controller.transcript.items.isEmpty
-              ? Center(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      HarnessActivity(radius: 11),
-                      const SizedBox(height: 14),
-                      Text(
-                        'Loading the conversation…',
-                        style: theme.textTheme.bodySmall?.copyWith(
-                          color: theme.colorScheme.onSurfaceVariant,
-                        ),
-                      ),
-                    ],
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              // With the keyboard up the person is typing the answer: the
+              // card has all the room, and what shows the conversation goes
+              // (it is a line of it, in a window with the keyboard in it).
+              final room = constraints.maxHeight;
+              final bar =
+                  controller.promptInFlight ||
+                  controller.activity != null ||
+                  interaction != null;
+              return Column(
+                children: [
+                  Expanded(
+                    child:
+                        controller.loading &&
+                            controller.transcript.items.isEmpty
+                        ? Center(
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                HarnessActivity(radius: 11),
+                                const SizedBox(height: 14),
+                                Text(
+                                  'Loading the conversation…',
+                                  style: theme.textTheme.bodySmall?.copyWith(
+                                    color: theme.colorScheme.onSurfaceVariant,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          )
+                        : TranscriptView(
+                            items: controller.transcript.items,
+                            showThinking: _app.settings.showThinking,
+                            streaming: controller.promptInFlight,
+                            scrollTick: _scrollTick,
+                          ),
                   ),
-                )
-              : TranscriptView(
-                  items: controller.transcript.items,
-                  showThinking: _app.settings.showThinking,
-                  streaming: controller.promptInFlight,
-                  scrollTick: _scrollTick,
-                ),
+                  if (plan.isNotEmpty && interaction == null)
+                    _PlanStrip(plan: plan),
+                  if (bar && !(typing && interaction != null))
+                    _ActivityBar(
+                      activity: controller.activity,
+                      waiting: interaction != null,
+                      running: controller.promptInFlight,
+                    ),
+                  if (interaction != null)
+                    ConstrainedBox(
+                      constraints: BoxConstraints(
+                        maxHeight: _requestRoom(room, interaction, typing),
+                      ),
+                      child: InteractionCard(controller: controller),
+                    ),
+                ],
+              );
+            },
+          ),
         ),
-        if (plan.isNotEmpty && controller.currentInteraction == null)
-          _PlanStrip(plan: plan),
-        if (controller.promptInFlight ||
-            controller.activity != null ||
-            controller.currentInteraction != null)
-          _ActivityBar(
-            activity: controller.activity,
-            waiting: controller.currentInteraction != null,
+        Offstage(
+          offstage: question,
+          child: MessageComposer(
             running: controller.promptInFlight,
-          ),
-        if (controller.currentInteraction != null)
-          ConstrainedBox(
-            constraints: BoxConstraints(
-              maxHeight: MediaQuery.sizeOf(context).height *
-                  (controller.currentInteraction!.isQuestion ? 0.64 : 0.46),
+            cancelling: controller.cancelling,
+            canAttach: _app.capability?.promptImages == true,
+            awaitingAnswer: interaction != null,
+            // Typing goes on while the connection is out; sending waits for it.
+            offline: !controller.canSend,
+            enabled: interaction == null && controller.canSend,
+            onStop: controller.cancel,
+            // How the next message is handled: the model, the permission mode,
+            // how full the context is and what the conversation has cost.
+            footer: _SessionFooter(
+              app: _app,
+              summary: summary,
+              onModel: _chooseModel,
+              onMode: _chooseMode,
+              onInteractive: _toggleInteractive,
             ),
-            child: InteractionCard(controller: controller),
+            // What is typed outlives this screen: see DraftStore.
+            drafts: _app.drafts,
+            draftKey: DraftStore.composerKey(widget.sessionId),
+            onSend: (text, attachments) {
+              // No connection to take it: the composer keeps the message.
+              if (!controller.canSend) return false;
+              setState(() => _scrollTick++);
+              unawaited(controller.send(text, attachments: attachments));
+              return true;
+            },
           ),
-        MessageComposer(
-          running: controller.promptInFlight,
-          cancelling: controller.cancelling,
-          canAttach: _app.capability?.promptImages == true,
-          awaitingAnswer: controller.currentInteraction != null,
-          // Typing goes on while the connection is out; sending waits for it.
-          offline: !controller.canSend,
-          enabled: controller.currentInteraction == null && controller.canSend,
-          onStop: controller.cancel,
-          // How the next message is handled: the model, the permission mode,
-          // how full the context is and what the conversation has cost.
-          footer: _SessionFooter(
-            app: _app,
-            summary: summary,
-            onModel: _chooseModel,
-            onMode: _chooseMode,
-            onInteractive: _toggleInteractive,
-          ),
-          // What is typed outlives this screen: see DraftStore.
-          drafts: _app.drafts,
-          draftKey: DraftStore.composerKey(widget.sessionId),
-          onSend: (text, attachments) {
-            // No connection to take it: the composer keeps the message.
-            if (!controller.canSend) return false;
-            setState(() => _scrollTick++);
-            unawaited(controller.send(text, attachments: attachments));
-            return true;
-          },
         ),
       ],
     );
+  }
+
+  /// The most height the card of [request] may take of the [room] there is
+  /// for it and the conversation above it: what it needs, but for a strip
+  /// of the conversation, to keep where it is.  A card is as tall as what it
+  /// says and offers, and no taller: this is only what it is never taller
+  /// than.  With the keyboard up a question is being answered ([typing]),
+  /// and takes all of it.
+  double _requestRoom(double room, InteractionRequest request, bool typing) {
+    if (typing && request.isQuestion) return room;
+    return (room - 88).clamp(0.0, room);
   }
 }
 

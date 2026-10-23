@@ -284,6 +284,12 @@ class FakeHarness {
   final Map<String, Map<String, Object?>> tasks = {};
   final List<Map<String, Object?>> permissionAnswers = [];
   final List<Map<String, Object?>> questionAnswers = [];
+
+  /// The pending ids of the questions the client dismissed.
+  final List<String> questionCancels = [];
+
+  /// Make `question/answer` fail, as a harness that goes wrong does.
+  bool failQuestionAnswers = false;
   final List<String> prompts = [];
   final List<String> requestsByClient = [];
 
@@ -1295,17 +1301,14 @@ class FakeHarness {
         return;
       }
       if (method == '_harness/permission/pending') {
+        // As the harness answers it: the permission requests only.
         final sid = asString(params['session-id']);
-        _respond(
-          id,
-          enhanced
-              ? (sessions[sid]?['pending'] as List? ?? const [])
-              : const [],
-        );
+        _respond(id, enhanced ? _pendingKind(sid, 'permission') : const []);
         return;
       }
       if (method == '_harness/question/pending') {
-        _respond(id, const <Object?>[]);
+        final sid = asString(params['session-id']);
+        _respond(id, enhanced ? _pendingKind(sid, 'question') : const []);
         return;
       }
       if (method == '_harness/permission/answer') {
@@ -1313,9 +1316,29 @@ class FakeHarness {
         _respond(id, const <String, Object?>{});
         return;
       }
+      if (method == '_harness/question/answer' && failQuestionAnswers) {
+        _respondError(id, -32603, 'The harness could not take the answer');
+        return;
+      }
       if (method == '_harness/question/answer') {
-        questionAnswers.add(asMap(params['answer']));
-        _respond(id, const <String, Object?>{});
+        final answer = asMap(params['answer']);
+        questionAnswers.add(answer);
+        final sid = asString(params['session-id']);
+        final pid = asString(params['pid']);
+        if (sid != null && pid != null && sessions[sid] != null) {
+          _resolve(sid, pid, asString(answer['answer']));
+        }
+        _respond(id, true);
+        return;
+      }
+      if (method == '_harness/question/cancel') {
+        final sid = asString(params['session-id']);
+        final pid = asString(params['pid']);
+        questionCancels.add(pid ?? '');
+        if (sid != null && pid != null && sessions[sid] != null) {
+          _resolve(sid, pid, null);
+        }
+        _respond(id, true);
         return;
       }
       if (method == '_harness/question/image') {
@@ -2226,6 +2249,135 @@ class FakeHarness {
       'update': {'sessionUpdate': '_harness/session', 'session': session},
     });
   }
+
+  /// The agent of session [sid] calls `ask_user`: the harness holds the
+  /// question as pending on the session, which is blocked on it, tells the
+  /// clients what the session waits on, and asks them the question, as
+  /// `_harness/ask_user`.  The answer comes back with the future (the
+  /// `result` of the client's reply).
+  Future<Map<String, Object?>> askUser(
+    String sid, {
+    required String question,
+    List<Object?> options = const [],
+    List<Object?>? diagrams,
+    String requestId = 'q-ask',
+  }) async {
+    final payload = <String, Object?>{
+      'question': question,
+      'options': options,
+      if (diagrams != null) 'diagrams': diagrams,
+    };
+    _hold(sid, requestId, payload);
+    final response = await _requestClient('_harness/ask_user', {
+      'sessionId': sid,
+      'requestId': requestId,
+      ...payload,
+    });
+    final result = asMap(response['result']);
+    // Another client may have answered it first, as the harness takes the
+    // first answer; what is still waiting is answered with this one.
+    if (isPending(sid, requestId)) {
+      questionAnswers.add(result);
+      _resolve(sid, requestId, asString(result['answer']));
+    }
+    return result;
+  }
+
+  /// A question the agent of session [sid] asked that no client heard: the
+  /// harness holds it as pending on the session, and tells the clients so
+  /// ([announce]), but asks none of them.  A client finds it with
+  /// `question/pending`.
+  void leavePendingQuestion(
+    String sid, {
+    required String question,
+    List<Object?> options = const [],
+    List<Object?>? diagrams,
+    String requestId = 'q-left',
+    bool announce = false,
+  }) {
+    _hold(
+      sid,
+      requestId,
+      {
+        'question': question,
+        'options': options,
+        if (diagrams != null) 'diagrams': diagrams,
+      },
+      announce: announce,
+    );
+  }
+
+  /// The question [id] of session [sid] was answered somewhere else (in
+  /// Emacs, on another device): the harness tells its clients.
+  void answerElsewhere(String sid, String id, String answer) {
+    questionAnswers.add({'answer': answer, 'from': 'elsewhere'});
+    _resolve(sid, id, answer);
+  }
+
+  /// Whether a request of session [sid] still waits for an answer.
+  bool isPending(String sid, String id) =>
+      _pendingOf(sid).any((item) => item['id'] == id);
+
+  /// The harness holds a question as pending on [sid], and says so.
+  void _hold(
+    String sid,
+    String id,
+    Map<String, Object?> payload, {
+    bool announce = true,
+  }) {
+    final pending = _pendingOf(sid);
+    pending.removeWhere((item) => item['id'] == id);
+    pending.add({
+      'id': id,
+      'kind': 'question',
+      'created': DateTime.now().millisecondsSinceEpoch / 1000,
+      'payload': payload,
+    });
+    sessions[sid]!['status'] = 'blocked';
+    if (announce) {
+      _setStatus(sid, 'blocked');
+      _event('session/pending-changed', [sid, List.of(pending)]);
+    }
+  }
+
+  /// The question [id] of session [sid] was answered, by whoever: it is no
+  /// longer pending, the clients are told, and the session goes on when
+  /// nothing else holds it.
+  void _resolve(String sid, String id, String? answer) {
+    final pending = _pendingOf(sid);
+    pending.removeWhere((item) => item['id'] == id);
+    if (pending.isEmpty) _setStatus(sid, 'running');
+    _event('question/answered', [sid, id, answer]);
+    _event('session/pending-changed', [sid, List.of(pending)]);
+  }
+
+  /// The pending requests of [sid] of one [kind], as the harness lists them.
+  List<Object?> _pendingKind(String? sid, String kind) {
+    final session = sessions[sid];
+    if (session == null) return const [];
+    return [
+      for (final item in _pendingOf(sid!))
+        if (item['kind'] == kind) item,
+    ];
+  }
+
+  /// The pending requests of session [sid], the list the harness keeps.
+  List<Map<String, Object?>> _pendingOf(String sid) {
+    final session = sessions[sid]!;
+    final list = session['pending'];
+    // The seeded lists are literals of a narrower type than this adds to.
+    if (_pendingLists.contains(list)) return list! as List<Map<String, Object?>>;
+    final copy = <Map<String, Object?>>[
+      for (final item in (list as List? ?? const []))
+        Map<String, Object?>.from(item as Map),
+    ];
+    _pendingLists.add(copy);
+    session['pending'] = copy;
+    return copy;
+  }
+
+  /// The lists [_pendingOf] made, which it can add to.
+  final Set<Object> _pendingLists = Set<Object>.identity();
 
   /// The harness announces [event], as it does when something happens in
   /// it: a client that listens refreshes what it shows.

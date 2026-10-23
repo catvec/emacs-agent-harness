@@ -50,8 +50,20 @@ time it opens. It asks again only when the harness does.
   *Always deny*; a path glob can be edited before a lasting answer is given.
   Harness `_harness/ask_user` questions become a choice with optional ASCII or
   image diagrams, a free-text answer, and the harness's cold-cache cost note
-  when it sends one. Requests that were already waiting when the client
-  connected are recovered through `permission/pending` and `question/pending`.
+  when it sends one. A question can always be answered, on a small phone with
+  the keyboard up too: the card takes the room the screen has left and no more,
+  the question is read in full in its body (Markdown drawn, scrolling when it
+  is long), and the answer stays in a footer that does not scroll away -- the
+  *Send answer* button for a chosen option, the field for a typed one (the
+  keyboard's send key sends it). The message field gives way to the card while
+  a question waits, and is back, with what was typed in it, once it is
+  answered. Requests that were already waiting when the client connected, or
+  that the harness holds without having asked this device, are recovered
+  through `permission/pending` and `question/pending` -- when the conversation
+  is opened and whenever the harness says (`session/pending-changed`) what a
+  session waits for -- and one that is answered somewhere else (in Emacs, on
+  another device) goes from the screen. The task board's *Answer* opens the
+  conversation of the task that waits.
 - **Shows the rest of the harness.** The task board (all seven columns, queue
   state and slot use, backlog mode, submit/start/queue/verify/reject/retry/
   complete/archive), spend, tokens, live sessions, daily spend, per-model and
@@ -630,6 +642,19 @@ The widget tests drive the real `AcpClient` against an in-memory ACP server
   text; and the whole path from the harness's nodes (`call-id`, `is-error`, a
   result's `meta`) to the page
  permission request and allow, question with a diagram and send
+- answering the agent's question on phones (`test/question_card_test.dart`):
+  on a 360×640 phone, a tall one, a Pixel and an iPhone, with the keyboard
+  down and up, a question with options and diagrams and one with none are
+  answered -- the card, its field and its button are inside what the screen
+  shows (the tests assert where they are), a long Markdown question is read
+  to its last words, the keyboard's send key sends what was typed and nothing
+  when nothing was, the composer gives way and comes back, and a question the
+  harness holds without having asked this device is found (when the
+  conversation opens, and while it is open), is not shown twice, goes when it
+  is answered elsewhere, and is not lost when the harness took no answer
+  (`test/question_task_board_test.dart`: the task board's *Answer* opens that
+  conversation; `test/question_screenshots_test.dart`: pictures of the card,
+  drawn with the fonts of a phone, written where `HARNESS_SHOTS` says)
 - creating a session and opening the new-task sheet / submitting a task, with
   pictures (`test/new_task_images_test.dart`: attached, removed, kept in the
   draft, limited to four, refused by type and size, hidden from a harness that

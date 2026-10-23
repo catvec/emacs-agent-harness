@@ -801,11 +801,13 @@ class _TaskActions extends StatelessWidget {
         onPressed: onReview,
       );
     } else if (task.needsInput) {
+      // What it asks is in its session, and is answered there.
+      final session = task.sessionId;
       primary = HarnessTextButton(
         label: 'Answer',
         icon: Icons.front_hand_outlined,
         dense: true,
-        onPressed: onReview,
+        onPressed: session == null ? onReview : () => onOpenSession(session),
       );
     } else if (task.isPending) {
       primary = HarnessTextButton(
@@ -1480,15 +1482,28 @@ class _TaskDetail extends StatelessWidget {
                 ),
                 if (task.sessionId != null) ...[
                   const SizedBox(height: HarnessSpace.lg),
-                  HarnessSecondaryButton(
-                    label: 'Open the task’s session',
-                    icon: Icons.open_in_new_rounded,
-                    expand: true,
-                    onPressed: () {
-                      Navigator.of(context).maybePop();
-                      onOpenSession(task!.sessionId!);
-                    },
-                  ),
+                  // A task that waits for an answer is answered in its
+                  // session: that is the one thing to do here.
+                  if (task.needsInput)
+                    HarnessPrimaryButton(
+                      label: 'Answer in the task’s session',
+                      icon: Icons.front_hand_outlined,
+                      expand: true,
+                      onPressed: () {
+                        Navigator.of(context).maybePop();
+                        onOpenSession(task!.sessionId!);
+                      },
+                    )
+                  else
+                    HarnessSecondaryButton(
+                      label: 'Open the task’s session',
+                      icon: Icons.open_in_new_rounded,
+                      expand: true,
+                      onPressed: () {
+                        Navigator.of(context).maybePop();
+                        onOpenSession(task!.sessionId!);
+                      },
+                    ),
                 ],
                 if (task.error != null && task.error!.isNotEmpty) ...[
                   const SizedBox(height: HarnessSpace.md),

@@ -134,7 +134,7 @@ class SessionController extends ChangeNotifier {
       if (promptInFlight) {
         unawaited(_refreshActivity());
       }
-      await _synthesizePending();
+      await _syncPending();
     } on AcpException catch (failure) {
       error = _friendlyError(failure);
     } catch (failure) {
@@ -363,29 +363,139 @@ class SessionController extends ChangeNotifier {
       sessionId: sessionId,
       completer: Completer<Object?>(),
     );
-    interactions.add(request);
+    // The harness asked it of this client after [_syncPending] already found
+    // it waiting: the one asked takes the other's place.
+    final id = request.harnessId;
+    final shown = id == null
+        ? -1
+        : interactions.indexWhere((other) => other.harnessId == id);
+    if (shown >= 0) {
+      interactions[shown] = request;
+    } else {
+      interactions.add(request);
+    }
     activity = const TurnActivity(phase: 'checking');
     _notify();
     return request.completer!.future;
   }
 
-  /// Recover requests that were already waiting when this client connected.
-  Future<void> _synthesizePending() async {
-    final pending = summary?.pending ?? const <PendingRequest>[];
-    if (pending.isEmpty || interactions.isNotEmpty) return;
-    final permissions = await api
-        .permissionPending(sessionId)
-        .catchError((_) => <JsonMap>[]);
-    final questions = await api
-        .questionPending(sessionId)
-        .catchError((_) => <JsonMap>[]);
-    for (final item in permissions) {
-      interactions.add(_syntheticPermission(item));
+  /// How long after the harness says what it waits on this client gives the
+  /// request that comes with it, which is asked right after, to arrive
+  /// before reading what the harness holds.
+  static const _pendingGrace = Duration(milliseconds: 1200);
+  Timer? _pendingTimer;
+
+  /// Read what the harness holds as pending soon, once, however many times
+  /// it said so.
+  void _syncPendingSoon() {
+    _pendingTimer?.cancel();
+    _pendingTimer = Timer(_pendingGrace, () {
+      _pendingTimer = null;
+      if (!_disposed) unawaited(_syncPending(force: true));
+    });
+  }
+
+  /// The requests the harness holds as pending on this session, as
+  /// (id, request) pairs, or null when that cannot be read now.
+  Future<List<(String, InteractionRequest)>?> _heldRequests() async {
+    final canPermissions = api.can('permission/pending');
+    final canQuestions = api.can('question/pending');
+    if (!canPermissions && !canQuestions) return null;
+    try {
+      final permissions = canPermissions
+          ? await api.permissionPending(sessionId)
+          : const <JsonMap>[];
+      final questions = canQuestions
+          ? await api.questionPending(sessionId)
+          : const <JsonMap>[];
+      return [
+        for (final item in permissions)
+          if (asString(item['id']) case final String id when id.isNotEmpty)
+            (id, _syntheticPermission(item)),
+        for (final item in questions)
+          if (asString(item['id']) case final String id when id.isNotEmpty)
+            (id, _syntheticQuestion(item)),
+      ];
+    } catch (_) {
+      return null;
     }
-    for (final item in questions) {
-      interactions.add(_syntheticQuestion(item));
+  }
+
+  /// Show what the harness waits on this session for, and nothing else.
+  ///
+  /// The harness asks the connected clients itself, as the request comes
+  /// (see [handleAgentRequest]); this is for what it holds without having
+  /// asked this client: what was already waiting when this client
+  /// connected, what it asked while the connection was out, what it asked
+  /// in a way that was not heard.  Such a request is shown from what the
+  /// harness holds ([InteractionRequest.synthetic]) and answered through
+  /// it.  A synthetic request the harness no longer holds was answered
+  /// somewhere else, and goes.  (Not one asked of this client: it was
+  /// asked after what was read here may have been written, and the harness
+  /// tells when it is answered, see [_dropUnheld].)
+  ///
+  /// Without [force] nothing is read for a session the harness holds
+  /// nothing on, as far as the summary knows.
+  Future<void> _syncPending({bool force = false}) async {
+    if (!force &&
+        (summary?.pending.isEmpty ?? true) &&
+        !interactions.any((request) => request.synthetic)) {
+      return;
     }
-    if (interactions.isNotEmpty) _notify();
+    final held = await _heldRequests();
+    if (held == null || _disposed) return;
+    var changed = false;
+    for (final request in List.of(interactions)) {
+      final id = request.harnessId;
+      if (!request.synthetic || id == null) continue;
+      if (held.any((item) => item.$1 == id)) continue;
+      interactions.remove(request);
+      changed = true;
+    }
+    for (final (id, request) in held) {
+      if (interactions.any((shown) => shown.harnessId == id)) continue;
+      interactions.add(request);
+      changed = true;
+    }
+    if (changed) _notify();
+  }
+
+  /// The harness says what it holds as pending on this session now, as a
+  /// list of requests (`session/pending-changed`'s second argument): a
+  /// request this client was asked, or recovered, that is not in it was
+  /// answered somewhere else (in Emacs, by another device, by a rule), and
+  /// goes.  The events come in the order of the requests the harness
+  /// sends, so what was asked of this client before the event is what the
+  /// event is about.
+  void _dropUnheld(Object? held) {
+    if (held != null && held is! List) return;
+    final ids = {
+      for (final item in asMapList(held))
+        if (asString(item['id']) case final String id) id,
+    };
+    for (final request in List.of(interactions)) {
+      final id = request.harnessId;
+      if (id != null && !ids.contains(id)) _drop(request);
+    }
+  }
+
+  /// [request] is not waited for any more.  What was asked of this client
+  /// is answered empty, which the harness takes for nothing, since it knows.
+  void _drop(InteractionRequest request) {
+    if (!interactions.remove(request)) return;
+    activity = null;
+    _release(request);
+    _notify();
+  }
+
+  void _release(InteractionRequest request) {
+    final completer = request.completer;
+    if (request.synthetic || completer == null || completer.isCompleted) return;
+    if (request.isPermission) {
+      completer.complete(request.cancelledPermissionResult());
+    } else if (request.isQuestion) {
+      completer.complete(request.questionResult('', const []));
+    }
   }
 
   InteractionRequest _syntheticPermission(JsonMap item) {
@@ -486,7 +596,7 @@ class SessionController extends ChangeNotifier {
       }
     } on AcpException catch (failure) {
       error = _friendlyError(failure);
-      _notify();
+      _putBack(request);
     }
     unawaited(refreshInfo());
   }
@@ -531,9 +641,20 @@ class SessionController extends ChangeNotifier {
       }
     } on AcpException catch (failure) {
       error = _friendlyError(failure);
-      _notify();
+      _putBack(request);
     }
     unawaited(refreshInfo());
+  }
+
+  /// An answer that did not reach the harness: the request is still waited
+  /// on there, so it is still shown, to be answered again.  (An answer to
+  /// what was asked of this client is the reply to the request, which has
+  /// no way to fail here.)
+  void _putBack(InteractionRequest request) {
+    if (request.synthetic && !_disposed && !interactions.contains(request)) {
+      interactions.insert(0, request);
+    }
+    _notify();
   }
 
   Future<void> cancelQuestion() async {
@@ -637,9 +758,21 @@ class SessionController extends ChangeNotifier {
         _notify();
         unawaited(refreshInfo());
       case 'session/status':
-      case 'session/pending-changed':
       case 'session/queue-changed':
         unawaited(refreshInfo());
+      case 'session/pending-changed':
+        // (session id, what is pending now)
+        if (args.length > 1) _dropUnheld(args[1]);
+        unawaited(refreshInfo());
+        _syncPendingSoon();
+      case 'question/answered':
+        // (session id, the question's id, the answer): by whoever did.
+        final answered = args.length > 1 ? asString(args[1]) : null;
+        for (final request in List.of(interactions)) {
+          if (answered != null && request.harnessId == answered) {
+            _drop(request);
+          }
+        }
       case 'session/deleted':
         deleted = true;
         _notify();
@@ -667,13 +800,9 @@ class SessionController extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    _pendingTimer?.cancel();
     for (final request in interactions) {
-      if (request.synthetic) continue;
-      if (request.isPermission) {
-        request.completer?.complete(request.cancelledPermissionResult());
-      } else if (request.isQuestion) {
-        request.completer?.complete(request.questionResult('', const []));
-      }
+      _release(request);
     }
     interactions.clear();
     _subscription?.cancel();

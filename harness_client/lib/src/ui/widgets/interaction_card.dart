@@ -9,6 +9,7 @@ import '../../state/interaction.dart';
 import '../../state/session_controller.dart';
 import '../adaptive/adaptive_widgets.dart';
 import '../theme/harness_theme.dart';
+import 'markdown_view.dart';
 
 class InteractionCard extends StatefulWidget {
   const InteractionCard({super.key, required this.controller});
@@ -20,6 +21,7 @@ class InteractionCard extends StatefulWidget {
 
 class _InteractionCardState extends State<InteractionCard> {
   final _answer = TextEditingController();
+  final _scroll = ScrollController();
   String? _currentKey;
   int _selectedQuestion = 0;
   String? _pattern;
@@ -28,9 +30,9 @@ class _InteractionCardState extends State<InteractionCard> {
   final Map<int, Future<Uint8List?>> _images = {};
 
   @override
-  @override
   void dispose() {
     _answer.dispose();
+    _scroll.dispose();
     super.dispose();
   }
 
@@ -43,12 +45,20 @@ class _InteractionCardState extends State<InteractionCard> {
           ? null
           : _selectedPattern,
     );
+    _answered();
   }
 
   Future<void> _question(String answer) async {
     if (_busy) return;
     setState(() => _busy = true);
     await widget.controller.answerQuestion(answer.trim());
+    _answered();
+  }
+
+  /// The answer is given.  If the card is still here, the answer did not
+  /// go through and the request is shown again: it can be answered again.
+  void _answered() {
+    if (mounted && _busy) setState(() => _busy = false);
   }
 
   Future<void> _editPattern() async {
@@ -75,6 +85,12 @@ class _InteractionCardState extends State<InteractionCard> {
       _answer.clear();
       _busy = false;
       _selectedQuestion = 0;
+      // Another request: its pictures are not the last one's, and it is
+      // read from its first line.
+      _images.clear();
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _scroll.hasClients) _scroll.jumpTo(0);
+      });
     }
     return Padding(
       padding: const EdgeInsets.fromLTRB(12, 6, 12, 4),
@@ -84,108 +100,178 @@ class _InteractionCardState extends State<InteractionCard> {
     );
   }
 
+  /// The frame of a request: what it is (a header), what it says and offers
+  /// (the [body], which scrolls when it is longer than the room there is),
+  /// and, for what is answered with more than a button, the [footer] where
+  /// the answer is given, which does not scroll away.  It takes the room it
+  /// is given and no more, whatever the room: a request is always
+  /// answerable.
+  ///
+  /// The body and the footer are told whether the room is [_stickyFooterRoom]
+  /// or less, too little to keep much in sight beside a header and a footer
+  /// (a small phone with its keyboard up): they leave the footer what must
+  /// stay in place, a field that has focus, and move the rest into the body.
+  ///
+  /// A [title] is read in the header, up to three lines of it; a request
+  /// that has none says what it has in its body, whole.
   Widget _shell({
     required BuildContext context,
     required Color accent,
     required IconData icon,
     required String eyebrow,
-    required String title,
+    String? title,
     String? subtitle,
-    required Widget body,
+    required Widget Function(bool tight) body,
+    Widget Function(bool tight)? footer,
     VoidCallback? onDismiss,
   }) {
     final theme = Theme.of(context);
     return AnimatedSize(
       duration: const Duration(milliseconds: 220),
       curve: Curves.easeOutCubic,
-      child: Container(
-        decoration: BoxDecoration(
-          color: theme.colorScheme.surfaceContainerLowest,
-          borderRadius: BorderRadius.circular(18),
-          border: Border.all(color: accent.withValues(alpha: 0.4), width: 1.2),
-          boxShadow: [
-            BoxShadow(
-              color: accent.withValues(alpha: 0.08),
-              blurRadius: 24,
-              offset: const Offset(0, 6),
-            ),
-          ],
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Container(
-              padding: const EdgeInsets.fromLTRB(14, 12, 6, 12),
-              decoration: BoxDecoration(
-                color: accent.withValues(alpha: 0.07),
-                borderRadius: const BorderRadius.vertical(
-                  top: Radius.circular(17),
-                ),
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final tight = constraints.maxHeight < _stickyFooterRoom;
+          return Container(
+            decoration: BoxDecoration(
+              color: theme.colorScheme.surfaceContainerLowest,
+              borderRadius: BorderRadius.circular(18),
+              border: Border.all(
+                color: accent.withValues(alpha: 0.4),
+                width: 1.2,
               ),
-              child: Row(
-                // The icon is level with the first line of text, not the
-                // middle of however many lines there are.
+              boxShadow: [
+                BoxShadow(
+                  color: accent.withValues(alpha: 0.08),
+                  blurRadius: 24,
+                  offset: const Offset(0, 6),
+                ),
+              ],
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                _header(
+                  context,
+                  accent: accent,
+                  icon: icon,
+                  eyebrow: eyebrow,
+                  title: title,
+                  subtitle: subtitle,
+                  onDismiss: onDismiss,
+                ),
+                Flexible(
+                  child: Scrollbar(
+                    controller: _scroll,
+                    child: SingleChildScrollView(
+                      controller: _scroll,
+                      child: body(tight),
+                    ),
+                  ),
+                ),
+                if (footer != null)
+                  Container(
+                    decoration: BoxDecoration(
+                      border: Border(
+                        top: BorderSide(
+                          color: theme.colorScheme.outlineVariant.withValues(
+                            alpha: 0.6,
+                          ),
+                        ),
+                      ),
+                    ),
+                    child: footer(tight),
+                  ),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  /// Less height than this has no room to keep the footer in sight beside
+  /// the header and still show something of the body.
+  static const _stickyFooterRoom = 340.0;
+
+  Widget _header(
+    BuildContext context, {
+    required Color accent,
+    required IconData icon,
+    required String eyebrow,
+    String? title,
+    String? subtitle,
+    VoidCallback? onDismiss,
+  }) {
+    final line = title == null;
+    return Container(
+      padding: EdgeInsets.fromLTRB(14, line ? 6 : 12, 6, line ? 6 : 12),
+      decoration: BoxDecoration(
+        color: accent.withValues(alpha: 0.07),
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(17)),
+      ),
+      child: Row(
+        // The icon is level with the first line of text, not the middle of
+        // however many lines there are.
+        crossAxisAlignment: line
+            ? CrossAxisAlignment.center
+            : CrossAxisAlignment.start,
+        children: [
+          Container(
+            width: 32,
+            height: 32,
+            decoration: BoxDecoration(
+              color: accent.withValues(alpha: 0.14),
+              borderRadius: BorderRadius.circular(9),
+            ),
+            child: Icon(icon, size: 18, color: accent),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Padding(
+              padding: EdgeInsets.only(
+                top: 1,
+                bottom: onDismiss == null || line ? 0 : 3,
+              ),
+              child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Container(
-                    width: 32,
-                    height: 32,
-                    decoration: BoxDecoration(
-                      color: accent.withValues(alpha: 0.14),
-                      borderRadius: BorderRadius.circular(9),
-                    ),
-                    child: Icon(icon, size: 18, color: accent),
+                  Text(
+                    eyebrow.toUpperCase(),
+                    style: HarnessText.label(context).copyWith(color: accent),
                   ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Padding(
-                      padding: EdgeInsets.only(
-                        top: 1,
-                        bottom: onDismiss == null ? 0 : 3,
-                      ),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            eyebrow.toUpperCase(),
-                            style: HarnessText.label(context)
-                                .copyWith(color: accent),
-                          ),
-                          const SizedBox(height: 3),
-                          Text(
-                            title,
-                            maxLines: 3,
-                            overflow: TextOverflow.ellipsis,
-                            style: HarnessText.rowTitle(context)
-                                .copyWith(fontWeight: FontWeight.w700),
-                          ),
-                          if (subtitle != null) ...[
-                            const SizedBox(height: 2),
-                            Text(
-                              subtitle,
-                              maxLines: 2,
-                              overflow: TextOverflow.ellipsis,
-                              style: HarnessText.caption(context),
-                            ),
-                          ],
-                        ],
-                      ),
+                  if (title != null) ...[
+                    const SizedBox(height: 3),
+                    Text(
+                      title,
+                      maxLines: 3,
+                      overflow: TextOverflow.ellipsis,
+                      style: HarnessText.rowTitle(context)
+                          .copyWith(fontWeight: FontWeight.w700),
                     ),
-                  ),
-                  if (onDismiss != null)
-                    HarnessIconButton(
-                      icon: Icons.close_rounded,
-                      label: 'Dismiss',
-                      size: 18,
-                      onPressed: onDismiss,
+                  ],
+                  if (subtitle != null) ...[
+                    const SizedBox(height: 2),
+                    Text(
+                      subtitle,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: HarnessText.caption(context),
                     ),
+                  ],
                 ],
               ),
             ),
-            Flexible(child: SingleChildScrollView(child: body)),
-          ],
-        ),
+          ),
+          if (onDismiss != null)
+            HarnessIconButton(
+              icon: Icons.close_rounded,
+              label: 'Dismiss',
+              size: 18,
+              onPressed: onDismiss,
+            ),
+        ],
       ),
     );
   }
@@ -216,7 +302,7 @@ class _InteractionCardState extends State<InteractionCard> {
       title: request.title,
       subtitle: request.subtitle,
       onDismiss: _busy ? null : widget.controller.dismissPermission,
-      body: Padding(
+      body: (_) => Padding(
         padding: const EdgeInsets.fromLTRB(14, 12, 14, 14),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -364,19 +450,35 @@ class _InteractionCardState extends State<InteractionCard> {
         diagrams.isNotEmpty && _selectedQuestion < diagrams.length
         ? diagrams[_selectedQuestion]
         : null;
+    // A line of words is the title of the card and stays in sight while the
+    // options scroll; anything longer is read in the body, whole.
+    final question = request.title;
+    final short = isShortQuestion(question);
+    Widget sendAnswer() => HarnessPrimaryButton(
+      label: 'Send answer',
+      icon: Icons.check_rounded,
+      expand: true,
+      busy: _busy,
+      onPressed: _busy ? null : () => _question(options[_selectedQuestion]),
+    );
     return _shell(
       context: context,
       accent: accent,
       icon: Icons.help_outline_rounded,
       eyebrow: 'Question',
-      title: request.title,
+      title: short ? question : null,
       onDismiss: _busy ? null : widget.controller.cancelQuestion,
-      body: Padding(
-        padding: const EdgeInsets.fromLTRB(14, 12, 14, 14),
+      body: (tight) => Padding(
+        padding: const EdgeInsets.fromLTRB(14, 12, 14, 8),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           mainAxisSize: MainAxisSize.min,
           children: [
+            if (!short)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 10),
+                child: HarnessMarkdown(text: question, compact: true),
+              ),
             if (request.cowboy.isNotEmpty) _CowboyNote(info: request.cowboy),
             for (var index = 0; index < options.length; index++)
               Padding(
@@ -392,53 +494,63 @@ class _InteractionCardState extends State<InteractionCard> {
               ),
             if (selectedDiagram != null)
               Padding(
-                padding: const EdgeInsets.only(top: 4, bottom: 8),
+                padding: const EdgeInsets.only(top: 4, bottom: 4),
                 child: _DiagramView(
                   diagram: selectedDiagram,
-                  maxHeight: 120,
+                  maxHeight: 200,
                   image: asString(selectedDiagram['type']) == 'image'
                       ? (_images[_selectedQuestion] ??= widget.controller
                             .questionImage(_selectedQuestion))
                       : null,
                 ),
               ),
-            if (options.isNotEmpty) ...[
-              const SizedBox(height: 4),
-              HarnessPrimaryButton(
-                label: 'Send answer',
-                icon: Icons.check_rounded,
-                expand: true,
-                busy: _busy,
-                onPressed: _busy
-                    ? null
-                    : () => _question(options[_selectedQuestion]),
+            // Where there is room it is in the footer, in sight.
+            if (tight && options.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 4, bottom: 4),
+                child: sendAnswer(),
               ),
+          ],
+        ),
+      ),
+      // Where it is answered: the option chosen, or what was typed.  Always
+      // in reach, with the keyboard up too.  The field stays where it is
+      // whatever the room, or it would lose the focus it is typed in.
+      footer: (tight) => Padding(
+        padding: const EdgeInsets.fromLTRB(14, 10, 14, 12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (!tight && options.isNotEmpty) ...[
+              sendAnswer(),
+              const SizedBox(height: 10),
             ],
-            const SizedBox(height: 10),
             Row(
+              key: const ValueKey('question-typed-answer'),
               crossAxisAlignment: CrossAxisAlignment.end,
               children: [
                 Expanded(
                   child: HarnessTextField(
+                    key: const Key('question-answer-field'),
                     controller: _answer,
                     hint: options.isEmpty
                         ? 'Type an answer'
                         : 'Or type an answer',
                     maxLines: 3,
                     minLines: 1,
-                    onSubmitted: (_) => _question(_answer.text),
+                    // Not a field for lines: the keyboard's key says send,
+                    // and it does.
+                    keyboardType: TextInputType.text,
+                    textInputAction: TextInputAction.send,
+                    onSubmitted: (_) => _sendTyped(),
                   ),
                 ),
                 const SizedBox(width: 6),
                 HarnessIconButton(
                   icon: Icons.arrow_upward_rounded,
                   label: 'Send typed answer',
-                  onPressed: _busy
-                      ? null
-                      : () {
-                          final text = _answer.text.trim();
-                          if (text.isNotEmpty) _question(text);
-                        },
+                  onPressed: _busy ? null : _sendTyped,
                 ),
               ],
             ),
@@ -447,6 +559,22 @@ class _InteractionCardState extends State<InteractionCard> {
       ),
     );
   }
+
+  /// Answer with what was typed, if anything was.
+  void _sendTyped() {
+    final text = _answer.text.trim();
+    if (text.isNotEmpty) _question(text);
+  }
+}
+
+/// Whether [question] is a line of plain words: one the header of the card
+/// shows whole.  A longer one, or one with lines or Markdown in it, is
+/// read in the body of the card, where it scrolls.
+bool isShortQuestion(String question) {
+  final text = question.trim();
+  return text.length <= 140 &&
+      !text.contains('\n') &&
+      !RegExp(r'[`*#>\[\]|]|\b_|_\b').hasMatch(text);
 }
 
 class _QuestionChoice extends StatelessWidget {

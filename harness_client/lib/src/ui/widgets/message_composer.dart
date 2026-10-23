@@ -78,6 +78,17 @@ class _MessageComposerState extends State<MessageComposer> {
   }
 
   @override
+  void didUpdateWidget(MessageComposer oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // Something waits to be answered, which is not here: the keyboard that
+    // was up for this field is of no use, and, where the field goes out of
+    // sight, would stay.
+    if (widget.awaitingAnswer && !oldWidget.awaitingAnswer) {
+      _focus.unfocus();
+    }
+  }
+
+  @override
   void dispose() {
     widget.drafts?.removeListener(_followDraft);
     _text.removeListener(_rememberDraft);
