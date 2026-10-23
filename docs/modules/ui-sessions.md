@@ -92,6 +92,18 @@ Every cell starts at the same place on every row, under its header,
 and the figures -- context, output, rate and cost -- are right-aligned
 so their ends line up (see "Rows" below for how the rows are printed).
 
+The columns, their cells and the rows are not the list buffer's
+alone.  Another view that lists sessions draws them with the same
+code, so that a session reads the same wherever it is listed, and
+draws no rows of its own: the task slots page lists the tasks at work
+this way.  `harness-ui-sessions-column` is a column of the list,
+`harness-ui-sessions-format` the format of some columns,
+`harness-ui-sessions-cells` a session's cells in them,
+`harness-ui-sessions-insert-entry` its row, with the line saying what
+it waits on when it is blocked, and `harness-ui-sessions-header-row`
+the header of a buffer that has no header line.  None of them reads
+the list's buffer.
+
 The Priority column shows the arrow for the level the harness serves
 the session's work at -- up for high, down for low, the default,
 medium, left out as it is everywhere else -- and the arrow is a

@@ -140,8 +140,9 @@ the harness option `harness-tasks-max-running`, saved like the Review
 switch, so every project has that many slots.  A higher limit starts
 waiting tasks at once; a lower one stops none at work.  S opens the
 project's task slots page (`harness-ui-tasks-slots`, which runs
-`harness-slots` of harness-ui-slots.el): a box for each slot, in use
-or free, the queue by priority and how long tasks waited for a slot.
+`harness-slots` of harness-ui-slots.el): the tasks at work, listed as
+the session list lists sessions, the queue by priority and how long
+tasks waited for a slot.
 
 The header line holds what the board does not show -- each column's
 heading counts its own tasks.  As a chat's header does for its

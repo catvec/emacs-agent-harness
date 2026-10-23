@@ -12231,30 +12231,44 @@ Task slots page (`harness-ui-slots`, `harness-slots`: `S` on a board
 for its project -- `harness-ui-tasks-slots`, which names the module
 when it is not loaded -- `C-c h Q` and the menu's `Q` for the current one;
 `*harness slots*`, `harness-ui-slots-mode`): the answer of
-`_harness/task/slots` drawn as a box for each slot -- the ones in use
-first, the longest at work first, each with its task's title, its
-priority's arrow and border face, its state and for how long; then the
-free ones (at most `harness-ui-slots--max-free`); holders past a lowered
-limit are marked over it -- then the queue's waits by priority (how
+`_harness/task/slots` drawn with the session list's own rows: the tasks
+in slots, the longest at work first, as a table whose columns are the
+list's (`harness-ui-sessions-column`: the status icon, Name, Status,
+Priority, Context, Cost, Last msg) and one of the slots' own, At work,
+each row the session the UI has cached under the holder's `:session`
+overlaid with what `task/slots` says (the task's title, the slot's state,
+its priority; `harness-ui-slots--session`), laid out by the list's row
+printer (`harness-ui-sessions-format`, `-cells`, `-insert-row`,
+`-header-row`, `-insert-entry`) so the arrow and the context figure are
+the list's buttons and a blocked task has under its row the line of what
+it waits on, with the buttons that answer it (`-request-line`; `y`, `n`
+and `SPC` work as in the list).  What a row cannot say -- the task waits
+on its workers, was sent back from review, holds a slot past a lowered
+limit -- is a line under it, and a line under the table counts the free
+slots.  A window too narrow for the table leaves out Last msg, Cost,
+Context and Priority, in that order, before the names are cut
+(`harness-ui-slots--layout`).  Then the queue's waits by priority (how
 many, the longest and the average so far), the next five in line, and
 the recorded waits of the last `:days` days by priority (how many
-started, their average and longest).  `RET` or a click on a box opens
-its task's session (`harness-ui-session-opener`), `TAB` and `S-TAB` go
-from box to box, `l` or [Set limit] is the board's
-`harness-ui-tasks-set-max-running`.  Every column and border is placed
-with `(space :align-to COLUMN)`.  The page is a function of the answer,
+started, their average and longest).  `RET` or a click on a task's name
+opens its session (`harness-ui-session-opener`), `TAB` and `S-TAB` go
+from row to row, `l` or [Set limit] is the board's
+`harness-ui-tasks-set-max-running`.  Every column is placed with
+`(space :align-to COLUMN)`.  The page is a function of the answer,
 the width of its widest window and the time
 (`harness-ui-slots--page`); `harness-ui-slots--render` draws it only
 when that text differs from what is drawn, keeping point on the same
-box or line and each window's start.  It keeps up without churn: after
+row or line and each window's start.  It keeps up without churn: after
 the events a board reloads on (`harness-ui-tasks--refresh-events`),
 `task/changed`, `task/deleted` and a change of a session's priority
 (`session/ext-changed` for its key), a page a window shows asks again
 once the burst settles (`harness-ui-slots--refetch-delay`, 0.5 s), and
 a hidden one is only marked stale, asking once a window shows it again
-(`window-buffer-change-functions`); its times run on the boards' clock
-(`harness-ui-tasks-tick-hook`), drawn from the answer it has; an answer
-to an older request than the last is dropped.
+(`window-buffer-change-functions`); its times and the figures of its
+sessions run on the boards' clock (`harness-ui-tasks-tick-hook`), drawn
+from the answer it has, and a request a task waits on that comes or is
+answered draws it again at once (`harness-ui-pending-changed-hook`);
+an answer to an older request than the last is dropped.
 
 Companion pet (`harness-ui-pet`, `C-c h z`, `harness-pet`, menu `z`):
 the buffer `*harness pet*`, and a few places besides.  Before it

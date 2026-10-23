@@ -2,13 +2,13 @@
 
 # ui-slots
 
-The task slots page: a box for each slot, in use or free, the queue and its waits by priority.
+The task slots page: the tasks that hold slots as the session list lists sessions, the queue and its waits by priority.
 
 - **Runs in:** the UI (your Emacs)
 - **Source:** [lisp/ui/harness-ui-slots.el](../../lisp/ui/harness-ui-slots.el)
 - **Loaded:** when enabled (see `harness-enable-modules`)
 - **Requires:** [ui](ui.md), [ui-tasks](ui-tasks.md)
-- **Brings along:** [ui-priority](ui-priority.md) (its file requires it)
+- **Brings along:** [ui-priority](ui-priority.md) (its file requires it), [ui-sessions](ui-sessions.md) (its file requires it)
 
 ## About
 
@@ -25,14 +25,13 @@ The page reads, top to bottom (this one is 100 columns wide):
 
   Task slots  my-project   3 of 4 in use · 1 free · 4 waiting   [Set limit]
 
-  ╭─ ↓ low ────────────────────╮ ╭─ ↑ high ───────────────────╮ ╭─ medium ──────...
-  │ Add secret redaction tool… │ │ Fix stuck model responses… │ │ Plan task boa...
-  │ waits on you · 1h18m       │ │ running · 41m              │ │ running · 2m
-  ╰────────────────────────────╯ ╰────────────────────────────╯ ╰───────────...
-  ╭─ free ─────────────────────╮
-  │                            │
-  │                            │
-  ╰────────────────────────────╯
+  In use
+     Name                          Status    At work  Priority        Context         Cost Last msg
+   ‖  Add secret redaction tools   blocked     1h18m  ↓                                Max 12m ago
+     [Answer…]  has a question for you · Should the tool redact files in place?
+   ►  Fix stuck model responses…   running       41m  ↑            52.0k/200k          Max just now
+   ►  Plan task board polish       running        2m              9.1k/200k          Max 1m ago
+     1 free
 
   Queue · 4 waiting
     priority    waiting   longest   average
@@ -50,24 +49,37 @@ The page reads, top to bottom (this one is 100 columns wide):
     ↑ high            2        6m       12m
     ...
 
-One box for each slot, the slots in use first, the longest at work
-first, then the free ones (at most `harness-ui-slots--max-free` of
-them).  Without a limit only the slots in use show; a limit lowered
-below the tasks at work leaves their boxes marked "over the limit".  A
-click or RET on a box opens the session of its task, the way a click
-on a card of the task board does; TAB and S-TAB go from box to box.
-The first line's [Set limit] is the board's "N at a time" button
+The tasks at work are listed as the session list lists sessions, not
+drawn on their own: a row for each, the longest at work first, in the
+list's columns -- the status icon, Name, Status, Priority, Context,
+Cost and Last msg, each the list's own cell
+(`harness-ui-sessions-column`) laid out by its own row printer
+(`harness-ui-sessions-insert-entry`) -- and At work, how long the task
+has held its slot, which only the slots know.  So a priority arrow
+and a context figure are buttons here as they are there, and a task
+blocked on a request has, as in the list, the line saying what it
+waits on under its row, with the buttons that answer it.  A task that
+waits on its workers, was sent back from review or holds a slot past
+the limit (a limit lowered below the tasks at work) has a line saying
+so.  A line under the rows counts the free slots.  A window too
+narrow for the table leaves out the last message, the cost, the
+context and the priority, one at a time, before it cuts the names
+(`harness-ui-slots--give-up`).  A click or RET on a task's name opens
+its session, the way a click on a card of the task board does; TAB and
+S-TAB go from row to row, SPC pops out what the task waits on and y
+and n answer a permission request, as in the list.  The
+first line's [Set limit] is the board's "N at a time" button
 (`harness-ui-tasks-set-max-running`).
 
 Where things sit is told with `(space :align-to COLUMN)`, never by
 counting characters: an arrow or an icon is drawn a little wider or
 narrower than the letters around it in some fonts, and would move a
-border or a column that came after it.
+column that came after it.
 
 The page is a function of what the harness said, the width of its
 window and the time (`harness-ui-slots--page`), so a redraw whose text
 would be the same as what is drawn is skipped
-(`harness-ui-slots--render`) and point stays on the same box or line.
+(`harness-ui-slots--render`) and point stays on the same row or line.
 
 It stays current without a timer of its own and without asking more
 than it must:
@@ -78,9 +90,12 @@ than it must:
     (`harness-ui-slots--refetch-delay`), and
     only while a window shows it: a hidden page is only marked stale,
     and asks once when it shows again;
-  - its times run on the board's clock (`harness-ui-tasks-tick-hook`,
-    every `harness-ui-tasks--tick-interval` seconds), drawn from the
-    answer it has, asking the harness for nothing;
+  - its times, and the figures of the sessions in its rows, run on the
+    board's clock (`harness-ui-tasks-tick-hook`, every
+    `harness-ui-tasks--tick-interval` seconds), drawn from the answer
+    it has, asking the harness for nothing; a request a task waits
+    on, which comes or is answered, draws it again at once
+    (`harness-ui-pending-changed-hook`);
   - either way, a redraw that would draw the same text is skipped.
 
 S on a task board opens the page for the board's project, and C-c h Q
@@ -91,10 +106,10 @@ S on a task board opens the page for the board's project, and C-c h Q
 ### Commands
 
 - `harness-slots` — Show how the task slots of DIR's project are used.
-- `harness-ui-slots-mouse-open` — Open the session of the task in the box EVENT, a click, is on.
-- `harness-ui-slots-next-box` — Move to the next box.
-- `harness-ui-slots-open` — Open the session of the task in the box at point, in POSITION.
-- `harness-ui-slots-previous-box` — Move to the previous box.
+- `harness-ui-slots-mouse-open` — Open the session of the task in the row EVENT, a click, is on.
+- `harness-ui-slots-next-row` — Move to the next task in a slot.
+- `harness-ui-slots-open` — Open the session of the task in the row at point, in POSITION.
+- `harness-ui-slots-previous-row` — Move to the previous task in a slot.
 - `harness-ui-slots-refresh` — Ask the harness for the slots again.
 - `harness-ui-slots-set-limit` — Ask how many tasks of a project may work at once, and set it.
 
@@ -107,6 +122,7 @@ S on a task board opens the page for the board's project, and C-c h Q
 ### Hooks it adds to
 
 - `harness-ui-event-functions` → `harness-ui-slots--on-event`
+- `harness-ui-pending-changed-hook` → `harness-ui-slots--on-pending`
 - `harness-ui-redraw-hook` → `harness-ui-slots--redraw-all`
 - `harness-ui-tasks-tick-hook` → `harness-ui-slots--on-tick`
 - `window-buffer-change-functions` → `harness-ui-slots--on-window-change`

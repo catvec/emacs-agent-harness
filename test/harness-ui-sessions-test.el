@@ -3643,5 +3643,150 @@ anchor."
         (kill-buffer anchor)
         (kill-buffer file)))))
 
+;;;; Rows for other views
+
+;; The list's columns, cells and rows are what another view that lists
+;; sessions draws them with (the task slots page does): none of it reads
+;; the list's buffer.
+
+(ert-deftest harness-ui-sessions-format-is-the-format-of-the-columns-it-is-given ()
+  (let ((columns (list (harness-ui-sessions-column "Name") (harness-ui-sessions-column "Cost"))))
+    (should (equal [("Name" 28 t) ("Cost" 12 harness-ui-sessions--spend< :right-align t)]
+                   (harness-ui-sessions-format columns)))
+    ;; A column may be another width than its spec's.
+    (should (equal '(("Name" 12) ("Cost" 12))
+                   (mapcar (lambda (spec) (list (nth 0 spec) (nth 1 spec)))
+                           (harness-ui-sessions-format columns '(("Name" . 12))))))
+    (should-not (harness-ui-sessions-column "No such column"))
+    ;; The list's own format is that of the columns it shows.
+    (should (equal (harness-ui-sessions-format (harness-ui-sessions--shown-columns))
+                   (harness-ui-sessions--format)))))
+
+(ert-deftest harness-ui-sessions-cells-are-those-of-the-columns ()
+  (clrhash harness-ui--sessions)
+  (unwind-protect
+      (let* ((session (harness-ui-sessions-test--add "a" "/tmp/" :status "running"))
+             (columns (mapcar #'harness-ui-sessions-column '("" "Name" "Status")))
+             (cells (harness-ui-sessions-cells columns session)))
+        (should (= 3 (length cells)))
+        (should (equal "a" (substring-no-properties (aref cells 1))))
+        (should (equal "running" (substring-no-properties (aref cells 2))))
+        ;; A child's name is indented under its parent's.
+        (should (string-match-p "\\`  ↳ a\\'" (substring-no-properties
+                                              (aref (harness-ui-sessions-cells columns session 1) 1))))
+        ;; A column of the caller's own has the same shape.
+        (should (equal ["x"] (harness-ui-sessions-cells (list (list :name "X" :width 1 :cell (lambda (_s _d) "x")))
+                                                          session))))
+    (clrhash harness-ui--sessions)))
+
+(defun harness-ui-sessions-test--cell-start (name)
+  "Return where the cell of column NAME starts in the current buffer, a row."
+  (save-excursion
+    (goto-char (point-min))
+    (prop-match-beginning (text-property-search-forward 'tabulated-list-column-name name #'equal))))
+
+(ert-deftest harness-ui-sessions-rows-need-no-list-buffer ()
+  ;; A row in a buffer that is no list: each cell starts where its column does,
+  ;; the figures end where theirs do, whatever the cells before them hold.
+  (let ((format [("" 2 t) ("Name" 6 t) ("Cost" 5 nil :right-align t)]))
+    (with-temp-buffer
+      (harness-ui-sessions-insert-row format ["x" "abc" "$1"] 1)
+      (should (string-suffix-p "\n" (buffer-string)))
+      ;; The name starts at column 4: the padding, the icon column and its space.
+      (let ((name (harness-ui-sessions-test--cell-start "Name")))
+        (should (equal "abc" (buffer-substring-no-properties name (+ name 3))))
+        (goto-char name)
+        (should (= 4 (current-column))))
+      (goto-char (point-min))
+      (end-of-line)
+      ;; Right-aligned: the figure ends at the end of its column, 4 + 6 + 1 + 5.
+      (should (= 16 (current-column))))
+    ;; A name that fills its column, or runs over it, leaves the next cell where it is.
+    (with-temp-buffer
+      (harness-ui-sessions-insert-row format ["x" "a name far too long for it" "$1"] 1)
+      (goto-char (harness-ui-sessions-test--cell-start "Cost"))
+      (end-of-line)
+      (should (= 16 (current-column))))
+    ;; The header row has its labels where the cells are, and no tooltip of its own.
+    (let ((header (harness-ui-sessions-header-row format 1 'bold)))
+      (should (equal " " (substring-no-properties (substring header 0 1))))
+      (should (string-match "Name" header))
+      (should (= 4 (let ((text (harness-ui-sessions-test--align-visual header))) (string-match "Name" text))))
+      (should (= 16 (length (string-trim-right (harness-ui-sessions-test--align-visual header)))))
+      (should (eq 'bold (get-text-property (string-match "Name" header) 'face header)))
+      (should-not (text-property-not-all 0 (length header) 'help-echo nil header)))))
+
+(defun harness-ui-sessions-test--align-visual (text)
+  "Return TEXT, a row, as drawn: each `(space :align-to N)' written out as spaces."
+  (let ((column 0) (out nil))
+    (dotimes (i (length text))
+      (let ((target (harness-ui-sessions-test--align-target i text)))
+        (cond (target (when (> target column)
+                        (push (make-string (- target column) ?\s) out)
+                        (setq column target)))
+              ((eq (aref text i) ?\n))
+              (t (push (string (aref text i)) out)
+                 (setq column (+ column (char-width (aref text i))))))))
+    (apply #'concat (nreverse out))))
+
+(ert-deftest harness-ui-sessions-entry-says-what-a-blocked-session-waits-on ()
+  (harness-ui-sessions-test-with-repo
+    (let* ((columns (mapcar #'harness-ui-sessions-column '("" "Name" "Status")))
+           (format (harness-ui-sessions-format columns))
+           (entry (lambda (id)
+                    (let ((session (harness-ui-session id)))
+                      (with-temp-buffer
+                        (harness-ui-sessions-insert-entry session (harness-ui-sessions-cells columns session)
+                                                          format 1 4)
+                        (buffer-string))))))
+      (harness-ui-sessions-test--blocked "stuck" root "permission")
+      (harness-ui-sessions-test--add "fine" root)
+      ;; One line for a session that waits on nothing.
+      (should (= 1 (length (split-string (string-trim-right (funcall entry "fine")) "\n"))))
+      ;; Two for one that waits on a request: the buttons that answer it, and what it is.
+      (let* ((text (funcall entry "stuck"))
+             (lines (split-string (string-trim-right text) "\n")))
+        (should (= 2 (length lines)))
+        (should (string-match-p "\\`    \\[Allow\\].*\\[Deny\\].*Bash: rm -rf build/" (substring-no-properties (nth 1 lines))))
+        ;; y and n answer a permission request, on both lines.
+        (should (eq #'harness-ui-sessions-allow (lookup-key (get-text-property 5 'keymap text) "y")))
+        (should (eq #'harness-ui-sessions-deny (lookup-key (get-text-property 5 'keymap text) "n")))
+        (should (get-text-property (1+ (string-match "\n" text)) 'keymap text)))
+      ;; A question has no y or n.
+      (harness-ui-sessions-test--blocked "asking" root "question")
+      (should-not (lookup-key (or (get-text-property 5 'keymap (funcall entry "asking")) (make-sparse-keymap)) "y"))
+      ;; Given the width of a window, what it waits on is cut to fit it.
+      (harness-ui-sessions-test--add
+       "long" root :status "blocked"
+       :pending (list (list :id "long-q" :kind "question"
+                            :payload (list :question "Which of the two colours would you rather the headings were drawn in?"
+                                           :options '("red" "green")))))
+      (let ((request (lambda (width)
+                       (substring-no-properties
+                        (string-trim-right
+                         (harness-ui-sessions-request-line "long" (harness-ui-pending-first "long") 4 width))))))
+        (should (string-match-p "headings were drawn in\\?\\'" (funcall request nil)))
+        (should (string-match-p "headings were drawn in\\?\\'" (funcall request 200)))
+        (let ((narrow (funcall request 70)))
+          (should (< (string-width narrow) 70))
+          (should (string-match-p "…\\'" narrow)))
+        ;; Never less than a few characters of it, however narrow the window.
+        (should (string-match-p "Which" (funcall request 5)))))))
+
+(ert-deftest harness-ui-sessions-allow-and-deny-answer-for-the-session-at-point-of-any-view ()
+  ;; The list finds its session in its rows; another view says it through
+  ;; `harness-ui-session-at-point-function', and y and n answer for it too.
+  (let (answered)
+    (cl-letf (((symbol-function 'harness-ui-pending-answer-first-permission)
+               (lambda (id option) (push (list id option) answered))))
+      (with-temp-buffer
+        (setq-local harness-ui-session-at-point-function (lambda () "s-here"))
+        (harness-ui-sessions-allow)
+        (harness-ui-sessions-deny))
+      (should (equal '(("s-here" "allow-once") ("s-here" "deny-once")) (nreverse answered)))
+      ;; With no session at point, no answer.
+      (with-temp-buffer
+        (should-error (harness-ui-sessions-allow) :type 'user-error)))))
+
 (provide 'harness-ui-sessions-test)
 ;;; harness-ui-sessions-test.el ends here

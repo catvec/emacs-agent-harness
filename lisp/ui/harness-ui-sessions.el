@@ -82,6 +82,18 @@
 ;; and the figures -- context, output, rate and cost -- are right-aligned
 ;; so their ends line up (see "Rows" below for how the rows are printed).
 ;;
+;; The columns, their cells and the rows are not the list buffer's
+;; alone.  Another view that lists sessions draws them with the same
+;; code, so that a session reads the same wherever it is listed, and
+;; draws no rows of its own: the task slots page lists the tasks at work
+;; this way.  `harness-ui-sessions-column' is a column of the list,
+;; `harness-ui-sessions-format' the format of some columns,
+;; `harness-ui-sessions-cells' a session's cells in them,
+;; `harness-ui-sessions-insert-entry' its row, with the line saying what
+;; it waits on when it is blocked, and `harness-ui-sessions-header-row'
+;; the header of a buffer that has no header line.  None of them reads
+;; the list's buffer.
+;;
 ;; The Priority column shows the arrow for the level the harness serves
 ;; the session's work at -- up for high, down for low, the default,
 ;; medium, left out as it is everywhere else -- and the arrow is a
@@ -466,8 +478,10 @@ returns the cell.  `:always' marks the status icon, which is never
 left out, and `:all-projects' the Project column, which shows only when
 the list covers all projects.  See `harness-ui-sessions--shown-columns'.")
 
-(defun harness-ui-sessions--column (name)
-  "Return the column named NAME of `harness-ui-sessions--columns', or nil."
+(defun harness-ui-sessions-column (name)
+  "Return the column named NAME of `harness-ui-sessions--columns', or nil.
+Another view that lists sessions picks the columns it shows from the
+list's own, so a session reads the same in both."
   (cl-find name harness-ui-sessions--columns
            :key (lambda (column) (plist-get column :name)) :test #'equal))
 
@@ -494,21 +508,42 @@ covers all projects."
                     (not (plist-get column :all-projects))))))
      harness-ui-sessions--columns)))
 
+(defun harness-ui-sessions-format (columns &optional widths)
+  "Return the `tabulated-list-format' of COLUMNS, a list of column specs.
+WIDTHS, an alist of a column's name and a width, gives a column another
+width than its spec's; a spec's `:pad-right' is the columns left between
+its cells and the next column's, one when it has none.  The session
+list builds its own format with this, and so does any view that draws
+sessions in the same columns (`harness-ui-sessions-insert-entry')."
+  (vconcat (mapcar (lambda (column)
+                     (append (list (plist-get column :name)
+                                   (or (cdr (assoc (plist-get column :name) widths))
+                                       (plist-get column :width))
+                                   (plist-get column :sort))
+                             (and (plist-get column :right-align) '(:right-align t))
+                             (and (plist-get column :pad-right)
+                                  (list :pad-right (plist-get column :pad-right)))))
+                   columns)))
+
 (defun harness-ui-sessions--format ()
   "Return the `tabulated-list-format' of the columns this list shows now."
-  (vconcat (mapcar (lambda (column)
-                     (append (list (plist-get column :name) (plist-get column :width)
-                                   (plist-get column :sort))
-                             (and (plist-get column :right-align) '(:right-align t))))
-                   (harness-ui-sessions--shown-columns))))
+  (harness-ui-sessions-format (harness-ui-sessions--shown-columns)))
+
+(defun harness-ui-sessions-cells (columns session &optional depth)
+  "Return SESSION's cells in COLUMNS, a vector of strings, one for each.
+DEPTH is how deep its name is indented under its parents, 0 by default.
+A column is a spec of `harness-ui-sessions--columns', or one of the
+caller's own with the same keys: its `:cell' is called with SESSION, a
+plist, and DEPTH."
+  (vconcat (mapcar (lambda (column) (funcall (plist-get column :cell) session (or depth 0)))
+                   columns)))
 
 (defun harness-ui-sessions--entry (depth s)
   "Return the entry of session S in `tabulated-list-entries'.
 Its cells are those of the columns shown now, in order; its name is
 indented DEPTH levels under its parents."
   (list (plist-get s :id)
-        (vconcat (mapcar (lambda (column) (funcall (plist-get column :cell) s depth))
-                         (harness-ui-sessions--shown-columns)))))
+        (harness-ui-sessions-cells (harness-ui-sessions--shown-columns) s depth)))
 
 (defun harness-ui-sessions--show-columns ()
   "Give the list the format of the columns it shows now.
@@ -603,19 +638,24 @@ The marks of sessions the cache no longer has are dropped
   (propertize (harness-ui-action-button label action :help help)
               'keymap harness-ui-sessions-button-map))
 
-(defun harness-ui-sessions--request-line (id r)
+(defun harness-ui-sessions-request-line (id r indent &optional width)
   "Return the line under the row of session ID, which waits on request R.
-It has the buttons answering R, then says what R is, under the name."
-  (let ((depth (or (and harness-ui-sessions--depths (gethash id harness-ui-sessions--depths)) 0))
-        (session (harness-ui-session id)))
-    (concat (make-string (+ tabulated-list-padding 3 (* 2 depth) (if (> depth 0) 2 0)) ?\s)
-            (mapconcat (lambda (a) (harness-ui-sessions--button (nth 0 a) (nth 1 a) (nth 2 a)))
-                       (harness-ui-pending-view-actions id) " ")
-            "  "
-            (propertize (or (harness-ui-pending-summary session) "waits for you")
-                        'face 'harness-status-blocked-face)
-            (propertize " · " 'face 'harness-dim-face)
-            (harness-ui-pending-subject r 80)
+It has the buttons answering R, then says what R is.  It starts INDENT
+columns in, which is where the name of the row above it starts.  What R
+is takes 80 characters at most, and with WIDTH, the columns a line may
+take, what the buttons leave of it (8 at least), so that it does not
+wrap in a narrow window."
+  (let* ((session (harness-ui-session id))
+         (head (concat (make-string indent ?\s)
+                       (mapconcat (lambda (a) (harness-ui-sessions--button (nth 0 a) (nth 1 a) (nth 2 a)))
+                                  (harness-ui-pending-view-actions id) " ")
+                       "  "
+                       (propertize (or (harness-ui-pending-summary session) "waits for you")
+                                   'face 'harness-status-blocked-face)
+                       (propertize " · " 'face 'harness-dim-face))))
+    (concat head
+            (harness-ui-pending-subject
+             r (if width (min 80 (max 8 (- width 1 (string-width head)))) 80))
             "\n")))
 
 (defun harness-ui-sessions--banner ()
@@ -654,8 +694,9 @@ It has the buttons answering R, then says what R is, under the name."
 ;; pushing the next cell further; one that runs over by more cannot be,
 ;; as a space only ever moves what follows it forward.
 
-(defun harness-ui-sessions--print-cell (n desc x)
+(defun harness-ui-sessions--print-cell (format n desc x)
   "Insert cell N of a row at point, from its descriptor DESC, at column X.
+FORMAT is the vector of the columns (`harness-ui-sessions-format').
 Return the column the next cell starts at.  This is
 `tabulated-list-print-col' with two differences.  A cell that is not the
 last ends in an aligning space even when it fills its column, and its
@@ -663,7 +704,7 @@ padding is part of that space.  And a cell is cut to its own column,
 never into the room a right-aligned neighbour leaves, as
 `tabulated-list-print-col' lets it: no cell of this list could use that
 room."
-  (let* ((spec (aref tabulated-list-format n))
+  (let* ((spec (aref format n))
          (name (nth 0 spec))
          (width (nth 1 spec))
          (props (nthcdr 3 spec))
@@ -674,7 +715,7 @@ room."
                       (t (car desc))))
          (label-width (string-width label))
          (help-echo (concat name ": " label))
-         (last-column (= (1+ n) (length tabulated-list-format)))
+         (last-column (= (1+ n) (length format)))
          (start (point)))
     ;; A cell is cut to its column, with an ellipsis, the last one apart:
     ;; it has the rest of the line.
@@ -706,20 +747,53 @@ room."
       (put-text-property start (point) 'tabulated-list-column-name name)
       next-x)))
 
-(defun harness-ui-sessions--print-row (id cols)
-  "Insert the row of the entry ID, whose cells are COLS, at point.
-It is what `tabulated-list-print-entry' inserts -- the padding, the
-cells and the newline, with the entry's id and cells as properties of
-the whole line -- but with the cells of `harness-ui-sessions--print-cell'."
-  (let ((start (point))
-        (x (max tabulated-list-padding 0))
+(defun harness-ui-sessions-insert-row (format cells &optional padding)
+  "Insert at point the row of CELLS in the columns of FORMAT.
+FORMAT is a vector as `harness-ui-sessions-format' makes it and CELLS
+one string for each of its columns (`harness-ui-sessions-cells').  The
+row starts PADDING columns in, and ends in a newline.  It is what
+`tabulated-list-print-entry' inserts, but with the cells of
+`harness-ui-sessions--print-cell', so a view that is no
+`tabulated-list-mode' buffer draws the session list's rows too."
+  (let ((x (max (or padding 0) 0))
         (inhibit-read-only t))
-    (when (> tabulated-list-padding 0)
+    (when (> x 0)
       (insert (make-string x ?\s)))
-    (dotimes (n (length tabulated-list-format))
-      (setq x (harness-ui-sessions--print-cell n (aref cols n) x)))
-    (insert ?\n)
-    (add-text-properties start (point) `(tabulated-list-id ,id tabulated-list-entry ,cols))))
+    (dotimes (n (length format))
+      (setq x (harness-ui-sessions--print-cell format n (aref cells n) x)))
+    (insert ?\n)))
+
+(defun harness-ui-sessions-header-row (format &optional padding face)
+  "Return the header row of the columns of FORMAT, as a string.
+Each label starts, or for a right-aligned column ends, where its cells
+do (`harness-ui-sessions-insert-row'), in FACE, and the row starts
+PADDING columns in.  It is for a view that shows its rows in a buffer of
+its own: the session list has the header line."
+  (with-temp-buffer
+    (harness-ui-sessions-insert-row
+     format (vconcat (mapcar (lambda (spec) (propertize (car spec) 'face face)) format)) padding)
+    ;; No tooltip for a label, which says what it is.
+    (remove-text-properties (point-min) (point-max) '(help-echo nil tabulated-list-column-name nil))
+    (buffer-string)))
+
+(defun harness-ui-sessions-insert-entry (session cells format padding indent &optional width)
+  "Insert at point the entry of SESSION: its row of CELLS, and what it waits on.
+CELLS are one string for each column of FORMAT, which starts PADDING
+columns in (`harness-ui-sessions-insert-row'); a session that is blocked
+on a request has the line saying what that is under its row, INDENT
+columns in and, with WIDTH, no wider than that many columns
+\(`harness-ui-sessions-request-line'), and on both lines y and n answer
+a permission request.  This is what the session list draws for a
+session, and what any other view that lists sessions in the same
+columns draws for one too."
+  (let ((start (point))
+        (id (plist-get session :id)))
+    (harness-ui-sessions-insert-row format cells padding)
+    (when-let* ((r (and id (equal (plist-get session :status) "blocked")
+                        (harness-ui-pending-first id))))
+      (insert (harness-ui-sessions-request-line id r indent width))
+      (when (equal (plist-get r :kind) "permission")
+        (harness-ui-add-keymap start (point) harness-ui-sessions-permission-map)))))
 
 ;;;; The footer
 ;;
@@ -766,7 +840,7 @@ filter goes above the first row.  A marked session's row starts with a
 mark (`harness-ui-sessions-mark-face') in place of the padding space,
 which keeps the row's text properties, `tabulated-list-id' above all.  A
 blocked session gets the line of what it waits on under its row
-\(`harness-ui-sessions--request-line'), which is the session's too: RET
+\(`harness-ui-sessions-request-line'), which is the session's too: RET
 opens it, SPC pops its request out, and it is not marked.
 Under the last row, and its line, goes the footer
 \(`harness-ui-sessions-footer-functions')."
@@ -777,19 +851,16 @@ Under the last row, and its line, goes the footer
   (let ((entries (and (listp tabulated-list-entries) tabulated-list-entries)))
     (when (equal id (car (car entries)))
       (setq harness-ui-sessions--last-id (car (car (last entries))))))
-  (let ((start (point)))
-    (harness-ui-sessions--print-row id cols)
+  (let ((start (point))
+        (depth (or (and harness-ui-sessions--depths (gethash id harness-ui-sessions--depths)) 0)))
+    (harness-ui-sessions-insert-entry (harness-ui-session id) cols
+                                      tabulated-list-format tabulated-list-padding
+                                      (+ tabulated-list-padding 3 (* 2 depth) (if (> depth 0) 2 0)))
+    (add-text-properties start (point) (list 'tabulated-list-id id 'tabulated-list-entry cols))
     (when (and harness-ui-sessions--marked (gethash id harness-ui-sessions--marked))
       (save-excursion
         (goto-char start)
-        (tabulated-list-put-tag (propertize "*" 'face 'harness-ui-sessions-mark-face))))
-    (when-let* ((r (and (equal (plist-get (harness-ui-session id) :status) "blocked")
-                        (harness-ui-pending-first id))))
-      (let ((line (point)))
-        (insert (harness-ui-sessions--request-line id r))
-        (add-text-properties line (point) (list 'tabulated-list-id id 'tabulated-list-entry cols)))
-      (when (equal (plist-get r :kind) "permission")
-        (harness-ui-add-keymap start (point) harness-ui-sessions-permission-map))))
+        (tabulated-list-put-tag (propertize "*" 'face 'harness-ui-sessions-mark-face)))))
   (when (equal id harness-ui-sessions--last-id)
     (harness-ui-sessions--insert-footer)))
 
@@ -1012,7 +1083,7 @@ shows count: with both hidden there is nothing to redraw for."
                         (or (null at)
                             (equal (substring-no-properties (aref entry at))
                                    (substring-no-properties
-                                    (funcall (plist-get (harness-ui-sessions--column name) :cell)
+                                    (funcall (plist-get (harness-ui-sessions-column name) :cell)
                                              session 0))))))
                     '("Context" "Output"))))))
 
@@ -1943,7 +2014,7 @@ which start as `harness-ui-sessions-hidden-columns' says and leave the
 option as it is.  The status icon column cannot be hidden, and the
 Project column shows only when the list covers all projects."
   (interactive (list (harness-ui-sessions--read-column)))
-  (let ((column (harness-ui-sessions--column name))
+  (let ((column (harness-ui-sessions-column name))
         (hidden (harness-ui-sessions--hidden-names)))
     (when (or (null column) (plist-get column :always))
       (user-error "No column to show or hide named \"%s\"" name))
@@ -2021,16 +2092,22 @@ own, so this works from any buffer; the mode line's button does the same."
   "Answer the permission request the session at point waits on with Allow.
 That is the [Allow] of the request's panel and of the task board, and
 their y (`harness-ui-pending-answer-first-permission'); its tooltip says
-what it covers (`harness-ui-pending-answer-help')."
+what it covers (`harness-ui-pending-answer-help').  It answers for the
+session at point (`harness-ui-session-at-point'), so a view that lists
+sessions with this list's rows (`harness-ui-sessions-insert-entry') has
+the same y."
   (interactive)
-  (harness-ui-pending-answer-first-permission (harness-ui-sessions--id) "allow-once"))
+  (harness-ui-pending-answer-first-permission
+   (or (harness-ui-session-at-point t) (harness-ui-sessions--id)) "allow-once"))
 
 (defun harness-ui-sessions-deny ()
   "Answer the permission request the session at point waits on with Deny.
 That is the [Deny] of the request's panel and of the task board, and
-their n (`harness-ui-pending-answer-first-permission')."
+their n (`harness-ui-pending-answer-first-permission'), for the session at
+point as `harness-ui-sessions-allow' has it."
   (interactive)
-  (harness-ui-pending-answer-first-permission (harness-ui-sessions--id) "deny-once"))
+  (harness-ui-pending-answer-first-permission
+   (or (harness-ui-session-at-point t) (harness-ui-sessions--id)) "deny-once"))
 
 (defun harness-ui-sessions-reload ()
   "Reload sessions and tasks from the harness and resolve their projects again.

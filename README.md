@@ -186,7 +186,7 @@ OpenAI-compatible APIs and AWS Bedrock.
 | Insights: a month of work, summed up by your model | The sessions, tools, permissions and tasks behind it |
 | ![Two chats: an Always deny answer in the left one, a call the rule denied in the right one, both struck through and offering [Redo] after [Undo] was clicked on the right](docs/media/chat-decisions.png) | ![Two chats: an always answer to the cold-cache question in the left one, a default taken unasked in the right one, which names that answer, both offering [Undo]](docs/media/chat-decisions-cold.png) |
 | A lasting answer, undone from another session: both offer [Redo] | An "always" cold-cache answer, and a chat it decided for |
-| ![The task slots page: four slots in use, each a box with its task, priority, state and time at work; the queue by priority, the next four in line, and how long tasks waited for a slot this week](docs/media/slots.png) | |
+| ![The task slots page: the four tasks in slots as rows of the session list's columns -- status, priority, context, cost, time at work -- the blocked one with its question and [Answer…] under it; the queue by priority, the next four in line, and how long tasks waited for a slot this week](docs/media/slots.png) | |
 | A project's task slots: who holds them, who waits, for how long | |
 | ![A chat whose agent replied in three paragraphs, the reply quoted in the compose box with C-c > and answered inline: the middle of the long paragraph elided as [...], the quote split in two with an answer under each part](docs/media/quote-reply.png) | ![A chat whose agent answered a reply that quoted it: the agent's answer quoted in the compose box with the thread under it one level deeper, the user's answers and the agent's message they quoted, and an answer typed under the agent's line](docs/media/quote-thread.png) |
 | Answering a reply inline: `C-c >` quotes it, `C-c [` elides what you skip as `[...]`, `M-RET` splits the quote to answer a part | The thread kept: the message the reply answers, and what that answered, nested under the quote |
@@ -3123,18 +3123,25 @@ with), `recap` writes the recaps on the cards,
   running keeps its slot, and so does a borrower that comes to wait on
   you: it never lends a slot it only borrowed.
 - `S` on the board, or `C-c h Q` from anywhere, opens the project's
-  **Task slots** page: a box for each slot, in use or free -- the task
-  that holds it, its priority's arrow, what it is doing (running,
-  waiting on you, starting) and for how long -- then the queue by
-  priority, with how many wait and the longest and average wait so far,
-  the next five in line, and how long tasks waited for a slot over the
-  last `harness-tasks-slot-wait-days` days (7), by priority. `RET` or a
-  click on a box opens its task's session, `TAB` goes from box to box,
-  and `[Set limit]` (`l`) is the board's `N at a time`. The page keeps
+  **Task slots** page: the tasks that hold the slots, listed as the
+  [session list](#session-list) lists sessions -- one row for each,
+  the longest at work first, with the list's own status icon, name,
+  status, priority arrow, context, cost and last message, and how long
+  it has held its slot; a task blocked on a question or a permission
+  request has, as in the list, the line saying what it waits on under
+  its row, with its `[Allow]`, `[Deny]` or `[Answer…]` -- and how many
+  slots are free. Then the queue by priority, with how many wait and the
+  longest and average wait so far, the next five in line, and how long
+  tasks waited for a slot over the last `harness-tasks-slot-wait-days`
+  days (7), by priority. `RET` or a click on a task's name opens its
+  session, `TAB` goes from row to row, `SPC` pops out what the task
+  waits on, and `[Set limit]` (`l`) is the board's `N at a time`. The page keeps
   itself current without churn: it asks the harness again once a burst
   of the board's events settles, and only while a window shows it (a
-  hidden page asks once when it shows again); its times run on the
-  board's own 15-second clock; and a redraw that would change nothing is
+  hidden page asks once when it shows again); its times, and the
+  figures of the sessions in its rows, run on the board's own 15-second
+  clock, and a request a task waits on, when it comes or is answered,
+  draws it again at once; and a redraw that would change nothing is
   skipped. The harness answers it with `task/slots`, which counts the
   slots as the scheduler does.
 - Each card is one line, with a subtitle that recaps the task: what it is

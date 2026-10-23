@@ -16,6 +16,8 @@
 (require 'harness-ui-slots)
 
 (defvar harness-ui-tasks--dir)
+(defvar harness-ui--sessions)
+(declare-function harness-ui-pending--forget-all "harness-ui-pending")
 (declare-function harness-module-requires "harness-core")
 (declare-function harness-module-init-fn "harness-core")
 (declare-function harness-module-shutdown-fn "harness-core")
@@ -55,6 +57,7 @@ The opener of sessions only records what it was asked to open."
          (harness-ui-slots-test--answer nil)
          (harness-ui-slots-test--displayed nil)
          (harness-ui-slots-test--opened nil))
+     (clrhash harness-ui--sessions)
      (cl-letf (((symbol-function 'harness-ui-slots--fetch) #'harness-ui-slots-test--fetch)
                ((symbol-function 'harness-ui-display-view)
                 (lambda (buffer &optional _position) (push buffer harness-ui-slots-test--displayed)))
@@ -62,6 +65,8 @@ The opener of sessions only records what it was asked to open."
                 (lambda (&optional position)
                   (lambda (id) (push (cons id position) harness-ui-slots-test--opened)))))
        (unwind-protect (progn ,@body)
+         (clrhash harness-ui--sessions)
+         (harness-ui-pending--forget-all)
          (when-let* ((buffer (get-buffer harness-ui-slots--buffer-name)))
            (kill-buffer buffer))))))
 
@@ -110,7 +115,9 @@ PROPS replace the keys they name."
 (defun harness-ui-slots-test--visual (text)
   "Return TEXT as the display draws it: each `(space :align-to N)' written out.
 The lines come out as long as their columns say, so what the display
-aligns is aligned here; text is counted by its width in columns."
+aligns is aligned here; text is counted by its width in columns.  A
+string a run of text is displayed as (the ellipsis a cell is cut with)
+stands for the whole run."
   (let ((column 0) (out nil) (i 0))
     (while (< i (length text))
       (let ((char (aref text i))
@@ -121,6 +128,10 @@ aligns is aligned here; text is counted by its width in columns."
             (when (> to column)
               (push (make-string (- to column) ?\s) out)
               (setq column to))))
+         ((stringp display)
+          (unless (and (> i 0) (eq display (get-text-property (1- i) 'display text)))
+            (push display out)
+            (setq column (+ column (string-width display)))))
          ((eq char ?\n) (push "\n" out) (setq column 0))
          (t (push (string char) out) (setq column (+ column (char-width char))))))
       (setq i (1+ i)))
@@ -139,9 +150,21 @@ aligns is aligned here; text is counted by its width in columns."
   "Return the first of LINES matching REGEXP, or nil."
   (cl-find-if (lambda (line) (string-match-p regexp line)) lines))
 
-(defun harness-ui-slots-test--box-count (lines)
-  "Return how many boxes LINES have: their top left corners."
-  (cl-loop for line in lines sum (cl-count ?╭ line)))
+(defun harness-ui-slots-test--section (lines)
+  "Return the lines of the In use section of LINES, the page.
+They follow its heading, up to the blank line that ends it."
+  (let ((rest (cdr (member " In use" lines))))
+    (seq-take-while (lambda (line) (not (string-empty-p line))) rest)))
+
+(defun harness-ui-slots-test--cache (id &rest props)
+  "Cache the session ID as the UI would know it, with PROPS; return it.
+It is named ID, idle, on a model with a context window, unless PROPS
+say otherwise."
+  (let ((session (append props (list :id id :name id :status "idle" :kind "task"
+                                     :model "demo:scripted" :context-window 200000
+                                     :usage (list :cost 0 :context 0)))))
+    (puthash id session harness-ui--sessions)
+    session))
 
 (defun harness-ui-slots-test--count (regexp lines)
   "Return how many times REGEXP matches in LINES, one line at a time."
@@ -226,10 +249,9 @@ The arrow of a priority is left out of its label."
     (should (string-match-p "\\` Task slots" first))
     (should (string-match-p "acme" first))
     (should (string-match-p "0 of 4 in use · 4 free · 0 waiting" first))
-    ;; Four boxes, all free, with nothing inside.
-    (should (= 4 (harness-ui-slots-test--box-count lines)))
-    (should (= 4 (harness-ui-slots-test--count "╭─ free ─+╮" lines)))
-    (should (= 8 (harness-ui-slots-test--count "│ +│" lines)))
+    ;; Nothing at work: a line says so, and how many slots are free.
+    (should (equal '("   nothing holds a slot" "   4 free") (harness-ui-slots-test--section lines)))
+    (should-not (harness-ui-slots-test--line-with lines "Name +Status"))
     ;; The queue shows its three priorities, all empty.
     (should (harness-ui-slots-test--line-with lines "Queue · 0 waiting"))
     (dolist (priority '("high" "medium" "low"))
@@ -262,161 +284,248 @@ The arrow of a priority is left out of its label."
                             (funcall first :suspended t :queue (harness-ui-slots-test--busy-queue))))
     (should-not (string-match-p "queue suspended" (funcall first)))))
 
-(ert-deftest harness-ui-slots-some-busy-some-free ()
+(ert-deftest harness-ui-slots-lists-the-tasks-at-work-in-a-table ()
   (let* ((data (harness-ui-slots-test--data :holders (harness-ui-slots-test--busy)))
-         (text (harness-ui-slots--text data 100 harness-ui-slots-test--now "/home/me/src/acme/"))
-         (lines (harness-ui-slots-test--lines text)))
+         (lines (harness-ui-slots-test--page data))
+         (section (harness-ui-slots-test--section lines)))
     (should (string-match-p "3 of 4 in use · 1 free · 0 waiting" (car lines)))
-    (should (= 4 (harness-ui-slots-test--box-count lines)))
-    ;; The top borders carry the priority, the longest at work first, then free.
-    (let ((tops (cl-remove-if-not (lambda (line) (string-match-p "╭" line)) lines)))
-      (should (= 2 (length tops)))
-      (should (string-match-p
-               (format "╭─ %s low ─+╮ ╭─ %s high ─+╮ ╭─ medium ─+╮"
-                       (regexp-quote (harness-ui-slots-test--arrow "low"))
-                       (regexp-quote (harness-ui-slots-test--arrow "high")))
-               (nth 0 tops)))
-      (should (string-match-p "\\`  ?╭─ free ─+╮\\'" (nth 1 tops))))
-    ;; Their titles and what they are doing and for how long.
-    (let ((titles (harness-ui-slots-test--line-with lines "│ Add secret redaction tools +│"))
-          (states (harness-ui-slots-test--line-with lines "│ waits on you · 1h18m +│")))
-      (should titles)
-      (should states)
-      (should (string-match-p "│ Add secret redaction tools +│ │ Fix stuck model responses +│ │ Plan task board polish +│" titles))
-      (should (string-match-p "│ waits on you · 1h18m +│ │ running · 41m +│ │ running · 2m +│" states)))
-    ;; The free box is empty inside.
-    (let ((free (cl-remove-if-not (lambda (line) (string-match-p "\\`  ?│ +│\\'" line)) lines)))
-      (should (= 2 (length free))))
-    ;; The border of a box takes the colour of its priority.
-    (with-temp-buffer
-      (insert text)
-      (let ((face-of (lambda (key)
-                       (get-text-property (harness-ui-slots-test--first key) 'face))))
-        (should (eq 'harness-priority-high-face (funcall face-of "task:t-high")))
-        (should (eq 'harness-priority-low-face (funcall face-of "task:t-low")))
-        (should (eq 'default (funcall face-of "task:t-mid")))
-        (should (eq 'harness-dim-face (funcall face-of "free:1")))))))
+    ;; The section has its heading, then a header row with the session list's
+    ;; columns and At work, the slots' own.
+    (should (equal " In use" (nth (1- (cl-position " In use" lines :test #'equal)) (cdr lines))))
+    (should (string-match-p "\\` +Name +Status +At work +Priority +Context +Cost +Last msg\\'"
+                            (nth 0 section)))
+    ;; One row for each task, the longest at work first; the arrow of a high or
+    ;; a low priority, none for the default.
+    (should (string-match-p (format "Add secret redaction tools +blocked +1h18m +%s"
+                                    (regexp-quote (harness-ui-slots-test--arrow "low")))
+                            (nth 1 section)))
+    (should (string-match-p (format "Fix stuck model responses +running +41m +%s"
+                                    (regexp-quote (harness-ui-slots-test--arrow "high")))
+                            (nth 2 section)))
+    (should (string-match-p "Plan task board polish +running +2m *\\'" (nth 3 section)))
+    ;; Then how many slots are free.
+    (should (equal "   1 free" (nth 4 section)))
+    (should (= 5 (length section)))
+    ;; Nothing on the page is a box.
+    (should-not (cl-some (lambda (line) (string-match-p "[╭╮╰╯│]" line)) lines))))
 
-(ert-deftest harness-ui-slots-box-says-the-state-of-its-task ()
+(ert-deftest harness-ui-slots-says-the-state-of-each-task ()
   (let* ((holders (list (harness-ui-slots-test--holder "t-a" "Running one" "medium" "running" 150.0)
                         (harness-ui-slots-test--holder "t-b" "Blocked one" "medium" "blocked" 4680.0)
-                        (harness-ui-slots-test--holder "t-c" "Starting one" "medium" "starting" 10.0)
+                        (harness-ui-slots-test--holder "t-c" "Starting one" "medium" "starting" 10.0
+                                                       :session nil)
                         (harness-ui-slots-test--holder "t-d" "Waiting one" "medium" "waiting" 725.0)
                         (harness-ui-slots-test--holder "t-e" "Sent back one" "medium" "running" 40.0
                                                        :sent-back t)))
-         (lines (harness-ui-slots-test--page (harness-ui-slots-test--data :limit 5 :holders holders) 140))
-         (states (mapconcat #'identity lines "\n")))
-    (should (string-match-p "│ running · 2m +│" states))
-    (should (string-match-p "│ waits on you · 1h18m +│" states))
-    (should (string-match-p "│ starting… +│" states))
-    (should-not (string-match-p "starting… ·" states))
-    (should (string-match-p "│ waits on its workers · 12m +│" states))
-    (should (string-match-p "│ running · 40s · sent back +│" states))))
+         (rows (cdr (harness-ui-slots-test--section
+                     (harness-ui-slots-test--page
+                      (harness-ui-slots-test--data :limit 5 :holders holders) 140)))))
+    ;; The longest at work first; what a row cannot say goes on a line under it.
+    (should (= 7 (length rows)))
+    (should (string-match-p "Blocked one +blocked +1h18m" (nth 0 rows)))
+    (should (string-match-p "Waiting one +waiting +12m" (nth 1 rows)))
+    (should (string-match-p "\\` +waits on its workers\\'" (nth 2 rows)))
+    (should (string-match-p "Running one +running +2m" (nth 3 rows)))
+    (should (string-match-p "Sent back one +running +40s" (nth 4 rows)))
+    (should (string-match-p "\\` +sent back\\'" (nth 5 rows)))
+    ;; A task that starts has no time at work yet.
+    (should (string-match-p "Starting one +starting *\\'" (nth 6 rows)))))
 
-(ert-deftest harness-ui-slots-box-fits-a-long-title-and-state ()
-  (let* ((holders (list (harness-ui-slots-test--holder
-                         "t-a" "A title far longer than any box can hold, even a wide one" "high" "waiting" 725.0
-                         :sent-back t)))
-         (lines (harness-ui-slots-test--page (harness-ui-slots-test--data :holders holders))))
-    ;; The first box of the line: borders and all, as wide as a box is.
-    (let ((title (harness-ui-slots-test--line-with lines "│ A title far")))
-      (should title)
-      (should (string-match-p "\\` │ A title far longer than a… │ │" title))
-      ;; Its borders are 30 columns apart, the title cut to what is between them.
-      (should (eq ?│ (aref title 1)))
-      (should (eq ?│ (aref title 30)))
-      (should (= 30 (string-width (substring title 1 31)))))
-    ;; The state drops what does not fit, last part first: the time stays.
-    (should (harness-ui-slots-test--line-with lines "│ waits on its workers · 12m +│"))
-    (should-not (harness-ui-slots-test--line-with lines "sent back"))
+(ert-deftest harness-ui-slots-cuts-a-long-title-to-its-column ()
+  (let* ((title "A title far longer than any column can hold, even a wide one, and then some")
+         (holders (list (harness-ui-slots-test--holder "t-a" title "high" "running" 725.0)))
+         (lines (harness-ui-slots-test--page (harness-ui-slots-test--data :holders holders)))
+         (row (harness-ui-slots-test--line-with lines "A title far")))
+    ;; Cut with an ellipsis, the state where it is in every row.
+    (should (string-match-p "\\` .  A title far longer than any[a-z ]*… running +12m" row))
+    (should (< (string-width row) 100))
+    ;; Wide enough for it, it is not cut.
+    (let ((row (harness-ui-slots-test--line-with
+                (harness-ui-slots-test--page (harness-ui-slots-test--data :holders holders) 200)
+                "A title far")))
+      (should (string-match-p "A title far longer than any column can … +running" row)))
     ;; Newlines and tabs in a title are spaces.
     (let ((lines (harness-ui-slots-test--page
                   (harness-ui-slots-test--data
-                   :holders (list (harness-ui-slots-test--holder "t-b" "Two\nlines\tand a tab" "medium" "running" 60.0))))))
-      (should (harness-ui-slots-test--line-with lines "│ Two lines and a tab +│")))))
+                   :holders (list (harness-ui-slots-test--holder "t-b" "Two\nlines\tand a tab" "medium"
+                                                                 "running" 60.0))))))
+      (should (harness-ui-slots-test--line-with lines "Two lines and a tab +running +1m")))))
 
-(ert-deftest harness-ui-slots-boxes-are-aligned ()
-  ;; Whatever the width, every line of a box row is as long as the others
-  ;; and the borders are in the same columns.
-  (dolist (width '(20 34 63 100 140))
-    (let* ((data (harness-ui-slots-test--data :limit 9 :holders (harness-ui-slots-test--busy)))
-           (lines (harness-ui-slots-test--page data width))
-           (box-lines (cl-remove-if-not (lambda (line) (string-match-p "[╭│╰]" line)) lines)))
-      (should box-lines)
-      (dolist (group (seq-partition box-lines 4))
-        (when (= 4 (length group))
-          (let ((widths (mapcar #'string-width group)))
-            (should (apply #'= widths))
-            (should (<= (car widths) (max 20 (1- width)))))
-          ;; The right borders line up.
-          (let ((columns (mapcar (lambda (line) (cl-position-if (lambda (c) (memq c '(?╮ ?│ ?╯))) line :from-end t))
-                                 group)))
-            (should (apply #'= columns)))))
-      (should (= 9 (harness-ui-slots-test--box-count lines))))))
-
-(ert-deftest harness-ui-slots-rows-wrap-by-the-width-of-the-window ()
-  (let ((data (harness-ui-slots-test--data :limit 7)))
-    (cl-flet ((per-row (width)
-                (let ((tops (cl-remove-if-not (lambda (line) (string-match-p "╭" line))
-                                              (harness-ui-slots-test--page data width))))
-                  (mapcar (lambda (line) (cl-count ?╭ line)) tops))))
-      (should (equal '(1 1 1 1 1 1 1) (per-row 40)))
-      (should (equal '(2 2 2 1) (per-row 63)))
-      (should (equal '(3 3 1) (per-row 100)))
-      (should (equal '(4 3) (per-row 140)))
-      (should (equal '(7) (per-row 300))))))
+(ert-deftest harness-ui-slots-fits-the-table-to-the-window ()
+  (let ((data (harness-ui-slots-test--data :limit 9 :holders (harness-ui-slots-test--busy))))
+    (dolist (width '(40 50 63 80 100 140))
+      (let* ((section (harness-ui-slots-test--section (harness-ui-slots-test--page data width)))
+             (header (car section))
+             (rows (seq-take (cdr section) 3))
+             (status (string-match "Status" header))
+             (work-end (+ (string-match "At work" header) (length "At work"))))
+        ;; No line of the table is as wide as the window.
+        (dolist (line section)
+          (should (< (string-width line) width)))
+        (dolist (row rows)
+          ;; Status starts under its label, whatever the name before it.
+          (should (= status (string-match "blocked\\|running" row)))
+          ;; The times at work are right-aligned, and end under At work.
+          (string-match "[0-9]+[hm]\\(?:[0-9]+m\\)?" row status)
+          (should (= work-end (match-end 0)))))))
+  ;; A narrow window leaves out the columns the table needs least, the last
+  ;; first, and keeps the name its room.
+  (let ((header (lambda (width)
+                  (harness-ui-slots-test--line-with
+                   (harness-ui-slots-test--page
+                    (harness-ui-slots-test--data :limit 9 :holders (harness-ui-slots-test--busy)) width)
+                   "Name +Status"))))
+    (dolist (case '((100 "Last msg" "Cost" "Context" "Priority")
+                    (80 "Cost" "Context" "Priority")
+                    (70 "Context" "Priority")
+                    (55 "Priority")
+                    (45)))
+      (let ((shown (funcall header (car case))))
+        (dolist (name '("Last msg" "Cost" "Context" "Priority"))
+          (if (member name (cdr case))
+              (should (string-match-p name shown))
+            (should-not (string-match-p name shown))))
+        (should (string-match-p "Status +At work" shown))))))
 
 (ert-deftest harness-ui-slots-no-limit-shows-only-the-slots-in-use ()
   (let* ((data (harness-ui-slots-test--data :limit nil :holders (harness-ui-slots-test--busy)))
-         (lines (harness-ui-slots-test--page data)))
+         (lines (harness-ui-slots-test--page data))
+         (section (harness-ui-slots-test--section lines)))
     (should (string-match-p "3 in use · no limit" (car lines)))
-    (should (= 3 (harness-ui-slots-test--box-count lines)))
+    ;; The header row and three rows, and no word of free slots.
+    (should (= 4 (length section)))
     (should-not (harness-ui-slots-test--line-with lines "free"))
-    ;; Nothing at work and no limit: no boxes at all.
-    (should (= 0 (harness-ui-slots-test--box-count
-                  (harness-ui-slots-test--page (harness-ui-slots-test--data :limit nil)))))))
+    ;; Nothing at work and no limit: the section says so.
+    (should (equal '("   nothing holds a slot")
+                   (harness-ui-slots-test--section
+                    (harness-ui-slots-test--page (harness-ui-slots-test--data :limit nil)))))))
 
 (ert-deftest harness-ui-slots-limit-zero-has-no-slots ()
   (let* ((data (harness-ui-slots-test--data :limit 0 :queue (harness-ui-slots-test--busy-queue)))
          (lines (harness-ui-slots-test--page data)))
     (should (string-match-p "limit 0: nothing starts by itself" (car lines)))
-    (should (= 0 (harness-ui-slots-test--box-count lines)))
+    (should (equal '("   nothing holds a slot") (harness-ui-slots-test--section lines)))
     (should (harness-ui-slots-test--line-with lines "Queue · 4 waiting"))
-    ;; Tasks still at work when it was lowered to 0 keep their boxes.
+    ;; Tasks still at work when it was lowered to 0 keep their rows, all over it.
     (let ((lines (harness-ui-slots-test--page
                   (harness-ui-slots-test--data :limit 0 :holders (harness-ui-slots-test--busy)))))
       (should (string-match-p "3 still at work" (car lines)))
-      (should (= 3 (harness-ui-slots-test--box-count lines)))
-      (should (= 3 (cl-loop for line in lines sum (1- (length (split-string line "over the limit")))))))))
+      (should (= 7 (length (harness-ui-slots-test--section lines))))
+      (should (= 3 (cl-count-if (lambda (line) (string-match-p "\\`  +over the limit\\'" line)) lines))))))
 
 (ert-deftest harness-ui-slots-holders-over-the-limit-are-marked ()
   ;; The limit was lowered to 2 under three tasks at work: the newest is over.
   (let* ((data (harness-ui-slots-test--data :limit 2 :holders (harness-ui-slots-test--busy)))
-         (lines (harness-ui-slots-test--page data)))
+         (lines (harness-ui-slots-test--page data))
+         (section (harness-ui-slots-test--section lines)))
     (should (string-match-p "3 of 2 in use · 0 free · 1 over the limit" (car lines)))
-    (should (= 3 (harness-ui-slots-test--box-count lines)))
-    (should-not (harness-ui-slots-test--line-with lines "free ─"))
-    (let ((tops (harness-ui-slots-test--line-with lines "╭")))
-      (should (string-match-p "╭─ [^ ]+ low ─+╮ ╭─ [^ ]+ high ─+╮ ╭─ medium · over the limit ─+╮" tops)))))
+    ;; Its row, the third, has the note under it; the others none; and no slot is free.
+    (should (= 5 (length section)))
+    (should (string-match-p "Plan task board polish" (nth 3 section)))
+    (should (string-match-p "\\`  +over the limit\\'" (nth 4 section)))
+    (should (= 1 (cl-count-if (lambda (line) (string-match-p "over the limit" line)) (cdr lines))))
+    (should-not (harness-ui-slots-test--line-with lines "\\`   [0-9]+ free\\'"))))
 
-(ert-deftest harness-ui-slots-does-not-draw-endless-free-boxes ()
-  ;; A limit of 40 with two tasks at work: their boxes, 16 free ones, and the rest counted.
+(ert-deftest harness-ui-slots-counts-the-free-slots-in-a-line ()
+  ;; A limit of 40 with two tasks at work: their rows, and one line for the rest.
   (let* ((holders (seq-take (harness-ui-slots-test--busy) 2))
-         (lines (harness-ui-slots-test--page (harness-ui-slots-test--data :limit 40 :holders holders) 140)))
-    (should (string-match-p "2 of 40 in use · 38 free" (car lines)))
-    (should (= 18 (harness-ui-slots-test--box-count lines)))
-    (should (= 16 (harness-ui-slots-test--count "╭─ free ─+╮" lines)))
-    (should (harness-ui-slots-test--line-with lines "… and 22 more free"))
-    ;; Up to the cap every slot has its box, and nothing is said.
-    (let ((lines (harness-ui-slots-test--page (harness-ui-slots-test--data :limit 18 :holders holders) 140)))
-      (should (= 18 (harness-ui-slots-test--box-count lines)))
-      (should-not (harness-ui-slots-test--line-with lines "more free")))))
+         (section (harness-ui-slots-test--section
+                   (harness-ui-slots-test--page (harness-ui-slots-test--data :limit 40 :holders holders) 140))))
+    (should (= 4 (length section)))
+    (should (equal "   38 free" (car (last section))))))
 
 (ert-deftest harness-ui-slots-says-a-suspended-queue ()
   (let ((lines (harness-ui-slots-test--page
                 (harness-ui-slots-test--data :suspended t :queue (harness-ui-slots-test--busy-queue)))))
     (should (string-match-p "queue suspended" (car lines)))
     (should (harness-ui-slots-test--line-with lines "Queue · 4 waiting · suspended"))))
+
+;;;; The session list's rows
+
+(ert-deftest harness-ui-slots-rows-are-the-session-lists ()
+  (harness-ui-slots-test-with
+    ;; The UI knows the session of the high priority task: its figures are the
+    ;; list's cells for it, not a rendering of the page's own.
+    (let ((session (harness-ui-slots-test--cache "s-t-high" :context-window 200000
+                                                 :usage (list :cost 1.25 :context 52000)
+                                                 :last-message (- harness-ui-slots-test--now 90))))
+      (let* ((lines (harness-ui-slots-test--page
+                     (harness-ui-slots-test--data :holders (harness-ui-slots-test--busy))))
+             (row (harness-ui-slots-test--line-with lines "Fix stuck model responses")))
+        (dolist (column '("Context" "Cost" "Last msg"))
+          (let ((cell (substring-no-properties
+                       (funcall (plist-get (harness-ui-sessions-column column) :cell) session 0))))
+            (should (string-match-p (regexp-quote cell) row))))
+        (should (string-match-p "52.0k/200k" row))
+        (should (string-match-p "\\$1.25" row))
+        (should (string-match-p "1m ago" row))
+        ;; The session list's own row, cell for cell: the same text under the same labels.
+        (let ((list-row (with-temp-buffer
+                          (harness-ui-sessions-insert-row
+                           (harness-ui-sessions-format
+                            (list (harness-ui-sessions-column "Context")))
+                           (harness-ui-sessions-cells (list (harness-ui-sessions-column "Context")) session))
+                          (string-trim (harness-ui-slots-test--visual (buffer-string))))))
+          (should (equal "52.0k/200k" list-row))))
+      ;; The tasks whose session it does not know show no figures, not zeros.
+      (let ((row (harness-ui-slots-test--line-with
+                  (harness-ui-slots-test--page (harness-ui-slots-test--data :holders (harness-ui-slots-test--busy)))
+                  "Plan task board polish")))
+        (should-not (string-match-p "/\\|\\$\\|ago" row))))))
+
+(ert-deftest harness-ui-slots-the-line-of-a-request-fits-the-window ()
+  ;; A long question is cut to what the buttons leave of the window, so the
+  ;; line does not wrap in a narrow one.
+  (harness-ui-slots-test-with
+    (harness-ui-slots-test--cache "s-t-low" :status "blocked"
+                                  :pending (list (list :id "q-1" :kind "question"
+                                                       :payload (list :question "Should /health check the database, or only the process?"
+                                                                      :options '("both" "process")))))
+    (dolist (width '(60 80 140))
+      (let* ((lines (harness-ui-slots-test--page
+                     (harness-ui-slots-test--data :holders (harness-ui-slots-test--busy)) width))
+             (request (harness-ui-slots-test--line-with lines "\\[Answer…\\]")))
+        (should request)
+        (should (< (string-width request) width))
+        (should (string-match-p "has a question for you · Should /health" request))))
+    ;; Wide enough, the question is whole.
+    (should (string-match-p "or only the process\\?"
+                            (harness-ui-slots-test--line-with
+                             (harness-ui-slots-test--page
+                              (harness-ui-slots-test--data :holders (harness-ui-slots-test--busy)) 200)
+                             "\\[Answer…\\]")))))
+
+(ert-deftest harness-ui-slots-a-blocked-task-shows-what-it-waits-on ()
+  (harness-ui-slots-test-with
+    (harness-ui-slots-test--cache "s-t-low" :status "blocked"
+                                  :pending (list (list :id "p-1" :kind "permission"
+                                                       :payload (list :title "Bash: rm -rf build/" :tool "bash"
+                                                                      :options '("allow-once" "allow-session"
+                                                                                 "deny-once")))))
+    (let* ((buffer (harness-ui-slots-test--open
+                    (harness-ui-slots-test--data :holders (harness-ui-slots-test--busy))))
+           (answers nil))
+      (with-current-buffer buffer
+        (let* ((lines (harness-ui-slots-test--lines (buffer-string)))
+               (at (cl-position-if (lambda (line) (string-match-p "Add secret redaction tools" line)) lines))
+               (request (nth (1+ at) lines)))
+          ;; Under the row, as under the session list's: the buttons that answer, what it is.
+          (should (string-match-p "\\[Allow\\].*\\[Deny\\].*needs your permission.*Bash" request))
+          ;; The line is the task's: its keys, and the permission keys of the session list.
+          (harness-ui-slots-test--goto "task:t-low" 1 6)
+          (should (equal "s-t-low" (get-text-property (point) 'harness-slot-session)))
+          (should (equal "s-t-low" (harness-ui-session-at-point)))
+          (should (eq #'harness-ui-sessions-allow (key-binding "y")))
+          (should (eq #'harness-ui-sessions-deny (key-binding "n")))
+          (cl-letf (((symbol-function 'harness-ui-pending-answer-first-permission)
+                     (lambda (id option) (push (list id option) answers))))
+            (call-interactively (key-binding "y"))
+            (call-interactively (key-binding "n")))
+          (should (equal '(("s-t-low" "allow-once") ("s-t-low" "deny-once")) (nreverse answers)))
+          ;; A task that waits on nothing has no such line.
+          (should (string-match-p "Fix stuck model responses" (nth (+ at 2) lines)))
+          ;; The request's buttons are drawn the same again: nothing to redraw.
+          (should-not (harness-ui-slots--render)))))))
 
 ;;;; The queue and the waits
 
@@ -674,32 +783,32 @@ The arrow of a priority is left out of its label."
            (buffer (harness-ui-slots-test--open (harness-ui-slots-test--data :holders (list holder))))
            (real-float-time (symbol-function 'float-time)))
       (with-current-buffer buffer
-        (should (string-match-p "running · 30s" (harness-ui-slots-test--visual (buffer-string))))
+        (should (string-match-p "Waiter +running +30s" (harness-ui-slots-test--visual (buffer-string))))
         ;; The same answer, a moment later: the same text, nothing drawn.
         (should-not (harness-ui-slots--render))
-        ;; Later, the time on the box reads otherwise: it is drawn.
+        ;; Later, the time on the row reads otherwise: it is drawn.
         (cl-letf (((symbol-function 'float-time)
                    (lambda (&optional time)
                      (if time (funcall real-float-time time) (+ (funcall real-float-time) 400.0)))))
           (should (harness-ui-slots--render))
           (should-not (harness-ui-slots--render)))
-        (should (string-match-p "running · 7m" (harness-ui-slots-test--visual (buffer-string))))))))
+        (should (string-match-p "Waiter +running +7m" (harness-ui-slots-test--visual (buffer-string))))))))
 
 (ert-deftest harness-ui-slots-redraws-for-the-width ()
   (harness-ui-slots-test-with
-    (let ((buffer (harness-ui-slots-test--open (harness-ui-slots-test--data :limit 6))))
+    (let ((buffer (harness-ui-slots-test--open
+                   (harness-ui-slots-test--data :holders (harness-ui-slots-test--busy)))))
       (with-current-buffer buffer
-        (let ((row-sizes (lambda ()
-                           (mapcar (lambda (line) (cl-count ?╭ line))
-                                   (cl-remove-if-not (lambda (line) (string-match-p "╭" line))
-                                                     (harness-ui-slots-test--lines (buffer-string)))))))
-          (should (equal '(3 3) (funcall row-sizes)))
+        (let ((header (lambda ()
+                        (harness-ui-slots-test--line-with
+                         (harness-ui-slots-test--lines (buffer-string)) "Name +Status"))))
+          (should (string-match-p "Cost +Last msg" (funcall header)))
           (cl-letf (((symbol-function 'harness-ui-slots--width) (lambda () 40)))
             (should (harness-ui-slots--render))
-            (should (equal '(1 1 1 1 1 1) (funcall row-sizes)))
+            (should-not (string-match-p "Last msg\\|Cost\\|Context" (funcall header)))
             (should-not (harness-ui-slots--render)))
           (should (harness-ui-slots--render))
-          (should (equal '(3 3) (funcall row-sizes))))))))
+          (should (string-match-p "Cost +Last msg" (funcall header))))))))
 
 (ert-deftest harness-ui-slots-width-is-the-widest-window-showing-the-page ()
   (harness-ui-slots-test-with
@@ -710,32 +819,32 @@ The arrow of a priority is left out of its label."
         (should (= (window-body-width (selected-window))
                    (with-current-buffer buffer (harness-ui-slots--width))))))))
 
-(ert-deftest harness-ui-slots-keeps-point-on-its-box ()
+(ert-deftest harness-ui-slots-keeps-point-on-its-row ()
   (harness-ui-slots-test-with
     (let ((buffer (harness-ui-slots-test--open
                    (harness-ui-slots-test--data :holders (harness-ui-slots-test--busy)
                                                 :queue (harness-ui-slots-test--busy-queue)))))
       (with-current-buffer buffer
-        ;; In the state line of the high priority box, 4 characters in.
-        (harness-ui-slots-test--goto "task:t-high" 2 4)
-        (let ((where (list (get-text-property (point) 'harness-slot-key)
-                           (- (point) (line-beginning-position))
-                           (line-number-at-pos))))
-          (should (equal "task:t-high" (car where)))
-          ;; Another task becomes the oldest: the boxes change places, the line the box starts on too.
+        ;; In the high priority task's row, 8 characters in.
+        (harness-ui-slots-test--goto "task:t-high" 0 8)
+        (let ((around (buffer-substring-no-properties (- (point) 4) (+ (point) 3))))
+          (should (equal "task:t-high" (get-text-property (point) 'harness-slot-key)))
+          ;; Another task becomes the oldest: the rows change places, and the line
+          ;; the row is on.
           (setq harness-ui-slots--data
                 (harness-ui-slots-test--data
                  :holders (cons (harness-ui-slots-test--holder "t-new" "Newcomer" "medium" "running" 9000.0)
                                 (harness-ui-slots-test--busy))
                  :limit 5
                  :queue (harness-ui-slots-test--busy-queue)))
-          (should (harness-ui-slots--render))
-          (should (equal "task:t-high" (get-text-property (point) 'harness-slot-key)))
-          ;; The same line of the box, the same place in it.
-          (should (= 2 (count-lines (harness-ui-slots-test--first "task:t-high")
-                                    (line-beginning-position))))
-          (should (equal "│ runni" (buffer-substring-no-properties (- (point) 4) (+ (point) 3)))))
-        ;; The box goes: point stays on the line it was on.
+          (let ((line (line-number-at-pos)))
+            (should (harness-ui-slots--render))
+            (should (equal "task:t-high" (get-text-property (point) 'harness-slot-key)))
+            ;; The same place in the same row, a line further down.
+            (should (= (1+ line) (line-number-at-pos)))
+            (should (= 0 (count-lines (harness-ui-slots-test--first "task:t-high") (line-beginning-position))))
+            (should (equal around (buffer-substring-no-properties (- (point) 4) (+ (point) 3))))))
+        ;; The row goes: point stays on the line it was on.
         (let ((line (line-number-at-pos)))
           (setq harness-ui-slots--data (harness-ui-slots-test--data))
           (should (harness-ui-slots--render))
@@ -768,28 +877,27 @@ The arrow of a priority is left out of its label."
           (harness-ui-slots--render)
           (should (= line (line-number-at-pos))))))))
 
-(ert-deftest harness-ui-slots-boxes-have-keys-of-their-own ()
+(ert-deftest harness-ui-slots-rows-have-keys-of-their-own ()
   (harness-ui-slots-test-with
     (let ((buffer (harness-ui-slots-test--open
                    (harness-ui-slots-test--data :limit 6 :holders (harness-ui-slots-test--busy)))))
       (with-current-buffer buffer
-        ;; One key and one index to a box, each different from the others.
+        ;; One key and one index to a row, each different from the others.
         (let (keys indexes)
-          (dolist (start (harness-ui-slots--box-starts))
+          (dolist (start (harness-ui-slots--row-starts))
             (push (get-text-property (cdr start) 'harness-slot-key) keys)
             (push (car start) indexes))
-          (should (= 6 (length keys)))
-          (should (= 6 (length (delete-dups (copy-sequence keys)))))
-          (should (equal '(0 1 2 3 4 5) (sort indexes #'<))))
-        ;; Point in the second free box stays in it when the boxes before it change.
-        (harness-ui-slots-test--goto "free:2" 2 3)
+          (should (equal '("task:t-high" "task:t-low" "task:t-mid") (sort keys #'string<)))
+          (should (equal '(0 1 2) (sort indexes #'<))))
+        ;; Point in a row stays in it when the rows before it change.
+        (harness-ui-slots-test--goto "task:t-high" 0 9)
         (setq harness-ui-slots--data
               (harness-ui-slots-test--data
                :limit 6 :holders (cons (harness-ui-slots-test--holder "t-new" "Newcomer" "medium" "running" 9000.0)
                                        (cdr (harness-ui-slots-test--busy)))))
         (should (harness-ui-slots--render))
-        (should (equal "free:2" (get-text-property (point) 'harness-slot-key)))
-        (should (= 3 (- (point) (harness-ui-slots--run-start "free:2" (line-beginning-position)
+        (should (equal "task:t-high" (get-text-property (point) 'harness-slot-key)))
+        (should (= 9 (- (point) (harness-ui-slots--run-start "task:t-high" (line-beginning-position)
                                                             (line-end-position)))))))))
 
 (ert-deftest harness-ui-slots-keeps-the-windows-where-they-were ()
@@ -819,53 +927,62 @@ The arrow of a priority is left out of its label."
 
 ;;;; Opening a session, moving between boxes
 
-(ert-deftest harness-ui-slots-key-opens-the-session-of-the-box ()
+(ert-deftest harness-ui-slots-key-opens-the-session-of-the-row ()
   (harness-ui-slots-test-with
     (let ((buffer (harness-ui-slots-test--open
-                   (harness-ui-slots-test--data :holders (harness-ui-slots-test--busy)))))
+                   (harness-ui-slots-test--data
+                    :holders (list (harness-ui-slots-test--holder "t-low" "Add secret redaction tools" "low"
+                                                                  "blocked" 4680.0)
+                                   (harness-ui-slots-test--holder "t-high" "Fix stuck model responses" "high"
+                                                                  "running" 2460.0 :sent-back t))))))
       (with-current-buffer buffer
         (should (eq #'harness-ui-slots-open (lookup-key harness-ui-slots-mode-map (kbd "RET"))))
-        ;; In any line of the box, the title, the state, the border.
-        (dolist (line '(0 1 2 3))
+        ;; In any line of the row, the cells and the note under them, anywhere on them.
+        (dolist (where '((0 3) (0 20) (0 60) (1 8)))
           (setq harness-ui-slots-test--opened nil)
-          (harness-ui-slots-test--goto "task:t-high" line 3)
+          (harness-ui-slots-test--goto "task:t-high" (car where) (cadr where))
           (harness-ui-slots-open)
           (should (equal '(("s-t-high")) (mapcar (lambda (o) (list (car o))) harness-ui-slots-test--opened))))
         (setq harness-ui-slots-test--opened nil)
-        (harness-ui-slots-test--goto "task:t-low" 1 3)
+        (harness-ui-slots-test--goto "task:t-low" 0 3)
         (harness-ui-slots-open)
         (should (equal "s-t-low" (car (car harness-ui-slots-test--opened))))
         ;; It takes the page's position, as a card of the board does: none asked for.
         (should-not (cdr (car harness-ui-slots-test--opened)))
         (harness-ui-slots-open 'right)
         (should (eq 'right (cdr (car harness-ui-slots-test--opened))))
-        ;; The session at point is the box's, for the commands that act on it.
+        ;; The session at point is the row's, for the commands that act on it.
         (should (equal "s-t-low" (harness-ui-session-at-point)))))))
 
-(ert-deftest harness-ui-slots-key-on-a-free-slot-opens-nothing ()
+(ert-deftest harness-ui-slots-key-off-the-rows-opens-nothing ()
   (harness-ui-slots-test-with
     (let ((buffer (harness-ui-slots-test--open
                    (harness-ui-slots-test--data :holders (harness-ui-slots-test--busy)))))
       (with-current-buffer buffer
-        (harness-ui-slots-test--goto "free:1" 1 3)
+        ;; On the line that counts the free slot, and on the first line.
+        (goto-char (point-min))
+        (search-forward "1 free")
         (should-error (harness-ui-slots-open) :type 'user-error)
         (goto-char (point-min))
         (should-error (harness-ui-slots-open) :type 'user-error)
         (should-not harness-ui-slots-test--opened)
         (should-not (harness-ui-slots--session-at-point))))))
 
-(ert-deftest harness-ui-slots-box-of-a-starting-task-has-no-session-yet ()
+(ert-deftest harness-ui-slots-row-of-a-starting-task-has-no-session-yet ()
   (harness-ui-slots-test-with
     (let* ((holder (harness-ui-slots-test--holder "t-s" "Just starting" "medium" "starting" 3.0 :session nil))
            (buffer (harness-ui-slots-test--open (harness-ui-slots-test--data :holders (list holder)))))
       (with-current-buffer buffer
-        (harness-ui-slots-test--goto "task:t-s" 1 3)
+        (harness-ui-slots-test--goto "task:t-s" 0 3)
         (should (equal "t-s" (get-text-property (point) 'harness-slot-task)))
         (should-not (get-text-property (point) 'harness-slot-session))
         (should-error (harness-ui-slots-open) :type 'user-error)
-        (should-not harness-ui-slots-test--opened)))))
+        (should-not harness-ui-slots-test--opened)
+        ;; Its name says so on hover.
+        (goto-char (text-property-any (point-min) (point-max) 'harness-slot-top 0))
+        (should (string-match-p "its session has not started yet" (get-text-property (point) 'help-echo)))))))
 
-(ert-deftest harness-ui-slots-click-opens-the-session-of-the-box ()
+(ert-deftest harness-ui-slots-click-opens-the-session-of-the-row ()
   (harness-ui-slots-test-with
     (let ((buffer (harness-ui-slots-test--open
                    (harness-ui-slots-test--data :holders (harness-ui-slots-test--busy)))))
@@ -874,47 +991,45 @@ The arrow of a priority is left out of its label."
         (set-window-buffer (selected-window) buffer)
         (with-current-buffer buffer
           (should (eq #'harness-ui-slots-mouse-open (lookup-key harness-ui-slots-mode-map [mouse-1])))
-          (let* ((pos (progn (harness-ui-slots-test--goto "task:t-mid" 1 4) (point)))
+          (let* ((pos (progn (harness-ui-slots-test--goto "task:t-mid" 0 6) (point)))
                  (event (list 'mouse-1 (list (selected-window) pos '(0 . 0) 0))))
             (goto-char (point-min))
             (harness-ui-slots-mouse-open event)
             (should (equal "s-t-mid" (car (car harness-ui-slots-test--opened))))
             (should (= pos (point))))
-          ;; A click on the free box or off the boxes opens nothing.
+          ;; A click off the rows opens nothing.
           (setq harness-ui-slots-test--opened nil)
-          (let* ((pos (progn (harness-ui-slots-test--goto "free:1" 1 1) (point))))
-            (should-error (harness-ui-slots-mouse-open (list 'mouse-1 (list (selected-window) pos '(0 . 0) 0)))
-                          :type 'user-error))
           (harness-ui-slots-mouse-open (list 'mouse-1 (list (selected-window) (point-min) '(0 . 0) 0)))
           (should-not harness-ui-slots-test--opened))))))
 
-(ert-deftest harness-ui-slots-box-is-one-clickable-area ()
+(ert-deftest harness-ui-slots-name-is-a-link-to-its-session ()
   (harness-ui-slots-test-with
     (let ((buffer (harness-ui-slots-test--open
                    (harness-ui-slots-test--data :holders (harness-ui-slots-test--busy)))))
       (with-current-buffer buffer
-        (dolist (line '(0 1 2 3))
-          (harness-ui-slots-test--goto "task:t-mid" line 5)
-          (should (eq 'highlight (get-text-property (point) 'mouse-face)))
-          (let ((help (get-text-property (point) 'help-echo)))
-            (should (string-match-p "Plan task board polish" help))
-            (should (string-match-p "medium priority · running · 2m" help))
-            (should (string-match-p "mouse-1, RET: open its session" help)))
-          (should (equal "t-mid" (get-text-property (point) 'harness-slot-task)))
-          (should (equal "s-t-mid" (get-text-property (point) 'harness-slot-session)))
-          ;; The keys are on the box itself, not only on the page's map.
-          (let ((map (get-text-property (point) 'keymap)))
-            (should (eq map harness-ui-slots-box-map))
-            (should (eq #'harness-ui-slots-open (lookup-key map (kbd "RET"))))
-            (should (eq #'harness-ui-slots-mouse-open (lookup-key map [mouse-1])))))
-        ;; A free box is no button.
-        (harness-ui-slots-test--goto "free:1" 1 3)
-        (should-not (get-text-property (point) 'mouse-face))
-        (should-not (get-text-property (point) 'help-echo))
-        (should-not (get-text-property (point) 'keymap))
-        (should-not (get-text-property (point) 'harness-slot-task))))))
+        ;; The name of a row is where it is highlighted and keyed.
+        (goto-char (text-property-any (point-min) (point-max) 'harness-slot-top 2))
+        (should (looking-at "Plan task board polish"))
+        (should (eq 'highlight (get-text-property (point) 'mouse-face)))
+        (let ((help (get-text-property (point) 'help-echo)))
+          (should (string-match-p "Plan task board polish" help))
+          (should (string-match-p "mouse-1, RET: open its session" help))
+          (should-not (string-match-p "\n" help)))
+        (should (equal "t-mid" (get-text-property (point) 'harness-slot-task)))
+        (should (equal "s-t-mid" (get-text-property (point) 'harness-slot-session)))
+        ;; The keys are on the name itself, not only on the page's map.
+        (let ((map (get-text-property (point) 'keymap)))
+          (should (eq map harness-ui-slots-row-map))
+          (should (eq #'harness-ui-slots-open (lookup-key map (kbd "RET"))))
+          (should (eq #'harness-ui-slots-mouse-open (lookup-key map [mouse-1]))))
+        ;; The other cells are the session list's: they have their own tooltips.
+        (search-forward "running")
+        (should (equal "running" (get-text-property (1- (point)) 'help-echo)))
+        (should-not (get-text-property (1- (point)) 'keymap))
+        ;; The row's keys are still there, for a click anywhere on it.
+        (should (equal "s-t-mid" (get-text-property (1- (point)) 'harness-slot-session)))))))
 
-(ert-deftest harness-ui-slots-arrow-of-a-box-asks-for-its-sessions-priority ()
+(ert-deftest harness-ui-slots-arrow-of-a-row-asks-for-its-sessions-priority ()
   (harness-ui-slots-test-with
     (let ((buffer (harness-ui-slots-test--open
                    (harness-ui-slots-test--data :holders (harness-ui-slots-test--busy)
@@ -926,7 +1041,7 @@ The arrow of a priority is left out of its label."
           ;; The arrow is the one of every view: a click on it asks for that session's priority.
           (should (equal "s-t-high" (get-text-property arrow harness-ui-priority-arrow-property)))
           (should (eq harness-ui-priority-arrow-map (get-text-property arrow 'keymap)))
-          ;; It is still in the box: the box's task is on it.
+          ;; It is still in the row: the row's task is on it.
           (should (equal "task:t-high" (get-text-property arrow 'harness-slot-key))))
         ;; A queued task's arrow asks for nothing: its session is not listed.
         (goto-char (point-min))
@@ -936,50 +1051,55 @@ The arrow of a priority is left out of its label."
           (should-not (get-text-property arrow harness-ui-priority-arrow-property))
           (should-not (get-text-property arrow 'keymap)))))))
 
-(ert-deftest harness-ui-slots-moves-from-box-to-box ()
+(ert-deftest harness-ui-slots-moves-from-row-to-row ()
   (harness-ui-slots-test-with
     (let ((buffer (harness-ui-slots-test--open
                    (harness-ui-slots-test--data :limit 5 :holders (harness-ui-slots-test--busy)))))
       (with-current-buffer buffer
-        (should (eq #'harness-ui-slots-next-box (lookup-key harness-ui-slots-mode-map (kbd "TAB"))))
-        (should (eq #'harness-ui-slots-previous-box (lookup-key harness-ui-slots-mode-map (kbd "<backtab>"))))
+        (should (eq #'harness-ui-slots-next-row (lookup-key harness-ui-slots-mode-map (kbd "TAB"))))
+        (should (eq #'harness-ui-slots-previous-row (lookup-key harness-ui-slots-mode-map (kbd "<backtab>"))))
+        ;; Not n and p: on the lines of a task waiting on a permission request n denies it.
+        (should-not (lookup-key harness-ui-slots-mode-map (kbd "n")))
+        (should-not (lookup-key harness-ui-slots-mode-map (kbd "p")))
         (let ((index-at-point (lambda () (get-text-property (point) 'harness-slot-index)))
-              (corner-p (lambda () (get-text-property (point) 'harness-slot-top))))
-          ;; From the top of the page, the first box, then each in turn, to the last and around.
+              (name-p (lambda () (get-text-property (point) 'harness-slot-top))))
+          ;; From the top of the page, the first row, then each in turn, to the last and around.
           (goto-char (point-min))
-          (harness-ui-slots-next-box)
-          (should (equal '(0 0) (list (funcall index-at-point) (funcall corner-p))))
+          (harness-ui-slots-next-row)
+          (should (equal '(0 0) (list (funcall index-at-point) (funcall name-p))))
+          (should (looking-at "Add secret redaction tools"))
           (let (seen)
-            (dotimes (_ 5) (harness-ui-slots-next-box) (push (funcall index-at-point) seen))
-            (should (equal '(1 2 3 4 0) (nreverse seen))))
-          ;; Backwards, and from inside a box, which goes by the box's number, not its place.
-          (harness-ui-slots-previous-box)
-          (should (= 4 (funcall index-at-point)))
-          (harness-ui-slots-test--goto "task:t-high" 3 5)
-          (harness-ui-slots-next-box)
-          (should (equal '(2 2) (list (funcall index-at-point) (funcall corner-p))))
-          (harness-ui-slots-test--goto "task:t-high" 3 5)
-          (harness-ui-slots-previous-box)
+            (dotimes (_ 3) (harness-ui-slots-next-row) (push (funcall index-at-point) seen))
+            (should (equal '(1 2 0) (nreverse seen))))
+          ;; Backwards, and from inside a row, which goes by the row's number, not its place.
+          (harness-ui-slots-previous-row)
+          (should (= 2 (funcall index-at-point)))
+          (harness-ui-slots-test--goto "task:t-high" 0 30)
+          (harness-ui-slots-next-row)
+          (should (equal '(2 2) (list (funcall index-at-point) (funcall name-p))))
+          (harness-ui-slots-test--goto "task:t-high" 0 30)
+          (harness-ui-slots-previous-row)
           (should (= 0 (funcall index-at-point))))))))
 
-(ert-deftest harness-ui-slots-box-keys-need-boxes ()
+(ert-deftest harness-ui-slots-row-keys-need-rows ()
   (harness-ui-slots-test-with
     (let ((buffer (harness-ui-slots-test--open (harness-ui-slots-test--data :limit nil))))
       (with-current-buffer buffer
-        (should-error (harness-ui-slots-next-box) :type 'user-error)
-        (should-error (harness-ui-slots-previous-box) :type 'user-error)))))
+        (should-error (harness-ui-slots-next-row) :type 'user-error)
+        (should-error (harness-ui-slots-previous-row) :type 'user-error)))))
 
 (ert-deftest harness-ui-slots-keys ()
   (dolist (binding '(("g" . harness-ui-slots-refresh) ("q" . harness-ui-quit-view)
-                     ("RET" . harness-ui-slots-open) ("TAB" . harness-ui-slots-next-box)
-                     ("<backtab>" . harness-ui-slots-previous-box) ("l" . harness-ui-slots-set-limit)
+                     ("RET" . harness-ui-slots-open) ("TAB" . harness-ui-slots-next-row)
+                     ("<backtab>" . harness-ui-slots-previous-row) ("l" . harness-ui-slots-set-limit)
+                     ("SPC" . harness-ui-sessions-requests)
                      ("?" . harness-menu) ("C-c C-z" . harness-ui-bury)))
     (should (eq (cdr binding) (lookup-key harness-ui-slots-mode-map (kbd (car binding))))))
   ;; The menu lists them for the buffer.
   (let ((group (get 'harness-ui-slots-mode 'harness-menu-group)))
     (should (equal "Task slots" (car group)))
-    (dolist (command '(harness-ui-slots-open harness-ui-slots-next-box harness-ui-slots-previous-box
-                       harness-ui-slots-set-limit harness-ui-slots-refresh))
+    (dolist (command '(harness-ui-slots-open harness-ui-slots-next-row
+                       harness-ui-sessions-requests harness-ui-slots-set-limit harness-ui-slots-refresh))
       (should (cl-some (lambda (column)
                          (cl-some (lambda (item) (and (consp item) (eq command (nth 2 item)))) (append column nil)))
                        (cdr group))))))
@@ -992,8 +1112,8 @@ The arrow of a priority is left out of its label."
                 :holders (list (list :id "t-x" :title "No times" :session "s-x" :priority "medium" :state "running"))
                 :queue (list (list :id "t-y" :title "Queued without a time" :priority "high"))))
          (lines (harness-ui-slots-test--page data)))
-    (should (harness-ui-slots-test--line-with lines "│ running +│"))
-    (should-not (harness-ui-slots-test--line-with lines "running ·"))
+    (should (harness-ui-slots-test--line-with lines "No times +running *\\'"))
+    (should-not (harness-ui-slots-test--line-with lines "running +[0-9]"))
     (should (harness-ui-slots-test--line-with lines "Queued without a time +0s"))
     (should (equal '("high" "1" "0s" "0s")
                    (harness-ui-slots-test--cells
@@ -1003,11 +1123,11 @@ The arrow of a priority is left out of its label."
                           (car (harness-ui-slots-test--page (harness-ui-slots-test--data :limit 3.0)))))
   (should (string-match-p "no limit"
                           (car (harness-ui-slots-test--page (harness-ui-slots-test--data :limit :null)))))
-  ;; An unknown priority is the default, a missing title is blank.
+  ;; An unknown priority is the default, a missing title is a name that is not given.
   (let ((lines (harness-ui-slots-test--page
                 (harness-ui-slots-test--data
                  :holders (list (harness-ui-slots-test--holder "t-z" nil "urgent" "running" 60.0))))))
-    (should (harness-ui-slots-test--line-with lines "╭─ medium ─"))))
+    (should (harness-ui-slots-test--line-with lines "unnamed +running +1m *\\'"))))
 
 (ert-deftest harness-ui-slots-opens-the-same-page-for-the-same-project ()
   (harness-ui-slots-test-with
@@ -1224,27 +1344,64 @@ It asks the harness for nothing: the times run from the answer it has."
           ;; `harness-ui-slots--on-resize' has it as it shows.
           (harness-ui-slots--render)
           (setq draws 0)
-          (should (string-match-p "running · 2m" (harness-ui-slots-test--visual (buffer-string))))
+          (should (string-match-p "Waiter +running +2m" (harness-ui-slots-test--visual (buffer-string))))
           ;; A tick that changes no time on it draws nothing.
           (harness-ui-slots--on-tick)
           (should (= 0 draws))
-          ;; Minutes later the box reads otherwise: drawn once.
+          ;; Minutes later the row reads otherwise: drawn once.
           (setq later 400.0)
           (harness-ui-slots--on-tick)
           (harness-ui-slots--on-tick)
           (should (= 1 draws))
-          (should (string-match-p "running · 9m" (harness-ui-slots-test--visual (buffer-string))))
+          (should (string-match-p "Waiter +running +9m" (harness-ui-slots-test--visual (buffer-string))))
           (should (= 1 (length harness-ui-slots-test--requests))))
         ;; Hidden, the clock draws nothing, however late it is.
         (setq later 4000.0)
         (harness-ui-slots--on-tick)
         (should (= 1 draws))))))
 
+(ert-deftest harness-ui-slots-live-a-request-a-task-waits-on-draws-the-page-again ()
+  "A request that comes or is answered changes the line under its task's row at once.
+A shown page draws again soon, once for a burst, asking the harness for
+nothing; a hidden one is left alone, drawn when it shows."
+  (harness-ui-slots-test-with
+    (let* ((buffer (harness-ui-slots-test--open
+                    (harness-ui-slots-test--data :holders (harness-ui-slots-test--busy))))
+           (harness-ui-slots--pending-delay 0.02)
+           ;; The module's init is what hooks the page to the requests.
+           (harness-ui-pending-changed-hook (list #'harness-ui-slots--on-pending))
+           (draws 0)
+           (waits (lambda ()
+                    (with-current-buffer buffer
+                      (string-match-p "\\[Allow\\]" (harness-ui-slots-test--visual (buffer-string)))))))
+      (cl-letf* ((draw (symbol-function 'harness-ui-slots--draw))
+                 ((symbol-function 'harness-ui-slots--draw)
+                  (lambda (text) (cl-incf draws) (funcall draw text))))
+        (harness-ui-slots-test-shown buffer
+          (harness-ui-slots--render)
+          (setq draws 0)
+          (should-not (funcall waits))
+          ;; The task that is blocked is asked a permission: its request is in the UI.
+          (harness-ui-slots-test--cache "s-t-low" :status "blocked"
+                                        :pending (list (list :id "p-1" :kind "permission"
+                                                             :payload (list :title "Bash: ls" :tool "bash"
+                                                                            :options '("allow-once" "deny-once")))))
+          (dotimes (_ 3) (run-hook-with-args 'harness-ui-pending-changed-hook "s-t-low"))
+          (harness-test-wait waits 3 "the request to show under its task")
+          (should (= 1 draws))
+          (should (= 1 (length harness-ui-slots-test--requests))))
+        ;; A page nothing shows is not drawn for it.
+        (setq draws 0)
+        (run-hook-with-args 'harness-ui-pending-changed-hook "s-t-low")
+        (sleep-for 0.1)
+        (should (= 0 draws))))))
+
 (ert-deftest harness-ui-slots-live-module-follows-the-events-and-the-clock ()
   (unwind-protect
       (progn
         (harness-ui-slots--init)
         (should (memq #'harness-ui-slots--on-event harness-ui-event-functions))
+        (should (memq #'harness-ui-slots--on-pending harness-ui-pending-changed-hook))
         (should (memq #'harness-ui-slots--on-tick harness-ui-tasks-tick-hook))
         (should (memq #'harness-ui-slots--redraw-all (default-value 'harness-ui-redraw-hook)))
         ;; C-c h Q, the queue, as Q in the harness menu.
@@ -1254,6 +1411,7 @@ It asks the harness for nothing: the times run from the answer it has."
         (should (= 1 (cl-count #'harness-ui-slots--on-event harness-ui-event-functions)))
         (harness-ui-slots--shutdown)
         (should-not (memq #'harness-ui-slots--on-event harness-ui-event-functions))
+        (should-not (memq #'harness-ui-slots--on-pending harness-ui-pending-changed-hook))
         (should-not (memq #'harness-ui-slots--on-tick harness-ui-tasks-tick-hook))
         (should-not (memq #'harness-ui-slots--redraw-all (default-value 'harness-ui-redraw-hook)))
         (should-not (lookup-key harness-ui-map (kbd "Q"))))
@@ -1391,7 +1549,8 @@ limit] there sets the board's limit, which the page shows too."
            (text (lambda () (with-current-buffer page (harness-ui-slots-test--visual (buffer-string)))))
            (shows (lambda (regexp)
                     (harness-test-wait (lambda () (string-match-p regexp (funcall text)))
-                                       5 (format "the page to show %s" regexp))))
+                                       5 (format "the page to show %s, it shows\n%s"
+                                                 regexp (funcall text)))))
            (saved nil))
       (should (cl-every #'stringp (list first second third)))
       (harness-test-wait (lambda () (= 2 (length (plist-get (harness-call 'task/slots dir) :holders))))
@@ -1405,14 +1564,14 @@ limit] there sets the board's limit, which the page shows too."
       (should (get-buffer-window page t))
       (should (equal (file-name-as-directory dir) (buffer-local-value 'harness-ui-slots--dir page)))
       (funcall shows "2 of 2 in use · 0 free · 1 waiting")
-      (let ((lines (split-string (funcall text) "\n")))
-        ;; Two boxes, both held at medium; none free.
-        (should (= 2 (harness-ui-slots-test--box-count lines)))
-        (should (= 2 (harness-ui-slots-test--count "╭─ medium ─" lines)))
-        (should (= 0 (harness-ui-slots-test--count "╭─ free ─" lines)))
-        (should (= 2 (harness-ui-slots-test--count "running · " lines)))
-        (should (harness-ui-slots-test--line-with lines "Held task one"))
-        (should (harness-ui-slots-test--line-with lines "Held task two"))
+      (let* ((lines (split-string (funcall text) "\n"))
+             (section (harness-ui-slots-test--section lines)))
+        ;; Two rows, both at work and running, at the default priority; none free.
+        (should (= 3 (length section)))
+        (should (harness-ui-slots-test--line-with section "Held task one +running"))
+        (should (harness-ui-slots-test--line-with section "Held task two +running"))
+        (should-not (harness-ui-slots-test--line-with lines "\\`   [0-9]+ free\\'"))
+        (should-not (cl-some (lambda (line) (string-match-p high line)) section))
         ;; The third waits, high: first in line.
         (should (harness-ui-slots-test--line-with lines "Queue · 1 waiting"))
         (should (equal '("high" "1") (seq-take (harness-ui-slots-test--cells
@@ -1424,12 +1583,12 @@ limit] there sets the board's limit, which the page shows too."
       ;; by itself, from the events, with the wait it had.
       (harness-call 'task/complete first)
       (funcall shows "2 of 2 in use · 0 free · 0 waiting")
-      (funcall shows (concat "╭─ " high " high ─"))
+      (funcall shows (concat "Urgent task three +[a-z]+ .*" high))
       (funcall shows "nobody waits for a slot")
       (let* ((lines (split-string (funcall text) "\n"))
              (waited (cdr (member (harness-ui-slots-test--line-with lines "Waited for a slot") lines))))
         (should-not (harness-ui-slots-test--line-with lines "Held task one"))
-        (should (harness-ui-slots-test--line-with lines "Urgent task three"))
+        (should (harness-ui-slots-test--line-with (harness-ui-slots-test--section lines) "Urgent task three"))
         (should (equal '("high" "1") (seq-take (harness-ui-slots-test--cells
                                                  (harness-ui-slots-test--line-with
                                                   waited (concat "\\`   " high " high ")))
@@ -1451,7 +1610,7 @@ limit] there sets the board's limit, which the page shows too."
           (harness-ui-action-push)))
       (harness-test-wait (lambda () (equal '((harness-tasks-max-running . 3)) saved)) 5 "the limit to be saved")
       (funcall shows "2 of 3 in use · 1 free · 0 waiting")
-      (should (= 1 (harness-ui-slots-test--count "╭─ free ─" (split-string (funcall text) "\n")))))))
+      (should (harness-ui-slots-test--line-with (split-string (funcall text) "\n") "\\`   1 free\\'")))))
 
 (provide 'harness-ui-slots-test)
 ;;; harness-ui-slots-test.el ends here

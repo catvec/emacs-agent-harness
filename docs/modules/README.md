@@ -77,7 +77,7 @@ ui-tasks); `(setq harness-enabled-modules t)` loads every module.
  ;;report             ; A task's report: its final message and evidence, in a popout and in…
  ;;review             ; Reviewing a task where it is looked at: its report in full in its…
  ;;search             ; Search the sessions' transcripts: words, literal… (with session-search)
- ;;slots              ; The task slots page: a box for each slot, in use or free, the queue…
+ ;;slots              ; The task slots page: the tasks that hold slots as the session list…
  ;;tree               ; Conversation tree: the fork family of a session as a git-like graph.
  )
 ```
@@ -198,7 +198,7 @@ ui-tasks); `(setq harness-enabled-modules t)` loads every module.
 | [ui-search](ui-search.md) |  | [ui](ui.md) | Search the sessions' transcripts: words, literal text, regexps or meaning. |
 | [ui-secrets](ui-secrets.md) |  | [ui](ui.md) | Redact a secret from everything the harness stored, and name the secrets to mask. |
 | [ui-sessions](ui-sessions.md) | by default | [ui](ui.md) | Session list buffer. |
-| [ui-slots](ui-slots.md) |  | [ui](ui.md), [ui-tasks](ui-tasks.md) | The task slots page: a box for each slot, in use or free, the queue and its waits by priority. |
+| [ui-slots](ui-slots.md) |  | [ui](ui.md), [ui-tasks](ui-tasks.md) | The task slots page: the tasks that hold slots as the session list lists sessions, the queue and its waits by priority. |
 | [ui-supervisor](ui-supervisor.md) |  | [ui](ui.md), [ui-chat](ui-chat.md) | Supervisor mode: the chat header's segment and the V key that toggles it. |
 | [ui-tasks](ui-tasks.md) |  | [ui](ui.md) | Task mode: a kanban of one-session tasks with a compose box. |
 | [ui-tasks-search](ui-tasks-search.md) |  | [ui-tasks](ui-tasks.md), [ui-quick-search](ui-quick-search.md) | The task board's search: find tasks, sessions and commands or act on tasks in words, answered by a cheap model. |
@@ -395,7 +395,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `harness-ui-media-rerender-functions` | [ui-media](ui-media.md) | [ui-chat](ui-chat.md) |
 | `harness-ui-notification-functions` | [ui](ui.md) | [ui-tasks](ui-tasks.md) |
 | `harness-ui-notify-segment-functions` | [ui-acp-remote](ui-acp-remote.md), [ui-notify](ui-notify.md) | [ui-acp-remote](ui-acp-remote.md), [ui-tasks](ui-tasks.md), [ui-version](ui-version.md) |
-| `harness-ui-pending-changed-hook` | [ui-pending](ui-pending.md) | [ui-access](ui-access.md), [ui-chat](ui-chat.md), [ui-pending](ui-pending.md), [ui-sessions](ui-sessions.md) |
+| `harness-ui-pending-changed-hook` | [ui-pending](ui-pending.md) | [ui-access](ui-access.md), [ui-chat](ui-chat.md), [ui-pending](ui-pending.md), [ui-sessions](ui-sessions.md), [ui-slots](ui-slots.md) |
 | `harness-ui-pending-drawn-predicates` |  | [ui-chat](ui-chat.md) |
 | `harness-ui-pending-panel-functions` | [ui-pending](ui-pending.md) | [ui-cowboy](ui-cowboy.md) |
 | `harness-ui-permission-functions` | [ui](ui.md) | [ui-pending](ui-pending.md) |
