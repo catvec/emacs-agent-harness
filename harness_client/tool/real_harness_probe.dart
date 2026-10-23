@@ -24,6 +24,7 @@ import 'package:harness_client/src/acp/acp_client.dart';
 import 'package:harness_client/src/acp/acp_message.dart';
 import 'package:harness_client/src/acp/capabilities.dart';
 import 'package:harness_client/src/acp/connection_target.dart';
+import 'package:harness_client/src/services/harness_api.dart';
 
 Future<void> main(List<String> arguments) async {
   if (arguments.isEmpty) {
@@ -91,6 +92,22 @@ Future<void> main(List<String> arguments) async {
     stdout.writeln(
       'features: ${caps.features.where((f) => f.enabled).map((f) => f.name).join(', ')}',
     );
+    if (caps.isHarness) {
+      // What a run of tool calls is folded by in a transcript: the allow list
+      // of the harness's tools, asked for as the app asks for it.
+      final tools = await HarnessApi(client, caps).toolCatalogue();
+      final folding = [
+        for (final spec in tools.specs)
+          if (spec.coalescable) spec.name,
+      ]..sort();
+      stdout.writeln(
+        'tools: ${tools.length}, ${folding.length} of them fold into runs',
+      );
+      stdout.writeln('folding: ${folding.join(' ')}');
+      if (caps.has('tools/list') && tools.isEmpty) {
+        throw StateError('tools/list is advertised but listed no tool');
+      }
+    }
     final listed = asMap(await client.request('session/list', {'cwd': cwd}));
     final sessions = asMapList(listed['sessions']);
     stdout.writeln('sessions in $cwd: ${sessions.length}');

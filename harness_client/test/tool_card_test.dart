@@ -515,6 +515,26 @@ void main() {
       expect(problem.bottom, lessThanOrEqualTo(viewport.bottom));
       expect(tester.getRect(header).top, greaterThanOrEqualTo(viewport.top));
     });
+
+    testWidgets('is seen when it is opened by a frame that takes long', (
+      tester,
+    ) async {
+      await _pump(tester, _transcript(toolShowcaseNodes()));
+      final viewport = tester.getRect(
+        find.byKey(const ValueKey('transcript-list')),
+      );
+      final header = _header('Hand in the finished work: Tool call results');
+      await tester.tap(header);
+      await tester.pump();
+      // One frame that takes longer than the whole of the animation, as the
+      // frame of a call with a long result to build does: the animation is
+      // over before the card has been laid out at the size it ends at.
+      await tester.pump(const Duration(seconds: 1));
+      await _settle(tester);
+      final problem = tester.getRect(find.text('PROBLEM'));
+      expect(problem.top, greaterThanOrEqualTo(viewport.top));
+      expect(problem.bottom, lessThanOrEqualTo(viewport.bottom));
+    });
   });
 
   group('a call that was opened', () {

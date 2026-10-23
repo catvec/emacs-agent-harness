@@ -5,6 +5,7 @@ import 'package:harness_client/src/acp/acp_message.dart';
 import 'package:harness_client/src/acp/acp_transport.dart';
 import 'package:harness_client/src/acp/connection_target.dart';
 
+import 'harness_tools.dart';
 import 'tool_showcase.dart';
 
 /// In-memory ACP transport: the client's writes go to [onSend], the harness's
@@ -81,6 +82,7 @@ class FakeHarness {
     this.tidyProjects = true,
     this.taskPictures = true,
     this.quota = true,
+    this.toolCatalogue = true,
     Set<String>? knownSecrets,
   }) : knownSecrets = knownSecrets ?? <String>{} {
     if (enhanced) {
@@ -130,6 +132,7 @@ class FakeHarness {
         'harness/version',
         'harness/modules',
         'config/describe',
+        if (toolCatalogue) 'tools/list',
       });
       events.addAll({
         'session/created',
@@ -190,6 +193,19 @@ class FakeHarness {
 
   /// Make `provider/quota` fail, as a provider whose probe goes wrong does.
   bool failQuota = false;
+
+  /// Whether the harness offers `tools/list`: its tools, what people call
+  /// them, and the allow list of the calls a chat folds into runs.  An older
+  /// harness does not, and the app then folds nothing.
+  final bool toolCatalogue;
+
+  /// What `tools/list` answers: the harness's real tools (see
+  /// `harness_tools.dart`), which a test may change to see what the app does
+  /// with other ones.
+  final List<Map<String, Object?>> toolSpecs = harnessToolSpecs();
+
+  /// Make `tools/list` fail, as a harness that goes wrong does.
+  bool failToolList = false;
 
   /// Where git worktrees that are not in the `.worktrees` of their checkout
   /// are, as a repository's `.git` says it: worktree -> checkout.  An older
@@ -1029,6 +1045,57 @@ class FakeHarness {
     nodes[toolShowcaseId] = toolShowcaseNodes();
   }
 
+  /// The agent adds [node] to session [sid]'s transcript while a client is
+  /// open on it, and the client is sent it as the harness sends a live node:
+  /// the ACP update, and the whole node beside it.
+  void stream(String sid, Map<String, Object?> node) {
+    (nodes[sid] ??= []).add(node);
+    for (final update in _updatesForNode(node, replay: false)) {
+      _send('session/update', {'sessionId': sid, 'update': update});
+    }
+  }
+
+  /// Session [sid] asks the person to allow the call [callId], as the harness
+  /// does before it runs a command it has no leave for.  The answer comes
+  /// when the person gives it, and is kept in [permissionAnswers].
+  Future<Map<String, Object?>> askPermission(
+    String sid, {
+    required String callId,
+    String tool = 'bash',
+    String title = 'Run the command',
+  }) async {
+    final response = await _requestClient('session/request_permission', {
+      'sessionId': sid,
+      'toolCall': {
+        'toolCallId': callId,
+        'title': title,
+        'kind': 'execute',
+        'rawInput': {'command': title},
+      },
+      'options': _permissionOptions,
+      '_harness': {'pendingId': 'perm-$callId', 'tool': tool},
+    });
+    final answer = asMap(response['result']);
+    permissionAnswers.add(answer);
+    return answer;
+  }
+
+  static const _permissionOptions = <Map<String, Object?>>[
+    {'optionId': 'allow-once', 'name': 'Allow', 'kind': 'allow_once'},
+    {
+      'optionId': 'allow-session',
+      'name': 'Allow for session',
+      'kind': 'allow_always',
+    },
+    {
+      'optionId': 'allow-always',
+      'name': 'Always allow',
+      'kind': 'allow_always',
+    },
+    {'optionId': 'deny-once', 'name': 'Deny', 'kind': 'reject_once'},
+    {'optionId': 'deny-always', 'name': 'Always deny', 'kind': 'reject_always'},
+  ];
+
   Map<String, Object?> _node(
     String id,
     String kind,
@@ -1648,7 +1715,7 @@ class FakeHarness {
       }
       if (method == '_harness/insights/projects') {
         _respond(id, listedProjects());
-       return;
+        return;
       }
       if (method == '_harness/provider/list') {
         _respond(id, [
@@ -1747,6 +1814,16 @@ class FakeHarness {
           'cwd': '/Users/noah/Code/emacs-agent-harness/',
           'inProject': true,
         });
+        return;
+      }
+      if (method == '_harness/tools/list' && toolCatalogue) {
+        if (failToolList) {
+          _respondError(id, -32603, 'The harness could not list its tools.');
+          return;
+        }
+        // The specs of every tool, as the harness gives them without a
+        // session: what a transcript's calls are labelled by.
+        _respond(id, toolSpecs);
         return;
       }
       if (method == '_harness/session/test-hang') {
@@ -2047,25 +2124,7 @@ class FakeHarness {
           'kind': 'execute',
           'rawInput': {'command': 'flutter test'},
         },
-        'options': [
-          {'optionId': 'allow-once', 'name': 'Allow', 'kind': 'allow_once'},
-          {
-            'optionId': 'allow-session',
-            'name': 'Allow for session',
-            'kind': 'allow_always',
-          },
-          {
-            'optionId': 'allow-always',
-            'name': 'Always allow',
-            'kind': 'allow_always',
-          },
-          {'optionId': 'deny-once', 'name': 'Deny', 'kind': 'reject_once'},
-          {
-            'optionId': 'deny-always',
-            'name': 'Always deny',
-            'kind': 'reject_always',
-          },
-        ],
+        'options': _permissionOptions,
         '_harness': {
           'pendingId': 'perm-1',
           'tool': 'bash',

@@ -49,6 +49,11 @@ class InteractionRequest {
   JsonMap get toolCall => asMap(params['toolCall']);
   JsonMap get harness => asMap(params['_harness']);
 
+  /// The call a permission request is about: its `toolCallId` is the
+  /// `call-id` of the call in the transcript.  Null for a question.
+  String? get toolCallId =>
+      isPermission ? asString(toolCall['toolCallId']) : null;
+
   /// The id the harness holds this request by, as pending on its session:
   /// the one the request came with, or was recovered by.  What says whether
   /// the harness still waits for it, and whether two requests are the same.

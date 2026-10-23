@@ -51,11 +51,17 @@ class _ToolCardState extends State<ToolCard>
   void _opened() {
     if (!_reveal) return;
     _reveal = false;
-    if (!mounted || !_open) return;
-    context.findRenderObject()?.showOnScreen(
-      duration: const Duration(milliseconds: 240),
-      curve: Curves.easeOutCubic,
-    );
+    // The animation ends at the start of a frame, before the card has been
+    // laid out at the size it ends at, and a frame that takes long (a card
+    // with a long result to build) has ended it altogether before the card
+    // has grown: once the frame is drawn the card is as tall as it is.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_open) return;
+      context.findRenderObject()?.showOnScreen(
+        duration: const Duration(milliseconds: 240),
+        curve: Curves.easeOutCubic,
+      );
+    });
   }
 
   void _openFull() {

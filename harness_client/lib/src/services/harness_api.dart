@@ -7,6 +7,7 @@ import '../models/quota.dart';
 import '../models/server_info.dart';
 import '../models/session.dart';
 import '../models/task.dart';
+import '../models/tool_catalogue.dart';
 import '../models/usage.dart';
 
 class SessionPage {
@@ -29,6 +30,11 @@ class HarnessApi {
   AcpClient _client;
   HarnessCapabilities capabilities;
   final Set<String> _unavailable = <String>{};
+
+  /// The tools of this connection's harness, asked for once ([toolCatalogue]);
+  /// [_catalogueGeneration] tells an answer that came late that it is stale.
+  Future<ToolCatalogue>? _catalogue;
+  int _catalogueGeneration = 0;
   final _degraded = StreamController<String>.broadcast();
   final _notifications = StreamController<AcpNotification>.broadcast();
   StreamSubscription<AcpNotification>? _following;
@@ -47,6 +53,8 @@ class HarnessApi {
   void updateCapabilities(HarnessCapabilities next) {
     capabilities = next;
     _unavailable.clear();
+    // It may be another harness, or the same one with other modules.
+    forgetTools();
   }
 
   /// Set while the app is getting a lost connection back.  A request made
@@ -87,6 +95,13 @@ class HarnessApi {
 
   void _follow(AcpClient client) {
     _following = client.notifications.listen((notification) {
+      // A harness that was reloaded may have other tools.  They are forgotten
+      // before anyone hears of the reload, so whoever asks for them in
+      // answer to it gets the new ones.
+      if (notification.method == '_harness/event' &&
+          notification.params['event'] == 'harness/reloaded') {
+        forgetTools();
+      }
       if (!_notifications.isClosed) _notifications.add(notification);
     });
   }
@@ -597,6 +612,45 @@ class HarnessApi {
     });
   }
 
-  Future<JsonMap> toolsList([String? sessionId]) =>
-      extension('tools/list', {if (sessionId != null) 'session-id': sessionId});
+  // ---- Tools -------------------------------------------------------------
+
+  /// Every tool of the harness: what people call it, and whether its calls
+  /// fold into a run in the transcript (the allow list, `coalescable`).
+  ///
+  /// All the tools, not those one session is offered: a transcript can hold
+  /// calls of a tool that session no longer has, and they read by their
+  /// labels and fold like the rest.  It is asked for once for this connection
+  /// and kept: a harness that is reloaded (`harness/reloaded`) or reached
+  /// again after a lost connection ([rebind]) may have other tools, and is
+  /// asked again.  A harness without the method, or that fails to answer, has
+  /// [ToolCatalogue.empty]: no call folds.  A failure is not kept, so that
+  /// the next ask tries again.
+  Future<ToolCatalogue> toolCatalogue({bool refresh = false}) {
+    if (!can('tools/list')) return Future.value(ToolCatalogue.empty);
+    final kept = _catalogue;
+    if (kept != null && !refresh) return kept;
+    final generation = ++_catalogueGeneration;
+    final fetch = _fetchCatalogue(generation);
+    _catalogue = fetch;
+    return fetch;
+  }
+
+  Future<ToolCatalogue> _fetchCatalogue(int generation) async {
+    try {
+      // A short wait: the conversation opens on it, and one without a
+      // catalogue still opens, with nothing folded.
+      return ToolCatalogue.fromWire(
+        await extensionRaw('tools/list', null, const Duration(seconds: 10)),
+      );
+    } catch (_) {
+      if (generation == _catalogueGeneration) _catalogue = null;
+      return ToolCatalogue.empty;
+    }
+  }
+
+  /// Ask for the tools again the next time they are needed.
+  void forgetTools() {
+    _catalogue = null;
+    _catalogueGeneration++;
+  }
 }

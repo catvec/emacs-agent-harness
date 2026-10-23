@@ -2,6 +2,8 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 
 import '../../acp/acp_message.dart';
+import '../../models/tool_catalogue.dart';
+import '../../models/tool_runs.dart';
 import '../../models/transcript.dart';
 import '../adaptive/adaptive_widgets.dart';
 import '../adaptive/mark.dart';
@@ -10,6 +12,7 @@ import '../format.dart';
 import '../theme/harness_theme.dart';
 import 'markdown_view.dart';
 import 'tool_card.dart';
+import 'tool_run_card.dart';
 
 class TranscriptView extends StatefulWidget {
   const TranscriptView({
@@ -18,6 +21,8 @@ class TranscriptView extends StatefulWidget {
     required this.showThinking,
     this.streaming = false,
     this.scrollTick = 0,
+    this.tools = ToolCatalogue.empty,
+    this.waiting = const {},
   });
 
   final List<TranscriptItem> items;
@@ -25,8 +30,39 @@ class TranscriptView extends StatefulWidget {
   final bool streaming;
   final int scrollTick;
 
+  /// The harness's tools.  The calls of the ones on its allow list fold into
+  /// runs, each under one summary line (see `segmentTranscript`); every other
+  /// call is a card of its own.  Without them nothing folds.
+  final ToolCatalogue tools;
+
+  /// The ids of the calls that wait for the person to answer: a run never
+  /// folds them away.
+  final Set<String> waiting;
+
   @override
   State<TranscriptView> createState() => _TranscriptViewState();
+}
+
+/// One line of the list: an item of the transcript, or the summary of a run.
+sealed class _Row {
+  const _Row();
+}
+
+class _ItemRow extends _Row {
+  const _ItemRow(this.item, this.previous, {this.nested = false});
+
+  final TranscriptItem item;
+  final TranscriptItem? previous;
+
+  /// It is a call (or a thought) of a run that is open.
+  final bool nested;
+}
+
+class _RunRow extends _Row {
+  const _RunRow(this.run, this.open);
+
+  final ToolRun run;
+  final bool open;
 }
 
 class _TranscriptViewState extends State<TranscriptView> {
@@ -34,6 +70,73 @@ class _TranscriptViewState extends State<TranscriptView> {
   bool _atBottom = true;
   int _lastCount = 0;
   int _lastLength = 0;
+
+  /// The keys of the items of the runs the person opened.  A run is open
+  /// when any of its items is in here, so that one stays as it was left when
+  /// a call joins it, or a call that waited for an answer comes back to it
+  /// and the runs are worked out again.
+  final Set<String> _opened = <String>{};
+
+  bool _isOpen(ToolRun run) =>
+      run.members.any((member) => _opened.contains(member.key));
+
+  /// The first call of the run the person has just opened, until it has been
+  /// drawn and brought into view (see `ToolRunMember.reveal`).
+  String? _revealing;
+
+  void _toggle(ToolRun run) {
+    final keys = [for (final member in run.members) member.key];
+    setState(() {
+      if (_isOpen(run)) {
+        _opened.removeAll(keys);
+      } else {
+        _opened.addAll(keys);
+        _revealing = run.members.first.key;
+      }
+    });
+    // Once the calls are drawn it is done: a call that is built again later,
+    // as the list is scrolled to it, is not brought into view again.
+    WidgetsBinding.instance.addPostFrameCallback((_) => _revealing = null);
+  }
+
+  /// What the list shows, top to bottom: the items that stand alone, a
+  /// summary line for each run, and under the summary of a run that is open,
+  /// its calls.  The calls are rows of their own and not one tall row, so
+  /// that the list builds only the ones that are near the screen.
+  List<_Row> _rows() {
+    final rows = <_Row>[];
+    TranscriptItem? previous;
+    for (final segment in segmentTranscript(
+      widget.items,
+      tools: widget.tools,
+      waiting: widget.waiting,
+    )) {
+      switch (segment) {
+        case ItemSegment(:final item):
+          if (item.kind == TranscriptKind.thinking && !widget.showThinking) {
+            continue;
+          }
+          rows.add(_ItemRow(item, previous));
+          previous = item;
+        case RunSegment(:final run):
+          final open = _isOpen(run);
+          rows.add(_RunRow(run, open));
+          if (open) {
+            for (final member in run.members) {
+              // Thoughts are shown only when the person asked for them, and
+              // one that says nothing has nothing to show.
+              if (member.isThinking &&
+                  (!widget.showThinking || member.text.trim().isEmpty)) {
+                continue;
+              }
+              rows.add(_ItemRow(member, null, nested: true));
+            }
+          }
+          previous = run.members.last;
+      }
+    }
+    return rows;
+  }
 
   @override
   void initState() {
@@ -114,11 +217,8 @@ class _TranscriptViewState extends State<TranscriptView> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final visible = [
-      for (final item in widget.items)
-        if (item.kind != TranscriptKind.thinking || widget.showThinking) item,
-    ];
-    if (visible.isEmpty) {
+    final rows = _rows();
+    if (rows.isEmpty) {
       return Center(
         child: SingleChildScrollView(
           padding: const EdgeInsets.all(28),
@@ -163,19 +263,33 @@ class _TranscriptViewState extends State<TranscriptView> {
             parent: BouncingScrollPhysics(),
           ),
           padding: const EdgeInsets.only(top: 6, bottom: 14),
-          itemCount: visible.length,
+          itemCount: rows.length,
           itemBuilder: (context, index) {
-            final item = visible[index];
-            final previous = index == 0 ? null : visible[index - 1];
-            final isLast = index == visible.length - 1;
-            return TranscriptEntry(
-              key: ValueKey(item.key),
-              item: item,
-              previous: previous,
-              isLast: isLast,
-              showThinking: widget.showThinking,
-              streaming: widget.streaming,
-            );
+            switch (rows[index]) {
+              case _RunRow(:final run, :final open):
+                return ToolRunCard(
+                  key: ValueKey('run-${run.key}'),
+                  run: run,
+                  open: open,
+                  showThinking: widget.showThinking,
+                  onToggle: () => _toggle(run),
+                );
+              case _ItemRow(:final item, :final previous, :final nested):
+                final entry = TranscriptEntry(
+                  key: ValueKey(item.key),
+                  item: item,
+                  previous: previous,
+                  isLast: index == rows.length - 1,
+                  showThinking: widget.showThinking,
+                  streaming: widget.streaming,
+                );
+                return nested
+                    ? ToolRunMember(
+                        reveal: item.key == _revealing,
+                        child: entry,
+                      )
+                    : entry;
+            }
           },
         ),
         if (!_atBottom)

@@ -1,5 +1,7 @@
 // What the transcript of a task's session holds once it has done some work:
-// tool calls of the kinds an agent makes, with the results as the harness
+// tool calls of the kinds an agent makes (the reads and the commands among them
+// fold into runs under one summary line, the edit and the refused write stand
+// alone, as the harness's allow list says), with the results as the harness
 // writes them (`call-id` and `is-error` in kebab case, the result's `meta`
 // with its duration, the permission system's `denied`, and the report a
 // `hand_in` call handed in).  The fake harness serves it as a session of its
@@ -309,6 +311,11 @@ List<Map<String, Object?>> toolShowcaseNodes() {
       {'path': 'lib/src/ui/widgets/tool_card.dart', 'offset': 1, 'limit': 60},
     ),
     result('call-read', toolShowcaseSource(), duration: 0.02),
+    node('thinking', {
+      'content':
+          'The card is closed until it is opened. Before I change that I '
+          'want to see everywhere `_open` is set.',
+    }),
     call('call-grep', 'grep', 'Search files: _open', {
       'pattern': '_open',
       'path': 'lib/src/ui/widgets',

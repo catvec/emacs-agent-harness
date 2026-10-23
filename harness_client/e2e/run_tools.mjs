@@ -1,10 +1,13 @@
-// How a tool call reads in the transcript: opened to its input and its output,
-// a long result cut to a screenful and then shown whole, a call that failed
-// and one the permission system refused, the report a hand-in call handed in,
-// and the page that shows a call whole.  It drives the same E2E web build as
-// run_flows.mjs, against a preview harness started with `--tools` (a task's
-// session with the calls of every kind; see test/support/tool_showcase.dart),
-// and writes a screenshot of each to ../screenshots/ (OUT overrides).
+// How a tool call reads in the transcript: the calls of the tools on the
+// harness's allow list folded into runs under one summary line (as its Emacs
+// chat folds them) and a run opened to its calls; a call opened to its input
+// and its output, a long result cut to a screenful and then shown whole, a call
+// that failed and one the permission system refused, the report a hand-in call
+// handed in, and the page that shows a call whole.  It drives the same E2E web
+// build as run_flows.mjs, against a preview harness started with `--tools` (a
+// task's session with the calls of every kind; see
+// test/support/tool_showcase.dart), and writes a screenshot of each to
+// ../screenshots/ (OUT overrides).
 //
 //   WEB_URL=http://127.0.0.1:8899 TOOLS_ACP_URL=ws://127.0.0.1:4280/acp \
 //   ACP_URL=ws://127.0.0.1:4277/acp node run_tools.mjs
@@ -90,12 +93,16 @@ async function openSession(page, title) {
   await page.waitForTimeout(2000);
 }
 
-/** The list builds only what is near the screen: wheel until [text] is. */
-async function find(page, text, { role = 'button' } = {}) {
-  const locator = page
+/**
+ * The list builds only what is near the screen: wheel until [text] is.  Of
+ * several, the first; the last when [last] is set, which is the card of a call
+ * in an open run and not the summary line above it that names it too.
+ */
+async function find(page, text, { role = 'button', last = false } = {}) {
+  const matches = page
     .locator(`flt-semantics[role=${role}]`)
-    .filter({ hasText: text })
-    .first();
+    .filter({ hasText: text });
+  const locator = last ? matches.last() : matches.first();
   for (const direction of [1, -1]) {
     for (let step = 0; step < 30 && (await locator.count()) === 0; step += 1) {
       await page.mouse.move(206, 450);
@@ -116,8 +123,8 @@ async function toBottom(page) {
   await page.waitForTimeout(500);
 }
 
-async function tap(page, text) {
-  const locator = await find(page, text);
+async function tap(page, text, options = {}) {
+  const locator = await find(page, text, options);
   await locator.click();
   await page.waitForTimeout(900);
 }
@@ -152,8 +159,10 @@ async function run() {
     await page.getByText('PERMISSION', { exact: true }).waitFor({ timeout: 15000 });
     await page.getByRole('button', { name: 'Allow', exact: true }).first().click();
     await page.waitForTimeout(1400);
-    // The call that ran is a line in the transcript; open it.
+    // The call that ran is a run of one, a line in the transcript; open the
+    // line, and then the call.
     await tap(page, 'Run the full test suite');
+    await tap(page, 'Run the full test suite', { last: true });
     await shot(page, 'ios-tool-result');
     await context.close();
   }
@@ -165,7 +174,16 @@ async function run() {
     await connect(page, TOOLS, 'Tidy the tool cards');
     await openSession(page, 'Tidy the tool cards');
     await toBottom(page);
+    // The reads and the commands are the calls on the harness's allow list:
+    // each stretch is one line.  The edit and the refused write are not, and
+    // stand as cards between them.
     await shot(page, 'android-tool-calls');
+
+    // Runs opened: their calls, each as closed as any call is, and the
+    // thought the model had between its two reads, folded in with them.
+    await tap(page, 'Bash ×2');
+    await tap(page, 'Read file, Search files · thinking');
+    await shot(page, 'android-tool-run');
 
     // A command: what it was, then what it said, cut to a screenful.
     await tap(page, 'flutter test --reporter expanded');
@@ -227,6 +245,8 @@ async function run() {
     await connect(page, TOOLS, 'Tidy the tool cards');
     await openSession(page, 'Tidy the tool cards');
     await toBottom(page);
+    await shot(page, 'ios-tool-calls');
+    await tap(page, 'Bash ×2');
     await tap(page, 'Bash: flutter analyze');
     await shot(page, 'ios-tool-failed');
     await context.close();

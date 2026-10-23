@@ -454,6 +454,10 @@ class _SessionScreenState extends State<SessionScreen> {
                             showThinking: _app.settings.showThinking,
                             streaming: controller.promptInFlight,
                             scrollTick: _scrollTick,
+                            // The calls of the harness's allow list fold into
+                            // runs, never one that waits for you.
+                            tools: controller.tools,
+                            waiting: controller.waitingCalls,
                           ),
                   ),
                   if (plan.isNotEmpty && interaction == null)

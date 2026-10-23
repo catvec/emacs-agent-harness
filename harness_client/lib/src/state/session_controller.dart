@@ -7,6 +7,7 @@ import '../acp/acp_client.dart';
 import '../acp/acp_message.dart';
 import '../models/activity.dart';
 import '../models/session.dart';
+import '../models/tool_catalogue.dart';
 import '../models/transcript.dart';
 import '../services/harness_api.dart';
 import 'drafts.dart';
@@ -37,6 +38,11 @@ class SessionController extends ChangeNotifier {
   final DraftStore? drafts;
   SessionSummary? summary;
   final TranscriptState transcript = TranscriptState();
+
+  /// The harness's tools: what people call them, and the allow list of the
+  /// calls that fold into a run in the transcript.  Empty until the harness
+  /// has answered (and for one that does not say), when nothing folds.
+  ToolCatalogue tools = ToolCatalogue.empty;
   TurnActivity? activity;
   String? error;
   bool loading = true;
@@ -54,6 +60,14 @@ class SessionController extends ChangeNotifier {
 
   InteractionRequest? get currentInteraction =>
       interactions.isEmpty ? null : interactions.first;
+
+  /// The calls of the transcript that wait for the person to allow them: a
+  /// summary line must not fold them away while the session is blocked on
+  /// them.
+  Set<String> get waitingCalls => {
+    for (final request in interactions)
+      if (request.toolCallId case final String id when id.isNotEmpty) id,
+  };
 
   bool get needsAttention =>
       interactions.isNotEmpty || summary?.isBlocked == true;
@@ -102,6 +116,9 @@ class SessionController extends ChangeNotifier {
     error = null;
     _notify();
     try {
+      // What the harness's tools are first, so that the transcript replays
+      // into the runs it folds and not into cards that fold a moment later.
+      await _loadTools();
       // ACP's session/load resumes the session and replays the transcript.
       await api.loadSession(sessionId, cwd: summary?.cwd);
       // Read again: what a lost connection may have left behind is made up
@@ -160,6 +177,17 @@ class SessionController extends ChangeNotifier {
     } catch (_) {
       // Not fatal: the transcript is still live.
     }
+  }
+
+  /// Read the harness's tools (the api keeps them for the connection, so a
+  /// second conversation asks nobody).  An empty answer, which a harness that
+  /// does not say or one that could not be reached gives, never replaces
+  /// tools that are known: the runs a transcript folds into stay as they
+  /// were.
+  Future<void> _loadTools() async {
+    final found = await api.toolCatalogue();
+    if (_disposed || found.isEmpty) return;
+    tools = found;
   }
 
   Future<void> _refreshActivity() async {
@@ -780,6 +808,9 @@ class SessionController extends ChangeNotifier {
         unawaited(_refreshActivity());
       case 'session/nodes-removed':
         unawaited(open(force: true));
+      case 'harness/reloaded':
+        // Reloaded code may have other tools, and fold other calls.
+        unawaited(_loadTools().then((_) => _notify()));
     }
   }
 

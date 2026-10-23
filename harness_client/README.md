@@ -40,11 +40,15 @@ time it opens. It asks again only when the harness does.
   in as what they are, and what the call said, a screenful at a time, with
   *Show all* and a page of its own for the whole of it. A call that failed, or
   that the permission system refused, says so under its title. The call that
-  hands a task's work in shows its report. See [Tool calls](#tool-calls).
+  hands a task's work in shows its report. A stretch of quiet calls, the reads
+  and the commands among them, is one line, "3 tool calls: Read file ×2,
+  Search files", which opens to the calls: the tools that fold are the harness's
+  own allow list, the one its Emacs chat folds by. See
+  [Tool calls](#tool-calls).
 
-  | A command | The report of a hand-in call |
-  |---|---|
-  | ![A bash call opened: the command, and its output cut to a screenful](screenshots/android-tool-call.png) | ![The hand-in call opened: the problem, the summary, how to reproduce, the evidence](screenshots/android-hand-in-phone.png) |
+  | A command | Runs of calls | The report of a hand-in call |
+  |---|---|---|
+  | ![A bash call opened: the command, and its output cut to a screenful](screenshots/android-tool-call.png) | ![Two runs of calls, opened: the calls, and the thought between two of them](screenshots/android-tool-run.png) | ![The hand-in call opened: the problem, the summary, how to reproduce, the evidence](screenshots/android-hand-in-phone.png) |
 - **Answers the agent.** Standard ACP permission requests become an inline
   decision card with *Allow*, *Deny*, *Allow for session*, *Always allow* and
   *Always deny*; a path glob can be edited before a lasting answer is given.
@@ -409,6 +413,7 @@ The client never assumes a method because the agent calls itself a harness.
 | Streaming transcript, tools, plans | standard `session/update` |
 | Permission prompts | standard `session/request_permission` |
 | Rich nodes, final text, usage on a node | `session/get`, `session/nodes` |
+| Runs of tool calls folded under one line | `tools/list`, whose `coalescable` says which tools' calls fold; a harness without it folds nothing |
 | Live activity | `agent/activity` or `agent/activity-changed` |
 | Task board | `task/list` (actions need `task/start`, `task/verify`, …) |
 | Usage | `usage/totals` or `usage/summary` |
@@ -439,6 +444,12 @@ Everything beyond that is under `_harness/` and is optional.
 - Transcript: `_harness/node` (full node), `_harness/session` (title, status,
   usage, todos, queue, pending), `_harness/activity` (phase, tool, detail,
   running calls), `_harness/event` (task, usage, turn and config events).
+- Tools: `tools/list`, an array with a spec for each tool of the harness
+  (`name`, `label`, `kind`, `coalescable`; the schemas come too, and are not
+  read). It is asked for once for a connection, before a conversation is
+  replayed, and again after the harness is reloaded (`harness/reloaded`) or
+  reached again after the connection was lost. The app has no list of tools
+  of its own.
 - Tasks: `task/list`, `task/slots`, `task/settings`, `task/submit`,
   `task/start`, `task/queue`, `task/verify`, `task/reject`, `task/prompt`,
   `task/retry`, `task/cancel`, `task/complete`, `task/archive`,
@@ -580,9 +591,34 @@ evidence resolved. A call replayed from `session/nodes` and one that arrives
 as `tool_call` / `tool_call_update` / `_harness/node` end up the same
 `ToolView`.
 
+### Runs of calls
+
+A stretch of quiet calls is one line, as it is in the harness's Emacs chat.
+Both read the same flag, the `coalescable` of each tool's spec in `tools/list`
+(the harness's allow list), so the app keeps no list of its own, and a tool
+the harness puts on the list folds in both at once. The rules are the chat's
+(`harness-chat--regroup`), in plain Dart (`segmentTranscript`,
+`lib/src/models/tool_runs.dart`) so that they are tried without a widget.
+
+| What | How it is shown |
+|---|---|
+| Which calls fold | Only those of the tools on the allow list: the quiet reads (`read_file`, `grep`, `list_dir`, the lookups of sessions and tasks, the tools that look into Emacs) and `bash`. What writes, acts on other sessions or tasks, waits or watches, or reaches the web is a card of its own, and ends the run it meets: an edit among reads leaves two lines with its own card between them. |
+| A run | The calls that follow one another with nothing between them but thinking. Thinking between two calls folds in (*· thinking ×2*), since a model that thinks before every call would never have a run otherwise; thinking before the first call or after the last stays out. Anything else ends a run: the agent's words, the person's, a hint, a compaction, a plan. A lone call is a run of one, *1 tool call*, named as its card is. |
+| The line | `ToolRunCard`: *3 tool calls*, under it what they were, counted by what people call the tools (*Read file ×2, Search files*), and how many failed or were refused, in red and amber, which a run that is closed must not hide. A spinner while a call runs, a check when all went well. |
+| Opened | Tapping the line opens the run (`ToolRunMember`): its calls, set in under it, each as closed as a call is anywhere else, and the thoughts between them when thinking is shown. The first call is brought into view, since the calls come out below a line that may be at the foot of the page. Tapping again folds them. |
+| What stays out | A call whose result brings a picture or a video, one the session waits for the person to allow (the pending request names it by its `toolCallId`; it joins the run once it is answered) and one the harness recorded for the session and the agent never made (its `_harness.from`). |
+| Kept open | What the person opened is kept by the calls in it, not by the run: a call that joins an open run, or one that leaves it while it waits and comes back, leaves the run as it was open. A run made of calls of one that was open is open too, and no other. |
+| Without the list | A harness that cannot say which tools fold (no `tools/list`: an older harness or a plain ACP agent) folds nothing, and neither does one that does not answer. The conversation opens all the same, and each call is a card of its own. |
+
+The transcript is a list of rows and not of runs, so that an open run of a
+hundred calls builds only the calls near the screen. The runs are worked out
+from the whole list of items at each build, so a conversation read in one go
+and one that grew call by call fold the same way.
+
 | | | |
 |---|---|---|
-| ![A task's session: the calls, one that failed and one that was refused](screenshots/android-tool-calls.png) | ![An edit: the text it took out and the text it put in](screenshots/android-tool-edit.png) | ![A result on a page of its own](screenshots/android-tool-output.png) |
+| ![A task's session: runs of calls, an edit and a refused write between them, a failed command counted on its line](screenshots/android-tool-calls.png) | ![An edit: the text it took out and the text it put in](screenshots/android-tool-edit.png) | ![A result on a page of its own](screenshots/android-tool-output.png) |
+| ![The same session in the Apple style](screenshots/ios-tool-calls.png) | ![A command that ran, a run of one opened to its call](screenshots/ios-tool-result.png) | |
 
 ## Testing
 
@@ -641,6 +677,20 @@ The widget tests drive the real `AcpClient` against an in-memory ACP server
   message; nothing overflows at 320 points or at one and a half times the
   text; and the whole path from the harness's nodes (`call-id`, `is-error`, a
   result's `meta`) to the page
+- runs of calls (`test/tool_runs_test.dart`, `tool_run_view_test.dart`,
+  `tool_flow_test.dart`): the allow list is the harness's, read from
+  `tools/list` (`test/support/harness_tools.json` is the real one, and a suite
+  on the Emacs side, `test/harness-client-tools-test.el`, keeps it honest); a
+  stretch of calls of listed tools is one run, cut by any other call or item,
+  with the thinking between them folded in and the thinking around them left
+  out; a call with a picture, one waiting for an answer and one the harness
+  recorded stay out; the line counts the calls by label and the failed and
+  refused ones; a run opens to its calls, each closed, and its first call is
+  brought into view; it stays open as calls join it or leave it and come back;
+  an open run of three hundred calls builds a few of them; nothing overflows at
+  320 points or at one and a half times the text, in either style; and the
+  whole path from `tools/list` to the page, for a harness that lists its tools,
+  one that does not, one that fails to answer, and one that is reloaded
  permission request and allow, question with a diagram and send
 - answering the agent's question on phones (`test/question_card_test.dart`):
   on a 360×640 phone, a tall one, a Pixel and an iPhone, with the keyboard

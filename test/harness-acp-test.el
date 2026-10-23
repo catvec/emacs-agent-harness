@@ -617,6 +617,22 @@ and has no next page; a page past the last session lists none."
         (should (equal "read" (plist-get (car tools) :kind)))
         ;; With the name people read, which UIs show for it.
         (should (equal "List directory" (plist-get (car tools) :label))))
+      ;; The apps fold a run of calls under one summary line the way the
+      ;; Emacs chat does, and take the allow list of the tools that fold from
+      ;; this answer, so it is an array of specs on the wire, each saying
+      ;; whether its calls fold: `true' or null, never missing.
+      (harness-define-tool "peek" :label "Peek" :description "peek" :kind 'read :coalescable t
+                           :handler #'ignore)
+      (let* ((specs (harness-json-parse
+                     (harness-json-encode
+                      (harness-acp-test-request conn "_harness/tools/list" nil))))
+             (spec (lambda (name) (cl-find name specs :key (lambda (s) (plist-get s :name))
+                                           :test #'equal))))
+        (should (equal '("list_dir" "peek") (sort (mapcar (lambda (s) (plist-get s :name)) specs)
+                                                  #'string<)))
+        (should (eq t (plist-get (funcall spec "peek") :coalescable)))
+        (should (plist-member (funcall spec "list_dir") :coalescable))
+        (should-not (plist-get (funcall spec "list_dir") :coalescable)))
       (let ((api (harness-acp-test-request conn "_harness/harness/api" nil)))
         (should (member "session/get" (mapcar (lambda (m) (plist-get m :name)) (plist-get api :methods))))
         (should (cl-every #'stringp (plist-get api :filters))))

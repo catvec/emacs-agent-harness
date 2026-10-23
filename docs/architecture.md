@@ -10489,6 +10489,18 @@ the user answers it.  Such a call leaving its run, or coming back to it
 once answered, has the transcript grouped anew, as a load groups it:
 other calls of its step may have come after it meanwhile.  A group
 with a call of a group the user had opened is open too, and no other.
+The Flutter app (`harness_client/`) folds a transcript by the same
+rules and from the same list: it asks `tools/list` for the tools once
+per connection (again after `harness/reloaded` or a reconnect), and
+folds the calls of those that say `:coalescable`; its
+`lib/src/models/tool_runs.dart` is a port of `harness-chat--regroup`,
+under the same summary words and over a transcript that is grouped
+from the whole list at every build.  It keeps no list of tools of its
+own, so a tool put on the allow list folds in the chat and in the app
+at once, and a harness that serves no `tools/list` folds nothing
+there.  The app's tests run against the registry as it is served
+(`harness_client/test/support/harness_tools.json`), which
+`test/harness-client-tools-test.el` holds to the registry.
 A page of history can start with the result of a
 call on the page before it: the result shows alone, as the result of
 an earlier tool call, until that page loads, then joins its call
