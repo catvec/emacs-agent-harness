@@ -327,8 +327,9 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 
 | Chain | Run by | Joined by (priorities) |
 |---|---|---|
-| `agent/before-turn` | [agent](agent.md), [seed](seed.md) | [cache-compact](cache-compact.md) (11), [cache-warm](cache-warm.md) (1), [compaction](compaction.md) (12, 20), [cowboy](cowboy.md) (15), [fallback](fallback.md) (10), [handoff](handoff.md) (10), [merge](merge.md) (30), [seed](seed.md) (5), [tasks](tasks.md) (2), [usage](usage.md) (30) |
+| `agent/before-turn` | [agent](agent.md), [seed](seed.md) | [cache-compact](cache-compact.md) (11), [cache-warm](cache-warm.md) (1), [compaction](compaction.md) (11, 12, 20), [cowboy](cowboy.md) (15), [fallback](fallback.md) (10), [handoff](handoff.md) (10), [merge](merge.md) (30), [seed](seed.md) (5), [tasks](tasks.md) (2), [usage](usage.md) (30) |
 | `agent/builtin-tools` | [tools](tools.md) | [provider-claude](provider-claude.md) (50), [tools-web](tools-web.md) (50) |
+| `agent/hold` | [agent](agent.md) | [compaction](compaction.md) (50) |
 | `agent/message` | [agent](agent.md) | [cache](cache.md) (90), [tasks](tasks.md) (50) |
 | `agent/outstanding` | [agent](agent.md) | [supervisor](supervisor.md) (50), [tools-agent](tools-agent.md) (50), [tools-events](tools-events.md) (50), [tools-sessions](tools-sessions.md) (50) |
 | `agent/step` | [agent](agent.md) | [compaction](compaction.md) (12), [handoff](handoff.md) (10), [merge](merge.md) (30), [usage](usage.md) (30) |

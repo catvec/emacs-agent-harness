@@ -753,7 +753,10 @@ with a picture or another attachment can be deleted but not put back in
 the box). Once the model has the message it reads like any other, with
 nothing beside your name. Nothing is said once the turn is over either,
 unless the model never got the message because you cancelled the turn:
-*not delivered*, and the next turn reads it.
+*not delivered*, and the next turn reads it. A message sent while the
+conversation is being compacted is not queued at all: it waits for the
+compaction and goes to the model right after it, as your next message
+([below](#compacting-a-conversation)).
 
 Each button of a queued message shows its key, `s` (send now), `e`
 (edit) and `d` (delete), which acts while point is on the message; from
@@ -1657,6 +1660,21 @@ and asks to `queue` the compaction (the default) or to `interrupt` the
 turn first, which is what an agent does when it sees the context
 filling up mid-task.
 
+A compaction can take a while, and you can keep writing meanwhile. A
+message that comes while a conversation is being compacted -- by hand,
+before a turn, or in the middle of one -- is not queued and is not
+asked about: it waits for the compaction, the activity line saying so
+(*Compacting the conversation… · 1 message waits: “and now the lexer”*,
+or a count when several wait), and goes to the model right after it, as
+your next message, in the order you sent them. The model answers it
+from the compacted conversation. Sent into the conversation at once it
+would lie before the summary, where the model never reads it, and a
+turn that ran beside the compaction would be buried by it, the
+conversation restarting after the whole exchange. A message to a
+session whose prompt cache lapsed, compacted by hand from the panel
+below, does not ask what goes first either: the compaction under way
+is the answer.
+
 A provider's prompt cache lasts only a while after its last use: five
 minutes or an hour for Claude, hours for DeepSeek (see
 `harness-cache-ttl`). Once it expires, the next message re-sends the
@@ -1722,7 +1740,10 @@ before and says so in a note; Ignore sends it as before and adds
 nothing to the conversation at all — no note, no compaction. Not now
 keeps the message, unsent, until the next one goes with it. Whatever
 you pick, the model can look back with `session_history`. Another
-session's agent cannot answer the question for you.
+session's agent cannot answer the question for you. A message that
+comes while a compaction of the session already runs -- one you started
+from the cache panel, or with `/compact` -- is not asked about: the
+compaction is the answer, and the message goes right after it.
 
 A capital letter, or "always" with a choice, makes that choice the
 default and stops the asking (`harness-cowboy-default`,

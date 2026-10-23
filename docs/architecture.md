@@ -3962,7 +3962,11 @@ decisions.
   steering — the message is queued and injected at the next step boundary
   (appended to the next tool result, a hosted loop handed its images
   with that result, or sent as the next user turn if the model stops
-  first), and only once.  OPTS `:queue` true only
+  first), and only once.  A turn held at a boundary by work that
+  replaces the conversation under it -- the filter `agent/hold` below,
+  a compaction -- is not steered: the message waits with the turn and
+  is recorded as an ordinary user message when it goes on (see
+  `agent/hold`).  OPTS `:queue` true only
   queues, even while a turn runs.  OPTS `:from`, when the user is not
   the sender, is the sender plist (see "Node") kept on the message's
   node (and on a queued item).  An empty message is refused, and so is
@@ -3975,10 +3979,35 @@ decisions.
   question) lets it go: the turn then ends `cancelled` as soon as its
   `agent/before-turn` chain settles, with no "Turn not started" hint,
   rather than after the grace period of a provider's cancel.
-- `agent/note-activity SESSION-ID ACTIVITY` — announces ACTIVITY (an
-  `agent/activity` value, `(:phase compacting)` say) for a turn still
+- `agent/note-activity SESSION-ID ACTIVITY &optional RUNNING` —
+  announces ACTIVITY (an `agent/activity` value, `(:phase compacting)`
+  say, with a `:detail` when there is more to say) for a turn still
   held by its gate: the cowboy module's compaction before the message.
-  The turn sets its own when it starts and clears it when it ends.
+  With RUNNING true a session that reads idle is shown as running too,
+  as a turn that waits in a gate is.  The turn sets its own activity
+  when it starts and clears it when it ends.
+- Sync filter `agent/hold` (value nil; arg SID): what holds the turn of
+  SID before its next request, `(:text WORDS :phase PHASE)`, the first
+  handler to answer winning; nil when nothing does.  The compaction
+  module answers `(:text "the compaction" :phase compacting)` while a
+  compaction of the session runs.  While a turn is held -- its
+  `agent/before-turn` or `agent/step` filters have not let it go, and
+  something answers -- a message sent to it neither steers it nor is
+  queued: the conversation it would join is about to be replaced, and
+  recorded now it would lie before the compaction node, where the model
+  never reads it.  It waits with the turn instead (`harness-agent--held`;
+  the message that opened the turn is in the same position, not recorded
+  until the gate lets it go), is shown in the turn's activity as
+  `:detail` ("1 message waits: “and now the lexer”", or "3 messages
+  wait", counting the one that opened the turn too, while its gate holds
+  it: `harness-agent-waiting-text`; what they wait for is the phase) with
+  the session running, and emits `agent/steered`.  When the gate lets
+  the turn go on it is recorded, after the message that opened the turn,
+  as an ordinary user message (no `:steering`, `:from` kept), in the
+  order sent, before the turn's next request: the model reads it with
+  the summary and answers.  A turn cancelled meanwhile records them all
+  the same.  A turn in the middle of a step is not held, whatever the
+  filter says, and is steered.
 - `agent/send-queue SESSION-ID &optional QIDS` — sends the queued items
   as one turn: every item, or with QIDS (a list of item ids) only
   those, which sends one message now and leaves the others queued for
@@ -4098,7 +4127,10 @@ decisions.
   node that is not steering, whether the model's place for the message
   moves (`session/messages`) or not, which is how a UI tells a message
   the model has from one that still waits for its next step.  Until
-  then the user can take a message back (`agent/withdraw`).
+  then the user can take a message back (`agent/withdraw`).  A message
+  sent to a turn that a compaction holds at a boundary steers nothing:
+  it waits with the turn and is recorded after the compaction
+  (`agent/hold`).
   A turn has no step limit: long unattended work is the point, and the
   loop ends when the model stops, the provider errors or hits its
   output limit, the user cancels, or an `agent/step` filter (a merge
@@ -4778,6 +4810,36 @@ and tools.
   to an idle session compacts at once, like any other.  A compaction
   already waiting is replaced; the pending entry lives in the harness
   process and is dropped when the session is.
+
+  A message that comes to a session while a compaction of it runs goes
+  on with the compacted conversation: nothing asks about it, nothing
+  queues it, and the model answers it right after.  Three things
+  make it so.  An `agent/before-turn` gate
+  (`harness-compaction--wait-gate`, priority 11, ahead of the
+  cold-cache question at 15 and automatic compaction at 20) holds a
+  turn that starts while one runs -- the session compacted by hand is
+  idle, so no turn waits for that one -- until it settles, whether it
+  did well or not, showing the session running with the activity
+  `(:phase compacting :detail …)` that names the message.  Without it
+  the turn went at once, beside the compaction: the compaction node
+  comes after the whole exchange, and the conversation restarts there,
+  so the model forgot the exchange; or, with the prompt cache cold, the
+  question of what goes first was asked while the answer, a
+  compaction, was already under way.  After a compaction the session
+  has no cache, so the question is not asked; after one that failed the
+  cache is as cold as it was, and it is.  Second, the compaction
+  answers the sync filter `agent/hold` (see agent) with
+  `(:text "the compaction" :phase compacting)` while it runs, so a
+  message sent to a turn held at a boundary -- the automatic or
+  cowboy compaction before its first request, a queued one between two
+  steps -- waits with the turn and is recorded after the compaction as
+  the user's next message, instead of steering it: recorded at once it
+  would lie before the compaction node, where nothing reads it.
+  Third, a message that steered a turn and still waited for its step when
+  a compaction began is carried over after it with the other unanswered
+  messages (`:carried-from`), and says it was delivered
+  (`:delivered-after` the compaction node), so a chat does not show
+  it queued for good.
 - `compaction/estimate SESSION-ID` → `(:context :model :model-label
   :messages :cached :carry-on :carry-on-cached :compacting :kind
   :kinds)`: the context the next message sends, how many messages it
@@ -4854,7 +4916,12 @@ as it is, all of the conversation uncached, without a decision.
   you chose", "the default for a session that does not wait for you",
   …), except for `ignore`, which leaves no hint.  While the compaction
   runs the session is `running` with the activity `(:phase compacting)`
-  (`agent/note-activity`).
+  (`agent/note-activity`), and a message sent meanwhile waits with the
+  turn (`agent/hold`) instead of steering it.  A compaction that is
+  under way when the message comes -- one the user started from the cache
+  panel or with `/compact` -- answers the question already: the
+  compaction module's gate (priority 11) holds the turn until it is
+  done, the cache is reset, and this gate finds the session warm.
 - Asked unless `harness-cowboy-ask` is nil or the session is
   non-interactive (the policy's `harness-non-interactive`, else the
   session's own `:non-interactive`, else the config, as perms decides):

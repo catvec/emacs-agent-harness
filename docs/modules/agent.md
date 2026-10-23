@@ -26,6 +26,14 @@ together as a turn of their own.  A message is delivered when it
 starts a turn or steers one, a queued one when its queue goes out;
 then, and only then, the `agent/message` filters see it and may
 change it (task mode sends a task waiting for review back this way).
+A turn can be held before its next request by work that replaces the
+conversation under it -- a compaction (harness-compaction.el), which
+the sync filter `agent/hold` says -- and a message sent to it then
+neither steers nor queues: the conversation it would join is about to
+be replaced, so it waits with the turn (`harness-agent--hold-message`)
+and is recorded, an ordinary user message, right after the work is
+done and before the turn's next request (`harness-agent--flush-held`),
+where the model reads it and answers.
 A model that stops on its own, with nothing steering, is not let go
 at once: the `agent/stop` filters may answer it with a message of the
 harness's and a step more, a few times at most (`harness-agent--stopped`).
@@ -68,7 +76,7 @@ The loop is entirely event driven: nothing here waits.
 
 - `agent/activity` (session-id) — Return what SESSION-ID's running turn is doing now, or nil.
 - `agent/cancel` (session-id) — Cancel the running turn of SESSION-ID, if any.
-- `agent/note-activity` (session-id activity) — Announce ACTIVITY as what SESSION-ID's turn does, before the turn starts.
+- `agent/note-activity` (session-id activity &optional running) — Announce ACTIVITY as what SESSION-ID's turn does, before the turn starts.
 - `agent/outstanding` (session-id) — Return what runs for SESSION-ID outside its own turn, as a short text, or nil.
 - `agent/prompt` (session-id blocks &optional opts) — Send BLOCKS (content blocks, or a string) to SESSION-ID.
 - `agent/running` (&optional session-id) — Return running session ids, or non-nil when SESSION-ID is running.
@@ -93,6 +101,7 @@ The loop is entirely event driven: nothing here waits.
 ### Filter chains it runs
 
 - `agent/before-turn`
+- `agent/hold`
 - `agent/message`
 - `agent/outstanding`
 - `agent/step`

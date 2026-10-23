@@ -89,6 +89,16 @@ and the session's settling at the next start puts it back in its
 queue (`harness-session--settle`).  A turn cancelled while the
 question waits dismisses it.
 
+A compaction already under way answers the question before it is
+asked: a message that comes while one of its session runs -- the user
+compacted it from the cache panel, say -- waits for it
+(`harness-compaction--wait-gate`, ahead of this gate) and meets a
+session the compaction left with no cache, which is not cold.  And a
+message sent to the turn this gate holds while its compaction runs
+waits with the turn (`agent/hold`) and goes after the compaction, the
+turn's own message first, rather than steering it: recorded at once it
+would lie before the compaction node, where the model never reads it.
+
 The gate only sees a session whose own `:cache` lapsed.  A session
 made from another -- the supervisor's worker, a fork of the
 supervisor's whole conversation onto a model that has never read it

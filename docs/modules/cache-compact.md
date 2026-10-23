@@ -59,7 +59,10 @@ choice of what goes first can be changed from the note, too.
 
 A message that comes to the session while the compaction runs waits
 for it: it is sent the compacted conversation, as one that met the
-cold-cache gate would be.
+cold-cache gate would be.  Any compaction of a session holds a turn
+that starts meanwhile (`harness-compaction--wait-gate`); this module's
+gate covers what that one cannot see: the moment between the decision
+and the compaction's start, and the note written after it.
 
 ## Provides
 

@@ -1101,5 +1101,241 @@ compaction once the turn is over, however it ended."
       (should-error (harness-await (harness-call 'compaction/compact id '(:kind "transcript" :idle t)))
                     :type 'harness-error))))
 
+;;;; A message that comes while a compaction runs
+
+;; Whichever turn the compaction holds -- before its first request, or
+;; between two steps (a compaction queued for the boundary, or the one
+;; made in the middle of a turn) -- a message sent meanwhile does not
+;; steer it: it waits with the turn and is recorded after the compaction
+;; (`agent/hold').  A test of one that expects the message as a steering
+;; node before the compaction node, copied after it, expects what that
+;; replaced.
+
+(defvar harness-compaction-test--requests nil
+  "The requests of the turns the demo provider answered, newest first.
+The summaries a compaction asks for are not among them.")
+
+(defun harness-compaction-test--summary-p (request)
+  "Non-nil when REQUEST asks for a summary: a compaction's."
+  (string-match-p "handoff summary" (or (plist-get request :system) "")))
+
+(defun harness-compaction-test--answer (request)
+  "Answer REQUEST: the summary when it asks for one, else a short reply.
+The turns' requests are kept in `harness-compaction-test--requests'."
+  (if (harness-compaction-test--summary-p request)
+      harness-compaction-test-script
+    (push request harness-compaction-test--requests)
+    '((:type text :delta "Done.") (:type done :stop-reason end-turn))))
+
+(defun harness-compaction-test-user-texts (id)
+  "Return the texts of the user messages of session ID, oldest first."
+  (mapcar (lambda (n) (plist-get n :content))
+          (cl-remove-if-not (lambda (n) (eq (plist-get n :kind) 'user)) (harness-call 'session/nodes id))))
+
+(defun harness-compaction-test-steering (id)
+  "Return the steering messages recorded in session ID."
+  (cl-remove-if-not (lambda (n) (plist-get (plist-get n :meta) :steering)) (harness-call 'session/nodes id)))
+
+(defun harness-compaction-test-wait-waiting (id)
+  "Wait until the turn of session ID waits for a compaction, shown as running."
+  (harness-test-wait (lambda () (and (harness-compaction-busy-p id)
+                                     (eq 'running (plist-get (harness-call 'session/get id) :status))))
+                     10 "the turn to wait for the compaction"))
+
+(ert-deftest harness-compaction-a-message-that-comes-while-it-runs-goes-after-it ()
+  "A message sent to an idle session while a compaction of it runs waits for it.
+No turn runs beside the compaction, which would bury its exchange: the
+conversation restarts at the compaction node, which comes after the
+whole exchange.  The turn waits, the session reads as compacting and
+says what waits, and a second message waits with it.  Once the
+compaction is done they are the user's messages after it, in the order
+sent, and the model answers both in one request."
+  (harness-compaction-test-with
+    (setq harness-compaction-test--requests nil)
+    (let* ((harness-provider-demo--delay 0.15)
+           (harness-provider-demo-script-override #'harness-compaction-test--answer)
+           (id (harness-compaction-test-session))
+           (compaction (harness-call 'compaction/compact id '(:kind "summary" :idle t)))
+           (turn (harness-call 'agent/prompt id "and now the lexer")))
+      (harness-compaction-test-wait-waiting id)
+      (should-not harness-compaction-test--requests)
+      (should (eq 'compacting (plist-get (harness-call 'agent/activity id) :phase)))
+      (should (equal "1 message waits: “and now the lexer”"
+                     (plist-get (harness-call 'agent/activity id) :detail)))
+      ;; Not in the transcript, which the compaction is about to replace.
+      (should-not (member "and now the lexer" (harness-compaction-test-user-texts id)))
+      (should (eq turn (harness-call 'agent/prompt id "and the parser")))
+      (should (equal "2 messages wait"
+                     (plist-get (harness-call 'agent/activity id) :detail)))
+      (should-not (plist-get (harness-call 'session/get id) :queue))
+      (should (eq 'end-turn (plist-get (harness-test-await turn 20) :stop-reason)))
+      (harness-test-await compaction 5)
+      (should (equal '(user assistant hint compaction hint user user assistant)
+                     (harness-compaction-test-kinds id)))
+      (should (equal '("please refactor the parser" "and now the lexer" "and the parser")
+                     (harness-compaction-test-user-texts id)))
+      (should-not (harness-compaction-test-steering id))
+      ;; The model read the summary and both messages, once.
+      (should (= 1 (length harness-compaction-test--requests)))
+      (let ((text (harness-compaction-test-request-text (car harness-compaction-test--requests))))
+        (should (string-match-p "\\`Summary of the conversation so far:\n\nSUMMARY TEXT" text))
+        (should (string-match-p "and now the lexer\nand the parser\\'" text)))
+      (should (eq 'idle (plist-get (harness-call 'session/get id) :status)))
+      (should-not (harness-call 'agent/activity id)))))
+
+(ert-deftest harness-compaction-a-turn-that-met-no-compaction-is-left-alone ()
+  "With no compaction under way a turn starts at once, and a message sent
+to it steers it, as it always did."
+  (harness-compaction-test-with
+    (setq harness-compaction-test--requests nil)
+    (let* ((harness-provider-demo-script-override #'harness-compaction-test--answer)
+           (id (harness-compaction-test-session))
+           (turn (harness-call 'agent/prompt id "go")))
+      (harness-test-wait (lambda () (harness-call 'agent/running id)))
+      (should-not (harness-compaction--on-hold nil id))
+      (harness-call 'agent/prompt id "and this")
+      (should (= 1 (length (harness-compaction-test-steering id))))
+      (harness-test-await turn 10)
+      (should-not (memq 'compaction (harness-compaction-test-kinds id))))))
+
+(ert-deftest harness-compaction-says-it-holds-a-turn-only-while-it-runs ()
+  "The `agent/hold' answer is the compaction's while one of the session
+runs, and the first handler to answer wins."
+  (harness-compaction-test-with
+    (let ((id (harness-compaction-test-session)))
+      (should-not (harness-compaction--on-hold nil id))
+      (puthash id (harness-make-promise) harness-compaction--running)
+      (should (equal '(:text "the compaction" :phase compacting) (harness-compaction--on-hold nil id)))
+      (should (equal '(:text "another" :phase waiting)
+                     (harness-compaction--on-hold '(:text "another" :phase waiting) id)))
+      (should-not (harness-compaction--on-hold nil "another-session"))
+      (remhash id harness-compaction--running))))
+
+(ert-deftest harness-compaction-a-failed-compaction-lets-the-waiting-messages-go ()
+  "A compaction that fails leaves the conversation as it was, and the
+messages that waited for it go on with it: nothing is lost to the failure."
+  (harness-compaction-test-with
+    (setq harness-compaction-test--requests nil)
+    (let* ((harness-provider-demo--delay 0.1)
+           (harness-provider-demo-script-override
+            (lambda (request)
+              (if (harness-compaction-test--summary-p request)
+                  '((:type done :stop-reason error :error "boom"))
+                (harness-compaction-test--answer request))))
+           (id (harness-compaction-test-session))
+           (compaction (harness-call 'compaction/compact id '(:kind "summary" :idle t)))
+           (turn (harness-call 'agent/prompt id "carry on")))
+      (harness-compaction-test-wait-waiting id)
+      (harness-call 'agent/prompt id "and this too")
+      (should-error (harness-test-await compaction 10))
+      (should (eq 'end-turn (plist-get (harness-test-await turn 20) :stop-reason)))
+      (should-not (memq 'compaction (harness-compaction-test-kinds id)))
+      (should (equal '("please refactor the parser" "carry on" "and this too")
+                     (harness-compaction-test-user-texts id)))
+      (let ((text (harness-compaction-test-request-text (car harness-compaction-test--requests))))
+        (should (string-match-p "please refactor the parser" text))
+        (should (string-match-p "carry on\nand this too\\'" text))))))
+
+(ert-deftest harness-compaction-the-compaction-before-a-turn-holds-its-messages ()
+  "A message sent while the compaction a turn waits for runs -- the
+automatic one, before the turn -- waits with the turn rather than steer
+it: sent so, it would lie before the compaction, which the model never
+reads.  The session reads as compacting meanwhile, and the model reads
+both messages after the summary."
+  (harness-compaction-test-with
+    (setq harness-compaction-test--requests nil)
+    (let* ((harness-provider-demo--delay 0.15)
+           (harness-provider-demo-script-override #'harness-compaction-test--answer)
+           (id (harness-compaction-test-session))
+           (_ (harness-call 'session/usage-add id '(:context 7500)))
+           (turn (harness-call 'agent/prompt id "next question")))
+      (harness-test-wait (lambda () (harness-compaction-busy-p id)) 10 "the automatic compaction")
+      (should (eq turn (harness-call 'agent/prompt id "one more thing")))
+      ;; Both wait: this compaction showed nothing, so the turn does now.
+      (should (eq 'running (plist-get (harness-call 'session/get id) :status)))
+      (should (equal '(:phase compacting :detail "2 messages wait")
+                     (harness-plist-remove (harness-call 'agent/activity id) :since)))
+      (should-not (harness-compaction-test-steering id))
+      (should (eq 'end-turn (plist-get (harness-test-await turn 20) :stop-reason)))
+      (should (equal '(user assistant hint compaction hint user user assistant)
+                     (harness-compaction-test-kinds id)))
+      (should (equal '("please refactor the parser" "next question" "one more thing")
+                     (harness-compaction-test-user-texts id)))
+      (should-not (harness-compaction-test-steering id))
+      (should (= 1 (length harness-compaction-test--requests)))
+      (let ((text (harness-compaction-test-request-text (car harness-compaction-test--requests))))
+        (should (string-match-p "\\`Summary of the conversation so far:" text))
+        (should (string-match-p "next question\none more thing\\'" text))))))
+
+(defun harness-compaction-test-define-plain ()
+  "Define `plain', a provider that calls a tool once, then answers.
+A turn's first request is answered with a call of list_dir, its next
+ones with text; a summary comes slowly, so that a message can be sent
+while it is written.  The turns' requests are kept in
+`harness-compaction-test--requests'."
+  (harness-define-tool "list_dir" :label "List" :description "list" :kind 'read
+                       :handler (lambda (input _ctx) (format "listing of %s" (plist-get input :path))))
+  (harness-define-provider
+   'plain :label "Plain"
+   :models (lambda () (harness-resolved (list (list :name "m" :label "Plain M" :context-window 8000))))
+   :complete (lambda (request)
+               (let* ((on-event (plist-get request :on-event))
+                      (summary (harness-compaction-test--summary-p request))
+                      (_ (unless summary (push request harness-compaction-test--requests)))
+                      (events (cond (summary '((:type text :delta "SUMMARY TEXT") (:type done :stop-reason end-turn)))
+                                    ((= 1 (length harness-compaction-test--requests))
+                                     '((:type tool-call :id "t1" :name "list_dir" :input (:path "/a"))
+                                       (:type done :stop-reason tool-use)))
+                                    (t '((:type text :delta "Done.") (:type done :stop-reason end-turn))))))
+                 (run-at-time (if summary 0.4 0.01) nil
+                              (lambda () (dolist (ev events) (funcall on-event ev))))
+                 (list :cancel #'ignore)))))
+
+(ert-deftest harness-compaction-a-boundary-that-compacts-holds-the-messages-for-the-next-step ()
+  "A compaction queued for a turn runs at its next step boundary.  A
+message sent while it runs waits there, and is recorded right after it:
+the step that follows reads the summary and the message, and answers."
+  (harness-compaction-test-with
+    (harness-compaction-test-define-plain)
+    (setq harness-compaction-test--requests nil)
+    (let* ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)
+                                        :model "plain:m" :context-window 8000)
+                          :id))
+           (turn (harness-call 'agent/prompt id "go")))
+      (harness-test-wait (lambda () (harness-call 'agent/running id)))
+      (should (plist-get (harness-await (harness-call 'compaction/compact id '(:kind "summary" :queue t))) :queued))
+      (harness-test-wait (lambda () (harness-compaction-busy-p id)) 10 "the compaction at the boundary")
+      (should (eq turn (harness-call 'agent/prompt id "and also this")))
+      (should (eq 'running (plist-get (harness-call 'session/get id) :status)))
+      ;; Whatever the step before left the line saying, the turn compacts.
+      (should (equal '(:phase compacting :detail "1 message waits: “and also this”")
+                     (harness-plist-remove (harness-call 'agent/activity id) :since)))
+      (should-not (member "and also this" (harness-compaction-test-user-texts id)))
+      (should (eq 'end-turn (plist-get (harness-test-await turn 20) :stop-reason)))
+      (should (equal '(user hint tool-call tool-result hint compaction hint user assistant)
+                     (harness-compaction-test-kinds id)))
+      (should-not (harness-compaction-test-steering id))
+      ;; The first request is the turn's, the second the step after the compaction.
+      (should (= 2 (length harness-compaction-test--requests)))
+      (let ((text (harness-compaction-test-request-text (car harness-compaction-test--requests))))
+        (should (string-match-p "\\`Summary of the conversation so far:" text))
+        (should (string-match-p "and also this\\'" text))
+        (should-not (string-match-p "listing of" text))))))
+
+(ert-deftest harness-compaction-carries-a-steering-message-over-delivered ()
+  "A message that steered a turn and still waited for its step when a
+compaction began is carried over after it, and says it was delivered: the
+model reads it with the conversation that starts there, and a chat must
+not show it queued for good."
+  (harness-compaction-test-with
+    (let ((id (harness-compaction-test-session)))
+      (harness-call 'session/append id '(:kind user :content "carry me" :meta (:steering t)))
+      (let* ((node (harness-await (harness-call 'compaction/compact id '(:kind "transcript"))))
+             (copy (car (last (harness-call 'session/nodes id)))))
+        (should (equal "carry me" (plist-get copy :content)))
+        (should (plist-get (plist-get copy :meta) :steering))
+        (should (equal (plist-get node :id) (plist-get (plist-get copy :meta) :delivered-after)))
+        (should (plist-get (plist-get copy :meta) :carried-from))))))
+
 (provide 'harness-compaction-test)
 ;;; harness-compaction-test.el ends here

@@ -3355,6 +3355,67 @@ the same notes."
                                           (funcall agent "a1")))
         (should (= 0 (funcall count unread)))))))
 
+(ert-deftest harness-ui-chat-a-message-sent-while-the-conversation-compacts-is-not-queued ()
+  "A message sent from the box while the conversation is compacted is not queued.
+The chat shows no \"queued\" word, no buttons and no queue: its activity
+line says the session compacts and which message waits.
+Once the compaction is done the message stands after it, as any message
+does, and the model answers it."
+  (harness-ui-chat-test-with
+    (harness-test-load-module 'compaction)
+    (let* ((harness-provider-demo--delay 0.15)
+           (harness-provider-demo-script-override
+            (lambda (request)
+              (if (string-match-p "handoff summary" (or (plist-get request :system) ""))
+                  '((:type text :delta "SUMMARY TEXT") (:type done :stop-reason end-turn))
+                '((:type text :delta "Done.") (:type done :stop-reason end-turn)))))
+           (sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid))
+           (waits "Compacting the conversation.*1 message waits: “and now the lexer”"))
+      (harness-call 'session/append sid '(:kind user :content "please refactor the parser"))
+      (harness-call 'session/append sid '(:kind assistant :content "Done: parser.el rewritten"))
+      (let ((compaction (harness-call 'compaction/compact sid '(:kind "summary" :idle t))))
+        (harness-ui-chat-test-type buf "and now the lexer")
+        (with-current-buffer buf (harness-chat-send))
+        ;; The line says what the session does, and what waits for it.
+        (harness-test-wait (lambda () (string-match-p waits (or (harness-ui-chat-test-activity-line buf) "")))
+                           10 "the activity line to say what waits")
+        (should-not (harness-ui-chat-test-find buf "queued"))
+        (should-not (harness-ui-chat-test-find buf "[delete]"))
+        (should-not (with-current-buffer buf harness-chat--queue))
+        (should-not (member "and now the lexer" (harness-ui-chat-test-user-texts sid)))
+        ;; The box is empty: the message was sent.
+        (should (equal "" (with-current-buffer buf (harness-compose-text))))
+        (harness-test-await compaction 10)
+        (harness-test-wait (lambda () (= 1 (harness-ui-chat-test-turns-ended sid))) 10 "the turn the message opened"))
+      (harness-test-wait (lambda () (with-current-buffer buf (and (null harness-chat--turn-start)
+                                                                  (null (harness-ui-chat-test-activity-line buf)))))
+                         5 "the turn over")
+      ;; The message stands after the compaction, as any message does, and was answered.
+      (let ((compaction (harness-ui-chat-test-find buf "context compacted"))
+            (message (harness-ui-chat-test-find buf "and now the lexer")))
+        (should compaction)
+        (should message)
+        (should (< compaction message)))
+      (should-not (harness-ui-chat-test-find buf "queued"))
+      (should-not (harness-ui-chat-test-find buf "not delivered"))
+      (should (harness-ui-chat-test-find buf "Done."))
+      (should (equal '("please refactor the parser" "and now the lexer") (harness-ui-chat-test-user-texts sid))))))
+
+(ert-deftest harness-ui-chat-activity-line-says-what-waits-for-a-compaction ()
+  "The activity line of a compacting session says how many messages wait."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid)))
+      (harness-ui-chat-test-set-status buf "running")
+      (with-current-buffer buf
+        (harness-chat--apply-update
+         (list :sessionUpdate "_harness/activity"
+               :activity (list :phase "compacting" :since (float-time)
+                               :detail "2 messages wait"))))
+      (should (string-match-p "Compacting the conversation.* \N{U+00B7} 2 messages wait"
+                              (harness-ui-chat-test-activity-line buf))))))
+
 (defun harness-ui-chat-test-hold-turn (buf gates)
   "Start a turn in BUF whose first tool call waits for the first of GATES.
 Return when the turn is in its tool.  The tool \"hold\" is defined here;

@@ -258,6 +258,62 @@ conversation."
       (harness-cowboy-test--answer sid "carry on")
       (harness-test-wait (lambda () (not (harness-call 'agent/running sid))) 10 "the turn"))))
 
+(ert-deftest harness-cowboy-a-compaction-under-way-answers-the-question ()
+  "A message sent while the conversation is compacted asks nothing.
+A session whose cache lapsed, compacted by hand -- from the cache panel,
+say -- has the answer to the question under way: the compaction leaves
+nothing cold.  The message waits for it, the session shown as compacting,
+and goes with the compacted conversation, without the old one."
+  (harness-cowboy-test-with
+    (let* ((harness-provider-demo--delay 0.2)
+           (sid (harness-cowboy-test-session))
+           (compaction (harness-call 'compaction/compact sid '(:kind "brief" :idle t)))
+           (turn (harness-call 'agent/prompt sid "and now the lexer")))
+      (harness-test-wait (lambda () (eq 'running (plist-get (harness-call 'session/get sid) :status)))
+                         5 "the turn to wait for the compaction")
+      (should-not (harness-call 'question/pending sid))
+      (should-not (harness-call 'cowboy/asking sid))
+      (should (eq 'compacting (plist-get (harness-call 'agent/activity sid) :phase)))
+      (should (equal "1 message waits: “and now the lexer”"
+                     (plist-get (harness-call 'agent/activity sid) :detail)))
+      (should (eq 'end-turn (plist-get (harness-test-await turn 15) :stop-reason)))
+      (harness-test-await compaction 5)
+      (should-not (harness-call 'question/pending sid))
+      (should (= 1 (length (harness-cowboy-test--compactions sid))))
+      (let* ((nodes (harness-call 'session/nodes sid))
+             (compacted (cl-position 'compaction nodes :key (lambda (n) (plist-get n :kind))))
+             (message (cl-position "and now the lexer" nodes :key (lambda (n) (plist-get n :content)) :test #'equal)))
+        (should (< compacted message)))
+      ;; One message to the model: the summary and the message after it,
+      ;; not the conversation the summary stands for.
+      (let ((request (car harness-cowboy-test--requests)))
+        (should (= 1 (length (plist-get request :messages))))
+        (should (string-match-p "\\`Summary of the conversation so far:\n\nSUMMARY TEXT"
+                                (harness-cowboy-test--request-text request)))
+        (should (string-match-p "and now the lexer\\'" (harness-cowboy-test--request-text request)))))))
+
+(ert-deftest harness-cowboy-a-compaction-that-failed-leaves-the-question ()
+  "A compaction that fails answers nothing: the cache is still cold, and
+the message that waited for it is asked about, as it would have been."
+  (harness-cowboy-test-with
+    (let* ((harness-provider-demo--delay 0.1)
+           (harness-provider-demo-script-override
+            (lambda (request)
+              (if (string-match-p "handoff summary" (or (plist-get request :system) ""))
+                  '((:type done :stop-reason error :error "boom"))
+                (harness-cowboy-test--script request))))
+           (sid (harness-cowboy-test-session))
+           (compaction (harness-call 'compaction/compact sid '(:kind "brief" :idle t)))
+           (turn (harness-call 'agent/prompt sid "and now the lexer")))
+      (should-error (harness-test-await compaction 10))
+      (should (string-match-p "Your message waits"
+                              (plist-get (plist-get (harness-cowboy-test--question sid) :payload) :question)))
+      (harness-cowboy-test--answer sid "carry on")
+      (should (eq 'end-turn (plist-get (harness-test-await turn 15) :stop-reason)))
+      (should-not (harness-cowboy-test--compactions sid))
+      (should (string-match-p "please refactor the parser"
+                              (harness-cowboy-test--request-text (car harness-cowboy-test--requests)))))))
+
 (ert-deftest harness-cowboy-brief-summary-and-carrying-on ()
   "A brief summary is the cheap model's; carrying on sends it all again."
   (harness-cowboy-test-with

@@ -16,6 +16,14 @@
 ;; starts a turn or steers one, a queued one when its queue goes out;
 ;; then, and only then, the `agent/message' filters see it and may
 ;; change it (task mode sends a task waiting for review back this way).
+;; A turn can be held before its next request by work that replaces the
+;; conversation under it -- a compaction (harness-compaction.el), which
+;; the sync filter `agent/hold' says -- and a message sent to it then
+;; neither steers nor queues: the conversation it would join is about to
+;; be replaced, so it waits with the turn (`harness-agent--hold-message')
+;; and is recorded, an ordinary user message, right after the work is
+;; done and before the turn's next request (`harness-agent--flush-held'),
+;; where the model reads it and answers.
 ;; A model that stops on its own, with nothing steering, is not let go
 ;; at once: the `agent/stop' filters may answer it with a message of the
 ;; harness's and a step more, a few times at most (`harness-agent--stopped').
@@ -251,6 +259,29 @@ Nothing but the request: no `:on-event'.  The caller must not change it."
 A provider `checkpoint' event without a call id belongs to that node.
 Kept beside the turn records, as the activity tables are.")
 
+(defvar harness-agent--held (make-hash-table :test 'eq :weakness 'key)
+  "Turn -> the messages sent to it while work held it, oldest first.
+Each is (:blocks BLOCKS :from FROM): a message that came while the sync
+filter `agent/hold' said something holds the turn.  It waits with the
+turn and is recorded once the gate lets it go on
+\(`harness-agent--flush-held').  Kept beside the turn records, as the
+activity tables are, so a reload keeps the turns working.")
+
+(defvar harness-agent--opening (make-hash-table :test 'eq :weakness 'key)
+  "Turn -> the blocks of the message that opened it, until its gate lets it go.
+That message is not in the transcript until then
+\(`harness-agent--start'), so it waits as the messages in
+`harness-agent--held' do, and the turn counts it with them when it says
+what waits.  Kept beside the turn records, as the activity tables are.")
+
+(defvar harness-agent--gated (make-hash-table :test 'eq :weakness 'key)
+  "Turn -> t while the filters of a boundary hold it.
+That is before its first request (`agent/before-turn') or between two
+steps (`agent/step').  Only then is a message sent to it held: the
+gate records the messages once it lets the turn go on, and a turn
+mid-step has no such moment to wait for.  Kept beside the turn records,
+as the activity tables are.")
+
 (defun harness-agent--compact (plist)
   "Return PLIST without the keys whose value is nil."
   (cl-loop for (k v) on plist by #'cddr when v append (list k v)))
@@ -409,13 +440,30 @@ running call (:call-id, :tool, :title, :detail, :note and :since), the
 Every change is announced as `agent/activity-changed'."
   (gethash session-id harness-agent--activities))
 
-(harness-defmethod agent/note-activity (session-id activity)
+(defun harness-agent--show-running (session-id)
+  "Show SESSION-ID, whose turn waits in a gate, as running.
+A session that reads idle turns running, as it does once the turn takes
+its first step, so a client draws what the turn does (`agent/activity')
+and offers nothing that needs a session at rest.  A session that reads
+anything else, or has no turn, is left as it is.  Never signals."
+  (condition-case err
+      (when (and (gethash session-id harness-agent--turns)
+                 (eq (plist-get (harness-call 'session/get session-id) :status) 'idle))
+        (harness-call 'session/set-status session-id 'running))
+    (error (harness-log 'warn "agent: showing %s as running: %s"
+                        session-id (harness-error-short-message err)))))
+
+(harness-defmethod agent/note-activity (session-id activity &optional running)
   "Announce ACTIVITY as what SESSION-ID's turn does, before the turn starts.
 For an `agent/before-turn' gate that works first, such as the cold
 cache's compaction (harness-cowboy.el): ACTIVITY is a plist as
-`agent/activity' returns, say (:phase compacting).  Nothing happens
-when SESSION-ID has no turn; the turn's own activity replaces it once
-it starts, and its end clears it."
+`agent/activity' returns, say (:phase compacting), and may carry a
+`:detail', one more thing the activity line says.  With RUNNING non-nil
+a session that reads idle is shown as running too, as a turn that waits
+in a gate is: a gate that holds a turn without doing so itself says it
+this way.  Nothing happens when SESSION-ID has no turn; the turn's own
+activity replaces it once it starts, and its end clears it."
+  (when running (harness-agent--show-running session-id))
   (harness-agent--update-activity session-id activity)
   nil)
 
@@ -933,11 +981,112 @@ handed with the tool result that delivers it
                                 (and images (list :images images))))))
     node))
 
+;;;; Messages held with a turn
+
+;; A conversation that is being compacted is about to be replaced by
+;; something much smaller, and a turn goes on from the replacement, not
+;; from what it replaces.  A message sent to such a turn could not steer
+;; it: recorded now, it would lie before the compaction, which the model
+;; never reads (`session/messages' starts the conversation at the
+;; compaction), and be lost.  Nor is it queued for later, with the
+;; buttons of a queued message: the user sent it, and the model answers
+;; it as soon as it can, which is once the compaction is done.  So it
+;; waits with the turn, announced in what the turn is doing, and is
+;; recorded when the gate lets the turn go on, after the compaction and
+;; the message that opened the turn, in the order it was sent.
+
+(defun harness-agent--holding (session-id)
+  "Return what holds the turn of SESSION-ID before its next request, or nil.
+That is the answer of the sync filter `agent/hold' (value nil, argument
+SESSION-ID), a plist (:text WORDS :phase PHASE).  A module whose work the
+turn waits for, and which replaces the conversation the turn goes on
+with, reports it there: the compaction does (harness-compaction.el).
+WORDS name that work, \"the compaction\", and PHASE is what a client says
+the turn does meanwhile (see `agent/activity').  A handler with nothing
+to report returns the value unchanged, and the first that reports wins."
+  (let ((hold (harness-run-filter 'agent/hold nil session-id)))
+    (and (consp hold) (stringp (plist-get hold :text)) hold)))
+
+(defun harness-agent-waiting-text (texts)
+  "Say, as the activity line does, that the messages TEXTS wait.
+TEXTS are what the messages say.  What they wait for is the activity's
+phase, which the line says first (\"Compacting the conversation…\"), so
+this says only that they wait and, for one message, which: its first
+line, cut short.  The line is cut at the window's edge, which is why
+the count comes first.  Nil when none waits."
+  (let* ((n (length texts))
+         (first (and texts (harness-first-line (string-trim (or (car texts) "")))))
+         (quoted (and first (not (string-empty-p first)) (harness-truncate-end first 40))))
+    (cond ((zerop n) nil)
+          ((= n 1) (if quoted (format "1 message waits: “%s”" quoted) "1 message waits"))
+          (t (format "%d messages wait" n)))))
+
+(defun harness-agent--hold-message (turn blocks from hold)
+  "Keep BLOCKS, a message from FROM sent to TURN, until its gate lets it go on.
+HOLD is what holds the turn (`harness-agent--holding').  The message is
+recorded by `harness-agent--flush-held'.  Meanwhile the turn shows what
+it waits for, naming the messages that wait with it -- the one that
+opened the turn too, while its gate holds it -- and its session reads
+running, as it does while a gate holds its first message."
+  (let* ((sid (harness-agent-turn-session-id turn))
+         (held (append (gethash turn harness-agent--held)
+                       (list (list :blocks blocks :from from))))
+         (opening (gethash turn harness-agent--opening)))
+    (puthash turn held harness-agent--held)
+    (harness-log 'info "agent: a message waits with the turn of %s for %s" sid (plist-get hold :text))
+    (harness-agent--try (format "showing the messages held for %s" sid)
+      (harness-agent--show-running sid)
+      ;; What holds the turn is what it does meanwhile, whatever its last
+      ;; step left the line saying.
+      (harness-agent--set-activity
+       sid (list :phase (or (plist-get hold :phase)
+                            (plist-get (gethash sid harness-agent--activities) :phase)
+                            'waiting)
+                 :detail (harness-agent-waiting-text
+                          (mapcar #'harness-agent--blocks-text
+                                  (append (and opening (list opening))
+                                          (mapcar (lambda (m) (plist-get m :blocks)) held)))))))
+    (harness-emit 'agent/steered sid)))
+
+(defun harness-agent--opening-node (blocks from)
+  "Return the user node of a message BLOCKS from FROM that opens or joins a turn.
+FROM, when non-nil, is who sent it (see `agent/prompt').  A message of
+text alone is its text; any other keeps its blocks."
+  (append (list :kind 'user :content (harness-agent--blocks-text blocks)
+                :blocks (unless (harness-agent--only-text-p blocks) blocks))
+          (and from (list :meta (list :from from)))))
+
+(defun harness-agent--flush-held (turn)
+  "Record the messages held for TURN, oldest first, as ordinary user messages.
+Called once the gate that held the turn lets it go on, right after the
+message that opened it, or at a step boundary: they follow the work
+that held it and the model reads them with its next request.  A message
+that cannot be recorded is logged and the others still are: the
+turn must not stop for it.  Nothing is recorded for a session that is
+gone."
+  (when-let* ((held (gethash turn harness-agent--held)))
+    (remhash turn harness-agent--held)
+    (let ((sid (harness-agent-turn-session-id turn)))
+      (when (harness-call 'session/exists-p sid)
+        (dolist (message held)
+          (harness-agent--try (format "recording a message held for %s" sid)
+            (harness-call 'session/append sid
+                          (harness-agent--opening-node (plist-get message :blocks)
+                                                       (plist-get message :from)))))))))
+
 (harness-defmethod agent/prompt (session-id blocks &optional opts)
   "Send BLOCKS (content blocks, or a string) to SESSION-ID.
 Idle session: start a turn and return a promise of (:stop-reason …).
 Running session: steer — the message is recorded now and delivered at
 the next step boundary, once; the running turn's promise is returned.
+A running turn that work holds before its next request -- the sync
+filter `agent/hold' says what, a compaction being the one that does --
+is not steered: the conversation the message would join is about to be
+replaced.  The message waits with the turn and is recorded when it goes
+on, after that work and the message that opened the turn, as an
+ordinary user message (no `:steering'): the model reads it with its
+next request and answers it.  The turn's promise is returned all the
+same.
 OPTS `:queue' true only queues the message, with OPTS `:attachments',
 for the next turn, whatever the session is doing.
 OPTS `:from' says who sent the message when the user did not: the
@@ -967,7 +1116,9 @@ call the harness made and cannot be continued."
          (attachments (and queue (plist-get opts :attachments)))
          (from (let ((f (plist-get opts :from))) (and (harness-sender-kind f) f)))
          (queued (plist-get opts :queued))
-         (turn (gethash session-id harness-agent--turns)))
+         (turn (gethash session-id harness-agent--turns))
+         (hold (and turn (not queue) (gethash turn harness-agent--gated)
+                    (harness-agent--holding session-id))))
     (unless (or blocks attachments)
       (signal 'harness-error (list "Nothing to send: the message is empty")))
     (unless queue
@@ -977,6 +1128,9 @@ call the harness made and cannot be continued."
      (queue
       (harness-call 'session/queue session-id (harness-agent--blocks-text blocks) attachments from)
       (harness-resolved (list :queued t)))
+     (hold
+      (harness-agent--hold-message turn blocks from hold)
+      (harness-agent-turn-promise turn))
      (turn
       (harness-agent--record-steering turn blocks from)
       (harness-emit 'agent/steered session-id)
@@ -1027,17 +1181,20 @@ FROM, when non-nil, is who sent the message (see `agent/prompt')."
   (let* ((session (harness-call 'session/get session-id))
          (promise (harness-make-promise))
          (turn (make-harness-agent-turn :session-id session-id :promise promise :started (float-time)))
-         (node (append (list :kind 'user :content (harness-agent--blocks-text blocks)
-                             :blocks (unless (harness-agent--only-text-p blocks) blocks))
-                       (and from (list :meta (list :from from))))))
+         (node (harness-agent--opening-node blocks from)))
     (puthash session-id turn harness-agent--turns)
+    (puthash turn blocks harness-agent--opening)
+    (puthash turn t harness-agent--gated)
     (remhash session-id harness-agent--failures)
     (remhash session-id harness-agent--retries)
     (remhash session-id harness-agent--stop-continues)
     ;; The provider conversation follows the head first, then the gate
     ;; runs, so that an automatic compaction lands before the user's new
     ;; message, never after it.  The gate's value carries the message
-    ;; (:text TEXT :from FROM), for a gate that asks about it.
+    ;; (:text TEXT :from FROM), for a gate that asks about it.  A message
+    ;; sent to the turn while the gate holds it for work that replaces the
+    ;; conversation waits with it (`harness-agent--hold-message') and
+    ;; follows this one.
     (harness-then
      (harness-then (harness-agent--follow-head session-id)
                    (lambda (_)
@@ -1049,8 +1206,12 @@ FROM, when non-nil, is who sent the message (see `agent/prompt')."
                                                    (harness-call 'session/get session-id)
                                                  session))))
      (lambda (gate)
-       (when (harness-call 'session/exists-p session-id)
-         (harness-call 'session/append session-id node))
+       (remhash turn harness-agent--opening)
+       (remhash turn harness-agent--gated)
+       (if (harness-call 'session/exists-p session-id)
+           (progn (harness-call 'session/append session-id node)
+                  (harness-agent--flush-held turn))
+         (remhash turn harness-agent--held))
        (cond
         ;; Cancelled while a gate held it (one asking the user, say): the
         ;; message stays, the turn is over, or ends now.
@@ -1860,11 +2021,17 @@ everything recorded so far."
 (defun harness-agent--next-step (turn)
   "Run one more step of TURN, once the `agent/step' filters let it.
 They are asked at every step boundary: a filter that refuses (a merge
-hold, say) ends the turn `blocked', with its reason as a hint."
+hold, say) ends the turn `blocked', with its reason as a hint.  The
+messages sent to the turn while a filter held it for a compaction are
+recorded once they let it go (`harness-agent--flush-held'), whether it
+goes on or not, so the step that follows reads them."
   (let ((sid (harness-agent-turn-session-id turn)))
+    (puthash turn t harness-agent--gated)
     (harness-then
      (harness-run-filter-async 'agent/step (list :proceed t) (harness-call 'session/get sid))
      (lambda (gate)
+       (remhash turn harness-agent--gated)
+       (harness-agent--flush-held turn)
        (if (plist-get gate :proceed)
            (harness-agent--step turn)
          (when (plist-get gate :reason) (harness-call 'session/hint sid (plist-get gate :reason)))

@@ -69,6 +69,22 @@
 ;; gates hold that boundary, and `agent/turn-ended' runs it when the
 ;; turn ends first.
 ;;
+;; A message that comes to a session while a compaction of it runs goes
+;; on with the compacted conversation: nothing asks about it, nothing
+;; queues it, and the model answers it right after the compaction.  A
+;; turn that starts meanwhile waits at the `agent/before-turn' gate
+;; (`harness-compaction--wait-gate', ahead of the cold-cache question,
+;; which the compaction under way answers already -- it leaves nothing
+;; cold -- and of the automatic compaction), showing the session as
+;; compacting; and a message sent to a turn that waits for a compaction
+;; waits with it (the sync filter `agent/hold', which
+;; `harness-compaction--on-hold' answers), and is recorded after the
+;; compaction, as the user's next message (harness-agent.el).  Recorded
+;; meanwhile it would lie before the compaction node, where the model
+;; never reads it, and a turn that ran beside the compaction would be
+;; buried by it: the node comes after the whole exchange, and the
+;; conversation restarts there.
+;;
 ;; The summarisation request has no tools.  An API provider gets the
 ;; transcript as ordinary messages.  A hosted-loop provider keeps the
 ;; conversation itself and is only sent the newest user messages, so it
@@ -101,6 +117,7 @@
 (defvar harness-provider-fallback-context-window)
 
 (declare-function harness-agent-strip-result-images "harness-agent" (messages))
+(declare-function harness-agent-waiting-text "harness-agent" (texts))
 
 (defconst harness-compaction-kinds '(summary brief transcript fresh truncate)
   "The kinds of compaction: what stands in for the conversation from then on.
@@ -899,9 +916,15 @@ TRAILING.  The conversation starts over from the node
     (dolist (n keep)
       (harness-call 'session/append session-id n))
     (dolist (u trailing)
-      (harness-call 'session/append session-id
-                    (list :kind 'user :content (plist-get u :content) :blocks (plist-get u :blocks)
-                          :meta (plist-put (copy-sequence (plist-get u :meta)) :carried-from (plist-get u :id)))))
+      (let ((carried (plist-put (copy-sequence (plist-get u :meta)) :carried-from (plist-get u :id))))
+        ;; A message sent to a turn that runs reaches the model with the
+        ;; conversation that starts here, so the copy is delivered
+        ;; already: a chat would show it queued for good otherwise.
+        (when (harness-json-true-p (plist-get carried :steering))
+          (setq carried (plist-put carried :delivered-after (plist-get node :id))))
+        (harness-call 'session/append session-id
+                      (list :kind 'user :content (plist-get u :content) :blocks (plist-get u :blocks)
+                            :meta carried))))
     (harness-compaction--start-over session-id)
     ;; The conversation starts over from the compaction: whatever the
     ;; summariser's request cached, the next request reads none of it.
@@ -1377,6 +1400,65 @@ then too."
   "Forget the compaction of SESSION-ID, which is gone."
   (remhash session-id harness-compaction--pending))
 
+;;;; A message that comes while a compaction runs
+
+(defconst harness-compaction--hold-text "the compaction"
+  "What a turn waits for while a compaction runs: the words `agent/hold' says.")
+
+(defun harness-compaction--on-hold (value session-id)
+  "Say a compaction holds the turn of SESSION-ID, while one of it runs.
+The sync filter `agent/hold' (harness-agent.el), VALUE being what the
+handlers before this one said: the first that says something wins.  The
+answer is (:text WORDS :phase PHASE): a message sent to the turn waits
+for the compaction, instead of lying before it where the model never
+reads it, and meanwhile the turn is compacting."
+  (or value
+      (and (gethash session-id harness-compaction--running)
+           (list :text harness-compaction--hold-text :phase 'compacting))))
+
+(defun harness-compaction--note-waiting (session-id message)
+  "Show SESSION-ID's turn as compacting, naming MESSAGE, which waits for it.
+MESSAGE is the `:message' of the `agent/before-turn' value, (:text TEXT
+:from FROM), the one that opened the turn.  The session reads running
+and its activity line says the conversation is compacted and which
+message waits.  A failure to say so is logged, never raised: the turn
+must not stop for it."
+  (condition-case err
+      (harness-call 'agent/note-activity session-id
+                    (append (list :phase 'compacting)
+                            (when-let* ((detail (harness-agent-waiting-text
+                                                 (list (plist-get message :text)))))
+                              (list :detail detail)))
+                    t)
+    (error (harness-log 'warn "compaction: could not show %s as compacting: %s"
+                        session-id (harness-error-short-message err)))))
+
+(defun harness-compaction--wait-gate (value next session)
+  "Hold SESSION's turn while a compaction of it runs, then let it go on.
+VALUE and NEXT are those of the `agent/before-turn' filter.  A message
+that starts a turn while the conversation is being compacted -- one
+compacted by hand, say, which no turn waits for -- would otherwise go
+at once with the conversation as it is, and its exchange would come
+before the compaction node, which the conversation restarts at, so the
+model would forget it; or, while the prompt cache is cold, it would ask
+what goes first when the compaction already is the answer.  So the turn
+waits for the compaction, whether it ends well or not, shown as
+compacting, and the gates after this one -- the cold-cache question,
+the automatic compaction -- see the session as the compaction left it.
+A compaction that failed leaves the conversation as it was, and they
+decide as they would have."
+  (let ((promise (and (plist-get value :proceed)
+                      (gethash (plist-get session :id) harness-compaction--running))))
+    (if (null promise)
+        (funcall next value)
+      (let ((id (plist-get session :id)))
+        (harness-log 'info "compaction: the turn of %s waits for the compaction under way" id)
+        (harness-compaction--note-waiting id (plist-get value :message))
+        (harness-then promise
+                      (lambda (_) (funcall next value) nil)
+                      (lambda (_) (funcall next value) nil)))))
+  nil)
+
 ;;;; Automatic compaction
 
 (defun harness-compaction--before-turn (value next session)
@@ -1398,8 +1480,14 @@ The compaction is of `harness-compaction-kind'."
 
 (defun harness-compaction--init ()
   "Hook automatic and queued compaction into the turn loop."
-  ;; A queued compaction runs before cowboy (15) and the automatic
-  ;; compaction (20), so the fresh context is what those gates see.
+  ;; A compaction under way holds a turn at 11, beside the one a cache
+  ;; about to lapse makes (harness-cache-compact.el), and a queued one
+  ;; runs at 12: both before cowboy (15) and the automatic compaction
+  ;; (20), so the fresh context is what those gates see.  What a
+  ;; message sent to a turn so held does is the agent's
+  ;; (`harness-agent--hold-message').
+  (harness-add-filter 'agent/before-turn #'harness-compaction--wait-gate 11)
+  (harness-add-filter 'agent/hold #'harness-compaction--on-hold)
   (harness-add-filter 'agent/before-turn #'harness-compaction--gate 12)
   (harness-add-filter 'agent/step #'harness-compaction--gate 12)
   (harness-add-filter 'agent/before-turn #'harness-compaction--before-turn 20)
