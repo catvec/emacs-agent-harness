@@ -1652,6 +1652,16 @@ redact).
 - `session/pending-add ID REQUEST` → id; `session/pending-resolve ID PID ANSWER`;
   `session/pending ID`.  Event `session/pending-changed ID ITEMS`.
   Status becomes `blocked` while anything is pending.
+  `session/pending-update ID PID CHANGES` merges CHANGES, a plist, into
+  the payload of a request that still waits (what is learned of it after
+  it was made: a cheap model's summary of a permission prompt's call) and
+  returns the item, or nil when the request, or the session, is gone.  It
+  is announced as `session/pending-updated ID PID CHANGES` (one of the
+  events forwarded over ACP, which the clients that draw the request learn
+  from) and the session as `session/changed`, so that a client that reads
+  the session has its pending list as it is; the status and the update
+  time stay, and the listeners of `session/pending-changed` hear
+  nothing.
 - `session/usage-add ID USAGE &optional CONTEXT` → accumulated usage.
   A record of a request that read or wrote the prompt cache (its
   `:cache-read` or `:cache-write` above 0) stamps the totals'
@@ -3335,7 +3345,14 @@ stage's label, else `gate`; the access module's judgements and the
   a lasting answer always held for and a few words for them ("gcloud and
   gsutil"); a tool prompt's `:paths` are its subject
   paths, and a shell command's prompt has `:cwd`, where it runs; a
-  confirmation has `:confirm t` and its own `:reason`; UIs offer only the
+  confirmation has `:confirm t` and its own `:reason`; a prompt a user is
+  asked about also has `:summarizing t` while a cheap model writes what its
+  call would do, then `:summary` (a sentence or two) and `:summary-model`
+  once it came, added by `session/pending-update` (see "Summaries of what
+  a prompt asks" in perms; `harness-perms-summarize` and
+  `harness-perms-summary-model` are its settings), or neither when the
+  model gave none, and a prompt of a call summarized before has the
+  `:summary` from the start; UIs offer only the
   listed `:options`, show a pattern only when there is one, and word a
   lasting answer with the step of `:ladder` it is for when there is one,
   else with `:covers`),
@@ -3457,7 +3474,12 @@ stage's label, else `gate`; the access module's judgements and the
   session on DeepSeek is judged by a DeepSeek model and one on Claude by
   Claude Haiku; a provider without tiers is sorted by price, and the
   session's own model is the last resort.  Naming a model, or nil for
-  the session's own, overrides it.  `yolo` allows everything; the jail
+  the session's own, overrides it.  Every prompt a user is asked also
+  gets a sentence or two on what its call would do, from a cheap model
+  (`harness-perms-summary-model`, by default the judge's, asked
+  after the prompt has gone out; `harness-perms-summarize` turns it
+  off), shown as the model's advice and read by nothing that decides.
+  `yolo` allows everything; the jail
   still applies.  Tools in
   `harness-perms--auto-allow-tools` are allowed in every mode: the meta
   tools, skill lookups, `web_search`, which only sends its
@@ -10036,7 +10058,8 @@ someone other than the user sent, and a tool call or result the harness
 recorded (see Node), names its sender in `_harness.from`.
 Requests agent → client: `session/request_permission {sessionId, toolCall,
 options:[{optionId,name,kind}], _harness:{pendingId, tool, paths, cwd, dir,
-pattern, commands, covers, ladder, cover, reason}}` (`options`: the same five
+pattern, commands, covers, ladder, cover, reason, summarizing, summary,
+summaryModel}}` (`options`: the same five
 for every request, named as the UI's buttons are,
 `harness-acp-permission-answers`; `cwd`: where a shell command runs;
 `paths`: what the call is about, see perms; `ladder`: what the lasting
@@ -10050,7 +10073,13 @@ outside the allowed directories for another glob pattern than its
 `_harness.pattern` (only such a request has one, see perms), and
 `_harness:{cover}` when it lets the user choose the cover of a lasting
 answer, the id of a step of `_harness.ladder` (any other, or none, is the
-step the request started on),
+step the request started on); `summarizing` says that a cheap model is
+writing what the call would do (draw a placeholder), `summary` is what it
+wrote and `summaryModel` the model: the words are advice, to be drawn as a
+model's, and the update that brings them is the forwarded event
+`_harness/event` `session/pending-updated`, its `args` `[sessionId,
+pendingId, {summary, summary-model, summarizing}]`, which also says, with
+no `summary`, that there will be none,
 and `_harness/ask_user {sessionId, requestId, question, options, diagrams, allowMultiple, cowboy}` → `{answer}`,
 or `{answer, attachments}` when the user attached files to the answer:
 `attachments` are ACP content blocks, as a `session/prompt`'s `prompt`

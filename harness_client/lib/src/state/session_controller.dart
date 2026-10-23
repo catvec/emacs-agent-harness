@@ -411,6 +411,7 @@ class SessionController extends ChangeNotifier {
     final shown = id == null
         ? -1
         : interactions.indexWhere((other) => other.harnessId == id);
+    _applyPendingNews(request);
     if (shown >= 0) {
       interactions[shown] = request;
     } else {
@@ -495,11 +496,72 @@ class SessionController extends ChangeNotifier {
       changed = true;
     }
     for (final (id, request) in held) {
-      if (interactions.any((shown) => shown.harnessId == id)) continue;
+      final shown = interactions.where((other) => other.harnessId == id);
+      if (shown.isNotEmpty) {
+        if (_learnSummaryFrom(shown.first, request)) changed = true;
+        continue;
+      }
+      _applyPendingNews(request);
       interactions.add(request);
       changed = true;
     }
     if (changed) _notify();
+  }
+
+  /// Say what is the summary of the request [shown] from [read], the same
+  /// request as the harness holds it now, which may know more of it: the
+  /// summary of its call, or that there will be none.  It only goes forward:
+  /// a summary is not taken back, and a request does not start to wait for
+  /// one.  Returns whether [shown] changed.
+  bool _learnSummaryFrom(InteractionRequest shown, InteractionRequest read) {
+    if (shown.summary == null && read.summary != null) {
+      return shown.learnSummary({
+        'summary': read.summary,
+        'summary-model': read.summaryModel,
+        'summarizing': false,
+      });
+    }
+    if (shown.summarizing && !read.summarizing && read.summary == null) {
+      return shown.learnSummary({'summarizing': false});
+    }
+    return false;
+  }
+
+  /// What the harness said of a request this client did not hold yet, by the
+  /// request's id: the news of its summary can come before the request does
+  /// (one read from the harness is as old as the read).  The newest few.
+  final Map<String, JsonMap> _pendingNews = <String, JsonMap>{};
+  static const _pendingNewsKept = 20;
+
+  /// The harness says the payload of request [id] was added to with
+  /// [changes]: the summary of its call came, or will not.  Shown at once
+  /// when the request is; kept for it otherwise.
+  void _learnPending(String? id, JsonMap changes) {
+    if (id == null || id.isEmpty || changes.isEmpty) return;
+    var learned = false;
+    for (final request in interactions) {
+      if (request.harnessId == id && request.learnSummary(changes)) {
+        learned = true;
+      }
+    }
+    if (learned) {
+      _notify();
+      return;
+    }
+    if (interactions.any((request) => request.harnessId == id)) return;
+    _pendingNews.remove(id);
+    _pendingNews[id] = changes;
+    while (_pendingNews.length > _pendingNewsKept) {
+      _pendingNews.remove(_pendingNews.keys.first);
+    }
+  }
+
+  /// Have [request], new here, learn what the harness said of it before.
+  void _applyPendingNews(InteractionRequest request) {
+    final id = request.harnessId;
+    if (id == null) return;
+    final news = _pendingNews.remove(id);
+    if (news != null) request.learnSummary(news);
   }
 
   /// The harness says what it holds as pending on this session now, as a
@@ -593,6 +655,11 @@ class SessionController extends ChangeNotifier {
           'commands': payload['commands'],
           'covers': payload['covers'],
           'reason': payload['reason'],
+          // A cheap model's summary of the call, or that one is on its way
+          // (the harness keeps these in the payload as it asks them).
+          'summary': payload['summary'],
+          'summaryModel': payload['summary-model'],
+          'summarizing': payload['summarizing'],
         },
       },
     );
@@ -819,6 +886,11 @@ class SessionController extends ChangeNotifier {
         if (args.length > 1) _dropUnheld(args[1]);
         unawaited(refreshInfo());
         _syncPendingSoon();
+      case 'session/pending-updated':
+        // (session id, the request's id, what was added to its payload): a
+        // cheap model's summary of a permission request's call came, or
+        // will not.
+        if (args.length > 2) _learnPending(asString(args[1]), asMap(args[2]));
       case 'question/answered':
         // (session id, the question's id, the answer): by whoever did.
         final answered = args.length > 1 ? asString(args[1]) : null;

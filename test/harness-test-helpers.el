@@ -115,6 +115,12 @@ before, so no other test sees it."
 ;; their own.
 (setq harness-perms-claude-auto-mode nil)
 
+(defvar harness-perms-summarize)
+;; No permission prompt asks a model what its call would do: a suite that
+;; scripts the models of a session would find a request it did not
+;; expect after every prompt.  Tests of the summaries turn it on.
+(setq harness-perms-summarize nil)
+
 (defvar harness-tasks-store-in-repository)
 ;; Tasks stay in the throwaway state directory whatever directory a test
 ;; submits them in, so no test writes into a real repository's .git.

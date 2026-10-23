@@ -60,7 +60,9 @@ session's todo list a checklist that moves on a step each time
 (`harness-provider-demo--todos`).  The companion pet gets
 its name and its lines (`harness-provider-demo--pet`), and the
 Insights report a summary of its figures
-(`harness-provider-demo--insights`).
+(`harness-provider-demo--insights`).  A permission prompt's call is
+summarized in a sentence about the program it runs
+(`harness-provider-demo--summary`).
 
 ## Provides
 

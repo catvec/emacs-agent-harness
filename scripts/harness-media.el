@@ -1343,6 +1343,19 @@ and been told what it found (its second answer):
         (harness-json-encode-text (list :sessions "API guide"))))
      (t (harness-media--search-json)))))
 
+(defconst harness-media--call-summaries
+  '(("pip install" . "Installs httpx 0.28 or newer from PyPI into this project's Python environment, downloading it over the network.")
+    ("rm -rf" . "Deletes the build directory and everything in it, with no way back; nothing outside the project is touched.")
+    ("strace" . "Runs the authentication tests under strace, which records every file they open. It changes nothing and sends nothing away.")
+    ("unittest" . "Runs the project's test suite. It reads the code and writes nothing outside the project."))
+  "What the scripted model says a prompt's call does: (WORDS . SUMMARY).
+WORDS is a regexp for the call's command, the first to match picks.")
+
+(defun harness-media--call-summary (text)
+  "The scripted model's summary of the call TEXT describes."
+  (or (cdr (cl-find-if (lambda (e) (string-match-p (car e) text)) harness-media--call-summaries))
+      "Calls the tool with the arguments shown, inside the project."))
+
 (defun harness-media--script (request)
   "Return the events that answer REQUEST."
   (let* ((system (or (plist-get request :system) ""))
@@ -1352,6 +1365,9 @@ and been told what it found (its second answer):
     (cond
      ((string-prefix-p "You are the permission judge" system)
       (list (harness-media--say "{\"decision\":\"allow\",\"reason\":\"Ordinary development work inside the project.\"}")))
+     ;; The summary a permission prompt shows of its call.
+     ((string-prefix-p "You explain one blocked tool call" system)
+      (list (harness-media--say (harness-media--call-summary first))))
      ((string-prefix-p "You write short titles" system)
       (list (harness-media--say (or (cdr (cl-find-if (lambda (e) (string-match-p (car e) first)) harness-media--titles))
                                     "Work on the API"))))
@@ -2388,6 +2404,12 @@ machine's shows.  Only those directories are taken for others:
                              (list (plist-get paths :build) (plist-get paths :clone)))))
                (buffer (harness-media--access-view id page)))
       (when (eq page 'judgements) (harness-media--expand buffer "drop_access"))
+      ;; The request waiting on the user, at the end of the view from the
+      ;; top, is a line longer with the summary of its call: the frame is
+      ;; too, so that its answers show.
+      (unless (eq page 'judgements)
+        (set-frame-size nil harness-media-columns (1+ harness-media-lines))
+        (harness-media--settle 0.5))
       (with-current-buffer buffer
         (goto-char (point-min))
         (set-window-start (selected-window) (point-min)))
@@ -3118,8 +3140,9 @@ column, the project, needs."
   (harness-media--goto-session-row (plist-get harness-media--world :permission))
   (harness-ui-sessions-requests)
   ;; The whole list shows over the popout: four lines more than the
-  ;; text of the two windows, which the popout's own height eats.
-  (harness-media--fit-popout-shot 36 harness-media-hero-columns 4)
+  ;; text of the two windows, which the popout's own height eats.  The
+  ;; popout is taller since its panel lists the covers and a summary.
+  (harness-media--fit-popout-shot 48 harness-media-hero-columns 8)
   (harness-media--capture "popout-permission"))
 
 (defun harness-media-shot-popout-question ()

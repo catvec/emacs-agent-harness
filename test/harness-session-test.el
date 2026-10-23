@@ -1518,6 +1518,52 @@ harness's too, so the model never sees either, and comes once."
         (should (eq 'running (plist-get (harness-call 'session/get id) :status))))
       (should (equal '(running blocked running) (reverse statuses))))))
 
+(ert-deftest harness-session-pending-update-adds-to-the-payload ()
+  "What is learned about a pending request after it was made is merged
+into its payload, and told as `session/pending-updated': the session's
+status and update time stay and the listeners of `session/pending-changed'
+hear nothing, but the session is announced changed, so that a client that
+reads the session, not the events, has its pending list as it is.  A
+request answered meanwhile, or a session that is gone, is not an error."
+  (harness-session-test-with
+    (let* ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id))
+           (updated nil) (changed 0) (announced 0) (announced-sessions nil))
+      (harness-call 'session/set-status id 'running)
+      (let ((first (harness-call 'session/pending-add id '(:kind permission :payload (:tool "bash" :summarizing t))))
+            (second (harness-call 'session/pending-add id '(:kind permission :payload (:tool "edit_file")))))
+        (harness-on 'session/pending-updated (lambda (&rest args) (push args updated)))
+        (harness-on 'session/pending-changed (lambda (&rest _) (cl-incf changed)))
+        (harness-on 'session/changed (lambda (_id session) (cl-incf announced) (push session announced-sessions)))
+        (let ((stamp (plist-get (harness-call 'session/get id) :updated))
+              (item (harness-call 'session/pending-update id first '(:summary "Lists files." :summarizing nil))))
+          ;; The item comes back as it is now, and so does the session's list.
+          (should (equal "Lists files." (plist-get (plist-get item :payload) :summary)))
+          (should-not (plist-get (plist-get item :payload) :summarizing))
+          (should (equal "bash" (plist-get (plist-get item :payload) :tool)))
+          (should (eq 'permission (plist-get item :kind)))
+          (should (equal (list first second) (mapcar (lambda (it) (plist-get it :id))
+                                                      (harness-call 'session/pending id))))
+          (should (equal item (car (harness-call 'session/pending id))))
+          (should-not (plist-get (plist-get (cadr (harness-call 'session/pending id)) :payload) :summary))
+          (should (equal (list (list id first '(:summary "Lists files." :summarizing nil))) updated))
+          ;; The session is announced, with the pending list as it is now;
+          ;; its status and update time stay, and no request changed.
+          (should (= 0 changed))
+          (should (= 1 announced))
+          (should (equal "Lists files."
+                         (plist-get (plist-get (car (plist-get (car announced-sessions) :pending)) :payload)
+                                    :summary)))
+          (should (eq 'blocked (plist-get (harness-call 'session/get id) :status)))
+          (should (equal stamp (plist-get (harness-call 'session/get id) :updated))))
+        ;; Answered, deleted, never there: nothing to update.
+        (harness-call 'session/pending-resolve id first '(:behavior allow))
+        (setq updated nil)
+        (should-not (harness-call 'session/pending-update id first '(:summary "Late.")))
+        (should-not (harness-call 'session/pending-update id "nope" '(:summary "Late.")))
+        (should-not (harness-call 'session/pending-update "no-such-session" second '(:summary "Late.")))
+        (should-not updated)
+        (should-not (plist-get (plist-get (car (harness-call 'session/pending id)) :payload) :summary))))))
+
 (ert-deftest harness-session-queue-take-some-items ()
   "Taking some queued items leaves the others queued, and says what is left.
 The items come in queue order, whatever order the ids are given in, as a

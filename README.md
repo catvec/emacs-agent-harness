@@ -166,7 +166,7 @@ OpenAI-compatible APIs and AWS Bedrock.
 
 | | |
 |---|---|
-| ![A chat waiting for permission to run pip install, with the allow and deny buttons](docs/media/chat-permission.png) | ![A chat waiting for the answer to a question, with three options](docs/media/chat-question.png) |
+| ![A chat waiting for permission to run pip install, with a model's summary of the command and the allow and deny buttons](docs/media/chat-permission.png) | ![A chat waiting for the answer to a question, with three options](docs/media/chat-question.png) |
 | A permission request, answered in the chat | A question from the agent, answered with a digit |
 | ![A call the harness denied, with an [Approve] button under it and the handle the denial named](docs/media/chat-denied.png) | ![That call after the user approved it: marked user-approved, the agent's rerun under it with what the command printed](docs/media/chat-denied-approved.png) |
 | A denied call: the harness blocked it, [Approve] lets it run anyway | Approved: the agent reruns the call exactly as it was denied |
@@ -182,7 +182,7 @@ OpenAI-compatible APIs and AWS Bedrock.
 | Usage: cost per day and model, plan quota, fallback list, budgets | Settings, here as one project overrides them |
 | ![The session list with forks, BTWs and task sessions](docs/media/sessions.png) | ![The worktrees of a project, with their branches and sessions, one assumed as the project](docs/media/worktrees.png) |
 | The session list | The worktrees of a project and their sessions, one assumed as the project to look at its files |
-| ![The session list with a permission request popped out, its allow and deny buttons under it](docs/media/popout-permission.png) | ![The task board with a question popped out, its options and a box to type another answer under it](docs/media/popout-question.png) |
+| ![The session list with a permission request popped out, a model's summary of the command and its allow and deny buttons under it](docs/media/popout-permission.png) | ![The task board with a question popped out, its options and a box to type another answer under it](docs/media/popout-question.png) |
 | A request popped out of the session list, answered there | A question popped out of the task board, answered there |
 | ![A BTW side conversation open under a session](docs/media/btw.png) | ![The task board writing a message to the session of a task at work, the compose box in amber](docs/media/tasks-message.png) |
 | A BTW side conversation under its session | Messaging a task's session: the box says so, in its colours |
@@ -1165,6 +1165,42 @@ denies the pattern: once (for the one call, or until the turn ends for
 the agent's own request), for the session, or always (as an entry of
 `harness-allowed-directories`, or a rule in `harness-perms-rules` for
 *Always deny*).
+
+**What the call does.** A prompt says what its call would do, in a
+sentence or two that a cheap model writes, so that a long pipeline or an
+Elisp form takes a moment to judge rather than a minute to read.  Every
+prompt you are asked has one, a shell command or not: a file edit, the
+agent asking for a directory, a confirmation.  The prompt appears at
+once, with a line saying it is being summarized, and the summary takes
+that line's place when it comes; a model that fails, or is slow, leaves
+the prompt as it was, with nothing said.
+
+```
+ Permission  Bash: rm -rf build && make
+   kind: exec   runs in: ~/proj
+   command: rm -rf build && make
+   Model summary: Deletes the build directory, then rebuilds the project.
+```
+
+It is the model's words, and the line says so (its tooltip names the
+model); it is advice, and decides nothing: your answer, a rule, the
+permission mode and the auto-mode judge decide, and none of them reads
+it.  The model is given the one call alone, its input cut when long,
+where it runs and why you are asked, and is told that the call is text
+the agent wrote, which may be mistaken or after something, never
+instructions to follow; it is asked to say what the call does and to
+flag what deletes, networks or leaves the project, not whether to allow
+it.  So the command above the summary is still the call you judge.  By
+default it is the model the auto-mode judge uses
+(`harness-perms-summary-model`: `auto` for the simple tier of the
+session's provider, a model of your own, or nil for the session's own);
+`harness-perms-summarize` turns the summaries off (both under *Files and
+safety* on the settings page; a policy can set them).  A summary is
+asked once for a call, however many prompts the call goes through, and
+each is recorded as a session of kind `internal` named *Permission
+summary*, with what it cost, as the judge's calls are.  A session that
+never waits for you has no prompt to summarize.  The phone's permission
+card shows it too.
 
 **What a lasting answer covers.** Any other request, such as the
 permission mode asking about a file edit or a command, or the auto-mode
@@ -3210,7 +3246,8 @@ moves it to another directory (see
 - **Tasks only.** `T` lists only the sessions that work on a task, with
   the sub-agents, forks and BTWs under them, and `T` again lists them
   all.
-- **The harness's own model calls.** The permission judge, the Elisp
+- **The harness's own model calls.** The permission judge, the summary
+  of a permission prompt's call, the Elisp
   judge, the session judge, auto-naming, recaps, the Insights summary,
   the pet and the task board's search each record the call they make as
   a session of kind `internal`: its model, status, cost and time, with
@@ -4842,7 +4879,8 @@ cached for it, so a changed URL or model list shows at once.
 ### Model tiers
 
 Some calls get their model from the harness rather than from you: the
-auto-mode judge, a session's title, a brief summary, a session's todo
+auto-mode judge, the summary of a permission prompt's call, a session's
+title, a brief summary, a session's todo
 list kept current, the plan and the work of a task in the board's Plan
 mode (until you pick others), the workers of a supervisor's plan. The
 harness picks such a model by tier, from the provider the session is on.

@@ -210,7 +210,7 @@ it can answer for another one.")
     merge/queued merge/started merge/conflict merge/finished
     worktree/created worktree/removed worktree/locked worktree/unlocked session/forked session/head-moved
     session/nodes-removed session/redacted secrets/redacted
-    session/moved session/ext-changed supervisor/changed
+    session/moved session/ext-changed session/pending-updated supervisor/changed
     question/answered task/changed task/deleted task/review task/done task/queue task/backlog-mode
     permission/dir-allowed permission/dir-revoked
     config/changed harness/reloaded tools/file-written acp/remote-changed pet/changed pet/said version/checked
@@ -1780,7 +1780,17 @@ for in `_harness.ladder', narrowest first, each {id, label}, and the
 one they start on in `_harness.cover' (see `harness-perms--cover-ladder'):
 a client that lets the user choose answers with the id of the chosen
 step in `_harness.cover' of its result, next to the outcome; one that
-does not gets the step it starts on."
+does not gets the step it starts on.
+
+A cheap model summarizes what the call would do while the request
+waits (see \"Summaries of what a prompt asks\" in harness-perms.el).
+The request goes out at once, saying in `_harness.summarizing' that
+one is on its way, or carrying `_harness.summary' (and
+`_harness.summaryModel') when the same call was summarized before; the
+`session/pending-updated' event, forwarded as `_harness/event', brings
+the summary, or says there is none, when it comes.  It is text for the
+user to read, marked as a model's; a client that knows nothing of it
+shows the request as before."
   (let* ((payload (or (plist-get pending :payload) pending))
          (pid (plist-get pending :id)))
     (harness-acp--request-clients
@@ -1801,7 +1811,10 @@ does not gets the step it starts on."
                            :covers (plist-get payload :covers)
                            :ladder (plist-get payload :ladder)
                            :cover (plist-get payload :cover)
-                           :reason (plist-get payload :reason)))
+                           :reason (plist-get payload :reason)
+                           :summary (plist-get payload :summary)
+                           :summaryModel (plist-get payload :summary-model)
+                           :summarizing (plist-get payload :summarizing)))
      (lambda (result)
        (let* ((outcome (plist-get result :outcome))
               (extra (plist-get result :_harness))

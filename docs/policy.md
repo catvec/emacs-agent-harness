@@ -223,6 +223,16 @@ not used, and the BTW keeps its session's model.
   sets it to `narrowest` makes least privilege the starting point of
   every prompt, and the person answering still chooses a wider step on
   purpose.
+- **Summaries of prompts** (`harness-perms-summarize`,
+  `harness-perms-summary-model`).  A permission prompt shows what its call
+  would do, in a sentence a cheap model writes from the call's input (see
+  the README).  The call goes to the model of the session's provider, as
+  the auto-mode judge's does, so a policy that does not want the commands
+  and paths of prompts sent to a model sets `harness-perms-summarize` to
+  nil; one that picks the model sets `harness-perms-summary-model`.  A
+  model `harness-allowed-models` leaves out is refused like any other
+  request, and the prompt goes without a summary.  The summary is advice
+  on the prompt: nothing that decides a call reads it.
 - **Allowed directories** (`harness-allowed-directories`).  The list is
   the policy's: no directory prompt offers Always allow, and the global
   entries cannot be revoked from the directory list.  A person in front

@@ -51,7 +51,9 @@
 ;; (`harness-provider-demo--todos').  The companion pet gets
 ;; its name and its lines (`harness-provider-demo--pet'), and the
 ;; Insights report a summary of its figures
-;; (`harness-provider-demo--insights').
+;; (`harness-provider-demo--insights').  A permission prompt's call is
+;; summarized in a sentence about the program it runs
+;; (`harness-provider-demo--summary').
 
 ;;; Code:
 
@@ -74,6 +76,14 @@ answers) gives a function.")
   "The opening of the session judge's system prompt (harness-supervisor.el).
 The demo answers it (`harness-provider-demo--judge') rather than the
 generic script, so a demo session under `auto' is judged like any other.")
+
+(defconst harness-provider-demo--summary-prompt
+  "You explain one blocked tool call"
+  "The opening of the system prompt that has a model summarize a prompt's call.
+That is `harness-perms--summary-system' (harness-perms.el).  The demo
+answers it (`harness-provider-demo--summary') rather than the generic
+script, so a demo session's permission prompt gets a summary like any
+other.")
 
 (defconst harness-provider-demo--layouts
   '(("Sidebar on the left"
@@ -227,8 +237,9 @@ only keeps the prompt cache warm (`:cache-refresh') is answered \"ok\",
 having read the conversation from the cache.  Otherwise the
 system prompt picks a script for a request to name a session, write a
 task up, plan one, search a task board, name the companion pet, give
-it its lines, write the Insights report or judge how a session starts;
-else the last user message picks one (see the Commentary)."
+it its lines, write the Insights report, judge how a session starts or
+summarize a permission prompt's call; else the last user message picks
+one (see the Commentary)."
   (let ((text (downcase (harness-provider-demo--last-user-text request)))
         (cwd (or (plist-get (plist-get request :session) :cwd) default-directory)))
     (cond
@@ -260,6 +271,8 @@ else the last user message picks one (see the Commentary)."
       (harness-provider-demo--insights request))
      ((string-prefix-p harness-provider-demo--judge-prompt (or (plist-get request :system) ""))
       (harness-provider-demo--judge request))
+     ((string-prefix-p harness-provider-demo--summary-prompt (or (plist-get request :system) ""))
+      (harness-provider-demo--summary request))
      ;; A reply in a thread: the marker the harness put after it names the
      ;; thread, and answering in it is what it asks.  Before the words below,
      ;; which a reply may well hold.
@@ -514,6 +527,35 @@ message counts: the judge's own question names both words."
                                               (downcase opening))
                               "SUPERVISE" "HANDS-ON"))
       (:type usage :input 60 :output 2 :cost 0.0001)
+      (:type done :stop-reason end-turn))))
+
+(defun harness-provider-demo--summary (request)
+  "Answer the request to summarize a permission prompt's call, as a model would.
+REQUEST's message describes the call (see `harness-perms--summary-text'):
+the demo says what a shell command in it does by the program it runs,
+and any other call by its tool, in a sentence or two.  Nothing here is
+looked up; the demo only has to sound like one."
+  (let* ((text (harness-provider-demo--last-user-text request))
+         (tool (and (string-match "^Tool: \\(.*\\)$" text) (match-string 1 text)))
+         (command (and (string-match "\"command\":\"\\(\\(?:[^\"\\\\]\\|\\\\.\\)*\\)\"" text)
+                       (match-string 1 text)))
+         (summary
+          (cond
+           ((null command)
+            (format "Calls %s with the arguments shown, in the working directory." (or tool "a tool")))
+           ((string-match-p "\\brm\\b" command)
+            "Deletes files and directories recursively, with no way back. It stays inside the project.")
+           ((string-match-p "\\bpip3?\\b.*\\binstall\\b" command)
+            "Installs a Python package into the active environment, downloading it from the package index over the network.")
+           ((string-match-p "\\b\\(?:curl\\|wget\\|ssh\\|scp\\)\\b" command)
+            "Talks to another machine over the network, which can send files or data away.")
+           ((string-match-p "\\bsudo\\b" command)
+            "Runs a command with administrator rights, outside what the project can reach.")
+           ((string-match-p "\\b\\(?:unittest\\|pytest\\|make test\\|npm test\\|cargo test\\)\\b" command)
+            "Runs the project's test suite. It reads the code and writes nothing outside the project.")
+           (t "Runs a shell command in the working directory; nothing in it reaches outside the project."))))
+    `((:type text :delta ,summary)
+      (:type usage :input 150 :output 30 :cost 0.0001)
       (:type done :stop-reason end-turn))))
 
 (defun harness-provider-demo--title (request)

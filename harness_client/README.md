@@ -52,6 +52,13 @@ time it opens. It asks again only when the harness does.
 - **Answers the agent.** Standard ACP permission requests become an inline
   decision card with *Allow*, *Deny*, *Allow for session*, *Always allow* and
   *Always deny*; a path glob can be edited before a lasting answer is given.
+  The card says what the call would do, in a sentence or two a cheap model
+  writes while it waits (*Model summary*, marked as advice that can be wrong,
+  with a spinner until it comes; `_harness.summarizing`, `_harness.summary`
+  and `_harness.summaryModel` of the request, and `session/pending-updated`
+  when it arrives, which the app keeps for a request it does not hold yet):
+  a model that fails leaves the card as it was, and nothing in the app reads
+  the summary but the person.
   Harness `_harness/ask_user` questions become a choice with optional ASCII or
   image diagrams, a free-text answer, and the harness's cold-cache cost note
   when it sends one. A question the agent lets you tick several options of

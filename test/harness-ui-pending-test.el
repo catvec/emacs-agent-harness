@@ -2711,5 +2711,225 @@ programs on any host it used to hold for."
         ;; What the answer carries is the cover picked; picking none, the one it started on.
         (should (equal '(:cover "host-programs") (harness-ui-pending--answer-extras r "allow-always")))))))
 
+;;;; A model's summary of the call
+
+(defvar harness-ui-pending-test-changed nil
+  "Session ids `harness-ui-pending-changed-hook' was run with, newest first.")
+
+(defun harness-ui-pending-test-hear-changes (sid)
+  "Note that the requests of SID changed."
+  (push sid harness-ui-pending-test-changed))
+
+(defun harness-ui-pending-test-summary-item (&optional id extra)
+  "Return a pending item for a shell call, ID by default \"p1\", with EXTRA in its payload."
+  (list :id (or id "p1") :kind "permission"
+        :payload (append (list :title "Bash: rm -rf build && make" :tool "bash" :kind "exec"
+                               :input '(:command "rm -rf build && make")
+                               :reason "The permission judge would deny this call: it deletes files"
+                               :options '("allow-once" "deny-once"))
+                         extra)))
+
+(ert-deftest harness-ui-pending-panel-says-it-is-summarizing-and-then-shows-the-summary ()
+  "A permission request whose call a model summarizes is drawn at once with a
+line saying so; the summary takes the line's place when it comes, marked as
+a model's, its tooltip saying the model and that it decides nothing.  It
+sits under the call and why it is asked, above the answers."
+  (harness-ui-pending-test-with
+    (let ((sid (harness-ui-pending-test-session))
+          (harness-ui-pending-test-changed nil))
+      (add-hook 'harness-ui-pending-changed-hook #'harness-ui-pending-test-hear-changes)
+      (unwind-protect
+          (progn
+            (harness-ui-pending-sync sid (list (harness-ui-pending-test-summary-item "p1" '(:summarizing t))))
+            (let ((text (harness-ui-pending-test-rendered sid "p1")))
+              (should (string-search "   Model summary: summarizing…\n" text))
+              (should (< (string-search "The permission judge would deny" text)
+                         (string-search "Model summary:" text)
+                         (string-search "[Allow]" text)))
+              ;; Dim, like what is not known yet.
+              (with-temp-buffer
+                (let ((harness-ui-session-id sid))
+                  (harness-ui-pending--insert-permission (harness-ui-pending-record sid "p1")))
+                (goto-char (point-min))
+                (search-forward "summarizing")
+                (should (harness-ui-pending-test-face-p (1- (point)) 'harness-dim-face))))
+            ;; The harness says what the model wrote.
+            (setq harness-ui-pending-test-changed nil)
+            (harness-ui-pending--on-event
+             "session/pending-updated"
+             (list sid "p1" '(:summary "Deletes the build directory, then rebuilds the project."
+                              :summary-model "claude:claude-haiku-4-5" :summarizing nil)))
+            (should (equal (list sid) harness-ui-pending-test-changed))
+            (let ((text (harness-ui-pending-test-rendered sid "p1")))
+              (should (string-search "   Model summary: Deletes the build directory, then rebuilds the project.\n" text))
+              (should-not (string-search "summarizing" text))
+              (should (< (string-search "The permission judge would deny" text)
+                         (string-search "Model summary:" text)
+                         (string-search "[Allow]" text))))
+            (with-temp-buffer
+              (let ((harness-ui-session-id sid))
+                (harness-ui-pending--insert-permission (harness-ui-pending-record sid "p1")))
+              (goto-char (point-min))
+              (search-forward "Deletes the build")
+              (should (harness-ui-pending-test-face-p (1- (point)) 'harness-ui-pending-summary-face))
+              (let ((help (get-text-property (1- (point)) 'help-echo)))
+                (should (string-search "the model claude:claude-haiku-4-5" help))
+                (should (string-search "can be wrong" help))
+                (should (string-search "decides nothing" help)))
+              (goto-char (point-min))
+              (search-forward "Model summary:")
+              (should (harness-ui-pending-test-face-p (1- (point)) 'harness-dim-face)))
+            ;; A request the harness made with the summary in it, the same call asked about before.
+            (harness-ui-pending-sync
+             sid (list (harness-ui-pending-test-summary-item
+                        "p2" '(:summary "Runs make." :summary-model "claude:haiku"))))
+            (should (string-search "   Model summary: Runs make.\n" (harness-ui-pending-test-rendered sid "p2"))))
+        (remove-hook 'harness-ui-pending-changed-hook #'harness-ui-pending-test-hear-changes)))))
+
+(ert-deftest harness-ui-pending-panel-without-a-summary-is-as-it-was ()
+  "A model that gave no summary leaves only the panel it would have been:
+the line saying one is on its way goes, and nothing takes its place."
+  (harness-ui-pending-test-with
+    (let ((sid (harness-ui-pending-test-session)))
+      (harness-ui-pending-sync sid (list (harness-ui-pending-test-summary-item "plain")
+                                         (harness-ui-pending-test-summary-item "waits" '(:summarizing t))))
+      (let ((plain (harness-ui-pending-test-rendered sid "plain")))
+        (should-not (string-search "Model summary" plain))
+        (should-not (equal plain (harness-ui-pending-test-rendered sid "waits")))
+        (harness-ui-pending--on-event "session/pending-updated" (list sid "waits" '(:summarizing nil)))
+        (should (equal plain (harness-ui-pending-test-rendered sid "waits")))
+        ;; Over the wire a false is :false, a null nil.
+        (harness-ui-pending-sync sid (list (harness-ui-pending-test-summary-item "wire" '(:summarizing t))))
+        (should (string-search "summarizing" (harness-ui-pending-test-rendered sid "wire")))
+        (harness-ui--dispatch-ui "_harness/event"
+                                 (list :event "session/pending-updated"
+                                       :args (list sid "wire" '(:summary nil :summarizing :false)))
+                                 nil)
+        (should (equal plain (harness-ui-pending-test-rendered sid "wire")))))))
+
+(ert-deftest harness-ui-pending-summary-news-for-a-request-not-held-is-no-harm ()
+  "An update for a request, a session or a shape this Emacs does not hold
+changes nothing and signals nothing; a question has no call to summarize."
+  (harness-ui-pending-test-with
+    (let ((sid (harness-ui-pending-test-session))
+          (harness-ui-pending-test-changed nil))
+      (harness-ui-pending-test-question sid "q1")
+      (add-hook 'harness-ui-pending-changed-hook #'harness-ui-pending-test-hear-changes)
+      (unwind-protect
+          (progn
+            (dolist (args (list (list sid "nope" '(:summary "x"))
+                                (list "no-such-session" "p1" '(:summary "x"))
+                                (list sid "q1" nil)
+                                (list sid nil '(:summary "x"))
+                                (list sid "q1" '(:summary "x"))
+                                nil))
+              (should-not (harness-ui-pending--on-event "session/pending-updated" args)))
+            (should-not (harness-ui-pending--on-event "session/pending-changed" (list sid "q1" '(:summary "x"))))
+            ;; Nothing else about the request moved with the unknown ones.
+            (should (equal '("q1") (mapcar (lambda (r) (plist-get r :id)) (harness-ui-pending-items sid)))))
+        (remove-hook 'harness-ui-pending-changed-hook #'harness-ui-pending-test-hear-changes)))))
+
+(ert-deftest harness-ui-pending-the-session-list-only-teaches-forwards ()
+  "The session's list lags the news of a request: a push made before the
+summary came does not take it back, and does not make a request wait for
+one it has none of.  A list that has the summary teaches it, and one that
+says there is none takes the placeholder off."
+  (harness-ui-pending-test-with
+    (let ((sid (harness-ui-pending-test-session)))
+      ;; The request waits for a summary; the list, later, has it.
+      (harness-ui-pending-sync sid (list (harness-ui-pending-test-summary-item "a" '(:summarizing t))))
+      (should (harness-ui-pending-sync
+               sid (list (harness-ui-pending-test-summary-item "a" '(:summary "Runs make." :summary-model "m")))))
+      (should (equal "Runs make." (plist-get (harness-ui-pending-record sid "a") :summary)))
+      (should-not (plist-get (harness-ui-pending-record sid "a") :summarizing))
+      ;; A push made before it came is not the last word.
+      (should-not (harness-ui-pending-sync
+                   sid (list (harness-ui-pending-test-summary-item "a" '(:summarizing t)))))
+      (should (equal "Runs make." (plist-get (harness-ui-pending-record sid "a") :summary)))
+      (should-not (plist-get (harness-ui-pending-record sid "a") :summarizing))
+      ;; Nor does a request that waits for none start to.
+      (harness-ui-pending-sync sid (list (harness-ui-pending-test-summary-item "b")))
+      (should-not (harness-ui-pending-sync
+                   sid (list (harness-ui-pending-test-summary-item "b" '(:summarizing t)))))
+      (should-not (plist-get (harness-ui-pending-record sid "b") :summarizing))
+      ;; A list that says there is none takes the placeholder off.
+      (harness-ui-pending-sync sid (list (harness-ui-pending-test-summary-item "c" '(:summarizing t))))
+      (should (harness-ui-pending-sync sid (list (harness-ui-pending-test-summary-item "c"))))
+      (should-not (plist-get (harness-ui-pending-record sid "c") :summarizing))
+      (should-not (plist-get (harness-ui-pending-record sid "c") :summary))
+      ;; The news of the request, made before it was summarized, loses nothing either.
+      (harness-ui-pending-add sid (list :id "a" :kind "permission" :tool "bash" :summarizing t))
+      (should (equal "Runs make." (plist-get (harness-ui-pending-record sid "a") :summary)))
+      (should-not (plist-get (harness-ui-pending-record sid "a") :summarizing)))))
+
+(ert-deftest harness-ui-pending-acp-request-brings-its-summary-state ()
+  "A request the harness asks over ACP says whether a summary is on its way,
+or carries the one written; an update over the wire then reaches it, the
+request holding the function that answers it all the while."
+  (harness-ui-pending-test-with
+    (let* ((sid (harness-ui-pending-test-session))
+           (answers nil)
+           (respond (lambda (r) (push r answers) t))
+           (drawn (list sid))
+           (drawn-p (lambda (session-id) (member session-id drawn))))
+      (add-hook 'harness-ui-pending-drawn-predicates drawn-p)
+      (unwind-protect
+          (progn
+            (should (harness-ui-pending--on-permission
+                     (list :sessionId sid
+                           :toolCall (list :toolCallId "c1" :title "Bash: make" :kind "execute")
+                           :_harness (list :pendingId "p1" :tool "bash" :summarizing t))
+                     respond))
+            (let ((r (harness-ui-pending-record sid "p1")))
+              (should (eq t (plist-get r :summarizing)))
+              (should-not (plist-get r :summary)))
+            (should (string-search "summarizing" (harness-ui-pending-test-rendered sid "p1")))
+            (harness-ui--dispatch-ui "_harness/event"
+                                     (list :event "session/pending-updated"
+                                           :args (list sid "p1" '(:summary "Runs make." :summary-model "claude:haiku"
+                                                                  :summarizing nil)))
+                                     nil)
+            (let ((r (harness-ui-pending-record sid "p1")))
+              (should (equal "Runs make." (plist-get r :summary)))
+              (should (equal "claude:haiku" (plist-get r :summary-model)))
+              (should-not (plist-get r :summarizing))
+              (should (eq respond (plist-get r :respond))))
+            ;; A request that came with its summary.
+            (should (harness-ui-pending--on-permission
+                     (list :sessionId sid
+                           :toolCall (list :toolCallId "c2" :title "Bash: make" :kind "execute")
+                           :_harness (list :pendingId "p2" :tool "bash" :summary "Runs make."
+                                           :summaryModel "claude:haiku"))
+                     respond))
+            (let ((r (harness-ui-pending-record sid "p2")))
+              (should (equal "Runs make." (plist-get r :summary)))
+              (should (equal "claude:haiku" (plist-get r :summary-model)))
+              (should-not (plist-get r :summarizing)))
+            (harness-ui-pending-answer-permission sid "p1" "allow-once")
+            (should (equal '((:outcome (:outcome "selected" :optionId "allow-once"))) answers)))
+        (remove-hook 'harness-ui-pending-drawn-predicates drawn-p)))))
+
+(ert-deftest harness-ui-pending-popout-follows-the-summary ()
+  "The popout of a request redraws when its summary comes, as the chat's tail
+does: both are drawn from the one store."
+  (harness-ui-pending-test-with
+    (let* ((sid (harness-ui-pending-test-session "Asker"))
+           (key (list 'pending sid)))
+      (harness-ui-pending-sync sid (list (harness-ui-pending-test-summary-item "p1" '(:summarizing t))))
+      (harness-ui-pending-popout sid)
+      (let ((buf (harness-ui-popout-buffer key)))
+        (should (buffer-live-p buf))
+        (with-current-buffer buf
+          (should (string-search "Model summary: summarizing…" (buffer-string)))
+          (should-not (string-search "Deletes the build" (buffer-string))))
+        (harness-ui-pending--on-event
+         "session/pending-updated"
+         (list sid "p1" '(:summary "Deletes the build directory." :summary-model "m" :summarizing nil)))
+        (harness-test-wait (lambda () (with-current-buffer buf (string-search "Deletes the build" (buffer-string))))
+                           5 "the popout to show the summary")
+        (with-current-buffer buf
+          (should (string-search "Model summary: Deletes the build directory." (buffer-string)))
+          (should-not (string-search "summarizing" (buffer-string))))))))
+
 (provide 'harness-ui-pending-test)
 ;;; harness-ui-pending-test.el ends here

@@ -45,7 +45,7 @@ The pictures, by the name `scripts/media.sh` takes:
 | Name | Shows | Function |
 |---|---|---|
 | `chat` | The task board in the fullscreen layout, the session of the task in review beside it: the feedback it was sent back with, the fix, the report it handed in again and the review banner, with the changes the task made: the files as a tree and the threads | `harness-media-shot-chat` |
-| `chat-permission` | A chat waiting for permission to run `pip install` | `harness-media-shot-chat-permission` |
+| `chat-permission` | A chat waiting for permission to run `pip install`, a cheap model's summary of the command under it | `harness-media-shot-chat-permission` |
 | `chat-question` | A chat waiting for the answer to a question | `harness-media-shot-chat-question` |
 | `attachments` | A compose box holding a picture and a video, their thumbnails in the chips, and a link still downloading with its progress | `harness-media-shot-attachments` |
 | `compose-chips` | A compose box whose message names an image, a file of the project and a task: every reference the same inline chip, the list of attachments above | `harness-media-shot-compose-chips` |
@@ -57,7 +57,7 @@ The pictures, by the name `scripts/media.sh` takes:
 | `report` | The board with a task's report popped out, at its end: the chart it handed in, the test run it quotes, the review banner and the feedback box | `harness-media-shot-report` |
 | `report-image` | That chart, clicked: shown larger in a popout of its own | `harness-media-shot-report-image` |
 | `sessions` | The session list | `harness-media-shot-sessions` |
-| `popout-permission` | The session list with a session's permission request popped out under it, as wide as the `sessions` picture | `harness-media-shot-popout-permission` |
+| `popout-permission` | The session list with a session's permission request popped out under it, summary and all, as wide as the `sessions` picture | `harness-media-shot-popout-permission` |
 | `popout-question` | The task board with a task's question popped out under it | `harness-media-shot-popout-question` |
 | `tree` | The conversation tree: a session, a fork and a BTW | `harness-media-shot-tree` |
 | `usage` | The usage dashboard over 30 days, by model, with the fallback list beneath the plan | `harness-media-shot-usage` |

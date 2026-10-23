@@ -155,6 +155,7 @@ take it in.  The session list hides internal sessions unless asked.
 - `session/pending` (id) — Return the pending requests of session ID.
 - `session/pending-add` (id request) — Register a blocking REQUEST (:kind permission|question :payload …) on ID.
 - `session/pending-resolve` (id pid answer) — Remove pending request PID from session ID with ANSWER; return the item or nil.
+- `session/pending-update` (id pid changes) — Merge CHANGES into the payload of pending request PID of session ID.
 - `session/provider-continuation` (id &optional node-id) — Return how the provider conversation of session ID goes on from NODE-ID.
 - `session/provider-state` (id &optional model) — Return the provider state of session ID that MODEL can continue, or nil.
 - `session/queue` (id text &optional attachments from) — Queue TEXT with ATTACHMENTS for the next turn of session ID; return the item.
@@ -201,6 +202,7 @@ take it in.  The session list hides internal sessions unless asked.
 - `session/nodes-removed` — (ID NODE-IDS) after nodes were dropped from the transcript (`session/discard-nodes`)
 - `session/pending-changed` — (ID ITEMS)
 - `session/pending-resolved` — (ID ITEM ANSWER)
+- `session/pending-updated` — (ID PID CHANGES) after a pending request's payload was added to (`session/pending-update`); CHANGES are the keys merged in
 - `session/plan` — (ID TEXT)
 - `session/provider-state-changed` — (ID STATE) when the provider state is replaced by another
 - `session/queue-changed` — (ID ITEMS)
@@ -265,6 +267,7 @@ take it in.  The session list hides internal sessions unless asked.
 - `session/nodes-removed`
 - `session/pending-changed`
 - `session/pending-resolved`
+- `session/pending-updated`
 - `session/plan`
 - `session/provider-state-changed`
 - `session/queue-changed`

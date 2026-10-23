@@ -258,7 +258,7 @@ together by user story, in the order the story is told:
 | Section | Options |
 |---|---|
 | New sessions | `harness-model`, `harness-thinking`, `harness-permission-mode`, `harness-non-interactive`, `harness-budget` |
-| Files and safety | `harness-allowed-directories`, `harness-sandbox-policy`, `harness-perms-rules`, `harness-perms-auto-model` |
+| Files and safety | `harness-allowed-directories`, `harness-sandbox-policy`, `harness-perms-rules`, `harness-perms-auto-model`, `harness-perms-summarize`, `harness-perms-summary-model` |
 | Task board | `harness-tasks-model`, `harness-tasks-thinking`, `harness-tasks-permission-mode`, `harness-tasks-non-interactive`, `harness-tasks-context-limit`, `harness-tasks-require-verification`, `harness-tasks-max-running`, `harness-tasks-lend-blocked-slot-after`, `harness-tasks-worktrees` |
 | Commits | `harness-commit-msg-strip-attribution` (off unless a project turns it on in its `.dir-locals.el`, or the global value does for every project) |
 | Notifications | `harness-tasks-notify-events`, `harness-notifications-providers`, `harness-gotify-url`, `harness-gotify-token` |

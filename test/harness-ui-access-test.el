@@ -29,6 +29,8 @@
 (defvar harness-ui-access--filter)
 (defvar harness-ui-access--page)
 (defvar harness-ui-map)
+(defvar harness-perms-summarize)
+(declare-function harness-provider-demo--script "harness-provider-demo")
 
 (defconst harness-ui-access-test-width 120
   "The width of the window the views are laid out for in the tests.
@@ -1333,6 +1335,37 @@ the buttons go on a line under the path; a wide window keeps them in one row."
           (should (equal "Permission mode (x) Ask ( ) Accept Edits ( ) Auto ( ) YOLO Ask before writes, commands and network"
                          (harness-ui-access-test-setting 'mode))))))))
 
+
+(ert-deftest harness-ui-access-waiting-request-shows-what-a-model-says-its-call-does ()
+  "With summaries on, the request the session waits on is drawn at once and
+gets what a cheap model writes of its call: the whole way, from the
+permission chain through the session's pending list and the ACP events to
+the panel of the access view, which is the chat's.  The demo provider is
+the cheap model."
+  (harness-ui-access-test-with
+    (let* ((harness-perms-summarize t)
+           (harness-provider-demo-script-override
+            (lambda (request)
+              (if (string-prefix-p "You explain one blocked tool call" (or (plist-get request :system) ""))
+                  ;; The demo's own answer to a summary.
+                  (let ((harness-provider-demo-script-override nil))
+                    (harness-provider-demo--script request))
+                '((:type tool-call :id "w1" :name "test_fetch" :input (:url "https://example.com"))
+                  (:type done :stop-reason end-turn)))))
+           (turn (harness-call 'agent/prompt sid "go")))
+      (harness-test-wait (lambda () (harness-call 'permission/pending sid)) 5 "the request")
+      (harness-ui-access-test-open sid)
+      (harness-ui-access-test-wait-text "Waiting for you")
+      (harness-ui-access-test-wait-text "Model summary: Calls test_fetch with the arguments shown")
+      (let ((text (harness-ui-access-test-text)))
+        (should-not (string-match-p "summarizing" text))
+        (should (< (string-search "Permission" text) (string-search "Model summary:" text)
+                   (string-search "[Allow]" text))))
+      ;; The request is the user's to answer, summary or not.
+      (should (plist-get (plist-get (car (harness-call 'permission/pending sid)) :payload) :summary))
+      (harness-ui-access-test-push "[Allow]" (harness-ui-access--find-anchor '(call . "w1")))
+      (harness-test-await turn 20)
+      (harness-ui-access-test-wait-text "Waiting for you" t))))
 
 (provide 'harness-ui-access-test)
 ;;; harness-ui-access-test.el ends here

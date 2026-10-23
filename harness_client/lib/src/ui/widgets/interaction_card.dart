@@ -331,6 +331,14 @@ class _InteractionCardState extends State<InteractionCard> {
                   ),
                 ),
               ),
+            // What a cheap model says the call does, marked as its words:
+            // a line saying it is being written, then the summary, or
+            // nothing when the model gave none.
+            if (request.summarizing || request.summary != null)
+              _SummaryNote(
+                summary: request.summary,
+                model: request.summaryModel,
+              ),
             if (patterns is String && patterns.isNotEmpty)
               Padding(
                 padding: const EdgeInsets.only(bottom: 12),
@@ -813,6 +821,94 @@ class _DiagramView extends StatelessWidget {
           ),
         );
       },
+    );
+  }
+}
+
+/// What a cheap model wrote about the call a permission request is about,
+/// or, while it is being written, a line saying so.  The words are the
+/// model's and advice only: the card says so, and the call is judged by the
+/// command shown above them.  It takes as little room as it can, so that
+/// the answers stay near on a small phone.
+class _SummaryNote extends StatelessWidget {
+  const _SummaryNote({required this.summary, required this.model});
+
+  final String? summary;
+  final String? model;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final text = summary;
+    final writer = model;
+    return Semantics(
+      container: true,
+      label: text == null || text.isEmpty
+          ? 'A model is summarizing what this call does'
+          : 'Summary written by '
+                '${writer == null || writer.isEmpty ? 'a model' : writer}, '
+                'which can be wrong: $text',
+      child: Container(
+        key: const ValueKey('permission-summary'),
+        width: double.infinity,
+        margin: const EdgeInsets.only(bottom: 10),
+        padding: const EdgeInsets.fromLTRB(11, 8, 11, 9),
+        decoration: BoxDecoration(
+          color: theme.colorScheme.surfaceContainerLow,
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(
+            color: theme.colorScheme.outlineVariant.withValues(alpha: 0.7),
+          ),
+        ),
+        child: ExcludeSemantics(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Icon(
+                    Icons.auto_awesome_outlined,
+                    size: 14,
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
+                  const SizedBox(width: 6),
+                  Text(
+                    'Model summary',
+                    style: HarnessText.meta(
+                      context,
+                    ).copyWith(fontWeight: FontWeight.w700),
+                  ),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      text == null || text.isEmpty ? '' : 'advice, can be wrong',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: HarnessText.caption(context),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 4),
+              if (text == null || text.isEmpty)
+                Row(
+                  children: [
+                    const HarnessActivity(radius: 7),
+                    const SizedBox(width: 8),
+                    Text('Summarizing…', style: HarnessText.caption(context)),
+                  ],
+                )
+              else
+                Text(
+                  text,
+                  style: HarnessText.body(
+                    context,
+                  ).copyWith(fontStyle: FontStyle.italic, height: 1.35),
+                ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }

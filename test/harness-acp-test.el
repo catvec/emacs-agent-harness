@@ -985,6 +985,48 @@ labelled image 1; an image without one, from any other client, has none."
       (harness-test-wait (lambda () (= 2 (length recorded))))
       (should (equal (list sid "p2" '(:behavior deny :scope once)) (car recorded))))))
 
+(ert-deftest harness-acp-local-permission-request-carries-its-summary ()
+  "A request says in `_harness' that a summary of its call is on its way, or
+carries the one already written, and the update that brings it is a
+forwarded event; a request made without one has the keys empty."
+  (harness-acp-test-with
+    (let* ((conn (harness-acp-test-connect))
+           (sid (harness-acp-test-new-session conn))
+           (extra-of (lambda (pid)
+                       (harness-test-wait
+                        (lambda () (cl-find-if (lambda (m) (and (equal (car m) "session/request_permission")
+                                                                (equal pid (plist-get (plist-get (nth 1 m) :_harness)
+                                                                                      :pendingId))))
+                                               harness-acp-test-messages)))
+                       (plist-get (nth 1 (cl-find-if (lambda (m) (equal pid (plist-get (plist-get (nth 1 m) :_harness)
+                                                                                      :pendingId)))
+                                                     harness-acp-test-messages))
+                                  :_harness))))
+      (harness-emit 'permission/requested sid
+                    (list :id "s1" :kind 'permission
+                          :payload (list :tool "bash" :kind 'exec :input '(:command "make") :summarizing t)))
+      (let ((extra (funcall extra-of "s1")))
+        (should (eq t (plist-get extra :summarizing)))
+        (should-not (plist-get extra :summary)))
+      (harness-emit 'permission/requested sid
+                    (list :id "s2" :kind 'permission
+                          :payload (list :tool "bash" :kind 'exec :input '(:command "make")
+                                         :summary "Runs make." :summary-model "claude:haiku")))
+      (let ((extra (funcall extra-of "s2")))
+        (should (equal "Runs make." (plist-get extra :summary)))
+        (should (equal "claude:haiku" (plist-get extra :summaryModel)))
+        (should-not (plist-get extra :summarizing)))
+      (harness-emit 'permission/requested sid
+                    (list :id "s3" :kind 'permission :payload (list :tool "bash" :kind 'exec)))
+      (let ((extra (funcall extra-of "s3")))
+        (should-not (plist-get extra :summary))
+        (should-not (plist-get extra :summarizing)))
+      ;; The update is forwarded as an event, with what was merged in.
+      (harness-emit 'session/pending-updated sid "s1" '(:summary "Runs make." :summary-model "claude:haiku" :summarizing nil))
+      (harness-test-wait (lambda () (harness-acp-test-events "session/pending-updated")) 5 "the update")
+      (should (equal (list (list sid "s1" '(:summary "Runs make." :summary-model "claude:haiku" :summarizing nil)))
+                     (harness-acp-test-events "session/pending-updated"))))))
+
 (ert-deftest harness-acp-local-directory-permission-options ()
   "Every request is offered the same options, under the same names.
 A tool prompt, the jail's prompt about a directory and an agent's own

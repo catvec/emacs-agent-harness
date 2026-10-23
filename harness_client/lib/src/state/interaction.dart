@@ -30,7 +30,14 @@ class InteractionRequest {
     this.completer,
     this.synthetic = false,
     this.pendingId,
-  }) : createdAt = DateTime.now();
+  }) : createdAt = DateTime.now() {
+    if (isPermission) {
+      final extra = harness;
+      summary = _summaryText(extra['summary']);
+      summaryModel = asString(extra['summaryModel']);
+      summarizing = summary == null && extra['summarizing'] == true;
+    }
+  }
 
   final String method;
   final JsonMap params;
@@ -48,6 +55,38 @@ class InteractionRequest {
 
   JsonMap get toolCall => asMap(params['toolCall']);
   JsonMap get harness => asMap(params['_harness']);
+
+  /// What a cheap model wrote about the call a permission request is about,
+  /// a sentence or two (null when there is none), and the model that wrote
+  /// it.  The harness asks the person at once and has the model write it
+  /// meanwhile, so [summarizing] says one is on its way; it arrives with
+  /// [learnSummary].  It is advice, shown as a model's words: nothing the
+  /// harness decides reads it.
+  String? summary;
+  String? summaryModel;
+  bool summarizing = false;
+
+  /// Take in what the harness says of the summary: [changes] are the keys of
+  /// the request's payload it added to (`summary`, `summary-model`,
+  /// `summarizing`), as the harness tells them in `session/pending-updated`.
+  /// A summary, or the news that there will be none, ends [summarizing].
+  /// Returns whether the request changed.
+  bool learnSummary(JsonMap changes) {
+    if (!isPermission) return false;
+    final text = _summaryText(changes['summary']);
+    final model = asString(changes['summary-model']);
+    final waiting =
+        changes.containsKey('summarizing') && changes['summarizing'] == true;
+    final before = (summary, summaryModel, summarizing);
+    if (text != null) {
+      summary = text;
+      summaryModel = model ?? summaryModel;
+    }
+    if (text != null || changes.containsKey('summarizing')) {
+      summarizing = text == null && waiting && summary == null;
+    }
+    return before != (summary, summaryModel, summarizing);
+  }
 
   /// The call a permission request is about: its `toolCallId` is the
   /// `call-id` of the call in the transcript.  Null for a question.
@@ -145,6 +184,12 @@ class InteractionRequest {
     'answer': answer,
     if (attachments.isNotEmpty) 'attachments': attachments,
   };
+}
+
+/// [value], a summary the harness sent, as text, or null when it holds none.
+String? _summaryText(Object? value) {
+  final text = asString(value)?.trim();
+  return text == null || text.isEmpty ? null : text;
 }
 
 /// The answer to a question of several choices

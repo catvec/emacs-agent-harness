@@ -2565,6 +2565,32 @@ Return the pending id.  The session becomes `blocked'."
       (harness-session--touch s))
     item))
 
+(harness-defmethod session/pending-update (id pid changes)
+  "Merge CHANGES into the payload of pending request PID of session ID.
+CHANGES is a plist of payload keys: a request is shown to the user the
+moment it is made, and what is learned about it later, such as a
+summary of a permission prompt a cheap model writes while the user
+reads it, is added to it here.  Return the updated item, or nil when
+nothing was updated: the session or the request is gone, answered
+meanwhile.  The request stays what it is: the session's status and
+update time stay, and the listeners of `session/pending-changed' hear
+nothing.  `session/pending-updated' tells the clients that draw the
+request, and the session is announced changed (`session/changed', so
+that a client reading the session, not the events, has its pending list
+as it is now)."
+  (when-let* ((s (gethash id harness-sessions))
+              (item (cl-find pid (harness-session-pending s)
+                             :key (lambda (it) (plist-get it :id)) :test #'equal)))
+    (let ((new (plist-put (copy-sequence item) :payload
+                          (harness-plist-merge (plist-get item :payload) changes))))
+      (setf (harness-session-pending s)
+            (mapcar (lambda (it) (if (eq it item) new it)) (harness-session-pending s)))
+      (harness-emit 'session/pending-updated id pid changes)
+      ;; Not `harness-session--touch': the session did not change by this,
+      ;; its update time stays; but what a client reads of it did.
+      (harness-session--announce s)
+      new)))
+
 (harness-defmethod session/pending (id)
   "Return the pending requests of session ID."
   (harness-session-pending (harness-session--get id)))
@@ -3650,6 +3676,7 @@ run on in this process."
               (session/queue-changed . "(ID ITEMS)") (session/pending-changed . "(ID ITEMS)")
               (session/steering-changed . "(ID ITEMS) when the messages the running turn has not taken yet changed (`session/set-steering')")
               (session/pending-resolved . "(ID ITEM ANSWER)")
+              (session/pending-updated . "(ID PID CHANGES) after a pending request's payload was added to (`session/pending-update'); CHANGES are the keys merged in")
               (session/usage . "(ID TOTALS RECORD)") (session/todos . "(ID TODOS)") (session/plan . "(ID TEXT)")))
   (harness-declare-event (car ev) (cdr ev)))
 

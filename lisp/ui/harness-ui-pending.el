@@ -45,6 +45,13 @@
 ;; its own.  A click on a line, or < and >, picks the one the answers hold
 ;; for; the least permissive stays one step away.
 ;;
+;; A permission panel also says what its call would do, in a sentence or
+;; two a cheap model writes while the request waits (see "What a model
+;; says the call does" below): the request is drawn at once with a line
+;; saying it is being summarized, and the summary takes its place when
+;; the harness tells it came (`session/pending-updated').  The chat, a
+;; popout and the access view draw the one panel, so they all show it.
+;;
 ;; A question that allows several options (`:allow-multiple', ask_user's
 ;; `allow_multiple') draws its options as check boxes.  A digit or a
 ;; click ticks or unticks one instead of answering; the options ticked
@@ -80,6 +87,10 @@
 (harness-ui-define-icon harness-icon-check-off "check-off" "☐" "[ ]"
                         "An option that is not ticked: an empty box.")
 
+(defface harness-ui-pending-summary-face '((t :inherit italic))
+  "Face of what a model wrote about a permission request's call."
+  :group 'harness-ui-pending)
+
 (declare-function harness-ui-popout-show "harness-ui-popout")
 (declare-function harness-ui-popout-refresh "harness-ui-popout")
 (declare-function harness-ui-popout-close "harness-ui-popout")
@@ -108,7 +119,11 @@ user may tick several of its options.  A permission also has the
 `:call-id' of the tool call that waits on it, and, when the harness
 worked out what its lasting answers could cover, a `:ladder' of covers
 \(plists of `:id' and `:label', narrowest first), the id of the one they
-start on, `:cover', and the id the user picked instead, `:picked-cover'.")
+start on, `:cover', and the id the user picked instead, `:picked-cover'.
+A cheap model summarizes what the call would do while the request
+waits: `:summarizing' says one is on its way, `:summary' is the text
+\(and `:summary-model' the model that wrote it) once it came; neither
+when there is none.  The panel draws it marked as a model's.")
 
 (defvar harness-ui-pending--diagrams (make-hash-table :test 'equal)
   "Session id -> (PID . INDEX) of the diagram its panel shows.
@@ -255,6 +270,14 @@ session's pending list, must not undo what they chose on its panel."
   (when-let* ((picked (plist-get old :picked-cover))
               ((harness-ui-pending--ladder-step record picked)))
     (setq record (plist-put (copy-sequence record) :picked-cover picked)))
+  ;; What the harness learned of the call meanwhile is not forgotten
+  ;; when news of the request, made before, arrives.
+  (when (and (plist-get old :summary) (not (plist-get record :summary)))
+    (setq record (harness-plist-merge record (list :summary (plist-get old :summary)
+                                                   :summary-model (plist-get old :summary-model)
+                                                   :summarizing nil))))
+  (when (and (not (plist-get old :summarizing)) (plist-get record :summarizing) old)
+    (setq record (plist-put (copy-sequence record) :summarizing nil)))
   record)
 
 (defun harness-ui-pending-add (session-id record)
@@ -271,6 +294,18 @@ cover they picked (see `harness-ui-pending--keep-choices')."
          (rest (cl-remove pid (harness-ui-pending-items session-id)
                           :key (lambda (r) (plist-get r :id)) :test #'equal)))
     (harness-ui-pending--put session-id (append rest (list record)))))
+
+(defun harness-ui-pending-update (session-id pid changes)
+  "Merge CHANGES, a plist of record keys, into the request PID of SESSION-ID.
+The hosts drawing it are told.  Nothing happens, and nil is returned,
+when SESSION-ID waits on no request PID or CHANGES leave it as it is."
+  (when-let* ((old (harness-ui-pending-record session-id pid)))
+    (let ((new (harness-plist-merge old changes)))
+      (unless (equal new old)
+        (harness-ui-pending--put session-id
+                                 (mapcar (lambda (r) (if (eq r old) new r))
+                                         (harness-ui-pending-items session-id)))
+        t))))
 
 (defun harness-ui-pending-remove (session-id pid)
   "Forget the request PID of SESSION-ID."
@@ -312,6 +347,8 @@ ITEM is (:id :kind :payload) in the wire shape."
             :commands (plist-get payload :commands) :covers (plist-get payload :covers)
             :ladder (plist-get payload :ladder) :cover (plist-get payload :cover)
             :reason (plist-get payload :reason)
+            :summary (plist-get payload :summary) :summary-model (plist-get payload :summary-model)
+            :summarizing (and (harness-json-true-p (plist-get payload :summarizing)) t)
             :options (plist-get payload :options)))))
 
 (defun harness-ui-pending-sync-session (session-id)
@@ -323,17 +360,38 @@ for it.  Bringing them in lets a view's popout show and answer them
   (when-let* ((session (harness-ui-session session-id)))
     (harness-ui-pending-sync session-id (plist-get session :pending))))
 
+(defun harness-ui-pending--learn (session-id old item)
+  "Learn from ITEM, a pending item of SESSION-ID, what it adds to the request OLD.
+That is the summary of a permission request's call, or that there will
+be none.  The session's list lags the news of the request, so this only
+goes forward: a summary is never taken back, and a request never starts
+to wait for one.  Return non-nil when the request changed."
+  (when (equal (plist-get old :kind) "permission")
+    (let* ((payload (plist-get item :payload))
+           (summary (plist-get payload :summary))
+           (changes (cond
+                     ((and (stringp summary) (not (plist-get old :summary)))
+                      (list :summary summary :summary-model (plist-get payload :summary-model)
+                            :summarizing nil))
+                     ((and (plist-get old :summarizing)
+                           (not (harness-json-true-p (plist-get payload :summarizing))))
+                      (list :summarizing nil)))))
+      (and changes (harness-ui-pending-update session-id (plist-get old :id) changes)))))
+
 (defun harness-ui-pending-sync (session-id items)
   "Reconcile the requests of SESSION-ID with its pending ITEMS.
 Records a client owns (with a `:respond' function) keep it.  Return
 non-nil when the store changed."
   (let ((changed nil))
     (dolist (item items)
-      (let ((pid (plist-get item :id)))
-        (unless (or (harness-ui-pending-record session-id pid)
-                    (harness-ui-pending--answered-p session-id pid))
-          (harness-ui-pending-add session-id (harness-ui-pending--record-of-item item))
-          (setq changed t))))
+      (let* ((pid (plist-get item :id))
+             (old (harness-ui-pending-record session-id pid)))
+        (cond
+         (old (when (harness-ui-pending--learn session-id old item)
+                (setq changed t)))
+         ((harness-ui-pending--answered-p session-id pid))
+         (t (harness-ui-pending-add session-id (harness-ui-pending--record-of-item item))
+            (setq changed t)))))
     (dolist (r (harness-ui-pending-items session-id))
       (let ((pid (plist-get r :id)))
         (when (and (not (cl-find pid items :key (lambda (i) (plist-get i :id)) :test #'equal))
@@ -1331,6 +1389,8 @@ the panel's keys from there."
       (harness-ui-pending--insert-input r))
     (when-let* ((reason (plist-get r :reason)))
       (insert (propertize (format "   %s\n" reason) 'face 'harness-hint-face)))
+    ;; What a model says the call does, marked as its words.
+    (harness-ui-pending--insert-summary r)
     ;; What the lasting answers cover, and the lines to pick it from.
     (harness-ui-pending--insert-cover-block r)
     (insert "   ")
@@ -1345,6 +1405,44 @@ the panel's keys from there."
     (when-let* ((key (and harness-ui-pending-box-hints (nth 1 (car buttons)))))
       (insert "   " (harness-compose-panel-hint key) "\n"))
     (harness-ui-pending--decorate start (point) pid (harness-ui-pending--permission-map r))))
+
+;;;;; What a model says the call does
+;;
+;; A cheap model reads the call while the request waits and writes a
+;; sentence or two about it (see "Summaries of what a prompt asks" in
+;; harness-perms.el).  The request is drawn at once, with a line saying
+;; that it is being summarized; the summary replaces it when it comes,
+;; or the line goes when there is none.  It is the model's words, so the
+;; line says so, and its tooltip says that they can be wrong and decide
+;; nothing: the user judges the call by what the panel shows above it.
+
+(defconst harness-ui-pending--summary-label "Model summary:"
+  "What starts the line of a model's summary of a request's call.")
+
+(defun harness-ui-pending--summary-help (r)
+  "Return the tooltip of the summary line of permission record R."
+  (format "Written by %s from the call's arguments. It can be wrong and it decides nothing: judge the call by what is shown above it."
+          (if-let* ((model (plist-get r :summary-model))
+                    ((stringp model)))
+              (format "the model %s" model)
+            "a model")))
+
+(defun harness-ui-pending--insert-summary (r)
+  "Insert the line of the summary of permission record R, or of its placeholder.
+Nothing when the request has neither: a model that failed leaves the
+panel as it was."
+  (let ((summary (plist-get r :summary))
+        (label harness-ui-pending--summary-label))
+    (cond
+     ((and (stringp summary) (not (string-blank-p summary)))
+      (insert (propertize (concat "   " (propertize label 'face 'harness-dim-face) " "
+                                  (propertize summary 'face 'harness-ui-pending-summary-face)
+                                  "\n")
+                          'wrap-prefix "     "
+                          'help-echo (harness-ui-pending--summary-help r))))
+     ((plist-get r :summarizing)
+      (insert (propertize (format "   %s summarizing…\n" label) 'face 'harness-dim-face
+                          'help-echo "A model is writing a summary of what this call does."))))))
 
 ;;;;; A long input, whole
 ;;
@@ -1945,6 +2043,8 @@ clients, or the session's own pending list, answer it."
                :commands (plist-get extra :commands) :covers (plist-get extra :covers)
                :ladder (plist-get extra :ladder) :cover (plist-get extra :cover)
                :reason (plist-get extra :reason)
+               :summary (plist-get extra :summary) :summary-model (plist-get extra :summaryModel)
+               :summarizing (and (harness-json-true-p (plist-get extra :summarizing)) t)
                :options (plist-get params :options))))
       t)))
 
@@ -2158,12 +2258,36 @@ its panel's; for a question, the question."
       (propertize (harness-first-line (or (plist-get r :question) "") max) 'face 'bold)
     (harness-ui-tool-title-string (plist-get r :tool) (plist-get r :title) max)))
 
+;;;; What the harness learns of a request
+
+(defun harness-ui-pending--on-event (event args)
+  "Add what the harness learned of a request to the one drawn.
+On `harness-ui-event-functions'.  EVENT `session/pending-updated' has
+ARGS (SESSION-ID PID CHANGES): CHANGES are the keys of the request's
+payload that were added to; the summary a model wrote of a permission
+request's call is the one that is drawn, or that there will be none.
+A request this Emacs does not hold learns it from the session's list,
+when it holds the request."
+  (when (equal event "session/pending-updated")
+    (pcase-let ((`(,session-id ,pid ,changes) args))
+      (when (and (stringp session-id) (stringp pid) (consp changes))
+        (harness-ui-pending-update
+         session-id pid
+         (append (and (plist-member changes :summary)
+                      (list :summary (plist-get changes :summary)))
+                 (and (plist-member changes :summary-model)
+                      (list :summary-model (plist-get changes :summary-model)))
+                 (and (plist-member changes :summarizing)
+                      (list :summarizing (and (harness-json-true-p (plist-get changes :summarizing)) t))))))))
+  nil)
+
 ;;;; Module
 
 (defun harness-ui-pending--init ()
   "Join the UI: own ACP requests, and pop out what a session waits on."
   (add-hook 'harness-ui-permission-functions #'harness-ui-pending--on-permission)
   (add-hook 'harness-ui-question-functions #'harness-ui-pending--on-question)
+  (add-hook 'harness-ui-event-functions #'harness-ui-pending--on-event)
   (add-hook 'harness-ui-connected-hook #'harness-ui-pending--retry-images)
   (when (boundp 'harness-ui-popout-at-point-functions)
     (add-hook 'harness-ui-popout-at-point-functions #'harness-ui-pending-popout-at-point)))

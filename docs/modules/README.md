@@ -109,7 +109,7 @@ ui-tasks); `(setq harness-enabled-modules t)` loads every module.
 | [naming](naming.md) | by default | [session](session.md), [provider](provider.md), [agent](agent.md) | Name nameless sessions with a cheap model as soon as their first message is sent. |
 | [notifications](notifications.md) |  |  | Notifications for the user through pluggable providers: desktop (system) and Gotify. |
 | [patch-review](patch-review.md) |  | [store](store.md), [tasks](tasks.md), [tools-review](tools-review.md) | The threads of a task's review: kept in the state directory, delivered with the feedback, answered by the agent. |
-| [perms](perms.md) | by default | [config](config.md), [tools](tools.md) | Directory jail, directory requests, sandbox guard, permission modes, auto judge, user prompts and the user's approval of denied calls. |
+| [perms](perms.md) | by default | [config](config.md), [tools](tools.md) | Directory jail, directory requests, sandbox guard, permission modes, auto judge, user prompts with a cheap model's summary of the call, and the user's approval of denied calls. |
 | [pet](pet.md) |  | [store](store.md), [provider](provider.md) | A companion pet: hatched with random bones, named and voiced by a cheap model, growing with use. |
 | [plugins](plugins.md) |  | [session](session.md) | Projects' plugins: what a project's trusted .dir-locals.el loads, and the plugin modules each session froze. |
 | [priority](priority.md) | by default |  | Session priority (a task's is its session's): low, medium or high, and the one vocabulary for it. |
@@ -262,7 +262,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `permission/decided` | [tools](tools.md) | [tools](tools.md) | [access](access.md), [agent](agent.md), [insights](insights.md), [perms](perms.md) |  |
 | `permission/dir-allowed` | [perms](perms.md) | [access](access.md), [perms](perms.md) |  | yes |
 | `permission/dir-revoked` | [perms](perms.md) | [access](access.md), [perms](perms.md) |  | yes |
-| `permission/requested` | [perms](perms.md) | [perms](perms.md) | [acp](acp.md), [insights](insights.md) |  |
+| `permission/requested` | [perms](perms.md) | [perms](perms.md) | [acp](acp.md), [insights](insights.md), [perms](perms.md) |  |
 | `pet/changed` | [pet](pet.md) | [pet](pet.md) | [ui-pet](ui-pet.md) | yes |
 | `pet/said` | [pet](pet.md) | [pet](pet.md) | [ui-pet](ui-pet.md) | yes |
 | `provider/models-updated` | [provider](provider.md) | [provider](provider.md) | [session](session.md) | yes |
@@ -292,6 +292,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `session/nodes-removed` | [session](session.md) | [session](session.md) | [ui-chat](ui-chat.md) | yes |
 | `session/pending-changed` | [session](session.md) | [session](session.md) | [resilience](resilience.md), [tasks](tasks.md), [tools](tools.md), [tools-sessions](tools-sessions.md) | yes |
 | `session/pending-resolved` | [session](session.md) | [session](session.md) |  |  |
+| `session/pending-updated` | [session](session.md) | [session](session.md) | [ui-pending](ui-pending.md) | yes |
 | `session/plan` | [session](session.md) | [session](session.md) |  |  |
 | `session/provider-state-changed` | [session](session.md) | [session](session.md) | [provider-claude](provider-claude.md) |  |
 | `session/queue-changed` | [session](session.md) | [session](session.md) |  | yes |
@@ -398,7 +399,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `harness-ui-cache-warm-functions` | [ui-cache-warm](ui-cache-warm.md) |  |
 | `harness-ui-connected-hook` | [ui](ui.md) | [ui-cache-warm](ui-cache-warm.md), [ui-chat](ui-chat.md), [ui-decisions](ui-decisions.md), [ui-pending](ui-pending.md), [ui-pet](ui-pet.md), [ui-tasks](ui-tasks.md), [ui-tool-slots-load](ui-tool-slots-load.md), [ui-version](ui-version.md) |
 | `harness-ui-decision-functions` | [ui-chat](ui-chat.md), [ui-decisions](ui-decisions.md) | [ui-chat](ui-chat.md) |
-| `harness-ui-event-functions` | [ui](ui.md), [ui-children](ui-children.md), [ui-priority](ui-priority.md) | [ui-access](ui-access.md), [ui-acp-remote](ui-acp-remote.md), [ui-cache-warm](ui-cache-warm.md), [ui-chat](ui-chat.md), [ui-children](ui-children.md), [ui-config](ui-config.md), [ui-decisions](ui-decisions.md), [ui-merge](ui-merge.md), [ui-patch-review](ui-patch-review.md), [ui-pet](ui-pet.md), [ui-priority](ui-priority.md), [ui-report](ui-report.md), [ui-review](ui-review.md), [ui-secrets](ui-secrets.md), [ui-sessions](ui-sessions.md), [ui-slots](ui-slots.md), [ui-tasks](ui-tasks.md), [ui-tool-slots-load](ui-tool-slots-load.md), [ui-tree](ui-tree.md), [ui-usage](ui-usage.md), [ui-version](ui-version.md), [ui-worktree](ui-worktree.md) |
+| `harness-ui-event-functions` | [ui](ui.md), [ui-children](ui-children.md), [ui-priority](ui-priority.md) | [ui-access](ui-access.md), [ui-acp-remote](ui-acp-remote.md), [ui-cache-warm](ui-cache-warm.md), [ui-chat](ui-chat.md), [ui-children](ui-children.md), [ui-config](ui-config.md), [ui-decisions](ui-decisions.md), [ui-merge](ui-merge.md), [ui-patch-review](ui-patch-review.md), [ui-pending](ui-pending.md), [ui-pet](ui-pet.md), [ui-priority](ui-priority.md), [ui-report](ui-report.md), [ui-review](ui-review.md), [ui-secrets](ui-secrets.md), [ui-sessions](ui-sessions.md), [ui-slots](ui-slots.md), [ui-tasks](ui-tasks.md), [ui-tool-slots-load](ui-tool-slots-load.md), [ui-tree](ui-tree.md), [ui-usage](ui-usage.md), [ui-version](ui-version.md), [ui-worktree](ui-worktree.md) |
 | `harness-ui-linking-context-functions` | [ui-linking](ui-linking.md), [ui-patch-review](ui-patch-review.md) | [ui-linking](ui-linking.md), [ui-patch-review](ui-patch-review.md) |
 | `harness-ui-live-functions` | [ui](ui.md) | [ui-chat](ui-chat.md), [ui-sessions](ui-sessions.md) |
 | `harness-ui-media-rerender-functions` | [ui-media](ui-media.md) | [ui-chat](ui-chat.md) |

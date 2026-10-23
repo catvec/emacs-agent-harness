@@ -56,6 +56,13 @@ about a path outside the allowed directories lists the patterns around
 its own.  A click on a line, or < and >, picks the one the answers hold
 for; the least permissive stays one step away.
 
+A permission panel also says what its call would do, in a sentence or
+two a cheap model writes while the request waits (see "What a model
+says the call does" below): the request is drawn at once with a line
+saying it is being summarized, and the summary takes its place when
+the harness tells it came (`session/pending-updated`).  The chat, a
+popout and the access view draw the one panel, so they all show it.
+
 A question that allows several options (`:allow-multiple`, ask_user's
 `allow_multiple`) draws its options as check boxes.  A digit or a
 click ticks or unticks one instead of answering; the options ticked
@@ -93,9 +100,14 @@ what the box holds: the options ticked, a line each, then the words.
 - `question/answer` ([tools-question](tools-question.md))
 - `question/image` ([tools-question](tools-question.md))
 
+### Events it hears over ACP
+
+- `session/pending-updated` → `harness-ui-pending--on-event`
+
 ### Hooks it adds to
 
 - `harness-ui-connected-hook` → `harness-ui-pending--retry-images`
+- `harness-ui-event-functions` → `harness-ui-pending--on-event`
 - `harness-ui-pending-changed-hook` → `harness-ui-pending--popout-changed`
 - `harness-ui-permission-functions` → `harness-ui-pending--on-permission`
 - `harness-ui-popout-at-point-functions` → `harness-ui-pending-popout-at-point`

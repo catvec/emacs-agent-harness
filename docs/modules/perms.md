@@ -2,7 +2,7 @@
 
 # perms
 
-Directory jail, directory requests, sandbox guard, permission modes, auto judge, user prompts and the user's approval of denied calls.
+Directory jail, directory requests, sandbox guard, permission modes, auto judge, user prompts with a cheap model's summary of the call, and the user's approval of denied calls.
 
 - **Runs in:** the harness process
 - **Source:** [lisp/modules/harness-perms.el](../../lisp/modules/harness-perms.el)
@@ -105,6 +105,13 @@ objected to, so the user can allow a call the judge was wrong about
 instead of the work stopping (or the user having to leave auto mode).
 A non-interactive session has nobody to ask: it takes the verdict and
 steers the agent to another approach.
+
+Every prompt a user is asked also shows what its call would do, in a
+sentence or two a cheap model writes (see "Summaries of what a prompt
+asks"): a long pipeline or an Elisp form is read faster that way.  The
+prompt appears at once, with a placeholder, and the summary is added
+when it comes, or the placeholder goes when it does not.  It is
+advice, marked as a model's, and nothing that decides a call reads it.
 
 An agent asks for another directory with the request_directory_access
 tool.  The first stage owns that tool's decision and always makes it
@@ -264,6 +271,8 @@ needs from them are looked up with `harness-method-exists-p`.
 - `harness-perms-claude-auto-mode` — Whether the auto-mode judge follows the autoMode rules of Claude Code.
 - `harness-perms-default-cover` — Which cover the lasting answers of a permission prompt start on.
 - `harness-perms-rules` — Standing permission rules that apply to every session.
+- `harness-perms-summarize` — Whether a permission prompt shows what its call would do, in a sentence or two.
+- `harness-perms-summary-model` — Model that writes the summary of a permission prompt, as PROVIDER:NAME.
 
 ## Uses
 
@@ -288,6 +297,7 @@ needs from them are looked up with `harness-method-exists-p`.
 - `session/pending` ([session](session.md)), when it is loaded
 - `session/pending-add` ([session](session.md)), when it is loaded
 - `session/pending-resolve` ([session](session.md)), when it is loaded
+- `session/pending-update` ([session](session.md)), when it is loaded
 - `session/tmp-dir` ([session](session.md)), when it is loaded
 - `session/update` ([session](session.md)), when it is loaded
 - `session/update-node` ([session](session.md)), when it is loaded
@@ -303,6 +313,8 @@ needs from them are looked up with `harness-method-exists-p`.
 - `permission/decided` → `harness-perms--remember-decided-by`
 - `permission/decided` → `harness-perms--on-decided`
 - `permission/decided` → `harness-perms--remember-denied`
+- `permission/requested` → `harness-perms--on-requested` at 60
+- `session/deleted` → `harness-perms--forget-summaries`
 - `session/deleted` → `harness-perms--forget-denied`
 - `session/deleted` → `harness-perms--forget-decided-by`
 - `session/deleted` → `harness-perms--forget-revealed`

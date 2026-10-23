@@ -92,8 +92,15 @@ reaching a custom file."
       ;; is, as the UI client of another test loads it.
       ;; Those no module defines are not there: the supervisor's, until
       ;; its plugin is loaded.  One that two sections name is there once.
+      ;; A module defines an option with `defcustom': one a test helper
+      ;; bound ahead of its module (`harness-perms-summarize', turned off
+      ;; for every suite) is no setting until then.
       (let ((placed (delete-dups (cl-loop for (_ . props) in harness-config-sections
-                                          append (cl-remove-if-not #'boundp (plist-get props :keys))))))
+                                          append (cl-remove-if-not
+                                                  (lambda (key) (and (boundp key)
+                                                                     (or (get key 'standard-value)
+                                                                         (memq key harness-config-keys))))
+                                                  (plist-get props :keys))))))
         (should (equal (sort (copy-sequence placed) #'string<)
                        (sort (append (list 'harness-budget)
                                      (and (boundp 'harness-emacs-eval) (list 'harness-emacs-eval))

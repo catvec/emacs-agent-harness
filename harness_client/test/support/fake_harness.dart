@@ -1057,12 +1057,15 @@ class FakeHarness {
 
   /// Session [sid] asks the person to allow the call [callId], as the harness
   /// does before it runs a command it has no leave for.  The answer comes
-  /// when the person gives it, and is kept in [permissionAnswers].
+  /// when the person gives it, and is kept in [permissionAnswers].  [extra]
+  /// adds to what the request says of itself (`_harness`): that a cheap model
+  /// is summarizing the call (`summarizing`), or what it wrote (`summary`).
   Future<Map<String, Object?>> askPermission(
     String sid, {
     required String callId,
     String tool = 'bash',
     String title = 'Run the command',
+    Map<String, Object?> extra = const {},
   }) async {
     final response = await _requestClient('session/request_permission', {
       'sessionId': sid,
@@ -1073,12 +1076,19 @@ class FakeHarness {
         'rawInput': {'command': title},
       },
       'options': _permissionOptions,
-      '_harness': {'pendingId': 'perm-$callId', 'tool': tool},
+      '_harness': {'pendingId': 'perm-$callId', 'tool': tool, ...extra},
     });
     final answer = asMap(response['result']);
     permissionAnswers.add(answer);
     return answer;
   }
+
+  /// The harness added to the payload of the request [id] of session [sid]
+  /// with [changes], as it does when a cheap model has written the summary of
+  /// the call a permission request waits on (or will not): the clients are
+  /// told with `session/pending-updated`.
+  void pendingUpdated(String sid, String id, Map<String, Object?> changes) =>
+      _event('session/pending-updated', [sid, id, changes]);
 
   static const _permissionOptions = <Map<String, Object?>>[
     {'optionId': 'allow-once', 'name': 'Allow', 'kind': 'allow_once'},
