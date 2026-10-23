@@ -45,7 +45,16 @@ compaction summaries and runs of coalescable tools (with the thinking
 between their calls) collapse under overlays that isearch opens, so
 every word of the conversation stays searchable; a hand_in call that
 succeeds opens expanded once its result is in, its body the report
-the task handed in.  History loads lazily: the newest
+the task handed in.  A `review_comment` call with words -- the agent's
+answer in a thread of the task's review, to a reply of yours -- is
+drawn as the message it is, from the agent, with the call under its
+fold (`harness-chat--render-thread-message`); a message of yours holds
+its replies in threads as cards, what each replies to and the words
+under it, with a link to the thread (`harness-chat--render-replies`).
+The text of a message is marked with the node and the part of it it
+is (`harness-chat-part`), and where its source was (`harness-md-source`),
+so that C-c > knows what a region is from (`harness-chat--region-refs`).
+History loads lazily: the newest
 `harness-chat--history-limit` nodes at open, an older page whenever a
 window scrolls near the top, and blocks far above every window are
 dropped again so a long session never fills the buffer.
@@ -69,6 +78,7 @@ this file never touches a session struct.
 - `harness-chat-send-functions` — Functions run with the TEXT and ATTACHMENTS of each message sent.
 - `harness-chat-tool-body-functions` — Functions giving a tool call block a body of their own.
 - `harness-chat-top-functions` — Functions putting something at the top of the tail, first below the transcript.
+- `harness-thread-ref-functions` — Functions that know what a region of a buffer is from.
 - `harness-ui-decision-functions`
 
 ### Commands
@@ -105,12 +115,14 @@ this file never touches a session struct.
 - `harness-chat-send-queue` — Send every queued message now.
 - `harness-chat-send-queued` — Send the queued message QID now; the others stay queued.
 - `harness-chat-tab` — Complete in the compose box; elsewhere expand or collapse the block at point.
+- `harness-chat-thread-reply` — Start a reply in a thread to the region, or the message at point.
 - `harness-chat-toggle-block` — Collapse or expand the block ID (default the one at point).
 - `harness-chat-toggle-group` — Show or hide the tool calls of group GID (default the one at point).
 - `harness-chat-toggle-todos` — Show or hide the session's todo list above the compose box.
 - `harness-open-latest-session` — Open the newest session of the current project in POSITION.
 - `harness-open-session` — Open session ID in POSITION.
 - `harness-prompt-region` — Prompt a session with the region: start a message in its box with it.
+- `harness-thread-region` — Start a reply in a thread to the region of the current buffer.
 - `harness-up-to-parent` — Show the session this one was started from, and return its buffer.
 
 ### Options
@@ -118,6 +130,7 @@ this file never touches a session struct.
 - `harness-chat-agent-label` — Sender name shown at the start of each agent turn.
 - `harness-chat-session-label` — Sender name shown above the messages the agent of another session sent.
 - `harness-chat-system-label` — Sender name shown above the messages the harness sent on its own.
+- `harness-chat-thread-quote-limit` — Most characters of a message a reply in a thread quotes.
 - `harness-chat-user-label` — Sender name shown above the user's messages.
 
 ## Uses

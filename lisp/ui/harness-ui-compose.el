@@ -12,7 +12,11 @@
 ;;   - quoting to reply: C-c > quotes the region, or the message at
 ;;     point, in the box as Markdown, point under it for the reply, with
 ;;     the compose-quote library; in a quote in the box M-RET splits it,
-;;     to answer the part above, and C-c [ elides part of it as [...];
+;;     to answer the part above, and C-c [ elides part of it as [...]
+;;     (a chat's C-c > starts a thread instead, its C-u C-c > quotes);
+;;   - replies in threads: a card in the box for each region replied to,
+;;     what it is and the part of it quoted, with the words of the reply
+;;     typed under it, in the same box (see the Threads section);
 ;;   - typing anywhere in the buffer goes into the box: a printable
 ;;     character (or a yank) with point outside it moves point to the
 ;;     end of the box and types there, unless the key is a command where
@@ -153,6 +157,8 @@ ATT stood among the attachments.  The token yanked, typed or undone back
 brings ATT back, to where it stood (see `harness-compose--sync-tokens').")
 (defvar-local harness-compose--token-overlays nil
   "Overlays showing the tokens of the box's attachments as chips.")
+(defvar-local harness-compose--thread-rails nil
+  "Overlays drawing the rail beside the words under the cards of threads.")
 (defvar-local harness-compose--tasks nil
   "The tasks of the box's project, as `_harness/task/list' gives them.
 For @task: completion and `harness-compose-attach-task'; nil without the
@@ -294,13 +300,14 @@ the text is left alone while it ticks."
   (dolist (p harness-compose--progress) (delete-overlay (cdr p)))
   (setq harness-compose--progress nil
         harness-compose--fit-room (harness-compose--room))
-  (when harness-compose-attachments
+  ;; A reply in a thread is a card in the box, not a line of this list.
+  (when-let* ((atts (cl-remove-if #'harness-compose--thread-attachment-p harness-compose-attachments)))
     (let* ((prefix (or prefix ""))
            (lead (concat " " (propertize (harness-ui-icon 'harness-icon-attach) 'face 'harness-dim-face) " "))
            ;; As wide as the paperclip's lead, whatever the icon's size.
            (indent (propertize " " 'display `(space :width (,(harness-compose--pixels lead)))))
            (room (- harness-compose--fit-room (harness-compose--pixels (concat prefix lead)))))
-      (cl-loop for att in harness-compose-attachments
+      (cl-loop for att in atts
                for first = t then nil
                do (let ((start (point)))
                     (insert prefix (if first lead indent))
@@ -428,9 +435,10 @@ that does something else than compose -- sending a message to a session,
 say.  Point ends after the box's final newline.  The tokens of its
 attachments show as chips (`harness-compose--show-tokens')."
   (dolist (ov (append (list harness-compose-overlay harness-compose--placeholder harness-compose--indent)
-                      harness-compose--token-overlays))
+                      harness-compose--token-overlays harness-compose--thread-rails))
     (when ov (delete-overlay ov)))
-  (setq harness-compose--token-overlays nil)
+  (setq harness-compose--token-overlays nil
+        harness-compose--thread-rails nil)
   (when text
     ;; New text: the attachments whose tokens were deleted go for good.
     (setq harness-compose--text text
@@ -949,18 +957,30 @@ back."
   "Return (TEXT . ATTACHMENTS) from the box, or signal when both are empty.
 The files that @ references typed out in TEXT name are attached too,
 after the box's own attachments (`harness-compose--references'), each
-file once; the references stay in TEXT.  A link still downloading
-signals too: the message waits for it.  The attachments with a token
-are those whose tokens TEXT holds (`harness-compose--sync-tokens'): an
-image with its label, a file with its reference, a task."
+file once; the references stay in TEXT.  A box with cards of threads
+\(see the Threads section) is split at them: TEXT is the message's own
+words, and each reply is an attachment first among ATTACHMENTS, with
+the words under its card as `:response'; a card with none signals.  A
+link still downloading signals too: the message waits for it.  The
+attachments with a token are those whose tokens TEXT holds
+\(`harness-compose--sync-tokens'): an image with its label, a file with
+its reference, a task."
   (when (harness-compose--sync-tokens) (harness-compose-redraw))
-  (let ((text (string-trim (harness-compose-text)))
-        (atts harness-compose-attachments))
-    (when (and (string-empty-p text) (null atts)) (user-error "Nothing to send"))
+  (let* ((whole (string-trim (harness-compose-text)))
+         (atts harness-compose-attachments)
+         (split (harness-compose--split-threads whole atts))
+         (text (car split))
+         (threads (cdr split)))
+    (when (and (string-empty-p whole) (null atts)) (user-error "Nothing to send"))
     (when-let* ((pending (cl-find-if (lambda (a) (plist-get a :pending)) atts)))
       (user-error "%s is still downloading: wait for it, or remove it (×)"
                   (or (plist-get pending :name) "An attachment")))
-    (cons text (append atts (cl-remove-if #'harness-compose--attached-p (harness-compose--references text))))))
+    (when-let* ((bare (cl-find-if (lambda (a) (string-empty-p (plist-get a :response))) threads)))
+      (user-error "Write your reply under the card of %s, or remove it (×)"
+                  (harness-compose--chip-what bare)))
+    (cons text (append threads
+                       (cl-remove-if #'harness-compose--thread-attachment-p atts)
+                       (cl-remove-if #'harness-compose--attached-p (harness-compose--references whole))))))
 
 (defun harness-compose-newline ()
   "Insert a newline in the box, or jump there from elsewhere.
@@ -1051,11 +1071,16 @@ token, [image 1], right before it (see `harness-compose--label').  An
 attachment that is text of its own and no file, a task, is that text
 \(`harness-compose--task-text'), marked `_harness.attached' so that the
 transcript sets it apart from the words around it
-\(`harness-acp--block-from-acp', `harness-agent--blocks-text')."
+\(`harness-acp--block-from-acp', `harness-agent--blocks-text').  A reply in
+a thread is the words under its card, with the thread's data as
+`_harness.thread'."
   (let* ((path (plist-get att :path))
          (mime (or (plist-get att :mime) "application/octet-stream"))
          (label (plist-get att :label)))
     (cond
+     ((plist-get att :thread)
+      (list :type "text" :text (or (plist-get att :response) "")
+            :_harness (list :thread (plist-get att :thread))))
      ((and (stringp (plist-get att :text)) (null path))
       (list :type "text" :text (plist-get att :text) :_harness (list :attached t)))
      ((and (string-prefix-p "image/" mime) (file-readable-p path))
@@ -1337,15 +1362,19 @@ An image's token shows in it in the transcript too."
 
 (defun harness-compose--att-token (att)
   "Return the token of attachment ATT in the text, or nil when it has none.
-An image's [image 1], from its label; a file's or a task's @ reference,
-from its `:ref'.  A download under way has none yet."
+An image's [image 1], from its label; a reply in a thread's [reply 1];
+a file's or a task's @ reference, from its `:ref'.  A download under way
+has none yet."
   (unless (plist-get att :pending)
-    (cond ((plist-get att :label) (harness-compose--image-token (plist-get att :label)))
+    (cond ((plist-get att :thread) (harness-compose--thread-token att))
+          ((plist-get att :label) (harness-compose--image-token (plist-get att :label)))
           ((plist-get att :ref) (concat "@" (plist-get att :ref))))))
 
 (defun harness-compose--attachment-id (att)
-  "Return what tells attachment ATT apart: a task's task:ID, else its file's path."
+  "Return what tells attachment ATT apart.
+A task's task:ID, a reply in a thread's reply:N, else its file's path."
   (cond ((plist-get att :task) (concat "task:" (plist-get att :task)))
+        ((plist-get att :thread) (format "reply:%s" (plist-get att :reply)))
         ((plist-get att :path) (expand-file-name (plist-get att :path)))))
 
 (defun harness-compose--what-id (what)
@@ -1353,6 +1382,7 @@ from its `:ref'.  A download under way has none yet."
 See `harness-compose--attachment-id'."
   (cond ((consp what) (harness-compose--attachment-id what))
         ((harness-compose--task-name-p what) what)
+        ((and (stringp what) (string-prefix-p "reply:" what)) what)
         ((stringp what) (expand-file-name what))))
 
 (defun harness-compose--attached-p (what)
@@ -1485,12 +1515,21 @@ goes on after it.  A box not drawn gets it at the end of its text."
   (when (or (= (point) harness-compose-end) (not (memq (char-after) '(?\s ?\t ?\n))))
     (insert " ")))
 
+(defun harness-compose--token-tail-p (token char)
+  "Non-nil when CHAR, the one after TOKEN, goes with it when it is deleted.
+That is the space that keeps it apart from the words, or, for the token
+of a card (`harness-compose--thread-token'), the line break under it."
+  (or (eq char ?\s) (and (eq char ?\n) (string-prefix-p "[reply " token))))
+
 (defun harness-compose--without-token (token text)
   "Return TEXT without TOKEN wherever it stands, a space after each too."
   (dolist (span (reverse (harness-compose--token-spans token text)) text)
     (let ((end (cdr span)))
       (setq text (concat (substring text 0 (car span))
-                         (substring text (if (and (< end (length text)) (eq (aref text end) ?\s)) (1+ end) end)))))))
+                         (substring text (if (and (< end (length text))
+                                                  (harness-compose--token-tail-p token (aref text end)))
+                                             (1+ end)
+                                           end)))))))
 
 (defun harness-compose--delete-tokens (token)
   "Delete TOKEN wherever it stands in the box, a space after each too.
@@ -1502,7 +1541,10 @@ See `harness-compose--token-spans' for where an @ reference stands."
       (dolist (span (reverse (harness-compose--token-spans token (harness-compose--box-string))))
         (let ((end (+ start (cdr span))))
           (delete-region (+ start (car span))
-                         (if (and (< end harness-compose-end) (eq (char-after end) ?\s)) (1+ end) end)))))
+                         (if (and (< end harness-compose-end)
+                                  (harness-compose--token-tail-p token (char-after end)))
+                             (1+ end)
+                           end)))))
     (harness-compose-update-placeholder)))
 
 (defun harness-compose--keep-aside (att)
@@ -1586,7 +1628,10 @@ together."
       (dolist (att harness-compose-attachments)
         (when-let* ((token (harness-compose--att-token att)))
           (dolist (span (harness-compose--token-spans token text))
-            (push (list (+ start (car span)) (+ start (cdr span)) att) want))))
+            ;; The room a card has is part of what it shows.
+            (push (list (+ start (car span)) (+ start (cdr span)) att
+                        (and (plist-get att :thread) (harness-compose--thread-chip-room)))
+                  want))))
       (dolist (w (sort want (lambda (a b) (or (< (car a) (car b))
                                               (and (= (car a) (car b)) (> (cadr a) (cadr b)))))))
         (when (>= (car w) reach)
@@ -1594,11 +1639,13 @@ together."
           (setq reach (cadr w))))
       (setq want (nreverse kept))
       (unless (equal want (mapcar (lambda (ov) (list (overlay-start ov) (overlay-end ov)
-                                                     (overlay-get ov 'harness-compose-attachment)))
+                                                     (overlay-get ov 'harness-compose-attachment)
+                                                     (overlay-get ov 'harness-compose-room)))
                                   harness-compose--token-overlays))
         (mapc #'delete-overlay harness-compose--token-overlays)
         (setq harness-compose--token-overlays
-              (mapcar (lambda (w) (apply #'harness-compose--inline-chip w)) want))))))
+              (mapcar (lambda (w) (apply #'harness-compose--inline-chip (seq-take w 3))) want)))
+      (harness-compose--show-thread-rails))))
 
 (defun harness-compose--inline-chip (beg end att)
   "Return the overlay showing the token from BEG to END of attachment ATT.
@@ -1609,11 +1656,17 @@ image's thumbnail a line high, the icon of a file or a task
 and mouse-2 open it, mouse-3 offers a menu (`harness-compose--chip-map').
 The cursor shows on what comes first when point is before the token.
 The token's display is a string, so point never rests inside it: the
-command loop moves it to an edge."
+command loop moves it to an edge.  A reply in a thread shows as the
+card of the thread instead (`harness-compose--thread-card'), in as many
+columns as the windows have (`harness-compose--thread-chip-room')."
   (let* ((ov (make-overlay beg end nil t nil))
-         (props (list 'help-echo (harness-compose--chip-help att) 'mouse-face 'highlight
+         (thread (plist-get att :thread))
+         (props (list 'help-echo (if thread
+                                     (harness-compose--thread-help thread)
+                                   (harness-compose--chip-help att))
+                      'mouse-face 'highlight
                       'keymap (harness-compose--chip-map att) 'pointer 'hand))
-         (head (harness-compose--chip-head att)))
+         (head (and (not thread) (harness-compose--chip-head att))))
     (overlay-put ov 'harness-compose-token (buffer-substring-no-properties beg end))
     (when (plist-get att :label) (overlay-put ov 'harness-compose-label (plist-get att :label)))
     (overlay-put ov 'harness-compose-attachment att)
@@ -1629,9 +1682,12 @@ command loop moves it to an edge."
                                   props)
                            (propertize " " 'face harness-compose--face
                                        'display (if (display-graphic-p) '(space :width (3)) '(space :width 1))))))
-    (overlay-put ov 'display (apply #'propertize (harness-compose--chip-text att)
-                                    'face (list 'harness-compose-token-face harness-compose--face)
-                                    props))
+    (overlay-put ov 'display (if thread
+                                 (harness-compose--thread-card att)
+                               (apply #'propertize (harness-compose--chip-text att)
+                                      'face (list 'harness-compose-token-face harness-compose--face)
+                                      props)))
+    (when thread (overlay-put ov 'harness-compose-room (harness-compose--thread-chip-room)))
     (dolist (p (seq-partition props 2)) (overlay-put ov (car p) (cadr p)))
     ov))
 
@@ -1663,7 +1719,8 @@ middle to `harness-compose--token-max' characters."
 
 (defun harness-compose--chip-what (att)
   "Return what attachment ATT is, in a word or two: image 1, file, task t-1a2b."
-  (cond ((plist-get att :label))
+  (cond ((plist-get att :thread) (format "reply %s" (plist-get att :reply)))
+        ((plist-get att :label))
         ((plist-get att :task) (concat "task " (plist-get att :task)))
         (t "file")))
 
@@ -1709,7 +1766,14 @@ mouse-3 pops up the menu of what else there is to do with it
   "Return what the chip of attachment ATT offers: (NAME . FUNCTION) each.
 Open it, remove it from the message, its tokens with it
 \(`harness-compose-remove-attachment'), and copy its file's path, or its
-task's id."
+task's id; a reply in a thread offers what its card does
+\(`harness-compose--thread-actions')."
+  (if (plist-get att :thread)
+      (harness-compose--thread-actions att)
+    (harness-compose--chip-file-actions att)))
+
+(defun harness-compose--chip-file-actions (att)
+  "Return what the chip of ATT, a file or a task, offers: (NAME . FUNCTION) each."
   (list (cons "Open" (lambda () (harness-compose-open-attachment att)))
         (cons "Remove from the message" (lambda () (harness-compose-remove-attachment att)))
         (if (plist-get att :task)
@@ -1889,6 +1953,333 @@ the task is read with completion (`harness-compose-read-task')."
            (harness-ui-tasks-show-task (plist-get att :task) (harness-compose--root)))
           (t (user-error "Task %s has no session yet, and the task board is not loaded"
                          (plist-get att :task))))))
+
+;;;; Threads
+
+;; A THREAD is a reply to a region of something on the screen -- part of
+;; a message, several messages, lines of a diff -- that the user starts
+;; on purpose, with C-c >.  What the region is from is recorded as data,
+;; the references of the thread (`harness-thread-block' says their shape),
+;; so nothing is guessed from the words later.  In the box a thread is an
+;; attachment, `(:thread DATA :reply N)', with the token [reply N] that
+;; the others have: shown as a CARD, what the reply is to -- who wrote
+;; it, and the part quoted, a few lines -- with a rail down its side that
+;; goes on beside the words written under it.  Those words are the reply:
+;; typed in the box as any, with all it has, the attachments, the @
+;; references, the completions, the undo.  The text before the first
+;; card is the message's own; the text after a card, up to the next, is
+;; the response in that thread.
+;;
+;; The card is no text: the token is.  So moving, cutting, yanking and
+;; undoing work on it as on an image's token, and deleting the token
+;; removes the thread, the words under it staying as plain text.  A click
+;; on the card shows what it is a reply to (`harness-compose-thread-open-function'),
+;; mouse-3 offers the rest, and the [×] in its header removes it.
+;;
+;; `harness-compose-take' splits the box at the cards: the message's own
+;; text is TEXT, and each thread is an attachment with the response under
+;; it, `:response'.  An attachment of that kind is a text block of its own
+;; when the message goes out (`harness-compose-attachment-block',
+;; `harness-attachments-to-blocks'), and `harness-compose-restore' lays
+;; the cards and their responses out in the box again for a message taken
+;; back.
+
+(defface harness-thread-rail-face '((t :inherit font-lock-keyword-face :weight bold))
+  "The rail down the side of a thread's card and of the words under it."
+  :group 'harness-compose)
+
+(defface harness-thread-header-face '((t :inherit (shadow bold)))
+  "The line of a thread's card that says what the reply is to."
+  :group 'harness-compose)
+
+(defface harness-thread-quote-face '((t :inherit (italic shadow)))
+  "The part of a message a thread's card quotes."
+  :group 'harness-compose)
+
+(defcustom harness-thread-card-lines 5
+  "Most lines of a quote a thread's card shows; the tooltip has the rest."
+  :type 'natnum
+  :group 'harness-compose)
+
+(defvar harness-compose-thread-open-function #'ignore
+  "Function showing what a thread's card is a reply to.
+It is called with the data of the thread (`harness-thread-block') and the
+reference clicked, a plist, or nil for the card as a whole; the host
+sets it: the chat shows the message.")
+
+(defun harness-compose--thread-attachment-p (att)
+  "Non-nil when attachment ATT is a reply in a thread."
+  (and (consp att) (plist-get att :thread) t))
+
+(defun harness-compose--thread-token (att)
+  "Return the token of ATT, a reply in a thread: [reply 1]."
+  (and (integerp (plist-get att :reply)) (format "[reply %d]" (plist-get att :reply))))
+
+(defun harness-thread-ref-label (ref)
+  "Return what the card of a thread says REF, a region's reference, is.
+Of a part of the chat that is who wrote it -- the agent's message, its
+plan, its answer in a thread, your own message, a call of a tool -- and of
+a diff or a buffer the file and its lines."
+  (let ((lines (harness-thread-line-label ref)))
+    (pcase (harness-thread-ref-kind ref)
+      ("diff" (concat (or (plist-get ref :file) "the change")
+                      (and lines (concat ":" lines))
+                      (if (equal (format "%s" (plist-get ref :side)) "old") " (before)" " (after)")))
+      ("buffer" (concat (or (plist-get ref :file) (plist-get ref :name) "buffer")
+                        (and lines (concat ":" lines))))
+      (_ (let ((label (plist-get ref :label)))
+           (pcase (format "%s" (plist-get ref :who))
+             ("agent" "agent's message")
+             ("thread" "agent's answer in a thread")
+             ("you" "your message")
+             ("plan" "agent's plan")
+             ("report" "hand-in report")
+             ("tool" (if (stringp label) (format "%s call" label) "tool call"))
+             (who (if (and (stringp label) (not (string-empty-p label))) label who))))))))
+
+(defun harness-thread-ref-excerpt (ref room)
+  "Return the lines of REF's quote a card shows, at most ROOM columns wide.
+The first `harness-thread-card-lines' non-blank lines, a long one cut
+short and the cut ones ending in an ellipsis."
+  (let* ((text (or (plist-get ref :text) ""))
+         (lines (cl-remove-if #'string-blank-p
+                              (mapcar #'string-trim-right (split-string text "\n"))))
+         (shown (seq-take lines harness-thread-card-lines)))
+    (append (mapcar (lambda (line) (truncate-string-to-width line room nil nil "…")) shown)
+            (and (> (length lines) (length shown)) (list "…")))))
+
+(defun harness-thread-card-lines (data &optional room close)
+  "Return the lines of the card for the thread DATA, as propertized strings.
+Each reference is a header -- what it is (`harness-thread-ref-label') --
+and the lines of its quote under it, ROOM columns wide at most (by
+default 72), every line after the rail and with the reference it is of
+as `harness-thread-ref', for a click to show.  CLOSE, a string, is put at
+the end of the first header, such as a button that removes the thread.
+The card is no text of the buffer; the caller puts it where it goes."
+  (let* ((room (max 16 (- (or room 72) 2)))
+         (rail (propertize "▎ " 'face 'harness-thread-rail-face))
+         (refs (harness-thread-refs data))
+         (first t) lines)
+    (dolist (ref refs)
+      (let ((header (concat rail
+                            (propertize (concat "↩ " (harness-thread-ref-label ref))
+                                        'face 'harness-thread-header-face))))
+        (push (if (and first close) (concat header "  " close) header) lines)
+        (setq first nil)
+        (dolist (line (harness-thread-ref-excerpt ref room))
+          (push (concat rail (propertize line 'face 'harness-thread-quote-face)) lines))
+        ;; Each line of a reference says which it is: a click on it shows that one.
+        (let ((here (cl-loop for l in lines
+                             while (not (get-text-property 0 'harness-thread-ref l))
+                             collect l)))
+          (dolist (l here)
+            (put-text-property 0 (length l) 'harness-thread-ref ref l)))))
+    (nreverse lines)))
+
+(defun harness-compose--thread-help (data)
+  "Return the tooltip of a thread's card: the whole quote of each reference."
+  (mapconcat (lambda (ref)
+               (concat (harness-thread-ref-label ref) ":\n" (or (plist-get ref :text) "")))
+             (harness-thread-refs data) "\n\n"))
+
+(defun harness-compose--next-reply ()
+  "Return the number of the next reply in a thread: the one after the highest.
+The number of a reply never changes once given, as an image's, since the
+words under it may name it."
+  (1+ (apply #'max 0 (delq nil (append
+                                (mapcar (lambda (a) (plist-get a :reply)) harness-compose-attachments)
+                                (mapcar (lambda (entry) (plist-get (nth 1 entry) :reply))
+                                        harness-compose--detached))))))
+
+(defun harness-compose--insert-thread-token (token)
+  "Put TOKEN, a reply's, into the box on a line of its own; point goes under it.
+At point when point is in the box, else at the end of the box; a line
+break comes before it unless it starts a line, and one after it, where
+the response is written.  A box not drawn gets it at the end of its
+text.  Point ends where the response starts."
+  (if (not (harness-compose-live-p))
+      (setq harness-compose--text
+            (concat harness-compose--text
+                    (and (string-match-p "[^\n]\\'" harness-compose--text) "\n")
+                    token "\n"))
+    (unless (harness-compose-in-p) (goto-char harness-compose-end))
+    (unless (or (= (point) harness-compose-start) (eq (char-before) ?\n))
+      (insert "\n"))
+    (insert token "\n")
+    (harness-compose-update-placeholder)))
+
+(defun harness-compose-add-thread (refs)
+  "Start a reply in a thread to REFS, references to regions, in the box.
+The reply is a card -- what the regions are, and the part of each quoted
+-- and the words written under it are the response.  Point goes there.
+REFS are plists of the shape `harness-thread-block' describes.  Return
+the attachment."
+  (unless refs (user-error "Nothing to reply to"))
+  (let ((att (list :thread (list :refs refs) :reply (harness-compose--next-reply))))
+    (setq harness-compose-attachments (append harness-compose-attachments (list att)))
+    (harness-compose--forget-detached (harness-compose--thread-token att))
+    (harness-compose--insert-thread-token (harness-compose--thread-token att))
+    (funcall harness-compose-redraw-function)
+    ;; Its windows follow point into the box, where the words go.
+    (harness-compose--quoted)
+    att))
+
+(defun harness-compose--thread-spans (text atts)
+  "Return where the cards of ATTS stand in TEXT: (ATT START . END), in order.
+The first place a token is in TEXT; a reply whose token is not there is
+left out."
+  (let (spans)
+    (dolist (att atts)
+      (when (harness-compose--thread-attachment-p att)
+        (when-let* ((token (harness-compose--thread-token att))
+                    (span (car (harness-compose--token-spans token text))))
+          (push (cons att span) spans))))
+    (sort spans (lambda (a b) (< (cadr a) (cadr b))))))
+
+(defun harness-compose--split-threads (text atts)
+  "Return (OWN . THREADS) from TEXT, the box's, and ATTS, its attachments.
+OWN is the text before the first card, with the cards and what is under
+them cut out; THREADS are the replies in order, each its attachment with
+`:response' the words under its card up to the next, trimmed.  A box with
+no card is OWN alone, as it stands."
+  (let ((spans (harness-compose--thread-spans text atts)))
+    (if (null spans)
+        (cons text nil)
+      (let (threads)
+        (cl-loop for (entry . more) on spans
+                 do (let* ((att (car entry))
+                           (from (cddr entry))
+                           (to (if more (cadr (car more)) (length text))))
+                      (push (append (list :response (string-trim (substring text from to)))
+                                    (cl-loop for (k v) on att by #'cddr
+                                             unless (eq k :response) append (list k v)))
+                            threads)))
+        (cons (string-trim (substring text 0 (cadr (car spans)))) (nreverse threads))))))
+
+(defun harness-compose-restore (text atts)
+  "Put TEXT and ATTS, a message taken back, into the box as `take' gave them.
+A reply in a thread among ATTS has its words in `:response': they go
+back under its card, after TEXT, and the attachment is kept without
+them, as the box has it.  Return the attachments."
+  (let ((box text) threads others)
+    (dolist (att atts)
+      (if (not (harness-compose--thread-attachment-p att))
+          (push att others)
+        (setq box (concat box (if (string-empty-p box) "" "\n")
+                          (harness-compose--thread-token att) "\n"
+                          (or (plist-get att :response) "")))
+        (push (cl-loop for (k v) on att by #'cddr unless (eq k :response) append (list k v)) threads)))
+    (harness-compose-set box)
+    (setq harness-compose-attachments (append (nreverse threads) (nreverse others)))))
+
+(defun harness-compose-prepend (text replies)
+  "Put TEXT and REPLIES, a message taken back, into the box, above its words.
+REPLIES are attachments of replies in threads as `harness-compose-take'
+gives them, `:response' the words under each card: they take the
+numbers after the box's own, their cards come before the box's, and
+TEXT goes ahead of the words the box has of its own, a blank line
+between: the text before a card is the message's, and a card keeps
+what follows it.  Return the box's attachments."
+  (let* ((draft (harness-compose-text))
+         (first (car (harness-compose--thread-spans draft harness-compose-attachments)))
+         (own (string-trim (if first (substring draft 0 (cadr first)) draft)))
+         (cards (and first (substring draft (cadr first))))
+         (n (1- (harness-compose--next-reply)))
+         (box (concat text (if (or (string-empty-p text) (string-empty-p own)) "" "\n\n") own))
+         added)
+    (dolist (reply replies)
+      (setq n (1+ n))
+      (let ((att (cons :reply (cons n (cl-loop for (k v) on reply by #'cddr
+                                               unless (memq k '(:reply :response)) append (list k v))))))
+        (setq box (concat box (if (string-empty-p box) "" "\n")
+                          (harness-compose--thread-token att) "\n" (or (plist-get reply :response) ""))
+              added (append added (list att)))))
+    (harness-compose-set (concat box (if cards (concat (if (string-empty-p box) "" "\n") cards) "")))
+    (setq harness-compose-attachments (append harness-compose-attachments added))))
+
+(defun harness-compose--thread-chip-room ()
+  "Return how many columns the card of a thread has: the narrowest window's body.
+Less the prompt's and the rail's."
+  (let ((windows (get-buffer-window-list nil nil t)))
+    (max 24 (- (if windows (apply #'min (mapcar #'window-body-width windows)) (frame-width)) 6))))
+
+(defun harness-compose--thread-card (att)
+  "Return the card of ATT, a reply in a thread, as the string a token shows.
+Its lines are parted by line breaks, the last without one, since the
+text goes on with its own; the first header ends with [×], which removes
+the thread.  A click on the rest shows what the reply is to."
+  (let* ((data (plist-get att :thread))
+         (props (list 'help-echo (harness-compose--thread-help data)
+                      'keymap (harness-compose--chip-map att)
+                      'mouse-face 'highlight 'pointer 'hand))
+         (close (propertize "[×]" 'face 'harness-thread-header-face 'mouse-face 'highlight 'pointer 'hand
+                            'help-echo "Remove this thread; the words under it stay"
+                            'keymap (let ((m (make-sparse-keymap)))
+                                      (define-key m [mouse-1]
+                                                  (harness-compose--chip-command
+                                                   (lambda (_) (harness-compose-remove-attachment att))))
+                                      m)))
+         (card (string-join (harness-thread-card-lines data (harness-compose--thread-chip-room) close) "\n"))
+         (pos 0))
+    ;; Everywhere but on the button, which has its own.
+    (while (< pos (length card))
+      (let ((next (next-single-property-change pos 'keymap card (length card))))
+        (unless (get-text-property pos 'keymap card)
+          (add-text-properties pos next props card))
+        (setq pos next)))
+    card))
+
+(defun harness-compose--thread-rail ()
+  "Return the prefix of the lines of the words under a card.
+The box's indentation (`harness-compose--indent'), and the rail."
+  (concat (or (and harness-compose--indent (overlay-buffer harness-compose--indent)
+                   (overlay-get harness-compose--indent 'line-prefix))
+              "")
+          (propertize "▎ " 'face (list 'harness-thread-rail-face harness-compose--face))))
+
+(defun harness-compose--thread-response-overlays ()
+  "Return what covers the words under each card, to draw the rail beside them.
+Each is (START END PREFIX): from the line after a token to the next card
+or the end of the box, the box's last newline included, so that an empty
+response has its line too."
+  (let* ((text (harness-compose--box-string))
+         (start (marker-position harness-compose-start))
+         (spans (harness-compose--thread-spans text harness-compose-attachments))
+         (rail (and spans (harness-compose--thread-rail))))
+    (cl-loop for (entry . more) on spans
+             for from = (+ start (cddr entry) 1)
+             for to = (if more (+ start (cadr (car more))) (1+ (marker-position harness-compose-end)))
+             when (and (< from to) (<= from (point-max))) collect (list from (min to (point-max)) rail))))
+
+(defun harness-compose--show-thread-rails ()
+  "Draw the rail beside the words under each card; draw it again only if it moved."
+  (let ((want (harness-compose--thread-response-overlays)))
+    (unless (equal want (mapcar (lambda (ov) (list (overlay-start ov) (overlay-end ov) (overlay-get ov 'line-prefix)))
+                                harness-compose--thread-rails))
+      (mapc #'delete-overlay harness-compose--thread-rails)
+      (setq harness-compose--thread-rails
+            (mapcar (lambda (w)
+                      (let ((ov (make-overlay (nth 0 w) (nth 1 w) nil nil t)))
+                        (overlay-put ov 'line-prefix (nth 2 w))
+                        (overlay-put ov 'wrap-prefix (nth 2 w))
+                        (overlay-put ov 'priority 10)
+                        (overlay-put ov 'harness-compose-thread-rail t)
+                        (overlay-put ov 'evaporate t)
+                        ov))
+                    want)))))
+
+(defun harness-compose-open-thread (att &optional ref)
+  "Show what ATT, a reply in a thread, is a reply to; REF, one reference of it.
+The host does it (`harness-compose-thread-open-function')."
+  (funcall harness-compose-thread-open-function (plist-get att :thread) ref))
+
+(defun harness-compose--thread-actions (att)
+  "Return what the card of ATT offers: (NAME . FUNCTION) each."
+  (list (cons "Show what this replies to" (lambda () (harness-compose-open-thread att)))
+        (cons "Remove the thread, keep my words" (lambda () (harness-compose-remove-attachment att)))
+        (cons "Copy the quote" (lambda ()
+                                 (kill-new (harness-thread-quote (plist-get att :thread)))
+                                 (message "Copied the quote")))))
 
 ;;;; Undo
 
@@ -2278,7 +2669,8 @@ shortened as much as that needs."
 A task opens its session's chat, or shows its card on the task board
 while it has no session (`harness-compose--open-task')."
   (let ((path (plist-get att :path)))
-    (cond ((plist-get att :task) (harness-compose--open-task att))
+    (cond ((plist-get att :thread) (harness-compose-open-thread att))
+          ((plist-get att :task) (harness-compose--open-task att))
           ((null path) (user-error "%s is no file to open" (or (plist-get att :name) "This attachment")))
           ((not (file-exists-p path)) (user-error "%s is gone" (abbreviate-file-name path)))
           ((and (string-match-p "\\`\\(?:video\\|audio\\)/" (or (plist-get att :mime) ""))

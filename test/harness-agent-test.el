@@ -779,6 +779,46 @@ inline and gets no note, and neither does one that quotes nothing."
                              :text "From `ratelimit.py` (lines 1-2):\n\n> calls = 0\n> def f(): pass"))))
     (should-not (harness-agent--inline-reply-p (list (list :type "text" :text "status?"))))))
 
+(ert-deftest harness-agent-a-reply-in-a-thread-is-not-answered-inline ()
+  "A reply that is a comment in a thread names the thread to answer in and the
+tool to answer with: its marker, which the model reads as the user wrote
+it, and no note that tells the model to answer inline instead.  The
+plain [thread ID] lines of the review's feedback are no such marker."
+  (harness-agent-test-with
+    (let ((reply (concat "> The build is green.\n\nGood.\n\n" (harness-thread-marker "t-3f2a1b09"))))
+      (should-not (harness-agent--inline-reply-p (list (list :type "text" :text reply))))
+      (should (equal (list (list :type "text" :text reply))
+                     (harness-agent--prepare-content (list (list :type "text" :text reply)) nil)))
+      ;; The review's own [thread ID] lines are no such marker.
+      (should (harness-agent--inline-reply-p
+               (list (list :type "text" :text "> a quoted line\n\nmy comment\n[thread t-1]")))))))
+
+(ert-deftest harness-agent-sends-a-reply-in-a-thread-as-its-text ()
+  "The model reads a reply in a thread as text, without the data the chat draws
+it from; one that is no comment in a review yet is answered inline, the note
+telling the model how; the node keeps the blocks, for the chat to draw."
+  (harness-agent-test-with
+    (let* ((data (list :refs (list '(:kind "chat" :node "n-1" :who "agent" :text "The build is green."))))
+           (plain (harness-thread-block data "Good."))
+           (made (harness-thread-block (append data (list :id "t-3f2a1b09")) "Good.")))
+      (should (equal (list (list :type "text" :text (plist-get plain :text))
+                           (list :type "text" :text harness-agent--inline-reply-note))
+                     (harness-agent--prepare-content (list plain) nil)))
+      (should (equal (list (list :type "text" :text (plist-get made :text)))
+                     (harness-agent--prepare-content (list made) nil)))
+      (should (string-suffix-p (harness-thread-marker "t-3f2a1b09") (plist-get made :text)))
+      ;; A message with a reply keeps its blocks, one of plain text does not.
+      (should-not (harness-agent--only-text-p (list (list :type "text" :text "Intro") plain)))
+      (should (harness-agent--only-text-p (list (list :type "text" :text "Intro")))))
+    (let* ((id (plist-get (harness-call 'session/create :cwd default-directory :model "demo:scripted") :id))
+           (reply (harness-thread-block
+                   (list :refs (list '(:kind "chat" :node "n-1" :who "agent" :text "The build is green.")))
+                   "Good.")))
+      (harness-test-await (harness-call 'agent/prompt id (list (list :type "text" :text "Intro") reply)))
+      (let ((user (car (harness-call 'session/nodes id))))
+        (should (equal "Intro\n\n> The build is green.\n\nGood." (plist-get user :content)))
+        (should (harness-thread-block-p (cadr (plist-get user :blocks))))))))
+
 (defun harness-agent-test-image (dir)
   "Write a PNG image in DIR and return its file name."
   (let ((file (expand-file-name "shot.png" dir)))

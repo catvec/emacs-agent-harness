@@ -479,7 +479,9 @@ the quote."
         ;; The summary's, not the banner's "Fix the flaky test" nor the
         ;; problem above it, which both hold "The flaky test".
         (let ((case-fold-search nil)) (search-forward "The flaky test is fixed."))
-        (should (eq 'compose-quote-reply (key-binding (kbd "C-c >"))))
+        ;; The session's C-c > starts a thread, but the banner's report says
+        ;; what it quotes as (`compose-quote'), and that is a quote.
+        (should (eq 'harness-chat-thread-reply (key-binding (kbd "C-c >"))))
         (execute-kbd-macro (kbd "C-c >"))
         (should (equal quoted (harness-compose-text)))
         (should (= (point) harness-compose-end))

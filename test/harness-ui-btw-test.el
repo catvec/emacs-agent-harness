@@ -659,10 +659,11 @@ From Lisp a question can be asked at once; it names the BTW."
         ;; A kept BTW is open: it stays active.
         (should (eq 'idle (plist-get (harness-call 'session/get sid) :status)))))))
 
-(ert-deftest harness-ui-btw-quotes-its-answer-to-reply ()
-  "C-c > in a BTW quotes its answer in the box, to reply to it, as in a chat.
-The key is the chat's, the reply follows the quote, and what C-c C-c
-sends is the quote and the reply."
+(ert-deftest harness-ui-btw-replies-to-its-answer-in-a-thread ()
+  "C-c > in a BTW starts a reply in a thread to its answer, as in a chat: a card in
+the box, point under it, and the words under the card are the reply.  A BTW is
+no task's session, so it has no review: what C-c C-c sends is the quote and the
+reply, as a mail has them.  C-u C-c > quotes the answer in the box as Markdown."
   (harness-ui-btw-test-with
     (pcase-let ((`(,_parent . ,parent-window) (harness-ui-btw-test--open-session)))
       (let* ((window (harness-ui-btw-test--open-btw parent-window #'harness-btw))
@@ -675,10 +676,19 @@ sends is the quote and the reply."
                                                       (harness-ui-btw-test--buffer-text buffer)))
                            5 "the answer in the BTW")
         (with-selected-window window
-          (should (eq 'compose-quote-reply (key-binding (kbd "C-c >"))))
-          (execute-kbd-macro (kbd "C-c >"))
+          (should (eq 'harness-chat-thread-reply (key-binding (kbd "C-c >"))))
+          ;; The quote, as Markdown, with the prefix argument.
+          (let ((current-prefix-arg nil))
+            (execute-kbd-macro (kbd "C-u C-c >")))
           (should (equal "> Two tasks are in progress.\n\n" (harness-compose-text)))
+          (harness-compose-set "")
+          ;; A thread, without.
+          (execute-kbd-macro (kbd "C-c >"))
+          (should (equal "[reply 1]\n" (harness-compose-text)))
           (should (= (point) harness-compose-end))
+          (should (equal '("Two tasks are in progress.")
+                         (mapcar (lambda (ref) (plist-get ref :text))
+                                 (harness-thread-refs (plist-get (car harness-compose-attachments) :thread)))))
           (execute-kbd-macro "Which two?")
           (call-interactively (key-binding (kbd "C-c C-c"))))
         (harness-test-wait (lambda () (= 2 (length (harness-ui-btw-test--user-texts sid)))) 5 "the reply sent")

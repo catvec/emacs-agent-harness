@@ -142,6 +142,13 @@
 ;;               the control panel it quotes what is selected in a version,
 ;;               else the last comment of the thread at the current
 ;;               difference.  The reply is a draft, as r's.
+;;   thread on   C-c > in a version with lines selected starts a thread on
+;;   lines       them, in place of the quote reply: a card in the box of the
+;;               report, the file, the side, the lines and the revision
+;;               recorded with them (`harness-ui-patch-review-thread-reply'),
+;;               and the words written under it the comment.  Sent with
+;;               the feedback it is a thread on those lines, which the
+;;               agent answers.
 ;;   drafts      A draft is yours to change or to take back until the
 ;;               feedback sends it: it has an [Edit] button, which edits
 ;;               that draft, a [Delete] button, which deletes it after
@@ -3881,6 +3888,60 @@ way a draft in the thread, which goes with the feedback."
        (change-review-ui-quote-string
         (change-review-comment-body (change-review-thread-last-comment thread)))))))
 
+(defun harness-ui-patch-review--region-ref (review)
+  "Return the reference to the region selected in this version of a file of REVIEW.
+A plist that says what a reply in a thread is about (`harness-thread-block'):
+the file, the side the version is on -- `old' for the merge base's, `new'
+for the branch's -- the first and last line of the region in it, the
+revision the review is at, and the lines themselves."
+  (let* ((index harness-ui-patch-review--index)
+         (file (or (and (integerp index) (nth index (harness-ui-patch-review--r-files review)))
+                   (user-error "No file here")))
+         (state (harness-ui-patch-review--r-ediff review))
+         (side (if (eq (current-buffer) (plist-get state :a)) "old" "new"))
+         (beg (region-beginning))
+         (end (region-end))
+         (first (line-number-at-pos beg t))
+         ;; A region that ends at the start of a line stops on the line before.
+         (last (line-number-at-pos (if (and (> end beg) (eq (char-before end) ?\n)) (1- end) end) t))
+         (text (buffer-substring-no-properties beg end)))
+    (when (string-blank-p text) (user-error "The selection is blank: select the lines to reply to"))
+    (append (list :kind "diff" :file (change-review-file-path file) :side side :line first)
+            (and (> last first) (list :end last))
+            (and (harness-ui-patch-review--r-tip review) (list :revision (harness-ui-patch-review--r-tip review)))
+            (list :text (string-trim-right text "\n+")))))
+
+(defun harness-ui-patch-review--show-ref (review ref)
+  "Show the lines REF, a reference of a reply in a thread, is of in REVIEW's Ediff."
+  (let ((line (plist-get ref :line)))
+    (if (integerp line)
+        (harness-ui-patch-review--show-line
+         review (cons (if (equal (format "%s" (plist-get ref :side)) "old") :old :new) line))
+      (user-error "That reply is to no lines"))))
+
+(defun harness-ui-patch-review-thread-reply ()
+  "Start a reply in a thread to the lines selected in this version of a file.
+The thread records where it is from: the file, the side -- the merge base's
+or the branch's -- the lines and the revision, with the lines themselves.
+It starts in the box of the feedback, as a card, and the words written
+under it are the reply: sent with the feedback it is a comment in a thread
+of the review, on those lines, which the agent answers.  Point goes to the
+box.  Without a region, or with text of a comment selected with the mouse,
+this is the library's quote reply (\\[change-review-ui-quote-reply])."
+  (interactive)
+  (if (or (not (use-region-p)) (change-review-ui--overlay-selection))
+      (call-interactively #'change-review-ui-quote-reply)
+    (let* ((review (harness-ui-patch-review--current))
+           (ref (harness-ui-patch-review--region-ref review))
+           (popout (harness-ui-patch-review--feedback-box review)))
+      (deactivate-mark)
+      (with-current-buffer popout
+        (setq-local harness-compose-thread-open-function
+                    (lambda (_data ref) (harness-ui-patch-review--show-ref review ref)))
+        (goto-char harness-compose-end)
+        (harness-compose-add-thread (list ref)))
+      (harness-ui-patch-review-edit-feedback "A reply in a thread is waiting for your words."))))
+
 (defun harness-ui-patch-review-toggle-thread ()
   "Close the thread at the current difference, or at point, or open it again."
   (interactive)
@@ -4248,8 +4309,9 @@ Return a promise of the review."
 
 (defvar harness-ui-patch-review-lines-mode-map (make-sparse-keymap)
   "Keys in the two versions Ediff compares: c comments on the line at point.
-Those of the library's threads under a line -- r, C-c >, x, m, o, RET --
-are its.")
+C-c > starts a reply in a thread to the lines selected
+\(`harness-ui-patch-review-thread-reply').  The others of the library's
+threads under a line -- r, x, m, o, RET -- are its.")
 
 ;; Filled at top level, not in the `defvar', so that loading this file
 ;; again, as a reload does, gives the keymap an Emacs that runs on has the
@@ -4257,6 +4319,7 @@ are its.")
 (let ((map harness-ui-patch-review-lines-mode-map))
   (set-keymap-parent map change-review-ui-lines-mode-map)
   (define-key map (kbd "c") #'harness-ui-patch-review-comment-line)
+  (define-key map (kbd "C-c >") #'harness-ui-patch-review-thread-reply)
   (define-key map (kbd "a") #'harness-ui-patch-review-approve-ediff)
   (define-key map (kbd "e") #'harness-ui-patch-review-edit-comment)
   (define-key map (kbd "k") #'harness-ui-patch-review-delete-comment)
@@ -4272,6 +4335,8 @@ are its.")
 \\[harness-ui-patch-review-comment-line] comments on the line at point, as a thread of
 its own.
 \\[change-review-ui-reply] replies to the thread under it.
+\\[harness-ui-patch-review-thread-reply] with lines selected starts a thread on them: a card in the
+feedback box, the words under it the comment.
 \\[change-review-ui-toggle-status] closes it or opens it again.
 \\[change-review-ui-toggle-reviewed] marks it reviewed, when the agent closed it.
 \\[change-review-ui-cycle-fold] folds it: one line, its conversation, all of it.

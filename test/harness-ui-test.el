@@ -316,7 +316,7 @@ module leaves the entry out, so the menu is unharmed."
       (should (string-match-p "C-c C-a +Attach file or task" text))
       ;; Pasting is C-y; C-c C-v is the review banner's [Verify].
       (should (string-match-p "C-y +Paste; an image attaches" text))
-      (should (string-match-p "C-c > +Quote reply: region or message" text))
+      (should (string-match-p "C-c > +Reply in a thread; C-u quotes" text))
       ;; A key of a panel above the box, which types there, and the box's own M-< and M->.
       (should (string-match-p "C-c \\. +A key of the panel above, from the box" text))
       (should (string-match-p "M-< +Top of the box, then the buffer" text))
@@ -335,7 +335,7 @@ module leaves the entry out, so the menu is unharmed."
       (should (string-match-p "C-c C-k +Close" text))
       (should-not (string-match-p "C-c C-k +Cancel turn" text))
       (should (string-match-p "C-c C-c +Send" text))
-      (should (string-match-p "C-c > +Quote reply" text)))))
+      (should (string-match-p "C-c > +Reply in a thread" text)))))
 
 (ert-deftest harness-ui-menu-in-review-shows-its-keys-over-the-chats ()
   "While a task's review banner shows, C-c C-v verifies and C-c C-x sends
@@ -461,7 +461,16 @@ leave free.  None is left out by the menu."
                                        ;; the compose box's C-y, `yank' remapped.
                                        (let ((global (lookup-key global-map own)))
                                          (and global (symbolp global)
-                                              (eq command (lookup-key map (vector 'remap global)))))))
+                                              (eq command (lookup-key map (vector 'remap global)))))
+                                       ;; Or the command the map gives it, remapped
+                                       ;; in the map itself: the chat's C-c >, the
+                                       ;; box's `compose-quote-reply' remapped to
+                                       ;; starting a thread, which the quoting
+                                       ;; minor mode's own binding of the key
+                                       ;; would otherwise outrank.
+                                       (let ((bound (lookup-key map own)))
+                                         (and bound (symbolp bound)
+                                              (eq command (lookup-key map (vector 'remap bound)))))))
                                  maps)))))))))
   ;; What every harness buffer offers is checked above; here, that each mode is there.
   (dolist (mode '(harness-chat-mode harness-ui-tasks-mode harness-ui-slots-mode harness-ui-sessions-mode

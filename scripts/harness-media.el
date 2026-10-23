@@ -1248,6 +1248,10 @@ The handle is the one the approval message names."
     ("Let a sub-agent run" . harness-media--notes-script)
     ("Run the project's check suite" . harness-media--notes-child-script)
     ("old build" . harness-media--decisions-script)
+    ;; The thread-reply picture: a reply the harness made comments in
+    ;; threads of (its markers name them), and the question before it.
+    ("answer with review_comment" . harness-media--thread-script)
+    ("Failed webhook deliveries" . harness-media--thread-first-script)
     ("dropped after one try" . harness-media--quote-script)
     ;; The denied call and the user's approval of it.
     ("baseline" . harness-media--baseline-denied-script)
@@ -2501,8 +2505,11 @@ One decision is yours: should a delivery that gave up be reported somewhere, or 
 (defun harness-media--keys (keys)
   "Press KEYS, a `kbd' string, in the selected window, as a user would.
 They go through the command loop, so the keymaps, the minor modes and
-their hooks act as they do for a user at the keyboard."
-  (execute-kbd-macro (kbd keys))
+their hooks act as they do for a user at the keyboard.  A prefix
+argument such as C-u gives leaves its value behind, which only the
+command loop clears; it is not left for the next picture."
+  (let ((current-prefix-arg nil))
+    (execute-kbd-macro (kbd keys)))
   (harness-media--settle 0.2))
 
 (defun harness-media--type (text)
@@ -2527,7 +2534,7 @@ before did not do what the picture needs."
 (defun harness-media-shot-quote-reply ()
   "A reply of the agent's quoted in the compose box and answered inline.
 The session is asked how to retry failed webhooks and answers in three
-paragraphs.  Then, with the keys a user presses in the box: C-c > quotes
+paragraphs.  Then, with the keys a user presses in the box: C-u C-c > quotes
 the whole reply; C-SPC at the start of the long paragraph's middle and
 C-c [ at its end elide it as [...], keeping the front and the end of
 that paragraph for context; M-RET splits the quote after the paragraph,
@@ -2544,9 +2551,10 @@ picture shows it."
            (code (car (delq chat (window-list nil 'nomini)))))
       (select-window chat)
       (with-current-buffer buffer
-        ;; From the box, C-c > quotes the agent's last reply, whole.
+        ;; From the box, C-u C-c > quotes the agent's last reply, whole
+        ;; (C-c > itself starts a thread).
         (goto-char harness-compose-end)
-        (harness-media--keys "C-c >")
+        (harness-media--keys "C-u C-c >")
         (harness-media--box-expect "\\`> Yes, and the request path")
         ;; The middle of the long paragraph: from "A background thread"
         ;; through "between attempts."  The region is the user's, from
@@ -2601,11 +2609,11 @@ so no other picture shows it."
            (code (car (delq chat (window-list nil 'nomini)))))
       (select-window chat)
       (with-current-buffer buffer
-        ;; From the box, C-c > quotes the agent's last reply and, under
+        ;; From the box, C-u C-c > quotes the agent's last reply and, under
         ;; it, the inline reply it answers, the agent's message that
         ;; reply quoted under that.
         (goto-char harness-compose-end)
-        (harness-media--keys "C-c >")
+        (harness-media--keys "C-u C-c >")
         (harness-media--box-expect "\\`> Changed: three tries")
         (harness-media--box-expect "> > > A failed delivery is retried once, 30 seconds later\\.")
         (harness-media--box-expect "> > Log the URL too\\.")
@@ -2625,6 +2633,168 @@ so no other picture shows it."
         (harness-media--box-goto "Good\\. Ship it with the release\\." t))
       (harness-media--capture "quote-thread"))
     (harness-call 'session/delete id)))
+
+;;;; Answering a reply in its thread
+
+(defconst harness-media--thread-question
+  "Failed webhook deliveries are lost after one attempt. What should the retry look like?"
+  "What the thread-reply picture's session is asked; its script answers it.")
+
+(defun harness-media--thread-first-script (_request)
+  "The answer of the thread-reply picture's session: two short paragraphs.
+The second ends in a question, which the user answers."
+  (list
+   (harness-media--say "Keep each failed delivery in a `webhook_retries` table and retry it from a background thread, waiting 1, 2, 4 and 8 minutes between attempts.
+
+After an hour a delivery that still fails is given up. Should that be reported to the subscriber, or only logged?")))
+
+(defconst harness-media--thread-answers
+  '(("Changed to 1, 5 and 30 minutes, with up to 10% of jitter, so the retries of one outage do not arrive together. Say if you want none." . "open")
+    ("Only logged, then: one warning with the order and the URL when a delivery gives up." . "closed"))
+  "What the agent of the thread-reply picture answers in each thread, in order.
+Each is (BODY . STATUS): the first thread stays open for the user's
+reply, the second is done.")
+
+(defun harness-media--thread-ids (request)
+  "Return the ids of the threads the newest user message of REQUEST names.
+Its marker lines (`harness-thread-marker'), in every text block of the
+message: the message holds a reply in a thread in each."
+  (let (ids)
+    (dolist (m (plist-get request :messages))
+      (when (member (plist-get m :role) '(user "user"))
+        (let ((here (cl-loop for b in (plist-get m :content)
+                             when (equal (plist-get b :type) "text")
+                             append (harness-thread-marker-ids (plist-get b :text)))))
+          (when here (setq ids here)))))
+    ids))
+
+(defun harness-media--thread-script (request)
+  "The turn of the thread-reply picture's session after the user's reply.
+The reply's replies are comments in threads, and the marker after each
+names its thread (`harness-thread-marker'): the agent reads the id there
+and answers in the thread, with `review_comment', as a model does."
+  (cl-loop for id in (harness-media--thread-ids request)
+           for (body . status) in harness-media--thread-answers
+           collect (harness-media--tool "review_comment" :thread id :body body :status status)))
+
+(defun harness-media--thread-answers-made (id)
+  "Return how many comments in a thread the agent of session ID has made."
+  (cl-count "review_comment" (harness-call 'session/nodes id)
+            :key (lambda (node) (plist-get node :tool)) :test #'equal))
+
+(defun harness-media--select-text (text)
+  "Select TEXT, as drawn in the transcript before the box: the region, point at its end.
+Signal an error when it is not there: the picture needs it."
+  (goto-char (point-min))
+  (unless (search-forward text (harness-compose--front) t)
+    (error "The transcript does not show %S" text))
+  (push-mark (match-beginning 0) t t)
+  (goto-char (match-end 0)))
+
+(defun harness-media-shot-thread-reply ()
+  "Replies in threads, started on purpose: what a reply is to is a card in the box.
+The session is a task, as a session adopted on the board is: a task has a
+review, and the review has the threads.  The agent proposes how to retry
+failed webhooks in two paragraphs.  With the keys a user presses: part of
+the first paragraph is selected and C-c > starts a thread on it -- a card
+that says it is the agent's message and quotes that part -- and the words
+under the card are the reply, typed in the box as any; so are the second's.
+C-c C-c sends it: each reply is a comment in a thread of the task's review,
+which the message shows with a link to it, and the agent answers each in
+its thread, what it wrote there a message of its own, under the thread's
+name, one thread still open and one closed.  Then C-c > with point on the
+agent's answer in the first thread starts a reply in that thread, the words
+typed under its card.  The session and its task are made here and deleted
+after, so no other picture shows them."
+  (let ((id (harness-media--new-session :name "Retry failed webhooks"
+                                        :model "claude:claude-opus-5-5"
+                                        :permission-mode 'accept-edits)))
+    (harness-media--prompt id harness-media--thread-question)
+    (let* ((task (plist-get (harness-call 'task/adopt id) :id))
+           (buffer (harness-media--chat-shot id "acme/webhooks.py"))
+           (chat (get-buffer-window buffer))
+           (code (car (delq chat (window-list nil 'nomini)))))
+      (select-window chat)
+      (with-current-buffer buffer
+        (harness-media--select-text "retry it from a background thread, waiting 1, 2, 4 and 8 minutes between attempts")
+        (harness-media--keys "C-c >")
+        (harness-media--box-expect "\\`\\[reply 1\\]\n\\'")
+        (harness-media--type "Make it 1, 5 and 30 minutes: our subscribers' endpoints are slow to recover.")
+        (harness-media--select-text "Should that be reported to the subscriber, or only logged?")
+        (harness-media--keys "C-c >")
+        (harness-media--type "Only logged for now. One warning when a delivery gives up is enough.")
+        (harness-media--box-expect "recover\\.\n\\[reply 2\\]\nOnly logged for now\\.")
+        (harness-media--keys "C-c C-c"))
+      (harness-media--wait (lambda () (and (>= (harness-media--thread-answers-made id) 2)
+                                           (eq (harness-media--status id) 'idle)))
+                           60 "the agent to answer in the threads")
+      (harness-media--settle 1)
+      (with-current-buffer buffer
+        ;; The agent's answer in the first thread: a reply to it is a reply in that thread.
+        (goto-char (point-min))
+        (unless (search-forward "of jitter" (harness-compose--front) t)
+          (error "The answer in the first thread is not drawn"))
+        (harness-media--keys "C-c >")
+        (harness-media--type "Jitter is fine, thanks."))
+      (harness-media--fit (max (harness-media--text-lines chat) (harness-media--text-lines code)) 34)
+      (harness-media--to-bottom buffer)
+      (with-current-buffer buffer
+        (harness-media--box-goto "Jitter is fine, thanks\\." t))
+      (harness-media--capture "thread-reply")
+      (harness-call 'task/delete task))
+    (harness-call 'session/delete id)))
+
+;;; The thread a reply made, in the task's review
+
+(defun harness-media--thread-reply-review-prepare ()
+  "Make the thread of a reply the user started on the agent's words, once.
+The slow-request task's agent said what it changed in a message; the user
+replied to a part of it, as the chat sends the reply -- the message goes
+through the filter that makes the reply a comment in a thread of the
+review (`harness-patch-review--on-message') -- and the agent answered in
+the thread with `review_comment', its call in the session.  Return the
+thread's id."
+  (let* ((id (plist-get (plist-get harness-media--world :tasks) :slow))
+         (sid (plist-get (harness-media--task id) :session))
+         (user-full-name "Noah Huppert") (user-mail-address "noah@acme.example")
+         (said (harness-call 'session/append sid
+                             (list :kind 'assistant
+                                   :content "The threshold is a named constant now, `SLOW_SECONDS`, and the log line says it is in seconds.\n\nA request slower than that is logged once, with its method, its path and its duration."))))
+    (let* ((text (car (harness-patch-review--on-message
+                       (list (harness-thread-block
+                              (list :refs (list (list :kind "chat" :node (plist-get said :id) :who "agent"
+                                                      :text "A request slower than that is logged once, with its method, its path and its duration.")))
+                              "Once per request, or once per path in a minute? The health check will be slow at startup."))
+                       sid '(:from nil))))
+           (thread (plist-get (plist-get text :thread) :id))
+           (body "Once per request, as it is: one line each. The health check is not timed, because `timed` wraps the application and `/health` is routed before it, so startup does not log.")
+           (call "toolu_media_thread"))
+      (unless thread (error "The reply made no thread"))
+      (harness-call 'session/append sid
+                    (list :kind 'tool-call :call-id call :tool "review_comment"
+                          :input (list :thread thread :body body)))
+      (harness-call 'patch-review/comment id body :thread thread :session sid :call-id call)
+      thread)))
+
+(defun harness-media-shot-thread-reply-review ()
+  "The thread a reply in the chat made, in the review of the slow-request task.
+The user quoted a part of what the agent said and asked about it; the
+review has that as a thread, the quote above the question, and the agent's
+answer in it.  The report at its threads, the filter on all of them."
+  (harness-media--thread-reply-review-prepare)
+  (let ((popout (harness-media--review-layout)))
+    (with-selected-window (get-buffer-window popout)
+      (change-review-ui-set-filter 'all)
+      (harness-media--settle 0.5)
+      (goto-char (point-min))
+      (re-search-forward "^Threads ")
+      (beginning-of-line))
+    (harness-media--fit-popout-shot 56)
+    (with-selected-window (get-buffer-window popout)
+      (goto-char (point-max))
+      (re-search-backward "Once per request, or once per path")
+      (recenter 4))
+    (harness-media--capture "thread-reply-review")))
 
 (defun harness-media--text-lines (window)
   "Return how many lines the text of WINDOW's buffer takes in WINDOW.
@@ -3969,6 +4139,49 @@ it, and an answer is typed (`review-quote')."
           (call-interactively #'harness-ui-patch-review-ediff-quit))
         (harness-media--settle 0.5)))))
 
+(defun harness-media-shot-review-thread-lines ()
+  "A thread started on lines of the branch's version, with C-c >.
+Ediff on acme/app.py, three lines of the branch's version selected with
+the keys a user presses (C-SPC and C-n), and C-c >: the report's box holds a
+card that says the file, the side and the lines, with the lines themselves,
+point under it, and the question about them is typed there.  Sent with the
+feedback it is a thread on those lines (`thread-lines')."
+  (let ((popout (harness-media--review-layout)))
+    (let* ((review harness-media--review)
+           (files (harness-ui-patch-review--r-files review))
+           (index (cl-position "acme/app.py" files :key #'change-review-file-path :test #'equal)))
+      (harness-ui-patch-review-ediff review index
+                                     (cons :new (harness-media--review-line "if handler is None" "acme/app.py")))
+      (harness-media--wait (lambda () (let ((state (harness-ui-patch-review--r-ediff review)))
+                                        (and (buffer-live-p (plist-get state :control))
+                                             (get-buffer-window (plist-get state :control)))))
+                           30 "Ediff to show")
+      (harness-media--settle 1.5)
+      (let* ((state (harness-ui-patch-review--r-ediff review))
+             (version (plist-get state :b))
+             (window (get-buffer-window version)))
+        (ignore-errors (window-resize window 8))
+        (select-window window)
+        (with-current-buffer version
+          (goto-char (point-min))
+          (re-search-forward "^    if handler is None:")
+          (beginning-of-line)
+          (set-window-point window (point))
+          (set-window-start window (line-beginning-position -2)))
+        (harness-media--keys "C-SPC")
+        (dotimes (_ 3) (harness-media--keys "C-n"))
+        (unless (use-region-p) (error "The keys selected nothing"))
+        (harness-media--keys "C-c >")
+        (with-current-buffer popout
+          (harness-media--box-expect "\\`\\[reply 1\\]\n\\'"))
+        (harness-media--type "Should a 404 be timed too? A scanner probing unknown paths would fill the log.")
+        (harness-media--capture "review-thread-lines")
+        ;; Give the reply up, and Ediff, as the other pictures leave them.
+        (with-current-buffer popout (harness-compose-clear))
+        (with-current-buffer (plist-get (harness-ui-patch-review--r-ediff review) :control)
+          (call-interactively #'harness-ui-patch-review-ediff-quit))
+        (harness-media--settle 0.5)))))
+
 ;;;; Links in what agents write
 
 (defconst harness-media--links-message
@@ -4145,6 +4358,7 @@ names."
     ;; Likewise: they ask a session of their own, deleted after the picture.
     ("quote-reply" . harness-media-shot-quote-reply)
     ("quote-thread" . harness-media-shot-quote-thread)
+    ("thread-reply" . harness-media-shot-thread-reply)
     ("access" . harness-media-shot-access)
     ("access-judgements" . harness-media-shot-access-judgements)
     ;; Last: they add a commit to the slow-request task's branch and the
@@ -4158,10 +4372,14 @@ names."
     ("review-diff" . harness-media-shot-review-diff)
     ;; It takes review-select on the way.
     ("review-quote" . harness-media-shot-review-quote)
+    ("review-thread-lines" . harness-media-shot-review-thread-lines)
     ;; Last: two sessions of their own, and a thread on the slow-request
     ;; task's review that the review pictures must not show.
     ("links" . harness-media-shot-links)
-    ("links-followed" . harness-media-shot-links-followed))
+    ("links-followed" . harness-media-shot-links-followed)
+    ;; Last of all: a thread on the slow-request task's review that no
+    ;; other picture shows, made by a reply in its session.
+    ("thread-reply-review" . harness-media-shot-thread-reply-review))
   "Every picture, as (NAME . FUNCTION), in the order they are taken.")
 
 ;;;; Entry point

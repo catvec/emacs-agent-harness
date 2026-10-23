@@ -526,25 +526,51 @@ the harness sends itself, would take the whole rendering down."
       (and rule (>= count 3)))))
 
 (defun harness-ui-markdown-render (text)
-  "Render Markdown TEXT into a propertized string."
-  (let ((lines (split-string (or text "") "\n"))
-        (out nil)
-        (para nil))
+  "Render Markdown TEXT into a propertized string.
+Each block of the result -- a paragraph, a heading, a list item, a code
+block, a table, the lines of a quote -- has the text property
+`harness-md-source', (FROM . TO): where in TEXT the block was written,
+as offsets of characters.  Something that acts on what is on the screen
+-- a reply to part of it -- knows from that what the text it selects was
+rendered from."
+  (let* ((text (or text ""))
+         (lines (split-string text "\n"))
+         (all (vconcat lines))
+         (total (length all))
+         (starts (let ((pos 0) (acc nil))
+                   (dolist (line lines)
+                     (push pos acc)
+                     (setq pos (+ pos (length line) 1)))
+                   (vconcat (nreverse acc))))
+         (out nil)
+         (para nil)
+         (para-first nil)
+         (para-last nil))
     (cl-labels
-        ((flush-para ()
+        ((here () (- total (length lines) 1))
+         (mark (string first last)
+           ;; STRING came from lines FIRST to LAST: say where in TEXT.
+           (when (and (stringp string) (> (length string) 0) (<= first last))
+             (put-text-property 0 (length string) 'harness-md-source
+                                (cons (aref starts first) (+ (aref starts last) (length (aref all last))))
+                                string))
+           string)
+         (flush-para ()
            ;; Every block branch calls this between matching its line and
            ;; reading the groups, so the inline rendering must leave the
            ;; match data alone.
            (when para
              (save-match-data
-               (push (concat (harness-ui-markdown-inline
-                              (string-join (nreverse para) (if harness-ui-markdown-hard-breaks "\n" " ")))
-                             "\n")
+               (push (mark (concat (harness-ui-markdown-inline
+                                    (string-join (nreverse para) (if harness-ui-markdown-hard-breaks "\n" " ")))
+                                   "\n")
+                           para-first para-last)
                      out))
              (setq para nil)))
          (emit (s) (push s out)))
       (while lines
-        (let ((line (pop lines)))
+        (let* ((line (pop lines))
+               (first (here)))
           (cond
            ;; Fenced code block
            ((string-match "\\`[ ]\\{0,3\\}\\(```+\\|~~~+\\)[ ]*\\([A-Za-z0-9_+.-]*\\)" line)
@@ -553,18 +579,20 @@ the harness sends itself, would take the whole rendering down."
               (while (and lines (not (string-match-p (concat "\\`[ ]\\{0,3\\}" (regexp-quote fence) "[ ]*\\'") (car lines))))
                 (push (pop lines) code))
               (pop lines)
-              (emit (harness-ui-markdown--code-block (string-join (nreverse code) "\n") lang))))
+              (emit (mark (harness-ui-markdown--code-block (string-join (nreverse code) "\n") lang)
+                          first (min (here) (1- total))))))
            ;; Heading
            ((string-match "\\`\\(#\\{1,6\\}\\)[ \t]+\\(.*?\\)[ \t#]*\\'" line)
             (flush-para)
             (let* ((level (length (match-string 1 line)))
                    (face (pcase level (1 'harness-md-heading-1) (2 'harness-md-heading-2)
                                 (3 'harness-md-heading-3) (_ 'harness-md-heading-4))))
-              (emit (concat (harness-ui-markdown--add-face (harness-ui-markdown-inline (match-string 2 line)) face) "\n"))))
+              (emit (mark (concat (harness-ui-markdown--add-face (harness-ui-markdown-inline (match-string 2 line)) face) "\n")
+                          first first))))
            ;; Horizontal rule
            ((harness-ui-markdown--rule-p line)
             (flush-para)
-            (emit (propertize (concat (make-string 40 ?\s) "\n") 'face 'harness-md-rule)))
+            (emit (mark (propertize (concat (make-string 40 ?\s) "\n") 'face 'harness-md-rule) first first)))
            ;; Table (a line with pipes followed by a separator line)
            ((and (string-match-p "|" line) lines
                  (string-match-p "\\`[ ]*|?[ ]*:?-+:?[ ]*\\(|[ ]*:?-+:?[ ]*\\)*|?[ ]*\\'" (car lines)))
@@ -572,17 +600,19 @@ the harness sends itself, would take the whole rendering down."
             (let ((rows (list line)))
               (while (and lines (string-match-p "|" (car lines)))
                 (push (pop lines) rows))
-              (emit (harness-ui-markdown--table (nreverse rows)))))
+              (emit (mark (harness-ui-markdown--table (nreverse rows)) first (here)))))
            ;; Block quote
            ((string-match "\\`[ ]\\{0,3\\}>[ ]?\\(.*\\)\\'" line)
             (flush-para)
             (let ((quoted (list (match-string 1 line))))
               (while (and lines (string-match "\\`[ ]\\{0,3\\}>[ ]?\\(.*\\)\\'" (car lines)))
                 (push (match-string 1 (pop lines)) quoted))
-              (let ((inner (harness-ui-markdown-render (string-join (nreverse quoted) "\n"))))
+              (let ((inner (harness-ui-markdown-render (string-join (nreverse quoted) "\n")))
+                    (last (here)))
                 (dolist (l (split-string (string-trim-right inner "\n") "\n"))
-                  (emit (concat (propertize "┃ " 'face 'harness-md-quote-bar)
-                                (harness-ui-markdown--add-face l 'harness-md-quote) "\n"))))))
+                  (emit (mark (concat (propertize "┃ " 'face 'harness-md-quote-bar)
+                                      (harness-ui-markdown--add-face l 'harness-md-quote) "\n")
+                              first last))))))
            ;; List item
            ((string-match "\\`\\([ \t]*\\)\\([-*+]\\|[0-9]+[.)]\\)[ \t]+\\(.*\\)\\'" line)
             (flush-para)
@@ -597,17 +627,20 @@ the harness sends itself, would take the whole rendering down."
                           (not (string-match-p "\\`[ \t]*\\([-*+]\\|[0-9]+[.)]\\)[ \t]+" (car lines)))
                           (string-match-p "\\`[ \t]+" (car lines)))
                 (push (string-trim (pop lines)) body))
-              (emit (harness-ui-markdown--wrap
-                     (concat (harness-ui-markdown-inline (string-join (nreverse body) " ")) "\n")
-                     prefix
-                     (concat (make-string indent ?\s) (propertize bullet 'face 'harness-md-bullet))))))
+              (emit (mark (harness-ui-markdown--wrap
+                           (concat (harness-ui-markdown-inline (string-join (nreverse body) " ")) "\n")
+                           prefix
+                           (concat (make-string indent ?\s) (propertize bullet 'face 'harness-md-bullet)))
+                          first (here)))))
            ;; Blank line
            ((string-blank-p line)
             (flush-para)
             (when (and out (not (string-suffix-p "\n\n" (car out))))
               (emit "\n")))
            ;; Paragraph text
-           (t (push line para)))))
+           (t (unless para (setq para-first first))
+              (setq para-last first)
+              (push line para)))))
       (flush-para))
     (let ((s (apply #'concat (nreverse out))))
       (string-trim-right s "\n+"))))

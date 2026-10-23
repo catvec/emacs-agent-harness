@@ -3188,7 +3188,9 @@ for it.  Blank text blocks are dropped; a blank OPENING adds nothing."
                               blocks)))
     (cond
      ((harness-string-blank-p opening) blocks)
-     ((harness-tasks--text-block-p (car blocks))
+     ;; A reply in a thread is not the words the opening goes before: it
+     ;; keeps its own text, which its data is drawn with.
+     ((and (harness-tasks--text-block-p (car blocks)) (not (harness-thread-block-p (car blocks))))
       (cons (plist-put (copy-sequence (car blocks)) :text
                        (harness-tasks--opened-text opening (string-trim (plist-get (car blocks) :text))))
             (cdr blocks)))
@@ -3278,11 +3280,31 @@ ADDITIONS are those `harness-tasks--feedback-additions' returned."
     blocks))
 
 (defun harness-tasks--words (blocks)
-  "Return the words of the message BLOCKS: its text blocks, trimmed and joined."
+  "Return the words of the message BLOCKS: its text blocks, trimmed and joined.
+A reply in a thread the review has made a comment of already
+\(`harness-thread-block-p' with an `:id') is no words: the review keeps it
+as the thread it is, and keeps it once."
   (string-join (cl-loop for b in blocks
-                        when (harness-tasks--text-block-p b)
+                        when (and (harness-tasks--text-block-p b)
+                                  (not (and (harness-thread-block-p b)
+                                            (plist-get (plist-get b :thread) :id))))
                         collect (string-trim (plist-get b :text)))
                "\n\n"))
+
+(defun harness-tasks--register-threads (task attachments)
+  "Return ATTACHMENTS, a task's feedback's, with its replies in threads registered.
+A reply in a thread (an attachment with `:thread') is a comment in a
+thread of TASK's review, which the module that keeps the review makes: it
+is a filter on `task/feedback-attachments' (value ATTACHMENTS, arg TASK)
+and returns the attachments with the id of the thread in each reply's
+data.  That is done before the round of feedback is kept, so that the
+text the round keeps ends with the marker of each thread
+\(`harness-thread-marker'), and before a message waits for a slot, so that
+it goes out as the threads it is made of and no more of them.  Without
+such a filter, or when it fails, ATTACHMENTS are as they were."
+  (if (cl-some (lambda (a) (and (consp a) (plist-get a :thread))) attachments)
+      (or (harness-run-filter 'task/feedback-attachments attachments task) attachments)
+    attachments))
 
 (defun harness-tasks--feedback-round (task feedback)
   "Return TASK's rounds of feedback with a new one, FEEDBACK, at the end."
@@ -5498,9 +5520,12 @@ FEEDBACK and ATTACHMENTS go to the task's own session, in its own
 worktree, as a new prompt opened by `harness-tasks--reject-message'.  The
 round of feedback is kept in the task's `:feedback'.  The task is
 active again and comes back to review when that turn ends.  Feedback
-may be ATTACHMENTS alone, a screenshot say, but not nothing.  Any
-message the user sends the session meanwhile does the same; one from
-another session's agent does not (`harness-tasks--on-message').
+may be ATTACHMENTS alone, a screenshot say, but not nothing.  A reply
+in a thread among ATTACHMENTS (an attachment with `:thread') is a
+comment in a thread of the task's review before the round is kept
+\(`harness-tasks--register-threads').  Any message the user sends the
+session meanwhile does the same; one from another session's agent does
+not (`harness-tasks--on-message').
 
 Sending it back is held to `harness-tasks-max-running' like any start
 \(`harness-tasks--make-room'): the task works at once with a slot of its
@@ -5525,6 +5550,9 @@ slot frees, when it comes to outrank a task at work, at
       (error "Task %s was archived and its worktree removed; submit a new task" id))
     (let* ((sid (plist-get task :session))
            (feedback (harness-tasks--add-to-feedback feedback additions))
+           ;; The replies in threads are comments of the review before the
+           ;; round keeps their text.
+           (attachments (harness-tasks--register-threads task attachments))
            (blocks (harness-tasks--blocks (list :prompt (string-trim (or feedback ""))
                                                 :attachments attachments))))
       (if (not (harness-tasks--make-room task))

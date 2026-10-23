@@ -751,11 +751,14 @@ The compose box marks it (`harness-compose-attachment-block'), and so does
 An image reads [image], or its token, [image 1], when it has a label;
 nothing when the text holds its token already, as the compose box's
 does.  A file reads @ and its name, nothing when the text has an @
-reference to it already, as the compose box's does.  The text of an
-attachment (`harness-attached-text-p') follows the rest, a paragraph
-apart, rather than running on from the user's words."
+reference to it already, as the compose box's does.  The replies in
+threads (`harness-thread-block-p') follow the words, and the text of an
+attachment (`harness-attached-text-p') follows them, each a paragraph
+apart, rather than running on from the user's words: a quote starts a
+line."
   (let* ((attached (cl-remove-if-not #'harness-attached-text-p blocks))
-         (blocks (cl-remove-if #'harness-attached-text-p blocks))
+         (threads (cl-remove-if-not #'harness-thread-block-p blocks))
+         (blocks (cl-remove-if (lambda (b) (or (harness-attached-text-p b) (harness-thread-block-p b))) blocks))
          (text (mapconcat (lambda (b) (if (equal (plist-get b :type) "text") (or (plist-get b :text) "") ""))
                           blocks " "))
          (words (mapconcat
@@ -776,11 +779,14 @@ apart, rather than running on from the user's words."
                  " ")))
     (mapconcat #'identity
                (cl-remove-if #'string-empty-p
-                             (cons words (delq nil (mapcar (lambda (b) (plist-get b :text)) attached))))
+                             (cons words (delq nil (mapcar (lambda (b) (plist-get b :text))
+                                                           (append threads attached)))))
                "\n\n")))
 
 (defun harness-attachments-to-blocks (attachments)
   "Turn ATTACHMENTS, attachment plists, into content blocks.
+A reply in a thread, an attachment with `:thread' and the `:response'
+under it, is the text block of that reply (`harness-thread-block').
 An image keeps its `:label', which its token in the text names.  An
 attachment that carries its own `:text' and no `:path' -- a task the
 user attached, say, which is described rather than stored in a file --
@@ -790,7 +796,9 @@ is that text as a text block, none when the text is blank, marked
   (delq nil
         (mapcar (lambda (a)
                   (let ((mime (or (plist-get a :mime) "")))
-                    (cond ((and (stringp (plist-get a :text)) (null (plist-get a :path)))
+                    (cond ((plist-get a :thread)
+                           (harness-thread-block (plist-get a :thread) (plist-get a :response)))
+                          ((and (stringp (plist-get a :text)) (null (plist-get a :path)))
                            (unless (harness-string-blank-p (plist-get a :text))
                              (list :type "text" :text (plist-get a :text) :attached t)))
                           ((string-prefix-p "image/" mime)
@@ -801,6 +809,165 @@ is that text as a text block, none when the text is blank, marked
                           (t (list :type "file" :path (plist-get a :path) :size (plist-get a :size)
                                    :mime mime :name (plist-get a :name))))))
                 attachments)))
+
+;;;; Threads
+;;
+;; A THREAD is a reply the user starts on purpose, with C-c >, to a region
+;; of something on the screen: part of a message in the chat, several
+;; messages, lines of a diff.  The reply is a text block that carries the
+;; thread's DATA, a plist, as `:thread':
+;;
+;;   (:refs (REF ...)          where the reply is from, in order
+;;    :response TEXT           what the user wrote under it
+;;    :reply (:thread T :comment C)    the thread of the review it follows
+;;    :id T :comment C)        set once the review made it a thread
+;;
+;; A REF says which region, and where it is from.  Of the chat it is
+;; (:kind "chat" :node ID :who WHO :label LABEL :from N :to M :text
+;; EXCERPT): the node, who wrote it, the offsets of the part in what the
+;; node says, and the part itself.  Of a diff it is (:kind "diff" :file F
+;; :side "old"|"new" :line L :end E :revision R :text EXCERPT); of any
+;; other buffer (:kind "buffer" :name NAME :file F :line L :end E :text
+;; EXCERPT).  The keys are single words, so they pass through JSON and the
+;; ACP `_harness' extension as they are.
+;;
+;; The block's `:text' says it all, as a mail does: the quotes of the
+;; refs, then the response, then, once the thread is a comment in the
+;; review of the task, the thread's marker line -- [thread t-3f2a1b09:
+;; answer with review_comment].  That is what the agent reads: it tells
+;; the agent the thread to answer in, and with which tool.  A UI that
+;; knows threads draws the data -- the card -- instead.  The plain
+;; [thread ID] lines of the feedback that sends a task back are another
+;; thing, and no marker.
+
+(defconst harness-thread-marker-regexp
+  "^[ \t]*\\[thread \\([A-Za-z0-9][A-Za-z0-9_.-]*\\): answer with review_comment\\][ \t]*$"
+  "Regexp matching the marker line of a reply that is a comment in a thread.
+Group 1 is the thread's id.  See `harness-thread-marker'.")
+
+(defun harness-thread-marker (id)
+  "Return the marker line of thread ID, which a reply in that thread ends with."
+  (format "[thread %s: answer with review_comment]" id))
+
+(defun harness-thread-marker-ids (text)
+  "Return the ids of the threads TEXT names with marker lines, in order.
+Nil for a TEXT with none, or that is no string."
+  (when (and (stringp text) (string-search "[thread " text))
+    (let ((pos 0) (ids nil))
+      (while (string-match harness-thread-marker-regexp text pos)
+        (push (match-string 1 text) ids)
+        (setq pos (match-end 0)))
+      (nreverse ids))))
+
+(defun harness-thread-block-p (block)
+  "Non-nil when BLOCK is a reply in a thread: a text block with thread data."
+  (and (consp block) (equal (plist-get block :type) "text") (plist-get block :thread) t))
+
+(defun harness-thread-ref-kind (ref)
+  "Return the kind of REF, a region's reference, as a string: chat, diff or buffer."
+  (let ((kind (plist-get ref :kind)))
+    (cond ((symbolp kind) (and kind (symbol-name kind)))
+          ((stringp kind) kind))))
+
+(defun harness-thread-refs (data)
+  "Return the references of the thread DATA, a list of plists, in order.
+Whatever a JSON array parsed as, a vector or a list, is a list now."
+  (let ((refs (plist-get data :refs)))
+    (cl-remove-if-not (lambda (ref) (and (consp ref) (keywordp (car ref))))
+                      (if (vectorp refs) (append refs nil) refs))))
+
+(defun harness-thread-normalize (data)
+  "Return the thread DATA with its references as a list, as the harness keeps it.
+Keys without a value are dropped, so the data reads the same whether it
+came over JSON or was made here."
+  (let (out)
+    (cl-loop for (key value) on data by #'cddr
+             do (let ((value (if (eq key :refs)
+                                 (mapcar #'harness-thread-normalize (harness-thread-refs data))
+                               value)))
+                  (when (and value (not (eq value :false)))
+                    (push key out)
+                    (push value out))))
+    (nreverse out)))
+
+(defun harness-thread-line-label (ref)
+  "Return the lines REF names as text: \"12\", \"12-15\", or nil without a line."
+  (let ((line (plist-get ref :line)) (end (plist-get ref :end)))
+    (cond ((not (integerp line)) nil)
+          ((and (integerp end) (> end line)) (format "%d-%d" line end))
+          (t (format "%d" line)))))
+
+(defun harness-thread-ref-header (ref)
+  "Return the line that opens the quote of REF, a region's reference, or nil.
+The words of the agent need none: a quote says whose they are.  Anything
+else says where the quote is from, as the agent could not tell otherwise:
+the message of the user's own, the file and lines of a diff, a buffer."
+  (let ((lines (harness-thread-line-label ref)))
+    (pcase (harness-thread-ref-kind ref)
+      ("diff"
+       (let ((revision (and (plist-get ref :revision) (format "%s" (plist-get ref :revision)))))
+         (format "In %s%s (%s%s):"
+                 (or (plist-get ref :file) "the change")
+                 (if lines (format ", line%s %s" (if (string-search "-" lines) "s" "") lines) "")
+                 (if (equal (format "%s" (plist-get ref :side)) "old") "before the change" "after the change")
+                 (if revision (format ", at %s" (substring revision 0 (min 8 (length revision)))) ""))))
+      ("buffer"
+       (format "In %s%s:"
+               (or (plist-get ref :file) (plist-get ref :name) "a buffer")
+               (if lines (format ", line%s %s" (if (string-search "-" lines) "s" "") lines) "")))
+      (_ (when (member (format "%s" (plist-get ref :who)) '("you" "user"))
+           "My earlier message:")))))
+
+(defun harness-thread-quote-lines (text)
+  "Return TEXT as a block quote: \"> \" before each line, \">\" for a blank one."
+  (mapconcat (lambda (line) (if (string-blank-p line) ">" (concat "> " line)))
+             (split-string (string-trim-right (or text "") "[ \t\n]+") "\n")
+             "\n"))
+
+(defun harness-thread-quote (data)
+  "Return the quotes of the thread DATA's references, the way a mail quotes.
+Each reference is a block quote -- the line that says where it is from
+\(`harness-thread-ref-header') first, if it has one -- and a blank line
+parts two.  Every line of it starts with \">\": a reader that takes a
+reply apart, quotes and answers, finds the quote whole."
+  (mapconcat (lambda (ref)
+               (let ((text (plist-get ref :text)))
+                 (harness-thread-quote-lines
+                  (string-join (delq nil (list (harness-thread-ref-header ref)
+                                               (and (stringp text) (not (string-blank-p text)) text)))
+                               "\n\n"))))
+             (harness-thread-refs data) "\n\n"))
+
+(defun harness-thread-text (data)
+  "Return the text of a reply in the thread DATA: quotes, response, marker.
+The marker line follows once the thread has an `:id'."
+  (string-join
+   (cl-remove-if #'string-empty-p
+                 (list (harness-thread-quote data)
+                       (string-trim (let ((response (plist-get data :response))) (if (stringp response) response "")))
+                       (if-let* ((id (plist-get data :id))) (harness-thread-marker id) "")))
+   "\n\n"))
+
+(defun harness-thread-block (data &optional response)
+  "Return the text block of a reply in the thread DATA, with the RESPONSE it holds.
+RESPONSE, else DATA's `:response', is what the user wrote under the
+quotes.  The block's `:text' is all of the reply as a mail would have it
+\(`harness-thread-text'); `:thread' is DATA to draw it from."
+  (let ((data (harness-thread-normalize
+               (if response (plist-put (copy-sequence data) :response response) data))))
+    (list :type "text" :text (harness-thread-text data) :thread data)))
+
+(defun harness-blocks-only-text-p (blocks)
+  "Non-nil when every block of BLOCKS is plain text: no picture, no thread.
+A node keeps the `:blocks' of a message that is more than its text
+\(`harness-agent--only-text-p'): a reply in a thread (`harness-thread-block-p')
+is text that has data to draw it from."
+  (cl-every (lambda (b) (and (equal (plist-get b :type) "text") (not (harness-thread-block-p b)))) blocks))
+
+(defun harness-thread-response (block)
+  "Return what the user wrote in BLOCK, a reply in a thread, under the quotes."
+  (let ((response (plist-get (plist-get block :thread) :response)))
+    (if (stringp response) response "")))
 
 (defun harness-queued-message-node (item)
   "Return the user node queued ITEM will be once sent, to draw it before.
@@ -816,8 +983,7 @@ ITEM alone keeps its own numbers, as the user wrote them."
          (from (plist-get item :from)))
     (append (list :id (plist-get item :id) :kind 'user :content (harness-blocks-text blocks)
                   ;; As the agent's node: the blocks, unless they are all text.
-                  :blocks (unless (cl-every (lambda (b) (equal (plist-get b :type) "text")) blocks)
-                            blocks))
+                  :blocks (unless (harness-blocks-only-text-p blocks) blocks))
             (and (harness-sender-kind from) (list :meta (list :from from))))))
 
 ;;;; Paths

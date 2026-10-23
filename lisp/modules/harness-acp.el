@@ -1403,11 +1403,16 @@ An image's `_harness.label', the token naming it in the message's text
 \(image 1 for [image 1]), becomes its `:label'.  A text block with
 `_harness.attached', the text of an attachment such as a task, keeps
 that as `:attached', which sets it apart from the user's words in the
-transcript (`harness-agent--blocks-text')."
+transcript (`harness-agent--blocks-text').  A text block with
+`_harness.thread' is a reply in a thread: its text is what the user
+wrote under the quotes, and the thread's data says what they quote
+\(`harness-thread-block' makes the block of both)."
   (pcase (plist-get block :type)
-    ("text" (append (list :type "text" :text (or (plist-get block :text) ""))
-                    (and (harness-json-true-p (plist-get (plist-get block :_harness) :attached))
-                         (list :attached t))))
+    ("text" (if-let* ((thread (plist-get (plist-get block :_harness) :thread)))
+                (harness-thread-block thread (or (plist-get block :text) ""))
+              (append (list :type "text" :text (or (plist-get block :text) ""))
+                      (and (harness-json-true-p (plist-get (plist-get block :_harness) :attached))
+                           (list :attached t)))))
     ("image" (let ((label (plist-get (plist-get block :_harness) :label)))
                (append (list :type "image" :mime (plist-get block :mimeType) :data (plist-get block :data))
                        (and (stringp label) (not (string-empty-p label)) (list :label label)))))

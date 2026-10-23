@@ -25,6 +25,13 @@
 ;; Both are offered to task sessions: a session that is no task's has no
 ;; review (the filter `agent/tools' removes them), unless it names a task.
 ;;
+;; The user's replies that quote the agent's words are comments in threads
+;; of the review too, and the message the agent reads names the thread
+;; each is in (harness-patch-review.el): `review_comment' is how the agent
+;; answers in it.  The result of a call says which thread and comment it
+;; made, and which comment it follows (`:meta'), which the transcript keeps
+;; so that the chat can draw the call as the message from the agent that it
+;; is: the words of the comment, under the thread's name.
 ;; In the chat, runs of calls fold under one summary line, but only the
 ;; calls of tools on an explicit allow list (`:coalescable', see
 ;; harness-tools.el), so that a call the user should see stays in view.
@@ -83,6 +90,18 @@ That is the task INPUT names, else the task of the calling session."
       (harness-tool-error "Reviews with threads are not enabled in this harness (the patch-review module)."))
      (t (harness-tool-ok (harness-call 'patch-review/threads-text id status))))))
 
+(defun harness-tools-review--meta (result)
+  "Return what the transcript keeps of RESULT, from `patch-review/comment'.
+The thread's id as the review has it (the call may have named it by the
+start of it), its status, the comment made -- none when only the status
+changed -- and the comment it follows in the thread: who wrote it and the
+start of it, which the chat draws under the answer's thread."
+  (append (list :thread (plist-get result :thread) :status (plist-get result :status))
+          (and (plist-get result :comment)
+               (list :comment (plist-get (plist-get result :comment) :id)))
+          (and (plist-get result :parent)
+               (list :parent (plist-get result :parent)))))
+
 (defun harness-tools-review--comment (input ctx)
   "Handler of review_comment: add the agent's comment INPUT says, in CTX's session.
 The links in the comment are written out in full first
@@ -118,7 +137,8 @@ not from the session the comment was written in."
                                      (if (plist-get input :thread) "" " the new"))
                            "Changed")
                          (plist-get result :thread) (plist-get result :status))
-                 (cdr written))))
+                 (cdr written))
+                :meta (harness-tools-review--meta result)))
            (harness-error (harness-tool-error (harness-error-message err))))))))))
 
 (harness-define-tool "review_threads"
@@ -136,7 +156,7 @@ not from the session the comment was written in."
 
 (harness-define-tool "review_comment"
   :label "Review comment"
-  :description "Answer a thread of the review of your work, or start one. The thread id is given in the feedback after \"[thread ...]\", and review_threads lists them. Write what you did or why you disagree, briefly, in Markdown: the review draws it rendered, so name code in `backquotes`, put lines of code in a fenced block and steps in a list; the user looks at every thread you close, so when you close one say what you changed and where. Close the thread (status closed) once what it raises is done; leave it open when it is not, or when you want the user's answer, and never close a thread you only argued against. Without thread a new thread starts: on the change as a whole, or on file and line of it, to explain something to the user where they will read the diff. The comment records this call, so the user can follow it back to this point of the conversation. Link what you mean in it, the tool call that proves a fix or the message you answer: [the test run](harness:call/bash#1). With thread and status but no body, only the status changes."
+  :description "Answer a thread of the review of your work, or start one. The thread id is given in the feedback after \"[thread ...]\", and review_threads lists them. A reply of the user's that quotes your own words ends with such a marker too, [thread ID: answer with review_comment]: answer it here, in that thread, instead of in a message of your own; the chat shows your comment as your answer. Write what you did or why you disagree, briefly, in Markdown: the review draws it rendered, so name code in `backquotes`, put lines of code in a fenced block and steps in a list; the user looks at every thread you close, so when you close one say what you changed and where. Close the thread (status closed) once what it raises is done; leave it open when it is not, or when you want the user's answer, and never close a thread you only argued against. Without thread a new thread starts: on the change as a whole, or on file and line of it, to explain something to the user where they will read the diff. The comment records this call, so the user can follow it back to this point of the conversation. Link what you mean in it, the tool call that proves a fix or the message you answer: [the test run](harness:call/bash#1). With thread and status but no body, only the status changes."
   :schema '(:type "object"
             :properties (:thread (:type "string"
                                   :description "The id of the thread to answer, or the start of it when unique. Omit to start a new thread.")

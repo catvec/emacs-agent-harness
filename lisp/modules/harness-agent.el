@@ -141,9 +141,15 @@ wrote it (`harness-agent--inline-reply-p').")
 That is a line of the message from \"> \" on with, further down, a line
 of its own: the user's answer under the part it quotes.  A message that
 only quotes -- a region prompt, a selection pasted in -- has no such
-line, and is not answered inline."
+line, and is not answered inline.  Nor is one whose replies are comments
+in threads (`harness-thread-marker'): each names the thread to answer in
+and the tool to answer with, which the note would contradict."
   (let ((quoted nil))
     (catch 'found
+      (dolist (block blocks)
+        (when (equal (plist-get block :type) "text")
+          (when (harness-thread-marker-ids (plist-get block :text))
+            (throw 'found nil))))
       (dolist (block blocks)
         (when (equal (plist-get block :type) "text")
           (dolist (line (split-string (or (plist-get block :text) "") "\n"))
@@ -526,8 +532,9 @@ text block names it.  A tool_result block whose call returned images
 gets them the same way (`harness-agent--prepare-result'); any other is
 returned as it is."
   (pcase (plist-get block :type)
-    ;; What marks the text of an attachment is for the transcript.
-    ("text" (if (plist-member block :attached)
+    ;; What marks the text of an attachment, and the data of a reply in a
+    ;; thread, is for the transcript: a provider is sent the text.
+    ("text" (if (or (plist-member block :attached) (plist-member block :thread))
                 (list :type "text" :text (plist-get block :text))
               block))
     ("image"
@@ -594,9 +601,10 @@ cut to the newest `harness-agent-history-images' first (see
 A UI reads a queued message with it as the agent will record it
 \(`harness-queued-message-node').")
 
-(defun harness-agent--only-text-p (blocks)
-  "Non-nil when every block of BLOCKS is a text block."
-  (cl-every (lambda (b) (equal (plist-get b :type) "text")) blocks))
+(defalias 'harness-agent--only-text-p #'harness-blocks-only-text-p
+  "Alias of `harness-blocks-only-text-p', shared with the UIs (harness-util.el).
+A message of text alone is kept as its text; a reply in a thread has
+data besides, and keeps its blocks.")
 
 (defun harness-agent--blank-p (block)
   "Non-nil when BLOCK is a text block holding nothing but whitespace."

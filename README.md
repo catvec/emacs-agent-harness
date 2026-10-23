@@ -190,6 +190,8 @@ OpenAI-compatible APIs and AWS Bedrock.
 | A project's task slots: who holds them, who waits, for how long | |
 | ![A chat whose agent replied in three paragraphs, the reply quoted in the compose box with C-c > and answered inline: the middle of the long paragraph elided as [...], the quote split in two with an answer under each part](docs/media/quote-reply.png) | ![A chat whose agent answered a reply that quoted it: the agent's answer quoted in the compose box with the thread under it one level deeper, the user's answers and the agent's message they quoted, and an answer typed under the agent's line](docs/media/quote-thread.png) |
 | Answering a reply inline: `C-c >` quotes it, `C-c [` elides what you skip as `[...]`, `M-RET` splits the quote to answer a part | The thread kept: the message the reply answers, and what that answered, nested under the quote |
+| ![A task's chat: the agent's two paragraphs, a reply of the user's in two threads -- each a card that says it replies to the agent's message and quotes the part, the words under it beside the same rail, and a link to the thread -- the agent's answers in those threads drawn as its own messages under the thread's name, one thread open, one closed, and the compose box with a card for the agent's answer in the first thread and a reply typed under it](docs/media/thread-reply.png) | ![The review of a task, its report at the threads: the first is a reply made in the chat, a comment of the user's with the agent's words quoted above the question, and the agent's answer under it, which links to the call that wrote it](docs/media/thread-reply-review.png) |
+| `C-c >` on a part of a message starts a thread: a card in the compose box, your words under it. Sent in a task's session it is a comment in a thread of the task's review, and the agent answers in the thread; replying to its answer continues the same one | The same exchange in the task's review: a thread of its own, the quote above the question, the agent's answer under it linking to its call |
 | ![A chat whose agent wrote a message with links in it: the test run it ran, the survey session, that session's answer, a thread of the review of the task and the task, each a link in the words the agent chose](docs/media/links.png) | ![That chat after a click on the link to the thread: the task's report opened under it, the review at the thread the link names](docs/media/links-followed.png) |
 | Links in what agents write: a tool call, a session, one of its messages, a thread, a task | A click on the link to a thread opens the task's review at that thread |
 
@@ -203,6 +205,8 @@ OpenAI-compatible APIs and AWS Bedrock.
 | What the agent closed since you looked: the filter lists it, with the answers | |
 | ![Ediff on that file: the end of the agent's answer selected with the mouse, marked in the thread drawn under its line in the branch's version](docs/media/review-select.png) | ![The reply C-c > started: in a buffer under the version, the selected part quoted with > before each line, point under it, and the answer typed](docs/media/review-quote.png) |
 | Part of a comment selected with the mouse, in Ediff, where no region holds a comment's text | `C-c >` starts the reply with it quoted, and your answer goes under it |
+| ![Ediff on a file of that review, three lines of the branch's version selected and C-c > pressed: the report's box under it holds a card -- the file, the side and the lines, with the lines themselves -- and the question typed under it](docs/media/review-thread-lines.png) | |
+| `C-c >` with lines selected starts a thread on them: a card in the report's box, your words under it; sent with the feedback it is a thread on those lines, at that revision, which the agent answers | |
 
 ## Requirements
 
@@ -500,6 +504,7 @@ default), or nil for nowhere.
 | `C-c h o` | `harness-open-latest-session` | Open the newest session of the current project |
 | `C-c h O` | `harness-open-session` | Open a session chosen by name |
 | `C-c h >` | `harness-prompt-region` | Start a message with the selected text, in any buffer (see [Prompting with the region](#prompting-with-the-region)) |
+| `C-c h <` | `harness-thread-region` | Start a reply in a thread to the selected text, in any buffer: the card goes in the box of the project's newest session (see *Replies in threads*, below) |
 | `C-c h l` | `harness-sessions` | Show the session list (see [Session list](#session-list)) |
 | `SPC` | `harness-ui-sessions-requests` | Pop out what the session at point waits on |
 | `b` | `harness-ui-sessions-toggle-blocked` | In the session list, show only the sessions waiting for you, or every session again |
@@ -730,7 +735,7 @@ so `C-c .` is how you aim a key at a panel from there (see
 | `C-c C-w` | Copy the last reply |
 | `C-c C-l` | Copy a link to the message or tool call at point -- `harness:session/ID/message/NODE`, `harness:session/ID/call/NODE` -- or to the session where point is on none; with `C-u` the Markdown link `[words](URL)`. Paste it in a message and the agent can write it in what it says (see [Links in what agents write](#links-in-what-agents-write)) |
 | `C-c M-l` | Copy a link to the session (`C-u`: as `[name](URL)`) |
-| `C-c >` | Quote, to reply: the selected text, or the agent's reply or plan at point (elsewhere the one above it, from the box the last), goes in the compose box as a Markdown quote, point under it. An answer that quotes nothing comes with the message it answers nested under it, so a thread's replies quote each other. A selection keeps its code blocks, inline code and links as Markdown, and leaves out what a fold hides. It is the [compose-quote](lisp/vendor/compose-quote/README.md) library's command (see *Answering inline*, below). `C-c h >` does it for the selection of any buffer (see [Prompting with the region](#prompting-with-the-region)) |
+| `C-c >` | Reply in a thread: to the selected text, or to the message point is on, whole; from the box, or anywhere that is no message, to the agent's last. A card in the compose box says what the reply is to -- who wrote it and the part of it you selected, or each message when the selection runs across several -- and what you write under the card is the reply (see *Replies in threads*, below). `C-u C-c >` quotes it in the box as Markdown instead, to answer inline, as does a selection in the box: the agent's reply, plan or answer in a thread, with a selection's code blocks, inline code and links as Markdown and what a fold hides left out; an answer that quotes nothing comes with the message it answers nested under it, so a thread's replies quote each other. That is the [compose-quote](lisp/vendor/compose-quote/README.md) library's command (see *Answering inline*, below). `C-c h >` quotes the selection of any buffer (see [Prompting with the region](#prompting-with-the-region)), `C-c h <` replies in a thread to it |
 | `M-RET` | In a quote in the compose box: split it where point is, to answer that part: the quote above, an empty line for your answer, the quote below |
 | `C-c [` | In a quote in the compose box: elide the region, or the rest of its paragraph from point (with `C-u`, the rest of the quote), leaving `[...]`, so a bit of front matter stays for context |
 | `C-c C-e` | Jump to the bottom; while the window is scrolled away from it, the header line shows `↓ newer messages`, which does the same |
@@ -767,7 +772,8 @@ argument takes the Nth up: `C-c . e` brings the last one back into the
 box, `M-2 C-c . d` deletes the one before it.
 
 **Answering inline.** A long message is seldom answered by one reply.
-`C-c >` puts it in the box as a quote; once point is in a quote the echo
+`C-u C-c >` puts it in the box as a quote (`C-c >` itself starts a thread,
+see *Replies in threads*, below); once point is in a quote the echo
 area names the two keys that take it apart (`compose-quote-inline-hint`
 turns that off). `M-RET` splits the quote where point is: the part above
 stays a quote, the empty line it opens is for your answer to that part,
@@ -808,6 +814,74 @@ answers under the quotes is sent to the model with a note saying so, so
 its answer keeps the quotes and goes on under them, and the thread a
 thing is discussed in goes on from both sides. The note is the
 harness's own, and the transcript keeps your message as you wrote it.
+
+**Replies in threads.** `C-c >` starts a thread: a reply you mean to
+keep together with what it answers, so that nested replies are easy to
+follow. It does not read the words you selected and guess where they
+came from: the chat knows what every part of it is, and the reply records
+it.
+
+- A selection inside one message -- the agent's answer, its plan, its
+  answer in a thread, a tool call, the report it handed in, one of your
+  own -- is a reference to that message and to the part you selected.
+- A selection across several messages is a reference to each, in order,
+  with the part of each that is selected.
+- With nothing selected, the message point is on, whole; from the box,
+  the agent's last.
+
+The reference is a card in the compose box: who wrote it -- *agent's
+message*, *your message*, *hand-in report*, *Bash call* -- and the part
+quoted, a few lines of it (the tooltip has the rest), with a rail down its
+side that goes on beside what you write under it. That is the reply, typed
+in the one compose box with everything it has: attachments, `@` files,
+completion, undo. A message may hold several cards, each with its words
+under it, and words before the first card that are no reply. The card is
+no text, its token, `[reply 1]`, is: cut it, yank it, undo it, as an
+image's. `[×]` on the card, or deleting the token, takes the thread away
+and keeps your words. A click on a card shows the message it replies to,
+the part lit (`RET` on a card of the transcript does too); `mouse-3` on a
+card in the box has the rest.
+
+Sent, the message shows the same cards with your words under them, and
+`↳ thread t-3f2a1b09` once the task's review has made it a thread: in the
+session of a task -- any session, once `I` has put it on the board -- each
+reply is a comment in a thread of the task's [review](#task-board), open,
+which keeps the replies of one thing together instead of nesting them.
+When what you replied to is the agent's answer in a thread, or an earlier
+reply of yours in one, your reply is a comment in *that* thread, and a
+closed thread is open again, since you have more to say. The harness ends
+each reply with a line that names its thread, `[thread t-3f2a1b09: answer
+with review_comment]`, which is how the agent knows where to answer and
+with what. The agent answers with `review_comment`, and the chat draws
+the call as the message it is, from the agent, not as a tool call: its
+words, under a line that names the thread, the comment it answers and how
+the thread stands (`↳ thread t-3f2a1b09 · answering you: “Make it 1, 5 and
+30 minutes…” · open`), and the call, its input and what it returned,
+under a fold -- the reverse of how your answer to a question the agent
+asked is drawn, as a message of yours in its tool call. Reply to that
+message, and the reply is in the same thread. `M-n` and `M-p` stop at it,
+`C-c C-w` copies it, `C-u C-c >` quotes it.
+
+Nothing is guessed from your words: words that merely look like a quote
+make no thread. The reference keeps the part you selected, up to
+`harness-chat-thread-quote-limit` characters (a longer one is cut, with
+`[...]` at the end). What the agent reads is the quotes the way a mail
+has them -- with a line that says where a quote is from when it is not the
+agent's own words -- then your words, then the marker. A session that is
+no task's has no review to hold threads, and an agent without
+`review_comment` cannot answer in one: the reply goes as the quote and
+your words, answered inline as described above.
+
+Other places make threads too. In Ediff's versions of a file in a task's
+review, `C-c >` with lines selected starts a thread on them: the card, in
+the report's box, says the file, the side and the lines, and the reply is
+a comment on those lines at the revision the review shows (see *Quote
+reply*, under the review of a task's changes). `C-c h <`
+(`harness-thread-region`) does it for the selection of any other
+buffer -- a file, a log -- recording its file and lines, or the buffer's
+name, and puts the card in the box of the project's newest session, as
+`C-c h >` does a quote; a buffer that knows more about its regions can say
+so with `harness-thread-ref-functions`.
 
 Drag a file from your file browser onto a chat or the task board and it
 attaches. Drag a *link* — an image from a web page, a video, any address
@@ -1399,9 +1473,9 @@ harness's own buffers and in every other.
 
 ![Lines of a Python file selected on the left, and on the right the newest session of the project, its compose box holding where they come from, the file and its lines, and the code in a fenced python block, ready for the request](docs/media/prompt-region.png)
 
-- In a chat, the task board or a popout it does what `C-c >` does: the
-  selection goes into the compose box as a Markdown quote, point under
-  it for your reply.
+- In a chat, the task board or a popout it does what `C-u C-c >` does:
+  the selection goes into the compose box as a Markdown quote, point under
+  it for your reply (`C-c h <` starts a thread to it instead).
 - In any other buffer the text becomes the start of a message in the
   compose box of the newest session of the buffer's project. Its chat is
   shown and selected, with point in the box under the text, ready for
@@ -2394,8 +2468,8 @@ extra controls appear at the front of its header line:
   asked is deleted.
 - `[keep]` (`C-c C-o`) keeps it as a normal session.
 
-The rest of its keys are the chat's: `C-c >`, for one, quotes its
-answer, or the part of it you select, in the box to follow up on it.
+The rest of its keys are the chat's: `C-c >`, for one, starts a reply
+to its answer, or the part of it you select, to follow up on it.
 
 So that quick questions get quick answers and cost little, a BTW runs on
 a cheap model and starts at the `low` thinking level, whatever the
@@ -3591,11 +3665,25 @@ with), `recap` writes the recaps on the cards,
   under a quote of the agent's words, in a round of feedback or typed in
   its session while it worked -- are threads too, closed, each with the
   quote it answered; `M-x harness-ui-patch-review-import-manual`, in a
-  task's report, session or card, makes the ones the review lacks.
+  task's report, session or card, makes the ones the review lacks. A
+  reply in a thread started in the chat (`C-c >`) is a thread of the
+  review as it is sent, open, with the agent's answer in it (*Replies in
+  threads*, in the chat's section), and the import leaves those alone.
   A comment keeps the revision it was written against, and a thread
   is shown where its line is now in the newest version -- `line 44 (was
   42)`, `changed since` -- also across the rounds of a review, and
   each commented file says whether it changed since your last comment.
+
+  **A thread on lines.** `C-c >` in one of the two versions Ediff
+  compares, with lines selected, starts a thread on them: a card in the
+  report's box, which says the file, the side -- the merge base's or the
+  branch's -- and the lines, with the lines themselves, and what you write
+  under it is the comment. Point goes to the box; `C-c C-d` there goes back
+  to Ediff. Sent with the feedback, the comment is a thread on those lines
+  at the revision the review shows, open, and the agent answers it with
+  `review_comment`, as it does a thread you made with `c`; a click on the
+  card shows the lines again. With nothing selected, or with text of a
+  comment selected with the mouse, `C-c >` is the quote reply below.
 
   **Quote reply.** `C-c >` answers a comment as a mail answers another:
   it starts a reply, a draft in the thread, with what you selected of the

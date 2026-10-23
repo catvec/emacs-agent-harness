@@ -735,5 +735,33 @@ along the text, took the square of its length."
     (should (equal "" (harness-ui-markdown-summary nil)))
     (should (equal "" (harness-ui-markdown-summary "")))))
 
+
+(ert-deftest harness-ui-markdown-says-where-each-block-was-written ()
+  "Every block of the rendering has `harness-md-source': the offsets of the
+lines of the text it was rendered from, the lines of a paragraph, a list
+item, a code block with its fences, a table or a quote together; the
+lines a quote renders as each say where the whole quote was."
+  (let* ((text (concat "# Title\n\nFirst line\nsecond line.\n\n- item one\n  more\n- item two\n\n"
+                       "```elisp\n(code)\n```\n\n> quoted\n> more\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\nLast."))
+         (out (harness-ui-markdown-render text))
+         (seen nil)
+         (pos 0))
+    (while (< pos (length out))
+      (let ((range (get-text-property pos 'harness-md-source out))
+            (next (next-single-property-change pos 'harness-md-source out (length out))))
+        (when range (push (cons (substring text (car range) (cdr range)) (substring-no-properties out pos next)) seen))
+        (setq pos next)))
+    (setq seen (nreverse seen))
+    (should (equal '("# Title" "First line\nsecond line." "- item one\n  more" "- item two"
+                     "```elisp\n(code)\n```" "> quoted\n> more"
+                     "| a | b |\n|---|---|\n| 1 | 2 |" "Last.")
+                   (mapcar #'car seen)))
+    ;; What is drawn is what the lines say, in other markup.
+    (should (string-search "Title" (cdr (nth 0 seen))))
+    (should (string-search "item two" (cdr (nth 3 seen))))
+    ;; A blank line between two blocks is no block's.
+    (should (equal "# Title" (substring text 0 7)))
+    (should-not (get-text-property (length (cdr (nth 0 seen))) 'harness-md-source out))))
+
 (provide 'harness-ui-markdown-test)
 ;;; harness-ui-markdown-test.el ends here

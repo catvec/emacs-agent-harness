@@ -64,8 +64,33 @@ its feedback as text.  The first time a task's set is made, the
 comments quoted in those rounds become closed threads of the set, with
 ids that follow from where they were, so that they are made once.  A
 reply written inline, under a quote of the agent's own words (the
-compose box's `C-c >`), keeps that quote above its text: "silence"
+compose box's `C-u C-c >`), keeps that quote above its text: "silence"
 says nothing without the line it answers.
+
+THE THREADS STARTED IN THE CHAT.  The compose box's `C-c >` starts a
+thread on purpose: the region it replies to -- a part of a message,
+several messages, lines of a diff -- is recorded with the reply, as
+data (`harness-thread-block`), and nothing is guessed from the words.
+When the message is sent, each such reply is a comment in a thread of
+the task's review (`harness-patch-review--on-message`, an
+`agent/message` filter; `task/reject`, which the report's box sends
+the feedback with, asks for it itself before the round of feedback is
+kept, `harness-patch-review--on-feedback-attachments`, a filter on
+`task/feedback-attachments`): a reference to a comment of the
+agent's in a thread (`review_comment`) or to an earlier reply of the
+user's makes it a reply in that thread, which a close does not keep
+from opening again; lines of a diff put it on those lines, at the
+revision; any other starts a thread on the change as a whole.  The
+block that goes on, and is recorded, has the thread's id, and its text
+ends with the marker (`harness-thread-marker`), which is how the agent
+knows the thread to answer in, and with which tool, and how the chat
+draws a link to it.  A reply that is a thread is no words: the tasks
+module leaves it out of the words a task is sent back with
+(`harness-tasks--words`), so they are not a thread of their own too,
+and the import of rounds and of words by hand, which reads text, skips
+what ends with a marker.  Only a task's session has a review, and only
+an agent that has `review_comment` can answer in it: any other
+session's replies stay plain, answered inline.
 
 THE WORDS BY HAND.  Not every reply made it into a round.  One typed in
 the session while the agent was at work -- steering, quoting what the
@@ -112,10 +137,13 @@ to say.
 ### Methods it calls
 
 - `session/get` ([session](session.md)), when it is loaded
+- `session/node` ([session](session.md))
 - `session/nodes` ([session](session.md)), when it is loaded
 - `store/load` ([store](store.md))
 - `store/save` ([store](store.md))
+- `task/for-session` ([tasks](tasks.md))
 - `task/get` ([tasks](tasks.md))
+- `tools/list` ([tools](tools.md)), when it is loaded
 
 ### Events it handles
 
@@ -125,6 +153,11 @@ to say.
 ### Events it emits
 
 - `patch-review/changed`
+
+### Filter chains it joins
+
+- `agent/message` at 40 → `harness-patch-review--on-message`
+- `task/feedback-attachments` at 40 → `harness-patch-review--on-feedback-attachments`
 
 ### Hooks it adds to
 

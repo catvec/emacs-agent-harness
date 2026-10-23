@@ -330,7 +330,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `agent/before-turn` | [agent](agent.md), [seed](seed.md) | [cache-compact](cache-compact.md) (11), [cache-warm](cache-warm.md) (1), [compaction](compaction.md) (11, 12, 20), [cowboy](cowboy.md) (15), [fallback](fallback.md) (10), [handoff](handoff.md) (10), [merge](merge.md) (30), [seed](seed.md) (5), [tasks](tasks.md) (2), [usage](usage.md) (30) |
 | `agent/builtin-tools` | [tools](tools.md) | [provider-claude](provider-claude.md) (50), [tools-web](tools-web.md) (50) |
 | `agent/hold` | [agent](agent.md) | [compaction](compaction.md) (50) |
-| `agent/message` | [agent](agent.md) | [cache](cache.md) (90), [tasks](tasks.md) (50) |
+| `agent/message` | [agent](agent.md) | [cache](cache.md) (90), [patch-review](patch-review.md) (40), [tasks](tasks.md) (50) |
 | `agent/outstanding` | [agent](agent.md) | [supervisor](supervisor.md) (50), [tools-agent](tools-agent.md) (50), [tools-events](tools-events.md) (50), [tools-sessions](tools-sessions.md) (50) |
 | `agent/step` | [agent](agent.md) | [compaction](compaction.md) (12), [handoff](handoff.md) (10), [merge](merge.md) (30), [usage](usage.md) (30) |
 | `agent/step-error` | [agent](agent.md) | [fallback](fallback.md) (50), [retry](retry.md) (60) |
@@ -344,6 +344,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `permission/decide` | [tools](tools.md) | [access](access.md) (4, 5), [perms](perms.md) (5, 6, 7, 10, 20, 30, 40, 90), [readonly](readonly.md) (8), [secrets](secrets.md) (3), [supervisor](supervisor.md) (9, 28), [tasks](tasks.md) (25), [tools-sessions](tools-sessions.md) (6) |
 | `permission/dir-entries` | [perms](perms.md) | [access](access.md) (50) |
 | `session/before-move` | [session](session.md) | [merge](merge.md) (50), [tasks](tasks.md) (50) |
+| `task/feedback-attachments` | [tasks](tasks.md) | [patch-review](patch-review.md) (40) |
 | `task/before-hand-in` | [tools-handin](tools-handin.md) |  |
 | `tools/output` | [tools](tools.md) | [redact](redact.md) (4), [secrets](secrets.md) (5) |
 | `tools/output-text` | [agent](agent.md), [tools](tools.md) | [redact](redact.md) (4), [secrets](secrets.md) (5) |
@@ -387,6 +388,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `harness-reload-hook` | `harness.el`, `harness-revision.el` | `harness-revision.el` |
 | `harness-start-hook` | `harness.el`, `harness-revision.el` | `harness-revision.el` |
 | `harness-tasks-feedback-additions-functions` | [patch-review](patch-review.md), [tasks](tasks.md) | [patch-review](patch-review.md) |
+| `harness-thread-ref-functions` | [ui-chat](ui-chat.md) |  |
 | `harness-ui-cache-warm-functions` | [ui-cache-warm](ui-cache-warm.md) |  |
 | `harness-ui-connected-hook` | [ui](ui.md) | [ui-cache-warm](ui-cache-warm.md), [ui-chat](ui-chat.md), [ui-decisions](ui-decisions.md), [ui-pending](ui-pending.md), [ui-pet](ui-pet.md), [ui-tasks](ui-tasks.md), [ui-tool-slots-load](ui-tool-slots-load.md), [ui-version](ui-version.md) |
 | `harness-ui-decision-functions` | [ui-chat](ui-chat.md), [ui-decisions](ui-decisions.md) | [ui-chat](ui-chat.md) |

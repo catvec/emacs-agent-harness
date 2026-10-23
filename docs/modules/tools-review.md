@@ -35,6 +35,13 @@ the change as a whole, or on a file and line of it.
 Both are offered to task sessions: a session that is no task's has no
 review (the filter `agent/tools` removes them), unless it names a task.
 
+The user's replies that quote the agent's words are comments in threads
+of the review too, and the message the agent reads names the thread
+each is in (harness-patch-review.el): `review_comment` is how the agent
+answers in it.  The result of a call says which thread and comment it
+made, and which comment it follows (`:meta`), which the transcript keeps
+so that the chat can draw the call as the message from the agent that it
+is: the words of the comment, under the thread's name.
 In the chat, runs of calls fold under one summary line, but only the
 calls of tools on an explicit allow list (`:coalescable`, see
 harness-tools.el), so that a call the user should see stays in view.
@@ -48,7 +55,7 @@ call stays in view.
 
 ### Tools
 
-- `review_comment` — Answer a thread of the review of your work, or start one. The thread id is given in the feedback after "[thread ...]", and review_threads lists them. Write what you did or why you disagree, briefly, in Markdown: the review draws it rendered, so name code in `backquotes`, put lines of code in a fenced block and steps in a list; the user looks at every thread you close, so when you close one say what you changed and where. Close the thread (status closed) once what it raises is done; leave it open when it is not, or when you want the user's answer, and never close a thread you only argued against. Without thread a new thread starts: on the change as a whole, or on file and line of it, to explain something to the user where they will read the diff. The comment records this call, so the user can follow it back to this point of the conversation. Link what you mean in it, the tool call that proves a fix or the message you answer: [the test run](harness:call/bash#1). With thread and status but no body, only the status changes.
+- `review_comment` — Answer a thread of the review of your work, or start one. The thread id is given in the feedback after "[thread ...]", and review_threads lists them. A reply of the user's that quotes your own words ends with such a marker too, [thread ID: answer with review_comment]: answer it here, in that thread, instead of in a message of your own; the chat shows your comment as your answer. Write what you did or why you disagree, briefly, in Markdown: the review draws it rendered, so name code in `backquotes`, put lines of code in a fenced block and steps in a list; the user looks at every thread you close, so when you close one say what you changed and where. Close the thread (status closed) once what it raises is done; leave it open when it is not, or when you want the user's answer, and never close a thread you only argued against. Without thread a new thread starts: on the change as a whole, or on file and line of it, to explain something to the user where they will read the diff. The comment records this call, so the user can follow it back to this point of the conversation. Link what you mean in it, the tool call that proves a fix or the message you answer: [the test run](harness:call/bash#1). With thread and status but no body, only the status changes.
 - `review_threads` — List the threads of comments in the review of your task's work: for each, its id, whether it is open or closed, where in the change it is, a link to it that you can put in a message, and the comments the user sent, with who wrote them. Use it to find the thread to answer with review_comment when the feedback that sent the task back is no longer in your context. With status, only the open or only the closed threads; with task, another task's review.
 
 ## Uses

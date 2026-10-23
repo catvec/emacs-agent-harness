@@ -5240,6 +5240,8 @@ leaves the buffer's commands out, never the whole menu."
     ("s" "Switch session" harness-switch-session)
     (">" "Prompt with the region" harness-prompt-region
      :if (lambda () (harness-ui--command-available-p 'harness-prompt-region)))
+    ("<" "Reply in a thread to the region" harness-thread-region
+     :if (lambda () (harness-ui--command-available-p 'harness-thread-region)))
     ("l" "Session list" harness-sessions :if (lambda () (harness-ui--command-available-p 'harness-sessions)))
     ("g" "Search sessions" harness-search-sessions
      :if (lambda () (harness-ui--command-available-p 'harness-search-sessions)))

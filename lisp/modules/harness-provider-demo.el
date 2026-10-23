@@ -25,6 +25,9 @@
 ;;   "stream"      two model calls paced like a real model's: thinking
 ;;                 without text, then with it, text, a tool call's input,
 ;;                 each call's usage -- for the live token count
+;;   a thread      a reply that is a comment in a thread of the task's
+;;                 review, which names the thread with a marker line
+;;                 (`harness-thread-marker'): review_comment answers it
 ;;   anything else echo the prompt back as markdown
 ;;
 ;; A session writing a backlog task up (the system prompt has the task
@@ -179,6 +182,19 @@ user wrote."
             (setq text (plist-get b :text))))))
     (or text "")))
 
+(defun harness-provider-demo--thread-ids (request)
+  "Return the ids of the threads the newest user message of REQUEST names.
+Its marker lines (`harness-thread-marker'), in every text block of the
+message: a message may hold the replies in several threads, a block each."
+  (let (ids)
+    (dolist (m (plist-get request :messages))
+      (when (equal (plist-get m :role) 'user)
+        (let ((here (cl-loop for b in (plist-get m :content)
+                             when (equal (plist-get b :type) "text")
+                             append (harness-thread-marker-ids (plist-get b :text)))))
+          (when here (setq ids here)))))
+    ids))
+
 (defun harness-provider-demo--script (request)
   "Return the events the demo plays for REQUEST.
 `harness-provider-demo-script-override' wins when set.  A request that
@@ -217,6 +233,11 @@ else the last user message picks one (see the Commentary)."
       (harness-provider-demo--insights request))
      ((string-prefix-p harness-provider-demo--judge-prompt (or (plist-get request :system) ""))
       (harness-provider-demo--judge request))
+     ;; A reply in a thread: the marker the harness put after it names the
+     ;; thread, and answering in it is what it asks.  Before the words below,
+     ;; which a reply may well hold.
+     ((harness-provider-demo--thread-ids request)
+      (harness-provider-demo--thread request))
      ((string-match-p "\\btour\\b" text)
       `((:type thinking :delta "The user wants a tour. ")
         (:type thinking :delta "I will read a file, then summarise.")
@@ -321,6 +342,27 @@ else the last user message picks one (see the Commentary)."
       `((:type text :delta ,(format "You said: *%s*\n\nThis is the demo provider; try `tour`, `tools`, `ask`, `diagram`, `images`, `debug` or `stream`." text))
         (:type usage :input 400 :output 30 :cost 0.0008 :context 450)
         (:type done :stop-reason end-turn))))))
+
+(defun harness-provider-demo--thread (request)
+  "Return the script of an agent answering the threads of REQUEST's newest message.
+The reply is a comment in each thread its marker lines name
+\(`harness-thread-marker'): the agent answers each in its thread with
+review_comment, as it is told to, and leaves it open for the user to go on.
+The tool calls end the request each, as a real model's do, and the rest of
+the script goes on when their results are in."
+  (let ((ids (harness-provider-demo--thread-ids request)))
+    `(,@(cl-loop
+         for id in ids
+         for n from 1
+         collect `(:type tool-call :id ,(format "demo-th%d" n) :name "review_comment"
+                         :input (:thread ,id
+                                 :body ,(concat "This is the demo provider answering in the thread: a real "
+                                                "agent would say what it changed and where.\n\n"
+                                                "Quote this answer with `C-c >` and reply to it, and the "
+                                                "reply is a comment in the same thread.")
+                                 :status "open")))
+      (:type usage :input 500 :output 60 :cost 0.001 :context 700)
+      (:type done :stop-reason end-turn))))
 
 (defun harness-provider-demo--paced (type text size seconds)
   "Return TEXT as events of TYPE (`text' or `thinking'), paced like a model's.

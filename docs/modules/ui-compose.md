@@ -22,7 +22,11 @@ major mode, then `harness-compose-insert` wherever it draws the box
   - quoting to reply: C-c > quotes the region, or the message at
     point, in the box as Markdown, point under it for the reply, with
     the compose-quote library; in a quote in the box M-RET splits it,
-    to answer the part above, and C-c [ elides part of it as [...];
+    to answer the part above, and C-c [ elides part of it as [...]
+    (a chat's C-c > starts a thread instead, its C-u C-c > quotes);
+  - replies in threads: a card in the box for each region replied to,
+    what it is and the part of it quoted, with the words of the reply
+    typed under it, in the same box (see the Threads section);
   - typing anywhere in the buffer goes into the box: a printable
     character (or a yank) with point outside it moves point to the
     end of the box and types there, unless the key is a command where
@@ -106,6 +110,7 @@ prompt blocks with `harness-compose-attachment-block`.
 - `harness-compose-download-max-size` — Largest file, in bytes, that a link dropped on a compose box downloads.
 - `harness-compose-thumbnail-lines` — Height of the thumbnail an attached image or video shows, in lines.
 - `harness-compose-yank-media` — Non-nil: yanking in a compose box attaches the media on the clipboard.
+- `harness-thread-card-lines` — Most lines of a quote a thread's card shows; the tooltip has the rest.
 
 ## Uses
 

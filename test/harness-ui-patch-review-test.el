@@ -1990,6 +1990,64 @@ been left."
         (harness-ui-patch-review-test--press #'harness-ui-patch-review-open)
         (with-current-buffer control (call-interactively #'harness-ui-patch-review-ediff-quit))))))
 
+(ert-deftest harness-ui-patch-review-replies-in-a-thread-to-lines-of-a-version ()
+  "C-c > with lines selected in a version Ediff compares starts a reply in a thread
+in the report's box: a card whose reference is the file, the side, the lines
+and the revision, with the lines themselves; point goes to the box, under the
+card, where the words go.  Without a region it is still the library's quote
+reply."
+  (harness-ui-patch-review-test-with-task
+    (let* ((popout (harness-ui-patch-review-test--changes board id))
+           (review (gethash id harness-ui-patch-review--reviews)))
+      (harness-ui-patch-review-ediff review 0)
+      (let* ((control (harness-ui-patch-review-test--control review 0))
+             (new (nth 2 (harness-ui-patch-review--ediff-buffers review)))
+             (old (nth 1 (harness-ui-patch-review--ediff-buffers review)))
+             (box (get-buffer-window popout t)))
+        (should (window-live-p box))
+        (with-current-buffer new
+          (should (eq #'harness-ui-patch-review-thread-reply (key-binding (kbd "C-c >"))))
+          (setq-local transient-mark-mode t)
+          (goto-char (point-min))
+          (forward-line 17)
+          (push-mark (point) t t)
+          (forward-line 2)
+          (should (use-region-p))
+          (let ((lines (buffer-substring-no-properties (mark) (point))))
+            (call-interactively #'harness-ui-patch-review-thread-reply)
+            (should-not (region-active-p))
+            (with-current-buffer popout
+              (should (equal "[reply 1]\n" (harness-compose-text)))
+              (should (= (point) harness-compose-end))
+              (let* ((ref (car (harness-thread-refs (plist-get (car harness-compose-attachments) :thread)))))
+                (should (equal "diff" (plist-get ref :kind)))
+                (should (equal "a.el" (plist-get ref :file)))
+                (should (equal "new" (plist-get ref :side)))
+                (should (equal 18 (plist-get ref :line)))
+                (should (equal 19 (plist-get ref :end)))
+                (should (equal (harness-ui-patch-review--r-tip review) (plist-get ref :revision)))
+                (should (equal (string-trim-right lines "\n+") (plist-get ref :text)))
+                ;; A click shows the lines in Ediff.
+                (should (functionp harness-compose-thread-open-function))))
+            (should (eq box (selected-window)))
+            (with-current-buffer popout
+              (insert "Why a symbol?")
+              (pcase-let ((`(,text . ,atts) (harness-compose-take)))
+                (should (equal "" text))
+                (should (equal "Why a symbol?" (plist-get (car atts) :response)))))))
+        ;; The merge base's version is the old side.
+        (with-current-buffer popout (harness-compose-clear))
+        (with-current-buffer old
+          (setq-local transient-mark-mode t)
+          (goto-char (point-min))
+          (push-mark (point) t t)
+          (forward-line 1)
+          (call-interactively #'harness-ui-patch-review-thread-reply))
+        (with-current-buffer popout
+          (should (equal "old" (plist-get (car (harness-thread-refs (plist-get (car harness-compose-attachments) :thread))) :side)))
+          (should (equal 1 (plist-get (car (harness-thread-refs (plist-get (car harness-compose-attachments) :thread))) :line))))
+        (with-current-buffer control (call-interactively #'harness-ui-patch-review-ediff-quit))))))
+
 (ert-deftest harness-ui-patch-review-box-stays-in-sight-when-the-report-draws ()
   "The report drawn again -- a file approved in Ediff -- leaves the window
 beside Ediff on the box: a window that is not selected loses its point when
@@ -4333,7 +4391,10 @@ thread at the current difference."
                     (get-text-property (string-search "only ever" (overlay-get overlay 'after-string))
                                        'keymap (overlay-get overlay 'after-string))))
         (with-current-buffer new
-          (should (eq #'change-review-ui-quote-reply (key-binding (kbd "C-c >"))))
+          ;; The version's own C-c > starts a thread on lines selected in it
+          ;; (`harness-ui-patch-review-thread-reply'); text of a comment
+          ;; selected with the mouse, or nothing selected, is the library's.
+          (should (eq #'harness-ui-patch-review-thread-reply (key-binding (kbd "C-c >"))))
           (harness-ui-patch-review-test--drag overlay "only ever uses one" 0 18)
           (should (equal '("c" "only ever uses one")
                          (let ((selection (overlay-get overlay 'change-review-selection)))
@@ -4341,7 +4402,7 @@ thread at the current difference."
                                  (substring (change-review-comment-body two) (nth 1 selection) (nth 2 selection))))))
           (goto-char (point-min))
           (let ((change-review-ui-read-function reader))
-            (call-interactively #'change-review-ui-quote-reply)))
+            (call-interactively #'harness-ui-patch-review-thread-reply)))
         (should (equal "> only ever uses one\n\nI see."
                        (change-review-comment-body (change-review-thread-last-comment thread))))
         (should (equal (change-review-comment-id two)
@@ -4358,7 +4419,7 @@ thread at the current difference."
           (forward-line 1)
           (let ((change-review-ui-read-function (lambda (_p initial _callback &optional _point)
                                                   (push initial calls))))
-            (call-interactively #'change-review-ui-quote-reply)))
+            (call-interactively #'harness-ui-patch-review-thread-reply)))
         (should (equal "> > only ever uses one\n>\n> I see.\n\n" (car calls)))
         ;; The control panel quotes the last comment of the thread at the current
         ;; difference, which is on line 2.

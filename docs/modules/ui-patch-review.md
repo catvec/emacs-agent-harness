@@ -152,6 +152,13 @@ bottom, else the diff's -- so the next file is the one on the next row.
               the control panel it quotes what is selected in a version,
               else the last comment of the thread at the current
               difference.  The reply is a draft, as r's.
+  thread on   C-c > in a version with lines selected starts a thread on
+  lines       them, in place of the quote reply: a card in the box of the
+              report, the file, the side, the lines and the revision
+              recorded with them (`harness-ui-patch-review-thread-reply`),
+              and the words written under it the comment.  Sent with
+              the feedback it is a thread on those lines, which the
+              agent answers.
   drafts      A draft is yours to change or to take back until the
               feedback sends it: it has an [Edit] button, which edits
               that draft, a [Delete] button, which deletes it after
@@ -387,6 +394,7 @@ it takes its part of the report and the banner out.
 - `harness-ui-patch-review-redraw-tree` — Draw the tree beside Ediff again.
 - `harness-ui-patch-review-reply` — Reply to the thread at the current difference, or at point, in Ediff.
 - `harness-ui-patch-review-select-diff` — Choose the diff the report of the changes shows.
+- `harness-ui-patch-review-thread-reply` — Start a reply in a thread to the lines selected in this version of a file.
 - `harness-ui-patch-review-thread-return` — Do what RET does on a thread of the changes, or on the file it is under.
 - `harness-ui-patch-review-threads` — Go to the threads of the review at point: a section below its files.
 - `harness-ui-patch-review-toggle-auto-approve` — Switch whether a file you looked through and made no comment on is approved.

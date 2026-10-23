@@ -352,6 +352,10 @@ here logs, emits or returns one.
 - `task/queue` — (PROJECT SUSPENDED) when a project's pending queue is suspended or resumed.
 - `task/review` — (TASK) when a task's finished work starts waiting for the user's review.
 
+### Filter chains it runs
+
+- `task/feedback-attachments`
+
 ### Hooks
 
 - `harness-tasks-feedback-additions-functions` — Functions that add to the feedback that sends a task back from review.

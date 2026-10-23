@@ -103,6 +103,127 @@ which batch Emacs would print."
   "Non-nil once no download of the box is pending."
   (not (harness-ui-compose-test--pending)))
 
+
+;;;; Replies in threads
+
+(defconst harness-ui-compose-test--ref
+  '(:kind "chat" :node "n-1" :who "agent" :text "The build is green.\nThe deploy is pending.")
+  "A reference to part of a message of the agent's.")
+
+(defun harness-ui-compose-test--cards ()
+  "Return the overlays of the box that show a reply in a thread as a card."
+  (cl-remove-if-not (lambda (ov) (plist-get (overlay-get ov 'harness-compose-attachment) :thread))
+                    harness-compose--token-overlays))
+
+(ert-deftest harness-ui-compose-thread-is-a-card-with-its-words-under-it ()
+  "A reply in a thread is an attachment with a token, [reply 1], on a line of
+its own and the words under it: the token shows as a card that says what the
+reply is to and quotes it, and a rail goes down beside the words."
+  (harness-ui-compose-test-with
+    (harness-compose-set "My own words.")
+    (let ((att (harness-compose-add-thread (list harness-ui-compose-test--ref))))
+      (should (equal 1 (plist-get att :reply)))
+      (should (equal "My own words.\n[reply 1]\n" (harness-compose-text)))
+      ;; Point is where the words under the card start.
+      (should (= (point) harness-compose-end))
+      (let* ((cards (harness-ui-compose-test--cards))
+             (card (overlay-get (car cards) 'display)))
+        (should (= 1 (length cards)))
+        (should (string-search "↩ agent's message" card))
+        (should (string-search "The build is green." card))
+        (should (string-search "The deploy is pending." card))
+        (should (string-search "[×]" card))
+        ;; The whole quote is the tooltip, and a click shows the message.
+        (should (string-search "The deploy is pending." (overlay-get (car cards) 'help-echo))))
+      ;; The words under it have the rail, and the box's last line too.
+      (insert "Why?")
+      (harness-compose--keep-tokens)
+      (should (cl-some (lambda (ov) (string-search "▎" (format "%s" (overlay-get ov 'line-prefix))))
+                       harness-compose--thread-rails))
+      ;; Not one of the attachment lines above the box.
+      (should-not (string-search "reply" (buffer-substring-no-properties (point-min) harness-compose-start))))))
+
+(ert-deftest harness-ui-compose-thread-take-splits-the-box-at-the-cards ()
+  "The box's own words are the text; each card is an attachment with the words
+under it, up to the next card, as its response, ahead of the other
+attachments.  A card with nothing under it, and a box of nothing but its
+cards' quotes, signal."
+  (harness-ui-compose-test-with
+    (harness-compose-set "Intro @notes.txt")
+    (write-region "x" nil (expand-file-name "notes.txt" dir))
+    (harness-compose-add-thread (list harness-ui-compose-test--ref))
+    (insert "First answer.\nOn two lines.")
+    (harness-compose-add-thread (list '(:kind "chat" :node "n-2" :who "plan" :text "Step two")))
+    (insert "Second answer.")
+    (harness-compose--keep-tokens)
+    (should (equal "Intro @notes.txt\n[reply 1]\nFirst answer.\nOn two lines.\n[reply 2]\nSecond answer."
+                   (harness-compose-text)))
+    (pcase-let ((`(,text . ,atts) (harness-compose-take)))
+      (should (equal "Intro @notes.txt" text))
+      (should (equal '(1 2) (mapcar (lambda (a) (plist-get a :reply)) (cl-remove-if-not (lambda (a) (plist-get a :thread)) atts))))
+      (should (equal '("First answer.\nOn two lines." "Second answer.")
+                     (mapcar (lambda (a) (plist-get a :response)) (cl-subseq atts 0 2))))
+      ;; The file the words named is attached after the replies.
+      (should (equal "notes.txt" (plist-get (nth 2 atts) :name)))
+      (should (equal (list harness-ui-compose-test--ref) (plist-get (plist-get (car atts) :thread) :refs)))))
+  (harness-ui-compose-test-with
+    (harness-compose-add-thread (list harness-ui-compose-test--ref))
+    (should-error (harness-compose-take) :type 'user-error)
+    (insert "Words.")
+    (should (equal "" (car (harness-compose-take))))))
+
+(ert-deftest harness-ui-compose-thread-goes-out-as-a-block-of-its-own ()
+  "A reply in a thread goes to the harness as a text block holding the words
+under the card, with the thread's data as `_harness.thread', and comes back
+from there as the block of that reply; queued, it is the same block."
+  (harness-ui-compose-test-with
+    (harness-compose-add-thread (list harness-ui-compose-test--ref))
+    (insert "Why?")
+    (pcase-let* ((`(,_text . ,atts) (harness-compose-take))
+                 (block (harness-compose-attachment-block (car atts)))
+                 (read (harness-acp--block-from-acp block)))
+      (should (equal "Why?" (plist-get block :text)))
+      (should (equal (list harness-ui-compose-test--ref) (plist-get (plist-get (plist-get block :_harness) :thread) :refs)))
+      (should (harness-thread-block-p read))
+      (should (equal "> The build is green.\n> The deploy is pending.\n\nWhy?" (plist-get read :text)))
+      (should (equal (list read) (harness-agent-attachments-to-blocks atts))))))
+
+(ert-deftest harness-ui-compose-thread-comes-back-into-the-box ()
+  "A message taken back, its text and its replies as `take' gave them, is laid out
+in the box again: the words under each card, and the attachments without them."
+  (harness-ui-compose-test-with
+    (harness-compose-add-thread (list harness-ui-compose-test--ref))
+    (insert "Why?")
+    (pcase-let ((`(,text . ,atts) (harness-compose-take)))
+      (harness-compose-clear)
+      (should (equal "" (harness-compose-text)))
+      (harness-compose-restore text atts)
+      (harness-compose--keep-tokens)
+      (should (equal "[reply 1]\nWhy?" (harness-compose-text)))
+      (should (= 1 (length harness-compose-attachments)))
+      (should-not (plist-get (car harness-compose-attachments) :response))
+      (should (= 1 (length (harness-ui-compose-test--cards))))
+      ;; And the next one takes the next number.
+      (should (equal 2 (harness-compose--next-reply))))))
+
+(ert-deftest harness-ui-compose-thread-goes-with-its-token ()
+  "Removing a card (its ×, the menu, or deleting its token) removes the thread and
+leaves the words under it; the token brought back by undo brings it back."
+  (harness-ui-compose-test-with
+    (let ((att (harness-compose-add-thread (list harness-ui-compose-test--ref))))
+      (insert "Why?")
+      (harness-compose--keep-tokens)
+      (harness-compose-remove-attachment att)
+      (should (equal "Why?" (harness-compose-text)))
+      (should-not harness-compose-attachments)
+      (should-not (harness-ui-compose-test--cards))
+      ;; Typing the token again brings the reply back, where it stood.
+      (goto-char harness-compose-start)
+      (insert "[reply 1]\n")
+      (harness-compose--keep-tokens)
+      (should (= 1 (length harness-compose-attachments)))
+      (should (= 1 (length (harness-ui-compose-test--cards)))))))
+
 ;;;; Links dropped on the box
 
 (ert-deftest harness-ui-compose-dropped-link-downloads-behind-a-chip ()
