@@ -398,6 +398,32 @@ user marks that close reviewed; the user's own closes never wait."
       (should-not (change-review-thread-closing bare))
       (should-not (change-review-thread-unreviewed-p set bare)))))
 
+(ert-deftest change-review-a-comment-in-a-closed-thread-leaves-it-closed ()
+  "Adding a comment to a thread is no change of its status: a closed thread
+stays closed, with nothing added to its history and still to review, whoever
+the comment is by.  The user's own reply opens it again where it is read
+\(`change-review-ui-reply-to-comment'), a change of status of its own."
+  (let* ((set (change-review-test--set))
+         (thread (change-review-test--closed-by-bot set))
+         (root (change-review-thread-root thread))
+         (calls nil))
+    (add-hook 'change-review-changed-functions (lambda (_set op) (push (plist-get op :op) calls)))
+    (unwind-protect
+        (progn
+          ;; The agent answers again in the thread it closed, and replies of
+          ;; the user's, as a mail's are, are added by the library as they are.
+          (change-review-reply set root "More on that." :author (change-review-test--bot) :time 60)
+          (change-review-reply set root "Thanks, but why?" :author (change-review-test--alice) :time 61)
+          (change-review-comment set "Also this." :thread thread
+                                 :author (change-review-test--alice) :time 62)
+          (should (equal '(add-comment add-comment add-comment) calls))
+          (should (= 4 (length (change-review-thread-comments thread))))
+          (should-not (change-review-thread-open-p thread))
+          (should (equal '(closed) (mapcar (lambda (e) (plist-get e :status))
+                                           (change-review-thread-history thread))))
+          (should (change-review-thread-unreviewed-p set thread)))
+      (setq change-review-changed-functions nil))))
+
 (ert-deftest change-review-reviewing-a-close-is-kept-in-its-history ()
   "Marking a close reviewed puts the time on the change of status that closed
 the thread, once; unmarking takes it off; an open thread has nothing to mark."

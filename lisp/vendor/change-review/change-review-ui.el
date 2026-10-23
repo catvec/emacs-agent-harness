@@ -45,7 +45,8 @@
 ;; whether the thread is open or closed, who closed it and when.  A
 ;; closed thread can be drawn as one line.  One that someone else closed
 ;; says `to review' until the user has looked at it and said so, or
-;; answered it (see below), and is then drawn whole.
+;; replied in it, which opens it again (see below), and is then drawn
+;; whole.
 ;;
 ;; A DRAFT can be changed, or taken back: it has an [Edit] button and a
 ;; [Delete] button, which act on that draft whatever point is on -- point
@@ -88,8 +89,9 @@
 ;; change set, grouped by file, with a filter on their status: open,
 ;; closed, all, or to review.  Point is on a comment, and the keys act
 ;; on it: RET shows where it was made (the file and line, the revision,
-;; and the lines of the diff it was made on), r replies to it, x closes
-;; its thread or opens it again, m marks its thread reviewed, d shows
+;; and the lines of the diff it was made on), r replies to it (a closed
+;; thread is open again then), x closes its thread or opens it again
+;; without a reply, m marks its thread reviewed, d shows
 ;; it in the diff view, o follows an agent's comment to the
 ;; conversation it came from, e edits a draft, k deletes it (K a thread
 ;; of drafts), c comments on the change as a whole.  n and p move between
@@ -101,10 +103,14 @@
 ;; the filter of that name lists those, so that after a round of work the
 ;; user sees what was closed and reads the answers.  A thread leaves the
 ;; filter only when the user acts on it: m (or [Mark reviewed]) says
-;; they looked at it, M says so for all that wait, a reply to it does
-;; too, and opening it again takes it out of the closed ones.  Nothing
-;; marks a thread by itself, so a close missed for two rounds still
-;; waits.  m on a thread already reviewed makes it wait again.
+;; they looked at it, M says so for all that wait, and opening it again
+;; takes it out of the closed ones.  A reply to it opens it again: whoever
+;; replies has more to say, so the point is not done, and a thread the
+;; user replies in is open, whoever closed it.  The reply is a draft in
+;; the thread, as before; the opening is a change of status of its own,
+;; made by the user after it.  Nothing marks a thread by itself, so a
+;; close missed for two rounds still waits.  m on a thread already
+;; reviewed makes it wait again.
 ;;
 ;; WHERE A COMMENT WAS MADE.  The lines under a comment are the diff of
 ;; the revision it was written against, as it was then: the answer to a
@@ -2335,22 +2341,36 @@ argument."
 
 ;;;; Commands on a thread
 
+(defun change-review-ui--open-for-reply (set thread reply)
+  "Open THREAD of SET again if it is closed, for REPLY, made in it by the user.
+Whoever replies has more to say, so the point is not done: a thread
+that was closed, by the user or by someone else, is open again, and
+says so.  That is looking at a close that waits for the user's review
+as well, which is why the thread no longer waits.  The thread is the one
+REPLY is in, found in SET, as the one the reply was read for may have
+been drawn again, or kept elsewhere, while it was written."
+  (let ((thread (or (and reply (change-review-find-thread set (change-review-comment-thread reply)))
+                    thread)))
+    (unless (change-review-thread-open-p thread)
+      (change-review-reopen set thread)
+      (message "Thread %s is open again" (change-review-ui-thread-short-id set thread)))))
+
 (defun change-review-ui-reply-to-comment (set thread comment &optional quote)
   "Read a reply to COMMENT of THREAD in SET and add it as a draft.
 QUOTE, a string, is a block quote (`change-review-ui-quote-string') the
 reply starts with: the text it answers, as it is in a mail.  Point starts
 under it, and a reply that is nothing but the quote is no reply.
-Answering a thread that waits for the user's review is looking at it:
-the thread is reviewed then."
+A reply to a closed thread opens it again, whoever closed it: the user
+has more to say, so the point is not done.  For a thread that waits for
+the user's review that is looking at it, and it no longer waits."
   (change-review-ui-read
    (format "Reply to %s:" (change-review-ui--comment-label set thread comment))
    (if quote (concat quote "\n\n") "")
    (lambda (text)
      (if (or (string-blank-p text) (and quote (change-review-ui--quote-only-p text)))
          (message "No reply")
-       (change-review-reply set comment (string-trim text))
-       (when (change-review-thread-unreviewed-p set thread)
-         (change-review-mark-reviewed set thread))))
+       (change-review-ui--open-for-reply
+        set thread (change-review-reply set comment (string-trim text)))))
    (and quote 'end)))
 
 (defun change-review-ui-reply-to-thread (set thread &optional quote)
@@ -2422,7 +2442,8 @@ it.  Select text of several comments of a thread and each is quoted,
 under a line that says who wrote it, in a reply to the last.  With
 nothing selected the whole comment is quoted: the one at point, or the
 last of the thread drawn under the line at point.  The reply is a draft,
-as one that \\[change-review-ui-reply] makes is."
+as one that \\[change-review-ui-reply] makes is, and opens a closed thread
+again."
   (interactive)
   (pcase-let ((`(,set ,thread ,comment ,quote) (change-review-ui--quotation)))
     (deactivate-mark)
@@ -2992,9 +3013,9 @@ Point is on a comment; the keys act on it:
 \\[change-review-ui-next-comment] and \\[change-review-ui-previous-comment] move between comments,
 \\[change-review-ui-next-thread] and \\[change-review-ui-previous-thread] between threads.
 \\[change-review-ui-show-origin] shows where the comment was made, hides it again.
-\\[change-review-ui-reply] replies to it, as a draft.
+\\[change-review-ui-reply] replies to it, as a draft; a closed thread is open again then.
 \\[change-review-ui-quote-reply] replies to it with the text you selected of it quoted, or all of it.
-\\[change-review-ui-toggle-status] closes its thread or opens it again.
+\\[change-review-ui-toggle-status] closes its thread or opens it again, with no reply.
 \\[change-review-ui-toggle-reviewed] marks a thread someone else closed reviewed, or makes it wait again;
 \\[change-review-ui-mark-all-reviewed] marks every one that waits.
 \\[change-review-ui-set-status] sets the status by name.
@@ -3342,14 +3363,14 @@ LINES maps (SIDE . NUMBER) to the end of the line that has it.")
 \\<change-review-diff-view-mode-map>
 \\[change-review-ui-comment-at-point] comments on the line at point, or on the region.
 Under a thread:
-\\[change-review-ui-reply] replies to it.
+\\[change-review-ui-reply] replies to it; a closed thread is open again then.
 \\[change-review-ui-quote-reply] replies to it with what you selected of a comment (drag the
 mouse over its text) quoted, or all of the last comment.
 \\[change-review-ui-edit-draft] edits a draft of it (the [Edit] button of a draft does too).
 \\[change-review-ui-delete-draft] deletes a draft of it (so does the [Delete] button of a draft).
 \\[change-review-ui-delete-draft-thread] deletes the thread when it is nothing but drafts
 \(its [Delete thread] button does too).
-\\[change-review-ui-toggle-status] closes it or opens it again.
+\\[change-review-ui-toggle-status] closes it or opens it again, with no reply.
 \\[change-review-ui-toggle-reviewed] marks it reviewed when someone else closed it, or makes it wait again;
 \\[change-review-ui-mark-all-reviewed] marks every thread that waits.
 \\[change-review-ui-return] opens it if it is one line, else shows where its comments were made.

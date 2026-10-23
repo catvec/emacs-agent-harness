@@ -2756,8 +2756,8 @@ changes nothing, and with nothing waiting it says so."
       (should (= 2 (length asked))))))
 
 (ert-deftest change-review-ui-answering-a-close-is-reviewing-it ()
-  "A reply to a thread that waits for the user's review marks it reviewed; an
-empty reply is no reply and marks nothing."
+  "A reply to a thread that waits for the user's review is looking at it: the
+thread no longer waits.  An empty reply is no reply and leaves it waiting."
   (change-review-ui-test--drawing
     (let* ((set (change-review-ui-test--set))
            (waiting (nth 1 (change-review-ui-test--populate set))))
@@ -2770,6 +2770,145 @@ empty reply is no reply and marks nothing."
       (should-not (change-review-thread-unreviewed-p set waiting))
       (should (equal "Thanks, but why not b3?"
                      (change-review-comment-body (change-review-thread-last-comment waiting)))))))
+
+;; Whoever replies has more to say: the point is not done.
+
+(defun change-review-ui-test--statuses (thread)
+  "Return the statuses THREAD has been changed to, oldest first."
+  (mapcar (lambda (entry) (plist-get entry :status)) (change-review-thread-history thread)))
+
+(ert-deftest change-review-ui-replying-to-a-closed-thread-opens-it-again ()
+  "A reply to a thread that is closed opens it again, whoever closed it: the
+agent, so it waited for the user's review, or the user.  The reply is a draft
+in the thread as before; the change of status is the user's, after the close,
+and the thread is open from then on, no longer to review."
+  (change-review-ui-test--drawing
+    (let* ((set (change-review-ui-test--set))
+           (threads (change-review-ui-test--populate set))
+           (by-agent (nth 1 threads))
+           (by-user (nth 3 threads))
+           (change-review-ui-read-function
+            (lambda (_prompt _initial callback) (funcall callback "Not yet: it still fails on a4."))))
+      (change-review-close set by-user)
+      ;; Closed by the agent, waiting for the user's review.
+      (should-not (change-review-thread-open-p by-agent))
+      (should (change-review-thread-unreviewed-p set by-agent))
+      (let ((before (change-review-comment-id (change-review-thread-last-comment by-agent))))
+        (change-review-ui-reply-to-thread set by-agent)
+        (should (change-review-thread-open-p by-agent))
+        (should-not (change-review-thread-unreviewed-p set by-agent))
+        (should (equal '(closed open) (change-review-ui-test--statuses by-agent)))
+        (should (change-review-own-author-p
+                 set (plist-get (car (last (change-review-thread-history by-agent))) :author)))
+        (let ((reply (change-review-thread-last-comment by-agent)))
+          (should (equal "Not yet: it still fails on a4." (change-review-comment-body reply)))
+          (should (change-review-comment-draft-p reply))
+          (should (equal before (change-review-comment-reply-to reply)))))
+      ;; Closed by the user.
+      (should-not (change-review-thread-open-p by-user))
+      (change-review-ui-reply-to-thread set by-user)
+      (should (change-review-thread-open-p by-user))
+      (should (equal '(closed open) (change-review-ui-test--statuses by-user)))
+      ;; Both are open threads now, and none is left to review.
+      (should (memq by-agent (change-review-threads set 'open)))
+      (should (memq by-user (change-review-threads set 'open)))
+      (should-not (change-review-threads set 'closed))
+      (should-not (change-review-threads set 'unreviewed)))))
+
+(ert-deftest change-review-ui-replying-opens-a-thread-once ()
+  "A reply to a thread that is open changes nothing of its status, however many
+replies it gets; a thread closed again and answered again is opened again."
+  (change-review-ui-test--drawing
+    (let* ((set (change-review-ui-test--set))
+           (open (nth 3 (change-review-ui-test--populate set)))
+           (change-review-ui-read-function
+            (lambda (_prompt _initial callback) (funcall callback "And another thing."))))
+      (change-review-ui-reply-to-thread set open)
+      (change-review-ui-reply-to-thread set open)
+      (should (change-review-thread-open-p open))
+      (should-not (change-review-thread-history open))
+      (change-review-close set open)
+      (change-review-ui-reply-to-thread set open)
+      (change-review-ui-reply-to-thread set open)
+      (should (change-review-thread-open-p open))
+      (should (equal '(closed open) (change-review-ui-test--statuses open)))
+      (change-review-close set open)
+      (change-review-ui-reply-to-thread set open)
+      (should (equal '(closed open closed open) (change-review-ui-test--statuses open))))))
+
+(ert-deftest change-review-ui-no-reply-leaves-a-closed-thread-closed ()
+  "A blank reply, and a reply that is only the quote it started with, answer
+nothing: the thread stays closed, and waiting for review."
+  (change-review-ui-test--drawing
+    (let* ((set (change-review-ui-test--set))
+           (waiting (nth 1 (change-review-ui-test--populate set)))
+           (count (length (change-review-thread-comments waiting)))
+           (said nil))
+      (cl-letf (((symbol-function 'message) (lambda (&rest args) (push (apply #'format args) said))))
+        (let ((change-review-ui-read-function (lambda (_prompt _initial callback) (funcall callback " \n "))))
+          (change-review-ui-reply-to-thread set waiting))
+        (let ((change-review-ui-read-function
+               (lambda (_prompt initial callback &optional _point) (funcall callback initial))))
+          (change-review-ui-reply-to-thread set waiting "> Fine."))
+        (let ((change-review-ui-read-function (lambda (_prompt _initial callback) (funcall callback ""))))
+          (change-review-ui-reply-to-comment set waiting (change-review-thread-root waiting))))
+      (should-not (change-review-thread-open-p waiting))
+      (should (change-review-thread-unreviewed-p set waiting))
+      (should (equal '(closed) (change-review-ui-test--statuses waiting)))
+      (should (= count (length (change-review-thread-comments waiting))))
+      (should (equal '("No reply" "No reply" "No reply") said)))))
+
+(ert-deftest change-review-ui-says-the-thread-is-open-again ()
+  "The reply that opens a thread says so, as closing and opening it by hand do,
+naming the thread; one in an open thread says nothing of the kind."
+  (change-review-ui-test--drawing
+    (let* ((set (change-review-ui-test--set))
+           (threads (change-review-ui-test--populate set))
+           (closed (nth 1 threads))
+           (open (nth 3 threads))
+           (said nil)
+           (change-review-ui-read-function
+            (lambda (_prompt _initial callback) (funcall callback "Why not b3?"))))
+      (cl-letf (((symbol-function 'message) (lambda (&rest args) (push (apply #'format args) said))))
+        (change-review-ui-reply-to-thread set open)
+        (should-not said)
+        (change-review-ui-reply-to-thread set closed))
+      (should (equal (list (format "Thread %s is open again"
+                                   (change-review-ui-thread-short-id set closed)))
+                     said)))))
+
+(ert-deftest change-review-ui-replies-open-a-closed-thread-however-they-are-made ()
+  "The [Reply] button, r, C-c > with the comment quoted, and r under a line of
+the diff view each open the closed thread they reply in."
+  (change-review-ui-test--drawing
+    (let* ((set (change-review-ui-test--set))
+           (threads (change-review-ui-test--populate set))
+           (closed (nth 1 threads))
+           (change-review-ui-read-function
+            (lambda (_prompt initial callback &optional _point) (funcall callback (concat initial "Not fine.")))))
+      ;; The button in the thread's header.
+      (should-not (change-review-thread-open-p closed))
+      (change-review-ui-test--press (change-review-ui-thread-string set closed :width 90) "[Reply]")
+      (should (change-review-thread-open-p closed))
+      (should (equal "Not fine." (change-review-comment-body (change-review-thread-last-comment closed))))
+      ;; The threads view.
+      (dolist (command '(change-review-ui-reply change-review-ui-quote-reply))
+        (change-review-close set closed)
+        (let ((change-review-ui-sets nil)
+              (buffer (save-window-excursion (change-review-open-threads set 'closed))))
+          (unwind-protect
+              (with-current-buffer buffer
+                (goto-char (point-min))
+                (search-forward "Fine.")
+                (should-not (change-review-thread-open-p closed))
+                (call-interactively command)
+                (should (change-review-thread-open-p closed))
+                ;; The view follows: it was the only closed thread, and it
+                ;; waited for the user's review.
+                (change-review-ui-flush)
+                (should (string-match-p "No closed threads\\." (change-review-ui-test--text)))
+                (should (string-match-p "to review 0 " (change-review-ui-test--text))))
+            (kill-buffer buffer)))))))
 
 (ert-deftest change-review-ui-lines-mode-marks-the-thread-under-the-line-reviewed ()
   "In a buffer that shows threads under its lines, m marks the thread there."

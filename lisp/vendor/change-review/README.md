@@ -135,7 +135,7 @@ or all. Point is on a comment, and the keys act on it:
 | --- | --- |
 | `n` `p` / `N` `P` | Move between comments / between threads. |
 | `RET` `TAB` | Show where the comment was made (file, line, revision, the lines of the diff of that revision around it), or hide that again. `RET` on a line of that diff shows the line of the source. |
-| `r` | Reply to the comment, as a draft. |
+| `r` | Reply to the comment, as a draft. A closed thread you reply in is open again. |
 | `C-c >` | Reply to the comment with what you selected of it quoted, or all of it: see [Replying with a quote](#replying-with-a-quote). |
 | `x` / `s` | Close the thread or open it again / set its status by name. |
 | `m` / `M` | Mark the thread someone else closed reviewed, or make it wait again / mark every thread that waits. |
@@ -280,7 +280,10 @@ Select the part first, or select nothing to quote all of the comment (the
 one at point, or the last of the thread drawn under the line at point).
 The reply is a draft, as one `r` starts is, in the thread, answering the
 comment; a reply that is nothing but the quote answers nothing and is
-not kept.
+not kept. A reply opens a closed thread again, whoever closed it: you have
+more to say, so the point is not done. The opening is a change of status
+of its own, yours, after the reply, and the echo area says so; `x` and
+`[Reopen]` open a thread without one.
 
 ```
 ┃ 1/3  Noah (you) · 2026-10-19 21:57 · v1
@@ -411,10 +414,11 @@ the `:reviewed` time in the thread's history entry that closed it -- so:
   `[Mark reviewed]` button, and is drawn whole in the diff view, the
   agent's answer in sight, where other closed threads are one line;
 - the user says they looked with `m` (or the button), for every thread
-  that waits with `M`, or by replying in it; `m` on a thread already
-  reviewed makes it wait again, so a slip is undone; opening the thread
-  takes it out of the closed ones, and a close by someone else after it
-  was opened is a new one, to review;
+  that waits with `M`, or by replying in it, which opens the thread
+  again: whoever replies has more to say, so the point is not done; `m`
+  on a thread already reviewed makes it wait again, so a slip is undone;
+  opening the thread takes it out of the closed ones, and a close by
+  someone else after it was opened is a new one, to review;
 - nothing marks a thread by itself: not the time, not the number of
   versions since, not showing it. A close missed for two rounds waits as
   one made a minute ago;

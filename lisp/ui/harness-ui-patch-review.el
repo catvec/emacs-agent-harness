@@ -291,11 +291,14 @@
 ;; whole under their line, the agent's answer in sight, where a closed
 ;; thread is one line.  m on such a row, in either version of Ediff or
 ;; in its control panel, marks the thread reviewed (and again, makes it
-;; wait once more), M every one that waits, and a reply to it is as good
-;; as m.  The mark is on that close: a thread the agent closes again
-;; after it was opened is to review again, and nothing marks one by
-;; itself, so a close missed for two rounds waits still.  The harness
-;; keeps the marks with the threads (`patch-review/apply').
+;; wait once more), M every one that waits, and a reply to it opens it
+;; again: you have more to say, so the point is not done, and a thread
+;; you reply in is open, whoever closed it.  The reply is a draft in the
+;; thread, the opening a change of status of yours after it.  The mark
+;; is on that close: a thread the agent closes again after it was opened
+;; is to review again, and nothing marks one by itself, so a close
+;; missed for two rounds waits still.  The harness keeps the marks, and
+;; the opening, with the threads (`patch-review/apply').
 ;;
 ;; Replies you wrote by hand before there were threads -- under a quote of
 ;; the agent's words, in a round of feedback or typed in its session while it
@@ -4038,7 +4041,8 @@ Signal when there is none."
 
 (defun harness-ui-patch-review-reply ()
   "Reply to the thread at the current difference, or at point, in Ediff.
-As a draft, in the thread: it goes with the feedback."
+As a draft, in the thread: it goes with the feedback.  A thread that is
+closed, by the agent or by you, is open again then: you have more to say."
   (interactive)
   (pcase-let ((`(,review . ,thread) (harness-ui-patch-review--ediff-thread)))
     (change-review-ui-reply-to-thread (harness-ui-patch-review--r-set review) thread)))
@@ -4058,7 +4062,8 @@ With text of a comment selected in either version, a reply to that comment
 with the text quoted, as \\<harness-ui-patch-review-lines-mode-map>\\[change-review-ui-quote-reply] does in the version.  Without, the
 reply r makes, to the thread at the current difference, that starts with
 its last comment quoted, as a mail's reply does, point under it.  Either
-way a draft in the thread, which goes with the feedback."
+way a draft in the thread, which goes with the feedback, and a closed
+thread is open again, as r makes it."
   (interactive)
   (if-let* ((version (harness-ui-patch-review--selected-version)))
       (with-current-buffer version
@@ -4550,10 +4555,10 @@ threads under a line -- r, x, m, o, RET -- are its.")
 \\<harness-ui-patch-review-lines-mode-map>
 \\[harness-ui-patch-review-comment-line] comments on the line at point, as a thread of
 its own.
-\\[change-review-ui-reply] replies to the thread under it.
+\\[change-review-ui-reply] replies to the thread under it; a closed thread is open again then.
 \\[harness-ui-patch-review-thread-reply] with lines selected starts a thread on them: a card in the
 feedback box, the words under it the comment.
-\\[change-review-ui-toggle-status] closes it or opens it again.
+\\[change-review-ui-toggle-status] closes it or opens it again, with no reply.
 \\[change-review-ui-toggle-reviewed] marks it reviewed, when the agent closed it.
 \\[change-review-ui-cycle-fold] folds it: one line, its conversation, all of it.
 \\[change-review-ui-return] opens it if it is one line, else shows where its comments were made.

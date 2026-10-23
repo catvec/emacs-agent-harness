@@ -832,6 +832,26 @@ at; with a status it closes the thread; with none, opens one."
         (should (equal "a.el" (plist-get (plist-get (car (plist-get thread :comments)) :location) :file)))
         (should (eql 2 (plist-get (plist-get (car (plist-get thread :comments)) :location) :line)))))))
 
+(ert-deftest harness-patch-review-an-answer-with-no-status-leaves-the-thread-as-it-is ()
+  "review_comment with text and no status changes nothing of the thread's
+status: the agent's answer in a thread it closed leaves it closed.  What opens
+a closed thread is the reviewer's reply, in the review's views and in the chat."
+  (harness-patch-review-test-with
+    (let* ((id (harness-patch-review-test--task))
+           (made (harness-patch-review-test--user-comment id "Why eighteen?"
+                                                         :location harness-patch-review-test--a18 :sent 5.0)))
+      (harness-patch-review-test--tool
+       "review_comment" (list :thread (car made) :body "Because." :status "closed") id)
+      (let ((result (harness-patch-review-test--tool
+                     "review_comment" (list :thread (car made) :body "And also this.") id))
+            (thread (car (plist-get (harness-call 'patch-review/get id) :threads))))
+        (should-not (plist-get result :is-error))
+        (should (equal "closed" (plist-get thread :status)))
+        (should (equal '("Why eighteen?" "Because." "And also this.")
+                       (mapcar (lambda (comment) (plist-get comment :body)) (plist-get thread :comments))))
+        (should (equal '("closed")
+                       (mapcar (lambda (entry) (plist-get entry :status)) (plist-get thread :history))))))))
+
 (ert-deftest harness-patch-review-tells-the-agent-what-went-wrong ()
   "An unknown thread, or a comment with nothing in it, is an error that says what to do."
   (harness-patch-review-test-with

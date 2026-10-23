@@ -5410,6 +5410,90 @@ version or in the control panel, marks it reviewed -- and makes it wait again
           (should-error (call-interactively #'harness-ui-patch-review-toggle-reviewed) :type 'user-error)
           (call-interactively #'harness-ui-patch-review-ediff-quit))))))
 
+(ert-deftest harness-ui-patch-review-replying-opens-a-closed-thread ()
+  "A reply to a closed thread opens it again, whoever closed it: r in Ediff's
+control panel to the thread the agent closed -- which then no longer waits for
+the reviewer -- and r in a version to the one the reviewer closed themselves.
+The reply is a draft in the thread, the reopening is the reviewer's, after the
+close, and the harness keeps both: the threads open, the history closed then
+open.  A reply in a thread that is open changes no status."
+  (harness-ui-patch-review-test-with-task
+    (let* ((harness-ui-patch-review-ediff-tree nil)
+           (popout (harness-ui-patch-review-test--changes board id))
+           (review (gethash id harness-ui-patch-review--reviews))
+           (set (harness-ui-patch-review--r-set review))
+           (two (harness-ui-patch-review-test--comment-on review "a.el" '(:new . 2) "Why two?"
+                                                          :sent (float-time)))
+           (eighteen (harness-ui-patch-review-test--comment-on review "a.el" '(:new . 18) "Why eighteen?"
+                                                               :sent (float-time)))
+           (mine (harness-ui-patch-review-test--thread-of review eighteen))
+           (reply (lambda (text) (lambda (_prompt _initial callback) (funcall callback text))))
+           (kept (lambda (thread)
+                   (cl-find (change-review-thread-id thread)
+                            (harness-ui-patch-review-test--harness-threads id)
+                            :key (lambda (th) (plist-get th :id)) :test #'equal)))
+           (statuses (lambda (thread)
+                       (mapcar (lambda (entry) (plist-get entry :status))
+                               (plist-get (funcall kept thread) :history)))))
+      (harness-ui-patch-review-test--wait-harness-threads id 2)
+      ;; The reviewer closes one, the agent the other: that one waits for them.
+      (change-review-close set mine)
+      (let ((theirs (harness-ui-patch-review-test--agent-closes review id sid two "Because two reads better.")))
+        (should (change-review-thread-unreviewed-p set theirs))
+        (should-not (change-review-thread-unreviewed-p set mine))
+        (harness-ui-patch-review-test--wait-text
+         popout "0 open, 2 closed \\[1 to review\\] \\[Threads\\]")
+        (harness-ui-patch-review-ediff review 0)
+        (let ((control (harness-ui-patch-review-test--control review 0))
+              (new (nth 2 (harness-ui-patch-review--ediff-buffers review))))
+          ;; The control panel, at the first difference: the agent's thread.
+          (with-current-buffer control
+            (should (equal '(:new . 2) (harness-ui-patch-review--ediff-position)))
+            (let ((change-review-ui-read-function (funcall reply "Not yet: it still fails on a4.")))
+              (call-interactively #'harness-ui-patch-review-reply)))
+          (should (change-review-thread-open-p theirs))
+          (should-not (change-review-thread-unreviewed-p set theirs))
+          (let ((answer (change-review-thread-last-comment theirs)))
+            (should (equal "Not yet: it still fails on a4." (change-review-comment-body answer)))
+            (should (change-review-comment-draft-p answer)))
+          ;; A version, on the line of the thread the reviewer closed.
+          (with-current-buffer new
+            (goto-char (point-min))
+            (forward-line 17)
+            (should (eq #'change-review-ui-reply (key-binding "r")))
+            (let ((change-review-ui-read-function (funcall reply "Wrong to close it.")))
+              (call-interactively #'change-review-ui-reply)))
+          (should (change-review-thread-open-p mine))
+          ;; Open threads, none to review: the heading says so.
+          (change-review-ui-flush)
+          (harness-ui-patch-review-test--wait-text popout "2 open, 0 closed \\[Threads\\]")
+          (should-not (string-match-p "\\[[0-9]+ to review\\]" (harness-ui-patch-review-test--text popout)))
+          (should (string-match-p "to review 0 " (harness-ui-patch-review-test--text popout)))
+          ;; A reply in an open thread changes nothing of its status.
+          (with-current-buffer control
+            (let ((change-review-ui-read-function (funcall reply "And one more thing.")))
+              (call-interactively #'harness-ui-patch-review-reply)))
+          (should (equal '(closed open) (mapcar (lambda (entry) (plist-get entry :status))
+                                                (change-review-thread-history theirs))))
+          (with-current-buffer control (call-interactively #'harness-ui-patch-review-ediff-quit)))
+        ;; The harness keeps both open, each reopening after its close.
+        (harness-test-wait (lambda () (and (equal "open" (plist-get (funcall kept theirs) :status))
+                                           (equal "open" (plist-get (funcall kept mine) :status))))
+                           5 "the harness to keep both threads open")
+        (should (equal '("closed" "open") (funcall statuses theirs)))
+        (should (equal '("closed" "open") (funcall statuses mine)))
+        (let ((entries (plist-get (funcall kept theirs) :history)))
+          ;; The agent closed it, the reviewer opened it, and nothing is reviewed.
+          (should (equal "open" (plist-get (car (last entries)) :status)))
+          (should (< (plist-get (car entries) :time) (plist-get (car (last entries)) :time)))
+          (should-not (cl-some (lambda (entry) (plist-get entry :reviewed)) entries)))
+        (should (equal '("Because two reads better." "Not yet: it still fails on a4." "And one more thing.")
+                       (mapcar (lambda (comment) (plist-get comment :body))
+                               (cdr (plist-get (funcall kept theirs) :comments)))))
+        (should (equal '("Wrong to close it.")
+                       (mapcar (lambda (comment) (plist-get comment :body))
+                               (cdr (plist-get (funcall kept mine) :comments)))))))))
+
 (ert-deftest harness-ui-patch-review-lists-the-other-threads-to-review ()
   "A thread on the change as a whole is shown by the section's \"to review\"
 filter when the agent closed it and the reviewer has not looked, and m on it

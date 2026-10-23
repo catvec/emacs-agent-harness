@@ -60,12 +60,17 @@
 ;;
 ;; A thread that someone other than the user closed -- an agent says
 ;; what it did and closes the thread -- is TO REVIEW until the user has
-;; looked at it and says so (`change-review-mark-reviewed'), or answers
-;; it.  The mark is on the change of status that closed the thread
-;; (`:reviewed' in its history entry), so a thread closed again after it
-;; was opened is to review again, and nothing marks one by the passing
-;; of time: a close missed for two rounds is still waiting.
-;; `change-review-thread-unreviewed-p' says which threads wait.
+;; looked at it and says so (`change-review-mark-reviewed'), or has more
+;; to say and opens it again: the user's reply in it does that
+;; (`change-review-ui-reply-to-comment'), the reply being a comment and
+;; the opening a change of status of its own.  The mark is on the change
+;; of status that closed the thread (`:reviewed' in its history entry),
+;; so a thread closed again after it was opened is to review again, and
+;; nothing marks one by the passing of time: a close missed for two
+;; rounds is still waiting.  `change-review-thread-unreviewed-p' says
+;; which threads wait.  Adding a comment to a thread (`change-review-reply')
+;; never changes its status: an agent that answers in a thread it has
+;; closed, or a reply that came by mail, leaves it as it is.
 ;;
 ;; A DRAFT is a comment not delivered yet, only its author's.  Its author
 ;; may change it (`edit-comment') or take it back (`delete-comment';

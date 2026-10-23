@@ -3789,9 +3789,11 @@ with), `recap` writes the recaps on the cards,
   session the comment came from), when, against which version of the
   change, whether it is a draft, and its place in the thread (`2/3`, and
   `↳ re 1/3` when it answers another than the one before). `r` replies
-  in the thread, `x` closes it -- closed is the good
-  ending: the point made, the change made -- or opens it again, `RET` on
-  a comment shows where it was made, with the lines of the diff of the
+  in the thread -- a closed thread you reply in is open again, as you
+  have more to say, so the point is not made -- `x` closes it -- closed
+  is the good ending: the point made, the change made -- or opens it
+  again without a reply, `RET` on a comment shows where it was made,
+  with the lines of the diff of the
   commit it was written against, as it was then (the answer to a comment
   changes the code it is about, so a reply shows the code its own commit
   had, not the code the thread started on), `[Source @ v1]` shows
@@ -3861,11 +3863,14 @@ with), `recap` writes the recaps on the cards,
   filtered to them; `f` cycles open, to review, closed, all), a file's
   row says how many it has, and Ediff draws them whole under their line.
   You say you looked with `m` on the thread (in Ediff's control panel
-  `m` too), with `M` for all of them, or by replying in it; `x` opens the
-  thread again. Nothing marks a thread by itself, and the mark is on that
-  close: a thread the agent closes again after you opened it is to review
-  again. The harness keeps the marks with the threads, and the agent is
-  told that you look at every thread it closes. Replies you wrote by hand before there were threads --
+  `m` too), with `M` for all of them, or by replying in it, which opens
+  the thread again -- you have more to say -- as `x` does without a reply
+  (your reply is a draft in the thread; the agent answers it once you
+  send the task back). Nothing marks a thread by itself, and the mark is
+  on that close: a thread the agent closes again after you opened it is
+  to review again. The harness keeps the marks with the threads, and the
+  agent is told that you look at every thread it closes. Replies you
+  wrote by hand before there were threads --
   under a quote of the agent's words, in a round of feedback or typed in
   its session while it worked -- are threads too, closed, each with the
   quote it answered; `M-x harness-ui-patch-review-import-manual`, in a
@@ -3906,7 +3911,8 @@ with), `recap` writes the recaps on the cards,
   `M-RET` splits the quote to answer a part and `C-c [` elides part of
   it, as in a session's box; a reply that is only the quote is no
   reply. The agent reads the quote as you wrote it, with the thread
-  named under the reply.
+  named under the reply. Like any reply in a closed thread, it opens the
+  thread again.
 
   Your comments are drafts until the task is sent back. Whatever sends
   it back -- the report's box (`C-c C-c`, an empty box too when drafts

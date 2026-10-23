@@ -13793,8 +13793,9 @@ lists every thread by file, filtered by status with f and F) and the
 threads under the lines of Ediff's two versions and of the library's own
 diff view (`change-review-open-diff`) all call them, and the keys on a
 thread are
-the library's whichever view it is in: r replies, x closes it or opens
-it, m marks one the agent closed reviewed (M every one that waits), s sets a status, e edits a draft, k deletes one and K a thread that is nothing but drafts, o follows an
+the library's whichever view it is in: r replies (a closed thread is
+open again then), x closes it or opens it with no reply, m marks one the
+agent closed reviewed (M every one that waits), s sets a status, e edits a draft, k deletes one and K a thread that is nothing but drafts, o follows an
 agent's comment to the point of its conversation, RET (TAB in the
 threads view) shows where its comment was made -- the file and line, the
 revision, the lines of the diff it was made on, the session and tool
@@ -13859,9 +13860,27 @@ TO REVIEW until the user looked at it (`change-review-thread-unreviewed-p`;
 the library's README has the whole rule): the mark is on the change of
 status that closed the thread, so a close from two rounds ago still
 waits, a thread closed again after it was opened waits again, and nothing
-marks a thread by itself.  The user marks one with m, the `[Mark
-reviewed]` button, or by replying in it, all of them with M; m again
-makes it wait.  The threads view has it as a filter, `unreviewed`, shown
+marks a thread by itself.  The user marks one with m or the `[Mark
+reviewed]` button, all of them with M; m again makes it wait.  A reply
+opens the thread again: whoever replies has more to say, so the point is
+not done, and a thread the user replies in is open, whoever closed it --
+which takes a close that waits out of those that wait, as looking at it
+does.  `change-review-ui-reply-to-comment`, where every way of replying
+in a view ends (r, the `[Reply]` button, C-c >, Ediff's r), adds the reply
+as a draft and then, when the thread it is in is closed
+(`change-review-ui--open-for-reply`: the thread is found in the set by the
+reply's own, as the one the reply was read for may have been drawn again
+while it was written), reopens it with `change-review-reopen`: a
+`set-status` operation of its own, the user's, after the `add-comment` of
+the reply, so a set kept elsewhere has nothing new to know, and the echo
+area says "Thread t-3f9a is open again".  A reply that is none -- blank,
+or only the quote it started with -- changes nothing, and a thread that is
+open already gets no change of status.  Only the user's reply opens: the
+agent's comment in a closed thread (`review_comment`), and a reply
+imported from a mail (`change-review-mail-import-reply`), whose author
+is the sender, leave the status as it is.  The chat does the same for a
+reply in a thread (`harness-patch-review--register-thread`).  The
+threads view has it as a filter, `unreviewed`, shown
 as "to review" and counted in its heading; the diff view draws such a
 thread whole where other closed threads are a line; the review of a task
 (below) counts them, lists them and draws them whole in Ediff.

@@ -301,11 +301,14 @@ their file, a line each, with the open threads.  Ediff draws them
 whole under their line, the agent's answer in sight, where a closed
 thread is one line.  m on such a row, in either version of Ediff or
 in its control panel, marks the thread reviewed (and again, makes it
-wait once more), M every one that waits, and a reply to it is as good
-as m.  The mark is on that close: a thread the agent closes again
-after it was opened is to review again, and nothing marks one by
-itself, so a close missed for two rounds waits still.  The harness
-keeps the marks with the threads (`patch-review/apply`).
+wait once more), M every one that waits, and a reply to it opens it
+again: you have more to say, so the point is not done, and a thread
+you reply in is open, whoever closed it.  The reply is a draft in the
+thread, the opening a change of status of yours after it.  The mark
+is on that close: a thread the agent closes again after it was opened
+is to review again, and nothing marks one by itself, so a close
+missed for two rounds waits still.  The harness keeps the marks, and
+the opening, with the threads (`patch-review/apply`).
 
 Replies you wrote by hand before there were threads -- under a quote of
 the agent's words, in a round of feedback or typed in its session while it
