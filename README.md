@@ -170,8 +170,8 @@ OpenAI-compatible APIs and AWS Bedrock.
 | A permission request, answered in the chat | A question from the agent, answered with a digit |
 | ![A call the harness denied, with an [Approve] button under it and the handle the denial named](docs/media/chat-denied.png) | ![That call after the user approved it: marked user-approved, the agent's rerun under it with what the command printed](docs/media/chat-denied-approved.png) |
 | A denied call: the harness blocked it, [Approve] lets it run anyway | Approved: the agent reruns the call exactly as it was denied |
-| ![The access view of a session: its sandbox, bwrap, its mode and the network it gave up, the Linux capability its commands were given, the directories it may write, only read or gave up, the tools it is offered and those turned off, its rules and the request waiting on you](docs/media/access.png) | ![The judgements of that session's calls in its access view: each call drawn as the chat draws it, under what was decided, by whom and its handle, the two the access settings refused with [Approve]](docs/media/access-judgements.png) |
-| A session's access: its jail, directories, tools and rules, changed in place | How each of its calls was judged, by whom and under which handle, filterable |
+| ![The jail and permissions view of a session: the settings in one group -- permission mode, interactive or not, the network it gave up, writing, the Linux capability its commands were given, the sandbox -- the directories it may write, only read or gave up, and a line each for its tools, rules and judgements](docs/media/access.png) | ![The Judgements page of that view: each call drawn as the chat draws it, under what was decided, by whom and its handle, the two the access settings refused with [Approve]](docs/media/access-judgements.png) |
+| A session's jail and permissions: its settings and directories in place, its tools, rules and judgements a page each | How each of its calls was judged, by whom and under which handle, filterable |
 | ![The task board with tasks needing input, in review, merging, in progress, in the backlog and completed, each fact in its column](docs/media/tasks.png) | ![The conversation tree of a session, its fork and a BTW](docs/media/tree.png) |
 | The task board: each task has a session and a worktree | The conversation tree of a session, a fork and a BTW |
 | ![A task's report popped out of the board: its chart large, the test run it quotes, and the banner and box to verify it or send it back](docs/media/report.png) | ![The chart of that report shown larger, in a popout of its own](docs/media/report-image.png) |
@@ -549,7 +549,7 @@ default), or nil for nowhere.
 | `C-c h I` | `harness-set-non-interactive-all` | Turn non-interactive mode on or off for every current session and task of every project |
 | `C-c h V` | `harness-toggle-supervisor` | Toggle supervisor mode: a session that supervises plans and leaves the changes to workers on cheaper models, a hands-on one may change files itself (see [Supervisor mode](#supervisor-mode)) |
 | menu `V` | `harness-set-supervisor-all` | In the `C-c h ?` menu, turn supervisor mode on or off for every current session and task of every project (see [Supervisor mode](#supervisor-mode)) |
-| `C-c h j` | `harness-access` | Show a session's access: its jail (sandbox, mode, network, writing, capabilities), directories, tools and rules, changed in place, and how each of its calls was judged (see [A session's access](#a-sessions-access)) |
+| `C-c h j` | `harness-access` | Show a session's jail and permissions: its settings (mode, interactive or not, network, writing, capabilities, sandbox) and directories, changed in place, with pages for its tools, rules and how each of its calls was judged; a click on the permission mode in a chat's header opens it too (see [A session's access](#a-sessions-access)) |
 | `C-c h d` | `harness-directories` | The same view, at the directories the session may access |
 | `C-c h W` | `harness-move-session` | Move a session to another working directory, and with it to that directory's project (see [Moving a session](#moving-a-session-to-another-directory)) |
 | `M` | `harness-ui-sessions-move` | In the session list, move the session at point to another directory |
@@ -1391,9 +1391,11 @@ session is. A session that [supervises](#supervisor-mode) starts the
 line with a `supervisor` badge, or a `hands-on` one once you switched
 that off; a click there toggles it, and a window too narrow for the
 whole line drops the badge before the session's own segments. Click
-the name, the model, the permission mode or the
-thinking level to change it, and `non-interactive` to make the session
-interactive again; `C-c h i` or the menu turns the mode on. The mode
+the name, the model or the thinking level to change it, `non-interactive`
+to make the session interactive again, and the permission mode to open
+the session's [jail and permissions](#a-sessions-access), where the
+mode is one click away (`C-c h p` changes it from the keyboard);
+`C-c h i` or the menu turns non-interactive mode on. The mode
 line shows the session's status, a spinner while a turn runs, and how
 long the turn has gone on. Neither repeats what the buffer shows: the
 todo list has its panel and what the turn does now has the activity
@@ -1532,67 +1534,81 @@ harness's own buffers and in every other.
 
 ### A session's access
 
-`C-c h j` (`M-x harness-access`) shows everything a session may reach
-in one buffer, and is where you change it: to check what a session can
-use, or to set one up in a tighter jail than the defaults. `C-c h d`
-(`harness-directories`) opens the same view at its directories. From
-the top:
+`C-c h j` (`M-x harness-access`) shows what a session may reach, and is
+where you change it: to check what a session can use, or to set one up
+in a tighter jail than the defaults.  The permission mode in a chat's
+header line (Ask, Accept Edits, Auto, YOLO) opens it with a click;
+`C-c h p` still changes the mode from the keyboard, and `C-c h d`
+(`harness-directories`) opens the view at its directories.  It is four
+pages, a buffer each, named in a strip under the title: Overview, Tools,
+Rules and Judgements.  `1` to `4` show them, `q` goes back to the
+Overview.
 
-- **Jail**: the sandbox backend its commands run in (bubblewrap,
-  `systemd-run` or MXC), the backends available and the sandbox policy,
-  whether its commands here run confined; its permission mode and
-  whether it is interactive, each with a button to change it; whether
-  it may reach the network, whether it may write at all, and the Linux
-  capabilities its commands run with, none unless you gave them some
-  (bubblewrap drops every one). Turning the network off takes the web
+- **Overview**, the page most visits are for.  The **settings** lead it,
+  in one group, each a choice with the one in effect
+  marked, a click on another taking it: its permission mode and whether
+  it is interactive; whether it may reach the network and whether it
+  may write at all; then the Linux capabilities its commands run with,
+  none unless you gave them some (bubblewrap drops every one), and the
+  sandbox backend its commands run in (bubblewrap, `systemd-run` or
+  MXC), the backends available, the sandbox policy and whether its
+  commands here run confined.  Turning the network off takes the web
   tools, `ssh` and `emacs_eval` (which runs in your Emacs, outside any
   sandbox) from the session and runs its `bash` and `elisp` offline;
-  where no sandbox can confine them, they go too. Read-only leaves the
+  where no sandbox can confine them, they go too.  Read-only leaves the
   reading tools and a read-only, offline `bash`, which gets no
-  capability. The capabilities row names the ones held, or says why
+  capability.  The capabilities row names the ones held, or says why
   none can be given (the sandbox is not bubblewrap, the session is
   read-only...), and has buttons to give one of those you let agents
-  ask for, each with what it lets a command do, to take one away and
-  to take them all away; `C` gives or takes one away from the keyboard.
-- **Directories**: each one the session may write (`rw`), only read
-  (`ro`) or gave up (`--`), with where it comes from -- the working
+  ask for, each with what it lets a command do, to take one away and to
+  take them all away; `C` gives or takes one away from the keyboard.
+  The **directories** are each one the session may write (`rw`), only
+  read (`ro`) or gave up (`--`), with where it comes from -- the working
   directory, the worktree, the temporary directory, every session's
   `harness-allowed-directories`, a grant to this session or for this
   turn, one it may only read -- and buttons to give one up, make it
   read-only, revoke a grant, restore what was given up, or allow
-  another directory for writing (`a`) or only for reading (`r`). A
-  directory it may only read reaches the tools that only read, and
-  `bash` sees it read-only.
+  another directory for writing (`a`) or only for reading (`r`), and to
+  move the session to another working directory (`m`).  A directory it
+  may only read reaches the tools that only read, and `bash` sees it
+  read-only.  The **details** end the page: a line each for the tools,
+  the rules and the judgements, with what is on their pages -- how many
+  tools are offered and off, how many rules, how many calls were
+  allowed, denied or are waiting -- and a click on a line opens its
+  page.
 - **Tools**: those it is offered, a click on one turning it off for
-  this session once you confirm, and those it is not, with why --
-  turned off, no network,
-  corporate mode, a read-only session -- and a button to turn each back
-  on. Tools that belong to other kinds of session, a task's `hand_in`
-  say, are named apart.
+  this session once you confirm, and those it is not, by why -- turned
+  off, no network, corporate mode, a read-only session -- a click on one
+  turned off turning it back on, and a button to give the network back.
+  Tools that belong to other kinds of session, a task's `hand_in` say,
+  are named apart.
 - **Rules**: the session's own and every session's, each with the
   programs, the arguments (a rule for an `ssh` call says which host) and
-  the directory it holds for, and the tools that never ask.
-- **Waiting for you**: the requests the session waits on, the same
-  panels as in its chat.
+  the directory it holds for, the tools exempt from prompts, and a
+  button that takes a lasting answer back.
 - **Judgements**: every call of the session the permission chain
   decided, newest first, each drawn as the chat draws it -- the same
   block, folded, `TAB` unfolding it -- under what was decided, who
   decided it (you, a rule, the mode, the auto-mode judge, the jail, the
   access settings, a module's gate, or nobody to ask while you are
-  away), why, and the call's handle. A refused call offers the chat's
-  `[Approve]`, which reruns it exactly as it was refused, and a waiting
-  one `[Allow]` and `[Deny]`. Filter them by what was decided (`f`),
-  who decided (`b`), the tool (`t`) or text in the tool, the reason,
-  the handle or the call (`s`); `c` clears the filter. The judgement is
-  written into the call's result too, so the list survives a restart.
+  away), why, and the call's handle.  A refused call offers the chat's
+  `[Approve]`, which reruns it exactly as it was refused; a call that
+  waits for an answer is listed as waiting, and is answered in the
+  session's chat, where the request is.  Filter them by what was
+  decided (`f`), who decided (`b`), the tool (`t`) or text in the tool,
+  the reason, the handle or the call (`s`); `c` clears the filter.  The
+  judgement is written into the call's result too, so the list survives
+  a restart.
 
-![The access view of a session kept to a jail: its sandbox, bwrap, its mode and the network it gave up, the Linux capability its commands were given (CAP_SYS_PTRACE, to trace its test run) with the buttons to give one or take one away, the directories it may write, only read or gave up, the tools it is offered and those turned off, its rules and the request waiting on you](docs/media/access.png)
+![The jail and permissions view of a session kept to a jail, its Overview: the settings in one group -- permission mode, interactive or not, the network the agent gave up, writing, the Linux capability its commands were given, the sandbox -- the directories it may write, only read or gave up, and a line each for its tools, rules and judgements](docs/media/access.png)
+
+![The Tools page: the tools the session is offered, the web tools gone with the network and the sub-agents turned off by you listed apart, by why](docs/media/access-tools.png)
 
 What you change there takes effect at once, and the session's
 transcript says so. The view follows the session as it goes: a grant
-from a prompt, a directory given up, a call judged. `n` and `p` move
-between calls, `M-n` and `M-p` between sections, `g` fetches it again
-and `?` lists the keys.
+from a prompt, a directory given up, a call judged. `TAB` and `S-TAB`
+move between buttons, `n` and `p` between calls, `M-n` and `M-p`
+between sections, `g` fetches a page again and `?` lists the keys.
 
 An agent changes its session's access with two tools. Giving access up
 is always allowed: `drop_access` gives up a directory (or only writing

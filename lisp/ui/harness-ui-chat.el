@@ -85,6 +85,7 @@
 (declare-function harness-ui-decisions-store "harness-ui-decisions" (decision))
 (declare-function harness-decision-undo "harness-ui-decisions" (id))
 (declare-function harness-decision-redo "harness-ui-decisions" (id))
+(declare-function harness-access "harness-ui-access" (&optional session-id section))
 (defvar harness-state-directory)
 (defvar harness-ui-decision-functions)
 (defvar harness-ui-markdown-table-width)
@@ -4903,6 +4904,32 @@ Per-token billing shows the cost; a subscription shows its plan and
 quota.  Clicking it opens the usage dashboard (`harness-ui-spend-segment')."
   (harness-ui-spend-segment (harness-ui-format-spend session t)))
 
+(defun harness-chat--permission-command ()
+  "Return the command a click on the permission mode in the header runs.
+The mode -- Ask, Accept Edits, Auto, YOLO -- opens the session's access
+view (`harness-access'): its jail and permissions, where the mode is
+chosen with the rest of what the session may reach.  Where that view is
+not loaded, the click chooses the mode (`harness-set-permission-mode'),
+as it did before the view."
+  (if (fboundp 'harness-access) #'harness-access #'harness-set-permission-mode))
+
+(defun harness-chat--permission-help (window _object _pos)
+  "Return the tooltip of the permission mode segment in WINDOW's header line.
+It names the mode and what it means, where a click goes and the key
+that changes the mode.  A `help-echo' function, so the keys are searched
+on hover, not on every redisplay of the header line."
+  (with-current-buffer (if (window-live-p window) (window-buffer window) (current-buffer))
+    (let* ((mode (format "%s" (or (plist-get (harness-chat--session) :permission-mode) "ask")))
+           (entry (assoc mode harness-ui-permission-modes))
+           (what (format "Permission mode: %s%s" (harness-ui-permission-mode-label mode)
+                         (if entry (format " — %s" (downcase (nth 2 entry))) ""))))
+      (harness-ui-one-line
+       (substitute-command-keys
+        (if (fboundp 'harness-access)
+            (format "%s · mouse-1: jail and permissions · \\[harness-set-permission-mode]: change mode" what)
+          (format "%s · mouse-1: change mode" what))
+        t)))))
+
 (defun harness-chat--non-interactive-segment (session)
   "Return the header segment saying SESSION never waits for the user, or nil.
 It reads \"non-interactive\" while SESSION is, and a click makes it
@@ -5118,8 +5145,8 @@ making room as its priorities say.  WIDTH is as
                                                  "Model (mouse-1: change)" 'harness-dim-face))
              50)
        (list (concat "  " (harness-chat--segment (harness-ui-permission-mode-label (plist-get s :permission-mode))
-                                                 #'harness-set-permission-mode
-                                                 "Permission mode (mouse-1: change)"))
+                                                 (harness-chat--permission-command)
+                                                 #'harness-chat--permission-help))
              90)
        (and non-interactive (list (concat "  " non-interactive) 40))
        (list (concat "  " (harness-chat--segment (harness-ui-thinking-label (plist-get s :thinking))

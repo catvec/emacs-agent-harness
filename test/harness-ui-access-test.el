@@ -4,9 +4,12 @@
 
 ;; The access view (harness-ui-access.el) against the real state layer,
 ;; the permission chain, the access module, the demo provider and the
-;; in-process ACP connection: its directories follow grants made
-;; anywhere, its jail changes the session's access, and its judgements
-;; are the chat's own tool-call blocks, [Approve] included.
+;; in-process ACP connection: its pages (the Overview, Tools, Rules and
+;; Judgements), its directories follow grants made anywhere, its
+;; settings change the session's access, and its judgements are the
+;; chat's own tool-call blocks, [Approve] included.  The permission
+;; mode in a chat's header line opens it.  Every button is pushed as a
+;; click does, which calls its action with no arguments.
 
 ;;; Code:
 
@@ -23,11 +26,19 @@
 (defvar harness-access--judged)
 (defvar harness-ui-access--describe)
 (defvar harness-ui-access--judgements)
+(defvar harness-ui-access--filter)
+(defvar harness-ui-access--page)
 (defvar harness-ui-map)
+
+(defconst harness-ui-access-test-width 120
+  "The width of the window the views are laid out for in the tests.
+No window shows a view in a batch Emacs, and the one a test gets is as
+narrow as the batch frame, which would cut what the tests read.")
 
 (defmacro harness-ui-access-test-with (&rest body)
   "Load the harness, the access module and the UI with the access view, run BODY.
-SID names a fresh session in ask mode."
+SID names a fresh session in ask mode.  The views are laid out for a
+window `harness-ui-access-test-width' columns wide."
   (declare (indent 0))
   `(harness-test-with-temp-state
      (harness-test-reset-bus)
@@ -50,14 +61,15 @@ SID names a fresh session in ask mode."
             (sid (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir) :model "demo:scripted"
                                           :permission-mode 'ask)
                             :id)))
-       (unwind-protect
-           (progn ,@body)
-         (dolist (b (buffer-list))
-           (when (with-current-buffer b (derived-mode-p 'harness-ui-access-mode)) (kill-buffer b)))
-         (maphash (lambda (_ b) (when (buffer-live-p b) (kill-buffer b))) harness-chat--buffers)
-         (clrhash harness-chat--buffers)
-         (dolist (c (copy-sequence harness-acp--clients))
-           (harness-acp--drop-client c))))))
+       (cl-letf (((symbol-function 'harness-ui-access--width) (lambda () harness-ui-access-test-width)))
+         (unwind-protect
+             (progn ,@body)
+           (dolist (b (buffer-list))
+             (when (with-current-buffer b (derived-mode-p 'harness-ui-access-mode)) (kill-buffer b)))
+           (maphash (lambda (_ b) (when (buffer-live-p b) (kill-buffer b))) harness-chat--buffers)
+           (clrhash harness-chat--buffers)
+           (dolist (c (copy-sequence harness-acp--clients))
+             (harness-acp--drop-client c)))))))
 
 (defun harness-ui-access-test-open (sid &optional section)
   "Open the access view of SID at SECTION, wait for it to be drawn, return it."
@@ -90,6 +102,34 @@ SID names a fresh session in ask mode."
   (should (search-forward label nil t))
   (goto-char (match-beginning 0))
   (funcall (get-text-property (point) 'harness-ui-action)))
+
+(defun harness-ui-access-test-flat-string (string)
+  "Return STRING with every run of white space one space, and the radio buttons as text.
+A choice in effect reads (x), one that is not ( ), whatever the display
+draws the rings with."
+  (string-trim
+   (replace-regexp-in-string
+    "\\(?:○\\|( )\\)" "( )"
+    (replace-regexp-in-string
+     "\\(?:◉\\|(\\*)\\)" "(x)"
+     (replace-regexp-in-string "[ \t\n]+" " " string)))))
+
+(defun harness-ui-access-test-setting (name)
+  "Return the text of the row of setting NAME, a symbol, and its note, flat.
+Where it reads \"Network (x) On ( ) Off\", the choice in effect is
+marked (x) (`harness-ui-access-test-flat-string')."
+  (let ((start (harness-ui-access--find-anchor (cons 'setting name))))
+    (should start)
+    (harness-ui-access-test-flat-string
+     (buffer-substring-no-properties
+      start (or (next-single-property-change start 'harness-ui-access-anchor) (point-max))))))
+
+(defun harness-ui-access-test-wait-setting (name regexp)
+  "Wait until the row of setting NAME matches REGEXP, flat."
+  (harness-test-wait (lambda ()
+                       (and (harness-ui-access--find-anchor (cons 'setting name))
+                            (string-match-p regexp (harness-ui-access-test-setting name))))
+                     5 (format "%s to read %s" name regexp)))
 
 ;;;; Directories
 
@@ -173,11 +213,72 @@ change."
             (harness-ui-access-test-wait-text (regexp-quote sub) t)
             (harness-ui-access-remove-read-dir notes)
             (harness-ui-access-test-wait-text (regexp-quote notes) t)
-            (harness-test-wait (lambda () (member (concat notes " may no longer be read") messages)) 5 "the message"))
+            (harness-test-wait (lambda () (member (concat "Read access removed: " notes) messages)) 5 "the message"))
           (should (member (concat "Revoked " sub) messages)))
         (should-not (member sub (harness-call 'permission/allowed-dirs sid)))
         ;; The ones left are drawn still.
         (should (string-match-p "rw +/ssh:box.example.invalid:~/ " (harness-ui-access-test-row home)))))))
+
+(defun harness-ui-access-test-click (label &optional from)
+  "Click the button LABEL, the first after FROM (the buffer's start), as a user does.
+A click runs the button's action with no arguments (`harness-ui-action-push'),
+which is what these buttons must survive: pushing the button's action by
+hand, with the arguments a test happens to know, hid that two of them
+took some."
+  (goto-char (or from (point-min)))
+  (should (search-forward label nil t))
+  (goto-char (match-beginning 0))
+  (harness-ui-action-push))
+
+(ert-deftest harness-ui-access-directory-buttons-work-when-clicked ()
+  "[Allow a directory…], [Allow reading a directory…] and [Move the session…]
+ask for the directory and do what they say.  Each runs a command that needs
+the directory, and a click gives its action no arguments: they signalled
+wrong-number-of-arguments, and nothing was asked or done."
+  (harness-ui-access-test-with
+    (let ((write (harness-test-temp-dir))
+          (read-only (harness-test-temp-dir))
+          (new (harness-test-temp-dir))
+          (asked nil)
+          (answer nil))
+      (harness-ui-access-test-open sid)
+      (cl-letf (((symbol-function 'read-directory-name)
+                 (lambda (prompt &rest _) (push prompt asked) answer)))
+        ;; Granted for writing, to this session.
+        (setq answer write)
+        (harness-ui-access-test-click "[Allow a directory…]")
+        (should (equal '("Allow for this session: ") asked))
+        (harness-ui-access-test-wait-text "granted to this session")
+        (should (member write (harness-call 'permission/allowed-dirs sid)))
+        (should (string-match-p "\\`  rw " (harness-ui-access-test-row write)))
+        ;; Read only.
+        (setq answer read-only)
+        (harness-ui-access-test-click "[Allow reading a directory…]")
+        (should (equal "Allow reading: " (car asked)))
+        (harness-test-wait (lambda ()
+                             (and (harness-ui-access--find-anchor (cons 'dir read-only))
+                                  (string-match-p "\\`  ro +.* +read only"
+                                                  (harness-ui-access-test-row read-only))))
+                           5 "the directory read only")
+        (should-not (member read-only (harness-call 'permission/allowed-dirs sid)))
+        ;; The session moves to another working directory.
+        (setq answer new)
+        (harness-ui-access-test-click "[Move the session…]")
+        (should (string-match-p "\\`Move .* to directory: \\'" (car asked)))
+        (harness-test-wait (lambda () (equal new (plist-get (harness-call 'session/get sid) :cwd)))
+                           5 "the move")))))
+
+(ert-deftest harness-ui-access-undo-a-decision-button-works-when-clicked ()
+  "[Undo a decision…], on the Rules page, runs `harness-decision-undo', which
+asks which decision, as its key does: a click gives its action no arguments,
+and the command needs the decision it is to undo."
+  (harness-ui-access-test-with
+    (let ((undone nil))
+      (cl-letf (((symbol-function 'harness-decision-undo)
+                 (lambda (id) (interactive (list "decision-1")) (push id undone))))
+        (harness-ui-access-test-open sid 'rules)
+        (harness-ui-access-test-click "[Undo a decision…]")
+        (should (equal '("decision-1") undone))))))
 
 (ert-deftest harness-ui-access-follows-grants-made-elsewhere ()
   "A grant made from a prompt, or until the turn ends, redraws the view;
@@ -225,13 +326,16 @@ when the view is fetched and drawn again, and a click on it does that."
           (kill-buffer elsewhere))))))
 
 (ert-deftest harness-ui-access-move-and-keys ()
-  "m moves the session, and the view follows; q buries the view; j and d
-open it from the harness keys."
+  "m moves the session, and the view follows; 1 to 4 show its pages and q
+leaves the Overview as any view is left; j and d open it from the harness keys."
   (harness-ui-access-test-with
     (let ((new (harness-test-temp-dir)))
       (harness-ui-access-test-open sid)
       (should (eq #'harness-ui-access-move (key-binding (kbd "m"))))
-      (should (eq #'harness-ui-quit-view (key-binding (kbd "q"))))
+      (should (eq #'harness-ui-access-quit (key-binding (kbd "q"))))
+      (should (equal '(harness-ui-access-show-overview harness-ui-access-show-tools
+                       harness-ui-access-show-rules harness-ui-access-show-judgements)
+                     (mapcar (lambda (key) (key-binding (kbd key))) '("1" "2" "3" "4"))))
       (should (eq #'harness-access (lookup-key harness-ui-map (kbd "j"))))
       (should (eq #'harness-directories (lookup-key harness-ui-map (kbd "d"))))
       (harness-ui-access-move new)
@@ -243,10 +347,10 @@ open it from the harness keys."
   (harness-ui-access-test-with
     (harness-ui-access-test-open sid)
     (harness-call 'session/delete sid)
-    (harness-ui-access-test-wait-text "was deleted: it reaches nothing any more")
-    (should-not (string-match-p "^Jail" (harness-ui-access-test-text)))
+    (harness-ui-access-test-wait-text "^Session .* deleted$")
+    (should-not (string-match-p "Settings\\|Directories" (harness-ui-access-test-text)))
     (harness-ui-access-refresh)
-    (should (string-match-p "was deleted" (harness-ui-access-test-text)))))
+    (should (string-match-p "^Session .* deleted$" (harness-ui-access-test-text)))))
 
 (ert-deftest harness-ui-access-view-is-no-chat ()
   "The view shows its session without being its chat: the modules that
@@ -265,39 +369,179 @@ passes the view by and finds the chat."
         (setq-local harness-ui-session-id sid)
         (should (harness-ui-chat-of-p (current-buffer) sid))))))
 
-;;;; The jail
+;;;; The settings
 
-(ert-deftest harness-ui-access-jail-network-writing-and-tools ()
-  "The jail shows the sandbox and mode, and its buttons turn the network,
-writing and a tool off and on again for the session."
+(ert-deftest harness-ui-access-overview-groups-the-settings ()
+  "The Overview leads with the settings, in one group: the permission mode,
+whether the session asks you, the network, writing and the sandbox, each the
+choices it has with the one in effect marked.  The directories follow, and then
+a line each for the tools, the rules and the judgements, which have pages of
+their own: none of their lists is on the Overview."
+  (harness-ui-access-test-with
+    (harness-ui-access-test-open sid)
+    (let ((text (harness-ui-access-test-text)))
+      (should (string-match-p "\\`Jail & permissions of " text))
+      (should (string-match-p "^Overview  ·  Tools  ·  Rules  ·  Judgements$" text)))
+    (should (equal "Permission mode (x) Ask ( ) Accept Edits ( ) Auto ( ) YOLO Ask before writes, commands and network"
+                   (harness-ui-access-test-setting 'mode)))
+    (should (equal "Interaction (x) Interactive ( ) Non-interactive Prompts for undecided calls"
+                   (harness-ui-access-test-setting 'interaction)))
+    (should (equal "Network (x) On ( ) Off" (harness-ui-access-test-setting 'network)))
+    (should (equal "Writing (x) On ( ) Read-only" (harness-ui-access-test-setting 'writing)))
+    (should (string-match-p "\\`Sandbox none No sandbox module · commands unconfined"
+                            (harness-ui-access-test-setting 'sandbox)))
+    ;; In one group, then the directories, then the details.
+    (let ((settings (harness-ui-access--find-anchor '(section . settings)))
+          (mode (harness-ui-access--find-anchor '(setting . mode)))
+          (sandbox (harness-ui-access--find-anchor '(setting . sandbox)))
+          (dirs (harness-ui-access--find-anchor '(section . directories)))
+          (details (harness-ui-access--find-anchor '(section . details))))
+      (should (< settings mode sandbox dirs details)))
+    ;; What has a page of its own is summed up in a line, not listed.
+    (should (string-match-p "^  Tools +[0-9]+ offered · 0 off$" (harness-ui-access-test-text)))
+    (should (string-match-p "^  Rules +none (permission mode only) · [0-9]+ tools exempt from prompts$"
+                            (harness-ui-access-test-text)))
+    (should (string-match-p "^  Judgements +none yet$" (harness-ui-access-test-text)))
+    (let ((case-fold-search nil))
+      (should-not (string-match-p "ask_user\\|read_file\\|Never ask\\|Offered" (harness-ui-access-test-text)))
+      (should-not (string-match-p "\\[All\\]\\|decided by" (harness-ui-access-test-text))))))
+
+(ert-deftest harness-ui-access-choices-change-the-settings ()
+  "A choice that is not in effect is a button that takes it, and the view follows:
+the permission mode, whether the session asks you, the network and writing.  The
+one in effect is no button."
+  (harness-ui-access-test-with
+    (let ((messages nil))
+      (harness-ui-access-test-open sid)
+      ;; The choice in effect is bold and does nothing; the others are buttons.
+      (goto-char (harness-ui-access--find-anchor '(setting . mode)))
+      (search-forward "Ask")
+      (should-not (get-text-property (1- (point)) 'harness-ui-action))
+      (should (eq 'bold (get-text-property (1- (point)) 'face)))
+      (search-forward "Accept Edits")
+      (should (get-text-property (1- (point)) 'harness-ui-action))
+      (should (string-match-p "Allow reads and edits inside the project"
+                              (get-text-property (1- (point)) 'help-echo)))
+      (cl-letf (((symbol-function 'message)
+                 (lambda (fmt &rest args) (when fmt (push (apply #'format fmt args) messages)))))
+        ;; The permission mode.
+        (harness-ui-access-test-click "Accept Edits" (harness-ui-access--find-anchor '(setting . mode)))
+        (harness-ui-access-test-wait-setting 'mode "\\`Permission mode ( ) Ask (x) Accept Edits ( ) Auto ( ) YOLO Allow reads and edits")
+        (should (eq 'accept-edits (plist-get (harness-call 'session/get sid) :permission-mode)))
+        (harness-ui-access-test-click "YOLO" (harness-ui-access--find-anchor '(setting . mode)))
+        (harness-ui-access-test-wait-setting 'mode "( ) Accept Edits ( ) Auto (x) YOLO")
+        (should (eq 'yolo (plist-get (harness-call 'session/get sid) :permission-mode)))
+        (harness-test-wait (lambda () (member "Permission mode → YOLO" messages)) 5 "the message")
+        ;; Whether you are asked.
+        (harness-ui-access-test-click "Non-interactive" (harness-ui-access--find-anchor '(setting . interaction)))
+        (harness-ui-access-test-wait-setting 'interaction "( ) Interactive (x) Non-interactive No prompts · decisions by the auto-mode judge")
+        (should (harness-json-true-p (plist-get (harness-call 'session/get sid) :non-interactive)))
+        (harness-ui-access-test-click "Interactive" (harness-ui-access--find-anchor '(setting . interaction)))
+        (harness-ui-access-test-wait-setting 'interaction "(x) Interactive ( ) Non-interactive Prompts for undecided calls")
+        (should-not (harness-json-true-p (plist-get (harness-call 'session/get sid) :non-interactive)))
+        ;; The network.
+        (harness-ui-access-test-click "Off" (harness-ui-access--find-anchor '(setting . network)))
+        (harness-ui-access-test-wait-setting 'network "\\`Network ( ) On (x) Off No web tools, ssh or emacs_eval")
+        (should-not (harness-access-network-p (harness-call 'session/get sid)))
+        (harness-ui-access-test-click "On" (harness-ui-access--find-anchor '(setting . network)))
+        (harness-ui-access-test-wait-setting 'network "\\`Network (x) On ( ) Off\\'")
+        (should (harness-access-network-p (harness-call 'session/get sid)))
+        ;; Writing.
+        (harness-ui-access-test-click "Read-only" (harness-ui-access--find-anchor '(setting . writing)))
+        (harness-ui-access-test-wait-setting 'writing "\\`Writing ( ) On (x) Read-only Reading tools only")
+        (should (harness-readonly-session-p (harness-call 'session/get sid)))
+        (harness-ui-access-test-click "On" (harness-ui-access--find-anchor '(setting . writing)))
+        (harness-ui-access-test-wait-setting 'writing "\\`Writing (x) On ( ) Read-only\\'")
+        (should-not (harness-readonly-session-p (harness-call 'session/get sid)))))
+    ;; Where a click left point, the redraw leaves it: not at the top.
+    (should (> (point) (harness-ui-access--find-anchor '(section . settings))))))
+
+(ert-deftest harness-ui-access-settings-a-policy-fixes-leave-no-choice ()
+  "A setting an administrator's policy sets, or another module's policy fixes,
+shows the choice in effect and offers no other: nothing is a button, and the
+row says who decides."
+  (harness-ui-access-test-with
+    (harness-ui-access-test-open sid)
+    (setq harness-ui-access--describe
+          (let ((d (copy-sequence harness-ui-access--describe)))
+            (dolist (change '((:mode-pinned t) (:non-interactive-pinned t)
+                              (:read-only t) (:read-only-profile nil) (:read-only-by "supervisor mode")))
+              (setq d (plist-put d (car change) (cadr change))))
+            d))
+    (harness-ui-access--render)
+    (should (equal "Permission mode (x) Ask ( ) Accept Edits ( ) Auto ( ) YOLO Ask before writes, commands and network · set by the policy"
+                   (harness-ui-access-test-setting 'mode)))
+    (should (equal "Interaction (x) Interactive ( ) Non-interactive Prompts for undecided calls · set by the policy"
+                   (harness-ui-access-test-setting 'interaction)))
+    (should (equal "Writing ( ) On (x) Read-only Read-only by supervisor mode"
+                   (harness-ui-access-test-setting 'writing)))
+    (dolist (name '(mode interaction writing))
+      (let* ((start (harness-ui-access--find-anchor (cons 'setting name)))
+             (end (next-single-property-change start 'harness-ui-access-anchor)))
+        ;; No text of the row runs anything.
+        (should-not (text-property-not-all start end 'harness-ui-action nil))))
+    ;; The commands say so as well.
+    (let ((err (should-error (harness-ui-access-toggle-writing) :type 'user-error)))
+      (should (string-match-p "Read-only by supervisor mode: not changeable here" (cadr err))))))
+
+;;;; The Tools page
+
+(ert-deftest harness-ui-access-tools-page-turns-tools-off-and-on ()
+  "The Tools page lists the tools the session is offered, each a button that
+turns it off, and those it is not, by why: the ones turned off for it buttons
+that turn them on, the others named, the network's with a button to give it
+back.  Those that belong to other kinds of session are named apart, with no
+button: nobody turned them off."
   (harness-ui-access-test-with
     ;; A tool of other kinds of session, as hand_in is a task's.
     (harness-define-tool "test_hand_in" :label "Test hand in" :kind 'meta
                          :description "Hand nothing in." :handler (lambda (_input _ctx) (harness-tool-ok "handed in")))
     (harness-add-filter 'agent/tools (lambda (names _session) (remove "test_hand_in" names)) 50)
-    (harness-ui-access-test-open sid)
-    (should (string-match-p "sandbox +none" (harness-ui-access-test-text)))
-    (should (string-match-p "mode +Ask" (harness-ui-access-test-text)))
-    ;; Nobody turned it off: it is named apart, with no button.
-    (should (string-match-p "n/a +for other kinds of session: +test_hand_in" (harness-ui-access-test-text)))
-    (should-not (string-match-p "off +test_hand_in" (harness-ui-access-test-text)))
-    (should (string-match-p "Tools +[0-9]+ offered · 0 off · 1 for other sessions" (harness-ui-access-test-text)))
-    (harness-ui-access-test-push "[Turn off]")
-    (harness-ui-access-test-wait-text "network +off")
-    (should-not (harness-access-network-p (harness-call 'session/get sid)))
-    (should (string-match-p "off +test_fetch +no network" (harness-ui-access-test-text)))
-    (harness-ui-access-test-push "[Turn on]")
-    (harness-ui-access-test-wait-text "network +on")
-    (harness-ui-access-test-push "[Make read-only]")
-    (harness-ui-access-test-wait-text "writing +read-only")
-    (should (harness-readonly-session-p (harness-call 'session/get sid)))
-    (harness-ui-access-test-push "[Allow writing]")
-    (harness-ui-access-test-wait-text "writing +on")
-    (harness-ui-access-set-tool "test_fetch" nil)
-    (harness-ui-access-test-wait-text "off +test_fetch +turned off")
+    (harness-ui-access-test-open sid 'tools)
+    (should (eq 'tools harness-ui-access--page))
+    (should (string-match-p "^Tools  [0-9]+ offered · 0 off · 1 for other kinds of session$"
+                            (harness-ui-access-test-text)))
+    (should (string-match-p "^For other kinds of session  1\n  test_hand_in" (harness-ui-access-test-text)))
+    (should-not (string-match-p "^Off  " (harness-ui-access-test-text)))
+    (goto-char (point-min))
+    (search-forward "test_hand_in")
+    (should-not (get-text-property (match-beginning 0) 'harness-ui-action))
+    ;; Offered: a name is a button, and asks before it turns the tool off.
+    (goto-char (point-min))
+    (search-forward "test_fetch")
+    (should (get-text-property (match-beginning 0) 'harness-ui-action))
+    (let ((asked nil))
+      (cl-letf (((symbol-function 'y-or-n-p) (lambda (prompt) (push prompt asked) nil)))
+        (harness-ui-access-test-click "test_fetch"))
+      (should (equal '("Turn test_fetch off for this session? ") asked)))
+    ;; The answer was no.
+    (should-not (member "test_fetch" (plist-get (harness-access-profile (harness-call 'session/get sid)) :tools-off)))
+    (cl-letf (((symbol-function 'y-or-n-p) (lambda (_) t)))
+      (harness-ui-access-test-click "test_fetch"))
+    (harness-ui-access-test-wait-text "^Off  1\n  turned off +test_fetch")
     (should (member "test_fetch" (plist-get (harness-access-profile (harness-call 'session/get sid)) :tools-off)))
+    (should (string-match-p "^Tools  [0-9]+ offered · 1 off · 1 for other kinds of session$"
+                            (harness-ui-access-test-text)))
+    ;; Off: the name is a button that turns it on again.
+    (harness-ui-access-test-click "test_fetch" (harness-ui-access--find-anchor '(section . off)))
+    (harness-ui-access-test-wait-text "^Off  " t)
+    (should-not (member "test_fetch" (plist-get (harness-access-profile (harness-call 'session/get sid)) :tools-off)))
+    ;; With no network the tools that need it are off, and the page gives it back.
+    (harness-call 'access/set-network sid :false)
+    (harness-ui-access-test-wait-text "no network +test_fetch")
+    (should (string-match-p "no network +.*test_fetch.*\\[Turn the network on\\]" (harness-ui-access-test-text)))
+    (should-not (get-text-property
+                 (progn (goto-char (harness-ui-access--find-anchor '(section . off)))
+                        (search-forward "test_fetch") (match-beginning 0))
+                 'harness-ui-action))
+    (harness-ui-access-test-click "[Turn the network on]")
+    (harness-ui-access-test-wait-text "^Off  " t)
+    (should (harness-access-network-p (harness-call 'session/get sid)))
+    ;; The command turns one off too, by name.
+    (harness-ui-access-set-tool "test_fetch" nil)
+    (harness-ui-access-test-wait-text "turned off +test_fetch")
     (harness-ui-access-toggle-tool "test_fetch")
-    (harness-ui-access-test-wait-text "test_fetch +turned off" t)))
+    (harness-ui-access-test-wait-text "turned off +test_fetch" t)))
 
 ;;;; The capabilities of its commands
 
@@ -357,10 +601,13 @@ writing and a tool off and on again for the session."
                      5 (format "%s %s" (if absent "no" "a") regexp)))
 
 (defun harness-ui-access-test-capabilities-row ()
-  "Return the line of the capabilities row of the view."
-  (goto-char (point-min))
-  (should (re-search-forward "^  capabilities " nil t))
-  (buffer-substring-no-properties (line-beginning-position) (line-end-position)))
+  "Return the line of the capabilities row of the view, flat; its note is below it."
+  (let ((start (harness-ui-access--find-anchor '(setting . capabilities))))
+    (should start)
+    (save-excursion
+      (goto-char start)
+      (harness-ui-access-test-flat-string
+       (buffer-substring-no-properties (line-beginning-position) (line-end-position))))))
 
 (defun harness-ui-access-test-caps (sid)
   "Return the capabilities SID's commands hold."
@@ -383,20 +630,22 @@ nil afterwards when nothing was asked."
      seen))
 
 (ert-deftest harness-ui-access-capabilities-row-draws-none-and-held ()
-  "The jail has a capabilities row, after writing: none, and every capability
-is dropped, until the session's commands are given some; then it names them,
-with the buttons to give more and take them away, and says what they mean."
+  "The settings have a capabilities row, after writing: none, and every
+capability is dropped, until the session's commands are given some; then it
+names them, with the buttons to give more and take them away, and says what
+they mean."
   (harness-ui-access-test-with-jail
     (harness-ui-access-test-open sid)
-    (should (equal "  capabilities none  every capability is dropped  [Give…]"
-                   (harness-ui-access-test-capabilities-row)))
+    (should (equal "Capabilities none [Give…]" (harness-ui-access-test-capabilities-row)))
+    (should (equal "Capabilities none [Give…] All capabilities dropped"
+                   (harness-ui-access-test-setting 'capabilities)))
     (should-not (string-match-p "\\[Take away…\\]\\|\\[Take all away\\]" (harness-ui-access-test-text)))
-    ;; In the jail: after writing, before the directories.
-    (goto-char (point-min))
-    (let ((writing (progn (re-search-forward "^  writing ") (point)))
-          (row (progn (re-search-forward "^  capabilities ") (point)))
-          (dirs (progn (re-search-forward "^Directories") (point))))
-      (should (< writing row dirs)))
+    ;; In the settings: after writing, before the sandbox they run in and the directories.
+    (let ((writing (harness-ui-access--find-anchor '(setting . writing)))
+          (row (harness-ui-access--find-anchor '(setting . capabilities)))
+          (sandbox (harness-ui-access--find-anchor '(setting . sandbox)))
+          (dirs (harness-ui-access--find-anchor '(section . directories))))
+      (should (< writing row sandbox dirs)))
     ;; The tooltips end with the key.
     (goto-char (point-min))
     (search-forward "[Give…]")
@@ -404,13 +653,13 @@ with the buttons to give more and take them away, and says what they mean."
                             (get-text-property (match-beginning 0) 'help-echo)))
     ;; One given.
     (harness-call 'access/set-capability sid "CAP_SYS_PTRACE" t)
-    (harness-ui-access-test-wait-flat "capabilities CAP_SYS_PTRACE")
-    (should (equal "  capabilities CAP_SYS_PTRACE  [Give…] [Take away…] [Take all away]"
+    (harness-ui-access-test-wait-flat "Capabilities CAP_SYS_PTRACE")
+    (should (equal "Capabilities CAP_SYS_PTRACE [Give…] [Take away…] [Take all away]"
                    (harness-ui-access-test-capabilities-row)))
-    (should (string-match-p "its bash and elisp commands run with these and no other capability, inside the sandbox only"
+    (should (string-match-p "Passed to bash and elisp commands · inside the sandbox only"
                             (harness-ui-access-test-flat)))
     (goto-char (point-min))
-    (re-search-forward "capabilities \\(CAP_SYS_PTRACE\\)")
+    (re-search-forward "Capabilities +\\(CAP_SYS_PTRACE\\)")
     (should (eq 'bold (get-text-property (match-beginning 1) 'face)))
     (dolist (label '("[Take away…]" "[Take all away]"))
       (goto-char (point-min))
@@ -422,11 +671,11 @@ with the buttons to give more and take them away, and says what they mean."
     (harness-call 'access/set-capability sid "CAP_NET_ADMIN" t)
     (harness-call 'access/set-capability sid "CAP_NET_BIND_SERVICE" t)
     (harness-ui-access-test-wait-flat "CAP_NET_BIND_SERVICE")
-    (should (equal "  capabilities CAP_SYS_PTRACE, CAP_NET_RAW, CAP_NET_ADMIN, CAP_NET_BIND_SERVICE  [Take away…] [Take all away]"
+    (should (equal "Capabilities CAP_SYS_PTRACE, CAP_NET_RAW, CAP_NET_ADMIN, CAP_NET_BIND_SERVICE [Take away…] [Take all away]"
                    (harness-ui-access-test-capabilities-row)))
     ;; Taken away elsewhere, the view follows.
     (harness-call 'access/set-capability sid "all" :false)
-    (harness-ui-access-test-wait-flat "capabilities none every capability is dropped \\[Give…\\]")
+    (harness-ui-access-test-wait-flat "Capabilities none \\[Give…\\] All capabilities dropped")
     (should-not (harness-ui-access-test-caps sid))))
 
 (ert-deftest harness-ui-access-capabilities-row-says-why-none-can-be-raised ()
@@ -437,22 +686,21 @@ the user lets agents ask for none -- the row says why, and offers no [Give…]."
           (harness-ui-access-test--jail :enforced nil :backend 'systemd
                                         :why "the sandbox backend is systemd-run, not bwrap"))
     (harness-ui-access-test-open sid)
-    (should (equal "  capabilities none  every capability is dropped"
-                   (string-trim-right (harness-ui-access-test-capabilities-row))))
-    (should (string-match-p "capabilities none every capability is dropped cannot be raised: the sandbox backend is systemd-run, not bwrap"
-                            (harness-ui-access-test-flat)))
+    (should (equal "Capabilities none" (harness-ui-access-test-capabilities-row)))
+    (should (equal "Capabilities none All capabilities dropped · Unavailable: the sandbox backend is systemd-run, not bwrap"
+                   (harness-ui-access-test-setting 'capabilities)))
     (should-not (string-match-p "\\[Give…\\]" (harness-ui-access-test-text)))
     ;; Where the jail can, a read-only session still cannot.
     (setq harness-ui-access-test--jail harness-ui-access-test--jail-enforcing)
     (harness-call 'access/set-read-only sid t)
-    (harness-ui-access-test-wait-flat "cannot be raised: this session is read-only")
+    (harness-ui-access-test-wait-flat "Unavailable: this session is read-only")
     (should-not (string-match-p "\\[Give…\\]" (harness-ui-access-test-text)))
     (harness-call 'access/set-read-only sid :false)
-    (harness-ui-access-test-wait-flat "cannot be raised" t)
+    (harness-ui-access-test-wait-flat "Unavailable" t)
     (should (string-match-p "\\[Give…\\]" (harness-ui-access-test-text)))
     ;; Nothing the user lets agents ask for.
     (setq harness-ui-access-test--jail (harness-ui-access-test--jail :grantable nil :docs nil))
-    (harness-ui-access-test-wait-flat "cannot be raised: the user lets agents ask for no capability")
+    (harness-ui-access-test-wait-flat "Unavailable: the user lets agents ask for no capability")
     (should-not (string-match-p "\\[Give…\\]" (harness-ui-access-test-text)))))
 
 (ert-deftest harness-ui-access-capabilities-row-says-when-those-held-are-not-passed ()
@@ -463,27 +711,27 @@ lets agents ask for it -- is named with the reason, and can be taken away."
     (harness-call 'access/set-capability sid "CAP_SYS_PTRACE" t)
     (harness-call 'access/set-capability sid "CAP_NET_RAW" t)
     (harness-ui-access-test-open sid)
-    (should (string-match-p "capabilities CAP_SYS_PTRACE, CAP_NET_RAW \\[Give…\\] \\[Take away…\\] \\[Take all away\\]"
+    (should (string-match-p "Capabilities CAP_SYS_PTRACE, CAP_NET_RAW \\[Give…\\] \\[Take away…\\] \\[Take all away\\]"
                             (harness-ui-access-test-flat)))
     ;; Read-only: held, and no [Give…].
     (harness-call 'access/set-read-only sid t)
-    (harness-ui-access-test-wait-flat "held, but a read-only session's commands get none")
-    (should (equal "  capabilities CAP_SYS_PTRACE, CAP_NET_RAW  [Take away…] [Take all away]"
+    (harness-ui-access-test-wait-flat "Held, not passed · read-only session")
+    (should (equal "Capabilities CAP_SYS_PTRACE, CAP_NET_RAW [Take away…] [Take all away]"
                    (harness-ui-access-test-capabilities-row)))
-    (should-not (string-match-p "its bash and elisp commands run with these" (harness-ui-access-test-flat)))
+    (should-not (string-match-p "Passed to bash and elisp commands" (harness-ui-access-test-flat)))
     (harness-call 'access/set-read-only sid :false)
-    (harness-ui-access-test-wait-flat "held, but" t)
+    (harness-ui-access-test-wait-flat "Held, not passed" t)
     ;; The jail cannot pass them on.
     (setq harness-ui-access-test--jail
           (harness-ui-access-test--jail :enforced nil :backend 'systemd
                                         :why "the sandbox backend is systemd-run, not bwrap"))
-    (harness-ui-access-test-wait-flat "held, but not passed: the sandbox backend is systemd-run, not bwrap")
-    (should (equal "  capabilities CAP_SYS_PTRACE, CAP_NET_RAW  [Take away…] [Take all away]"
+    (harness-ui-access-test-wait-flat "Held, not passed: the sandbox backend is systemd-run, not bwrap")
+    (should (equal "Capabilities CAP_SYS_PTRACE, CAP_NET_RAW [Take away…] [Take all away]"
                    (harness-ui-access-test-capabilities-row)))
     ;; One the user no longer lets agents ask for.
     (setq harness-ui-access-test--jail (harness-ui-access-test--jail :grantable '("CAP_NET_RAW")))
-    (harness-ui-access-test-wait-flat "CAP_SYS_PTRACE held, but not passed: the user no longer lets agents ask for it")
-    (should (equal "  capabilities CAP_SYS_PTRACE, CAP_NET_RAW  [Take away…] [Take all away]"
+    (harness-ui-access-test-wait-flat "CAP_SYS_PTRACE held, not passed: no longer offered to agents")
+    (should (equal "Capabilities CAP_SYS_PTRACE, CAP_NET_RAW [Take away…] [Take all away]"
                    (harness-ui-access-test-capabilities-row)))
     (should (equal '("CAP_SYS_PTRACE" "CAP_NET_RAW") (harness-ui-access-test-caps sid)))))
 
@@ -583,19 +831,19 @@ lists it; it says why when nothing can be given and nothing is held."
     (let ((err (progn (setq harness-ui-access-test--jail
                             (harness-ui-access-test--jail :enforced nil :why "the sandbox backend is systemd-run"))
                       (harness-ui-access-refresh)
-                      (harness-ui-access-test-wait-flat "cannot be raised")
+                      (harness-ui-access-test-wait-flat "Unavailable")
                       (should-error (call-interactively #'harness-ui-access-toggle-capability) :type 'user-error))))
-      (should (string-match-p "No capability can be given now: the sandbox backend is systemd-run" (cadr err))))
+      (should (string-match-p "No capability available: the sandbox backend is systemd-run" (cadr err))))
     (should-error (call-interactively #'harness-ui-access-grant-capability) :type 'user-error)
     (let ((err (should-error (call-interactively #'harness-ui-access-revoke-capability) :type 'user-error)))
-      (should (string-match-p "hold no capability" (cadr err))))
+      (should (string-match-p "No capability held" (cadr err))))
     ;; Everything given: nothing left to give.
     (setq harness-ui-access-test--jail harness-ui-access-test--jail-enforcing)
     (dolist (name '("CAP_SYS_PTRACE" "CAP_NET_RAW" "CAP_NET_ADMIN" "CAP_NET_BIND_SERVICE"))
       (harness-call 'access/set-capability sid name t))
     (harness-ui-access-test-wait-flat "CAP_NET_BIND_SERVICE")
     (let ((err (should-error (call-interactively #'harness-ui-access-grant-capability) :type 'user-error)))
-      (should (string-match-p "given already" (cadr err))))))
+      (should (string-match-p "All grantable capabilities given" (cadr err))))))
 
 (ert-deftest harness-ui-access-capabilities-refusal-is-reported ()
   "A capability the jail would not pass on is refused by the harness, and the
@@ -619,21 +867,23 @@ echo area says why; the session is left as it was."
 view signals nothing; the commands say so."
   (harness-ui-access-test-with-jail
     (harness-ui-access-test-open sid)
-    (should (string-match-p "^  capabilities " (harness-ui-access-test-text)))
+    (should (harness-ui-access--find-anchor '(setting . capabilities)))
     (dolist (capabilities '(:absent nil))
       (setq harness-ui-access--describe
             (if (eq capabilities :absent)
                 (harness-plist-remove harness-ui-access--describe :capabilities)
               (plist-put (copy-sequence harness-ui-access--describe) :capabilities nil)))
       (harness-ui-access--render)
+      (should-not (harness-ui-access--find-anchor '(setting . capabilities)))
       (should-not (string-match-p "capabilities" (harness-ui-access-test-text)))
-      (should (string-match-p "^  writing +on" (harness-ui-access-test-text)))
+      (should (string-match-p "^  Writing +" (harness-ui-access-test-text)))
+      (should (string-match-p "^  Sandbox +" (harness-ui-access-test-text)))
       (should (string-match-p "^Directories" (harness-ui-access-test-text)))
       (let ((err (should-error (call-interactively #'harness-ui-access-toggle-capability) :type 'user-error)))
-        (should (string-match-p "does not say what capabilities" (cadr err)))))
+        (should (string-match-p "No capability data" (cadr err)))))
     ;; The row comes back with the next fetch.
     (harness-ui-access-refresh)
-    (harness-test-wait (lambda () (string-match-p "^  capabilities " (harness-ui-access-test-text))) 5 "the row")))
+    (harness-test-wait (lambda () (harness-ui-access--find-anchor '(setting . capabilities))) 5 "the row")))
 
 ;;;; Rules
 
@@ -740,26 +990,349 @@ the filter narrows the list; TAB unfolds a call."
       (harness-ui-access-test-wait-text "handle j1" t)
       (should (string-match-p "\\[text: may not reach\\]" (harness-ui-access-test-text))))))
 
-(ert-deftest harness-ui-access-waiting-requests-are-the-pending-panels ()
-  "A request the session waits on shows as the chat's panel, without the
-compose box's hint, and its call among the judgements as waiting; the
-panel answers it."
+(ert-deftest harness-ui-access-filter-buttons-ask-what-to-filter-by ()
+  "The judgements' filter buttons -- who decided, the tool, a text -- ask for
+the value and filter by it.  A click gives a button's action no arguments, and
+each of these runs a command that takes the value: they signalled
+wrong-number-of-arguments."
+  (harness-ui-access-test-with
+    (harness-ui-access-test-open sid 'judgements)
+    (cl-letf (((symbol-function 'completing-read)
+               (lambda (prompt &rest _)
+                 (cond ((string-prefix-p "Decided by" prompt) "you (user)")
+                       ((string-prefix-p "Tool" prompt) "test_fetch")
+                       (t (error "Unexpected prompt %s" prompt)))))
+              ((symbol-function 'read-string)
+               (lambda (&rest _) "may not reach")))
+      (harness-ui-access-test-click "[decided by: anyone]")
+      (harness-ui-access-test-wait-text "\\[decided by: you\\]")
+      (should (equal '(:by "user") harness-ui-access--filter))
+      (harness-ui-access-test-click "[tool: any]")
+      (harness-ui-access-test-wait-text "\\[tool: test_fetch\\]")
+      (harness-ui-access-test-click "[text: —]")
+      (harness-ui-access-test-wait-text "\\[text: may not reach\\]")
+      (should (equal '(:by "user" :tool "test_fetch" :query "may not reach") harness-ui-access--filter))
+      (harness-ui-access-test-click "[Clear]")
+      (harness-ui-access-test-wait-text "\\[text: —\\]")
+      (should-not harness-ui-access--filter))))
+
+(ert-deftest harness-ui-access-a-waiting-request-is-the-chats-to-answer ()
+  "The view is for the settings and the jail, not for answering: a request the
+session waits on has no panel, no heading and no answer button on the Overview
+or the Judgements page.  Its call is counted and listed as waiting, with no
+reason that repeats it, and the view follows when the answer is made elsewhere,
+as the chat's panel makes it."
   (harness-ui-access-test-with
     (let* ((harness-provider-demo-script-override
             '((:type tool-call :id "w1" :name "test_fetch" :input (:url "https://example.com"))
               (:type done :stop-reason end-turn)))
-           (turn (harness-call 'agent/prompt sid "go")))
+           (turn (harness-call 'agent/prompt sid "go"))
+           (case-fold-search nil)
+           (answers "Waiting for you\\|Permission +Test fetch\\|\\[Allow\\]\\|\\[Deny\\]\\|More answers\\|waiting for your answer"))
       (harness-test-wait (lambda () (harness-call 'permission/pending sid)) 5 "the request")
+      ;; The Overview: the settings lead, and the details count the call.
       (harness-ui-access-test-open sid)
-      (harness-ui-access-test-wait-text "Waiting for you")
-      (let ((text (harness-ui-access-test-text)))
-        (should (string-match-p "Permission +Test fetch" text))
-        (should (string-match-p "? waiting for you · handle w1" text))
-        (should-not (string-match-p "from the box" text)))
-      (harness-ui-access-test-push "[Allow]" (harness-ui-access--find-anchor '(call . "w1")))
+      (harness-ui-access-test-wait-text "^  Judgements +1 call judged · allowed 0 · denied 0 · waiting 1$")
+      (should-not (string-match-p answers (harness-ui-access-test-text)))
+      (should-not (harness-ui-access--find-anchor '(section . waiting)))
+      (should (< (point-min) (harness-ui-access--find-anchor '(section . settings))))
+      (should-not (string-match-p "Settings" (substring (harness-ui-access-test-text) 0
+                                                       (harness-ui-access--find-anchor '(section . settings)))))
+      ;; The Judgements page: the call, waiting, and nothing to answer it with.
+      (harness-ui-access-test-open sid 'judgements)
+      (harness-ui-access-test-wait-text "? waiting · handle w1")
+      (should-not (string-match-p answers (harness-ui-access-test-text)))
+      (should (string-match-p "\\[Waiting 1\\]" (harness-ui-access-test-text)))
+      ;; The answer, made where the request is, shows here.
+      (harness-call 'permission/answer sid (plist-get (car (harness-call 'permission/pending sid)) :id) "allow-once")
       (harness-test-await turn 20)
-      (harness-ui-access-test-wait-text "Waiting for you" t)
-      (harness-ui-access-test-wait-text "✓ allowed by you · handle w1"))))
+      (harness-ui-access-test-wait-text "✓ allowed by you · handle w1")
+      (should-not (string-match-p "? waiting" (harness-ui-access-test-text))))))
+
+;;;; The pages
+
+(defun harness-ui-access-test-page-buffer (sid page)
+  "Return the live view of SID's PAGE, or nil."
+  (car (harness-ui-access--buffers sid page)))
+
+(ert-deftest harness-ui-access-pages-are-views-of-their-own ()
+  "The Overview, Tools, Rules and Judgements are four buffers of one session.
+The strip under the title names them, the one shown marked and the others
+buttons; a click, or the keys 1 to 4, shows another in place of this one; q
+goes back to the Overview, and from the Overview leaves the view."
+  (harness-ui-access-test-with
+    (let* ((overview (harness-ui-access-test-open sid))
+           (left nil))
+      (should (string-prefix-p "*harness access: " (buffer-name overview)))
+      (should (eq 'overview harness-ui-access--page))
+      ;; The strip: the page shown is marked, and no button.
+      (goto-char (point-min))
+      (re-search-forward "^Overview")
+      (should (eq 'harness-ui-access-page-face (get-text-property (match-beginning 0) 'face)))
+      (should-not (get-text-property (match-beginning 0) 'harness-ui-action))
+      (dolist (page '("Tools" "Rules" "Judgements"))
+        (search-forward page)
+        (should (get-text-property (match-beginning 0) 'harness-ui-action))
+        (should (string-match-p "([234])\\'" (get-text-property (match-beginning 0) 'help-echo))))
+      ;; A click on one shows it, as a view of its own, where this one was.
+      (let ((where (get-buffer-window overview)))
+        (should where)
+        (harness-ui-access-test-click "Tools" (save-excursion (goto-char (point-min))
+                                                              (re-search-forward "^Overview")
+                                                              (match-beginning 0)))
+        (let ((tools (harness-ui-access-test-page-buffer sid 'tools)))
+          (should tools)
+          (should (string-prefix-p "*harness access tools: " (buffer-name tools)))
+          (should (eq tools (window-buffer where)))
+          (should-not (get-buffer-window overview))
+          (set-buffer tools)
+          (harness-test-wait (lambda () harness-ui-access--describe) 5 "the Tools page")
+          (should (eq 'tools harness-ui-access--page))
+          (should (string-match-p "^Tools  [0-9]+ offered" (harness-ui-access-test-text)))
+          (should (string-match-p "^Jail & permissions of " (harness-ui-access-test-text)))
+          ;; The strip is on every page, this one's marked.
+          (goto-char (point-min))
+          (re-search-forward "^Overview  ·  Tools")
+          (should-not (eq 'harness-ui-access-page-face (get-text-property (match-beginning 0) 'face)))
+          (should (get-text-property (match-beginning 0) 'harness-ui-action))))
+      ;; The keys.
+      (dolist (case '(("3" rules "^Rules  first match, after the jail")
+                      ("4" judgements "^Judgements  ")
+                      ("2" tools "^Tools  [0-9]+ offered")
+                      ("1" overview "^Settings$")))
+        (call-interactively (key-binding (kbd (nth 0 case))))
+        (let ((buffer (harness-ui-access-test-page-buffer sid (nth 1 case))))
+          (should (eq buffer (window-buffer (get-buffer-window buffer))))
+          (set-buffer buffer)
+          (harness-test-wait (lambda () harness-ui-access--describe) 5 "the page")
+          (harness-ui-access-test-wait-text (nth 2 case))))
+      ;; Four buffers, one a page, and each the session's.
+      (should (= 4 (length (harness-ui-access--buffers sid))))
+      ;; q from another page goes back to the Overview; from the Overview it leaves.
+      (set-buffer (harness-ui-access-test-page-buffer sid 'judgements))
+      (cl-letf (((symbol-function 'harness-ui-quit-view) (lambda () (setq left t))))
+        (call-interactively (key-binding (kbd "q")))
+        (should-not left)
+        (should (eq overview (window-buffer (get-buffer-window overview))))
+        (set-buffer overview)
+        (call-interactively (key-binding (kbd "q")))
+        (should left)))))
+
+(ert-deftest harness-ui-access-details-link-to-their-pages ()
+  "Each of the Overview's details is a line, all of it a link, that opens its
+page: the tools, the rules, the judgements."
+  (harness-ui-access-test-with
+    (harness-ui-access-test-open sid)
+    (dolist (page '(tools rules judgements))
+      (let* ((anchor (cons 'detail page))
+             (start (harness-ui-access--find-anchor anchor))
+             (end (or (next-single-property-change start 'harness-ui-access-anchor) (point-max))))
+        (should start)
+        ;; The whole row is the link, and its tooltip names the key.
+        (should-not (text-property-not-all (+ start 2) (1- end) 'harness-ui-action
+                                           (get-text-property (+ start 2) 'harness-ui-action)))
+        (should (string-match-p "([234])\\'" (get-text-property (+ start 2) 'help-echo)))
+        (set-buffer (harness-ui-access-test-page-buffer sid 'overview))
+        (harness-ui-access-test-click (capitalize (symbol-name page)) start)
+        (let ((buffer (harness-ui-access-test-page-buffer sid page)))
+          (should buffer)
+          (should (eq buffer (window-buffer (get-buffer-window buffer))))
+          (set-buffer buffer)
+          (harness-test-wait (lambda () harness-ui-access--describe) 5 "the page")
+          (should (eq page harness-ui-access--page))
+          (harness-ui-access-show-overview)
+          (set-buffer (harness-ui-access-test-page-buffer sid 'overview)))))))
+
+(ert-deftest harness-ui-access-pages-ask-for-what-they-draw ()
+  "Every page asks for the session's description; the Overview and the Judgements
+page also for its judgements -- the Overview for their counts, one beside them,
+the Judgements page for as many as it lists; the Tools and Rules pages ask for
+none.  No page asks for the requests the session waits on."
+  (harness-ui-access-test-with
+    (let ((asked nil)
+          (call (symbol-function 'harness-ui-call)))
+      (cl-letf (((symbol-function 'harness-ui-call)
+                 (lambda (method params &rest rest)
+                   (when (or (string-prefix-p "_harness/access/" method)
+                             (string-prefix-p "_harness/session/pending" method))
+                     (push (cons method (plist-get params :limit)) asked))
+                   (apply call method params rest))))
+        (dolist (case `((overview ("_harness/access/describe") ("_harness/access/judgements" . 1))
+                        (tools ("_harness/access/describe"))
+                        (rules ("_harness/access/describe"))
+                        (judgements ("_harness/access/describe")
+                                    ("_harness/access/judgements" . ,harness-ui-access-judgements-limit))))
+          (setq asked nil)
+          (harness-ui-access-test-open sid (car case))
+          (harness-test-wait (lambda () (= (length asked) (length (cdr case)))) 5 "the requests")
+          (should (equal (sort (copy-sequence (cdr case)) (lambda (a b) (string< (car a) (car b))))
+                         (sort (copy-sequence asked) (lambda (a b) (string< (car a) (car b)))))))))))
+
+(ert-deftest harness-ui-access-hidden-pages-follow-the-session-when-shown ()
+  "A page nothing shows is not drawn again at every change: it is marked, and
+fetches once a window shows it.  The page that is shown follows at once."
+  (harness-ui-access-test-with
+    (let ((overview (harness-ui-access-test-open sid)))
+      (harness-ui-access-show-page 'tools)
+      (let ((tools (harness-ui-access-test-page-buffer sid 'tools)))
+        (set-buffer tools)
+        (harness-test-wait (lambda () harness-ui-access--describe) 5 "the Tools page")
+        (should-not (get-buffer-window overview))
+        (harness-call 'access/set-network sid :false)
+        ;; The shown page follows: no network, so the tools that need it are off.
+        (harness-ui-access-test-wait-text "no network +test_fetch")
+        ;; The hidden one waits.
+        (with-current-buffer overview
+          (should harness-ui-access--stale)
+          (should (equal "Network (x) On ( ) Off" (harness-ui-access-test-setting 'network))))
+        (set-buffer tools)
+        (harness-ui-access-show-overview)
+        (set-buffer overview)
+        (harness-ui-access-test-wait-setting 'network "\\`Network ( ) On (x) Off")))))
+
+;;;; Following the permission mode in a chat's header
+
+(defun harness-ui-access-test-header-segment (buffer command)
+  "Return the position in BUFFER's header line of the segment that runs COMMAND, or nil."
+  (let* ((header (with-current-buffer buffer (harness-chat--header most-positive-fixnum)))
+         (map (harness-chat--segment-map command))
+         (pos 0) found)
+    (while (and (not found) (< pos (length header)))
+      (if (eq map (get-text-property pos 'local-map header))
+          (setq found pos)
+        (setq pos (next-single-property-change pos 'local-map header (length header)))))
+    (and found (cons header found))))
+
+(ert-deftest harness-ui-access-opens-from-the-permission-mode-in-the-chats-header ()
+  "A click on the permission mode in a chat's header line opens the session's
+jail and permissions view, rather than asking which mode to choose; its tooltip
+says what the mode means and where a click goes."
+  (harness-ui-access-test-with
+    (let* ((chat (harness-chat-buffer sid))
+           (window (selected-window))
+           (segment (harness-ui-access-test-header-segment chat #'harness-access)))
+      (set-window-buffer window chat)
+      (should segment)
+      (let ((header (car segment)) (pos (cdr segment)))
+        (should (equal "Ask" (substring-no-properties header pos (+ pos 3))))
+        (let ((help (funcall (get-text-property pos 'help-echo header) window nil nil)))
+          (should (string-match-p "\\`Permission mode: Ask — ask before writes, commands and network" help))
+          (should (string-match-p "mouse-1: jail and permissions" help))
+          (should (string-match-p "change mode" help))
+          (should-not (string-match-p "\n" help)))
+        ;; The click.
+        (should-not (harness-ui-access-test-page-buffer sid 'overview))
+        (funcall (lookup-key (get-text-property pos 'local-map header) [header-line mouse-1])
+                 (list 'mouse-1 (list window 'header-line '(0 . 0) 0))))
+      (let ((view (harness-ui-access-test-page-buffer sid 'overview)))
+        (should view)
+        (should (get-buffer-window view))
+        (set-buffer view)
+        (harness-test-wait (lambda () harness-ui-access--describe) 5 "the view")
+        (should (equal sid harness-ui-session-id))
+        (should (equal "Permission mode (x) Ask ( ) Accept Edits ( ) Auto ( ) YOLO Ask before writes, commands and network"
+                       (harness-ui-access-test-setting 'mode)))
+        ;; The mode is chosen there, and the chat's header follows.
+        (harness-ui-access-test-click "Auto" (harness-ui-access--find-anchor '(setting . mode)))
+        (harness-ui-access-test-wait-setting 'mode "\\`Permission mode ( ) Ask ( ) Accept Edits (x) Auto")
+        (harness-test-wait (lambda () (equal "auto" (format "%s" (plist-get (harness-ui-session sid) :permission-mode))))
+                           5 "the cached mode")
+        (should (string-search "Auto" (with-current-buffer chat (harness-chat--header most-positive-fixnum))))))))
+
+(ert-deftest harness-ui-access-permission-mode-chooses-where-the-view-is-not-loaded ()
+  "Where the access view is not there to open -- its module is off -- a click on
+the permission mode in the header chooses the mode, as it did before the view."
+  (harness-ui-access-test-with
+    (should (eq #'harness-access (harness-chat--permission-command)))
+    (cl-letf (((symbol-function 'harness-access) nil))
+      (should (eq #'harness-set-permission-mode (harness-chat--permission-command)))
+      (let* ((chat (harness-chat-buffer sid))
+             (segment (harness-ui-access-test-header-segment chat #'harness-set-permission-mode)))
+        (should segment)
+        (should (string-match-p "mouse-1: change mode"
+                                (funcall (get-text-property (cdr segment) 'help-echo (car segment))
+                                         (selected-window) nil nil)))))))
+
+;;;; Looking at it
+
+(ert-deftest harness-ui-access-tab-goes-from-button-to-button ()
+  "TAB goes to the next button, S-TAB to the previous, round the buttons of the
+page: the strip's, the choices', the directories' and the details' links.  On a
+call's own text it folds the call instead."
+  (harness-ui-access-test-with
+    (harness-ui-access-test-open sid)
+    (let ((starts (harness-ui-access--button-starts)))
+      (should (> (length starts) 15))
+      ;; Each is where text that does something starts.
+      (dolist (start starts)
+        (should (get-text-property start 'harness-ui-action))
+        (should-not (and (> start (point-min))
+                         (eq (get-text-property start 'harness-ui-action)
+                             (get-text-property (1- start) 'harness-ui-action)))))
+      (should (eq #'harness-ui-access-toggle (key-binding (kbd "TAB"))))
+      (should (eq #'harness-ui-access-previous-button (key-binding (kbd "<backtab>"))))
+      (goto-char (point-min))
+      (let (seen)
+        (dotimes (_ (length starts))
+          (call-interactively #'harness-ui-access-toggle)
+          (push (point) seen))
+        (should (equal starts (nreverse seen))))
+      ;; Past the last the first is next, and before the first the last.
+      (call-interactively #'harness-ui-access-toggle)
+      (should (= (point) (car starts)))
+      (call-interactively #'harness-ui-access-previous-button)
+      (should (= (point) (car (last starts))))
+      (call-interactively #'harness-ui-access-previous-button)
+      (should (= (point) (car (last starts 2)))))))
+
+(defun harness-ui-access-test-fit (limit &rest kinds)
+  "Check that no line of the rows anchored as KINDS in the view is wider than LIMIT.
+A kind is `setting', `dir', `detail' or `section'.  The rows must be there."
+  (let ((pos (point-min)) (rows 0))
+    (while (setq pos (next-single-property-change pos 'harness-ui-access-anchor))
+      (let ((anchor (get-text-property pos 'harness-ui-access-anchor)))
+        (when (and anchor (memq (car anchor) kinds))
+          (cl-incf rows)
+          (let ((end (or (next-single-property-change pos 'harness-ui-access-anchor) (point-max))))
+            (save-excursion
+              (goto-char pos)
+              (while (< (point) end)
+                (let ((line (buffer-substring-no-properties (line-beginning-position) (line-end-position))))
+                  (ert-info ((format "the line %S of %S" line anchor))
+                    (should (<= (string-width line) limit))))
+                (forward-line 1)))))))
+    (should (> rows 0))))
+
+(ert-deftest harness-ui-access-rows-fit-a-narrow-window ()
+  "The rows of the settings, the directories and the details fit the window they
+are drawn for.  The path of a directory is cut in the middle, where its end is
+kept.  Where that leaves too little of it beside the buttons, the source and
+the buttons go on a line under the path; a wide window keeps them in one row."
+  (harness-ui-access-test-with
+    (let ((long (concat (harness-test-temp-dir) "a-directory-with-a-rather-long-name/inside/it/and/again/project/")))
+      (make-directory long t)
+      (harness-call 'permission/allow-dir sid long)
+      ;; Wide: a row is one line.
+      (let ((harness-ui-access-test-width 110))
+        (harness-ui-access-test-open sid)
+        (harness-ui-access-test-wait-text "granted to this session")
+        (harness-ui-access-test-fit 110 'setting 'dir 'detail 'section)
+        (let ((row (harness-ui-access-test-row long)))
+          (should (string-match-p "^  rw  /tmp/harness-tmp-[^ ]*…[^ ]*again/project/ +granted to this session +\\[Revoke\\] \\[Read only\\]" row))))
+      ;; Narrow: the path has a line, and the source and the buttons the next.
+      (let ((harness-ui-access-test-width 56))
+        (harness-ui-access-refresh)
+        (harness-ui-access-test-wait-text "^      granted to this session  \\[Revoke\\] \\[Read only\\]$")
+        (harness-ui-access-test-fit 56 'setting 'dir 'detail 'section)
+        (let ((row (harness-ui-access-test-row long)))
+          (should (string-match-p "^  rw  /tmp/[^ ]*…[^ ]*again/project/$" row))
+          (should (<= (string-width row) 56)))
+        ;; The choices of a setting, and its note, wrap under each other.
+        (let ((start (harness-ui-access--find-anchor '(setting . mode))))
+          (should (> (count-lines start (next-single-property-change start 'harness-ui-access-anchor)) 3))
+          (should (equal "Permission mode (x) Ask ( ) Accept Edits ( ) Auto ( ) YOLO Ask before writes, commands and network"
+                         (harness-ui-access-test-setting 'mode))))))))
+
 
 (provide 'harness-ui-access-test)
 ;;; harness-ui-access-test.el ends here

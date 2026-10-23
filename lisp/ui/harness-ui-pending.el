@@ -153,8 +153,8 @@ popout sets it to the session its item belongs to.")
 (defvar-local harness-ui-pending-box-hints t
   "Non-nil when the panels drawn in this buffer say how to press a key from a box.
 A panel's keys type into the compose box of a chat or a popout, so the
-panel says how to press them from there.  A view without a compose box,
-such as the access view (harness-ui-access.el), sets this to nil.")
+panel says how to press them from there.  A view without a compose box
+sets this to nil.")
 
 (defun harness-ui-pending--str (value)
   "Return VALUE as a string (a symbol or string), or nil for nil."

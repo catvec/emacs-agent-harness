@@ -167,7 +167,7 @@ ui-tasks); `(setq harness-enabled-modules t)` loads every module.
 | Module | Loaded | Requires | What it is |
 |---|---|---|---|
 | [ui](ui.md) | by default | [acp](acp.md) | UI foundation: ACP connection, faces, positions, keymap and menu. |
-| [ui-access](ui-access.md) | by default | [ui](ui.md), [ui-chat](ui-chat.md), [ui-pending](ui-pending.md) | The access view of a session: its sandbox, mode, directories, tools and rules, the requests it waits on and the judgements of its calls, each drawn as the chat draws it. |
+| [ui-access](ui-access.md) | by default | [ui](ui.md), [ui-chat](ui-chat.md), [ui-pending](ui-pending.md) | The jail and permissions view of a session, in four pages: its settings and directories, its tools, its rules and the judgements of its calls, each drawn as the chat draws it. |
 | [ui-acp-remote](ui-acp-remote.md) |  | [ui](ui.md) | Remote control page: serve phones and other devices, approve and see them. |
 | [ui-btw](ui-btw.md) |  | [ui](ui.md) | BTW side conversations over the current session or view. |
 | [ui-cache](ui-cache.md) |  | [ui](ui.md), [ui-chat](ui-chat.md) | Warns above a session's compose box once its prompt cache has expired or been dropped, offering to compact. |
@@ -403,7 +403,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `harness-ui-media-rerender-functions` | [ui-media](ui-media.md) | [ui-chat](ui-chat.md) |
 | `harness-ui-notification-functions` | [ui](ui.md) | [ui-tasks](ui-tasks.md) |
 | `harness-ui-notify-segment-functions` | [ui-acp-remote](ui-acp-remote.md), [ui-notify](ui-notify.md) | [ui-acp-remote](ui-acp-remote.md), [ui-tasks](ui-tasks.md), [ui-version](ui-version.md) |
-| `harness-ui-pending-changed-hook` | [ui-pending](ui-pending.md) | [ui-access](ui-access.md), [ui-chat](ui-chat.md), [ui-pending](ui-pending.md), [ui-sessions](ui-sessions.md), [ui-slots](ui-slots.md) |
+| `harness-ui-pending-changed-hook` | [ui-pending](ui-pending.md) | [ui-chat](ui-chat.md), [ui-pending](ui-pending.md), [ui-sessions](ui-sessions.md), [ui-slots](ui-slots.md) |
 | `harness-ui-pending-drawn-predicates` |  | [ui-chat](ui-chat.md) |
 | `harness-ui-pending-panel-functions` | [ui-pending](ui-pending.md) | [ui-cowboy](ui-cowboy.md) |
 | `harness-ui-permission-functions` | [ui](ui.md) | [ui-pending](ui-pending.md) |

@@ -2230,8 +2230,8 @@ for (`harness-ui-session-help-function')."
 
 (defconst harness-ui-permission-modes
   '(("ask" "Ask" "Ask before writes, commands and network")
-    ("accept-edits" "Accept Edits" "Reads and edits inside the project run freely")
-    ("auto" "Auto" "A cheap model judges each call")
+    ("accept-edits" "Accept Edits" "Allow reads and edits inside the project")
+    ("auto" "Auto" "Judge each call with a cheap model")
     ("yolo" "YOLO" "Allow everything inside the jail"))
   "Permission modes as (ID LABEL DESCRIPTION), least to most permissive.")
 
@@ -5470,7 +5470,7 @@ leaves the buffer's commands out, never the whole menu."
     ("H" "Thinking for all sessions" harness-set-thinking-all)
     ("p" "Permission mode" harness-set-permission-mode)
     ("e" "Context limit" harness-set-context-limit)
-    ("j" "Access & jail" harness-access :if (lambda () (harness-ui--command-available-p 'harness-access)))
+    ("j" "Jail & permissions" harness-access :if (lambda () (harness-ui--command-available-p 'harness-access)))
     ("d" "Directory access" harness-directories :if (lambda () (harness-ui--command-available-p 'harness-directories)))
     ("i" (lambda () (harness-ui--non-interactive-menu-label)) harness-toggle-non-interactive)
     ("I" "Non-interactive for all sessions" harness-set-non-interactive-all)

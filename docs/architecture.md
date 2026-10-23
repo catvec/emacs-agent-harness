@@ -10953,23 +10953,41 @@ EXPANDED` inserts a call node and its result node as the chat's block
 at point -- folded or not, `TAB` toggling it, a denied one with the
 `[Approve]` line that approves it -- and `harness-chat-tool-view-expanded`
 names the unfolded ones, to keep them so when the view draws again.  The
-access view (`harness-access`, harness-ui-access.el) draws each
-judgement's call so, under what was decided, by whom and its handle, and
-the requests the session waits on as the chat's own panels
-(`harness-ui-pending-insert-panel`, with `harness-ui-pending-box-hints`
-nil: it has no compose box to press their keys from).  It fetches
-`access/describe`, `access/judgements` and `session/pending` together,
-draws once all three are in, keeping point and each window's start on
-the section, directory, tool or call they were on, and fetches again
-(0.3 s after the last of a burst, or once a window shows it) on
-`access/changed`, `access/judged`, the session's moves, requests and
-ext changes, its node and tool call updates, every directory grant or
-revocation and `config/changed`.  Its rules section words each rule as a
-line (`harness-ui-access--rule-text`): the tool, the programs, the
-arguments the rule is exact about -- `whose host is exactly "box"`, so
-that the lasting answer to an ssh call, which holds for one host, does not
-read as one for every host -- and the directory.  A view whose session
-was deleted says so and fetches nothing more.  The buffers that look for a session's
+jail and permissions view (`harness-access`, harness-ui-access.el, the
+access view) draws each judgement's call so, under what was decided, by
+whom and its handle.  It draws no panel of the requests the session
+waits on, which are the chat's to answer: a call that waits is listed as
+waiting, and the view follows its answer.  It is four pages of one
+session, a buffer each (`harness-ui-access--pages`, named `*harness
+access: NAME*` for the Overview and `*harness access tools: NAME*` and
+the like for the rest): the Overview holds the settings in
+one group -- each a choice with the one in effect marked, a click on
+another running `session/set_mode`, `_harness/session/update` or the
+`access/set-*` methods -- the directories, and a line each for the tools,
+rules and judgements, which are the Tools, Rules and Judgements pages;
+a strip under the title, the keys 1 to 4 and a click show them
+(`harness-ui-access-show-page`, in the place the shown one had,
+`harness-ui-display-view`), and q goes from another page back to the
+Overview.  A page asks for what it draws and no more: every page for
+`access/describe`, the Overview and the Judgements page also for
+`access/judgements` (the Overview with `:limit 1`, for the counts),
+which they draw once both are in, keeping point and each window's start
+on the section, setting, directory, tool or call they were on.  Every
+page fetches again (0.3 s after the last of a burst, a page no window
+shows when it is shown) on `access/changed`, `access/judged`, the
+session's moves, requests (`session/pending-changed`) and ext changes, its
+node and tool call updates, every directory grant or revocation and
+`config/changed`.  The Rules page words each rule as a line
+(`harness-ui-access--rule-text`): the tool, the programs, the arguments
+the rule is exact about -- `whose host is exactly "box"`, so that the
+lasting answer to an ssh call, which holds for one host, does not read
+as one for every host -- and the directory.  A button given a command
+(`harness-ui-access--button`) runs it as its key does
+(`call-interactively`): a click gives a button's action no arguments, so
+a command that reads its arguments, such as `harness-ui-access-allow-dir`,
+could not be the action itself.  The permission mode in a chat's header
+line opens the view (`harness-chat--permission-command`).  A view whose
+session was deleted says so and fetches nothing more.  The buffers that look for a session's
 chat (the merge, children, tasks and review views) take only a buffer
 in `harness-chat-mode`, so the access view, which has a session id too,
 is never taken for one.

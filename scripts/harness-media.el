@@ -91,6 +91,7 @@ layout: half the frame keeps the board's cards whole.")
 (defvar harness-merge--locks)
 (defvar harness-ui-access--describe)
 (defvar harness-ui-access--judgements)
+(defvar harness-ui-access--page)
 
 (declare-function harness-start "harness")
 (declare-function harness-call "harness-core")
@@ -1872,7 +1873,10 @@ in a group that is closed until opened, so the group is opened too."
                    (push (cons id block) found)))
                harness-chat--blocks)
       (when-let* ((newest (car (sort found (lambda (a b) (string> (car a) (car b)))))))
-        (when-let* ((group (gethash (harness-chat-block-group (cdr newest)) harness-chat--groups))
+        ;; A view that draws calls without being their chat, such as the
+        ;; access view, has no groups to open.
+        (when-let* ((gid (harness-chat-block-group (cdr newest)))
+                    (group (and harness-chat--groups (gethash gid harness-chat--groups)))
                     ((not (harness-chat-group-expanded group))))
           (harness-chat-toggle-group (harness-chat-group-id group)))
         (when (harness-chat-block-collapsed (cdr newest))
@@ -2354,23 +2358,25 @@ Return the session's id."
     (harness-media--prompt id harness-media--access-prompt '(blocked idle))
     id))
 
-(defun harness-media--access-view (id)
-  "Show the access view of session ID in the whole frame; return its buffer."
-  (harness-media--view (lambda () (harness-access id))
+(defun harness-media--access-view (id page)
+  "Show PAGE of the access view of session ID in the whole frame; return its buffer.
+PAGE is `overview', `tools', `rules' or `judgements'."
+  (harness-media--view (lambda () (harness-access id (unless (eq page 'overview) page)))
                        (lambda ()
                          (let ((buffer (current-buffer)))
                            (harness-media--wait
                             (lambda () (with-current-buffer buffer
-                                         (and harness-ui-access--describe harness-ui-access--judgements
-                                              (harness-ui-access--find-anchor '(section . judgements)))))
+                                         (and harness-ui-access--describe
+                                              (or (not (memq harness-ui-access--page '(overview judgements)))
+                                                  harness-ui-access--judgements))))
                             15 "the access view to load"))))
   (window-buffer))
 
-(defun harness-media--access-shot (name judgements)
-  "Take picture NAME of the access view of a session kept to a jail.
-With JUDGEMENTS the view is scrolled to the judgements of its calls, the
-agent's own drop_access unfolded; else it shows from the top.  The
-session is made here and deleted after, so no other picture shows it.
+(defun harness-media--access-shot (name page)
+  "Take picture NAME of PAGE of the access view of a session kept to a jail.
+PAGE is `overview', `tools' or `judgements'.  On the judgements the
+agent's own drop_access is unfolded.  The session is made here and
+deleted after, so no other picture shows it.
 The view names the harness's own code, which every session may read: it
 is taken for straight's build of it in the scratch HOME and the clone
 that build links to, as in the version picture, so no path of this
@@ -2380,12 +2386,11 @@ machine's shows.  Only those directories are taken for others:
     (cl-letf* (((symbol-function 'harness-perms--harness-code-dirs)
                 (lambda () (let ((paths (harness-media--harness-paths)))
                              (list (plist-get paths :build) (plist-get paths :clone)))))
-               (buffer (harness-media--access-view id)))
-      (when judgements (harness-media--expand buffer "drop_access"))
+               (buffer (harness-media--access-view id page)))
+      (when (eq page 'judgements) (harness-media--expand buffer "drop_access"))
       (with-current-buffer buffer
-        (let ((pos (if judgements (harness-ui-access--find-anchor '(section . judgements)) (point-min))))
-          (goto-char pos)
-          (set-window-start (selected-window) pos)))
+        (goto-char (point-min))
+        (set-window-start (selected-window) (point-min)))
       (harness-media--capture name)
       (harness-call 'agent/cancel id)
       (harness-media--wait (lambda () (not (harness-call 'agent/running id))) 15 "the turn to end")
@@ -2394,19 +2399,27 @@ machine's shows.  Only those directories are taken for others:
       (kill-buffer buffer))))
 
 (defun harness-media-shot-access ()
-  "The access view of a session kept to a jail, from the top.
-The sandbox and mode, the network the agent gave up, the capability the
-user gave its commands, the directories (the ops notes read-only), the
-tools (the web gone with the network the agent gave up, sub-agents
-turned off by the user), the rules and the request waiting on the user."
-  (harness-media--access-shot "access" nil))
+  "The jail and permissions view of a session kept to a jail: its Overview.
+The settings lead, in one group -- the permission mode, whether it asks,
+the network the agent gave up, writing, the capability the user gave its
+commands and the sandbox -- then the directories (the ops notes
+read-only), and a line each for the tools, rules and judgements, which
+have pages of their own."
+  (harness-media--access-shot "access" 'overview))
+
+(defun harness-media-shot-access-tools ()
+  "The Tools page of that session's view.
+The tools it is offered, the web gone with the network the agent gave up
+and the sub-agents turned off by the user listed apart, by why."
+  (harness-media--access-shot "access-tools" 'tools))
 
 (defun harness-media-shot-access-judgements ()
-  "The judgements of that session's calls, in its access view.
+  "The Judgements page of that session's view.
 Each call drawn as the chat draws it, under what was decided, by whom and
-its handle; the refused ones offer [Approve], and the agent's own
-drop_access is unfolded."
-  (harness-media--access-shot "access-judgements" t))
+its handle; the refused ones offer [Approve], the test run that waits for
+the user is listed as waiting, and the agent's own drop_access is
+unfolded."
+  (harness-media--access-shot "access-judgements" 'judgements))
 
 (defun harness-media--notes-child (parent)
   "Return the sub-agent session PARENT sent to run the checks, once it exists."
@@ -4360,6 +4373,7 @@ names."
     ("quote-thread" . harness-media-shot-quote-thread)
     ("thread-reply" . harness-media-shot-thread-reply)
     ("access" . harness-media-shot-access)
+    ("access-tools" . harness-media-shot-access-tools)
     ("access-judgements" . harness-media-shot-access-judgements)
     ;; Last: they add a commit to the slow-request task's branch and the
     ;; threads of its review, which no other picture shows.

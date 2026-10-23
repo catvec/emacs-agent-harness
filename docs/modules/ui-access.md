@@ -2,7 +2,7 @@
 
 # ui-access
 
-The access view of a session: its sandbox, mode, directories, tools and rules, the requests it waits on and the judgements of its calls, each drawn as the chat draws it.
+The jail and permissions view of a session, in four pages: its settings and directories, its tools, its rules and the judgements of its calls, each drawn as the chat draws it.
 
 - **Runs in:** the UI (your Emacs)
 - **Source:** [lisp/ui/harness-ui-access.el](../../lisp/ui/harness-ui-access.el)
@@ -13,28 +13,35 @@ The access view of a session: its sandbox, mode, directories, tools and rules, t
 
 ## About
 
-One buffer per session, `harness-access` (C-c h j), says what the
-session may reach, in one place, and changes it:
+`harness-access` (C-c h j) says what a session may reach, in one
+place, and changes it.  Clicking the permission mode in a chat's
+header line (Ask, Accept Edits, Auto, YOLO) opens it too.  It is
+four pages, a buffer each, that share a strip under the title --
+Overview, Tools, Rules, Judgements, also the keys 1 to 4 -- so the
+first page holds what most visits are for and the long lists are a
+click away rather than all on one screen:
 
-- Jail: the sandbox its commands run in -- the backend, the ones
-  this machine has, the policy, whether commands in its directory
-  are confined -- its permission mode, whether it is interactive,
-  the network, writing and the Linux capabilities of its commands:
-  the sandbox drops every one, and you give it some (`C`), by name,
-  or take them away; why none can be given when none can (the
-  backend is not bwrap, the session is read-only) is said there.
-- Directories: those it may write, those it may only read and those
-  it gave up, each with where it comes from and what can be done
-  with it: give it up or keep it for reading only, revoke a grant,
-  restore one given up.  New ones are allowed, for writing or for
-  reading only, and the session moves to another working directory.
-  `harness-directories` (C-c h d) opens the view here.
-- Tools: those it is offered and those it is not, with why; a tool is
-  turned off for it, and on again, here.
-- Rules: the permission rules that apply to it, and the tools that
-  never ask.
-- Waiting: the permission requests it waits on, as the chat's own
-  panels, answered here as there.
+- Overview.  Settings lead it, in one group, each a choice with the
+  one in effect marked, a click on another changing it: the
+  permission mode, whether the session is interactive, the network
+  and writing; then the Linux capabilities of its commands
+  (the sandbox drops every one, and you give it some (`C`), by name,
+  or take them away; why none can be given when none can is said
+  there) and the sandbox its commands run in -- the backend, the ones
+  this machine has, the policy, whether commands in its directory are
+  confined.  Directories are those it may write, those it may only
+  read and those it gave up, each with where it comes from and what
+  can be done with it: give it up or keep it for reading only, revoke
+  a grant, restore one given up; new ones are allowed, for writing or
+  for reading only, and the session moves to another working
+  directory (`harness-directories`, C-c h d, opens the page here).
+  Details end it: a line each for the tools, the rules and the
+  judgements, with what they hold, each a link to its page.
+- Tools: those the session is offered, those it is not and why,
+  and those that belong to other kinds of session.  A tool is turned
+  off for the session, and on again, here.
+- Rules: the permission rules that apply to it, and the tools exempt
+  from prompts; a lasting answer is taken back here.
 - Judgements: every call of it the permission chain judged, newest
   first: what was decided, who decided it (you, a rule, the mode, the
   auto-mode judge, the jail, its access settings, a module's gate),
@@ -42,13 +49,16 @@ session may reach, in one place, and changes it:
   call by once you approve it.  Each call is drawn by the chat itself
   (`harness-chat-insert-tool-call`), [Approve] and all, so it reads as
   it does in the conversation.  The list is filtered by what was
-  decided, by who decided, by tool and by text.
+  decided, by who decided, by tool and by text.  A call that waits
+  for an answer is listed as waiting; the answer is the session's
+  chat's, where the request is, not this view's.
 
 What you change here takes effect at once, and the session's
 transcript says so.  The agent cannot change any of it this way: it
 asks you for more with request_escalation, and gives some up with
-drop_access (harness-access.el).  The buffer follows the session:
-grants, prompts, judgements and changes to its access redraw it.
+drop_access (harness-access.el).  Every page follows the session:
+grants, judgements and changes to its access redraw it, a page no
+window shows when it is shown again.
 
 ## Provides
 
@@ -65,15 +75,23 @@ grants, prompts, judgements and changes to its access redraw it.
 - `harness-ui-access-filter-tool` — Show the judgements of calls of TOOL; empty for all.
 - `harness-ui-access-grant-capability` — Give this buffer's session's commands the Linux capability NAME.
 - `harness-ui-access-move` — Move this buffer's session to the working directory DIRECTORY.
+- `harness-ui-access-next-button` — Move to the start of the Nth next button, back when N is negative.
 - `harness-ui-access-next-call` — Move to the Nth next judged call.
 - `harness-ui-access-next-section` — Move to the Nth next section.
+- `harness-ui-access-previous-button` — Move to the start of the Nth previous button.
 - `harness-ui-access-previous-call` — Move to the Nth previous judged call.
 - `harness-ui-access-previous-section` — Move to the Nth previous section.
+- `harness-ui-access-quit` — Go back from this page to the Overview, or put the view away from the Overview.
 - `harness-ui-access-refresh` — Fetch what BUFFER's session may reach, and its judgements, and draw them.
 - `harness-ui-access-restore-at-point` — Give the session back the directory at point, which it gave up.
 - `harness-ui-access-revoke-capability` — Take the capability NAME away from this buffer's session's commands.
 - `harness-ui-access-set-mode` — Choose the permission mode of this buffer's session.
 - `harness-ui-access-set-network` — Let this buffer's session reach the network when ON, else not.
+- `harness-ui-access-show-judgements` — Show the Judgements page of this view's session: every call the chain judged.
+- `harness-ui-access-show-overview` — Show the Overview page of this view's session: its settings and directories.
+- `harness-ui-access-show-page` — Show PAGE of this view's session in place of this one.
+- `harness-ui-access-show-rules` — Show the Rules page of this view's session: its permission rules.
+- `harness-ui-access-show-tools` — Show the Tools page of this view's session: what it is offered, and not.
 - `harness-ui-access-take-away` — Take the directory at point away from the session, as its first button does.
 - `harness-ui-access-toggle` — Fold or unfold the call at point, or move to the next button.
 - `harness-ui-access-toggle-capability` — Give the session's commands the capability NAME, or take it away when held.
@@ -85,7 +103,7 @@ grants, prompts, judgements and changes to its access redraw it.
 
 ### Options
 
-- `harness-ui-access-judgements-limit` — How many judgements the access view lists, the newest first.
+- `harness-ui-access-judgements-limit` — How many judgements the access view's Judgements page lists, the newest first.
 
 ## Uses
 
@@ -103,7 +121,6 @@ grants, prompts, judgements and changes to its access redraw it.
 - `access/set-tool` ([access](access.md))
 - `permission/allow-dir` ([perms](perms.md))
 - `permission/revoke-dir` ([perms](perms.md))
-- `session/pending` ([session](session.md))
 
 ### Events it hears over ACP
 
@@ -112,7 +129,6 @@ grants, prompts, judgements and changes to its access redraw it.
 ### Hooks it adds to
 
 - `harness-ui-event-functions` → `harness-ui-access--on-event`
-- `harness-ui-pending-changed-hook` → `harness-ui-access--on-pending`
 - `harness-ui-update-functions` → `harness-ui-access--on-update`
 - `window-buffer-change-functions` → `harness-ui-access--shown`
 
