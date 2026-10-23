@@ -51,6 +51,19 @@ drawn as the message it is, from the agent, with the call under its
 fold (`harness-chat--render-thread-message`); a message of yours holds
 its replies in threads as cards, what each replies to and the words
 under it, with a link to the thread (`harness-chat--render-replies`).
+A message with many replies draws the first and the last
+`change-review-ui-tail-replies` of them, and, for those between, one
+line, "▸ 6 earlier replies", a button (mouse-1, RET, TAB) that draws
+them and then folds them again.  The words of a reply, or the agent's
+answer in a thread, of more than `change-review-ui-max-comment-lines`
+rows once wrapped are cut there: "… 25 more lines" and [Show more],
+which draws all of them, [Show less] then cutting them again
+(`harness-chat--toggle-more`).  The review draws a thread's comments
+so, by the same two settings; nil turns either off.  What the reader
+asked for is kept in the block (`harness-chat-block-more`), and stays
+when the block is drawn again.  Only what is drawn is cut: what is sent
+and kept, and what a reply to the message quotes, is all of it, but a
+search does not find the words that are cut until they are drawn.
 The text of a message is marked with the node and the part of it it
 is (`harness-chat-part`), and where its source was (`harness-md-source`),
 so that C-c > knows what a region is from (`harness-chat--region-refs`).

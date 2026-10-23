@@ -10883,7 +10883,16 @@ message of the agent's for the jumps (`M-n`, `M-p`: kind `thread` in
 user's that holds replies in threads draws each as the card it was in
 the box, and the words under it beside the same rail
 (`harness-chat--render-replies`, see Threads), the thread's link
-on the card's first line once the review made it one.  A click
+on the card's first line once the review made it one.  A message with
+many replies draws the first, a button line for the ones between
+(`▸ 6 earlier replies`, `change-review-ui-folded-replies`) and the last
+`change-review-ui-tail-replies`; words of a reply, or the agent's words
+in a thread, longer than `change-review-ui-max-comment-lines` rows once
+wrapped are cut with `… 25 more lines  [Show more]`
+(`harness-chat--cut-words`, counted as `change-review-ui-cut-lines`
+counts), the reader's choice kept in the block (`harness-chat-block-more`)
+and so across a redraw; only the drawing is shorter, what a reply
+quotes is all of it.  A click
 or `RET` on a link opens it (`harness-ui-markdown-open-link`): a URL with
 `browse-url`, anything else as a file in `default-directory` -- the
 session's directory, in a chat -- in another window, at the line a
@@ -11885,7 +11894,10 @@ back.  The chat draws the cards of a sent message the same way
 (`harness-chat--render-replies`, `harness-thread-card-lines` once more),
 every line of a card a button that shows the reference it is of, and the
 words under it a Markdown rendering beside the rail, which is a prefix
-that has the message's face, since a prefix takes none from the text.
+that has the message's face, since a prefix takes none from the text.  A
+message of many replies folds the ones between the first and the last few,
+and long words are cut, as the review's threads are, by the library's
+counts (`harness-chat--earlier-line`, `harness-chat--cut-words`).
 
 The harness's own quoting names are obsolete aliases of the library's:
 `harness-compose-quote-reply`, `harness-compose-quote-string` and
@@ -13747,7 +13759,25 @@ words of what its root says rather than of what that quotes
 (`change-review-ui--summary`); `TAB` or a click opens it to its conversation
 (`▾`), and one that is taller than the window has room for
 (`change-review-ui-max-thread-lines`) is cut with `… 8 more lines`, which
-`TAB` or a click draws in full.  How a thread is folded is the set's:
+`TAB` or a click draws in full.  Every view, folded or not, keeps a long
+thread short two ways: a thread of many comments draws the first, one line
+`▸ 6 earlier replies` (a button) for the ones between and the last three
+(`change-review-ui-tail-replies`), and a comment of more than
+`change-review-ui-max-comment-lines` lines is cut after them with
+`… 12 more lines  [Show more]` (`[Show less]` once drawn in full), what the
+user opened staying open with the set (`change-review-ui-show-earlier`,
+`change-review-ui-show-comment`).  A window with less room than the
+comments take cuts the long ones shorter, not under three lines
+(`change-review-ui--fit-rows`), so that the button stays in sight, and cuts
+the thread off only when that is not enough; the count on its line is of
+what `TAB` draws.  The two counts are `change-review-ui-folded-replies` and
+`change-review-ui-cut-lines`, which the chat uses for the replies in its
+threads too.  A thread drawn under a line is no text of the buffer and
+hangs on one position, which a window cannot start in the middle of: a
+window scrolled by lines would stop at it, so a buffer with such threads
+keeps its windows from starting in one (`change-review-ui--unstick`, on
+`pre-redisplay-functions` and as advice on `scroll-up` and `scroll-down`)
+and has `C-n` and `C-p` go from line to line.  How a thread is folded is the set's:
 `change-review-ui-thread-fold` reads it from a weak table, keyed by the
 set and the thread's id with the status it had when it was folded, so a
 view drawn again, another view and the Ediff of the next file keep it, and

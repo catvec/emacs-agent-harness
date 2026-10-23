@@ -181,6 +181,43 @@ and another view of the same set show it so; a thread whose status
 changes goes back to what a thread of its new status is at first.
 Where there is no thread on the line, `TAB` is what it was.
 
+**Many replies, long ones.** A thread of many comments keeps its first
+comment, folds away the ones after it and draws the last three
+(`change-review-ui-tail-replies`; nil never folds): where the folded ones
+were there is one line, `▸ 6 earlier replies`, and a click on it draws
+them (`▾ 6 earlier replies`, which folds them again). Fewer than two
+comments are not worth a line of their own, and a draft, or a comment
+whose details are shown, is never folded away. A comment of more than
+`change-review-ui-max-comment-lines` lines (15; as drawn, wrapped to the
+room it has, so a long paragraph is several; nil never cuts) is cut after
+them, with `… 12 more lines  [Show more]`; a click draws all of it, and it
+ends with `[Show less]`. A comment a line over the limit is not cut: that
+line would be no shorter than the button. Both are in every view, the
+threads view, the diff view and the threads under the lines of your own
+view, and what was shown is kept with the set like a fold, so the same
+thread is as long in another view. A thread the user asked more of is not
+cut to the window; one that was not asked for is: where the window has less
+room than the comments take (`:max-lines`), the long ones are cut shorter,
+not under three lines, so that their `[Show more]` stays in sight, and the
+thread is cut off with `… 40 more lines` only when that is not enough. The
+count there is of what the click draws, all of the thread, which `TAB` also
+draws, what the next fold is when a drawing left something out. Folding a
+thread to one line takes back what was shown of it.
+`change-review-ui-folded-replies` and `change-review-ui-cut-lines` are the
+whole of the counting, for another view of conversations to use.
+
+**Scrolling past a thread.** A thread drawn under a line is rows of text
+that belong to no line of the buffer, hanging on one position, the end of
+the line. Emacs cannot start a window in the middle of them, and what it
+does when a scroll would is to start the window on that position, from
+which the next scroll goes to the same one: a window scrolled by lines --
+the wheel, `scroll-up` with a number, Ediff's `v` -- could not get past a
+thread, and past one as tall as the window nothing could, not even `C-n`.
+A buffer with threads drawn under its lines keeps its windows from
+starting in one: a window scrolled into a thread starts at the next line
+(back, at the line the thread is under), point with it, and `C-n` and
+`C-p` go from line to line, not through the rows of a thread.
+
 **The threads among your own text.** A buffer that shows the threads as a
 part of its own text -- the section of a report, a side panel -- gets the
 body of the threads view as a string, `change-review-ui-threads-string`
@@ -292,7 +329,8 @@ them.
 The options of the views are `change-review-ui-time-format`,
 `change-review-ui-relative-times`, `change-review-ui-width`,
 `change-review-ui-default-filter`, `change-review-ui-collapse-closed-in-diff`,
-`change-review-ui-max-thread-lines`,
+`change-review-ui-max-thread-lines`, `change-review-ui-tail-replies`,
+`change-review-ui-max-comment-lines`,
 `change-review-ui-read-function` (a comment is read in a `string-edit`
 buffer by default; `C-c C-c` keeps it as a draft) and
 `change-review-ui-directory`.

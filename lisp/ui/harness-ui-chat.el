@@ -40,6 +40,19 @@
 ;; fold (`harness-chat--render-thread-message'); a message of yours holds
 ;; its replies in threads as cards, what each replies to and the words
 ;; under it, with a link to the thread (`harness-chat--render-replies').
+;; A message with many replies draws the first and the last
+;; `change-review-ui-tail-replies' of them, and, for those between, one
+;; line, "▸ 6 earlier replies", a button (mouse-1, RET, TAB) that draws
+;; them and then folds them again.  The words of a reply, or the agent's
+;; answer in a thread, of more than `change-review-ui-max-comment-lines'
+;; rows once wrapped are cut there: "… 25 more lines" and [Show more],
+;; which draws all of them, [Show less] then cutting them again
+;; (`harness-chat--toggle-more').  The review draws a thread's comments
+;; so, by the same two settings; nil turns either off.  What the reader
+;; asked for is kept in the block (`harness-chat-block-more'), and stays
+;; when the block is drawn again.  Only what is drawn is cut: what is sent
+;; and kept, and what a reply to the message quotes, is all of it, but a
+;; search does not find the words that are cut until they are drawn.
 ;; The text of a message is marked with the node and the part of it it
 ;; is (`harness-chat-part'), and where its source was (`harness-md-source'),
 ;; so that C-c > knows what a region is from (`harness-chat--region-refs').
@@ -76,6 +89,27 @@
 (require 'harness-links)
 (require 'harness-ui-markdown)
 (require 'harness-ui-pending)
+
+;; change-review is in lisp/vendor/change-review, which the harness puts
+;; on `load-path' (`harness--setup-load-path'); the chat takes from it how
+;; many replies of a thread are drawn in full and how many lines of one
+;; (`change-review-ui-tail-replies', `change-review-ui-max-comment-lines'),
+;; as the review's own views draw its threads.  A harness older than that
+;; directory, reloading after an update, first checks that this file
+;; compiles with the `load-path' it has, so when the library is not found,
+;; look for it beside the file being compiled or loaded.
+(defvar byte-compile-current-file)
+(eval-and-compile
+  (unless (or (featurep 'change-review-ui) (locate-library "change-review-ui"))
+    (when-let* ((file (or (and (boundp 'byte-compile-current-file)
+                               (stringp byte-compile-current-file)
+                               byte-compile-current-file)
+                          load-file-name
+                          buffer-file-name))
+                (dir (expand-file-name "../vendor/change-review/" (file-name-directory file)))
+                ((file-directory-p dir)))
+      (add-to-list 'load-path dir))))
+(require 'change-review-ui)
 
 (declare-function harness-ui-media-render-attachment "harness-ui-media" (attachment))
 (declare-function harness-ui-decision "harness-ui-decisions" (id))
@@ -205,9 +239,15 @@ See `harness-ui-chat-goto-node'." :group 'harness-ui-chat)
 ;;;; Buffer state
 
 (cl-defstruct (harness-chat-block (:constructor harness-chat--make-block) (:copier nil))
-  "One rendered node."
+  "One rendered node.
+MORE is what the reader asked to see more of in the replies in threads
+the block draws: `earlier' for the replies of a message of yours that
+are folded away, `body' for the agent's words in a thread, and the
+number of a reply (from 0) for its words, cut short otherwise.  See
+`harness-chat--toggle-more'."
   id kind node result start end fold collapsed show-all shown content streamed group
-  head)                                 ; non-nil: first agent block of a turn, carries the sender name
+  head                                  ; non-nil: first agent block of a turn, carries the sender name
+  more)
 
 (cl-defstruct (harness-chat-group (:constructor harness-chat--make-group-record) (:copier nil))
   "A run of coalesced tool calls folded under one summary.
@@ -1924,6 +1964,201 @@ denied call's block where the buffer still has it."
      (harness-chat--face (concat header summary media (harness-chat--foldable details) reply) bg)
      bg)))
 
+;;;; Folding and cutting the replies in threads
+
+;; A message of yours with many replies in threads, or a reply of many
+;; lines, is more than the transcript has room to read: it would push the
+;; conversation out of sight.  The chat draws them as the review draws the
+;; comments of a thread (change-review-ui.el), by the same two settings:
+;; the first reply of a message, one line, "▸ 6 earlier replies", for the
+;; ones between, and the last `change-review-ui-tail-replies'; and the
+;; words of a reply, or of the agent's answer in a thread, cut after
+;; `change-review-ui-max-comment-lines' lines, a line saying how many
+;; there are more and a button, [Show more], that draws all of them, under
+;; which [Show less] cuts them again.  What the reader asked to see is
+;; kept with the block (`harness-chat-block-more'), so it stays so when
+;; the block is drawn again.  Only what is drawn is cut: the message, what
+;; a reply to it quotes, what is sent and what is kept are whole.
+
+(defun harness-chat--more-p (block key)
+  "Non-nil when the reader asked BLOCK to show more of KEY.
+KEY is `earlier', `body' or the number of a reply, as
+`harness-chat-block-more' says."
+  (and (memq key (harness-chat-block-more block)) t))
+
+(defun harness-chat--text-spans (text width)
+  "Return the lines of TEXT, as (START END ROWS) each.
+END is where the line's newline is, ROWS how many rows the line takes:
+as many as WIDTH columns hold it, an empty one a row, as the window wraps
+it, as near as can be told without the window."
+  (let ((pos 0) (size (length text)) spans)
+    (while (< pos size)
+      (let* ((end (or (string-search "\n" text pos) size))
+             (columns (string-width (substring-no-properties text pos end))))
+        (push (list pos end (max 1 (ceiling columns width))) spans)
+        (setq pos (1+ end))))
+    (nreverse spans)))
+
+(defun harness-chat--room-end (text start end rows width)
+  "Return where to cut the line of TEXT from START to END, to take ROWS rows.
+The rows are WIDTH columns wide; the cut is at the last space in them,
+unless that is far back."
+  (let* ((line (substring-no-properties text start end))
+         (kept (truncate-string-to-width line (* rows width)))
+         (cut (length kept)))
+    (when (and (< cut (length line)) (not (memq (aref line cut) '(?\s ?\t))))
+      (when-let* ((space (cl-position ?\s kept :from-end t))
+                  ((> space (/ cut 2))))
+        (setq cut space)))
+    (+ start cut)))
+
+(defun harness-chat--cut-text (text &optional limit)
+  "Return TEXT, rendered Markdown, cut short, as (SHOWN . HIDDEN).
+SHOWN is its first lines, as many whole lines as take LIMIT rows once
+the window wraps them -- a line that does not fit is cut inside, at a
+space, when the lines before it take less than half the room -- and
+HIDDEN the rows left out.  LIMIT is by default
+`change-review-ui-max-comment-lines', and what `change-review-ui-cut-lines'
+says of it holds: nothing is left out of a text that is only a row over,
+or when it is nil, and what is shown does not end on a blank line.  When
+nothing is left out HIDDEN is 0 and SHOWN is TEXT."
+  (let ((limit (or limit change-review-ui-max-comment-lines)))
+    (if (or (null limit) (string-empty-p text))
+        (cons text 0)
+      (let* ((width (max 20 (- (harness-chat--content-width) 2)))
+             (spans (harness-chat--text-spans text width))
+             (total (apply #'+ (mapcar (lambda (span) (nth 2 span)) spans)))
+             ;; One string a row, for the library to count: the line's
+             ;; own, then a mark for each row it takes more.
+             (rows (cl-loop for (start end n) in spans
+                            append (cons (substring-no-properties text start end)
+                                         (make-list (1- n) "…"))))
+             (room (length (car (change-review-ui-cut-lines rows limit)))))
+        (if (>= room total)
+            (cons text 0)
+          (let ((used 0) included next end)
+            (catch 'full
+              (dolist (span spans)
+                (if (<= (+ used (nth 2 span)) room)
+                    (progn (push span included) (cl-incf used (nth 2 span)))
+                  (setq next span)
+                  (throw 'full nil))))
+            (when (and included (>= used (/ room 2)))
+              ;; A gap is no way to end.
+              (while (and included
+                          (string-blank-p (substring-no-properties text (nth 0 (car included))
+                                                                   (nth 1 (car included)))))
+                (cl-decf used (nth 2 (car included)))
+                (pop included))
+              (when included (setq end (nth 1 (car included)))))
+            ;; Lines that do not fill the room: cut inside the one that came next.
+            (unless end
+              (setq end (harness-chat--room-end text (nth 0 next) (nth 1 next)
+                                                (max 1 (- room used)) width)
+                    used room))
+            (if (< (- total used) 2)
+                (cons text 0)
+              (cons (concat (string-trim-right (substring text 0 end)) "\n") (- total used)))))))))
+
+(defun harness-chat--more-row (block key)
+  "Return (START . END), where the line of BLOCK that shows more of KEY is, or nil."
+  (when-let* ((start (harness-chat-block-start block))
+              (end (harness-chat-block-end block))
+              (pos (text-property-any start end 'harness-chat-more key)))
+    (cons pos (or (text-property-not-all pos end 'harness-chat-more key) end))))
+
+(defun harness-chat--toggle-more (id key)
+  "Show more of KEY of the block ID, or less when it shows it already.
+KEY is as `harness-chat--more-p' says.  ID is a node's, or a queued
+message's (`harness-chat--queued-blocks'), which the tail then draws
+again.  The block is drawn again where it is and the window keeps its
+place -- the transcript does not scroll to its end, as it does for what
+is new.  Point, if it was on the line that says there is more, goes to
+where the words that were left out start, or, after less, to the line that
+says there is more, which is where they were, out of sight maybe."
+  (let* ((node-block (gethash id harness-chat--blocks))
+         (queued (and (null node-block) harness-chat--queued-blocks
+                      (gethash id harness-chat--queued-blocks)))
+         (block (or node-block queued)))
+    (when block
+      (let* ((less (harness-chat--more-p block key))
+             (row (and node-block (harness-chat--more-row block key)))
+             (offset (and row (<= (car row) (point)) (< (point) (cdr row))
+                          (- (car row) (marker-position (harness-chat-block-start block))))))
+        (setf (harness-chat-block-more block)
+              (if less
+                  (remq key (harness-chat-block-more block))
+                (cons key (harness-chat-block-more block))))
+        (let ((harness-chat--batch t))
+          (if queued (harness-chat--render-tail) (harness-chat--rerender block)))
+        (cond ((and less node-block)
+               (when-let* ((row (harness-chat--more-row node-block key)))
+                 (harness-chat--reveal (car row))))
+              ;; The line that shows more of the replies stays where it is.
+              ((and offset (not (eq key 'earlier)))
+               (goto-char (+ (marker-position (harness-chat-block-start node-block)) offset))))))))
+
+(defun harness-chat--reveal (pos)
+  "Put point at POS, scrolling its window to show it when it is out of sight."
+  (goto-char pos)
+  (when-let* ((window (get-buffer-window (current-buffer))))
+    (unless (pos-visible-in-window-p pos window)
+      (with-selected-window window (recenter)))))
+
+(defun harness-chat--cut-row (block key hidden shown)
+  "Return the line under the words KEY of BLOCK that are cut, as a string.
+Cut, which says how many rows are HIDDEN and has [Show more]; SHOWN in
+full, it has [Show less].  A click on the line, RET or TAB on it, shows
+more or less (`harness-chat--toggle-more').  The line carries
+`harness-chat-more', KEY, to find it by, and, cut, `harness-chat-cut'
+too: what a reply to the words quotes ends there (`harness-chat--block-ref')."
+  (let* ((id (harness-chat-block-id block))
+         (action (lambda () (harness-chat--toggle-more id key)))
+         (rows (format "%d %s" hidden (if (= hidden 1) "line" "lines")))
+         (row (if shown
+                  (harness-chat--button "[Show less]" action
+                                        :help "Cut these words short again (mouse-1, RET, TAB)")
+                ;; All of the line is a button, RET on its words too.
+                (concat (harness-chat--button
+                         (format "… %d more %s" hidden (if (= hidden 1) "line" "lines")) action
+                         :face 'harness-dim-face
+                         :help (format "Draw the other %s (mouse-1, RET, TAB)" rows))
+                        "  "
+                        (harness-chat--button "[Show more]" action
+                                              :help (format "Draw the other %s (mouse-1, RET, TAB)" rows))))))
+    (propertize (concat row "\n") 'harness-chat-more key 'harness-chat-cut (and (not shown) key))))
+
+(defun harness-chat--cut-words (block key text)
+  "Return TEXT, the rendered words KEY of BLOCK, cut short as the reader left it.
+TEXT ends in a newline.  Words longer than `change-review-ui-max-comment-lines'
+are cut, with the line that says so (`harness-chat--cut-row'), unless the
+reader asked for all of them (`harness-chat--toggle-more'), when [Show less]
+follows them; shorter words are TEXT."
+  (let* ((cut (harness-chat--cut-text text))
+         (hidden (cdr cut)))
+    (cond ((= hidden 0) text)
+          ((harness-chat--more-p block key)
+           (concat text (harness-chat--cut-row block key hidden t)))
+          (t (concat (car cut) (harness-chat--cut-row block key hidden nil))))))
+
+(defun harness-chat--earlier-line (block count open)
+  "Return the line for the COUNT replies of BLOCK that are folded away.
+\"▸ 6 earlier replies\", a button that draws them; OPEN, they are drawn
+under it and it is \"▾\", a button that folds them away again."
+  (let* ((id (harness-chat-block-id block))
+         (icon (harness-ui-icon (if open 'harness-icon-expanded 'harness-icon-collapsed)))
+         (icon (if (string-empty-p icon) (if open "-" "+") icon)))
+    (propertize
+     (concat (harness-chat--button
+              (format "%s %d earlier %s" icon count (if (= count 1) "reply" "replies"))
+              (lambda () (harness-chat--toggle-more id 'earlier))
+              :help (if open
+                        (format "Fold the %d earlier replies away (mouse-1, RET, TAB)" count)
+                      (format "Draw the %d replies between the first and the last (mouse-1, RET, TAB)"
+                              count)))
+             "\n")
+     'harness-chat-more 'earlier)))
+
 ;;;; The agent's answers in a thread
 
 ;; A reply of yours in a thread (C-c >, `harness-chat-thread-reply') is a
@@ -2019,7 +2254,9 @@ agent's, and under the fold what the call was and what it returned."
                          " " (harness-chat--thread-line block)
                          "  " (harness-chat--tool-status result node) "\n"))
          (words (harness-chat--face
-                 (harness-chat--ensure-newline (harness-chat--render-markdown (plist-get input :body) "body"))
+                 (harness-chat--cut-words
+                  block 'body
+                  (harness-chat--ensure-newline (harness-chat--render-markdown (plist-get input :body) "body")))
                  'harness-agent-face))
          (details (concat (propertize "  input\n" 'face 'harness-label-face)
                           (propertize (harness-ui-link-session-ids (harness-chat--input-listing input))
@@ -2062,16 +2299,22 @@ each a button that shows the reference it is of."
               line))
           (harness-thread-card-lines data (harness-chat--content-width))))
 
-(defun harness-chat--render-reply (reply &optional face)
+(defun harness-chat--rail (&optional face)
+  "Return the rail beside the words of a reply in a thread.
+The rail is a prefix, which takes no face from the text: it has FACE, the
+message's, so that it is on the message's background."
+  (propertize "▎ " 'face (if face (list 'harness-thread-rail-face face) 'harness-thread-rail-face)))
+
+(defun harness-chat--render-reply (reply &optional face block index)
   "Return the card of REPLY, a reply in a thread of yours, and the words under it.
 The first line ends with the thread's link when the review has it
 \(`harness-chat--thread-link'); the words are Markdown, as a message's,
-with its line breaks, beside the rail.  The rail there is a prefix, which
-takes no face from the text: it has FACE, the message's, so that it is on
-the message's background."
+with its line breaks, beside the rail (`harness-chat--rail'), which has
+FACE.  REPLY is the INDEXth reply of user BLOCK, when they are given: its
+words are cut short if they are long (`harness-chat--cut-words')."
   (let* ((data (plist-get reply :thread))
          (lines (harness-chat--card-lines data))
-         (rail (propertize "▎ " 'face (if face (list 'harness-thread-rail-face face) 'harness-thread-rail-face)))
+         (rail (harness-chat--rail face))
          (response (let ((harness-ui-markdown-hard-breaks t))
                      (harness-chat--ensure-newline
                       (harness-chat--render-markdown (harness-thread-response reply) "response")))))
@@ -2080,14 +2323,34 @@ the message's background."
       (setcar lines (concat first (propertize "  ↳ " 'face 'harness-dim-face)
                             (harness-chat--thread-link id))))
     (concat (mapconcat (lambda (line) (concat line "\n")) lines "")
-            (propertize response 'line-prefix rail 'wrap-prefix rail))))
+            (propertize (if (and block index)
+                            (harness-chat--cut-words block index response)
+                          response)
+                        'line-prefix rail 'wrap-prefix rail))))
 
 (defun harness-chat--render-replies (block &optional face)
   "Return the replies in threads of user BLOCK, drawn, a blank line between two.
 Nothing for a message with none.  FACE is the message's
-\(`harness-chat--render-reply')."
-  (mapconcat (lambda (reply) (harness-chat--render-reply reply face))
-             (harness-chat--thread-blocks (harness-chat-block-node block)) "\n"))
+\(`harness-chat--render-reply').  A message with many replies draws the
+first, a line for the ones after it that are folded away, and the last
+few (`change-review-ui-folded-replies', `harness-chat--earlier-line'),
+all of them once the reader asked for that (`harness-chat--toggle-more')."
+  (let* ((replies (harness-chat--thread-blocks (harness-chat-block-node block)))
+         (range (change-review-ui-folded-replies (length replies)))
+         (open (harness-chat--more-p block 'earlier))
+         (rail (harness-chat--rail face))
+         (index 0)
+         parts)
+    (dolist (reply replies)
+      (when (and range (= index (car range)))
+        (push (propertize (harness-chat--earlier-line block (- (cdr range) (car range)) open)
+                          'line-prefix rail 'wrap-prefix rail)
+              parts))
+      ;; Folded away, a reply has no line of its own.
+      (unless (and range (not open) (>= index (car range)) (< index (cdr range)))
+        (push (harness-chat--render-reply reply face block index) parts))
+      (cl-incf index))
+    (mapconcat #'identity (nreverse parts) "\n")))
 
 (defun harness-chat--rerender-media (id)
   "Redraw every chat block whose rendering shows the media ID, if any.
@@ -3529,12 +3792,13 @@ Its buttons say what sending a message now does, which depends on it."
   "Return the block that draws queued ITEM: the user block it will be once sent.
 Its node is ITEM as `harness-queued-message-node' reads it, the id
 ITEM's.  An item drawn before keeps the part of a long message it
-showed (`harness-chat--queued-blocks')."
+showed, and of its replies in threads (`harness-chat--queued-blocks')."
   (let ((block (harness-chat--new-block (harness-queued-message-node item)))
         (old (and harness-chat--queued-blocks
                   (gethash (plist-get item :id) harness-chat--queued-blocks))))
     (when old
-      (setf (harness-chat-block-shown block) (harness-chat-block-shown old)))
+      (setf (harness-chat-block-shown block) (harness-chat-block-shown old)
+            (harness-chat-block-more block) (harness-chat-block-more old)))
     block))
 
 (defvar harness-chat-queued-map (make-sparse-keymap)
@@ -5621,6 +5885,31 @@ first block's start to the last block's end."
             (setq pos next)))))
     (and from to (cons from to))))
 
+(defun harness-chat--cut-whole (block key)
+  "Return all of the words KEY of BLOCK, as its node has them, or nil.
+KEY is as `harness-chat--more-p' says: the agent's words in a thread, or
+the words of a reply in one."
+  (let ((node (harness-chat-block-node block)))
+    (pcase key
+      ('body (plist-get (harness-chat--thread-input node) :body))
+      ((pred integerp)
+       (when-let* ((reply (nth key (harness-chat--thread-blocks node))))
+         (harness-thread-response reply))))))
+
+(defun harness-chat--run-whole (block run from to)
+  "Return all of the words RUN of BLOCK is cut from, or nil when it is not cut.
+RUN is a run of text that is a part of the message (`harness-chat--part-runs'),
+and the words are cut short when the line that says so follows it
+\(`harness-chat--cut-row').  A region FROM to TO that holds all of what is
+shown of them, and that line, is a region of the words, not of the part
+that is drawn."
+  (let* ((end (nth 2 run))
+         ;; The newline that ends the words is no part of them.
+         (row (if (eq (char-after end) ?\n) (1+ end) end))
+         (key (and (< row (point-max)) (get-text-property row 'harness-chat-cut))))
+    (and key (<= from (nth 1 run)) (> to row)
+         (harness-chat--cut-whole block key))))
+
 (defun harness-chat--block-ref (block from to)
   "Return the reference to the text of BLOCK from FROM to TO, or nil for none.
 A plist (`harness-thread-block'): the node, who wrote it, the part of it
@@ -5628,16 +5917,23 @@ A plist (`harness-thread-block'): the node, who wrote it, the part of it
 node's words that stands -- narrowed to the words themselves when they
 read the same in the source as on the screen -- and the words, as
 Markdown.  The text of a node that has no parts, a tool call, is
-what shows of it."
+what shows of it.  Words cut short (`harness-chat--cut-words') are
+whole in a reference to all of them: the region holds them and the line
+that says there is more, which a message replied to as it is has."
   (let* ((runs (harness-chat--part-runs from to))
          (who (harness-chat--block-who block))
+         (whole nil)
          (text (string-trim
                 (if runs
-                    (mapconcat (lambda (run) (string-trim (harness-ui-markdown-source (nth 1 run) (nth 2 run))))
+                    (mapconcat (lambda (run)
+                                 (let ((all (harness-chat--run-whole block run from to)))
+                                   (when all (setq whole t))
+                                   (string-trim (or all (harness-ui-markdown-source (nth 1 run) (nth 2 run))))))
                                runs "\n\n")
                   (harness-ui-markdown-source from to))))
          (part (car (car runs)))
-         (span (harness-chat--source-span runs)))
+         ;; Where the drawn words stand in the words says nothing of all of them.
+         (span (and (not whole) (harness-chat--source-span runs))))
     (when (equal part "content")
       (let* ((source (harness-chat--message-text block))
              (hit (and span (string-search text source (car span)))))
@@ -5750,11 +6046,18 @@ The chat's `harness-compose-thread-open-function'."
   (harness-chat-show-ref (or ref (car (harness-thread-refs data)) (user-error "Nothing to show"))))
 
 (defun harness-chat-tab ()
-  "Complete in the compose box; elsewhere expand or collapse the block at point."
+  "Complete in the compose box; elsewhere expand or collapse the block at point.
+On the line of a reply in a thread that says there is more of it, the
+replies folded away or the words cut short, it shows or hides that
+\(`harness-chat--toggle-more')."
   (interactive)
   (cond ((harness-compose-in-p) (completion-at-point))
         ((get-text-property (point) 'harness-chat-todos) (harness-chat-toggle-todos))
         ((get-text-property (point) 'harness-chat-group) (harness-chat-toggle-group))
+        ((and (get-text-property (point) 'harness-chat-more)
+              (get-text-property (point) 'harness-chat-node))
+         (harness-chat--toggle-more (get-text-property (point) 'harness-chat-node)
+                                    (get-text-property (point) 'harness-chat-more)))
         ((get-text-property (point) 'harness-chat-node)
          (let ((b (gethash (get-text-property (point) 'harness-chat-node) harness-chat--blocks)))
            (if (and b (harness-chat-block-fold b)) (harness-chat-toggle-block)

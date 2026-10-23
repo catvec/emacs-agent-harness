@@ -433,7 +433,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `message-sent-hook` | `change-review-mail.el` | `change-review-mail.el` |
 | `post-command-hook` |  | [ui-cache-warm](ui-cache-warm.md), [ui-chat](ui-chat.md), [ui-compose](ui-compose.md), `compose-quote.el`, `change-review-ui.el` |
 | `pre-command-hook` |  | [ui-chat](ui-chat.md), [ui-compose](ui-compose.md) |
-| `pre-redisplay-functions` |  | [ui-compose](ui-compose.md), [ui-popout](ui-popout.md) |
+| `pre-redisplay-functions` |  | [ui-compose](ui-compose.md), [ui-popout](ui-popout.md), `change-review-ui.el` |
 | `project-find-functions` |  | `worktree-assume.el` |
 | `string-edit-mode-hook` | `change-review-ui.el` |  |
 | `tabulated-list-revert-hook` |  | [ui-sessions](ui-sessions.md), [ui-worktree](ui-worktree.md) |

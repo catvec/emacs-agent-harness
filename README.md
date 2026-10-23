@@ -876,6 +876,19 @@ asked is drawn, as a message of yours in its tool call. Reply to that
 message, and the reply is in the same thread. `M-n` and `M-p` stop at it,
 `C-c C-w` copies it, `C-u C-c >` quotes it.
 
+A message with many replies, or a reply or an answer of the agent's with
+many lines, is drawn as the review of a task's changes draws a thread (see
+[Task board](#task-board)): the first reply in full, one line, `▸ 6 earlier replies`, for
+the ones between, which `RET`, `TAB` or a click draws and folds away
+again, and the last three (`change-review-ui-tail-replies`; nil folds
+none). The words of a reply or of the agent's answer in a thread that run
+to more than 15 rows (`change-review-ui-max-comment-lines`; nil cuts
+none) are cut there, `… 25 more lines  [Show more]`, which draws all of
+them, `[Show less]` cutting them again. Only the drawing is shorter: what
+is sent and kept is whole, and `C-c >` or `C-u C-c >` on the message
+quotes all of it. A search finds the words that are cut only once they
+are drawn.
+
 Nothing is guessed from your words: words that merely look like a quote
 make no thread. The reference keeps the part you selected, up to
 `harness-chat-thread-quote-limit` characters (a longer one is cut, with
@@ -3820,9 +3833,21 @@ with), `recap` writes the recaps on the cards,
   “Why eighteen?…”`): `TAB` on that line -- in Ediff's control panel, on
   the threads of the current difference -- or a click on it opens it to
   its conversation (`▾`), and `TAB` folds any thread to a line again.
-  A thread longer than the window has room for is cut, saying how many
-  lines more there are (`… 8 more lines`); `TAB` or a click shows all of
-  it. Threads are drawn to the width of the window that shows them, so
+  A thread of many comments draws the first and the last three, with one
+  line, `▸ 6 earlier replies`, for the ones between, which a click draws;
+  a comment of more than 15 lines is cut after them, `… 12 more lines
+  [Show more]`, which a click draws in full, and `[Show less]` cuts it
+  again (`change-review-ui-tail-replies` and
+  `change-review-ui-max-comment-lines` set the numbers, nil turns each
+  off; what was shown stays so for the review, like a fold, and one line
+  takes it back). In a window with little room the long comments are cut
+  shorter to fit it, so that `[Show more]` stays in sight, and a thread
+  that is still longer than the window has room for is cut, saying how
+  many lines more there are (`… 8 more lines`); `TAB` or a click shows all
+  of it. A window of Ediff scrolls past a thread, a long reply that fills
+  it too, with the keys and the wheel (`v` and `V` in the control panel
+  included), and `C-n` and `C-p` go from line to line of the code, not
+  through the rows of a thread. Threads are drawn to the width of the window that shows them, so
   with the two versions side by side nothing wraps. `T`, or `[Threads]`,
   goes to the threads; in Ediff it shows the tree beside it and goes
   there. The agent answers with its own tools,

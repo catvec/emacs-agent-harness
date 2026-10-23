@@ -5015,6 +5015,144 @@ they are drawn again when a window changes its size."
         (ignore thread)
         (with-current-buffer control (call-interactively #'harness-ui-patch-review-ediff-quit))))))
 
+(ert-deftest harness-ui-patch-review-cuts-long-replies-and-folds-many-in-ediff ()
+  "A thread of many replies under a line of the version Ediff shows draws its
+first comment, one line for the earlier replies, and the last three; a long
+reply is cut, with its [Show more] in sight in the room the window has, which
+draws all of it and then offers [Show less].  The versions are kept from
+starting a window in a thread, and a window Ediff scrolls by lines gets past
+the thread, even one as tall as the window."
+  (harness-ui-patch-review-test-with-task
+    (let* ((harness-ui-patch-review-ediff-tree nil)
+           (change-review-ui-max-thread-lines 12)
+           (popout (harness-ui-patch-review-test--changes board id))
+           (review (gethash id harness-ui-patch-review--reviews))
+           (set (harness-ui-patch-review--r-set review))
+           (bot (change-review-agent "Claude" :session "sess-9" :tool-call "toolu_7"))
+           (noah (change-review-user "Noah" "noah@example.org"))
+           (two (harness-ui-patch-review-test--comment-on review "a.el" '(:new . 2) "Why two?"))
+           (answer (change-review-reply
+                    set two (mapconcat (lambda (n) (format "Answer line %d." n)) (number-sequence 1 40) "\n")
+                    :author bot :sent (float-time)))
+           (eighteen (harness-ui-patch-review-test--comment-on review "a.el" '(:new . 18) "Why eighteen?"))
+           (inhibit-message t))
+      (ignore popout answer)
+      (dotimes (i 9)
+        (change-review-reply set eighteen (format "Reply number %d." (+ i 2))
+                             :author (if (cl-evenp i) bot noah) :sent (float-time)))
+      (harness-ui-patch-review-ediff review 0)
+      (let* ((control (harness-ui-patch-review-test--control review 0))
+             (new (nth 2 (harness-ui-patch-review--ediff-buffers review)))
+             (text (lambda (line) (cdr (assq line (harness-ui-patch-review-test--drawn new)))))
+             (thread (lambda (line)
+                       (harness-ui-patch-review-test--thread-string
+                        new (harness-ui-patch-review-test--thread-of
+                             review (if (= line 2) two eighteen))))))
+        ;; The many replies: the first, one line, the last three.
+        (should (string-search "1/10  Noah" (funcall text 18)))
+        (should (string-search "▸ 6 earlier replies" (funcall text 18)))
+        (should-not (string-search "Reply number 5." (funcall text 18)))
+        (should (string-search "Reply number 8." (funcall text 18)))
+        (should (string-search "10/10" (funcall text 18)))
+        ;; The long reply: cut to the room, the button in sight, nothing taller than the room.
+        (should (string-search "Answer line 1." (funcall text 2)))
+        (should-not (string-search "Answer line 40." (funcall text 2)))
+        (should (string-match-p "… [0-9]+ more lines  \\[Show more\\]\\'" (funcall text 2)))
+        (should (<= (length (split-string (funcall text 2) "\n")) 13))
+        ;; The button draws all of the reply, and [Show less] cuts it again.
+        (harness-ui-patch-review-test--press-nth (funcall thread 2) "[Show more]" 0)
+        (change-review-ui-flush)
+        (should (string-search "Answer line 40." (funcall text 2)))
+        (should (string-match-p "\\[Show less\\]\\'" (funcall text 2)))
+        (harness-ui-patch-review-test--press-nth (funcall thread 2) "[Show less]" 0)
+        (change-review-ui-flush)
+        (should-not (string-search "Answer line 40." (funcall text 2)))
+        (should (string-match-p "\\[Show more\\]\\'" (funcall text 2)))
+        ;; The earlier replies: a click draws them, and the line folds them again.
+        (harness-ui-patch-review-test--press-nth (funcall thread 18) "▸ 6 earlier replies" 0)
+        (change-review-ui-flush)
+        (should (string-search "Reply number 5." (funcall text 18)))
+        (should (string-search "▾ 6 earlier replies" (funcall text 18)))
+        (harness-ui-patch-review-test--press-nth (funcall thread 18) "▾ 6 earlier replies" 0)
+        (change-review-ui-flush)
+        (should-not (string-search "Reply number 5." (funcall text 18)))
+        ;; A version with threads is kept from sticking on them.
+        (should (buffer-local-value 'change-review-ui--keeps-scrolling new))
+        (should (memq #'change-review-ui--pre-redisplay
+                      (buffer-local-value 'pre-redisplay-functions new)))
+        (with-current-buffer control (call-interactively #'harness-ui-patch-review-ediff-quit))))))
+
+(ert-deftest harness-ui-patch-review-puts-point-back-on-the-last-line-of-a-comment-that-got-shorter ()
+  "A reader on a line of a long comment that is cut again has, when the changes
+are drawn again, point on the comment's last line -- the one that says there is
+more -- and not on what comes after it; a line the comment still has is found."
+  (let* ((row (lambda (text comment)
+                (propertize (concat text "\n") 'harness-ui-patch-review-task "t-1"
+                            'change-review-comment comment)))
+         (draw (lambda (lines)
+                 (erase-buffer)
+                 (insert (funcall row "head" nil)
+                         (apply #'concat (mapcar (lambda (text) (funcall row text "c-1")) lines))
+                         (funcall row "next comment" "c-2"))))
+         (here (lambda () (buffer-substring-no-properties (line-beginning-position)
+                                                          (line-end-position)))))
+    (with-temp-buffer
+      (funcall draw '("header" "line 1" "line 2" "line 3" "line 4" "line 5" "[Show less]"))
+      (goto-char (point-min))
+      (search-forward "[Show less]")
+      (let ((anchor (harness-ui-patch-review--anchor-at (point)))
+            (cut '("header" "line 1" "line 2" "… 4 more lines  [Show more]")))
+        (funcall draw cut)
+        (harness-ui-patch-review--goto-anchor anchor)
+        (should (equal "… 4 more lines  [Show more]" (funcall here)))
+        ;; A line the comment has still is the very line.
+        (funcall draw '("header" "line 1" "line 2" "line 3" "line 4" "line 5" "[Show less]"))
+        (goto-char (point-min))
+        (search-forward "line 2")
+        (setq anchor (harness-ui-patch-review--anchor-at (point)))
+        (funcall draw cut)
+        (harness-ui-patch-review--goto-anchor anchor)
+        (should (equal "line 2" (funcall here)))))))
+
+(ert-deftest harness-ui-patch-review-scrolls-past-a-reply-as-tall-as-the-window-in-ediff ()
+  "A window of the version Ediff shows, scrolled by lines as Ediff's v does and as
+the wheel does, gets past a reply that takes as many rows as the window has:
+shown in full, it is no thread to stay in."
+  (harness-ui-patch-review-test-with-task
+    (let* ((harness-ui-patch-review-ediff-tree nil)
+           (popout (harness-ui-patch-review-test--changes board id))
+           (review (gethash id harness-ui-patch-review--reviews))
+           (set (harness-ui-patch-review--r-set review))
+           (bot (change-review-agent "Claude" :session "sess-9" :tool-call "toolu_7"))
+           (two (harness-ui-patch-review-test--comment-on review "a.el" '(:new . 2) "Why two?"))
+           (answer (change-review-reply
+                    set two (mapconcat (lambda (n) (format "Answer line %d." n)) (number-sequence 1 60) "\n")
+                    :author bot :sent (float-time)))
+           (inhibit-message t))
+      (ignore popout)
+      (change-review-ui-show-comment set answer t)
+      (harness-ui-patch-review-ediff review 0)
+      (let* ((control (harness-ui-patch-review-test--control review 0))
+             (new (nth 2 (harness-ui-patch-review--ediff-buffers review)))
+             (window (get-buffer-window new))
+             (start (lambda () (with-current-buffer new (line-number-at-pos (window-start window))))))
+        ;; The reply is a good deal taller than the window.
+        (should (> (length (split-string (cdr (assq 2 (harness-ui-patch-review-test--drawn new))) "\n"))
+                   (* 2 (window-body-height window))))
+        (set-window-start window (with-current-buffer new (point-min)))
+        (with-selected-window window
+          (dotimes (_ 3)
+            (scroll-up 1)))
+        ;; Not stuck on line 2, which the reply hangs on: three lines on.
+        (should (> (funcall start) 2))
+        (set-window-start window (with-current-buffer new (point-min)))
+        (with-current-buffer control
+          (dotimes (_ 3)
+            (let ((last-command-event ?v))
+              (ediff-scroll-vertically 1))))
+        (should (> (funcall start) 2))
+        (with-current-buffer control (call-interactively #'harness-ui-patch-review-ediff-quit))))))
+
 (defun harness-ui-patch-review-test--drag (overlay text from to)
   "Drag the mouse over TEXT of what OVERLAY shows, from the character FROM to TO.
 Both count from where TEXT starts.  The press, the move and the release are

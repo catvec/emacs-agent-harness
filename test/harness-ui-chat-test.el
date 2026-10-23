@@ -3429,6 +3429,386 @@ the thread's id gone and the comment it made kept, for the review to edit."
         (should (= 1 (length harness-compose-attachments)))
         (should (equal 1 (plist-get (car harness-compose-attachments) :reply)))))))
 
+;;;; Many replies in threads, and long ones
+
+(defun harness-ui-chat-test--reply (n &optional lines)
+  "Return the Nth reply in a thread of a message of yours: it quotes \"Quoted N.\".
+Its words are \"Question N?\", or LINES lines, each \"Line K of reply N.\"."
+  (harness-thread-block
+   (list :refs (list (list :kind "chat" :node "n-gone" :who "agent" :text (format "Quoted %d." n)))
+         :id (format "t-%07d" n) :comment (format "c-%d" n))
+   (if lines
+       (mapconcat (lambda (k) (format "Line %d of reply %d." k n)) (number-sequence 1 lines) "\n")
+     (format "Question %d?" n))))
+
+(defun harness-ui-chat-test--send-replies (sid buf replies)
+  "Send REPLIES, replies in threads, as one message of the user's in SID.
+Return its block, drawn in BUF."
+  (let ((blocks (cons '(:type "text" :text "Several things:") replies))
+        (before (length (harness-ui-chat-test-blocks buf "user"))))
+    (harness-call 'session/append sid (list :kind 'user :content (harness-blocks-text blocks)
+                                            :blocks blocks))
+    (harness-test-wait (lambda () (> (length (harness-ui-chat-test-blocks buf "user")) before))
+                       5 "the message")
+    (car (last (harness-ui-chat-test-blocks buf "user")))))
+
+(defun harness-ui-chat-test--occurrences (needle text)
+  "Return how many times NEEDLE is in TEXT."
+  (1- (length (split-string text (regexp-quote needle)))))
+
+(defun harness-ui-chat-test--questions (block)
+  "Return the numbers of the replies whose words, \"Question N?\", BLOCK draws."
+  (let ((text (harness-ui-chat-test-block-text block)))
+    (cl-remove-if-not (lambda (n) (string-search (format "Question %d?" n) text))
+                      (number-sequence 1 20))))
+
+(defun harness-ui-chat-test--press (block key)
+  "Press the button of BLOCK that shows more of KEY; point ends on its line."
+  (let ((row (harness-chat--more-row block key)))
+    (should row)
+    (goto-char (car row))
+    (should (get-text-property (point) 'harness-chat-action))
+    (harness-chat-push)))
+
+(ert-deftest harness-ui-chat-cuts-rendered-words-after-the-lines-that-fit ()
+  "Words are cut after as many whole lines as fit the limit once wrapped, the
+way the review cuts a comment (`change-review-ui-cut-lines'): not a text that
+is only a line over, not on a blank line, a line taller than the room inside."
+  (with-temp-buffer
+    (let ((change-review-ui-max-comment-lines 5)
+          (lines (lambda (n) (concat (mapconcat (lambda (k) (format "line %d" k)) (number-sequence 1 n) "\n")
+                                     "\n"))))
+      ;; Short words, as long as the limit, and a line over: whole.
+      (should (equal (cons "a\nb\n" 0) (harness-chat--cut-text "a\nb\n")))
+      (should (equal (cons (funcall lines 5) 0) (harness-chat--cut-text (funcall lines 5))))
+      (should (equal (cons (funcall lines 6) 0) (harness-chat--cut-text (funcall lines 6))))
+      ;; Two lines over: the first five, and how many are left.
+      (should (equal (cons (funcall lines 5) 2) (harness-chat--cut-text (funcall lines 7))))
+      (should (equal (cons (funcall lines 5) 95) (harness-chat--cut-text (funcall lines 100))))
+      ;; The limit can be given.
+      (should (equal (cons (funcall lines 2) 8) (harness-chat--cut-text (funcall lines 10) 2)))
+      ;; A gap is no way to end.
+      (should (equal (cons "a\nb\nc\nd\n" 4) (harness-chat--cut-text "a\nb\nc\nd\n\ne\nf\ng\n")))
+      ;; A line is as many rows as the window wraps it to: 80 columns, 78 for the words.
+      (let ((cut (harness-chat--cut-text (concat (make-string 200 ?x) "\n" (funcall lines 6)))))
+        (should (equal (concat (make-string 200 ?x) "\nline 1\nline 2\n") (car cut)))
+        (should (= 4 (cdr cut))))
+      ;; A line taller than the room is cut inside, at a space, and the rows left are counted.
+      (let* ((change-review-ui-max-comment-lines 2)
+             (words (string-join (make-list 60 "word") " "))
+             (cut (harness-chat--cut-text (concat words "\n"))))
+        (should (< (length (car cut)) (length words)))
+        (should (string-suffix-p "word\n" (car cut)))
+        (should (string-prefix-p (string-trim-right (car cut)) words))
+        (should (= 2 (cdr cut))))
+      ;; Lines that take less than half the room, and then one that does not
+      ;; fit: it is cut inside to fill the room, not left out.
+      (let* ((change-review-ui-max-comment-lines 15)
+             (paragraph (string-join (make-list 600 "word") " "))
+             (cut (harness-chat--cut-text (concat "Summary:\n" paragraph "\n"))))
+        (should (string-prefix-p "Summary:\nword word" (car cut)))
+        (should (< 1000 (length (car cut)) 1100))
+        (should (string-suffix-p "word\n" (car cut)))
+        (should (= 25 (cdr cut)))
+        ;; More than half the room: the line that does not fit is left out whole.
+        (let ((cut (harness-chat--cut-text
+                    (concat (funcall lines 9) paragraph "\n"))))
+          (should (equal (funcall lines 9) (car cut)))
+          (should (= 39 (cdr cut)))))
+      ;; What shows keeps its properties.
+      (let ((cut (harness-chat--cut-text (concat (propertize "bold" 'face 'bold) "\n" (funcall lines 9)))))
+        (should (eq 'bold (get-text-property 0 'face (car cut)))))
+      ;; Without a limit nothing is cut.
+      (let ((change-review-ui-max-comment-lines nil))
+        (should (equal (cons (funcall lines 100) 0) (harness-chat--cut-text (funcall lines 100))))))))
+
+(ert-deftest harness-ui-chat-folds-the-earlier-replies-of-a-message ()
+  "A message of yours that holds ten replies in threads draws the first, one
+line for the six between it and the last three, and those three.  The line is
+a button: pressed it draws the six, and is the button that folds them away
+again.  What was asked for stays when the block is drawn again."
+  (harness-ui-chat-test-with
+    (let* ((change-review-ui-tail-replies 3)
+           (sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid))
+           (block (harness-ui-chat-test--send-replies
+                   sid buf (mapcar #'harness-ui-chat-test--reply (number-sequence 1 10)))))
+      (with-current-buffer buf
+        (should (equal '(1 8 9 10) (harness-ui-chat-test--questions block)))
+        ;; The cards of the replies there are are drawn, the others' are not.
+        (should (string-search "Quoted 8." (harness-ui-chat-test-block-text block)))
+        (should-not (string-search "Quoted 2." (harness-ui-chat-test-block-text block)))
+        (should (= 1 (harness-ui-chat-test--occurrences "6 earlier replies" (harness-ui-chat-test-block-text block))))
+        ;; The line is between the first reply and the rest, and says what it stands for.
+        (should (string-match-p "Question 1\\?\n\n[^ \n]+ 6 earlier replies\n\n[^\n]*\n[^\n]*Quoted 8\\."
+                                (harness-ui-chat-test-block-text block)))
+        (should-not (harness-chat--more-p block 'earlier))
+        ;; Pressed: all ten, the line says so and is where it was, point on it.
+        (harness-ui-chat-test--press block 'earlier)
+        (should (harness-chat--more-p block 'earlier))
+        (should (equal (number-sequence 1 10) (harness-ui-chat-test--questions block)))
+        (should (= 1 (harness-ui-chat-test--occurrences "6 earlier replies" (harness-ui-chat-test-block-text block))))
+        (should (string-match-p "Question 1\\?\n\n[^ \n]+ 6 earlier replies\n\n[^\n]*\n[^\n]*Quoted 2\\."
+                                (harness-ui-chat-test-block-text block)))
+        (let ((row (harness-chat--more-row block 'earlier)))
+          (should (<= (car row) (point) (cdr row))))
+        ;; Drawn again for another reason: still all of them.
+        (harness-chat--rerender block)
+        (should (equal (number-sequence 1 10) (harness-ui-chat-test--questions block)))
+        ;; Pressed again: folded away.
+        (harness-ui-chat-test--press block 'earlier)
+        (should-not (harness-chat--more-p block 'earlier))
+        (should (equal '(1 8 9 10) (harness-ui-chat-test--questions block)))
+        ;; TAB on the line does the same, from anywhere on it.
+        (goto-char (+ (car (harness-chat--more-row block 'earlier)) 4))
+        (should (eq #'harness-chat-tab (key-binding (kbd "TAB"))))
+        (harness-chat-tab)
+        (should (equal (number-sequence 1 10) (harness-ui-chat-test--questions block)))
+        (harness-chat-tab)
+        (should (equal '(1 8 9 10) (harness-ui-chat-test--questions block)))
+        ;; The words are the message's still: nothing was changed.
+        (should (equal 10 (length (harness-chat--thread-blocks (harness-chat-block-node block)))))
+        (should (string-search "Question 2?" (harness-chat--cut-whole block 1)))))))
+
+(ert-deftest harness-ui-chat-folds-as-many-replies-as-the-setting-says ()
+  "The last replies drawn are `change-review-ui-tail-replies' of them; a message
+with too few to fold two is drawn whole, and so is any when the setting is nil."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid))
+           (block (harness-ui-chat-test--send-replies
+                   sid buf (mapcar #'harness-ui-chat-test--reply (number-sequence 1 10)))))
+      (with-current-buffer buf
+        (let ((drawn (lambda (tail)
+                       (let ((change-review-ui-tail-replies tail))
+                         (harness-chat--rerender block))
+                       (cons (harness-ui-chat-test--questions block)
+                             (and (string-match "\\([0-9]+\\) earlier repl\\(?:y\\|ies\\)"
+                                                (harness-ui-chat-test-block-text block))
+                                  (match-string 1 (harness-ui-chat-test-block-text block)))))))
+          (should (equal '((1 6 7 8 9 10) . "4") (funcall drawn 5)))
+          (should (equal '((1 9 10) . "7") (funcall drawn 2)))
+          (should (equal '((1 10) . "8") (funcall drawn 1)))
+          ;; At least the last reply stays.
+          (should (equal '((1 10) . "8") (funcall drawn 0)))
+          (should (equal (cons (number-sequence 1 10) nil) (funcall drawn nil)))))
+      ;; Replies too few for a line that is shorter than the replies it stands for.
+      (dolist (count '(2 5))
+        (let ((few (harness-ui-chat-test--send-replies
+                    sid buf (mapcar #'harness-ui-chat-test--reply (number-sequence 1 count)))))
+          (with-current-buffer buf
+            (let ((change-review-ui-tail-replies 3))
+              (harness-chat--rerender few))
+            (should-not (string-search "earlier repl" (harness-ui-chat-test-block-text few)))
+            (should (equal (number-sequence 1 count) (harness-ui-chat-test--questions few))))))
+      ;; Six fold two, and say "replies".
+      (let ((six (harness-ui-chat-test--send-replies
+                  sid buf (mapcar #'harness-ui-chat-test--reply (number-sequence 1 6)))))
+        (with-current-buffer buf
+          (let ((change-review-ui-tail-replies 3))
+            (harness-chat--rerender six))
+          (should (string-search "2 earlier replies" (harness-ui-chat-test-block-text six)))
+          (should (equal '(1 4 5 6) (harness-ui-chat-test--questions six))))))))
+
+(ert-deftest harness-ui-chat-cuts-a-long-reply-and-shows-it-on-a-click ()
+  "The words of a reply of many lines are cut after
+`change-review-ui-max-comment-lines' of them, a line says how many more there
+are, and its button draws them all, under which [Show less] cuts them again.
+Words a line over the limit are not cut: that line is no shorter than the one
+that says so.  Each reply has its own, and they stay when the block is drawn
+again; point is on the line that shows more and, after less, goes back to it."
+  (harness-ui-chat-test-with
+    (let* ((change-review-ui-max-comment-lines 15)
+           (change-review-ui-tail-replies 3)
+           (sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid))
+           (block (harness-ui-chat-test--send-replies
+                   sid buf (list (harness-ui-chat-test--reply 1 40)
+                               (harness-ui-chat-test--reply 2 16)
+                               (harness-ui-chat-test--reply 3 17)))))
+      (with-current-buffer buf
+        (let ((text (lambda () (harness-ui-chat-test-block-text block))))
+          ;; Forty lines: fifteen, and 25 more.
+          (should (string-search "Line 15 of reply 1." (funcall text)))
+          (should-not (string-search "Line 16 of reply 1." (funcall text)))
+          (should (string-match-p "Line 15 of reply 1\\.\n… 25 more lines  \\[Show more\\]\n" (funcall text)))
+          ;; Sixteen, a line over: all of them, nothing to show.
+          (should (string-search "Line 16 of reply 2." (funcall text)))
+          ;; Seventeen, two over: cut.
+          (should (string-search "Line 15 of reply 3." (funcall text)))
+          (should-not (string-search "Line 16 of reply 3." (funcall text)))
+          (should (string-search "… 2 more lines" (funcall text)))
+          (should (= 2 (harness-ui-chat-test--occurrences "[Show more]" (funcall text))))
+          ;; Press the button of the first: all of them, [Show less] under.
+          (harness-ui-chat-test--press block 0)
+          (should (harness-chat--more-p block 0))
+          (should (string-match-p "Line 40 of reply 1\\.\n\\[Show less\\]\n" (funcall text)))
+          (should-not (string-search "25 more lines" (funcall text)))
+          ;; The third is cut as it was.
+          (should-not (string-search "Line 16 of reply 3." (funcall text)))
+          ;; Point is where the words that were left out start.
+          (should (looking-at "Line 16 of reply 1\\."))
+          ;; Drawn again for another reason, it stays so.
+          (harness-chat--rerender block)
+          (should (string-search "Line 40 of reply 1." (funcall text)))
+          ;; Less: cut again, point on the line that says more.
+          (goto-char (car (harness-chat--more-row block 0)))
+          (harness-chat-push)
+          (should-not (harness-chat--more-p block 0))
+          (should-not (string-search "Line 16 of reply 1." (funcall text)))
+          (should (looking-at "… 25 more lines"))
+          (should (equal (car (harness-chat--more-row block 0)) (point)))
+          ;; The reply was cut where the setting says: another limit, another cut.
+          (let ((change-review-ui-max-comment-lines 5))
+            (harness-chat--rerender block))
+          (should (string-search "Line 5 of reply 1." (funcall text)))
+          (should-not (string-search "Line 6 of reply 1." (funcall text)))
+          (should (string-search "… 35 more lines" (funcall text)))
+          ;; No limit: nothing is cut.
+          (let ((change-review-ui-max-comment-lines nil))
+            (harness-chat--rerender block))
+          (should (string-search "Line 40 of reply 1." (funcall text)))
+          (should-not (string-search "Show more" (funcall text)))
+          (should-not (string-search "Show less" (funcall text))))))))
+
+(ert-deftest harness-ui-chat-cuts-a-long-paragraph-and-counts-the-rows-it-wraps-to ()
+  "Words that are one long paragraph are as many rows as the window wraps them
+to: they are cut inside it when it is taller than the limit."
+  (harness-ui-chat-test-with
+    (let* ((change-review-ui-max-comment-lines 5)
+           (sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid))
+           (words (string-join (mapcar (lambda (n) (format "word%d" n)) (number-sequence 1 400)) " "))
+           (block (harness-ui-chat-test--send-replies
+                   sid buf (list (harness-thread-block
+                                  (list :refs (list (list :kind "chat" :node "n-gone" :who "agent" :text "Quoted."))
+                                        :id "t-1")
+                                  words)))))
+      (with-current-buffer buf
+        (let ((text (harness-ui-chat-test-block-text block)))
+          (should (string-search "word1 word2" text))
+          (should-not (string-search "word400" text))
+          (should (string-match-p "… [0-9]+ more lines  \\[Show more\\]" text))
+          ;; About five rows of 78 columns of it.
+          (let* ((row (harness-chat--more-row block 0))
+                 (first (harness-ui-chat-test-find buf "word1 " (harness-chat-block-start block)))
+                 (columns (- (car row) first)))
+            (should (< 250 columns 400))))
+        (harness-ui-chat-test--press block 0)
+        (should (string-search "word400" (harness-ui-chat-test-block-text block)))
+        (should (string-search "[Show less]" (harness-ui-chat-test-block-text block)))))))
+
+(ert-deftest harness-ui-chat-cuts-a-long-answer-of-the-agent-in-a-thread ()
+  "The agent's words in a thread are cut as the words of a reply are: after
+`change-review-ui-max-comment-lines' lines, [Show more] drawing the rest and
+[Show less] cutting it again, in the block, which stays so when drawn again."
+  (harness-ui-chat-test-with
+    (let* ((change-review-ui-max-comment-lines 15)
+           (sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid)))
+      (with-current-buffer buf
+        (let* ((body (mapconcat (lambda (n) (format "Paragraph %d." n)) (number-sequence 1 40) "\n\n"))
+               (block (harness-ui-chat-test-thread-answer
+                       harness-ui-chat-test--thread-meta
+                       :input (list :thread harness-ui-chat-test--thread :body body :status "closed")))
+               (text (lambda () (harness-ui-chat-test-block-text block))))
+          (should (harness-chat--thread-message-p block))
+          (should (string-search "Paragraph 1." (funcall text)))
+          (should-not (string-search "Paragraph 20." (substring (funcall text) 0 (string-search "  input" (funcall text)))))
+          (should (string-match-p "… [0-9]+ more lines  \\[Show more\\]" (funcall text)))
+          ;; The call under the fold is whole: its input, what it was called with.
+          (should (string-search "Paragraph 40." (funcall text)))
+          (should (invisible-p (1- (harness-ui-chat-test-find buf "Paragraph 40." (harness-chat-block-start block)))))
+          (harness-ui-chat-test--press block 'body)
+          (should (harness-chat--more-p block 'body))
+          (should (string-match-p "Paragraph 40\\.\n\\[Show less\\]\n" (funcall text)))
+          (should-not (string-search "Show more" (funcall text)))
+          (harness-chat--rerender block)
+          (should (string-search "[Show less]" (funcall text)))
+          (harness-ui-chat-test--press block 'body)
+          (should-not (harness-chat--more-p block 'body))
+          (should (string-search "[Show more]" (funcall text)))
+          (should (looking-at "… [0-9]+ more lines"))
+          ;; Short words are drawn whole, with nothing to press.
+          (let ((short (harness-ui-chat-test-thread-answer harness-ui-chat-test--thread-meta :call "rc2")))
+            (should-not (string-search "Show" (harness-ui-chat-test-block-text short)))))))))
+
+(ert-deftest harness-ui-chat-quotes-the-whole-of-words-that-are-cut ()
+  "What is replied to is not what is drawn: a reply to the agent's words that are
+cut quotes all of them, whether it is the message, as it was written, or the
+message as a whole at point; and a region that holds the cut words and the line
+under them is a quote of all of them too.  A region of the part that is drawn
+quotes that part, and nothing of the rest."
+  (harness-ui-chat-test-with
+    (let* ((change-review-ui-max-comment-lines 15)
+           (sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid)))
+      (with-current-buffer buf
+        (let* ((body (mapconcat (lambda (n) (format "Paragraph %d." n)) (number-sequence 1 40) "\n\n"))
+               (block (harness-ui-chat-test-thread-answer
+                       harness-ui-chat-test--thread-meta
+                       :input (list :thread harness-ui-chat-test--thread :body body :status "closed")))
+               (start (marker-position (harness-chat-block-start block)))
+               (end (marker-position (harness-chat-block-end block))))
+          (should-not (string-search "Paragraph 40." (buffer-substring-no-properties
+                                                      start (car (harness-chat--more-row block 'body)))))
+          ;; The Markdown to quote is the message's.
+          (should (equal body (harness-chat--quote-markdown block)))
+          (goto-char (+ start 5))
+          (should (equal body (harness-chat--quote-at-point)))
+          ;; The message as a whole at point: all of it.
+          (let ((refs (harness-chat--default-refs)))
+            (should (= 1 (length refs)))
+            (should (string-search "Paragraph 40." (plist-get (car refs) :text)))
+            (should (string-search "Paragraph 1." (plist-get (car refs) :text)))
+            (should-not (string-search "more lines" (plist-get (car refs) :text)))
+            (should-not (string-search "Show more" (plist-get (car refs) :text)))
+            (should (equal "thread" (plist-get (car refs) :who))))
+          ;; A region over all of it.
+          (let ((refs (harness-chat--region-refs start end)))
+            (should (string-search "Paragraph 40." (plist-get (car refs) :text)))
+            (should-not (string-search "Show more" (plist-get (car refs) :text))))
+          ;; A region of what is drawn is what it is of.
+          (let* ((from (harness-ui-chat-test-find buf "Paragraph 2." start))
+                 (to (harness-ui-chat-test-find buf "Paragraph 3." start))
+                 (refs (harness-chat--region-refs (- from (length "Paragraph 2.")) to)))
+            (should (string-search "Paragraph 2." (plist-get (car refs) :text)))
+            (should (string-search "Paragraph 3." (plist-get (car refs) :text)))
+            (should-not (string-search "Paragraph 4." (plist-get (car refs) :text)))
+            (should-not (string-search "Paragraph 40." (plist-get (car refs) :text)))))))))
+
+(ert-deftest harness-ui-chat-quotes-the-whole-of-a-reply-of-yours-that-is-cut ()
+  "A message of yours whose reply is cut is quoted whole when it is replied to as
+a whole: the words under each card as they were written."
+  (harness-ui-chat-test-with
+    (let* ((change-review-ui-max-comment-lines 15)
+           (sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid))
+           (block (harness-ui-chat-test--send-replies
+                   sid buf (list (harness-ui-chat-test--reply 1 40) (harness-ui-chat-test--reply 2)))))
+      (with-current-buffer buf
+        (should-not (string-search "Line 40 of reply 1." (harness-ui-chat-test-block-text block)))
+        (goto-char (+ (marker-position (harness-chat-block-start block)) 3))
+        (let ((refs (harness-chat--default-refs)))
+          (should (= 1 (length refs)))
+          (should (equal "you" (plist-get (car refs) :who)))
+          (should (string-search "Several things:" (plist-get (car refs) :text)))
+          (should (string-search "Line 40 of reply 1." (plist-get (car refs) :text)))
+          (should (string-search "Question 2?" (plist-get (car refs) :text)))
+          (should-not (string-search "more lines" (plist-get (car refs) :text))))))))
+
+(ert-deftest harness-ui-chat-keeps-what-was-shown-of-a-queued-message ()
+  "A message waiting in the queue is drawn again whenever the tail is, a block
+each time: the replies the reader asked to see stay shown."
+  (harness-ui-chat-test-with
+    (let ((old (harness-chat--make-block :id "q1" :kind "user" :shown 7 :more '(earlier 0)))
+          (harness-chat--queued-blocks (make-hash-table :test 'equal)))
+      (puthash "q1" old harness-chat--queued-blocks)
+      (let ((block (harness-chat--queued-block (list :id "q1" :text "later"))))
+        (should-not (eq old block))
+        (should (equal '(earlier 0) (harness-chat-block-more block)))
+        (should (eql 7 (harness-chat-block-shown block)))))))
+
 ;;;; Queue
 
 (ert-deftest harness-ui-chat-queue-add-edit-remove ()

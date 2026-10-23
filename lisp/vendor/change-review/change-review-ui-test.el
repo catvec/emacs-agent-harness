@@ -1293,9 +1293,11 @@ conversation.  Clicking it, or the words of a thread of one line, folds it."
 (ert-deftest change-review-ui-cuts-a-thread-that-is-longer-than-the-room-it-has ()
   "A thread longer than MAX-LINES is cut, and says how many lines more there
 are, in a button that shows them all: the fold `full'.  Where the thread
-shows where its comments were made, it is not cut."
+shows where its comments were made, it is not cut.  (The comment is
+long, and not cut itself: that is `change-review-ui-max-comment-lines'.)"
   (change-review-ui-test--drawing
-    (let* ((set (change-review-ui-test--set))
+    (let* ((change-review-ui-max-comment-lines nil)
+           (set (change-review-ui-test--set))
            (comment (change-review-comment
                      set (mapconcat (lambda (n) (format "Line %d of a long comment." n))
                                     (number-sequence 1 20) "\n")
@@ -1335,6 +1337,549 @@ shows where its comments were made, it is not cut."
       ;; The threads view, with no fold, has no limit either.
       (should (= 22 (length (change-review-ui-test--lines
                              (change-review-ui-thread-string set thread :width 80 :max-lines 8))))))))
+
+;;;; Long threads and long comments
+
+(defun change-review-ui-test--conversation (set count &optional lines)
+  "Return a thread of SET with COUNT comments, each LINES lines long (default 1).
+The first is the user's, the others answer it by turns, the agent's
+and the user's; the Nth says \"Comment N, line K.\" on its Kth line.  All
+were sent, so none is a draft."
+  (let* ((noah (change-review-ui-test--author))
+         (bot (change-review-agent "Claude" :session "sess-1" :tool-call "toolu_9"))
+         (text (lambda (n)
+                 (mapconcat (lambda (k) (format "Comment %d, line %d." n k))
+                            (number-sequence 1 (or lines 1)) "\n")))
+         (then (- change-review-ui-test--now 100000))
+         (root (change-review-comment set (funcall text 1) :author noah :time then :sent then)))
+    (cl-loop for n from 2 to count
+             do (change-review-reply set root (funcall text n)
+                                     :author (if (cl-evenp n) bot noah)
+                                     :time (+ then (* 60 n)) :sent (+ then (* 60 n))))
+    (change-review-find-thread set (change-review-comment-thread root))))
+
+(ert-deftest change-review-ui-counts-the-replies-a-thread-folds-away ()
+  "A thread keeps its first comment and its last few; what is between is
+folded when that is two comments or more.  The comments that must stay in
+sight end the range before them."
+  (let ((change-review-ui-tail-replies 3))
+    (should (equal '(1 . 7) (change-review-ui-folded-replies 10)))
+    (should (equal '(1 . 4) (change-review-ui-folded-replies 7)))
+    (should (equal '(1 . 3) (change-review-ui-folded-replies 6)))
+    ;; Five comments would fold one: no shorter than the line that says so.
+    (should-not (change-review-ui-folded-replies 5))
+    (should-not (change-review-ui-folded-replies 1))
+    (should-not (change-review-ui-folded-replies 0))
+    ;; The number can be given, and the last comment always stays.
+    (should (equal '(1 . 8) (change-review-ui-folded-replies 10 2)))
+    (should (equal '(1 . 9) (change-review-ui-folded-replies 10 1)))
+    (should (equal '(1 . 9) (change-review-ui-folded-replies 10 0)))
+    ;; A comment kept in sight ends the range before it, and all after it stay.
+    (should (equal '(1 . 5) (change-review-ui-folded-replies 10 3 '(5))))
+    (should (equal '(1 . 4) (change-review-ui-folded-replies 10 3 '(6 4 9))))
+    (should (equal '(1 . 7) (change-review-ui-folded-replies 10 3 '(7 9))))
+    (should-not (change-review-ui-folded-replies 10 3 '(2)))
+    ;; The first comment is in sight anyway.
+    (should (equal '(1 . 7) (change-review-ui-folded-replies 10 3 '(0)))))
+  (let ((change-review-ui-tail-replies nil))
+    (should-not (change-review-ui-folded-replies 50))
+    (should (equal '(1 . 8) (change-review-ui-folded-replies 10 2)))))
+
+(ert-deftest change-review-ui-cuts-the-lines-of-a-long-text ()
+  "The first lines are shown and the rest counted, once it is two lines or
+more; the blank lines the cut ends on are not shown."
+  (let ((change-review-ui-max-comment-lines 5)
+        (lines (lambda (n) (mapcar (lambda (k) (format "line %d" k)) (number-sequence 1 n)))))
+    (should (equal (cons (funcall lines 3) 0) (change-review-ui-cut-lines (funcall lines 3))))
+    (should (equal (cons (funcall lines 5) 0) (change-review-ui-cut-lines (funcall lines 5))))
+    ;; One line over is no gain.
+    (should (equal (cons (funcall lines 6) 0) (change-review-ui-cut-lines (funcall lines 6))))
+    (should (equal (cons (funcall lines 5) 2) (change-review-ui-cut-lines (funcall lines 7))))
+    (should (equal (cons (funcall lines 5) 95) (change-review-ui-cut-lines (funcall lines 100))))
+    ;; The limit can be given.
+    (should (equal (cons (funcall lines 2) 8) (change-review-ui-cut-lines (funcall lines 10) 2)))
+    (should (equal (cons (funcall lines 1) 9) (change-review-ui-cut-lines (funcall lines 10) 0)))
+    ;; A gap is no way to end.
+    (should (equal (cons '("a" "b") 4)
+                   (change-review-ui-cut-lines '("a" "b" "" "  " "c" "d") 4))))
+  (let ((change-review-ui-max-comment-lines nil))
+    (should (equal (cons (number-sequence 1 50) 0)
+                   (change-review-ui-cut-lines (number-sequence 1 50))))))
+
+(ert-deftest change-review-ui-draws-the-first-comment-the-last-few-and-one-line-for-the-rest ()
+  "A thread of ten comments draws the first, a line for the six after it,
+and the last three; the comments keep their numbers, so the gap shows."
+  (change-review-ui-test--drawing
+    (let* ((change-review-ui-tail-replies 3)
+           (set (change-review-ui-test--set))
+           (thread (change-review-ui-test--conversation set 10))
+           (string (change-review-ui-thread-string set thread :width 80))
+           (lines (change-review-ui-test--lines string)))
+      (should (string-match-p "· 10 comments ·" (nth 0 lines)))
+      (should (equal '("┃  1/10" "┃  8/10" "┃  9/10" "┃ 10/10")
+                     (mapcar (lambda (n) (substring (nth n lines) 0 7))
+                             '(1 4 6 8))))
+      (should (equal "┃       Comment 1, line 1." (nth 2 lines)))
+      (should (equal "┃       ▸ 6 earlier replies" (nth 3 lines)))
+      (should (equal "┃       Comment 8, line 1." (nth 5 lines)))
+      (should (equal "┃       Comment 10, line 1." (nth 9 lines)))
+      ;; Nothing else: the header, 2 + 1 + 3 * 2 lines.
+      (should (= 10 (length lines)))
+      (should-not (cl-some (lambda (n) (string-search (format "Comment %d," n) string)) '(2 3 4 5 6 7)))
+      ;; The line is a button.
+      (should (change-review-ui-test--button string "▸ 6 earlier replies"))
+      ;; Every line of the thread, the line that stands for comments too, is its thread's.
+      (should-not (text-property-not-all 0 (length string) 'change-review-thread
+                                         (change-review-thread-id thread) string)))))
+
+(ert-deftest change-review-ui-draws-a-thread-of-a-few-comments-whole ()
+  "Five comments fold only one: nothing is folded.  Nor when the option is nil."
+  (change-review-ui-test--drawing
+    (let* ((change-review-ui-tail-replies 3)
+           (set (change-review-ui-test--set))
+           (five (change-review-ui-test--conversation set 5))
+           (six (change-review-ui-test--conversation set 6)))
+      (should-not (string-search "earlier repl"
+                                 (change-review-ui-thread-string set five :width 80)))
+      (should (string-search "▸ 2 earlier replies"
+                             (change-review-ui-thread-string set six :width 80)))
+      (let ((change-review-ui-tail-replies nil))
+        (should-not (string-search "earlier repl"
+                                   (change-review-ui-thread-string set six :width 80))))
+      (let ((change-review-ui-tail-replies 1))
+        (should (string-search "▸ 4 earlier replies"
+                               (change-review-ui-thread-string set six :width 80)))))))
+
+(ert-deftest change-review-ui-shows-the-earlier-replies-on-a-click-and-folds-them-again ()
+  "The line of the folded replies draws them; then it is a button that folds
+them away again.  What was chosen stays with the set, and is the thread's."
+  (change-review-ui-test--drawing
+    (let* ((change-review-ui-tail-replies 3)
+           (set (change-review-ui-test--set))
+           (other (change-review-ui-test--set))
+           (thread (change-review-ui-test--conversation set 10))
+           (draw (lambda () (change-review-ui-thread-string set thread :width 80))))
+      (should-not (change-review-ui-earlier-shown-p set thread))
+      (change-review-ui-test--press (funcall draw) "▸ 6 earlier replies")
+      (should (change-review-ui-earlier-shown-p set thread))
+      (let* ((string (funcall draw))
+             (lines (change-review-ui-test--lines string)))
+        ;; All ten, and the line that folds them, after the first: the header,
+        ;; the line, and two for each comment.
+        (should (= (+ 1 1 (* 2 10)) (length lines)))
+        (should (equal "┃       ▾ 6 earlier replies" (nth 3 lines)))
+        (should (equal '("┃  1/10" "┃  2/10" "┃  3/10" "┃  7/10" "┃  8/10" "┃ 10/10")
+                       (mapcar (lambda (n) (substring (nth n lines) 0 7))
+                               '(1 4 6 14 16 20))))
+        (should (string-search "Comment 4, line 1." string))
+        (change-review-ui-test--press string "▾ 6 earlier replies"))
+      (should-not (change-review-ui-earlier-shown-p set thread))
+      (should (= 10 (length (change-review-ui-test--lines (funcall draw)))))
+      ;; Another set, with a thread of the same id perhaps, has its own.
+      (change-review-ui-show-earlier set thread t)
+      (should (change-review-ui-earlier-shown-p set thread))
+      (should-not (change-review-ui-earlier-shown-p other thread)))))
+
+(ert-deftest change-review-ui-never-folds-away-a-draft-or-the-comments-after-it ()
+  "A draft is never out of sight, so neither is any comment after it."
+  (change-review-ui-test--drawing
+    (let* ((change-review-ui-tail-replies 3)
+           (set (change-review-ui-test--set))
+           (noah (change-review-ui-test--author))
+           (root (change-review-comment set "Question." :author noah
+                                        :time change-review-ui-test--now :sent change-review-ui-test--now)))
+      ;; Comments 2 and 3 were sent; 4 is a draft; 5 to 10 were sent.
+      (dolist (n (number-sequence 2 10))
+        (change-review-reply set root (format "Comment %d." n) :author noah
+                             :time (+ change-review-ui-test--now n)
+                             :sent (and (/= n 4) (+ change-review-ui-test--now n))))
+      (let* ((thread (change-review-find-thread set (change-review-comment-thread root)))
+             (string (change-review-ui-thread-string set thread :width 80)))
+        (should (string-search "▸ 2 earlier replies" string))
+        (should-not (string-search "Comment 2." string))
+        (should-not (string-search "Comment 3." string))
+        (dolist (n '(4 5 6 7 8 9 10))
+          (should (string-search (format "Comment %d." n) string)))
+        (should (string-search "[Edit]" string))))))
+
+(ert-deftest change-review-ui-keeps-a-comment-whose-details-show-in-sight ()
+  "A comment that shows where it was made is not folded away, nor are those after it."
+  (change-review-ui-test--drawing
+    (let* ((change-review-ui-tail-replies 3)
+           (set (change-review-ui-test--set))
+           (thread (change-review-ui-test--conversation set 10))
+           (fifth (nth 4 (change-review-thread-comments thread)))
+           (string (change-review-ui-thread-string
+                    set thread :width 80 :details (list (change-review-comment-id fifth)))))
+      (should (string-search "▸ 3 earlier replies" string))
+      (should (string-search "Comment 4, line 1." (substring-no-properties
+                                                    (change-review-ui-thread-string
+                                                     set thread :width 80 :details t))))
+      (should (string-search "Comment 5, line 1." string))
+      (should-not (string-search "Comment 4, line 1." string))
+      ;; All the details: nothing is out of sight.
+      (should-not (string-search "earlier repl" (change-review-ui-thread-string
+                                                 set thread :width 80 :details t))))))
+
+(ert-deftest change-review-ui-leaves-nothing-out-of-a-thread-drawn-in-full ()
+  "The fold `full' draws every comment, whole, with no line to open anything."
+  (change-review-ui-test--drawing
+    (let* ((change-review-ui-tail-replies 3)
+           (change-review-ui-max-comment-lines 4)
+           (set (change-review-ui-test--set))
+           (thread (change-review-ui-test--conversation set 10 8))
+           (string (change-review-ui-thread-string set thread :width 80 :fold 'full)))
+      (should-not (string-search "earlier repl" string))
+      (should-not (string-search "more line" string))
+      (should-not (string-search "Show " string))
+      (dolist (n (number-sequence 1 10))
+        (should (string-search (format "Comment %d, line 8." n) string)))
+      ;; And the one that was not asked for in full has both.
+      (let ((string (change-review-ui-thread-string set thread :width 80 :fold 'expanded)))
+        (should (string-search "earlier repl" string))
+        (should (string-search "[Show more]" string))))))
+
+(ert-deftest change-review-ui-cuts-a-long-comment-and-draws-the-rest-on-a-click ()
+  "A comment longer than the option is cut, says how many lines more there are,
+and its [Show more] draws them, with a [Show less] that cuts it again."
+  (change-review-ui-test--drawing
+    (let* ((change-review-ui-max-comment-lines 5)
+           (set (change-review-ui-test--set))
+           (thread (change-review-ui-test--conversation set 1 20))
+           (root (change-review-thread-root thread))
+           (draw (lambda () (change-review-ui-thread-string set thread :width 80))))
+      ;; The header, the comment's, five lines of the text, and the line that says more.
+      (let ((lines (change-review-ui-test--lines (funcall draw))))
+        (should (= 8 (length lines)))
+        (should (equal "┃      Comment 1, line 5." (nth 6 lines)))
+        (should (equal "┃      … 15 more lines  [Show more]" (nth 7 lines))))
+      (should-not (change-review-ui-comment-shown-p set root))
+      (change-review-ui-test--press (funcall draw) "[Show more]")
+      (should (change-review-ui-comment-shown-p set root))
+      ;; All of it, the header and the comment's, then [Show less].
+      (let ((lines (change-review-ui-test--lines (funcall draw))))
+        (should (= 23 (length lines)))
+        (should (equal "┃      Comment 1, line 20." (nth 21 lines)))
+        (should (equal "┃      [Show less]" (nth 22 lines))))
+      (change-review-ui-test--press (funcall draw) "[Show less]")
+      (should-not (change-review-ui-comment-shown-p set root))
+      (should (= 8 (length (change-review-ui-test--lines (funcall draw)))))
+      ;; The option nil never cuts.
+      (let ((change-review-ui-max-comment-lines nil))
+        (should (= 22 (length (change-review-ui-test--lines (funcall draw))))))
+      ;; A thread that was not cut says nothing of the buttons.
+      (should-not (string-search "Show less" (let ((change-review-ui-max-comment-lines nil))
+                                               (funcall draw)))))))
+
+(ert-deftest change-review-ui-does-not-cut-a-comment-a-line-over ()
+  "Cutting one line would leave the line that says so: the comment is drawn whole,
+until it is two lines over."
+  (change-review-ui-test--drawing
+    (let* ((change-review-ui-max-comment-lines 5)
+           (set (change-review-ui-test--set))
+           (six (change-review-ui-test--conversation set 1 6))
+           (seven (change-review-ui-test--conversation set 1 7)))
+      (let ((string (change-review-ui-thread-string set six :width 80)))
+        (should (= 8 (length (change-review-ui-test--lines string))))
+        (should-not (string-search "Show" string)))
+      (let ((string (change-review-ui-thread-string set seven :width 80)))
+        (should (= 8 (length (change-review-ui-test--lines string))))
+        (should (string-search "… 2 more lines  [Show more]" string))))))
+
+(ert-deftest change-review-ui-cuts-each-long-comment-of-a-thread-by-itself ()
+  "What one comment shows is its own: another long one is still cut, and the
+ones that are short have no button."
+  (change-review-ui-test--drawing
+    (let* ((change-review-ui-max-comment-lines 3)
+           (change-review-ui-tail-replies nil)
+           (set (change-review-ui-test--set))
+           (thread (change-review-ui-test--conversation set 3 10))
+           (second (nth 1 (change-review-thread-comments thread))))
+      (should (= 3 (length (change-review-ui-test--buttons
+                            (change-review-ui-thread-string set thread :width 80) "[Show more]"))))
+      (change-review-ui-show-comment set second t)
+      (let ((string (change-review-ui-thread-string set thread :width 80)))
+        (should (= 2 (length (change-review-ui-test--buttons string "[Show more]"))))
+        (should (= 1 (length (change-review-ui-test--buttons string "[Show less]"))))
+        (should (string-search "Comment 2, line 10." string))
+        (should-not (string-search "Comment 1, line 10." string))
+        (should-not (string-search "Comment 3, line 10." string))))))
+
+(ert-deftest change-review-ui-cuts-the-lines-a-set-draws ()
+  "The lines that are cut are the ones the set draws, with the faces it gave
+them: the cut does not count the lines of the text."
+  (change-review-ui-test--drawing
+    (let ((change-review-ui-max-comment-lines 3))
+      (pcase-let* ((`(,set . ,thread)
+                    (change-review-ui-test--markup-thread
+                     "plain\n!bold\n~extends\nfourth\nfifth\nsixth"))
+                   (string (change-review-ui-thread-string set thread :width 80))
+                   (lines (change-review-ui-test--lines string)))
+        (should (equal '("┃      plain" "┃      bold" "┃      extends"
+                         "┃      … 3 more lines  [Show more]")
+                       (nthcdr 2 lines)))
+        (should (eq 'bold (get-text-property (string-search "bold" string) 'face string)))
+        (should-not (string-search "fourth" string))))))
+
+(ert-deftest change-review-ui-offsets-in-a-cut-comment-are-those-of-its-text ()
+  "What is selected of the lines that are drawn is read back as the text it
+is of, as in a comment that is not cut, and the line that says more is
+none of it."
+  (change-review-ui-test--drawing
+    (let* ((change-review-ui-max-comment-lines 4)
+           (set (change-review-ui-test--set))
+           (thread (change-review-ui-test--conversation set 1 12))
+           (root (change-review-thread-root thread))
+           (body (change-review-comment-body root))
+           (string (change-review-ui-thread-string set thread :width 80))
+           (pos (string-search "line 3." string)))
+      (should (equal (cons (change-review-comment-id root) (string-search "line 3." body))
+                     (change-review-ui--offset-at pos string)))
+      ;; The line that says more has no text, and stands for where the shown ends.
+      (let ((more (string-search "more lines" string)))
+        (should-not (change-review-ui--body-line more string))
+        (should (equal (cons (change-review-comment-id root) (string-search "\nComment 1, line 5." body))
+                       (change-review-ui--offset-at more string)))))))
+
+(ert-deftest change-review-ui-does-not-cut-a-thread-the-user-asked-more-of ()
+  "A thread cut to the room of its window is cut by what the user did not
+ask for: once a comment is shown in full, or the earlier replies, nothing of
+the thread is cut to the window any more."
+  (change-review-ui-test--drawing
+    (let* ((change-review-ui-max-comment-lines 5)
+           (change-review-ui-tail-replies 3)
+           (set (change-review-ui-test--set))
+           (thread (change-review-ui-test--conversation set 1 20))
+           (draw (lambda (&rest keys)
+                   (apply #'change-review-ui-thread-string set thread :view 'diff :width 80
+                          :fold 'expanded :max-lines 6 keys))))
+      ;; Six lines of room: the header, the comment's, three of its lines and
+      ;; the one that says more, whose button draws all of the comment.
+      (let ((lines (change-review-ui-test--lines (funcall draw))))
+        (should (= 6 (length lines)))
+        (should (string-match-p "… 17 more lines  \\[Show more\\]\\'" (car (last lines)))))
+      (change-review-ui-show-comment set (change-review-thread-root thread) t)
+      (should (= 23 (length (change-review-ui-test--lines (funcall draw)))))
+      ;; The replies that were folded away too.
+      (change-review-ui-show-comment set (change-review-thread-root thread) nil)
+      (let ((many (change-review-ui-test--conversation set 10)))
+        (should (< (length (change-review-ui-test--lines
+                            (change-review-ui-thread-string set many :view 'diff :width 80
+                                                            :fold 'expanded :max-lines 6)))
+                   10))
+        (change-review-ui-show-earlier set many t)
+        (should (= 22 (length (change-review-ui-test--lines
+                               (change-review-ui-thread-string set many :view 'diff :width 80
+                                                               :fold 'expanded :max-lines 6)))))))))
+
+(ert-deftest change-review-ui-cuts-long-comments-shorter-to-fit-the-room ()
+  "A thread the window has less room for than its comments take keeps the
+line of each long comment that shows the rest: the comments are cut
+shorter, as far as the room goes and not under three lines.  Only when even
+that does not fit is the thread cut off, and the line that says so counts
+what clicking it draws: all of the thread."
+  (change-review-ui-test--drawing
+    (let* ((change-review-ui-max-comment-lines 15)
+           (change-review-ui-tail-replies 3)
+           (set (change-review-ui-test--set))
+           (thread (change-review-ui-test--conversation set 2 40))
+           (draw (lambda (&optional max)
+                   (change-review-ui-test--lines
+                    (change-review-ui-thread-string set thread :view 'diff :width 80
+                                                    :fold 'expanded :max-lines max))))
+           (shows (lambda (lines)
+                    (cl-count-if (lambda (line) (string-match-p "more lines  \\[Show more\\]\\'" line))
+                                 lines))))
+      ;; Room for all: each comment is cut as the option says.
+      (let ((lines (funcall draw)))
+        (should (= 35 (length lines)))
+        (should (= 2 (funcall shows lines)))
+        (should (string-search "Comment 1, line 15." (string-join lines "\n")))
+        (should-not (string-search "Comment 1, line 16." (string-join lines "\n"))))
+      ;; Room for 20: seven lines of each, and the line after them.
+      (let ((lines (funcall draw 20)))
+        (should (= 19 (length lines)))
+        (should (= 2 (funcall shows lines)))
+        (should (string-search "Comment 2, line 7." (string-join lines "\n")))
+        (should-not (string-search "Comment 2, line 8." (string-join lines "\n")))
+        (should (string-match-p "… 33 more lines  \\[Show more\\]\\'" (car (last lines)))))
+      ;; Room for 12: three lines of each.
+      (let ((lines (funcall draw 12)))
+        (should (= 11 (length lines)))
+        (should (= 2 (funcall shows lines)))
+        (should (string-search "Comment 2, line 3." (string-join lines "\n")))
+        (should-not (string-search "Comment 2, line 4." (string-join lines "\n"))))
+      ;; Less than that: the thread is cut off, saying how many lines the
+      ;; button draws, all of those the thread has less the ones drawn.
+      (let ((lines (funcall draw 8)))
+        (should (= 8 (length lines)))
+        (should (string-match-p "┃      … 76 more lines\\'" (car (last lines)))))
+      ;; The button on a comment draws all of it, and then the room is no limit.
+      (change-review-ui-show-comment set (change-review-thread-root thread) t)
+      (let ((lines (funcall draw 12)))
+        (should (string-search "Comment 1, line 40." (string-join lines "\n")))
+        (should (> (length lines) 40))))
+    ;; Without a cut to shorten, the thread is cut off where the room ends.
+    (let* ((change-review-ui-max-comment-lines nil)
+           (set (change-review-ui-test--set))
+           (thread (change-review-ui-test--conversation set 2 10))
+           (lines (change-review-ui-test--lines
+                   (change-review-ui-thread-string set thread :view 'diff :width 80
+                                                   :fold 'expanded :max-lines 8))))
+      (should (= 8 (length lines)))
+      (should (string-match-p "┃      … 16 more lines\\'" (car (last lines)))))))
+
+(ert-deftest change-review-ui-folding-a-thread-to-one-line-takes-back-what-was-shown ()
+  "The earlier replies and the long comments the user asked to see stay shown
+while the thread is folded to its conversation or to all of it; one line
+takes them back, so that its conversation comes back as short as it was."
+  (change-review-ui-test--drawing
+    (let* ((change-review-ui-max-comment-lines 5)
+           (change-review-ui-tail-replies 3)
+           (set (change-review-ui-test--set))
+           (thread (change-review-ui-test--conversation set 10 8))
+           (root (change-review-thread-root thread))
+           (other (change-review-ui-test--conversation set 7 8))
+           (lines (lambda (thread)
+                    (length (change-review-ui-test--lines
+                             (change-review-ui-thread-string set thread :width 80 :fold 'expanded))))))
+      (let ((short (funcall lines thread)))
+        (change-review-ui-show-earlier set thread t)
+        (change-review-ui-show-comment set root t)
+        (change-review-ui-set-fold set thread 'full)
+        (change-review-ui-set-fold set thread 'expanded)
+        (should (change-review-ui-earlier-shown-p set thread))
+        (should (change-review-ui-comment-shown-p set root))
+        (should (> (funcall lines thread) short))
+        (change-review-ui-set-fold set thread 'collapsed)
+        (should-not (change-review-ui-earlier-shown-p set thread))
+        (should-not (change-review-ui-comment-shown-p set root))
+        (change-review-ui-set-fold set thread 'expanded)
+        (should (= short (funcall lines thread))))
+      ;; Another thread's are its own.
+      (change-review-ui-show-earlier set other t)
+      (change-review-ui-set-fold set thread 'collapsed)
+      (should (change-review-ui-earlier-shown-p set other)))))
+
+(ert-deftest change-review-ui-keeps-the-reader-in-place-when-a-comment-is-shown-or-cut ()
+  "In the threads view a click that draws a comment in full, or cuts it again,
+draws the view again with point on the comment and on the row of the window
+it was on: on the first line the click drew, and, once the comment is cut,
+on the line that says there is more."
+  (change-review-ui-test--drawing
+    (let* ((change-review-ui-max-comment-lines 5)
+           (set (change-review-ui-test--set))
+           (_thread (change-review-ui-test--conversation set 1 30))
+           (change-review-ui-sets nil)
+           (buffer (save-window-excursion (change-review-open-threads set 'all))))
+      (unwind-protect
+          (save-window-excursion
+            (delete-other-windows)
+            (switch-to-buffer buffer)
+            (let ((press (lambda (label)
+                           (goto-char (point-min))
+                           (search-forward label)
+                           (backward-char 2)
+                           (recenter 3)
+                           (let ((row (change-review-ui--screen-row)))
+                             (push-button)
+                             (change-review-ui-flush)
+                             row)))
+                  (here (lambda ()
+                          (buffer-substring-no-properties (line-beginning-position)
+                                                          (line-end-position)))))
+              (let ((row (funcall press "[Show more]")))
+                (should (= 3 row))
+                (should (string-search "Comment 1, line 6." (funcall here)))
+                (should (= row (change-review-ui--screen-row))))
+              (let ((row (funcall press "[Show less]")))
+                (should (string-search "… 25 more lines  [Show more]" (funcall here)))
+                (should (= row (change-review-ui--screen-row))))))
+        (kill-buffer buffer)))))
+
+(ert-deftest change-review-ui-the-next-fold-shows-what-was-left-out ()
+  "From the conversation, the fold that shows all of it is next when replies
+were folded away or a comment cut, as when the window had no room: it draws
+every comment and every line, and the one after it is one line."
+  (change-review-ui-test--drawing
+    (let* ((change-review-ui-tail-replies 3)
+           (change-review-ui-max-comment-lines 5)
+           (set (change-review-ui-test--set))
+           (folded (change-review-ui-test--conversation set 10))
+           (long (change-review-ui-test--conversation set 1 20))
+           (whole (change-review-ui-test--conversation set 2)))
+      (dolist (thread (list folded long whole))
+        (change-review-ui-set-fold set thread 'expanded))
+      (dolist (thread (list folded long whole))
+        (change-review-ui-thread-string set thread :width 80 :fold 'expanded))
+      (should (change-review-ui--trimmed-p set folded))
+      (should (change-review-ui--trimmed-p set long))
+      (should-not (change-review-ui--trimmed-p set whole))
+      (should (eq 'full (change-review-ui-next-fold set folded)))
+      (should (eq 'full (change-review-ui-next-fold set long)))
+      (should (eq 'collapsed (change-review-ui-next-fold set whole)))
+      ;; Once everything was asked for, nothing is left out, and the next is one line.
+      (change-review-ui-show-earlier set folded t)
+      (change-review-ui-thread-string set folded :width 80 :fold 'expanded)
+      (should-not (change-review-ui--trimmed-p set folded))
+      (should (eq 'collapsed (change-review-ui-next-fold set folded))))))
+
+(ert-deftest change-review-ui-the-threads-view-folds-replies-and-cuts-comments ()
+  "The view of the threads is text; its buttons are pressed where point is,
+and the view draws again with what they showed."
+  (change-review-ui-test--drawing
+    (let* ((change-review-ui-tail-replies 3)
+           (change-review-ui-max-comment-lines 4)
+           (set (change-review-ui-test--set))
+           (change-review-ui-sets nil)
+           (thread (change-review-ui-test--conversation set 8 9))
+           (buffer (save-window-excursion (change-review-open-threads set 'all))))
+      (ignore thread)
+      (unwind-protect
+          (with-current-buffer buffer
+            (should (re-search-forward "▸ 4 earlier replies" nil t))
+            (should (= 1 (length (change-review-ui-test--buttons (buffer-string) "▸ 4 earlier replies"))))
+            ;; Show the replies: a press on the line, in the buffer.
+            (goto-char (match-beginning 0))
+            (push-button)
+            (change-review-ui-flush)
+            (goto-char (point-min))
+            (should (re-search-forward "▾ 4 earlier replies" nil t))
+            (should (search-forward "Comment 4, line 1." nil t))
+            ;; A comment's lines: cut after four, and the rest on a press.
+            (goto-char (point-min))
+            (should (search-forward "Comment 4, line 4." nil t))
+            (should-not (save-excursion (search-forward "Comment 4, line 5." (line-end-position 3) t)))
+            (should (re-search-forward "… 5 more lines  \\[Show more\\]" nil t))
+            (goto-char (match-beginning 0))
+            (search-forward "[Show more]")
+            (push-button (1- (point)))
+            (change-review-ui-flush)
+            (goto-char (point-min))
+            (should (search-forward "Comment 4, line 9." nil t))
+            (should (search-forward "[Show less]" nil t)))
+        (kill-buffer buffer)))))
+
+(ert-deftest change-review-ui-the-diff-view-and-the-lines-under-a-line-fold-and-cut-too ()
+  "A thread under a line is the text of an overlay: its buttons act on the
+thread, and the line the overlay is under draws again with what they showed."
+  (change-review-ui-test--drawing
+    (let* ((change-review-ui-tail-replies 3)
+           (change-review-ui-max-comment-lines 4)
+           (set (change-review-ui-test--set))
+           (thread (change-review-ui-test--conversation set 8 9)))
+      (with-temp-buffer
+        (insert "one\ntwo\n")
+        (setq change-review-ui--set set)
+        (goto-char (point-min))
+        (let ((overlay (change-review-ui-add-thread-overlay set thread (line-end-position)
+                                                            :view 'diff :width 80 :indent "  "
+                                                            :fold 'expanded)))
+          (let ((text (overlay-get overlay 'after-string)))
+            (should (string-search "▸ 4 earlier replies" text))
+            (should (string-search "… 5 more lines  [Show more]" text))
+            (change-review-ui-test--press text "▸ 4 earlier replies"))
+          (should (change-review-ui-earlier-shown-p set thread)))))))
 
 (ert-deftest change-review-ui-quotes-what-was-said-not-what-it-answered ()
   "The words that stand for a comment in one line are its own, not the
@@ -2374,6 +2919,244 @@ that grew under it is not in sight, and leaves the window alone when it is."
                 (should-not recentered))))
         (kill-buffer buffer)))))
 
+;;;; Scrolling past a thread under a line
+
+(defmacro change-review-ui-test--with-threads-under-lines (text overlay-line &rest body)
+  "Run BODY in a buffer of TEXT shown in the selected window, a thread under a line.
+The thread is drawn under line OVERLAY-LINE (1 for the first), `eol' being
+where it hangs.  `window', `thread' and `set' are bound."
+  (declare (indent 2))
+  `(change-review-ui-test--drawing
+     (let* ((set (change-review-ui-test--set))
+            (thread (change-review-ui-test--conversation set 2 3))
+            (buffer (generate-new-buffer " *change-review-scroll*"))
+            (window nil))
+       (unwind-protect
+           (save-window-excursion
+             (delete-other-windows)
+             (switch-to-buffer buffer)
+             (setq window (selected-window))
+             (with-current-buffer buffer
+               (insert ,text)
+               (setq change-review-ui--set set)
+               (goto-char (point-min))
+               (forward-line (1- ,overlay-line))
+               (let ((eol (line-end-position)))
+                 (ignore eol)
+                 (change-review-ui-add-thread-overlay set thread eol :view 'diff :width 70 :indent "  ")
+                 ,@body)))
+         (kill-buffer buffer)))))
+
+(ert-deftest change-review-ui-marks-a-buffer-with-threads-under-its-lines ()
+  "The first thread under a line makes C-n and C-p go by lines of the buffer
+and puts the hook that keeps its windows from starting in a thread; one
+buffer gets them once."
+  (change-review-ui-test--with-threads-under-lines "one\ntwo\nthree\nfour\n" 2
+    (should change-review-ui--keeps-scrolling)
+    (should-not line-move-visual)
+    (should (memq #'change-review-ui--pre-redisplay (buffer-local-value 'pre-redisplay-functions buffer)))
+    (change-review-ui-add-thread-overlay set thread (point-min) :before t :view 'diff :width 70)
+    (should (= 1 (cl-count #'change-review-ui--pre-redisplay
+                           (buffer-local-value 'pre-redisplay-functions buffer))))
+    ;; Another buffer is as it was.
+    (with-temp-buffer
+      (should-not change-review-ui--keeps-scrolling)
+      (should line-move-visual))))
+
+(ert-deftest change-review-ui-finds-where-a-thread-hangs ()
+  "A thread drawn under a line hangs on the end of the line; one drawn before
+the first hangs on the start of the buffer."
+  (change-review-ui-test--with-threads-under-lines "one\ntwo\nthree\nfour\n" 2
+    (should (change-review-ui--thread-string-at-p eol))
+    (should-not (change-review-ui--thread-string-at-p (1- eol)))
+    (should-not (change-review-ui--thread-string-at-p (1+ eol)))
+    (should-not (change-review-ui--thread-string-at-p (point-min)))
+    (change-review-ui-add-thread-overlay set thread (point-min) :before t :view 'diff :width 70)
+    (should (change-review-ui--thread-string-at-p (point-min)))
+    (change-review-ui-clear-overlays)
+    (should-not (change-review-ui--thread-string-at-p eol))))
+
+(ert-deftest change-review-ui-shows-the-cursor-at-the-first-row-of-a-thread ()
+  "Point at the end of a line, where the thread under it hangs, is shown after the
+thread's text, on its last row, which a thread taller than the window pushes
+out of sight, and the window scrolls to it.  The cursor is on the first row of
+the thread instead, the first character after the newline that ends the line.
+A thread before the first line has no such place to be."
+  (change-review-ui-test--with-threads-under-lines "one\ntwo\nthree\nfour\n" 2
+    (let* ((overlay (car (cl-remove-if-not (lambda (o) (overlay-get o 'change-review-overlay))
+                                           (overlays-in (point-min) (point-max)))))
+           (string (overlay-get overlay 'after-string)))
+      (should (eq ?\n (aref string 0)))
+      (should (eq t (get-text-property 1 'cursor string)))
+      (should-not (get-text-property 0 'cursor string))
+      (should-not (get-text-property 2 'cursor string))
+      ;; Drawn again, as a selection does, it has it still.
+      (change-review-ui-clear-selection)
+      (should (eq t (get-text-property 1 'cursor (overlay-get overlay 'after-string)))))
+    (change-review-ui-clear-overlays)
+    (let ((before (change-review-ui-add-thread-overlay set thread (point-min) :before t
+                                                         :view 'diff :width 70)))
+      (should (overlay-get before 'before-string))
+      (should-not (text-property-any 0 (length (overlay-get before 'before-string))
+                                     'cursor t (overlay-get before 'before-string))))))
+
+(ert-deftest change-review-ui-starts-a-window-scrolled-into-a-thread-past-it ()
+  "A window that a scroll started on the end of the line a thread is under
+starts at the next line, point with it; scrolled back, at the line the
+thread is under."
+  (change-review-ui-test--with-threads-under-lines "one\ntwo\nthree\nfour\n" 2
+    (let ((three (1+ eol)))
+      ;; Scrolled forwards from the first line into the thread.
+      (set-window-start window eol)
+      (goto-char eol)
+      (should (change-review-ui--unstick window (point-min) t))
+      (should (= three (window-start window)))
+      (should (= three (point)))
+      ;; Scrolled back from the third line: the thread's line.
+      (set-window-start window eol)
+      (goto-char (point-max))
+      (should (change-review-ui--unstick window three nil))
+      (should (= (save-excursion (goto-char eol) (line-beginning-position)) (window-start window)))
+      (should (= (point-max) (point)))
+      ;; A start that is no thread's is left as it is.
+      (set-window-start window three)
+      (should-not (change-review-ui--unstick window (point-min) t))
+      (should (= three (window-start window)))
+      ;; Scrolled forwards from where it was, it did not move: the same way out.
+      (set-window-start window eol)
+      (should (change-review-ui--unstick window eol t))
+      (should (= three (window-start window)))
+      ;; Not scrolled back, it did not move: it can go no further.
+      (set-window-start window eol)
+      (should-not (change-review-ui--unstick window eol nil))
+      (should (= eol (window-start window))))))
+
+(ert-deftest change-review-ui-moves-a-window-that-cannot-scroll-into-the-thread-it-starts-on ()
+  "A window that starts on the line a thread is under, when the thread has as
+many rows as the window, cannot be scrolled forwards by a row: the one after
+the line's is the thread's, and a window starts on no row of a thread.  The
+scroll does not move it, and it is moved to the next line, point with it.
+Not when it was scrolled back, nor when it moved, nor at the last line."
+  (change-review-ui-test--with-threads-under-lines "one\ntwo\nthree\nfour\n" 2
+    (let* ((two (save-excursion (goto-char eol) (line-beginning-position)))
+           (three (1+ eol))
+           (four (save-excursion (goto-char three) (forward-line 1) (point))))
+      (set-window-start window two)
+      (goto-char two)
+      (should (change-review-ui--unstick window two t))
+      (should (= three (window-start window)))
+      (should (= three (point)))
+      ;; Not when scrolled back, or when what moved it left it on the line.
+      (set-window-start window two)
+      (should-not (change-review-ui--unstick window two nil))
+      (should-not (change-review-ui--unstick window (point-min) t))
+      (should (= two (window-start window)))
+      ;; A line no thread is under is no place to be moved from.
+      (set-window-start window three)
+      (should-not (change-review-ui--unstick window three t))
+      (should (= three (window-start window)))
+      ;; And none is moved to the end of the buffer, where there is nothing to see.
+      (change-review-ui-clear-overlays)
+      (change-review-ui-add-thread-overlay set thread (1- (point-max)) :view 'diff :width 70 :indent "  ")
+      (set-window-start window four)
+      (should-not (change-review-ui--unstick window four t))
+      (should (= four (window-start window))))))
+
+(ert-deftest change-review-ui-gets-a-window-started-on-the-first-thread-going ()
+  "A thread before the first line hangs on the start of the buffer, which a
+window cannot leave by scrolling: a scroll that did not move it moves it to
+the second line."
+  (change-review-ui-test--with-threads-under-lines "one\ntwo\nthree\n" 3
+    (change-review-ui-add-thread-overlay set thread (point-min) :before t :view 'diff :width 70)
+    (set-window-start window (point-min))
+    (should (change-review-ui--unstick window (point-min) t))
+    (should (= (save-excursion (goto-char (point-min)) (forward-line 1) (point))
+               (window-start window)))
+    ;; Scrolled back to it, a window starts on it, the thread in sight.
+    (should-not (change-review-ui--unstick window (point-max) nil))))
+
+(ert-deftest change-review-ui-starts-in-the-empty-line-a-thread-is-under ()
+  "The empty line a thread is under is its own end: a window scrolled to it
+starts there, and one scrolled on from it leaves it with its thread."
+  (change-review-ui-test--with-threads-under-lines "one\n\nthree\nfour\n" 2
+    (let ((three (1+ eol)))
+      (should (= eol (save-excursion (goto-char eol) (line-beginning-position))))
+      (set-window-start window eol)
+      (goto-char eol)
+      (should-not (change-review-ui--unstick window (point-min) t))
+      (should (= eol (window-start window)))
+      (should (change-review-ui--unstick window eol t))
+      (should (= three (window-start window)))
+      (should (= three (point))))))
+
+(ert-deftest change-review-ui-scrolls-past-a-thread-by-lines ()
+  "`scroll-up' and `scroll-down' of a window of a buffer with threads under its
+lines do not leave it started in one; of any other buffer they are what they are."
+  (change-review-ui-test--with-threads-under-lines "one\ntwo\nthree\nfour\n" 2
+    (let ((three (1+ eol))
+          (scroll (lambda (to) (lambda (&rest args)
+                                 (set-window-start (selected-window) to)
+                                 (list 'scrolled args)))))
+      (set-window-start window (point-min))
+      (should (equal '(scrolled (3)) (change-review-ui--scroll-up-advice (funcall scroll eol) 3)))
+      (should (= three (window-start window)))
+      (set-window-start window three)
+      (should (equal '(scrolled (2)) (change-review-ui--scroll-down-advice (funcall scroll eol) 2)))
+      (should (= (save-excursion (goto-char eol) (line-beginning-position)) (window-start window)))
+      ;; A command that does not scroll is not asked for more.
+      (set-window-start window (point-min))
+      (should (eq 'no (change-review-ui--scroll-up-advice (lambda (&rest _) 'no) 3)))
+      (should (= (point-min) (window-start window)))
+      ;; Not by 0 lines either, nor on the thread's line.
+      (let ((two (save-excursion (goto-char eol) (line-beginning-position))))
+        (set-window-start window two)
+        (should (eq 'no (change-review-ui--scroll-up-advice (lambda (&rest _) 'no) 0)))
+        (should (= two (window-start window)))
+        ;; A negative number scrolls the other way.
+        (set-window-start window three)
+        (should (equal '(scrolled (-2)) (change-review-ui--scroll-up-advice (funcall scroll eol) -2)))
+        (should (= two (window-start window)))
+        (set-window-start window two)
+        (should (equal '(scrolled (-)) (change-review-ui--scroll-down-advice (funcall scroll eol) '-)))
+        (should (= three (window-start window))))
+      ;; Both are advised.
+      (should (advice-member-p #'change-review-ui--scroll-up-advice 'scroll-up))
+      (should (advice-member-p #'change-review-ui--scroll-down-advice 'scroll-down))))
+  ;; Elsewhere nothing is done.
+  (with-temp-buffer
+    (insert "one\ntwo\nthree\n")
+    (save-window-excursion
+      (switch-to-buffer (current-buffer))
+      (set-window-start (selected-window) (point-min))
+      (should (equal '(scrolled (1))
+                     (change-review-ui--scroll-up-advice
+                      (lambda (&rest args)
+                        (set-window-start (selected-window) 4)
+                        (list 'scrolled args))
+                      1)))
+      (should (= 4 (window-start (selected-window)))))))
+
+(ert-deftest change-review-ui-keeps-a-window-from-starting-in-a-thread-whatever-scrolled-it ()
+  "Before a window is redisplayed its start is looked at: if it moved to where a
+thread hangs it is moved on, in the direction it moved in."
+  (change-review-ui-test--with-threads-under-lines "one\ntwo\nthree\nfour\n" 2
+    (let ((three (1+ eol)))
+      (set-window-start window (point-min))
+      (change-review-ui--pre-redisplay window)
+      (should (= (point-min) (window-parameter window 'change-review-ui-start)))
+      (set-window-start window eol)
+      (change-review-ui--pre-redisplay window)
+      (should (= three (window-start window)))
+      (should (= three (window-parameter window 'change-review-ui-start)))
+      ;; And back.
+      (set-window-start window eol)
+      (change-review-ui--pre-redisplay window)
+      (should (= (save-excursion (goto-char eol) (line-beginning-position)) (window-start window)))
+      ;; A start that is not a thread's is left alone, and so is one that did not move.
+      (set-window-start window three)
+      (change-review-ui--pre-redisplay window)
+      (should (= three (window-start window))))))
+
 ;;;; The diff view
 
 (defmacro change-review-ui-test--diff-view (&rest body)
@@ -3013,7 +3796,9 @@ thread was answered, say."
 
 (ert-deftest change-review-ui-diff-view-cuts-a-thread-longer-than-the-window ()
   "A thread longer than the room the option gives is cut, with a line that
-says how much, and TAB shows all of it."
+says how much and a button, and TAB shows all of it.  Cut in a comment, the
+line is the comment's own, [Show more]: the comment is cut shorter than it
+would be, not the thread at a line that does not say where the rest is."
   (let ((change-review-ui-max-thread-lines 7))
     (change-review-ui-test--diff-view
       (let ((comment (change-review-comment
@@ -3031,7 +3816,8 @@ says how much, and TAB shows all of it."
                                                  (overlays-in (point-min) (point-max)))
                                      'after-string)))))
           ;; The header, the comment's, four of its lines and the one that says more.
-          (should (string-match-p "Line 4 of a long comment\\.\n    ┃      … 8 more lines\\'" (funcall drawn)))
+          (should (string-match-p "Line 4 of a long comment\\.\n    ┃      … 8 more lines  \\[Show more\\]\\'"
+                                  (funcall drawn)))
           (should-not (string-match-p "Line 5 of" (funcall drawn)))
           (change-review-ui-test--goto "^ (setq a6 6)")
           (end-of-line)
@@ -3312,7 +4098,9 @@ characters -- and however wide the drawing, each character of its text on the
 drawing is the very character of the text that its place says, and a region over
 all the drawing holds all of the text, bar the blanks."
   (change-review-ui-test--drawing
-    (let ((checked 0))
+    (let ((checked 0)
+          ;; The text is long, and a long comment is cut: not what this is about.
+          (change-review-ui-max-comment-lines nil))
       (dotimes (seed 60)
         (let* ((body (change-review-ui-test--odd-text seed))
                (width (+ 30 (random 60)))

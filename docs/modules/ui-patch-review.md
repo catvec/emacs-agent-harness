@@ -212,6 +212,19 @@ bottom, else the diff's -- so the next file is the one on the next row.
               the width of the window that shows them, and again when
               it changes, as it does when the two versions are put
               side by side.
+  long        A thread of many comments draws the first, one line,
+              "▸ 6 earlier replies", for the ones between, which a
+              click draws, and the last three; a comment of more than
+              15 lines is cut after them, "… 12 more lines [Show
+              more]", which a click draws in full, with a [Show less]
+              to cut it again (`change-review-ui-tail-replies`,
+              `change-review-ui-max-comment-lines`).  A window with
+              little room cuts the long comments shorter, not under
+              three lines, so that the button stays in sight.  The
+              two versions Ediff compares can be scrolled past such a
+              thread, a reply as tall as the window included: v and
+              V, the wheel and C-n go on to the next line of the code
+              instead of stopping on the one the thread is under.
 
 A comment is Markdown (`harness-ui-patch-review-markdown`): the user
 writes it in a buffer, an agent in its tool call, and wherever it is

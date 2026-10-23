@@ -202,6 +202,19 @@
 ;;               the width of the window that shows them, and again when
 ;;               it changes, as it does when the two versions are put
 ;;               side by side.
+;;   long        A thread of many comments draws the first, one line,
+;;               "▸ 6 earlier replies", for the ones between, which a
+;;               click draws, and the last three; a comment of more than
+;;               15 lines is cut after them, "… 12 more lines [Show
+;;               more]", which a click draws in full, with a [Show less]
+;;               to cut it again (`change-review-ui-tail-replies',
+;;               `change-review-ui-max-comment-lines').  A window with
+;;               little room cuts the long comments shorter, not under
+;;               three lines, so that the button stays in sight.  The
+;;               two versions Ediff compares can be scrolled past such a
+;;               thread, a reply as tall as the window included: v and
+;;               V, the wheel and C-n go on to the next line of the code
+;;               instead of stopping on the one the thread is under.
 ;;
 ;; A comment is Markdown (`harness-ui-patch-review-markdown'): the user
 ;; writes it in a buffer, an agent in its tool call, and wherever it is
@@ -3715,6 +3728,14 @@ Return the position, or nil when the changes are not drawn at all."
       (if found
           (progn (goto-char found)
                  (forward-line lines)
+                 ;; A comment that is shorter now -- one cut again -- has
+                 ;; point on its last line, not on what comes after it.
+                 (when (and (eq property 'change-review-comment)
+                            (not (equal value (get-text-property (line-beginning-position) property))))
+                   (goto-char found)
+                   (while (and (not (eobp))
+                               (equal value (get-text-property (line-beginning-position 2) property)))
+                     (forward-line 1)))
                  (move-to-column column)
                  (point))
         (when-let* ((base (and id (harness-ui-patch-review--find-property
@@ -4562,11 +4583,14 @@ whole, or whose line is gone, at the top of the branch's version.
 PLACED says where each thread is, an alist of its id to its place
 \(`harness-ui-patch-review--place-from-texts'), for those the report has
 not placed yet.  No line is wider than the window shows, and a thread is
-no taller than it has room for (`change-review-ui-current-size'): the
+no taller than it has room for (`change-review-ui-current-size'), its long
+comments cut shorter to fit, with the [Show more] that draws them: the
 window's size at this drawing is kept, for a window that changes it
 \(`harness-ui-patch-review--side-resized').  A closed thread is a line,
 which TAB or a click opens to its conversation, as the library's fold
-says (`change-review-ui-thread-fold')."
+says (`change-review-ui-thread-fold').  Windows of a version with threads
+are kept from starting in one, which scrolling by lines could not leave
+\(`change-review-ui--keep-scrolling')."
   (with-current-buffer buffer
     (let* ((inhibit-read-only t)
            (set (harness-ui-patch-review--r-set review))
