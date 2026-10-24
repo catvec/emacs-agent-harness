@@ -4,6 +4,7 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 
 import '../../models/task.dart';
+import '../../models/task_actions.dart';
 import '../../state/app_controller.dart';
 import '../../state/drafts.dart';
 import '../../state/prompt_attachment.dart';
@@ -16,6 +17,7 @@ import '../widgets/connection_banner.dart';
 import '../widgets/image_attachments.dart';
 import '../widgets/markdown_view.dart';
 import '../widgets/quota_widgets.dart';
+import '../widgets/task_action_runner.dart';
 import '../widgets/tool_body.dart';
 
 class TasksScreen extends StatefulWidget {
@@ -58,6 +60,19 @@ class _TasksScreenState extends State<TasksScreen> {
         return HarnessPage(
           title: 'Tasks',
           actions: [
+            // The tasks that were put away are kept out of sight; this is
+            // where they are looked for, and brought back from.
+            if (controller.archivedCount > 0 || controller.showArchived)
+              HarnessIconButton(
+                icon: controller.showArchived
+                    ? Icons.archive_rounded
+                    : Icons.archive_outlined,
+                label: controller.showArchived
+                    ? 'Hide archived tasks'
+                    : 'Show archived tasks',
+                onPressed: () =>
+                    controller.setShowArchived(!controller.showArchived),
+              ),
             HarnessIconButton(
               icon: adaptiveIcon(
                 context,
@@ -240,7 +255,9 @@ class _TaskHeader extends StatelessWidget {
                     );
                     if (chosen != null) {
                       unawaited(
-                        controller.load(project: chosen.isEmpty ? null : chosen),
+                        controller.load(
+                          project: chosen.isEmpty ? null : chosen,
+                        ),
                       );
                     }
                   }
@@ -261,13 +278,38 @@ class _TaskHeader extends StatelessWidget {
             _QueueLine(controller: controller, wide: wide)
           else
             Padding(
-              padding: const EdgeInsets.symmetric(vertical: 8),
-              child: Text(
-                'The tasks of every project. Pick a project to pause its '
-                'queue or change how its backlog starts.',
-                style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                  color: Theme.of(context).colorScheme.onSurfaceVariant,
-                ),
+              padding: const EdgeInsets.fromLTRB(
+                HarnessSpace.gutter,
+                0,
+                HarnessSpace.gutter,
+                0,
+              ),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 8),
+                      child: Text(
+                        'The tasks of every project. Pick a project to pause '
+                        'its queue or change how its backlog starts.',
+                        style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ),
+                  ),
+                  if (_hasAllQueues(controller))
+                    HarnessTextButton(
+                      label: 'All queues',
+                      icon: Icons.tune_rounded,
+                      dense: true,
+                      onPressed: () => showHarnessSheet<void>(
+                        context: context,
+                        builder: (sheetContext) =>
+                            _AllQueuesSheet(controller: controller),
+                      ),
+                    ),
+                ],
               ),
             ),
           const SizedBox(height: HarnessSpace.sm),
@@ -312,7 +354,7 @@ class _QueueLine extends StatelessWidget {
     final resume = HarnessTextButton(
       label: 'Resume',
       icon: Icons.play_arrow_rounded,
-      onPressed: controller.toggleQueue,
+      onPressed: () => controller.setQueueSuspended(false),
     );
     final Widget line;
     if (wide) {
@@ -325,14 +367,14 @@ class _QueueLine extends StatelessWidget {
             HarnessTextButton(
               label: 'Pause queue',
               icon: Icons.pause_rounded,
-              onPressed: controller.toggleQueue,
+              onPressed: () => controller.setQueueSuspended(true),
             ),
           HarnessTextButton(
             label: autoQueue ? 'Backlog: auto' : 'Backlog: manual',
             icon: autoQueue
                 ? Icons.auto_mode_rounded
                 : Icons.pan_tool_alt_outlined,
-            onPressed: controller.toggleBacklog,
+            onPressed: () => controller.setAutoQueue(!autoQueue),
           ),
         ],
       );
@@ -385,11 +427,30 @@ Future<void> _showQueue(BuildContext context, TaskController controller) {
 }
 
 /// The queue's settings: what pausing it does, how the backlog joins it,
-/// and whether finished work waits for a review.
-class _QueueSheet extends StatelessWidget {
+/// and whether finished work waits for a review.  And the tasks themselves:
+/// all of the project's can be paused at once, and let go again.
+class _QueueSheet extends StatefulWidget {
   const _QueueSheet({required this.controller});
 
   final TaskController controller;
+
+  @override
+  State<_QueueSheet> createState() => _QueueSheetState();
+}
+
+class _QueueSheetState extends State<_QueueSheet> {
+  /// What the last "all tasks" button did, in words.
+  String? _note;
+
+  TaskController get controller => widget.controller;
+
+  Future<void> _all({required bool pause}) async {
+    final count = await (pause
+        ? controller.pauseAll()
+        : controller.resumeAll());
+    if (!mounted || count == null) return;
+    setState(() => _note = _countNote(count, pause: pause));
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -400,6 +461,7 @@ class _QueueSheet extends StatelessWidget {
         final suspended = controller.slots?.suspended ?? false;
         final autoQueue = controller.settings?.backlogMode == 'auto';
         final review = controller.settings?.requireVerification == true;
+        final busy = controller.busy;
         return Padding(
           padding: EdgeInsets.fromLTRB(
             HarnessSpace.sheetGutter,
@@ -428,7 +490,7 @@ class _QueueSheet extends StatelessWidget {
                       'Waiting tasks do not start on their own until it '
                       'resumes.',
                   value: suspended,
-                  onChanged: (_) => controller.toggleQueue(),
+                  onChanged: busy ? null : controller.setQueueSuspended,
                 ),
                 _ToggleRow(
                   icon: Icons.auto_mode_rounded,
@@ -437,8 +499,19 @@ class _QueueSheet extends StatelessWidget {
                       'A task that is written up joins the queue by itself, '
                       'instead of waiting to be started.',
                   value: autoQueue,
-                  onChanged: (_) => controller.toggleBacklog(),
+                  onChanged: busy ? null : controller.setAutoQueue,
                 ),
+                if (_hasPauseAll(controller)) ...[
+                  const SizedBox(height: HarnessSpace.sm),
+                  Divider(color: Theme.of(context).colorScheme.outlineVariant),
+                  const SizedBox(height: HarnessSpace.sm),
+                  _AllTasksRow(
+                    busy: busy,
+                    note: _note,
+                    onPause: () => _all(pause: true),
+                    onResume: () => _all(pause: false),
+                  ),
+                ],
                 const SizedBox(height: HarnessSpace.sm),
                 Divider(color: Theme.of(context).colorScheme.outlineVariant),
                 HarnessInfoRow(
@@ -447,6 +520,195 @@ class _QueueSheet extends StatelessWidget {
                       ? 'Required: finished work waits for you to verify it.'
                       : 'Not required: finished work merges on its own.',
                 ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// Whether there is something to do to every project's queue at once.
+bool _hasAllQueues(TaskController controller) =>
+    _hasPauseAll(controller) ||
+    (controller.api.can('task/suspend-all-queues') &&
+        controller.api.can('task/resume-all-queues'));
+
+/// Whether the harness can pause and resume every task of a project at once.
+bool _hasPauseAll(TaskController controller) =>
+    controller.api.can('task/pause-all') &&
+    controller.api.can('task/resume-all');
+
+/// What pausing or resuming [count] tasks did, as the board in Emacs says it.
+String _countNote(int count, {required bool pause}) {
+  if (count == 0) return pause ? 'No task to pause.' : 'No paused task.';
+  final tasks = count == 1 ? '1 task' : '$count tasks';
+  return pause ? 'Paused $tasks.' : 'Resumed $tasks.';
+}
+
+/// The same for [count] queues.
+String _queuesNote(int count, {required bool pause}) {
+  if (count == 0) return pause ? 'No queue to pause.' : 'No paused queue.';
+  final queues = count == 1 ? '1 queue' : '$count queues';
+  return pause ? 'Paused $queues.' : 'Resumed $queues.';
+}
+
+/// The two buttons that pause every task and let them go again, with what
+/// the last one did.
+class _AllTasksRow extends StatelessWidget {
+  const _AllTasksRow({
+    required this.busy,
+    required this.note,
+    required this.onPause,
+    required this.onResume,
+  });
+
+  final bool busy;
+  final String? note;
+  final VoidCallback onPause;
+  final VoidCallback onResume;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text('TASKS', style: HarnessText.label(context)),
+        const SizedBox(height: 4),
+        Text(
+          'Pausing a task puts it back in the queue and holds it there; the '
+          'ones at work stop first.',
+          style: HarnessText.caption(context),
+        ),
+        const SizedBox(height: HarnessSpace.sm),
+        Row(
+          children: [
+            Expanded(
+              child: HarnessSecondaryButton(
+                label: 'Pause all',
+                icon: Icons.pause_rounded,
+                expand: true,
+                onPressed: busy ? null : onPause,
+              ),
+            ),
+            const SizedBox(width: HarnessSpace.sm),
+            Expanded(
+              child: HarnessSecondaryButton(
+                label: 'Resume all',
+                icon: Icons.play_arrow_rounded,
+                expand: true,
+                onPressed: busy ? null : onResume,
+              ),
+            ),
+          ],
+        ),
+        if (note != null) ...[
+          const SizedBox(height: 6),
+          Text(note!, style: HarnessText.caption(context)),
+        ],
+      ],
+    );
+  }
+}
+
+/// The queues of every project at once, for a board that shows them all.
+class _AllQueuesSheet extends StatefulWidget {
+  const _AllQueuesSheet({required this.controller});
+
+  final TaskController controller;
+
+  @override
+  State<_AllQueuesSheet> createState() => _AllQueuesSheetState();
+}
+
+class _AllQueuesSheetState extends State<_AllQueuesSheet> {
+  String? _note;
+
+  TaskController get controller => widget.controller;
+
+  Future<void> _queues({required bool suspend}) async {
+    final count = await controller.setAllQueuesSuspended(suspend);
+    if (!mounted || count == null) return;
+    setState(() => _note = _queuesNote(count, pause: suspend));
+  }
+
+  Future<void> _tasks({required bool pause}) async {
+    final count = await (pause
+        ? controller.pauseAll()
+        : controller.resumeAll());
+    if (!mounted || count == null) return;
+    setState(() => _note = _countNote(count, pause: pause));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: controller,
+      builder: (context, _) {
+        final busy = controller.busy;
+        final api = controller.api;
+        return Padding(
+          padding: EdgeInsets.fromLTRB(
+            HarnessSpace.sheetGutter,
+            4,
+            HarnessSpace.sheetGutter,
+            MediaQuery.viewInsetsOf(context).bottom + 22,
+          ),
+          child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text('Every project', style: HarnessText.sheetTitle(context)),
+                const SizedBox(height: 4),
+                Text(
+                  'Pick a project to pause its queue or change how its '
+                  'backlog starts. These act on all of them.',
+                  style: HarnessText.subtitle(context),
+                ),
+                if (api.can('task/suspend-all-queues') &&
+                    api.can('task/resume-all-queues')) ...[
+                  const SizedBox(height: HarnessSpace.lg),
+                  Text('QUEUES', style: HarnessText.label(context)),
+                  const SizedBox(height: HarnessSpace.sm),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: HarnessSecondaryButton(
+                          label: 'Pause every queue',
+                          icon: Icons.pause_rounded,
+                          expand: true,
+                          onPressed: busy ? null : () => _queues(suspend: true),
+                        ),
+                      ),
+                      const SizedBox(width: HarnessSpace.sm),
+                      Expanded(
+                        child: HarnessSecondaryButton(
+                          label: 'Resume every queue',
+                          icon: Icons.play_arrow_rounded,
+                          expand: true,
+                          onPressed: busy
+                              ? null
+                              : () => _queues(suspend: false),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+                if (_hasPauseAll(controller)) ...[
+                  const SizedBox(height: HarnessSpace.lg),
+                  _AllTasksRow(
+                    busy: busy,
+                    note: null,
+                    onPause: () => _tasks(pause: true),
+                    onResume: () => _tasks(pause: false),
+                  ),
+                ],
+                if (_note != null) ...[
+                  const SizedBox(height: HarnessSpace.md),
+                  Text(_note!, style: HarnessText.caption(context)),
+                ],
               ],
             ),
           ),
@@ -676,6 +938,8 @@ class TaskCard extends StatelessWidget {
     // card does not repeat either.
     final meta = HarnessMetaLine(
       parts: [
+        // What the column does not say: a pause, a wait, a task put away.
+        ...taskStateParts(task),
         if (app.selectedProject == null) projectName(app.projectOfTask(task)),
         task.branch,
         if (task.priority == 'high')
@@ -764,7 +1028,11 @@ class TaskCard extends StatelessWidget {
                         child: _TaskActions(
                           task: task,
                           controller: controller,
-                          onOpenSession: onOpenSession,
+                          actions: taskActionsOf(app, controller, task),
+                          runner: TaskActionRunner(
+                            controller: controller,
+                            onOpenSession: onOpenSession,
+                          ),
                           onReview: onTap,
                         ),
                       ),
@@ -780,88 +1048,82 @@ class TaskCard extends StatelessWidget {
   }
 }
 
+/// The buttons under a card: the one thing to do, the quickest way to stop
+/// or accept, and a menu of everything that applies.
 class _TaskActions extends StatelessWidget {
   const _TaskActions({
     required this.task,
     required this.controller,
-    required this.onOpenSession,
+    required this.actions,
+    required this.runner,
     required this.onReview,
   });
 
   final HarnessTask task;
   final TaskController controller;
-  final ValueChanged<String> onOpenSession;
+  final TaskActions actions;
+  final TaskActionRunner runner;
   final VoidCallback onReview;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    Widget? primary;
-    if (task.isReview) {
-      primary = HarnessTextButton(
+    final busy = controller.busy;
+    final primary = actions.primary;
+    void run(TaskAction action) => runner.run(context, action, task);
+    Widget? lead;
+    if (task.isReview && !task.archived) {
+      // The work is looked at in the sheet, where the report is.
+      lead = HarnessTextButton(
         label: 'Review',
         icon: Icons.rate_review_outlined,
         dense: true,
         onPressed: onReview,
       );
-    } else if (task.needsInput) {
-      // What it asks is in its session, and is answered there.
-      final session = task.sessionId;
-      primary = HarnessTextButton(
-        label: 'Answer',
-        icon: Icons.front_hand_outlined,
+    } else if (primary != null) {
+      lead = HarnessTextButton(
+        label: primary.labelFor(task),
+        icon: taskActionIcon(primary),
         dense: true,
-        onPressed: session == null ? onReview : () => onOpenSession(session),
+        onPressed: busy ? null : () => run(primary),
       );
-    } else if (task.isPending) {
-      primary = HarnessTextButton(
-        label: 'Start now',
-        icon: Icons.play_arrow_rounded,
-        dense: true,
-        onPressed: () => controller.start(task.id),
-      );
-    } else if (task.isBacklog) {
-      primary = HarnessTextButton(
-        label: 'Start',
-        icon: Icons.play_arrow_rounded,
-        dense: true,
-        onPressed: () => controller.start(task.id),
-      );
-    } else if (task.sessionId != null) {
-      primary = HarnessTextButton(
+    } else if (actions.contains(TaskAction.openSession)) {
+      lead = HarnessTextButton(
         label: 'Open',
         icon: Icons.open_in_new_rounded,
         dense: true,
-        onPressed: () => onOpenSession(task.sessionId!),
+        onPressed: () => run(TaskAction.openSession),
       );
     }
+    // The quickest way out: accept the work, or stop what is going on.
+    final quick = task.isReview && actions.contains(TaskAction.verify)
+        ? TaskAction.verify
+        : actions.contains(TaskAction.drop)
+        ? TaskAction.drop
+        : actions.contains(TaskAction.stop)
+        ? TaskAction.stop
+        : null;
     return Row(
       children: [
-        if (primary != null) primary,
+        if (lead != null) lead,
         const Spacer(),
-        if (task.isReview)
+        if (quick != null)
           HarnessIconButton(
-            icon: Icons.check_circle_outline_rounded,
-            label: 'Verify task',
+            icon: switch (quick) {
+              TaskAction.verify => Icons.check_circle_outline_rounded,
+              TaskAction.stop => Icons.stop_circle_outlined,
+              _ => taskActionIcon(quick),
+            },
+            label: switch (quick) {
+              TaskAction.verify => 'Verify task',
+              TaskAction.stop => 'Stop task',
+              _ => 'Drop task',
+            },
             size: 18,
-            color: HarnessColors.moss,
-            onPressed: () => controller.verify(task.id),
-          ),
-        if (task.isPending || task.isBacklog)
-          HarnessIconButton(
-            icon: Icons.delete_outline_rounded,
-            label: 'Cancel task',
-            size: 18,
-            color: theme.colorScheme.onSurfaceVariant,
-            onPressed: () => controller.cancelTask(task.id),
-          ),
-        if (task.isActive && task.sessionId != null)
-          HarnessIconButton(
-            icon: Icons.stop_circle_outlined,
-            label: 'Stop task',
-            size: 18,
-            color: theme.colorScheme.onSurfaceVariant,
-            onPressed: () => controller.cancelTask(task.id),
+            color: quick == TaskAction.verify
+                ? HarnessColors.moss
+                : theme.colorScheme.onSurfaceVariant,
+            onPressed: busy ? null : () => run(quick),
           ),
         HarnessIconButton(
           icon: Icons.more_horiz_rounded,
@@ -874,107 +1136,26 @@ class _TaskActions extends StatelessWidget {
   }
 
   Future<void> _showActions(BuildContext context) async {
-    final action = await showHarnessMenu<String>(
+    // What stops work or throws the task away is last, as in any menu.
+    final ordered = [
+      ...actions.all.where((action) => !action.destructive),
+      ...actions.all.where((action) => action.destructive),
+    ];
+    final action = await showHarnessMenu<TaskAction>(
       context: context,
       title: task.title,
       items: [
-        if (task.sessionId != null)
-          const HarnessMenuItem(
-            value: 'session',
-            label: 'Open session',
-            icon: Icons.open_in_new_rounded,
-          ),
-        if (task.isReview) ...[
-          const HarnessMenuItem(
-            value: 'verify',
-            label: 'Verify and merge',
-            icon: Icons.check_rounded,
-          ),
-          const HarnessMenuItem(
-            value: 'reject',
-            label: 'Send back with feedback',
-            icon: Icons.reply_rounded,
-          ),
-        ],
-        if (task.isBacklog)
-          const HarnessMenuItem(
-            value: 'queue',
-            label: 'Queue it',
-            icon: Icons.playlist_add_rounded,
-          ),
-        if (task.isPending)
-          const HarnessMenuItem(
-            value: 'start',
-            label: 'Start now',
-            icon: Icons.play_arrow_rounded,
-          ),
-        if (task.isStopped && !task.isReview)
-          const HarnessMenuItem(
-            value: 'retry',
-            label: 'Retry',
-            icon: Icons.replay_rounded,
-          ),
-        if (task.isActive)
-          const HarnessMenuItem(
-            value: 'cancel',
-            label: 'Stop',
-            icon: Icons.stop_rounded,
-            destructive: true,
-          ),
-        if (!task.isDone)
-          const HarnessMenuItem(
-            value: 'complete',
-            label: 'Mark complete',
-            icon: Icons.done_all_rounded,
-          ),
-        if (task.isDone)
-          const HarnessMenuItem(
-            value: 'archive',
-            label: 'Archive',
-            icon: Icons.archive_outlined,
+        for (final action in ordered)
+          HarnessMenuItem(
+            value: action,
+            label: taskActionMenuLabel(action, task),
+            icon: taskActionIcon(action),
+            destructive: action.destructive,
           ),
       ],
     );
-    if (action == null) return;
-    switch (action) {
-      case 'session':
-        if (task.sessionId != null) onOpenSession(task.sessionId!);
-      case 'verify':
-        await controller.verify(task.id);
-      case 'reject':
-        if (!context.mounted) return;
-        final feedback = await showHarnessTextPrompt(
-          context: context,
-          title: 'Send it back',
-          message: 'What should change? It goes to the task’s own session.',
-          hint: 'Feedback',
-          multiline: true,
-          confirmLabel: 'Send back',
-        );
-        if (feedback != null && feedback.trim().isNotEmpty) {
-          await controller.reject(task.id, feedback.trim());
-        }
-      case 'queue':
-        await controller.queue(task.id);
-      case 'start':
-        await controller.start(task.id);
-      case 'retry':
-        await controller.retry(task.id);
-      case 'cancel':
-        await controller.cancelTask(task.id);
-      case 'complete':
-        if (!context.mounted) return;
-        final confirmed = await showHarnessDialog<bool>(
-          context: context,
-          title: 'Mark this task complete?',
-          message: 'That accepts the work without waiting for a merge.',
-          confirmLabel: 'Complete',
-          destructive: true,
-        );
-        if (confirmed == true) await controller.complete(task.id);
-      case 'archive':
-        await controller.archive(task.id);
-    }
+    if (action == null || !context.mounted) return;
+    await runner.run(context, action, task);
   }
 }
 
@@ -1349,7 +1530,10 @@ class _ToggleRow extends StatelessWidget {
   final String title;
   final String subtitle;
   final bool value;
-  final ValueChanged<bool> onChanged;
+
+  /// Null while the row cannot be changed, as when the harness is busy with
+  /// the last change.
+  final ValueChanged<bool>? onChanged;
 
   @override
   Widget build(BuildContext context) {
@@ -1412,6 +1596,7 @@ class _TaskDetail extends StatelessWidget {
         final session = task.sessionId == null
             ? null
             : app.summaryFor(task.sessionId!);
+        final actions = taskActionsOf(app, controller, task);
         return Padding(
           padding: EdgeInsets.only(
             left: HarnessSpace.sheetGutter,
@@ -1482,13 +1667,14 @@ class _TaskDetail extends StatelessWidget {
                         color: HarnessColors.amber,
                         weight: FontWeight.w700,
                       ),
+                    ...taskStateParts(task),
                   ],
                 ),
                 if (task.sessionId != null) ...[
                   const SizedBox(height: HarnessSpace.lg),
                   // A task that waits for an answer is answered in its
                   // session: that is the one thing to do here.
-                  if (task.needsInput)
+                  if (actions.contains(TaskAction.answer))
                     HarnessPrimaryButton(
                       label: 'Answer in the task’s session',
                       icon: Icons.front_hand_outlined,
@@ -1610,23 +1796,29 @@ class _TaskDetail extends StatelessWidget {
                   ),
                 ],
                 const SizedBox(height: HarnessSpace.xl),
+                // What the harness said of the last thing done, where the
+                // person is looking: this sheet covers the board's banner.
+                if (controller.error != null) ...[
+                  HarnessErrorBanner(
+                    message: controller.error!,
+                    margin: EdgeInsets.zero,
+                    onDismiss: () => controller.reload(),
+                  ),
+                  const SizedBox(height: HarnessSpace.md),
+                ],
                 _DetailActions(
                   task: task,
                   controller: controller,
-                  onOpenSession: onOpenSession,
-                  onReject: () async {
-                    final feedback = await showHarnessTextPrompt(
-                      context: context,
-                      title: 'Send it back',
-                      message: 'What should change?',
-                      hint: 'Feedback',
-                      multiline: true,
-                      confirmLabel: 'Send back',
-                    );
-                    if (feedback != null && feedback.trim().isNotEmpty) {
-                      await controller.reject(task!.id, feedback.trim());
-                    }
-                  },
+                  actions: actions,
+                  runner: TaskActionRunner(
+                    controller: controller,
+                    // The conversation opens over the sheet's page: the
+                    // sheet goes, as it does for the button above.
+                    onOpenSession: (id) {
+                      Navigator.of(context).maybePop();
+                      onOpenSession(id);
+                    },
+                  ),
                 ),
               ],
             ),
@@ -1638,108 +1830,108 @@ class _TaskDetail extends StatelessWidget {
 }
 
 /// What can be done with the task.  The one action to take is full width;
-/// the others share a row, in equal parts: no ragged edge, and a thumb can
-/// find them in the same place every time.
+/// the others share rows, in equal parts: no ragged edge, and a thumb can
+/// find them in the same place every time.  Then the priority, and last what
+/// stops the task or throws it away.
 class _DetailActions extends StatelessWidget {
   const _DetailActions({
     required this.task,
     required this.controller,
-    required this.onOpenSession,
-    required this.onReject,
+    required this.actions,
+    required this.runner,
   });
 
   final HarnessTask task;
   final TaskController controller;
-  final ValueChanged<String> onOpenSession;
-  final VoidCallback onReject;
+  final TaskActions actions;
+  final TaskActionRunner runner;
 
   @override
   Widget build(BuildContext context) {
-    final primary = <Widget>[
-      if (task.isReview)
-        HarnessPrimaryButton(
-          label: 'Verify and merge',
-          icon: Icons.check_rounded,
+    final busy = controller.busy;
+    final primary = actions.primary;
+    Future<void> run(TaskAction action) async {
+      await runner.run(context, action, task);
+      if (!context.mounted) return;
+      // A task that is gone, dropped or deleted, leaves nothing to look at.
+      if (!controller.tasks.any((other) => other.id == task.id)) {
+        unawaited(Navigator.of(context).maybePop());
+      }
+    }
+
+    // Opening the session has its own button above; answering is that.
+    final secondary = [
+      for (final action in actions.secondary)
+        HarnessSecondaryButton(
+          label: action.labelFor(task),
+          icon: taskActionIcon(action),
           expand: true,
-          onPressed: () => controller.verify(task.id),
-        ),
-      if (task.isPending)
-        HarnessPrimaryButton(
-          label: 'Start now',
-          icon: Icons.play_arrow_rounded,
-          expand: true,
-          onPressed: () => controller.start(task.id),
-        ),
-      if (task.isBacklog)
-        HarnessPrimaryButton(
-          label: 'Start',
-          icon: Icons.play_arrow_rounded,
-          expand: true,
-          onPressed: () => controller.start(task.id),
+          onPressed: busy ? null : () => run(action),
         ),
     ];
-    final secondary = <Widget>[
-      if (task.isReview)
-        HarnessSecondaryButton(
-          label: 'Send back',
-          icon: Icons.reply_rounded,
-          expand: true,
-          onPressed: onReject,
-        ),
-      if (task.isBacklog)
-        HarnessSecondaryButton(
-          label: 'Queue it',
-          icon: Icons.playlist_add_rounded,
-          expand: true,
-          onPressed: () => controller.queue(task.id),
-        ),
-      if (task.isStopped && !task.isReview)
-        HarnessSecondaryButton(
-          label: 'Retry',
-          icon: Icons.replay_rounded,
-          expand: true,
-          onPressed: () => controller.retry(task.id),
-        ),
-      if (!task.isDone)
-        HarnessSecondaryButton(
-          label: 'Mark complete',
-          icon: Icons.done_all_rounded,
-          expand: true,
-          onPressed: () async {
-            final confirmed = await showHarnessDialog<bool>(
-              context: context,
-              title: 'Mark this task complete?',
-              message: 'That accepts the work without waiting for a merge.',
-              confirmLabel: 'Complete',
-              destructive: true,
-            );
-            if (confirmed == true) await controller.complete(task.id);
-          },
-        ),
-      if (task.isDone)
-        HarnessSecondaryButton(
-          label: 'Archive',
-          icon: Icons.archive_outlined,
-          expand: true,
-          onPressed: () => controller.archive(task.id),
-        ),
-    ];
+    final dangerous = actions.dangerous;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        for (final button in primary) ...[
-          button,
+        if (primary != null) ...[
+          HarnessPrimaryButton(
+            label: primary.labelFor(task),
+            icon: taskActionIcon(primary),
+            expand: true,
+            onPressed: busy ? null : () => run(primary),
+          ),
           const SizedBox(height: HarnessSpace.sm),
         ],
-        if (secondary.isNotEmpty)
+        // Two to a row, the last alone if there is an odd one: the same
+        // width everywhere, whatever is offered.
+        for (var index = 0; index < secondary.length; index += 2) ...[
+          if (index > 0) const SizedBox(height: HarnessSpace.sm),
           Row(
             children: [
-              for (var index = 0; index < secondary.length; index++) ...[
-                if (index > 0) const SizedBox(width: HarnessSpace.sm),
-                Expanded(child: secondary[index]),
-              ],
+              Expanded(child: secondary[index]),
+              const SizedBox(width: HarnessSpace.sm),
+              Expanded(
+                child: index + 1 < secondary.length
+                    ? secondary[index + 1]
+                    : const SizedBox.shrink(),
+              ),
             ],
           ),
+        ],
+        if (actions.canSetPriority) ...[
+          const SizedBox(height: HarnessSpace.lg),
+          Text('PRIORITY', style: HarnessText.label(context)),
+          const SizedBox(height: 7),
+          HarnessSegmented<String>(
+            options: const [
+              ('low', 'Low'),
+              ('medium', 'Medium'),
+              ('high', 'High'),
+            ],
+            value: task.priority ?? 'medium',
+            onChanged: (value) {
+              if (busy || value == (task.priority ?? 'medium')) return;
+              controller.setPriority(task, value);
+            },
+          ),
+        ],
+        if (dangerous.isNotEmpty) ...[
+          const SizedBox(height: HarnessSpace.md),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              for (final action in dangerous)
+                HarnessTextButton(
+                  label: action == TaskAction.delete
+                      ? 'Delete task'
+                      : action.labelFor(task),
+                  icon: taskActionIcon(action),
+                  destructive: true,
+                  onPressed: busy ? null : () => run(action),
+                ),
+            ],
+          ),
+        ],
       ],
     );
   }

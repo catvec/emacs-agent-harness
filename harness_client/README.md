@@ -99,8 +99,8 @@ time it opens. It asks again only when the harness does.
   Emacs shows. The task board's *Answer* opens the conversation of the task
   that waits.
 - **Shows the rest of the harness.** The task board (all seven columns, queue
-  state and slot use, backlog mode, submit/start/queue/verify/reject/retry/
-  complete/archive; a finished task's card has the words of its summary and its
+  state and slot use, backlog mode, and everything that can be done with a
+  task, below; a finished task's card has the words of its summary and its
   sheet the whole report, drawn as Markdown), spend, tokens, live sessions, daily spend, per-model and
   per-project breakdowns, budgets, the plan quota of the providers that report
   one, the model catalogue, harness modules and the full ACP capability report.
@@ -154,6 +154,54 @@ time it opens. It asks again only when the harness does.
   out of reach. The app does not read all the sessions again when the harness
   makes or ends a record of a model call of its own (an `internal` session),
   which it does every few seconds.
+- **Manages a task as fully as the board in Emacs does.** A task's card (its
+  buttons and its *…* menu) and its sheet offer what the harness will take for
+  it where it stands, the same sets as the cards of the board in Emacs
+  (`harness-ui-tasks--actions`) and the actions of the `task_control` tool, and
+  no others:
+
+  | Where it is | What is offered |
+  |---|---|
+  | Pending | *Start now*; *Pause* (the task is put back in the queue and held there: *Resume*, which a paused task offers first, lets the queue have it again); *Message* for a task that was put back in the queue after it worked; *Drop* |
+  | Backlog | *Start now*, *Queue it*, *Message* (feedback on the write-up, or steering while it is written), *Drop* |
+  | Needs input | *Answer*, which opens the task's session, and *Stop*, for a question or a permission; for a task that stopped part way *Retry* (*Retry merge* after a merge that failed), *Pause*, *Message*, *Mark complete* |
+  | Active | *Message* (steering), *Pause*, *Return to queue* (`task/return-to-pending`: the task goes back in the queue, to start again where it stopped), *Stop*, *Mark complete* |
+  | Merging | *Message*, *Stop*, *Mark complete* |
+  | Review | *Verify and merge*, *Send back* (with feedback), *Mark complete*, *Archive* |
+  | Done | *Archive*, *Message* (the session takes it up again) |
+
+  Every task that has a session also has *Open session*, and its *Priority*
+  (low, medium or high, which is its session's: a sheet has a control for it,
+  a menu a choice of the other two), and every task *Delete task*.  A task that
+  was archived is out of sight until *Show archived tasks*, and *Unarchive*
+  brings it back.  The harness does the work and checks the state of the task
+  each time (`test/task_actions_test.dart` has the table of what is offered
+  where); the app keeps no rules of its own about what may happen, and shows
+  what the harness says when it refuses, on the sheet, which covers the board's
+  own banner, and reads the board again, since a refusal usually means the
+  board was behind (it was verified in Emacs while the sheet was open).
+  What stops work or throws it away is asked first: *Stop*, *Drop*, *Delete task*
+  (which also asks whether the session goes too, for a task that has one worth
+  keeping) and *Mark complete*; a message and the feedback of *Send back* are
+  written in a dialog of their own, and an empty one sends nothing.  The
+  priority is shown at once and goes back if the harness refuses it.  An action
+  whose method the harness lacks (an older one) is not offered.
+
+  The queue of a project is *set*, never toggled, from the line under the
+  project's name: *Pause the queue* and *Queue the backlog automatically*
+  (`task/suspend-queue`, `task/resume-queue`, `task/set-backlog-mode`), so a
+  phone that is a moment behind cannot turn a queue the other way from the one
+  asked for.  *Pause all* and *Resume all* do the same to every task of the
+  project (`task/pause-all`, `task/resume-all`), and with the board on every
+  project, *All queues* pauses or resumes every project's queue and every
+  task at once (`task/suspend-all-queues`, `task/resume-all-queues`).  The app
+  follows a queue that is paused in Emacs, or by an agent, as the harness says
+  so (`task/queue`, `task/backlog-mode`).
+
+  | The menu of a card | The sheet of a task | What is asked first |
+  |---|---|---|
+  | ![The menu of a task at work](screenshots/android-task-card-menu.png) | ![The sheet of a task at work: message, pause, return to the queue, mark complete, priority, stop and delete](screenshots/android-task-sheet-actions.png) | ![Stopping a task asks first](screenshots/android-task-stop-asks.png) |
+  | ![A task that is paused waits in Pending, to be resumed](screenshots/android-task-paused.png) | ![The queue of a project: paused, with every task paused](screenshots/android-task-queue-paused.png) | ![The sheet of a task in review on an iPhone](screenshots/ios-task-sheet-review.png) |
  **Detects extensions per feature.** `initialize` is read for standard ACP
   capabilities and for the harness's `_harness.methods` and `_harness.events`.
   Each screen asks for the exact methods it needs. A missing method turns off
@@ -455,7 +503,7 @@ The client never assumes a method because the agent calls itself a harness.
 | Rich nodes, final text, usage on a node | `session/get`, `session/nodes` |
 | Runs of tool calls folded under one line | `tools/list`, whose `coalescable` says which tools' calls fold; a harness without it folds nothing |
 | Live activity | `agent/activity` or `agent/activity-changed` |
-| Task board | `task/list` (actions need `task/start`, `task/verify`, …) |
+| Task board | `task/list`; each action of a task needs its own method (`task/start`, `task/pause`, `task/delete`, …, `priority/set`) and is not offered without it |
 | Usage | `usage/totals` or `usage/summary` |
 | Plan quota | `provider/quota` and `provider/list`, which says which providers report one |
 | Question diagrams | `question/image` for images; ASCII comes with the request |
@@ -492,8 +540,20 @@ Everything beyond that is under `_harness/` and is optional.
   of its own.
 - Tasks: `task/list`, `task/slots`, `task/settings`, `task/submit`,
   `task/start`, `task/queue`, `task/verify`, `task/reject`, `task/prompt`,
-  `task/retry`, `task/cancel`, `task/complete`, `task/archive`,
-  `task/toggle-queue`, `task/toggle-backlog-mode`.
+  `task/retry`, `task/merge`, `task/cancel`, `task/complete`, `task/archive`
+  (`restore` brings one back), `task/delete` (`delete-session` takes its
+  session along), `task/pause`, `task/resume`, `task/return-to-pending`, and
+  `priority/set` with the task's session (a task's priority is its session's).
+  The queue of a project, which always names the project (`cwd`):
+  `task/suspend-queue`, `task/resume-queue`, `task/set-backlog-mode`, and
+  `task/pause-all`, `task/resume-all` (every project's without `cwd`);
+  `task/suspend-all-queues`, `task/resume-all-queues`;
+  `task/toggle-queue`, `task/toggle-backlog-mode` for a harness that can only
+  switch them.  The events `task/changed`, `task/review`, `task/done`,
+  `task/deleted`, `task/queue` and `task/backlog-mode`.  Nothing of this is
+  the app's own: the harness's ACP lets a client call every `task/` method, and
+  `test/harness-tasks-test.el` keeps the calls the app makes, with their
+  arguments, working.
 - Usage: `usage/totals`, `usage/summary`, `usage/live-all`, `usage/rates`,
   `usage/budgets`.
 - Plan quota: `provider/list` (a provider's `capabilities.quota` says it
@@ -790,6 +850,20 @@ The widget tests drive the real `AcpClient` against an in-memory ACP server
   attaching as it did
 - task review and verification, usage (a row per project, worktrees added),
   server capability table and project list
+- what can be done with a task (`test/task_actions_test.dart`,
+  `task_controller_actions_test.dart`, `task_actions_widget_test.dart`): the
+  actions offered for a task in each column and state, as the board in Emacs
+  offers them; each action's call, with its arguments (an archive sends no
+  `restore: false`, a queue call always names its project, a harness that can
+  only toggle is toggled only when the queue is not as asked); that every
+  action offered is one the harness takes, tried on a task in each state
+  against a harness that checks the state as the real one does; what is asked
+  before a task is stopped, dropped, deleted or marked complete; the message
+  and the feedback; the priority, shown at once and taken back when refused;
+  the harness's words on the sheet when it refuses, and the board read again;
+  the queue and the backlog mode set from their switches, and followed when
+  Emacs changes them; archived tasks hidden and brought back; and a harness
+  from before the controls, which is offered none of them
 - plain ACP fallback (three tabs, working chat, standard notice)
 - Cupertino rendering of the shell
 - layout (`test/layout_test.dart`): the notice that a session needs an answer
@@ -861,7 +935,11 @@ approval and loads the page again: the app must be on its sessions at once,
 with no form and no second approval (the mock would take six seconds), and
 again with the harness cut off (the browser's WebSocket is closed by
 Playwright) it must show the reconnecting card and, once the harness is back,
-get in by itself. The screenshots in this README are the output.
+get in by itself. `e2e/run_task_actions.mjs` then does what a person does with
+a task -- the menu of a card, the sheet with its actions and priority, what
+is asked before a task is stopped or deleted, a task paused and resumed, one
+archived and brought back, the queue of a project paused -- on both styles, and
+writes a screenshot for each.  The screenshots in this README are the output.
 
 | | |
 |---|---|

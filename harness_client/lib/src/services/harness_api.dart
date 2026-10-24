@@ -363,6 +363,11 @@ class HarnessApi {
     return HarnessTask.fromWire(result);
   }
 
+  // The actions on a task.  The harness checks the state of the task each
+  // one is given, and answers with an error where it does not apply (an
+  // [AcpException], whose message is the harness's own); the app offers what
+  // applies (see `TaskActions`) and says what the harness says of the rest.
+
   Future<HarnessTask> startTask(String id) async =>
       HarnessTask.fromWire(await extension('task/start', {'id': id}));
 
@@ -377,20 +382,46 @@ class HarnessApi {
         await extension('task/reject', {'id': id, 'feedback': feedback}),
       );
 
-  Future<HarnessTask> promptTask(String id, String text) async =>
-      HarnessTask.fromWire(
-        await extension('task/prompt', {'id': id, 'text': text}),
-      );
+  /// Write [text] to the session of task [id] (`task/prompt`): the harness
+  /// answers `true`, not the task.
+  Future<void> promptTask(String id, String text) async {
+    await extensionRaw('task/prompt', {'id': id, 'text': text});
+  }
 
   Future<HarnessTask> retryTask(String id) async =>
       HarnessTask.fromWire(await extension('task/retry', {'id': id}));
 
-  Future<HarnessTask> cancelTask(String id) async =>
-      HarnessTask.fromWire(await extension('task/cancel', {'id': id}));
+  /// Send the branch of task [id] through the merge queue again, after a
+  /// merge that failed (`task/merge`).
+  Future<HarnessTask> mergeTask(String id) async =>
+      HarnessTask.fromWire(await extension('task/merge', {'id': id}));
+
+  /// Stop task [id], or drop it when it never started (`task/cancel`): the
+  /// harness answers `true`, or nothing for a task it took off the board.
+  Future<void> cancelTask(String id) async {
+    await extensionRaw('task/cancel', {'id': id});
+  }
+
+  /// Put task [id] back in the pending queue and hold it there (`task/pause`).
+  Future<HarnessTask> pauseTask(String id) async =>
+      HarnessTask.fromWire(await extension('task/pause', {'id': id}));
+
+  /// End the pause of task [id] (`task/resume`).
+  Future<HarnessTask> resumeTask(String id) async =>
+      HarnessTask.fromWire(await extension('task/resume', {'id': id}));
+
+  /// Stop task [id] and put it back in the pending queue, where it starts
+  /// again when its turn comes (`task/return-to-pending`).
+  Future<HarnessTask> returnTaskToPending(String id) async =>
+      HarnessTask.fromWire(
+        await extension('task/return-to-pending', {'id': id}),
+      );
 
   Future<HarnessTask> completeTask(String id) async =>
       HarnessTask.fromWire(await extension('task/complete', {'id': id}));
 
+  /// Archive task [id], or bring it back when [restore] is set.  The flag is
+  /// sent only when it is true: the harness takes an explicit false for set.
   Future<HarnessTask> archiveTask(String id, {bool restore = false}) async =>
       HarnessTask.fromWire(
         await extension('task/archive', {
@@ -398,6 +429,18 @@ class HarnessApi {
           if (restore) 'restore': true,
         }),
       );
+
+  /// Forget task [id] (`task/delete`), and its session too when
+  /// [deleteSession] is set; a task that never started takes its session
+  /// along either way.  The worktree, if any, is kept.
+  Future<void> deleteTask(String id, {bool deleteSession = false}) async {
+    await extensionRaw('task/delete', {
+      'id': id,
+      if (deleteSession) 'delete-session': true,
+    });
+  }
+
+  // A task's priority is its session's: `setPriority` above gives it.
 
   Future<TaskSlots> taskSlots({String? cwd}) async => TaskSlots.fromWire(
     await extension('task/slots', {
@@ -412,15 +455,70 @@ class HarnessApi {
         }),
       );
 
-  Future<void> toggleTaskQueue({String? cwd}) => extension(
-    'task/toggle-queue',
-    {if (cwd != null && cwd.isNotEmpty) 'cwd': cwd},
+  // The queue of a project.  Each takes the project: without one the harness
+  // would act on the project of its own working directory, which a person
+  // never meant.
+
+  /// Suspend the pending queue of the project [cwd]: none of its waiting
+  /// tasks starts on its own until it is resumed (`task/suspend-queue`).
+  /// A task at work goes on, and an explicit start still starts a task.
+  Future<void> suspendQueue({required String cwd}) =>
+      extensionRaw('task/suspend-queue', {'cwd': cwd});
+
+  /// Let the waiting tasks of [cwd] start again, at once, by priority
+  /// (`task/resume-queue`).
+  Future<void> resumeQueue({required String cwd}) =>
+      extensionRaw('task/resume-queue', {'cwd': cwd});
+
+  /// Put the backlog of [cwd] in [mode], `auto` or `manual`: in auto mode a
+  /// task whose write-up finishes joins the queue by itself
+  /// (`task/set-backlog-mode`).  It moves no task that is waiting.
+  Future<void> setBacklogMode(String mode, {required String cwd}) =>
+      extensionRaw('task/set-backlog-mode', {'mode': mode, 'cwd': cwd});
+
+  /// Suspend the queue of [cwd] if it runs, else resume it
+  /// (`task/toggle-queue`): for a harness that has no way to set it.
+  Future<void> toggleTaskQueue({required String cwd}) =>
+      extensionRaw('task/toggle-queue', {'cwd': cwd});
+
+  /// Switch the backlog of [cwd] between manual and auto queueing
+  /// (`task/toggle-backlog-mode`): for a harness that has no way to set it.
+  Future<void> toggleBacklogMode({required String cwd}) =>
+      extensionRaw('task/toggle-backlog-mode', {'cwd': cwd});
+
+  /// Pause every task of the project [cwd], of every project without it
+  /// (`task/pause-all`): those at work, and those waiting for a slot.  The
+  /// ids of the tasks paused.
+  Future<List<String>> pauseAllTasks({String? cwd}) async => _ids(
+    await extensionRaw('task/pause-all', {
+      if (cwd != null && cwd.isNotEmpty) 'cwd': cwd,
+    }),
   );
 
-  Future<void> toggleBacklogMode({String? cwd}) => extension(
-    'task/toggle-backlog-mode',
-    {if (cwd != null && cwd.isNotEmpty) 'cwd': cwd},
+  /// End the pause of every paused task of [cwd], of every project without
+  /// it (`task/resume-all`).  The ids of the tasks resumed.
+  Future<List<String>> resumeAllTasks({String? cwd}) async => _ids(
+    await extensionRaw('task/resume-all', {
+      if (cwd != null && cwd.isNotEmpty) 'cwd': cwd,
+    }),
   );
+
+  /// Suspend the queue of every project that has one worth listing
+  /// (`task/suspend-all-queues`).  How many queues there were.
+  Future<int> suspendAllQueues() async =>
+      _projects(await extensionRaw('task/suspend-all-queues'));
+
+  /// Resume every suspended queue (`task/resume-all-queues`).  How many were
+  /// suspended.
+  Future<int> resumeAllQueues() async =>
+      _projects(await extensionRaw('task/resume-all-queues'));
+
+  int _projects(Object? result) => asList(asMap(result)['projects']).length;
+
+  List<String> _ids(Object? result) => [
+    for (final id in asList(asMap(result)['ids']))
+      if (asString(id) case final text? when text.isNotEmpty) text,
+  ];
 
   // ---- Usage -------------------------------------------------------------
 

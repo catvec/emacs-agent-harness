@@ -37,6 +37,11 @@ class HarnessTask {
     this.cannotContinue = false,
     this.queueSuspended = false,
     this.autoQueue = false,
+    this.returned = false,
+    this.returnReason,
+    this.hold,
+    this.merged = false,
+    this.worktreeRemoved = false,
     this.model,
     this.thinking,
     this.attachments = const [],
@@ -91,6 +96,17 @@ class HarnessTask {
           asBool(report['cannotContinue'] ?? report['cannot-continue']),
       queueSuspended: asBool(wire['queueSuspended'] ?? wire['queue-suspended']),
       autoQueue: asBool(wire['autoQueue'] ?? wire['auto-queue']),
+      // When it was put back in the queue after it worked, or true.
+      returned: asBool(wire['returned']),
+      returnReason: asString(wire['returnReason'] ?? wire['return-reason']),
+      hold: switch (asMap(wire['hold'])) {
+        final hold when hold.isEmpty => null,
+        final hold => TaskHold.fromWire(hold),
+      },
+      merged: asBool(wire['merged']),
+      worktreeRemoved: asBool(
+        wire['worktreeRemoved'] ?? wire['worktree-removed'],
+      ),
       model: asString(wire['model']),
       thinking: asString(wire['thinking']),
       attachments: [
@@ -132,6 +148,26 @@ class HarnessTask {
   final bool cannotContinue;
   final bool queueSuspended;
   final bool autoQueue;
+
+  /// Whether the task was put back in the pending queue after it worked
+  /// (paused, pre-empted, returned by hand, sent back while no slot could
+  /// take it): its session has the work, and starting it carries on.  The
+  /// harness clears it when the task starts again.
+  final bool returned;
+
+  /// Why it was returned: `returned`, `preempted`, `reclaimed`, `sent-back`,
+  /// `quota` or `budget`.
+  final String? returnReason;
+
+  /// What holds a task in the queue back, when something does: the user
+  /// paused it, or every model it could run on is out of quota or money.
+  final TaskHold? hold;
+
+  /// Whether the task's branch is merged.
+  final bool merged;
+
+  /// Whether the task's worktree was removed (it was archived and merged).
+  final bool worktreeRemoved;
   final String? model;
   final String? thinking;
 
@@ -174,6 +210,18 @@ class HarnessTask {
   bool get isDone => columnName == 'done';
   bool get isStopped => outcome != null && !isDone;
 
+  /// Whether an agent writes the task up for the backlog, or stopped part
+  /// way (see [outcome]).
+  bool get isRefining => state == 'refining';
+
+  /// Whether the user paused the task: it waits in the queue, whatever the
+  /// free slots, until it is resumed.
+  bool get isPaused => hold?.kind == 'paused';
+
+  /// Whether the task's session stopped on the word of an agent that the
+  /// board already has this task (`duplicate`), and waits for the user.
+  bool get isDuplicate => isRefining && outcome == 'duplicate';
+
   /// The name of the project the task is for: a git worktree of the harness
   /// is named for its project.
   String get projectName {
@@ -188,6 +236,51 @@ class HarnessTask {
     'low' => 'Low',
     _ => 'Medium',
   };
+
+  /// This task, with [priority] for the one it has: what the board shows
+  /// while the harness is told to change it.
+  HarnessTask withPriority(String priority) => HarnessTask(
+    id: id,
+    name: name,
+    prompt: prompt,
+    state: state,
+    column: column,
+    priority: priority,
+    project: project,
+    cwd: cwd,
+    sessionId: sessionId,
+    branch: branch,
+    worktree: worktree,
+    createdAt: createdAt,
+    finishedAt: finishedAt,
+    updatedAt: updatedAt,
+    queuedAt: queuedAt,
+    verifiedAt: verifiedAt,
+    outcome: outcome,
+    error: error,
+    report: report,
+    feedback: feedback,
+    mergeStatus: mergeStatus,
+    conflicts: conflicts,
+    verified: verified,
+    archived: archived,
+    backlog: backlog,
+    plan: plan,
+    mainTree: mainTree,
+    noMerge: noMerge,
+    cannotContinue: cannotContinue,
+    queueSuspended: queueSuspended,
+    autoQueue: autoQueue,
+    returned: returned,
+    returnReason: returnReason,
+    hold: hold,
+    merged: merged,
+    worktreeRemoved: worktreeRemoved,
+    model: model,
+    thinking: thinking,
+    attachments: attachments,
+    extra: extra,
+  );
 
   HarnessTask merge(HarnessTask newer) {
     if (newer.id != id) return this;
@@ -208,14 +301,18 @@ class HarnessTask {
       updatedAt: newer.updatedAt ?? updatedAt,
       queuedAt: newer.queuedAt ?? queuedAt,
       verifiedAt: newer.verifiedAt ?? verifiedAt,
-      outcome: newer.outcome ?? outcome,
-      error: newer.error ?? error,
+      // An event carries the whole task, so what it leaves out is gone: a
+      // task that is retried no longer stopped with an error, one that is
+      // restored is not archived any more, one that starts again is no
+      // longer returned to the queue or held there.
+      outcome: newer.outcome,
+      error: newer.error,
       report: newer.report ?? report,
       feedback: newer.feedback.isNotEmpty ? newer.feedback : feedback,
-      mergeStatus: newer.mergeStatus ?? mergeStatus,
-      conflicts: newer.conflicts.isNotEmpty ? newer.conflicts : conflicts,
+      mergeStatus: newer.mergeStatus,
+      conflicts: newer.conflicts,
       verified: newer.verified || verified,
-      archived: newer.archived || archived,
+      archived: newer.archived,
       backlog: newer.backlog,
       plan: newer.plan || plan,
       mainTree: newer.mainTree || mainTree,
@@ -223,6 +320,11 @@ class HarnessTask {
       cannotContinue: newer.cannotContinue || cannotContinue,
       queueSuspended: newer.queueSuspended,
       autoQueue: newer.autoQueue,
+      returned: newer.returned,
+      returnReason: newer.returnReason,
+      hold: newer.hold,
+      merged: newer.merged || merged,
+      worktreeRemoved: newer.worktreeRemoved || worktreeRemoved,
       model: newer.model ?? model,
       thinking: newer.thinking ?? thinking,
       attachments: newer.attachments.isNotEmpty
@@ -231,6 +333,34 @@ class HarnessTask {
       extra: {...extra, ...newer.extra},
     );
   }
+}
+
+/// What holds a task back in the pending queue (the view's `hold`): the user
+/// paused it, or every model it could run on is out of quota or money.
+class TaskHold {
+  const TaskHold({
+    required this.kind,
+    this.reason,
+    this.until,
+    this.guess = false,
+  });
+
+  factory TaskHold.fromWire(JsonMap wire) => TaskHold(
+    kind: enumName(wire['kind']),
+    reason: asString(wire['reason']),
+    until: parseTime(wire['until']),
+    guess: asBool(wire['guess']),
+  );
+
+  /// `paused`, `quota` or `budget`.
+  final String kind;
+  final String? reason;
+
+  /// When the hold ends, where the harness knows (a quota resets).
+  final DateTime? until;
+
+  /// Whether [until] is a guess.
+  final bool guess;
 }
 
 class TaskReport {

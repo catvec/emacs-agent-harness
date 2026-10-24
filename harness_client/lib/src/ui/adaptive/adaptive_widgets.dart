@@ -1341,80 +1341,123 @@ Future<String?> showHarnessTextPrompt({
   String initial = '',
   String confirmLabel = 'Save',
   bool multiline = false,
-}) async {
-  final controller = TextEditingController(text: initial);
-  final cupertino = HarnessStyle.isCupertino(context);
-  final result = await showDialog<String>(
+}) {
+  return showDialog<String>(
     context: context,
-    builder: (dialogContext) {
-      final field = HarnessTextField(
-        controller: controller,
-        hint: hint,
-        autofocus: true,
-        maxLines: multiline ? 5 : 1,
-        minLines: multiline ? 3 : null,
-        textInputAction: multiline
-            ? TextInputAction.newline
-            : TextInputAction.done,
-        onSubmitted: multiline
-            ? null
-            : (value) => Navigator.of(dialogContext).pop(value),
-      );
-      if (cupertino) {
-        return CupertinoAlertDialog(
-          title: Text(title),
-          content: Padding(
-            padding: const EdgeInsets.only(top: 12),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                if (message != null) ...[
-                  Text(message),
-                  const SizedBox(height: 12),
-                ],
-                field,
+    builder: (dialogContext) => _TextPromptDialog(
+      title: title,
+      message: message,
+      hint: hint,
+      initial: initial,
+      confirmLabel: confirmLabel,
+      multiline: multiline,
+    ),
+  );
+}
+
+/// The dialog of [showHarnessTextPrompt].  It owns the field's controller, so
+/// that the controller outlives the dialog's way out: the dialog fades away
+/// for a moment after it is closed, with its field still drawn.
+class _TextPromptDialog extends StatefulWidget {
+  const _TextPromptDialog({
+    required this.title,
+    required this.message,
+    required this.hint,
+    required this.initial,
+    required this.confirmLabel,
+    required this.multiline,
+  });
+
+  final String title;
+  final String? message;
+  final String? hint;
+  final String initial;
+  final String confirmLabel;
+  final bool multiline;
+
+  @override
+  State<_TextPromptDialog> createState() => _TextPromptDialogState();
+}
+
+class _TextPromptDialogState extends State<_TextPromptDialog> {
+  late final TextEditingController _controller = TextEditingController(
+    text: widget.initial,
+  );
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final message = widget.message;
+    final field = HarnessTextField(
+      controller: _controller,
+      hint: widget.hint,
+      autofocus: true,
+      maxLines: widget.multiline ? 5 : 1,
+      minLines: widget.multiline ? 3 : null,
+      textInputAction: widget.multiline
+          ? TextInputAction.newline
+          : TextInputAction.done,
+      onSubmitted: widget.multiline
+          ? null
+          : (value) => Navigator.of(context).pop(value),
+    );
+    if (HarnessStyle.isCupertino(context)) {
+      return CupertinoAlertDialog(
+        title: Text(widget.title),
+        content: Padding(
+          padding: const EdgeInsets.only(top: 12),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (message != null) ...[
+                Text(message),
+                const SizedBox(height: 12),
               ],
-            ),
+              field,
+            ],
           ),
-          actions: [
-            CupertinoDialogAction(
-              onPressed: () => Navigator.of(dialogContext).pop(),
-              child: const Text('Cancel'),
-            ),
-            CupertinoDialogAction(
-              isDefaultAction: true,
-              onPressed: () => Navigator.of(dialogContext).pop(controller.text),
-              child: Text(confirmLabel),
-            ),
-          ],
-        );
-      }
-      return AlertDialog(
-        title: Text(title),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            if (message != null) ...[Text(message), const SizedBox(height: 12)],
-            field,
-          ],
         ),
         actions: [
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(),
+          CupertinoDialogAction(
+            onPressed: () => Navigator.of(context).pop(),
             child: const Text('Cancel'),
           ),
-          FilledButton(
-            onPressed: () => Navigator.of(dialogContext).pop(controller.text),
-            child: Text(confirmLabel),
+          CupertinoDialogAction(
+            isDefaultAction: true,
+            onPressed: () => Navigator.of(context).pop(_controller.text),
+            child: Text(widget.confirmLabel),
           ),
         ],
       );
-    },
-  );
-  controller.dispose();
-  return result;
+    }
+    return AlertDialog(
+      title: Text(widget.title),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (message != null) ...[Text(message), const SizedBox(height: 12)],
+          field,
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.of(context).pop(_controller.text),
+          child: Text(widget.confirmLabel),
+        ),
+      ],
+    );
+  }
 }
 
 IconData adaptiveIcon(

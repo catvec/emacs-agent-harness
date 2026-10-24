@@ -64,3 +64,9 @@ WEB_URL="http://127.0.0.1:$PORT" \
 ACP_URL="ws://127.0.0.1:$ACP_PORT/acp" \
 TOOLS_ACP_URL="ws://127.0.0.1:$TOOLS_PORT/acp" \
 node run_tools.mjs
+# What a person can do with a task: the menu of a card, the sheet, what is
+# asked first, a task paused and resumed, archived, and the queue's controls.
+# It changes the preview harness's tasks, so it goes last.
+WEB_URL="http://127.0.0.1:$PORT" \
+ACP_URL="ws://127.0.0.1:$ACP_PORT/acp" \
+node run_task_actions.mjs

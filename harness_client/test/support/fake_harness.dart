@@ -81,6 +81,7 @@ class FakeHarness {
     this.projectMains = true,
     this.tidyProjects = true,
     this.taskPictures = true,
+    this.taskControls = true,
     this.quota = true,
     this.toolCatalogue = true,
     Set<String>? knownSecrets,
@@ -119,6 +120,20 @@ class FakeHarness {
         'task/settings',
         'task/toggle-queue',
         'task/toggle-backlog-mode',
+        if (taskControls) ...[
+          'task/pause',
+          'task/resume',
+          'task/return-to-pending',
+          'task/merge',
+          'task/delete',
+          'task/suspend-queue',
+          'task/resume-queue',
+          'task/set-backlog-mode',
+          'task/pause-all',
+          'task/resume-all',
+          'task/suspend-all-queues',
+          'task/resume-all-queues',
+        ],
         'usage/totals',
         'usage/summary',
         'usage/live-all',
@@ -146,6 +161,9 @@ class FakeHarness {
         'task/changed',
         'task/review',
         'task/done',
+        'task/deleted',
+        'task/queue',
+        'task/backlog-mode',
         'usage/live-updated',
         'usage/rates-updated',
         'usage/budgets-changed',
@@ -178,6 +196,13 @@ class FakeHarness {
   /// `task/settings` say (`inlineAttachments`).  An older harness does not
   /// say, and would lose them.
   final bool taskPictures;
+
+  /// Whether the harness has the controls of the board's queue and of a
+  /// task's state that came after the first ones: pausing and resuming,
+  /// returning to pending, retrying a merge, deleting, setting the queue and
+  /// the backlog mode, and the controls of every task or queue at once.  An
+  /// older harness has the toggles only.
+  final bool taskControls;
 
   /// Whether the harness offers `provider/quota`: the billing and plan quota
   /// of the providers that report one.  An older harness does not.
@@ -298,6 +323,22 @@ class FakeHarness {
   final Map<String, Map<String, Object?>> sessions = {};
   final Map<String, List<Map<String, Object?>>> nodes = {};
   final Map<String, Map<String, Object?>> tasks = {};
+
+  /// The projects whose pending queue is suspended, and those whose backlog
+  /// queues its tasks itself: the harness keeps both for each project.
+  final Set<String> suspendedQueues = {};
+  final Set<String> autoQueues = {};
+
+  /// What was written to the session of a task with `task/prompt`: the
+  /// task's id, and the text.
+  final List<(String, String)> taskMessages = [];
+
+  /// The params of the requests for [method] (`_harness/task/start`), in the
+  /// order they came.
+  List<JsonMap> calls(String method) => [
+    for (final (called, params) in requests)
+      if (called == method) params,
+  ];
   final List<Map<String, Object?>> permissionAnswers = [];
   final List<Map<String, Object?>> questionAnswers = [];
 
@@ -1374,7 +1415,19 @@ class FakeHarness {
         return;
       }
       if (method == '_harness/priority/set') {
-        _respond(id, const <String, Object?>{});
+        // A task's priority is its session's: the tasks of the session read
+        // it from there.
+        final sid = asString(params['session-id']) ?? '';
+        final level = asString(params['priority']) ?? 'medium';
+        if (!const {'low', 'medium', 'high'}.contains(level)) {
+          _respondError(id, -32603, 'Unknown priority "$level"');
+          return;
+        }
+        sessions[sid]?['priority'] = level;
+        for (final task in tasks.values) {
+          if (task['session'] == sid) task['priority'] = level;
+        }
+        _respond(id, level);
         return;
       }
       if (method == '_harness/permission/pending') {
@@ -1443,12 +1496,12 @@ class FakeHarness {
         return;
       }
       if (method == '_harness/task/slots') {
+        final project =
+            asString(params['cwd']) ?? '/Users/noah/Code/emacs-agent-harness/';
         _respond(id, {
-          'project':
-              asString(params['cwd']) ??
-              '/Users/noah/Code/emacs-agent-harness/',
+          'project': project,
           'limit': 3,
-          'suspended': false,
+          'suspended': suspendedQueues.contains(project),
           'holders': [
             {
               'id': 'task-1',
@@ -1474,10 +1527,12 @@ class FakeHarness {
         return;
       }
       if (method == '_harness/task/settings') {
+        final project =
+            asString(params['cwd']) ?? '/Users/noah/Code/emacs-agent-harness/';
         _respond(id, {
           'maxRunning': 3,
-          'queueSuspended': false,
-          'backlogMode': 'manual',
+          'queueSuspended': suspendedQueues.contains(project),
+          'backlogMode': autoQueues.contains(project) ? 'auto' : 'manual',
           'requireVerification': true,
           'model': 'claude:claude-fable-5-1',
           'permissionMode': 'auto',
@@ -1525,53 +1580,12 @@ class FakeHarness {
         _respond(id, task);
         return;
       }
+      if (method.startsWith('_harness/task/') &&
+          _taskQueueMethod(id, method, params)) {
+        return;
+      }
       if (method.startsWith('_harness/task/')) {
-        final action = method.substring('_harness/task/'.length);
-        final taskId = asString(params['id']);
-        final task = tasks[taskId];
-        if (task != null) {
-          if (action == 'start') {
-            task['state'] = 'active';
-            task['column'] = 'active';
-          } else if (action == 'queue') {
-            task['state'] = 'pending';
-            task['column'] = 'pending';
-            task['backlog'] = false;
-          } else if (action == 'verify') {
-            task['state'] = 'done';
-            task['column'] = 'done';
-            task['verified'] = true;
-          } else if (action == 'reject') {
-            task['state'] = 'active';
-            task['column'] = 'active';
-            task['feedback'] = [
-              ...(task['feedback'] as List? ?? const []),
-              {
-                'text': params['feedback'],
-                'at': DateTime.now().millisecondsSinceEpoch / 1000,
-              },
-            ];
-          } else if (action == 'complete') {
-            task['state'] = 'done';
-            task['column'] = 'done';
-          } else if (action == 'cancel') {
-            tasks.remove(taskId);
-            _event('task/deleted', [taskId]);
-            _respond(id, task);
-            return;
-          } else if (action == 'archive') {
-            task['archived'] = true;
-            tasks.remove(taskId);
-            _event('task/deleted', [taskId]);
-            _respond(id, task);
-            return;
-          } else if (action == 'retry') {
-            task['state'] = 'active';
-            task['column'] = 'active';
-          }
-          _event('task/changed', [task]);
-        }
-        _respond(id, task ?? const <String, Object?>{});
+        _taskAction(id, method.substring('_harness/task/'.length), params);
         return;
       }
       if (method == '_harness/usage/totals') {
@@ -2445,7 +2459,9 @@ class FakeHarness {
     final session = sessions[sid]!;
     final list = session['pending'];
     // The seeded lists are literals of a narrower type than this adds to.
-    if (_pendingLists.contains(list)) return list! as List<Map<String, Object?>>;
+    if (_pendingLists.contains(list)) {
+      return list! as List<Map<String, Object?>>;
+    }
     final copy = <Map<String, Object?>>[
       for (final item in (list as List? ?? const []))
         Map<String, Object?>.from(item as Map),
@@ -2475,6 +2491,259 @@ class FakeHarness {
     } else {
       transport?.harnessSend(message);
     }
+  }
+
+  /// The tasks' queue controls, which act on a project and not on a task.
+  /// Whether [method] was one.
+  bool _taskQueueMethod(Object? id, String method, JsonMap params) {
+    final action = method.substring('_harness/task/'.length);
+    final cwd = asString(params['cwd']);
+    switch (action) {
+      case 'suspend-queue' || 'resume-queue' || 'toggle-queue':
+        // The harness takes a missing project for the one of its own working
+        // directory, which no client means.
+        if (cwd == null || cwd.isEmpty) {
+          _respondError(id, -32602, 'Task queue calls need a project (cwd).');
+          return true;
+        }
+        final suspend = switch (action) {
+          'suspend-queue' => true,
+          'resume-queue' => false,
+          _ => !suspendedQueues.contains(cwd),
+        };
+        suspend ? suspendedQueues.add(cwd) : suspendedQueues.remove(cwd);
+        _event('task/queue', [cwd, suspend ? true : null]);
+        _respond(id, {'project': cwd, 'suspended': suspend ? true : false});
+      case 'set-backlog-mode' || 'toggle-backlog-mode':
+        if (cwd == null || cwd.isEmpty) {
+          _respondError(id, -32602, 'Task queue calls need a project (cwd).');
+          return true;
+        }
+        final mode = action == 'toggle-backlog-mode'
+            ? (autoQueues.contains(cwd) ? 'manual' : 'auto')
+            : asString(params['mode']);
+        if (mode != 'auto' && mode != 'manual') {
+          _respondError(
+            id,
+            -32603,
+            'Unknown backlog mode "$mode": it is manual or auto',
+          );
+          return true;
+        }
+        mode == 'auto' ? autoQueues.add(cwd) : autoQueues.remove(cwd);
+        _event('task/backlog-mode', [cwd, mode]);
+        _respond(id, {'project': cwd, 'mode': mode});
+      case 'suspend-all-queues':
+        final projects = {
+          for (final task in tasks.values)
+            if (task['project'] case final String project) project,
+        };
+        suspendedQueues.addAll(projects);
+        for (final project in projects) {
+          _event('task/queue', [project, true]);
+        }
+        _respond(id, {'projects': projects.toList(), 'suspended': true});
+      case 'resume-all-queues':
+        final projects = suspendedQueues.toList();
+        suspendedQueues.clear();
+        for (final project in projects) {
+          _event('task/queue', [project, null]);
+        }
+        _respond(id, {'projects': projects, 'suspended': false});
+      case 'pause-all' || 'resume-all':
+        final pause = action == 'pause-all';
+        final ids = <String>[];
+        for (final task in tasks.values.toList()) {
+          if (cwd != null && cwd.isNotEmpty && task['project'] != cwd) continue;
+          if (pause ? _inPauseAll(task) : _paused(task)) {
+            pause ? _pause(task) : _resume(task);
+            ids.add(task['id'] as String);
+            _event('task/changed', [task]);
+          }
+        }
+        _respond(id, {'ids': ids});
+      default:
+        return false;
+    }
+    return true;
+  }
+
+  bool _paused(Map<String, Object?> task) =>
+      asMap(task['hold'])['kind'] == 'paused';
+
+  /// A task at work, or waiting for a slot and not paused yet: what pausing
+  /// takes.
+  bool _pausable(Map<String, Object?> task) =>
+      !_paused(task) &&
+      task['archived'] != true &&
+      (task['state'] == 'active' ||
+          (task['state'] == 'pending' && task['backlog'] != true));
+
+  /// What `task/pause-all` pauses: a task at work (in progress, or waiting on
+  /// the person mid-work, not stopped part way or in the merge queue), or
+  /// waiting for a slot.
+  bool _inPauseAll(Map<String, Object?> task) =>
+      _pausable(task) &&
+      (task['state'] != 'active' ||
+          (task['outcome'] == null && task['merge-status'] == null));
+
+  void _pause(Map<String, Object?> task) {
+    if (task['state'] == 'active') {
+      task['state'] = 'pending';
+      task['column'] = 'pending';
+      task['returned'] = DateTime.now().millisecondsSinceEpoch / 1000;
+      task.remove('outcome');
+    }
+    task['hold'] = {'kind': 'paused', 'reason': 'Paused by hand.'};
+  }
+
+  void _resume(Map<String, Object?> task) => task.remove('hold');
+
+  /// One action on one task, as the harness takes it: it checks the state of
+  /// the task, and signals with the words of its own where the action does
+  /// not apply.
+  void _taskAction(Object? id, String action, JsonMap params) {
+    final taskId = asString(params['id']);
+    final task = tasks[taskId];
+    void refuse(String why) => _respondError(id, -32603, why);
+    if (task == null) {
+      // The harness knows no task by that id.
+      _respondError(id, -32603, 'No task $taskId');
+      return;
+    }
+    final state = asString(task['state']);
+    switch (action) {
+      case 'start':
+        if (state != 'pending' && state != 'refining') {
+          return refuse('Task $taskId already started');
+        }
+        task['state'] = 'active';
+        task['column'] = 'active';
+        task['backlog'] = false;
+        task.remove('hold');
+        task.remove('returned');
+      case 'queue':
+        if (state != 'pending' || task['backlog'] != true) {
+          return refuse('Task $taskId is not waiting in the backlog ($state)');
+        }
+        task['column'] = 'pending';
+        task['backlog'] = false;
+      case 'verify':
+        if (state != 'review') {
+          return refuse('Task $taskId is not waiting for review');
+        }
+        task['state'] = 'done';
+        task['column'] = 'done';
+        task['verified'] = true;
+      case 'reject':
+        if (state != 'review') {
+          return refuse('Task $taskId is not waiting for review');
+        }
+        if ((asString(params['feedback']) ?? '').trim().isEmpty) {
+          return refuse('Sending a task back needs feedback');
+        }
+        task['state'] = 'active';
+        task['column'] = 'active';
+        task['feedback'] = [
+          ...(task['feedback'] as List? ?? const []),
+          {
+            'text': params['feedback'],
+            'at': DateTime.now().millisecondsSinceEpoch / 1000,
+          },
+        ];
+      case 'complete':
+        task['state'] = 'done';
+        task['column'] = 'done';
+        task['verified'] = true;
+      case 'retry':
+        if (state == 'review' || state == 'done') {
+          return refuse('Task $taskId is $state; there is nothing to retry');
+        }
+        task['state'] = 'active';
+        task['column'] = 'active';
+        task.remove('outcome');
+        task.remove('error');
+      case 'pause':
+        if (!_paused(task) && !_pausable(task)) {
+          return refuse(
+            'Task $taskId is ${task['column']}; only a task at work or '
+            'waiting for a slot can be paused',
+          );
+        }
+        _pause(task);
+      case 'resume':
+        _resume(task);
+      case 'return-to-pending':
+        if (state != 'active') {
+          return refuse(
+            'Task $taskId is not at work ($state); only a task at work can '
+            'be returned to pending',
+          );
+        }
+        task['state'] = 'pending';
+        task['column'] = 'pending';
+        task['returned'] = DateTime.now().millisecondsSinceEpoch / 1000;
+        task.remove('outcome');
+      case 'merge':
+        if (task['worktree'] == null) {
+          return refuse('Task $taskId has no worktree to merge');
+        }
+        if (state == 'review') {
+          return refuse(
+            'Task $taskId waits for your review; verifying it merges it',
+          );
+        }
+        if (state == 'done') return refuse('Task $taskId is already merged');
+        task['column'] = 'merging';
+        task['merge-status'] = 'queued';
+        task.remove('outcome');
+      case 'archive':
+        if (params['restore'] == true) {
+          task['archived'] = false;
+        } else if (state == 'active' || state == 'pending') {
+          return refuse('Task $taskId is still working');
+        } else {
+          task['archived'] = true;
+        }
+      case 'cancel':
+        if (state == 'pending' ||
+            state == 'refining' && task['outcome'] != null) {
+          tasks.remove(taskId);
+          _event('task/deleted', [taskId]);
+          _respond(id, null);
+          return;
+        }
+        // Stopped: the task stays, where it can be retried.
+        task['outcome'] = 'cancelled';
+        task['column'] = 'needs-input';
+      case 'delete':
+        tasks.remove(taskId);
+        if (params['delete-session'] == true) {
+          sessions.remove(asString(task['session']));
+        }
+        _event('task/deleted', [taskId]);
+        _respond(id, true);
+        return;
+      case 'prompt':
+        final text = asString(params['text']) ?? '';
+        if (state == 'pending' &&
+            task['backlog'] != true &&
+            task['returned'] == null) {
+          return refuse(
+            'Task $taskId is waiting for a slot; task/start starts it',
+          );
+        }
+        taskMessages.add((taskId!, text));
+        if (state == 'review') {
+          // A message the user writes to a task in review sends it back.
+          task['state'] = 'active';
+          task['column'] = 'active';
+        }
+        _respond(id, true);
+        return;
+    }
+    _event('task/changed', [task]);
+    _respond(id, task);
   }
 
   void _respond(Object? id, Object? result) {

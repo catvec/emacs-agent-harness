@@ -125,7 +125,7 @@ void main() {
       expect(_listings(harness).last['cwd'], _other);
       expect(_ids(app.tasks!), _otherTasks);
       // An action of the person's reads it again too.
-      await app.tasks!.queue('task-7');
+      await app.tasks!.pause('task-7');
       expect(_listings(harness).last['cwd'], _other);
     });
 

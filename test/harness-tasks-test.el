@@ -7921,5 +7921,126 @@ same, and the id."
                          (plist-get (harness-tasks-test-task id) :branch)))
           (harness-call 'task/cancel id))))))
 
+;;;; The phone app's calls
+
+;; The Flutter app (harness_client/lib/src/services/harness_api.dart) manages a
+;; task through the same bus methods as the board in Emacs and `task_control',
+;; as `_harness/NAME' over ACP.  Nothing of its own is on the server: the
+;; harness checks the state of the task each call is given and answers with
+;; the error the app shows.  These tests keep the two sides together: every
+;; call the app makes is one ACP lets a client make, with the arguments the
+;; method takes, so that a method that is renamed or loses an argument, or a
+;; prefix that leaves the list of what clients may call, fails here and not on
+;; a phone.
+
+(defvar harness--methods)
+(defvar harness-acp--forwarded-events)
+(declare-function harness-acp--extension-allowed-p "harness-acp" (name))
+(declare-function harness-acp--map-params "harness-acp" (fn params))
+(declare-function harness-method-fn "harness-core" (method))
+
+(defconst harness-tasks-test--app-calls
+  '(;; The board.
+    (task/list (:cwd "/p/") ("/p/"))
+    (task/list nil (nil))
+    (task/get (:id "t-1") ("t-1"))
+    (task/slots (:cwd "/p/") ("/p/"))
+    (task/settings (:cwd "/p/") ("/p/"))
+    ;; What is done to a task.
+    (task/start (:id "t-1") ("t-1"))
+    (task/queue (:id "t-1") ("t-1"))
+    (task/retry (:id "t-1") ("t-1"))
+    (task/merge (:id "t-1") ("t-1"))
+    (task/pause (:id "t-1") ("t-1"))
+    (task/resume (:id "t-1") ("t-1"))
+    (task/return-to-pending (:id "t-1") ("t-1"))
+    (task/prompt (:id "t-1" :text "Use the new endpoint") ("t-1" "Use the new endpoint" nil nil))
+    (task/verify (:id "t-1") ("t-1"))
+    (task/reject (:id "t-1" :feedback "The footer is cut off") ("t-1" "The footer is cut off" nil))
+    (task/cancel (:id "t-1") ("t-1"))
+    (task/complete (:id "t-1") ("t-1"))
+    (task/archive (:id "t-1") ("t-1" nil))
+    (task/archive (:id "t-1" :restore t) ("t-1" t))
+    (task/delete (:id "t-1") ("t-1" nil))
+    (task/delete (:id "t-1" :delete-session t) ("t-1" t))
+    ;; A task'"'"'s priority is its session'"'"'s.
+    (priority/set (:session-id "s-1" :priority "high") ("s-1" "high"))
+    ;; The queue of a project, and its backlog.
+    (task/suspend-queue (:cwd "/p/") ("/p/"))
+    (task/resume-queue (:cwd "/p/") ("/p/"))
+    (task/toggle-queue (:cwd "/p/") ("/p/"))
+    (task/set-backlog-mode (:mode "auto" :cwd "/p/") ("auto" "/p/"))
+    (task/toggle-backlog-mode (:cwd "/p/") ("/p/"))
+    ;; Every task of a project, of every project, and every queue.
+    (task/pause-all (:cwd "/p/") ("/p/"))
+    (task/pause-all nil (nil))
+    (task/resume-all (:cwd "/p/") ("/p/"))
+    (task/resume-all nil (nil))
+    (task/suspend-all-queues nil nil)
+    (task/resume-all-queues nil nil))
+  "What the app calls: (METHOD PARAMS ARGS).
+PARAMS are what it sends, as the plist ACP reads from the JSON; ARGS are
+the arguments the method then gets.")
+
+(ert-deftest harness-tasks-the-phone-app-calls-reach-the-methods ()
+  "Each call the Flutter app makes of a task maps onto the method it names."
+  (harness-tasks-test-with
+    (dolist (call harness-tasks-test--app-calls)
+      (pcase-let ((`(,method ,params ,args) call))
+        (should (harness-acp--extension-allowed-p (symbol-name method)))
+        (let ((m (gethash method harness--methods)))
+          (should m)
+          (should (equal args (harness-acp--map-params (harness-method-fn m) params))))))))
+
+(ert-deftest harness-tasks-the-phone-app-hears-the-board-change ()
+  "The events the app follows to keep its board as Emacs has it are forwarded."
+  (harness-tasks-test-with
+    (dolist (event '(task/changed task/review task/done task/deleted
+                                  task/queue task/backlog-mode))
+      (should (memq event harness-acp--forwarded-events)))))
+
+(ert-deftest harness-tasks-the-phone-app-manages-a-task-over-acp ()
+  "The calls the app makes move a task as Emacs does.
+What the state of a task does not allow is refused in the harness's words,
+which the app shows as they are: it keeps no rules of its own."
+  (harness-tasks-test-with
+    (let* ((harness-tasks-max-running 0)
+           (conn (harness-acp-connect))
+           (call (lambda (method &rest params)
+                   (harness-test-await (harness-acp-request conn (concat "_harness/" method) params))))
+           (refused (lambda (method &rest params)
+                      (condition-case err
+                          (progn (apply call method params) nil)
+                        (acp-error (nth 1 (cdr err))))))
+           (id (plist-get (funcall call "task/submit" :cwd default-directory :prompt "Work to do") :id)))
+      ;; Paused where it waits, and let go again.
+      (should (equal "paused" (format "%s" (plist-get (plist-get (funcall call "task/pause" :id id) :hold) :kind))))
+      (should-not (plist-get (funcall call "task/resume" :id id) :hold))
+      ;; Refused, in the harness's own words.
+      (should (string-match-p "not waiting for review" (funcall refused "task/verify" :id id)))
+      (should (string-match-p "only a task at work" (funcall refused "task/return-to-pending" :id id)))
+      (should (string-match-p "waiting for a slot" (funcall refused "task/prompt" :id id :text "hello")))
+      ;; Its priority is its session's, which the app names by its id.
+      (let ((session (plist-get (funcall call "task/get" :id id) :session)))
+        (should (equal "high" (funcall call "priority/set" :session-id session :priority "high")))
+        (should (equal "high" (plist-get (funcall call "task/get" :id id) :priority))))
+      ;; The queue of the project is set, not toggled: asking again leaves it so.
+      (dotimes (_ 2)
+        (should (eq t (plist-get (funcall call "task/suspend-queue" :cwd default-directory) :suspended))))
+      (should (eq t (plist-get (funcall call "task/settings" :cwd default-directory) :queue-suspended)))
+      (should (eq :false (plist-get (funcall call "task/resume-queue" :cwd default-directory) :suspended)))
+      (should (equal "auto" (format "%s" (plist-get (funcall call "task/set-backlog-mode" :mode "auto"
+                                                              :cwd default-directory)
+                                                    :mode))))
+      (should (equal "auto" (format "%s" (plist-get (funcall call "task/settings" :cwd default-directory)
+                                                    :backlog-mode))))
+      (funcall call "task/set-backlog-mode" :mode "manual" :cwd default-directory)
+      ;; Every task of the project at once.
+      (should (equal (list id) (plist-get (funcall call "task/pause-all" :cwd default-directory) :ids)))
+      (should (equal (list id) (plist-get (funcall call "task/resume-all" :cwd default-directory) :ids)))
+      ;; Dropped, with its session, as a task that never started is.
+      (funcall call "task/cancel" :id id)
+      (should-not (harness-call 'task/list default-directory)))))
+
 (provide 'harness-tasks-test)
 ;;; harness-tasks-test.el ends here
