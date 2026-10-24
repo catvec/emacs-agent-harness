@@ -1,5 +1,7 @@
 ;;; harness-client-check.el --- Hold a hand-in of the Flutter app to its build check  -*- lexical-binding: t; -*-
 
+;; Version: 0.1.0
+
 ;;; Commentary:
 
 ;; A plugin of the harness's own repository, not a module of the

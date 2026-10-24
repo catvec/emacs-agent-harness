@@ -68,7 +68,7 @@ The pictures, by the name `scripts/media.sh` takes:
 | `settings-policy` | The settings page under an administrator's policy (docs/policy.md): the banner listing what it sets, the settings it sets locked | `harness-media-shot-settings-policy` |
 | `btw` | A BTW under the rate-limit session's chat, `acme/ratelimit.py` beside it | `harness-media-shot-btw` |
 | `menu` | The menu, opened from that chat | `harness-media-shot-menu` |
-| `version` | The version-and-update page of a harness straight.el installed from GitHub, behind GitHub and its development checkout: the commits it lacks as changelog entries, with their message bodies, and the [Update harness] button that would pull them | `harness-media-shot-version` |
+| `version` | The version-and-update page of a harness straight.el installed from GitHub, ten commits behind GitHub: a row each for what runs, the checkout (with [Reload]) and the remote (with [Update]), the commits it lacks as changelog entries with their message bodies, the development checkout with what it has pushed, and a vendored plugin with its version and [Update] | `harness-media-shot-version` |
 | `insights` | The Insights report over 30 days of every project: the totals, the summary the scripted model wrote, the messages by hour and weekday | `harness-media-shot-insights` |
 | `insights-activity` | The same report further down: the busiest sessions, the tools, the permission decisions and the tasks | `harness-media-shot-insights-activity` |
 | `chat-cowboy` | A chat whose prompt cache went cold yesterday, `orders.py` beside it: another session's message waits while the panel asks what goes first, each choice with its cost | `harness-media-shot-chat-cowboy` |

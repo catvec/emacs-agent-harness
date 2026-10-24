@@ -25,6 +25,13 @@ bind its commands: the compose box sets compose-quote's
 Its README may say where it comes from. Its tests run with nothing else:
 `emacs -Q --batch -L DIR -l NAME-test.el -f ert-run-tests-batch-and-exit`.
 
+Its main file carries a `Version:` header (`;; Version: 0.1.0`), as a
+package would: the version page shows it, beside the commit of the
+library's last change, and `[Update]` on the library's row updates it
+with the harness while it lives in the harness's checkout. Once it is a
+checkout of its own under `lisp/vendor`, the same row fast-forwards that
+checkout with `harness-update-plugin`.
+
 A library may use another of them where it is, and works without it:
 change-review answers a quote inline, in the buffer a reply is read in,
 with compose-quote when `(require 'compose-quote nil t)` finds it, and

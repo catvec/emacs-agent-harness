@@ -61,12 +61,24 @@ A report is a plist:
             counted), :missing-commits and :extra-commits (the newest
             of them, merges left out, each (:commit :date :subject :body)),
             :error
+  :plugins  a list of plists, one per plugin the running harness has:
+            :name, :version (its Version header, or nil), :directory,
+            :files, :checkout, :commit/:subject/:date (its last change),
+            :status ("same", "newer", "older", "diverged", "ahead",
+            "untracked", "unknown" or "error"), :missing, :extra,
+            :target, :remote, :branch, :error
   :verdict  "latest", "behind" or "unknown"
 
 :status is "same", "newer", "older", "diverged", "ahead" (a commit
 the harness lacks, not counted), "unknown" or "error".  The verdict is
-"behind" when an origin is newer, diverged or ahead, "unknown" when
-one cannot be placed or none could be read, else "latest".
+"behind" when the checkout the harness runs from, or the repository
+that checkout pulls from, is newer, diverged or ahead; "unknown" when
+one of those cannot be placed or read and none says behind; else
+"latest".  Other checkouts of the harness, such as a development
+checkout whose commits are not pushed, are compared with but are not
+version origins: the running harness cannot be updated from them, so
+they do not make it behind.  A plugin is checked against the commits
+that touched its directory in the same origins.
 
 ## Provides
 

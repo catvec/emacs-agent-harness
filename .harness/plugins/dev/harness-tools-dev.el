@@ -1,5 +1,7 @@
 ;;; harness-tools-dev.el --- Open a checkout's harness in an Emacs  -*- lexical-binding: t; -*-
 
+;; Version: 0.1.0
+
 ;;; Commentary:
 
 ;; A plugin of the harness's own repository, not a module of the

@@ -41,6 +41,15 @@ Signal an error when git fails."
   (harness-version-test--git dir "commit" "-q" "-m" subject)
   (harness-version-test--git dir "rev-parse" "HEAD"))
 
+(defun harness-version-test--commit-file (dir file content subject)
+  "Write CONTENT to FILE in DIR and commit it with SUBJECT; return the hash."
+  (let ((path (expand-file-name file dir)))
+    (make-directory (file-name-directory path) t)
+    (with-temp-file path (insert content)))
+  (harness-version-test--git dir "add" file)
+  (harness-version-test--git dir "commit" "-q" "-m" subject)
+  (harness-version-test--git dir "rev-parse" "HEAD"))
+
 (defun harness-version-test--commit-with-body (dir subject body)
   "Commit a change in DIR with SUBJECT and BODY; return the commit's hash."
   (let ((msg (expand-file-name "COMMIT-MSG" dir)))
@@ -60,6 +69,11 @@ Signal an error when git fails."
   (harness-version-test--configure dir)
   (with-temp-file (expand-file-name "harness.el" dir) (insert ";; a harness\n"))
   (with-temp-file (expand-file-name "lisp/harness-core.el" dir) (insert ";; its core\n"))
+  ;; A plugin: a vendored library with its Version header.
+  (make-directory (expand-file-name "lisp/vendor/demo" dir) t)
+  (with-temp-file (expand-file-name "lisp/vendor/demo/demo.el" dir)
+    (insert ";;; demo.el --- A plugin  -*- lexical-binding: t; -*-\n\n"
+            ";; Version: 0.1.0\n\n(provide 'demo)\n"))
   (harness-version-test--git dir "add" "-A")
   (harness-version-test--git dir "commit" "-q" "-m" "first")
   (harness-version-test--git dir "rev-parse" "HEAD"))
@@ -555,6 +569,100 @@ and the repository exists.
           (should (eq t (plist-get running :dirty)))
           (should (eq t (plist-get (harness-version-test--origin report "loaded") :dirty))))))))
 
+(ert-deftest harness-version-stays-latest-when-a-development-checkout-is-ahead ()
+  "An unpushed development checkout does not make the running harness behind.
+The harness runs the commit its remote has; a session's checkout with a
+commit of its own is compared with, and reported, but the update cannot
+make the running harness newer from it.  Before the fix the verdict
+stayed \"behind\" after every update, with nothing left to do."
+  (skip-unless (executable-find "git"))
+  (harness-version-test-with
+    (let* ((w (harness-version-test--world base))
+           (installed (plist-get w :installed)))
+      (setq harness-directory installed)
+      (harness-version-test--sessions-in (plist-get w :dev))
+      ;; Before: the upstream has a commit the installed checkout lacks.
+      (should (equal "behind" (plist-get (harness-version-test--check) :verdict)))
+      ;; The update command pulls it, as the page's Update button does.
+      (let ((result (harness-test-await (harness--update-checkout installed) 60)))
+        (should (= 1 (plist-get result :count)))
+        (should (string-prefix-p (plist-get result :to) (plist-get w :second))))
+      (harness-revision-note-loaded)
+      ;; The status refresh: running the remote's commit, with only the
+      ;; development checkout's own commit left over.
+      (let* ((report (harness-version-test--check 0))
+             (loaded (harness-version-test--origin report "loaded"))
+             (upstream (harness-version-test--origin report "upstream"))
+             (dev (harness-version-test--origin report "local")))
+        (should (equal "latest" (plist-get report :verdict)))
+        (should (equal "same" (plist-get loaded :status)))
+        (should (equal "same" (plist-get upstream :status)))
+        (should (equal "newer" (plist-get dev :status)))
+        (should (equal 1 (plist-get dev :unpushed)))
+        ;; The development checkout is still listed, with what to push.
+        (should (equal (plist-get w :third) (plist-get dev :commit))))
+      ;; A second update has nothing to pull; the verdict is still latest.
+      (let ((result (harness-test-await (harness--update-checkout installed) 60)))
+        (should (= 0 (plist-get result :count))))
+      (should (equal "latest" (plist-get (harness-version-test--check 0) :verdict))))))
+
+(ert-deftest harness-version-reports-a-plugin-and-its-update ()
+  "A vendored plugin has a row of its own: version and what its update changes.
+The plugin is in the harness's checkout, so the harness update updates
+it too; before it, the plugin is behind by the commits that touched its
+directory."
+  (skip-unless (executable-find "git"))
+  (harness-version-test-with
+    (let* ((w (harness-version-test--world base))
+           (installed (plist-get w :installed))
+           (upstream (plist-get w :upstream)))
+      (setq harness-directory installed)
+      (harness-version-test--commit-file
+       upstream "lisp/vendor/demo/demo.el"
+       ";;; demo.el --- A plugin  -*- lexical-binding: t; -*-\n\n;; Version: 0.2.0\n\n(provide 'demo)\n"
+       "Demo 0.2.0")
+      (let* ((report (harness-version-test--check))
+             (demo (cl-find "demo" (plist-get report :plugins)
+                            :key (lambda (p) (plist-get p :name)) :test #'equal)))
+        (should demo)
+        (should (equal "0.1.0" (plist-get demo :version)))
+        ;; The commit that changes it is upstream's, not fetched: the
+        ;; count is unknown, as for the harness itself.
+        (should (equal "ahead" (plist-get demo :status)))
+        (should-not (plist-get demo :missing))
+        (should (equal "first" (plist-get demo :subject))))
+      ;; The same update path updates the plugin.
+      (harness-test-await (harness--update-checkout installed) 60)
+      (harness-revision-note-loaded)
+      (let* ((report (harness-version-test--check 0))
+             (demo (cl-find "demo" (plist-get report :plugins)
+                            :key (lambda (p) (plist-get p :name)) :test #'equal)))
+        (should (equal "0.2.0" (plist-get demo :version)))
+        (should (equal "same" (plist-get demo :status)))
+        (should (equal "Demo 0.2.0" (plist-get demo :subject)))))))
+
+(ert-deftest harness-version-reads-the-version-header-of-a-plugin ()
+  (let* ((base (harness-test-temp-dir))
+         (file (expand-file-name "demo.el" base)))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert ";;; demo.el --- A plugin\n;; Version: 1.2.3\n"))
+          (should (equal "1.2.3" (harness-version--version-header file)))
+          (with-temp-file file (insert ";;; demo.el --- No version\n"))
+          (should-not (harness-version--version-header file))
+          ;; This repository's own plugin files have versions, and so
+          ;; do the vendored libraries.
+          (dolist (plugin (directory-files (expand-file-name ".harness/plugins/dev" harness-directory)
+                                           t "\\.el\\'"))
+            (should (harness-version--version-header plugin)))
+          (dolist (dir (directory-files (expand-file-name "lisp/vendor" harness-directory)
+                                        t "\\`[^.]"))
+            (when (file-directory-p dir)
+              (should (harness-version--version-header
+                       (expand-file-name (concat (file-name-nondirectory dir) ".el") dir))))))
+      (ignore-errors (delete-directory base t)))))
+
 (ert-deftest harness-version-places-older-ahead-and-unknown-origins ()
   (skip-unless (executable-find "git"))
   (harness-version-test-with
@@ -582,7 +690,10 @@ and the repository exists.
         (setq harness-version-origins (list (list :name "next" :location url :branch "next")))
         (let* ((report (harness-version-test--check 0))
                (next (harness-version-test--origin report "next")))
-          (should (equal "behind" (plist-get report :verdict)))
+          ;; A configured mirror the checkout does not pull from is
+          ;; compared with, but the update cannot install it: it does
+          ;; not make the running harness behind.
+          (should (equal "latest" (plist-get report :verdict)))
           (should (equal "ahead" (plist-get next :status)))
           (should (equal fourth (plist-get next :commit)))
           (should-not (plist-get next :missing))

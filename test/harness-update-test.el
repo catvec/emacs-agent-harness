@@ -853,5 +853,97 @@ directory; neither compiles unless the directory is on the path."
     (should (= 3 (length (plist-get (harness-test-await (harness--update-checkout clone) 60) :commits))))
     (should (file-exists-p (expand-file-name "lisp/ui/harness-ui-uses-lib.el" clone)))))
 
+;;;; Plugin updates
+
+(defmacro harness-update-test-with-plugin (&rest body)
+  "Run BODY with UPSTREAM and CLONE, a project that holds a plugin.
+The plugin is .harness/plugins/dev/demo, its file demo.el in both.
+BODY sees BASE, UPSTREAM, CLONE, PLUGIN and FILE, the plugin's file in
+CLONE."
+  (declare (indent 0))
+  `(let* ((base (harness-test-temp-dir))
+          (upstream (file-name-as-directory (expand-file-name "upstream" base)))
+          (clone (file-name-as-directory (expand-file-name "clone" base)))
+          (plugin (file-name-as-directory (expand-file-name ".harness/plugins/dev/demo" clone)))
+          (file (expand-file-name "demo.el" plugin)))
+     (ignore base upstream clone plugin file)
+     (unwind-protect
+         (progn
+           (make-directory upstream t)
+           (harness-update-test--git upstream "init" "-q" "-b" "main")
+           (harness-update-test--configure upstream)
+           (harness-update-test--commit upstream ".harness/plugins/dev/demo/demo.el"
+                                        ";; Version: 0.1.0\n" "First")
+           (harness-update-test--git base "clone" "-q" upstream clone)
+           (harness-update-test--configure clone)
+           ,@body)
+       (ignore-errors (delete-directory base t)))))
+
+(ert-deftest harness-update-plugin-fast-forwards-its-own-checkout ()
+  "A plugin in a project's checkout is fast-forwarded there, and reported.
+The outcome names the plugin, the commits that came in and asks for the
+restart that loads them; with nothing upstream it says up to date."
+  (harness-update-test-with-plugin
+    (let* ((before (harness-update-test--git clone "rev-parse" "--short" "HEAD"))
+           (outcome nil)
+           (harness--last-plugin-update nil)
+           (harness-plugin-update-hook
+            (list (lambda (result) (setq outcome result)))))
+      (harness-update-test--commit upstream ".harness/plugins/dev/demo/demo.el"
+                                   ";; Version: 0.2.0\n" "Say 0.2.0")
+      (harness-update-plugin plugin "demo")
+      (harness-test-wait (lambda () outcome) 30 "the plugin update")
+      (should (equal "updated" (plist-get outcome :state)))
+      (should (equal "demo" (plist-get outcome :name)))
+      (should (equal before (plist-get outcome :from)))
+      (should (equal 1 (plist-get outcome :count)))
+      (should (string-match-p "Say 0\\.2\\.0"
+                              (plist-get (car (plist-get outcome :commits)) :subject)))
+      (should (equal (harness-update-test--git clone "rev-parse" "--short" "HEAD")
+                     (plist-get outcome :to)))
+      (should (string-match-p "0\\.2\\.0" (harness-update-test--read file)))
+      (should (equal outcome harness--last-plugin-update))
+      ;; Nothing new upstream: the next update changes nothing, and says so.
+      (setq outcome nil)
+      (harness-update-plugin plugin "demo")
+      (harness-test-wait (lambda () outcome) 30 "the plugin update")
+      (should (equal "up-to-date" (plist-get outcome :state)))
+      (should (equal 0 (plist-get outcome :count)))
+      (should (equal (harness-update-test--git clone "rev-parse" "--short" "HEAD")
+                     (plist-get outcome :from)))
+      (should (equal (plist-get outcome :from) (plist-get outcome :to))))))
+
+(ert-deftest harness-update-plugin-refuses-a-checkout-with-local-changes ()
+  "A plugin update never merges or stashes: local changes refuse it.
+The outcome says why, and the checkout stays as it was."
+  (harness-update-test-with-plugin
+    (let* ((before (harness-update-test--git clone "rev-parse" "HEAD"))
+           (outcome nil)
+           (harness--last-plugin-update nil)
+           (harness-plugin-update-hook
+            (list (lambda (result) (setq outcome result)))))
+      (harness-update-test--commit upstream ".harness/plugins/dev/demo/demo.el"
+                                   ";; Version: 0.2.0\n" "Say 0.2.0")
+      (with-temp-file file (insert ";; my own changes\n"))
+      (harness-update-plugin plugin "demo")
+      (harness-test-wait (lambda () outcome) 30 "the plugin update")
+      (should (equal "failed" (plist-get outcome :state)))
+      (should (string-match-p "has local changes" (plist-get outcome :error)))
+      (should (equal before (harness-update-test--git clone "rev-parse" "HEAD")))
+      (should (string-match-p "my own changes" (harness-update-test--read file))))))
+
+(ert-deftest harness-update-plugin-in-the-harness-checkout-updates-the-harness ()
+  "A plugin in the harness's own checkout has no update of its own.
+It moves with the harness, through `harness-update', as its files do."
+  (harness-update-test-with-plugin
+    (let ((harness-directory clone)
+          (harness--last-plugin-update nil)
+          (called nil))
+      (cl-letf (((symbol-function 'harness-update)
+                 (lambda () (interactive) (setq called t))))
+        (harness-test-await (harness-update-plugin plugin "demo") 30))
+      (should called)
+      (should-not harness--last-plugin-update))))
+
 (provide 'harness-update-test)
 ;;; harness-update-test.el ends here

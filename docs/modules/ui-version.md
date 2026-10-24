@@ -13,26 +13,38 @@ Version page: whether the running harness is the latest, against its origins.
 ## About
 
 `harness-version` (C-c h v) answers "are we running the latest
-changes?".  It shows the commit the harness runs against the origins
-newer versions come from, as the version module (harness-version.el)
-reports them: the checkout the harness was loaded from as it is now,
-the repository that checkout pulls from (sourcehut, GitHub, whichever
-the package manager's recipe named), the local checkouts of the
-harness that sessions work in, and any `harness-version-origins`.
-An origin with commits the harness lacks lists the newest of them,
-when a local repository has them, each a changelog entry: its subject
-and message body, never a diff or file statistics.  The page says
-what to do about it: reload, update -- the Update section's button
-runs `harness-update`, which updates the checkout the way it was
-installed (straight.el's own pull for a straight.el install), checks
-the commit and reloads -- or push first.  What an update brought is
-shown the same way, from `harness--last-update`, which
-`harness-update-hook` reports as it settles, with how long ago that
-was: an "up to date" from hours ago, above a check that found the
-harness behind, is the answer of its moment.  A harness that runs
-elsewhere is told to pull with the package straight.el registered
-the checkout under (`harness--straight-package`), which is not always
-the name of its directory.
+changes?".  It shows one row per place a version lives:
+
+- Running: the commit the harness process runs, and the commit this
+  Emacs loaded the UI from when they differ;
+- Checkout: the checkout the harness was loaded from as it is now,
+  with [Reload] beside it -- the action that loads what the checkout
+  holds;
+- Remote: the repository the checkout pulls from (sourcehut, GitHub,
+  whichever the package manager's recipe named), with [Update] beside
+  it -- the action that pulls its commits and reloads.
+
+A development checkout of the harness, such as a session's main
+checkout with commits not pushed yet, has a row of its own under
+Development.  It is compared with, but the running harness cannot be
+updated from it, so it does not make the harness behind: [Update]
+would change nothing there.
+
+The commits a row is missing are shown as changelog entries under
+Recent commits: their subject and message body, never a diff or file
+statistics.  The plugins the running harness has -- the libraries
+under lisp/vendor and the project plugins loaded from a project's
+directory-local variables -- get a row each under Plugins, with their
+`Version:` header, their status and the same [Update] action.  A
+plugin in the harness's checkout is updated with the harness; one in
+a project's own checkout is fast-forwarded there, and a restart loads
+it.
+
+The page's copy is nouns and imperatives: a status ("current", "12
+commits to pull"), an action ([Reload], [Update], [Check now]).  What
+an update brought is under Last update, a plugin's own under Last
+plugin update, and a reload that was refused or failed -- or a plugin
+that now needs loading -- offers [Restart].
 
 The checks run in the background, in the harness process.  The page
 shows the last report at once and asks for a fresh one only when it
@@ -53,11 +65,6 @@ the page, which says what to do.  A UI connecting to a harness asks
 it for its last report (`version/report`, which checks nothing), so
 the icon shows at once rather than at the next check.
 
-Beside the harness process, the page shows the commit this Emacs
-loaded the UI from (harness-revision.el): the two load their files
-separately, so a restart of the harness process alone can leave them
-on different commits.
-
 ## Provides
 
 ### Hooks
@@ -68,6 +75,7 @@ on different commits.
 
 - `harness-ui-version-refresh` — Check the running harness against its origins again.
 - `harness-ui-version-update` — Update the harness from its checkout, as `harness-update` does.
+- `harness-ui-version-update-plugin` — Update PLUGIN's own checkout, then redraw the page.
 - `harness-version` — Show whether the running harness is the latest, against its origins.
 
 ### Options
@@ -89,6 +97,7 @@ on different commits.
 ### Hooks it adds to
 
 - `harness-chat-header-end-functions` → `harness-ui-version--chat-header`
+- `harness-plugin-update-hook` → `harness-ui-version--on-plugin-update`
 - `harness-ui-connected-hook` → `harness-ui-version--on-connected`
 - `harness-ui-event-functions` → `harness-ui-version--on-event`
 - `harness-ui-notify-segment-functions` → `harness-ui-version--notify-segment`

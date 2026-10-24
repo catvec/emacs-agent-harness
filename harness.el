@@ -1538,6 +1538,157 @@ came in, each with its subject and message body."
                       (run-hook-with-args 'harness-update-hook harness--last-update))
                     nil))))
 
+;;;; Plugin updates
+
+;; A project's plugin, or a library vendored under lisp/vendor, is code
+;; the running harness loaded once.  Its checkout is updated the way the
+;; harness's is -- the remote branch its branch tracks, fetched and
+;; fast-forwarded, never a merge -- but there is no harness to check in
+;; another Emacs: a plugin's repository need not hold harness.el.  The
+;; code a plugin update brings runs only at the next start, since a
+;; plugin loads once per process.
+
+(defvar harness--last-plugin-update nil
+  "The last plugin update's outcome, a plist; see `harness-update-plugin'.")
+
+(defvar harness-plugin-update-hook nil
+  "Hook run after `harness-update-plugin' settles, with the outcome.
+The outcome is a plist: :state \"updated\", \"up-to-date\" or
+\"failed\"; :name the plugin's; :checkout, :from and :to; :commits the
+newest that came in; :count; :message; :at; and :error why it failed.")
+
+(defun harness--plugin-checkout (dir)
+  "Return a promise of the git checkout owning DIR, the plugin's directory.
+DIR may be anywhere in its checkout, as a plugin is a directory of a
+project's; the checkout is the top of that repository.  The promise is
+of nil when DIR is in none."
+  (harness-then
+   (harness-revision-git dir '("rev-parse" "--show-toplevel"))
+   (lambda (output)
+     (let ((top (string-trim output)))
+       (and (not (string-empty-p top))
+            (file-name-as-directory (expand-file-name top)))))
+   (lambda (_err) nil)))
+
+(defun harness--plugin-update-result (dir from target)
+  "Return the update result for the plugin checkout DIR moved FROM to TARGET.
+The commits that came in are read as changelog entries, newest first."
+  (let (commits count)
+    (thread-first
+      (harness-all
+       (list (harness--git dir "rev-list" "--count" (concat from ".." target))
+             (harness--git dir "log" "-z" "--no-merges"
+                           (format "--max-count=%d" harness--update-listed)
+                           (concat "--format=" harness-revision-commit-format)
+                           (concat from ".." target) "--")))
+      (harness-then
+       (lambda (parts)
+         (setq count (string-to-number (string-trim (car parts)))
+               commits (harness-revision-parse-commits (cadr parts)))
+         (when (> count 0)
+           (harness--git dir "merge" "--ff-only" "--quiet" target))))
+      (harness-then (lambda (_) (harness--git dir "rev-parse" "--short" "HEAD")))
+      (harness-then (lambda (to) (list :from (substring from 0 7) :to to
+                                       :commits commits :count count))))))
+
+(defun harness--update-plugin-checkout (dir)
+  "Fast-forward DIR, a plugin's checkout, to the remote branch it follows.
+The remote is the one DIR's branch tracks, or else origin, or else its
+only remote; the commit it names is merged only when it descends from
+DIR's HEAD, so nothing is rewritten and nothing conflicts.  Return a
+promise of (:from :to :commits :count), as `harness--update-checkout'
+does.  Rejected when DIR is not a checkout of its own, has local
+changes, a detached HEAD or no remote, or the branch has commits the
+remote lacks."
+  (let ((dir (file-name-as-directory (expand-file-name dir)))
+        target)
+    (thread-first
+      (harness--checkout-top dir)
+      (harness-then (lambda (_) (harness--git dir "status" "--porcelain" "--untracked-files=no")))
+      (harness-then (lambda (changes)
+                      (if (string-empty-p changes)
+                          (harness-then (harness--git dir "symbolic-ref" "--short" "HEAD")
+                                        #'identity
+                                        (lambda (_err) nil))
+                        (harness--fail "%s has local changes; commit or discard them first" dir))))
+      (harness-then (lambda (branch)
+                      (if (null branch)
+                          (harness--fail "%s follows no branch: its HEAD is detached" dir)
+                        (harness-revision-remote dir branch))))
+      (harness-then (lambda (remote)
+                      (cond
+                       ((null remote)
+                        (harness--fail "%s has no remote to update from" dir))
+                       ((null (plist-get remote :branch))
+                        (harness--fail "%s tracks no branch of %s" dir (plist-get remote :remote)))
+                       (t
+                        (harness--git dir "fetch" "--quiet"
+                                      (plist-get remote :remote) (plist-get remote :branch))))))
+      (harness-then (lambda (_) (harness--git dir "rev-parse" "--verify" "FETCH_HEAD^{commit}")))
+      (harness-then (lambda (commit)
+                      (setq target commit)
+                      (harness--git dir "rev-parse" "HEAD")))
+      (harness-then (lambda (from)
+                      (thread-first
+                        (harness--git dir "rev-list" "--left-right" "--count"
+                                      (concat "HEAD..." target))
+                        (harness-then
+                         (lambda (counts)
+                           (pcase-let ((`(,ours ,theirs)
+                                        (mapcar #'string-to-number (split-string counts))))
+                             (cond
+                              ((and (> ours 0) (> theirs 0))
+                               (harness--fail "%s has %d commit%s the upstream lacks"
+                                              dir ours (if (= ours 1) "" "s")))
+                              ((zerop theirs) (harness--plugin-update-result dir from from))
+                              (t (harness--plugin-update-result dir from target))))))))))))
+
+;;;###autoload
+(defun harness-update-plugin (dir name)
+  "Update the plugin NAME, whose directory is DIR, from its checkout's remote.
+The checkout is fast-forwarded to the remote branch its branch tracks,
+as the harness is; a plugin in the harness's own checkout is updated
+with the harness (`harness-update'), its outcome and hook instead.  The
+plugin's code loads once per process, so a restart runs the version that
+came in.  A plugin's own update is recorded in
+`harness--last-plugin-update' and reported on `harness-plugin-update-hook'."
+  (interactive "DPlugin directory: sPlugin name: ")
+  (harness-then
+   (harness--plugin-checkout dir)
+   (lambda (checkout)
+     (cond
+      ((and checkout (harness-revision--same-directory-p checkout harness-directory))
+       (harness-update))
+      (t
+       (message "Plugin %s: fetching…" name)
+       (harness-then
+        (harness--update-plugin-checkout (or checkout dir))
+        (lambda (result)
+          (let* ((count (or (plist-get result :count) 0))
+                 (to (plist-get result :to))
+                 (text (if (zerop count)
+                           (format "%s is up to date (%s)" name to)
+                         (format "%s updated to %s (%d commit%s); restart to load it"
+                                 name to count (if (= count 1) "" "s")))))
+            (message "%s" text)
+            (setq harness--last-plugin-update
+                  (list :state (if (zerop count) "up-to-date" "updated")
+                        :name name :checkout checkout
+                        :from (plist-get result :from) :to to
+                        :commits (plist-get result :commits) :count count
+                        :message text :at (float-time)))
+            (run-hook-with-args 'harness-plugin-update-hook harness--last-plugin-update)
+            nil))
+        (lambda (err)
+          (let ((reason (harness-error-message err)))
+            (message "Plugin %s update failed: %s" name reason)
+            (setq harness--last-plugin-update
+                  (list :state "failed" :name name :checkout (or checkout dir)
+                        :error reason :message (format "%s update failed: %s" name reason)
+                        :at (float-time)))
+            (run-hook-with-args 'harness-plugin-update-hook harness--last-plugin-update))
+          nil)))))))
+
 ;; A reload loads this file first, then every module file by name, and
 ;; the modules that define tools (harness-tools-fs.el, harness-merge.el,
 ;; harness-perms.el ...) sort before harness-tools.el, whose

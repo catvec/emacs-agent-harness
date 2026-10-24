@@ -1,5 +1,7 @@
 ;;; harness-dev-plugin.el --- The harness repository's own plugin  -*- lexical-binding: t; -*-
 
+;; Version: 0.1.0
+
 ;;; Commentary:
 
 ;; What the repository's .dir-locals.el requires, from the main

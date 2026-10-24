@@ -602,6 +602,12 @@ pushed them."
       (make-directory (file-name-directory (expand-file-name file dev)) t)
       (write-region (format ";;; %s --- the harness\n" (file-name-nondirectory file)) nil
                     (expand-file-name file dev) nil 'silent))
+    ;; A vendored plugin, so the picture has a Plugins section.
+    (let ((file (expand-file-name "lisp/vendor/compose-quote/compose-quote.el" dev)))
+      (make-directory (file-name-directory file) t)
+      (write-region (concat ";;; compose-quote.el --- Quote a reply  -*- lexical-binding: t; -*-\n\n"
+                            ";; Version: 0.1.0\n\n(provide 'compose-quote)\n")
+                    nil file nil 'silent))
     (harness-media--git-in bare "init" "-q" "--bare")
     (harness-media--git-in bare "symbolic-ref" "HEAD" "refs/heads/main")
     (cl-loop for (subject . days) in harness-media--harness-history
@@ -3726,9 +3732,10 @@ for the picture.  The session is deleted after."
   "The version page of a harness installed with straight.el, two days behind.
 For the picture the harness was loaded two days ago from straight's
 clone of GitHub (see `harness-media--make-harness-repos'), so the page
-sees the development checkout and GitHub ten commits ahead and says to
-pull with straight.  The harness counts as loaded from its checkout again
-afterwards."
+shows the running commit, the checkout with [Reload], GitHub with
+[Update] ten commits ahead, the development checkout that pushed them
+and a vendored plugin with its version.  The harness counts as loaded
+from its checkout again afterwards."
   (let ((harness-directory (plist-get (harness-media--harness-paths) :build)))
     (let ((loaded (harness-revision-note-loaded)))
       (harness-media--wait (lambda () (harness-promise-settled-p loaded)) 20 "the revision loaded")

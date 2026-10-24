@@ -567,6 +567,20 @@ module `plugins`).
   them.  A development Emacs (scripts/harness-dev.el) sets
   `enable-local-variables` to `:safe`, so it never asks and loads no
   plugin unless its user trusts it there.
+- Versions and updates.  A plugin file may carry a `Version:` header
+  (`;; Version: 0.1.0` after its title), which the version page shows
+  beside the plugin's name; a plugin without one shows its last change
+  instead, so no plugin needs a number to be listed.  The page reads
+  the plugin modules the harness loaded (`harness-module-plugin-p`)
+  and the vendored libraries, and compares a plugin in the harness's
+  checkout by the commits that touched its directory in the origins
+  the harness updates from; a plugin in a project's own checkout is
+  compared with the branch that checkout tracks.  `[Update]` on its row
+  runs `harness-update-plugin` (harness.el): a plugin in the harness's
+  checkout is updated with `harness-update`; one in a project's own
+  checkout is fast-forwarded there, never merged, and a restart loads
+  it.  The outcome is in `harness--last-plugin-update`, and the page
+  shows it under Last plugin update.
 
 Methods of `plugins`:
 
@@ -599,7 +613,9 @@ guide; the contract is this:
 
 - A library needs nothing of the harness and never mentions it: no
   `harness` name, no `(require 'harness-...)`, not in a comment or a
-  docstring either.  The dependency runs one way.  What joins the two
+  docstring either.  Its main file carries a `Version:` header
+  (`;; Version: 0.1.0`), which the version page shows and takes as the
+  library's version; the commit of its last change sits beside it.  The dependency runs one way.  What joins the two
   lives in the harness's own files, which set the library's variables
   and bind its commands: the compose box sets
   `compose-quote-source-function` to `harness-ui-markdown-source`, say.
@@ -10735,17 +10751,35 @@ one last, as package managers clone shallowly.  When none holds both
 and the loaded checkout lacks the origin's commit (`cat-file -e`),
 the harness lacks it too: the origin is ahead, uncounted.
 
+The verdict counts only the version origins: the checkout the harness
+was loaded from and the repository it pulls from
+(`harness-version--version-origin-p`).  A development checkout has a
+row of its own under Development, with how many of its commits the
+upstream lacks (`harness-version--development-counts`), but the running
+harness cannot be updated from it, so it never makes the harness
+behind.  An `error` version origin makes the verdict unknown, never
+latest: a repository that cannot be read is no evidence of being
+current.
+
 `version/check (&optional max-age)` → promise of the report `(:checked
-:version :running :origins :verdict)`, each origin `(:name :kind
-:location :branch :upstream :commit :subject :date :dirty :status
+:version :running :origins :plugins :verdict)`, each origin `(:name
+:kind :location :branch :upstream :commit :subject :date :dirty :status
 :missing :extra :missing-commits :extra-commits :error)`,
 `:missing-commits` and `:extra-commits` the newest commits, each
 `(:commit :date :subject :body)`; `:status`
 same, newer, older, diverged, ahead (a commit the harness lacks, no
 local repository holding both), unknown (the running commit is in none)
-or error, and `:verdict` behind (an origin is newer, diverged or
-ahead), unknown (one cannot be placed, or none could be read) or
-latest.  The last report answers
+or error, and `:verdict` behind (a version origin is newer, diverged or
+ahead), unknown (one cannot be placed or read) or latest.  Each plugin
+is `(:name :version :directory :files :checkout :commit :subject :date
+:status :missing :extra :target :remote :branch :error)`: its `:version`
+is the `Version:` header of its files (`harness-version--version-header`;
+nil when it has none, and the page shows its last commit then), its
+`:status` how its directory stands to the
+version origins -- same, newer, older, diverged or ahead -- counted by
+the commits that touched its directory in the origins the harness can be
+updated from, or, for a plugin in another checkout, against the branch
+that checkout tracks.  The last report answers
 while it is about the revision running now and at most MAX-AGE seconds
 old; otherwise a check runs, or the one running is joined (replaced
 after five minutes).  Checks also run 30 s after the start, 3 s after
@@ -12529,18 +12563,32 @@ secret it reads has a fingerprint the harness redacted
 (`harness-ui-secrets--matching`).  A harness on another machine reads
 other files, so it is not followed.
 
-Version page (`harness-ui-version`, `C-c h v`, `harness-version`): the
-verdict, the commit running (with, when the harness runs in its own
-process, the commit this Emacs loaded the UI from, and a reload button
-when the two differ), each origin with its commit and status (the
-repository the loaded checkout pulls from says so), the commits the
-harness lacks (an origin at the same commit with the same status as one
-listed above says so instead of listing them again; an ahead one has
-none to list), and the update: an `[Update harness]` button (`u`) when
-this Emacs can reload the harness it shows, the last update's outcome
-(`harness--last-update`), with how long ago it settled, and, for one
-that brought commits, its changelog.  A commit is shown as its message,
-subject and body, never its diff or file statistics.  The button runs
+Version page (`harness-ui-version`, `C-c h v`, `harness-version`): a
+header line with the version and the verdict, then one row for each
+place a version lives -- Running (the harness process's commit, and,
+when it runs in its own process, the commit this Emacs loaded the UI
+from), Checkout (the checkout it was loaded from, with `[Reload]` (`r`)
+beside it) and Remote (the repository that checkout pulls from, with
+`[Update]` (`u`) beside it) -- each row naming its commit, its status in
+nouns (`current`, `12 commits to pull`, `2 commits to push`) and where
+it is.  Development checkouts follow under Development, with what to
+push; they are never where an update comes from.  The commits the
+version origins have and the harness lacks follow under Recent commits
+as a changelog, one listing however many origins name them; a commit is
+shown as its message, subject and body, never its diff or file
+statistics.  The plugins the harness has follow under Plugins, each
+with its `Version:` header, its status and `[Update]`: a plugin in the
+harness's checkout is updated with the harness, one in a project's own
+checkout through `harness-update-plugin' (harness.el), which
+fast-forwards that checkout, records the outcome in
+`harness--last-plugin-update` and runs `harness-plugin-update-hook`.
+The last update's outcome (`harness--last-update`) follows, with how
+long ago it settled, its changelog when it brought commits, and
+`[Restart]` when a reload was refused or failed; a plugin updated in
+its own checkout says so under Last plugin update, with the same
+`[Restart]`, since plugin code loads once per process.  The page's copy is nouns and
+imperatives -- a status and the action that changes it, no explanatory
+sentences.  The Update button runs
 `harness-update': a checkout straight.el has a recipe for is pulled with
 `straight-pull-package', the way its package manager updates it, and put
 back with `git reset --keep' when the commit it lands on fails the
@@ -12567,7 +12615,9 @@ A detached HEAD, or a checkout with no remote, is refused with a message
 that says so.  What to do without updating is said too: reload when the
 loaded checkout moved on, push when only a local checkout has them.  The
 page follows `harness-update-hook', which `harness-update' runs with the
-outcome as it settles, and redraws.
+outcome as it settles, and redraws; once it settles the page asks for a
+fresh report, as it does after `harness-plugin-update-hook', so the rows
+show what the update made current.
 Opening it shows the last report at once and asks `version/check` with
 a max-age of a minute; `g` asks with 0; `version/checked` redraws it,
 and the menu's Version entry says "not the latest" after a report that

@@ -1,5 +1,7 @@
 ;;; harness-ui-tools-dev.el --- Open harness on the task board  -*- lexical-binding: t; -*-
 
+;; Version: 0.1.0
+
 ;;; Commentary:
 
 ;; The half of this repository's dev plugin that lives in the user's

@@ -392,6 +392,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `harness-describe-modules-functions` | `harness-core.el` | [ui](ui.md), `harness.el` |
 | `harness-log-hook` | `harness-core.el` | `harness-server.el` |
 | `harness-module-init-hook` | `harness-core.el` |  |
+| `harness-plugin-update-hook` | `harness.el` | [ui-version](ui-version.md) |
 | `harness-reload-hook` | `harness.el`, `harness-revision.el` | `harness-revision.el` |
 | `harness-start-hook` | `harness.el`, `harness-revision.el` | `harness-revision.el` |
 | `harness-tasks-feedback-additions-functions` | [patch-review](patch-review.md), [tasks](tasks.md) | [patch-review](patch-review.md) |

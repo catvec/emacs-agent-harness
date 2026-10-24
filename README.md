@@ -460,46 +460,64 @@ delivered.
 ### Running the latest version
 
 With the `version` module (`:features version`), `C-c h v` (`M-x
-harness-version`) shows the commit the harness runs, compares it with the
-places newer commits come from, and can update it from there:
+harness-version`) shows one row for each place a version lives, with the
+action that changes it beside its status:
 
-- the checkout it was loaded from, as that checkout is now: what a pull
-  or a merge brought there runs only after a reload (`C-c h R`) or a
-  restart;
-- the repository that checkout pulls from: the remote its branch
-  tracks, else `origin`, else its only remote, and the branch it tracks
-  there, else the same-named one. straight.el sets it to the recipe's
-  repository, so an install from GitHub is compared with GitHub and one
-  from sourcehut with sourcehut. Nothing needs configuring where one of
-  them cannot be reached;
-- the local checkouts of the harness that your sessions work in, such
-  as a development checkout;
-- `harness-version-origins`: any others you list, such as a mirror the
-  install does not pull from. It is empty by default.
+- Running: the commit the harness process runs, and the commit this
+  Emacs loaded the UI from when they differ;
+- Checkout: the checkout the harness was loaded from, as it is now, with
+  `[Reload]` (`r`) beside it: what a pull or a merge brought there runs
+  only after a reload;
+- Remote: the repository that checkout pulls from, with `[Update]` (`u`)
+  beside it: the remote its branch tracks, else `origin`, else its only
+  remote, and the branch it tracks there, else the same-named one.
+  straight.el sets it to the recipe's repository, so an install from
+  GitHub is compared with GitHub and one from sourcehut with sourcehut.
+  `[Update]` runs `harness-update`: straight.el's own pull for an
+  install from straight.el, a fetch and fast-forward for any other
+  checkout, then a reload.
 
-Each origin says whether it has commits the harness lacks, and lists
-them as changelog entries: the subject of each and its message body,
-never a diff or file statistics. Nothing is fetched, so the commits are
-counted only when a local repository has them, such as a development
-checkout. Otherwise the page says that the origin has commits the
-harness lacks, without counting them. The page then says what to do:
-reload, update with the `[Update harness]` button (`u`), which runs
-`harness-update` and reloads, or push first. After an update the page
-says what came in, with the same changelog, and, when the reload was
-refused, how to restart Emacs or go back. The harness checks by itself,
-in its own process, shortly after it starts or reloads and then every
-half hour. Git never prompts there. The page shows the last result at
-once, and `g` checks again. After a check finds that the harness is behind,
-the menu's Version entry says so, and a small icon nags until it is not:
-an arrow up in a circle, in the mode line indicator (after its
-"harness", even with no session active), in each chat's header line
-and in the task board's. Hovering over it names the origins with
-commits the harness lacks, and a click opens the page, which says what
-to do. The icon goes as soon as the harness reloads, and comes back
-only if the check the harness makes a few seconds later finds it
-behind still. `harness-ui-version-nag-places` chooses where it shows:
-any of `mode-line`, `chat-header` and `board-header` (all three by
-default), or nil for nowhere.
+Development checkouts of the harness -- such as the main checkout a
+session works in, with commits not pushed yet -- have a row under
+Development, with how many commits to push. They are compared with, but
+the running harness cannot be updated from them, so they never make it
+behind. `harness-version-origins` lists any other checkouts or
+repositories, such as a mirror the install does not pull from; it is
+empty by default.
+
+A row with commits the harness lacks lists the newest of them under
+Recent commits, each a changelog entry: the subject of the commit and
+its message body, never a diff or file statistics. Nothing is fetched,
+so commits are counted only when a local repository holds them; an
+origin whose commit no local repository holds says it has commits the
+harness lacks, without counting them. After an update the page says
+what came in under Last update, with the same changelog, and
+`[Restart]` when a reload was refused or failed; a plugin updated in
+its own checkout says so under Last plugin update.
+
+The plugins the running harness has -- the libraries under `lisp/vendor`
+and the project plugins loaded from a project's directory-local
+variables -- have a row each under Plugins: their name, their `Version:`
+header, their status, and `[Update]`. A plugin in the harness's checkout
+is updated with the harness; one in a project's own checkout is
+fast-forwarded there (`harness-update-plugin`), and `[Restart]` loads
+it, as plugin code loads once per process. A plugin's version is the
+`Version:` header of its files; a plugin without one shows the commit of
+its last change.
+
+The harness checks by itself, in its own process, shortly after it
+starts or reloads and then every half hour. Git never prompts there. The
+page shows the last result at once, and `g` checks again. After a check
+finds that the harness is behind, the menu's Version entry says so, and
+a small icon nags until it is not: an arrow up in a circle, in the mode
+line indicator (after its "harness", even with no session active), in
+each chat's header line and in the task board's. Hovering over it names
+the origins with commits the harness lacks, and a click opens the page.
+The icon goes as soon as the harness reloads, and comes back only if the
+check the harness makes a few seconds later finds it behind still.
+`harness-ui-version-nag-places` chooses where it shows: any of
+`mode-line`, `chat-header` and `board-header` (all three by default), or
+nil for nowhere.
 
 ## Usage
 
@@ -566,7 +584,7 @@ default), or nil for nowhere.
 | `C-c h c` | `harness-connect-remote` | Connect the UI to a remote harness |
 | `C-c h P` | `harness-remote-control` | Serve phones and other devices ACP, approve the ones that ask to sign in, see who is signed in |
 | `C-c h y` | `harness-remote-approve` | Approve a device that asks to sign in (after comparing its code) |
-| `C-c h v` | `harness-version` | Show whether the harness runs the latest commit, and update it |
+| `C-c h v` | `harness-version` | Show whether the harness and its plugins are the latest, and update them |
 | `C-c h R` | `harness-reload` | Reload the harness in place |
 | `C-c h L` | `harness-show-log` | Show the harness log |
 | menu `x` | `harness-redact-secret` | In the `C-c h ?` menu, take a secret out of everything the harness stored (see [Secrets and redaction](#secrets-and-redaction)) |
