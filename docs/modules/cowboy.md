@@ -83,11 +83,16 @@ to carrying on: the message always goes, unless held.
 
 The message waiting for the answer is not in the transcript yet: the
 turn appends it once the gate settles, after the compaction (see
-`harness-agent--start`).  A harness that stops meanwhile loses the
-turn, so the question's payload keeps the message (`:waiting-message`)
-and the session's settling at the next start puts it back in its
-queue (`harness-session--settle`).  A turn cancelled while the
-question waits dismisses it.
+`harness-agent--start`).  Until then it shows as a queued message,
+above the compose box, as the messages that wait for a running turn
+do (`harness-cowboy--show-waiting`, `agent/show-waiting`): taking it
+back there -- [delete], or [edit] to write it again -- cancels the
+turn, which dismisses the question.  A harness that stops meanwhile
+loses the turn, so the question's payload keeps the message
+(`:waiting-message`) and the session's settling at the next start puts
+it back in its queue (`harness-session--settle`), once: the list of
+messages that wait, which holds it too, does not queue it again.  A
+turn cancelled while the question waits dismisses it.
 
 A compaction already under way answers the question before it is
 asked: a message that comes while one of its session runs -- the user
@@ -137,6 +142,7 @@ opens its hint with the caller's reason in place of the clock.
 ### Methods it calls
 
 - `agent/note-activity` ([agent](agent.md))
+- `agent/show-waiting` ([agent](agent.md))
 - `compaction/compact` ([compaction](compaction.md))
 - `compaction/estimate` ([compaction](compaction.md))
 - `config/get` ([config](config.md)), when it is loaded

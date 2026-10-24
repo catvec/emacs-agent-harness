@@ -227,7 +227,10 @@ time it opens. It asks again only when the harness does.
   marked *Queued*, and stands in the transcript where the model reads it, after
   what the agent did before, once the turn takes it (the harness says which
   messages it holds with `session/steering-changed`, and the session's
-  `steering` list).
+  `steering` list).  So is a message the harness holds back from a turn
+  that has not begun -- the one that waits for a compaction, or for the
+  answer to the question about a cold prompt cache -- listed there too, so
+  it shows *Queued* until it is delivered.
 - **Takes pictures with a new task.** The New task sheet attaches up to four
   images to the description, as a message does. A phone can name no file of
   the harness's machine, so the bytes go with `task/submit`

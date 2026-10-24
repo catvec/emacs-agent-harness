@@ -413,7 +413,8 @@ session shares it."
 
 (ert-deftest harness-cache-compact-holds-a-message-until-the-compaction-is-done ()
   "A message that comes while the compaction runs waits for it, and is sent the
-compacted conversation."
+compacted conversation.  It shows as a queued message while it waits, and
+is gone from the list of those that wait once it is recorded."
   (harness-cache-compact-test-with
     (let ((harness-provider-demo--delay 0.3)
           (sid (harness-cache-compact-test-session)))
@@ -422,7 +423,13 @@ compacted conversation."
       (should (gethash sid harness-cache-compact--running))
       (let ((turn (harness-call 'agent/prompt sid "and now the lexer")))
         (should-not (harness-cache-compact-test--compactions sid))
-        (harness-test-await turn 15))
+        (harness-test-wait (lambda () (plist-get (harness-call 'session/get sid) :steering)) 5
+                           "the message to show as waiting")
+        (let ((items (plist-get (harness-call 'session/get sid) :steering)))
+          (should (equal '("and now the lexer") (mapcar (lambda (item) (plist-get item :text)) items)))
+          (should (equal "the compaction" (plist-get (car items) :why))))
+        (harness-test-await turn 15)
+        (should-not (plist-get (harness-call 'session/get sid) :steering)))
       (let ((request (car harness-cache-compact-test--requests)))
         (should request)
         (should (string-match-p "SUMMARY TEXT"

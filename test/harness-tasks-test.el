@@ -6407,6 +6407,154 @@ not, and neither is one at work or merging already."
       (should-not (harness-tasks--wake-worthy-p (harness-tasks-test-task "t-refining")))
       (should (harness-tasks--wake-worthy-p (harness-tasks-test-task "t-active"))))))
 
+;;;; A task whose session waits for the user needs input, whatever else it is
+;;
+;; The board's column, the slot page, the session list's blocked filter
+;; and the mode line's count all ask one question of a session
+;; (`harness-session-waiting-on-user-p'), so a session on a question
+;; shows as waiting for the user everywhere, also while its task is
+;; starting or about to be woken: neither says the task is at work when
+;; its turn waits for the answer.
+
+(defun harness-tasks-test--ask (sid)
+  "Make session SID wait for the user: a question of the harness's is pending.
+Return the pending id."
+  (harness-call 'session/pending-add sid
+                (list :kind 'question :payload (list :question "What goes first?"))))
+
+(defun harness-tasks-test--column (id)
+  "Return the column the harness gives task ID."
+  (plist-get (harness-call 'task/get id) :column))
+
+(ert-deftest harness-tasks-column-a-session-waiting-for-the-user-needs-input ()
+  "A task whose session waits for the user is in needs-input, started or not.
+The task is starting, or a user's message is on its way to it (woken),
+and its turn has not begun: the question the turn's gate asks blocks
+the session, so the board says what the session list says -- the task
+needs the user -- where it said the task was at work.  Answering puts
+the task back where it was.  A task in review, pending or in the backlog
+is left to its own column."
+  (harness-tasks-test-with
+    (let* ((sid (harness-tasks-test--session-at 'idle))
+           (project default-directory)
+           (active (harness-tasks-test--hold 'active sid project))
+           (done (harness-tasks-test--hold 'done sid project))
+           (refining (harness-tasks-test--hold 'refining sid project))
+           (merging (harness-tasks-test--hold 'merging sid project))
+           (review (harness-tasks-test--hold 'review sid project)))
+      ;; At rest, nothing asked: the columns the states give.
+      (should (eq 'active (harness-tasks-test--column active)))
+      (should (eq 'done (harness-tasks-test--column done)))
+      (should (eq 'backlog (harness-tasks-test--column refining)))
+      (should (eq 'merging (harness-tasks-test--column merging)))
+      ;; Starting, and woken: at work before the turn begins.
+      (puthash active t harness-tasks--starting)
+      (puthash done t harness-tasks--waking)
+      (should (eq 'active (harness-tasks-test--column active)))
+      (should (eq 'active (harness-tasks-test--column done)))
+      ;; The question is asked before the turn starts.
+      (let ((pid (harness-tasks-test--ask sid)))
+        (should (harness-session-waiting-on-user-p (harness-call 'session/get sid)))
+        (dolist (id (list active done refining merging))
+          (should (eq 'needs-input (harness-tasks-test--column id))))
+        (should (eq 'review (harness-tasks-test--column review)))
+        ;; Starting and woken still, as the question asks, and says so.
+        (should (gethash active harness-tasks--starting))
+        (should (harness-tasks--waking-p (harness-tasks-test-task done)))
+        (harness-call 'session/pending-resolve sid pid "carry on"))
+      ;; Answered: where they were.
+      (should-not (harness-session-waiting-on-user-p (harness-call 'session/get sid)))
+      (should (eq 'active (harness-tasks-test--column active)))
+      (should (eq 'active (harness-tasks-test--column done)))
+      (should (eq 'backlog (harness-tasks-test--column refining)))
+      (should (eq 'merging (harness-tasks-test--column merging)))
+      (clrhash harness-tasks--starting)
+      (clrhash harness-tasks--waking)
+      (should (eq 'done (harness-tasks-test--column done))))))
+
+(ert-deftest harness-tasks-column-agrees-with-the-session-status ()
+  "Whatever a task's session is doing, its column says needs-input exactly when it blocks.
+Over the states a working task is in -- idle, running, blocked, with
+the task starting or woken or neither -- the board and the question
+`harness-session-waiting-on-user-p' answer alike, so the board and the
+list of the sessions waiting for the user cannot disagree."
+  (harness-tasks-test-with
+    (dolist (state '(active done))
+      (dolist (flag '(nil starting waking))
+        (dolist (status '(idle running blocked))
+          (let* ((sid (harness-tasks-test--session-at status))
+                 (id (harness-tasks-test--hold state sid default-directory)))
+            (clrhash harness-tasks--starting)
+            (clrhash harness-tasks--waking)
+            (pcase flag
+              ('starting (puthash id t harness-tasks--starting))
+              ('waking (puthash id t harness-tasks--waking)))
+            (let ((column (harness-tasks-test--column id))
+                  (waiting (harness-session-waiting-on-user-p (harness-call 'session/get sid))))
+              (should (eq waiting (and (eq column 'needs-input) t)))
+              (should (eq (eq status 'blocked) waiting)))))))))
+
+(ert-deftest harness-tasks-slots-say-blocked-of-a-starting-task-on-a-question ()
+  "A task that holds a slot while it starts is blocked when its session waits.
+The slot page tells what each holder does: a task resumed after a
+restart is starting until its turn begins, and if the cold prompt cache's
+question holds the turn first, the session waits for the user, as the
+board says."
+  (harness-tasks-test-with
+    (harness-tasks-test--settle)
+    (let* ((project (harness-tasks--project default-directory))
+           (sid (harness-tasks-test--session-at 'running))
+           (id (harness-tasks-test--hold 'active sid project :started (float-time))))
+      (puthash id t harness-tasks--starting)
+      (let ((state (lambda ()
+                     (plist-get (car (plist-get (harness-call 'task/slots default-directory) :holders))
+                                :state))))
+        (should (equal "starting" (funcall state)))
+        (let ((pid (harness-tasks-test--ask sid)))
+          (should (equal "blocked" (funcall state)))
+          (should (harness-tasks--blocked-p (harness-tasks-test-task id)))
+          (should (harness-tasks--blocked-since (harness-call 'session/get sid)))
+          (harness-call 'session/pending-resolve sid pid "carry on"))
+        (should (equal "starting" (funcall state)))))))
+
+(ert-deftest harness-tasks-resume-held-by-the-cold-cache-question-needs-input ()
+  "After a restart, a resumed task held by the cache question needs input.
+The harness stopped while the task worked, and its prompt cache lapsed
+meanwhile.  The message that carries the task on meets the cold cache,
+and the question that asks what goes first (harness-cowboy.el) blocks
+the session before the turn starts, so the task is still starting, with
+its slot, though nothing runs.  The board says it needs input, as the
+session list says the session is blocked, and the slot page says blocked;
+answering lets the turn start, which ends the wait."
+  (harness-tasks-test-with
+    (dolist (m '(compaction tools-question cowboy)) (harness-test-load-module m))
+    (let* ((harness-tasks-non-interactive nil)
+           (id (harness-tasks-test-submit "fix the parser"))
+           (sid (harness-tasks-test-session-id id)))
+      (harness-tasks-test-wait-state id 'done)
+      ;; The restart: the task was at work, its cache went cold meanwhile.
+      (harness-call 'session/usage-add sid
+                    '(:input 10 :output 10 :cache-read 3000 :context 3020 :cache-at 1000.0))
+      (harness-tasks--set id :state 'active :outcome nil :finished nil)
+      (should (harness-tasks--interrupted-p (harness-tasks-test-task id)))
+      (harness-tasks--recover)
+      (harness-test-wait (lambda () (harness-call 'question/pending sid)) 5
+                         "the question about the cold cache")
+      (let ((question (car (harness-call 'question/pending sid)))
+            (session (harness-call 'session/get sid)))
+        (should (gethash id harness-tasks--starting))
+        (should (eq 'blocked (plist-get session :status)))
+        (should (harness-session-waiting-on-user-p session))
+        (should (eq 'needs-input (harness-tasks-test--column id)))
+        (should (equal "blocked"
+                       (plist-get (car (plist-get (harness-call 'task/slots default-directory) :holders))
+                                  :state)))
+        ;; Carrying on: the turn begins, and the task is at work again.
+        (harness-call 'question/answer sid (plist-get question :id) (list :answer "carry on"))
+        (should (eq 'active (harness-tasks-test--column id)))
+        (harness-tasks-test-wait-state id 'done)
+        (should-not (gethash id harness-tasks--starting))))))
+
 ;;;; Pre-emption and return stop the work left running outside the turn
 ;;
 ;; A task whose session left work running outside its turn -- a

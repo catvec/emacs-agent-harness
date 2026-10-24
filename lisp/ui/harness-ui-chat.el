@@ -1482,13 +1482,18 @@ harness sent, or one with a picture, can only be deleted."
        (harness-chat--editable-message node)
        t))
 
-(defun harness-chat--steering-note (id node)
+(defun harness-chat--steering-note (id node &optional why)
   "Return the note of message ID, which waits for the model's next step.
 NODE is the user node it becomes.  The mark \"queued\", then [edit] and
 [delete], which take the message back before the turn delivers it;
 [edit] only where the message can be put back in the box
-\(`harness-chat--steering-editable-p')."
-  (concat (harness-chat--queued-mark "Not delivered yet: the model gets this message at its next step")
+\(`harness-chat--steering-editable-p').  A message the turn's gate
+holds -- the compaction under way, the question about the prompt cache
+-- is no different: it waits for WHY, which its mark's tooltip says
+\(`:why' of the session's `:steering' item)."
+  (concat (harness-chat--queued-mark (if (and (stringp why) (not (string-empty-p why)))
+                                         (format "Not delivered yet: it waits for %s" why)
+                                       "Not delivered yet: the model gets this message at its next step"))
           "  "
           (harness-chat--queued-buttons
            (append (when (harness-chat--steering-editable-p node)
@@ -3904,7 +3909,12 @@ the model reads it, once it does.  The activity line goes under them
 \(`harness-chat--activity-position').  First those the running turn
 takes at its next step (`harness-chat--steering'): the model gets them
 before the queue's, and until then they say \"queued\" and have [edit]
-and [delete] (`harness-chat--steering-note').  Then the queued messages,
+and [delete] (`harness-chat--steering-note').  So do the messages that
+wait for a gate that holds the turn -- the compaction under way, the
+question about a cold prompt cache -- which the session lists there too,
+with what they wait for (`:why'): the message that opened the turn and
+those sent to it meanwhile, in the order the model gets them.  Then the
+queued messages,
 which wait for the end of the turn, with [send now], [edit] and
 [delete] (`harness-chat--queued-note').  Each is drawn by
 `harness-chat--insert-waiting'.  All of them are marked
@@ -3921,7 +3931,7 @@ which wait for the end of the turn, with [send now], [edit] and
       (let* ((id (plist-get item :id))
              (node (harness-queued-message-node item)))
         (harness-chat--insert-waiting
-         item (harness-chat--steering-note id node)
+         item (harness-chat--steering-note id node (plist-get item :why))
          (harness-chat--queued-hint (if (harness-chat--steering-editable-p node) "e" "d"))
          harness-chat-steering-map 'harness-chat-steering blocks)))
     (dolist (item harness-chat--queue)

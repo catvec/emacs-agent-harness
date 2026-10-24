@@ -72,11 +72,16 @@
 ;;
 ;; The message waiting for the answer is not in the transcript yet: the
 ;; turn appends it once the gate settles, after the compaction (see
-;; `harness-agent--start').  A harness that stops meanwhile loses the
-;; turn, so the question's payload keeps the message (`:waiting-message')
-;; and the session's settling at the next start puts it back in its
-;; queue (`harness-session--settle').  A turn cancelled while the
-;; question waits dismisses it.
+;; `harness-agent--start').  Until then it shows as a queued message,
+;; above the compose box, as the messages that wait for a running turn
+;; do (`harness-cowboy--show-waiting', `agent/show-waiting'): taking it
+;; back there -- [delete], or [edit] to write it again -- cancels the
+;; turn, which dismisses the question.  A harness that stops meanwhile
+;; loses the turn, so the question's payload keeps the message
+;; (`:waiting-message') and the session's settling at the next start puts
+;; it back in its queue (`harness-session--settle'), once: the list of
+;; messages that wait, which holds it too, does not queue it again.  A
+;; turn cancelled while the question waits dismisses it.
 ;;
 ;; A compaction already under way answers the question before it is
 ;; asked: a message that comes while one of its session runs -- the user
@@ -652,6 +657,27 @@ that decision's note (`decision/attach').  Return the hint."
   "Session id -> (:pid PID :settle FN) while its cold-cache question waits.
 FN takes the choice and who made it, once: it lets the turn go on.")
 
+(defconst harness-cowboy--waiting-for-answer
+  "your answer about the prompt cache"
+  "What the message waiting for the question waits for: words after \"waits for\".")
+
+(defun harness-cowboy--show-waiting (session-id why)
+  "Show the messages SESSION-ID's turn holds as queued, waiting for WHY.
+The message that opened the turn is in no transcript until the gate
+lets it go on (`harness-agent--start'), which is when the user has
+answered the question, or the compaction chosen is done: the user sees
+nothing of it but its preview in the question's panel.  This has it
+listed on the session with the messages that wait (`agent/show-waiting'),
+so a UI draws it as a queued message, above its compose box, with the
+buttons that take it back.  WHY follows \"waits for\" in its tooltip.
+A failure to say so is logged, never raised: the question must be asked
+all the same."
+  (when (harness-method-exists-p 'agent/show-waiting)
+    (condition-case err
+        (harness-call 'agent/show-waiting session-id why)
+      (error (harness-log 'warn "cowboy: could not show the message waiting in %s: %s"
+                          session-id (harness-error-short-message err))))))
+
 (defun harness-cowboy--ask (session-id session value estimate settle &optional note)
   "Ask what goes first in SESSION-ID, whose record is SESSION.
 VALUE is the `agent/before-turn' value, whose `:message' is the
@@ -702,6 +728,7 @@ dismissed question holds the message."
                 (t (funcall settle (car parsed) 'user)))))))
     (unless answered
       (puthash session-id (list :pid pid :settle settle) harness-cowboy--asking)
+      (harness-cowboy--show-waiting session-id harness-cowboy--waiting-for-answer)
       (harness-emit 'cowboy/asked session-id pid))
     pid))
 
@@ -797,13 +824,16 @@ cannot be written to carrying on, each said in a hint."
 Its status turns running, its turn having begun, and its activity says
 it compacts: a client stops offering to compact it (the cache panel)
 and says what the message waits for.  The turn sets both again when it
-starts, and its end, cancelled or not, when it ends."
+starts, and its end, cancelled or not, when it ends.  The message that
+waits for the compaction shows as a queued message meanwhile
+\(`harness-cowboy--show-waiting'), as it did while the question waited."
   (condition-case err
       (progn
         (harness-call 'session/set-status session-id 'running)
         (when (harness-method-exists-p 'agent/note-activity)
           (harness-call 'agent/note-activity session-id (list :phase 'compacting))))
-    (error (harness-log 'warn "cowboy: could not mark %s busy: %s" session-id (harness-error-short-message err)))))
+    (error (harness-log 'warn "cowboy: could not mark %s busy: %s" session-id (harness-error-short-message err))))
+  (harness-cowboy--show-waiting session-id "the compaction"))
 
 (defun harness-cowboy--apply (session-id choice by value estimate &optional decision)
   "Do CHOICE before SESSION-ID's turn, as BY decided; promise the gate value.

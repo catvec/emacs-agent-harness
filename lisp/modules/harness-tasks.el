@@ -243,7 +243,10 @@
 ;;                 one (`task/start'), so its column says it is not
 ;;                 queued: `:state' stays pending with `:backlog' t
 ;;   needs-input   requires user input: its session is blocked on a
-;;                 permission or a question, or it (or its refinement)
+;;                 permission or a question -- also while the task is
+;;                 starting or resumed and the turn has not begun, held
+;;                 by the question a cold prompt cache asks first
+;;                 (harness-cowboy.el) --, or it (or its refinement)
 ;;                 stopped part way
 ;;   review        finished, waiting for the user to verify it
 ;;   merging       its branch holds a place in the merge queue: queued,
@@ -1428,19 +1431,31 @@ holds a place in the merge queue shows in merging however it holds it:
 queued, merging, or its session resolving the conflicts; unless that
 session waits on the user, whose answer the queue then waits for too.
 A task a user's message is on its way to (`harness-tasks--waking') shows
-active before the turn it starts actually begins."
+active before the turn it starts actually begins.
+
+A session that waits for the user (`harness-session-waiting-on-user-p')
+puts its task in needs-input before anything else: before it starts or
+is woken, and whatever state it is in, as the session list's blocked
+filter says the same of the session.  A turn that has not begun waits
+for the user too: a restarted harness resumes the tasks it was working
+on with a message that meets a prompt cache gone cold, and the question
+that asks what goes first (harness-cowboy.el) blocks the session before
+the turn starts -- the task is starting, or woken, and needs the
+user."
   (pcase (plist-get task :state)
     ('pending (if (harness-tasks--backlog-p task) 'backlog 'pending))
-    ('done (if (harness-tasks--waking-p task) 'active 'done))
+    ('done (cond ((harness-session-waiting-on-user-p (harness-tasks--session task)) 'needs-input)
+                 ((harness-tasks--waking-p task) 'active)
+                 (t 'done)))
     ('review 'review)
     ('refining (let ((session (harness-tasks--session task)))
-                 (cond ((plist-get session :pending) 'needs-input)
+                 (cond ((harness-session-waiting-on-user-p session) 'needs-input)
                        ((harness-tasks--turn-p task) 'backlog)
                        ((plist-get task :outcome) 'needs-input)
                        (t 'backlog))))
     (_ (let ((session (harness-tasks--session task)))
-         (cond ((gethash (plist-get task :id) harness-tasks--starting) 'active)
-               ((plist-get session :pending) 'needs-input)
+         (cond ((harness-session-waiting-on-user-p session) 'needs-input)
+               ((gethash (plist-get task :id) harness-tasks--starting) 'active)
                ((plist-get task :merge-status) 'merging)
                ((harness-tasks--waking-p task) 'active)
                ((eq (plist-get session :status) 'running) 'active)
@@ -2269,8 +2284,8 @@ That is when its status last became `blocked' (`harness-tasks--blocked-at'),
 else when its oldest pending request was made (`session/pending-add'
 stamps `:created'): a permission request, an ask_user question, the
 harness's own question about a cold prompt cache.  Nil when SESSION is
-not blocked."
-  (when (eq (plist-get session :status) 'blocked)
+not blocked (`harness-session-waiting-on-user-p')."
+  (when (harness-session-waiting-on-user-p session)
     (or (gethash (plist-get session :id) harness-tasks--blocked-at)
         (let ((times (delq nil (mapcar (lambda (item)
                                          (let ((at (plist-get item :created)))
@@ -2280,11 +2295,14 @@ not blocked."
 
 (defun harness-tasks--blocked-p (task &optional session)
   "Non-nil when active TASK's own top-level session is blocked on the user.
-SESSION is TASK's session plist when the caller has it."
+SESSION is TASK's session plist when the caller has it.  It is blocked
+when it waits for the user (`harness-session-waiting-on-user-p'): the
+same question the board's needs-input column and the session list's
+blocked filter ask."
   (and (eq (plist-get task :state) 'active)
        (let ((session (or session (harness-tasks--session task))))
          (and (harness-tasks--top-level-p session)
-              (eq (plist-get session :status) 'blocked)))))
+              (harness-session-waiting-on-user-p session)))))
 
 (defun harness-tasks--lend-due-at (task &optional session)
   "Return when TASK, blocked on the user, has waited long enough to lend its slot.
@@ -5010,7 +5028,11 @@ That is the title the board shows: its session's name, else its own
           :title (harness-tasks--slot-title task)
           :session (plist-get task :session)
           :priority (symbol-name (harness-priority-of-task task))
-          :state (cond ((gethash id harness-tasks--starting) "starting")
+          ;; Waiting for the user is that before it is anything else, as it
+          ;; is on the board (`harness-tasks--column'): a task resumed after
+          ;; a restart is starting and may sit on a question already.
+          :state (cond ((harness-session-waiting-on-user-p session) "blocked")
+                       ((gethash id harness-tasks--starting) "starting")
                        ((plist-get task :waiting) "waiting")
                        (t (format "%s" (plist-get session :status))))
           :since (harness-tasks--working-since task)
@@ -5060,10 +5082,13 @@ A plist, all of it plain data:
   :holders   the tasks holding a slot (`harness-tasks--holds-slot-p'),
              the longest at work first, each a plist of :id, :title (its
              name, else its prompt's first line), :session, :priority
-             (\"low\", \"medium\" or \"high\"), :state (\"starting\";
-             \"waiting\", its session ended its turn but left work
-             running; or its session's status, \"running\" or
-             \"blocked\"), :since (when its work began or was last sent
+             (\"low\", \"medium\" or \"high\"), :state (\"blocked\", its
+             session waits for the user -- a task starting or resumed
+             after a restart, held by the question a cold prompt cache
+             asks, is blocked, as the board says it needs input;
+             \"starting\"; \"waiting\", its session ended its turn but
+             left work running; or its session's status, \"running\"
+             or \"blocked\"), :since (when its work began or was last sent
              back, a float time) and :sent-back (t when its work is
              feedback that sent it back from review, else :false)
   :queue     the tasks waiting for a slot (`harness-tasks--queued-p'),

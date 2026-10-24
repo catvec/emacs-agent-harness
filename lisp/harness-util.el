@@ -993,6 +993,28 @@ record them."
                   :blocks (unless (harness-blocks-only-text-p blocks) blocks))
             (and (harness-sender-kind from) (list :meta (list :from from))))))
 
+;;;; A session that waits for the user
+
+(defun harness-session-waiting-on-user-p (session)
+  "Non-nil when SESSION waits for the user to answer something.
+SESSION is a session plist, as a method or an event gives it or as a UI
+holds it from JSON: its status a symbol or a string, its `:pending' a
+list or a vector.  It waits when a request is pending on it -- a
+permission, an ask_user question, a question the harness asks itself,
+such as the one a message meets when its session's prompt cache went
+cold -- or its status says `blocked'.  A session's status is `blocked'
+exactly while a request is pending (`session/pending-add'), so the two
+say the same: this takes either, so that a view that reads one and a
+view that reads the other cannot disagree.  What every view that says
+who waits for the user -- the session list's blocked filter, the
+mode line's count, the task board's needs-input column, the task slots
+-- asks, rather than each deciding for itself."
+  (and (listp session)
+       (let ((pending (plist-get session :pending)))
+         (or (and (seqp pending) (> (length pending) 0))
+             (equal (format "%s" (plist-get session :status)) "blocked")))
+       t))
+
 ;;;; Paths
 
 (defun harness-path-normalize (path)

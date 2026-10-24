@@ -90,8 +90,8 @@ gates hold that boundary, and `agent/turn-ended` runs it when the
 turn ends first.
 
 A message that comes to a session while a compaction of it runs goes
-on with the compacted conversation: nothing asks about it, nothing
-queues it, and the model answers it right after the compaction.  A
+on with the compacted conversation: nothing asks about it, no queue
+sends it later, and the model answers it right after the compaction.  A
 turn that starts meanwhile waits at the `agent/before-turn` gate
 (`harness-compaction--wait-gate`, ahead of the cold-cache question,
 which the compaction under way answers already -- it leaves nothing
@@ -103,7 +103,11 @@ compaction, as the user's next message (harness-agent.el).  Recorded
 meanwhile it would lie before the compaction node, where the model
 never reads it, and a turn that ran beside the compaction would be
 buried by it: the node comes after the whole exchange, and the
-conversation restarts there.
+conversation restarts there.  Until then such a message is no part
+of the transcript, so the session lists it with the messages that
+wait (`agent/show-waiting`, `harness-compaction-show-waiting`): a UI
+draws it as a queued message, above its compose box, with the buttons
+that take it back, and it leaves the list as it is recorded.
 
 The summarisation request has no tools.  An API provider gets the
 transcript as ordinary messages.  A hosted-loop provider keeps the
@@ -154,6 +158,7 @@ the token count progressively.
 - `agent/cancel` ([agent](agent.md))
 - `agent/note-activity` ([agent](agent.md))
 - `agent/running` ([agent](agent.md))
+- `agent/show-waiting` ([agent](agent.md))
 - `provider/capabilities` ([provider](provider.md))
 - `provider/complete` ([provider](provider.md))
 - `provider/fork` ([provider](provider.md))

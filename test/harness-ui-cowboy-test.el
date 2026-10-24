@@ -338,9 +338,10 @@ digits of any question are there too."
 
 (ert-deftest harness-ui-cowboy-chat-asks-and-a-key-answers ()
   "A message sent from the compose box of a session whose cache lapsed
-waits on the panel, the cache panel giving way; t answers it, the
-transcript compaction goes first, the message after it, and the panel
-goes."
+waits on the panel, the cache panel giving way, and shows as a queued
+message above the box, with the buttons that take it back; t answers
+the panel, the transcript compaction goes first, the message after it,
+and the panel and the queued message go."
   (harness-ui-cowboy-test-with
     (let* ((sid (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir) :model "demo:scripted") :id))
            (buffer nil))
@@ -367,7 +368,19 @@ goes."
         ;; The ordinary question panel is not drawn as well.
         (should-not (string-search "What goes first?  Answer \"always\""
                                    (buffer-substring-no-properties (point-min) (point-max))))
-        (should (harness-ui-cowboy-waiting-p sid))
+        (should (harness-ui-cowboy-waiting-p sid)))
+      ;; The message waits in no transcript, and the chat draws it as it
+      ;; draws a message that waits for a running turn: above the box,
+      ;; queued, with the buttons that take it back.
+      (harness-test-wait (lambda () (with-current-buffer buffer
+                                      (text-property-not-all (point-min) (point-max) 'harness-chat-steering nil)))
+                         5 "the message that waits shown as queued")
+      (with-current-buffer buffer
+        (let ((waiting (buffer-substring-no-properties
+                        (text-property-not-all (point-min) (point-max) 'harness-chat-steering nil)
+                        (point-max))))
+          (should (string-match-p "queued +\\[edit\\] e +\\[delete\\] d\nnow add tests\n" waiting)))
+        (should-not harness-chat--queue)
         ;; t, with point on the panel.
         (let ((at (harness-ui-cowboy-test--panel buffer)))
           (call-interactively (lookup-key (get-text-property at 'keymap) "t"))))
@@ -384,7 +397,18 @@ goes."
                                       (string-match-p "context compacted into a transcript file, the prompt cache being cold"
                                                       (buffer-substring-no-properties (point-min) (point-max)))))
                          5 "the compaction in the chat")
-      (should-not (harness-ui-cowboy-waiting-p sid)))))
+      ;; The session's record reaches the UI once it has been quiet for a
+      ;; moment (`harness-acp--session-debounce'): the turn went on through
+      ;; changes that kept it busy, so the UI's copy still lists the
+      ;; question for a few milliseconds after the turn.
+      (harness-test-wait (lambda () (not (harness-ui-cowboy-waiting-p sid))) 5
+                         "the UI's copy of the session to lose the question")
+      ;; Delivered: the message stands in the transcript, queued no more.
+      (harness-test-wait (lambda () (with-current-buffer buffer
+                                      (not (text-property-not-all (point-min) (point-max) 'harness-chat-steering nil))))
+                         5 "the queued message to go")
+      (with-current-buffer buffer
+        (should (string-match-p "now add tests" (buffer-substring-no-properties (point-min) harness-chat--transcript-end)))))))
 
 (ert-deftest harness-ui-cowboy-chat-i-ignores-the-cold-cache ()
   "i on the panel ignores the cold cache: the message goes with the whole

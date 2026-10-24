@@ -440,6 +440,127 @@ so it is warm and nothing asks again."
       (harness-test-await p 10)
       (should (equal "transcript" (harness-node-compaction-kind (car (harness-cowboy-test--compactions sid))))))))
 
+;;;; The message that waits shows as queued
+
+;; The message waiting for the answer is in no transcript yet, and the
+;; user saw nothing of it but the preview in the question's panel.  The
+;; session lists it with the messages that wait for a turn
+;; (`:steering'), so a UI draws it as queued, above the compose box,
+;; while the question is open and the compaction chosen runs.
+
+(defun harness-cowboy-test--waiting (sid)
+  "Return the items of the messages session SID lists as waiting for its turn."
+  (plist-get (harness-call 'session/get sid) :steering))
+
+(defun harness-cowboy-test--waiting-texts (sid)
+  "Return the texts of the messages session SID lists as waiting."
+  (mapcar (lambda (item) (plist-get item :text)) (harness-cowboy-test--waiting sid)))
+
+(ert-deftest harness-cowboy-the-message-waiting-for-the-answer-shows-as-queued ()
+  "While the question waits, the message that opened the turn is listed as
+waiting, with what it waits for, and it is no node of the transcript.
+Once answered it is recorded under the id it was listed with, and the
+list is empty again."
+  (harness-cowboy-test-with
+    (let* ((sid (harness-cowboy-test-session))
+           (p (harness-call 'agent/prompt sid "now add tests")))
+      (harness-cowboy-test--question sid)
+      (let ((waiting (harness-cowboy-test--waiting sid)))
+        (should (equal '("now add tests") (harness-cowboy-test--waiting-texts sid)))
+        (should (equal "your answer about the prompt cache" (plist-get (car waiting) :why)))
+        (should-not (member "now add tests" (mapcar (lambda (n) (plist-get n :content))
+                                                    (harness-call 'session/nodes sid))))
+        (harness-cowboy-test--answer sid "carry on")
+        (should (eq 'end-turn (plist-get (harness-test-await p 10) :stop-reason)))
+        (let ((node (cl-find "now add tests" (harness-call 'session/nodes sid)
+                             :key (lambda (n) (plist-get n :content)) :test #'equal)))
+          (should (equal (plist-get (car waiting) :id) (plist-get node :id)))))
+      (should-not (harness-cowboy-test--waiting sid)))))
+
+(ert-deftest harness-cowboy-the-message-waits-for-the-compaction-the-answer-chose ()
+  "Answered with a compaction, the message waits for it, which says so: it
+is listed as waiting for the compaction, with a message sent meanwhile.
+Both are recorded after it, and nothing is listed once they are."
+  (harness-cowboy-test-with
+    (let* ((harness-provider-demo--delay 0.2)
+           (sid (harness-cowboy-test-session))
+           (p (harness-call 'agent/prompt sid "now add tests")))
+      (harness-cowboy-test--question sid)
+      (harness-cowboy-test--answer sid "brief")
+      (harness-test-wait (lambda () (gethash sid harness-compaction--running)) 10 "the compaction")
+      (should (equal "the compaction" (plist-get (car (harness-cowboy-test--waiting sid)) :why)))
+      (harness-call 'agent/prompt sid "and the docs")
+      (should (equal '("now add tests" "and the docs") (harness-cowboy-test--waiting-texts sid)))
+      (should (eq 'end-turn (plist-get (harness-test-await p 20) :stop-reason)))
+      (should-not (harness-cowboy-test--waiting sid))
+      (let ((texts (mapcar (lambda (n) (plist-get n :content))
+                           (cl-remove-if-not (lambda (n) (eq (plist-get n :kind) 'user))
+                                             (harness-call 'session/nodes sid)))))
+        (should (equal '("now add tests" "and the docs") (last texts 2)))))))
+
+(ert-deftest harness-cowboy-a-default-taken-without-asking-shows-the-message-during-its-compaction ()
+  "Where nobody is asked -- asking is off -- the default compaction runs
+before the message goes, and the message is listed as waiting for it."
+  (harness-cowboy-test-with
+    (let* ((harness-provider-demo--delay 0.2)
+           (harness-cowboy-ask nil)
+           (sid (harness-cowboy-test-session))
+           (p (harness-call 'agent/prompt sid "now add tests")))
+      (harness-test-wait (lambda () (gethash sid harness-compaction--running)) 10 "the compaction")
+      (should (equal '("now add tests") (harness-cowboy-test--waiting-texts sid)))
+      (should (equal "the compaction" (plist-get (car (harness-cowboy-test--waiting sid)) :why)))
+      (should (eq 'end-turn (plist-get (harness-test-await p 20) :stop-reason)))
+      (should-not (harness-cowboy-test--waiting sid)))))
+
+(ert-deftest harness-cowboy-taking-back-the-waiting-message-dismisses-the-question ()
+  "[delete] on the message that waits for the answer deletes it, and the
+turn it opened has nothing to do: the question is dismissed, the turn
+ends cancelled at once, and the message is never recorded."
+  (harness-cowboy-test-with
+    (let* ((sid (harness-cowboy-test-session))
+           (p (harness-call 'agent/prompt sid "never mind")))
+      (harness-cowboy-test--question sid)
+      (let ((node (harness-call 'agent/withdraw sid (plist-get (car (harness-cowboy-test--waiting sid)) :id))))
+        (should (equal "never mind" (plist-get node :content))))
+      (should-not (harness-cowboy-test--waiting sid))
+      ;; Well before the agent's grace period of 3 seconds.
+      (should (eq 'cancelled (plist-get (harness-test-await p 1) :stop-reason)))
+      (should-not (harness-call 'question/pending sid))
+      (should-not (harness-call 'cowboy/asking sid))
+      (should-not (member "never mind" (mapcar (lambda (n) (plist-get n :content))
+                                               (harness-call 'session/nodes sid))))
+      (should-not (cl-some (lambda (h) (string-prefix-p "Turn not started" h)) (harness-cowboy-test--hints sid)))
+      (should-not harness-cowboy-test--requests)
+      (should (eq 'idle (plist-get (harness-call 'session/get sid) :status))))))
+
+(ert-deftest harness-cowboy-a-message-held-with-not-now-stops-showing-as-queued ()
+  "Not now keeps the message, in the transcript, where it is no queued
+message any more: the list of those that wait is empty."
+  (harness-cowboy-test-with
+    (let* ((sid (harness-cowboy-test-session))
+           (p (harness-call 'agent/prompt sid "the held one")))
+      (harness-cowboy-test--question sid)
+      (should (equal '("the held one") (harness-cowboy-test--waiting-texts sid)))
+      (harness-cowboy-test--answer sid "not now")
+      (harness-test-await p 10)
+      (should-not (harness-cowboy-test--waiting sid))
+      (should (member "the held one" (mapcar (lambda (n) (plist-get n :content))
+                                             (harness-call 'session/nodes sid)))))))
+
+(ert-deftest harness-cowboy-a-cancelled-turn-stops-showing-its-message-as-queued ()
+  "Cancelling the turn while the question waits dismisses it, keeps the
+message in the transcript, and the list of those that wait is empty."
+  (harness-cowboy-test-with
+    (let* ((sid (harness-cowboy-test-session))
+           (p (harness-call 'agent/prompt sid "never mind")))
+      (harness-cowboy-test--question sid)
+      (should (equal '("never mind") (harness-cowboy-test--waiting-texts sid)))
+      (harness-call 'agent/cancel sid)
+      (should (eq 'cancelled (plist-get (harness-test-await p 1) :stop-reason)))
+      (should-not (harness-cowboy-test--waiting sid))
+      (should (member "never mind" (mapcar (lambda (n) (plist-get n :content))
+                                           (harness-call 'session/nodes sid)))))))
+
 ;;;; Holding the message
 
 (ert-deftest harness-cowboy-not-now-keeps-the-message ()
@@ -486,11 +607,14 @@ the turn ends cancelled, not held; the message stays."
 
 (ert-deftest harness-cowboy-a-restart-queues-the-message-again ()
   "A harness that stops while the question waits loses the turn, not the
-message: the next start puts it back in the session's queue."
+message: the next start puts it back in the session's queue, once -- the
+session lists it as waiting too, and the question keeps it -- and the
+list of those that wait is empty, no turn holding them any more."
   (harness-cowboy-test-with
     (let ((sid (harness-cowboy-test-session)))
       (harness-call 'agent/prompt sid "keep me" (list :from (harness-sender-system "tasks")))
       (harness-cowboy-test--question sid)
+      (should (equal '("keep me") (harness-cowboy-test--waiting-texts sid)))
       ;; The process dies: whatever was only in memory is gone.
       (harness-session-flush)
       (clrhash harness-sessions)
@@ -502,6 +626,7 @@ message: the next start puts it back in the session's queue."
         (should (eq 'inactive (plist-get s :status)))
         (should-not (plist-get s :pending))
         (should (equal '("keep me") (mapcar (lambda (q) (plist-get q :text)) (plist-get s :queue))))
+        (should-not (plist-get s :steering))
         (should (equal "tasks" (plist-get (plist-get (car (plist-get s :queue)) :from) :source))))
       (should (member (concat "Interrupted: the harness stopped before you said what goes first, the prompt cache"
                               " being cold; the message that waited is back in the queue")

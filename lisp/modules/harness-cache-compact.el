@@ -66,6 +66,7 @@
 (defvar harness-cowboy-min-context)
 
 (declare-function harness-compaction-busy-p "harness-compaction" (session-id))
+(declare-function harness-compaction-show-waiting "harness-compaction" (session-id))
 
 (defcustom harness-cache-precompact t
   "Non-nil to compact a conversation just before its prompt cache lapses.
@@ -334,12 +335,15 @@ whoever comes after it."
   "Hold a turn in SESSION while the compaction before its cache lapsed runs.
 VALUE and NEXT are those of the `agent/before-turn' filter: the message
 goes with the compacted conversation, as one that met a cold cache
-would."
+would.  It waits as it does for any compaction, and shows as a queued
+message meanwhile (`harness-compaction-show-waiting')."
   (let ((promise (gethash (plist-get session :id) harness-cache-compact--running)))
     (if (and promise (plist-get value :proceed))
-        (harness-then promise
-                      (lambda (_) (funcall next value))
-                      (lambda (_) (funcall next value)))
+        (progn
+          (harness-compaction-show-waiting (plist-get session :id))
+          (harness-then promise
+                        (lambda (_) (funcall next value))
+                        (lambda (_) (funcall next value))))
       (funcall next value)))
   nil)
 

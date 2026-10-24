@@ -27,7 +27,13 @@
 ;; be replaced, so it waits with the turn (`harness-agent--hold-message')
 ;; and is recorded, an ordinary user message, right after the work is
 ;; done and before the turn's next request (`harness-agent--flush-held'),
-;; where the model reads it and answers.
+;; where the model reads it and answers.  Such a message, and the one
+;; that opened a turn its gate holds for a while -- a question to the user
+;; (the cold prompt cache's), a compaction under way: the gate says so
+;; with `agent/show-waiting' -- show as queued messages meanwhile: the
+;; session lists them with the messages that steer a running turn
+;; (`:steering'), saying what they wait for, and each leaves the list as
+;; it is recorded, or when the user takes it back (`agent/withdraw').
 ;; A model that stops on its own, with nothing steering, is not let go
 ;; at once: the `agent/stop' filters may answer it with a message of the
 ;; harness's and a step more, a few times at most (`harness-agent--stopped').
@@ -275,18 +281,35 @@ Kept beside the turn records, as the activity tables are.")
 
 (defvar harness-agent--held (make-hash-table :test 'eq :weakness 'key)
   "Turn -> the messages sent to it while work held it, oldest first.
-Each is (:blocks BLOCKS :from FROM): a message that came while the sync
-filter `agent/hold' said something holds the turn.  It waits with the
-turn and is recorded once the gate lets it go on
-\(`harness-agent--flush-held').  Kept beside the turn records, as the
-activity tables are, so a reload keeps the turns working.")
+Each is an entry as `harness-agent--message-entry' makes it, with
+`:blocks' and `:from': a message that came while the sync filter
+`agent/hold' said something holds the turn.  It waits with the turn
+and is recorded once the gate lets it go on (`harness-agent--flush-held').
+Kept beside the turn records, as the activity tables are, so a reload
+keeps the turns working.")
 
 (defvar harness-agent--opening (make-hash-table :test 'eq :weakness 'key)
-  "Turn -> the blocks of the message that opened it, until its gate lets it go.
+  "Turn -> the entry of the message that opened it, until its gate lets it go.
 That message is not in the transcript until then
 \(`harness-agent--start'), so it waits as the messages in
 `harness-agent--held' do, and the turn counts it with them when it says
 what waits.  Kept beside the turn records, as the activity tables are.")
+
+(defvar harness-agent--shown (make-hash-table :test 'eq :weakness 'key)
+  "Turn -> what its gate waits for, while its waiting messages show.
+That is a few words (\"the compaction\"), kept while the messages the
+gate holds -- the one that opened the turn, those sent to it meanwhile
+-- are listed on the session with the ones its steering holds, for a UI
+to draw them as queued (`agent/show-waiting').  A gate that lets the
+turn go on right away shows nothing: a message that waits a moment is
+no queued message.  Kept beside the turn records, as the activity tables
+are.")
+
+(defvar harness-agent--withdrawn (make-hash-table :test 'eq :weakness 'key)
+  "Turn -> t once the message that opened it was taken back.
+The turn is cancelled with it, and what its gate lets go on records no
+message for it (`harness-agent--start').  Kept beside the turn records,
+as the activity tables are.")
 
 (defvar harness-agent--gated (make-hash-table :test 'eq :weakness 'key)
   "Turn -> t while the filters of a boundary hold it.
@@ -1011,16 +1034,53 @@ turn running across a reload may still hold."
               (and blocks (not (harness-agent--only-text-p blocks))
                    (list :blocks (mapcar #'harness-agent--display-block blocks)))))))
 
+(defun harness-agent--waiting-entries (turn)
+  "Return the entries of the messages TURN's gate holds that show, oldest first.
+That is the message that opened the turn, then those sent to it while
+its gate held it (`harness-agent--held'), once something said they wait
+long enough to show (`harness-agent--shown').  Nil before: a gate that
+lets the turn go on at once shows nothing."
+  (and (gethash turn harness-agent--shown)
+       (append (and (gethash turn harness-agent--opening)
+                    (list (gethash turn harness-agent--opening)))
+               (gethash turn harness-agent--held))))
+
 (defun harness-agent--publish-steering (turn)
-  "Tell the session which messages TURN holds for its next step.
-Never signals: what a UI shows of the messages that wait must not stop
-the turn from delivering them."
-  (let ((sid (harness-agent-turn-session-id turn)))
+  "Tell the session which messages TURN holds, for a UI to draw as queued.
+They are the messages the gate that holds the turn keeps while it waits
+\(`harness-agent--waiting-entries'), each with `:why', what it waits for,
+then those the turn holds for its next step.  That is the order they
+reach the model in: the gate records its own first, as it lets the turn
+go on, and the step takes the others.  Never signals: what a UI shows of
+the messages that wait must not stop the turn from delivering them."
+  (let ((sid (harness-agent-turn-session-id turn))
+        (why (gethash turn harness-agent--shown)))
     (when (harness-call 'session/exists-p sid)
       (harness-agent--try (format "announcing the messages waiting in %s" sid)
         (harness-call 'session/set-steering sid
-                      (delq nil (mapcar #'harness-agent--steering-item
-                                        (harness-agent-turn-steering turn))))))))
+                      (append (delq nil (mapcar (lambda (entry)
+                                                  (when-let* ((item (harness-agent--steering-item entry)))
+                                                    (append item (list :why why))))
+                                                (harness-agent--waiting-entries turn)))
+                              (delq nil (mapcar #'harness-agent--steering-item
+                                                (harness-agent-turn-steering turn)))))))))
+
+(defun harness-agent--message-entry (blocks from)
+  "Return the entry of BLOCKS, a message from FROM that waits for the model.
+It is what the turn keeps of a message it has not recorded: `:node', the
+id the message will have as a node of the transcript, `:text', `:blocks'
+and `:ts', when it was sent, with `:from' when FROM, who sent it (see
+`agent/prompt'), is not the user, and `:images' when it attached any,
+which a hosted loop is handed with the tool result that delivers it
+\(`harness-agent--with-steering').  A message held for a gate
+\(`harness-agent--held') is kept as a message that steers is
+\(`harness-agent--record-steering'), so a UI draws both alike."
+  (let ((images (harness-agent--message-images blocks)))
+    (append (list :node (concat "n-" (harness-short-id 10))
+                  :text (harness-agent--blocks-text blocks)
+                  :blocks blocks :ts (float-time))
+            (and from (list :from from))
+            (and images (list :images images)))))
 
 (defun harness-agent--record-steering (turn blocks from)
   "Hold BLOCKS, a message from FROM, for the next step of the running TURN.
@@ -1029,16 +1089,10 @@ user with the messages that wait (`harness-agent--publish-steering'),
 and the next step boundary delivers it once
 \(`harness-agent--take-pending'), recording it as a user node marked
 `:steering' (and `:from', when FROM is who sent it: see `agent/prompt').
-The entry keeps the id that node will have, the message's text and
-blocks, who sent it, when, and its images, which a hosted loop is handed
-with the tool result that delivers it (`harness-agent--with-steering').
+The entry (`harness-agent--message-entry') keeps the id that node will
+have, the message's text and blocks, who sent it, when, and its images.
 Return the entry."
-  (let* ((text (harness-agent--blocks-text blocks))
-         (images (harness-agent--message-images blocks))
-         (entry (append (list :node (concat "n-" (harness-short-id 10)) :text text
-                              :blocks blocks :ts (float-time))
-                        (and from (list :from from))
-                        (and images (list :images images)))))
+  (let ((entry (harness-agent--message-entry blocks from)))
     (setf (harness-agent-turn-steering turn)
           (append (harness-agent-turn-steering turn) (list entry)))
     (harness-agent--publish-steering turn)
@@ -1066,12 +1120,26 @@ model has from one it never got (`harness-agent--flush-steering')."
 ;; from what it replaces.  A message sent to such a turn could not steer
 ;; it: recorded now, it would lie before the compaction, which the model
 ;; never reads (`session/messages' starts the conversation at the
-;; compaction), and be lost.  Nor is it queued for later, with the
-;; buttons of a queued message: the user sent it, and the model answers
-;; it as soon as it can, which is once the compaction is done.  So it
-;; waits with the turn, announced in what the turn is doing, and is
-;; recorded when the gate lets the turn go on, after the compaction and
-;; the message that opened the turn, in the order it was sent.
+;; compaction), and be lost.  Nor is it queued for the turn after: the
+;; user sent it, and the model answers it as soon as it can, which is
+;; once the compaction is done.  So it waits with the turn, announced in
+;; what the turn is doing, and is recorded when the gate lets the turn go
+;; on, after the compaction and the message that opened the turn, in the
+;; order it was sent.
+;;
+;; Until then it is a message that waits like any other, and shows as
+;; one: the session lists it in `:steering', with the messages a running
+;; turn has not taken yet, so a UI draws it with the queue above its
+;; compose box -- "queued", with the buttons that take it back
+;; (`agent/withdraw') -- and no second kind of waiting message needs
+;; drawing.  So does the message that opened the turn while its gate
+;; holds it for a while: a question to the user (the cold prompt cache's,
+;; harness-cowboy.el), a compaction under way (harness-compaction.el).
+;; Such a gate says so (`agent/show-waiting'); a gate that lets the turn
+;; go on within a moment shows nothing, for a message that waits no
+;; longer than that is not a queued message.  The messages leave the
+;; list as the gate lets the turn go on, each recorded under the id it
+;; was listed with, and when they are taken back.
 
 (defun harness-agent--holding (session-id)
   "Return what holds the turn of SESSION-ID before its next request, or nil.
@@ -1105,12 +1173,16 @@ HOLD is what holds the turn (`harness-agent--holding').  The message is
 recorded by `harness-agent--flush-held'.  Meanwhile the turn shows what
 it waits for, naming the messages that wait with it -- the one that
 opened the turn too, while its gate holds it -- and its session reads
-running, as it does while a gate holds its first message."
+running, as it does while a gate holds its first message.  The messages
+the gate holds are listed on the session, for a UI to draw as queued
+\(`harness-agent--publish-steering'), HOLD's words saying what they wait
+for."
   (let* ((sid (harness-agent-turn-session-id turn))
          (held (append (gethash turn harness-agent--held)
-                       (list (list :blocks blocks :from from))))
+                       (list (harness-agent--message-entry blocks from))))
          (opening (gethash turn harness-agent--opening)))
     (puthash turn held harness-agent--held)
+    (puthash turn (plist-get hold :text) harness-agent--shown)
     (harness-log 'info "agent: a message waits with the turn of %s for %s" sid (plist-get hold :text))
     (harness-agent--try (format "showing the messages held for %s" sid)
       (harness-agent--show-running sid)
@@ -1121,18 +1193,23 @@ running, as it does while a gate holds its first message."
                             (plist-get (gethash sid harness-agent--activities) :phase)
                             'waiting)
                  :detail (harness-agent-waiting-text
-                          (mapcar #'harness-agent--blocks-text
-                                  (append (and opening (list opening))
-                                          (mapcar (lambda (m) (plist-get m :blocks)) held)))))))
+                          (mapcar (lambda (entry) (plist-get entry :text))
+                                  (append (and opening (list opening)) held))))))
+    (harness-agent--publish-steering turn)
     (harness-emit 'agent/steered sid)))
 
-(defun harness-agent--opening-node (blocks from)
-  "Return the user node of a message BLOCKS from FROM that opens or joins a turn.
-FROM, when non-nil, is who sent it (see `agent/prompt').  A message of
-text alone is its text; any other keeps its blocks."
-  (append (list :kind 'user :content (harness-agent--blocks-text blocks)
-                :blocks (unless (harness-agent--only-text-p blocks) blocks))
-          (and from (list :meta (list :from from)))))
+(defun harness-agent--opening-node (entry)
+  "Return the user node of ENTRY, a message that opens or joins a turn.
+ENTRY is as `harness-agent--message-entry' makes it: the node has the id
+the message was listed under while it waited, so a UI that drew it
+waiting finds it in the transcript.  A message of text alone is its
+text; any other keeps its blocks."
+  (let ((blocks (plist-get entry :blocks))
+        (from (plist-get entry :from)))
+    (append (list :id (plist-get entry :node)
+                  :kind 'user :content (harness-agent--blocks-text blocks)
+                  :blocks (unless (harness-agent--only-text-p blocks) blocks))
+            (and from (list :meta (list :from from))))))
 
 (defun harness-agent--flush-held (turn)
   "Record the messages held for TURN, oldest first, as ordinary user messages.
@@ -1141,16 +1218,48 @@ message that opened it, or at a step boundary: they follow the work
 that held it and the model reads them with its next request.  A message
 that cannot be recorded is logged and the others still are: the
 turn must not stop for it.  Nothing is recorded for a session that is
-gone."
-  (when-let* ((held (gethash turn harness-agent--held)))
+gone.  The gate is done with its messages either way, so the session
+stops listing them (`harness-agent--publish-steering'), after they are
+nodes: a UI that drew them waiting draws them where they are."
+  (let ((held (gethash turn harness-agent--held))
+        (shown (gethash turn harness-agent--shown))
+        (sid (harness-agent-turn-session-id turn)))
     (remhash turn harness-agent--held)
-    (let ((sid (harness-agent-turn-session-id turn)))
-      (when (harness-call 'session/exists-p sid)
-        (dolist (message held)
-          (harness-agent--try (format "recording a message held for %s" sid)
-            (harness-call 'session/append sid
-                          (harness-agent--opening-node (plist-get message :blocks)
-                                                       (plist-get message :from)))))))))
+    (when (and held (harness-call 'session/exists-p sid))
+      (dolist (entry held)
+        (harness-agent--try (format "recording a message held for %s" sid)
+          (harness-call 'session/append sid (harness-agent--opening-node entry)))))
+    (when shown
+      (remhash turn harness-agent--shown)
+      (harness-agent--publish-steering turn))))
+
+(harness-defmethod agent/show-waiting (session-id &optional why)
+  "Show the messages the turn of SESSION-ID waits with, as queued ones.
+For an `agent/before-turn' gate that holds the turn for a while, such as
+the question a cold prompt cache asks (harness-cowboy.el) or a
+compaction under way (harness-compaction.el): the message that opened
+the turn is not in the transcript until the gate lets the turn go on,
+and a message sent meanwhile waits too (`agent/hold'), so the user sees
+nothing of them.  This lists them on the session (`:steering'), as the
+messages a running turn holds for its next step are, so a UI draws them
+as queued, above its compose box, with the buttons that take them back
+\(`agent/withdraw'); each leaves the list when the gate lets the turn go
+on and it is recorded.  WHY says what they wait for, a few words that
+follow \"waits for\" in the tooltip (\"the compaction\"), and defaults
+to what a message sent to the held turn says (`agent/hold'), else to
+the turn's gate.  Nothing happens when the session has no turn or its
+turn is not held by a gate, and a gate that holds the turn only a moment
+leaves this alone: a message that waits no longer is no queued one.
+Return non-nil when the messages show."
+  (let ((turn (gethash session-id harness-agent--turns)))
+    (when (and turn (gethash turn harness-agent--gated))
+      (puthash turn (or why
+                        (gethash turn harness-agent--shown)
+                        (plist-get (harness-agent--holding session-id) :text)
+                        "the turn's gate")
+               harness-agent--shown)
+      (harness-agent--publish-steering turn)
+      t)))
 
 (harness-defmethod agent/prompt (session-id blocks &optional opts)
   "Send BLOCKS (content blocks, or a string) to SESSION-ID.
@@ -1265,9 +1374,10 @@ FROM, when non-nil, is who sent the message (see `agent/prompt')."
   (let* ((session (harness-call 'session/get session-id))
          (promise (harness-make-promise))
          (turn (make-harness-agent-turn :session-id session-id :promise promise :started (float-time)))
-         (node (harness-agent--opening-node blocks from)))
+         (entry (harness-agent--message-entry blocks from))
+         (node (harness-agent--opening-node entry)))
     (puthash session-id turn harness-agent--turns)
-    (puthash turn blocks harness-agent--opening)
+    (puthash turn entry harness-agent--opening)
     (puthash turn t harness-agent--gated)
     (remhash session-id harness-agent--failures)
     (remhash session-id harness-agent--retries)
@@ -1293,9 +1403,13 @@ FROM, when non-nil, is who sent the message (see `agent/prompt')."
        (remhash turn harness-agent--opening)
        (remhash turn harness-agent--gated)
        (if (harness-call 'session/exists-p session-id)
-           (progn (harness-call 'session/append session-id node)
+           ;; A message the user took back while the gate held it
+           ;; (`agent/withdraw') is never recorded: it was deleted.
+           (progn (unless (gethash turn harness-agent--withdrawn)
+                    (harness-call 'session/append session-id node))
                   (harness-agent--flush-held turn))
          (remhash turn harness-agent--held))
+       (remhash turn harness-agent--withdrawn)
        (cond
         ;; Cancelled while a gate held it (one asking the user, say): the
         ;; message stays, the turn is over, or ends now.
@@ -2464,6 +2578,20 @@ can tell it from a message written now."
   (cl-find-if (lambda (p) (and (consp p) (equal (plist-get p :node) node-id)))
               (harness-agent-turn-steering turn)))
 
+(defun harness-agent--waiting-find (turn node-id)
+  "Return (WHERE . ENTRY) for the message TURN keeps under NODE-ID, or nil.
+WHERE says where the turn keeps it: `steering' for a message waiting
+for the next step, `held' for one the turn's gate holds
+\(`harness-agent--held'), `opening' for the message that opened the turn
+\(`harness-agent--opening'), which its gate has not let go on yet."
+  (or (when-let* ((entry (harness-agent--steering-entry turn node-id)))
+        (cons 'steering entry))
+      (when-let* ((entry (cl-find node-id (gethash turn harness-agent--held)
+                                  :key (lambda (e) (plist-get e :node)) :test #'equal)))
+        (cons 'held entry))
+      (when-let* ((entry (gethash turn harness-agent--opening)))
+        (and (equal (plist-get entry :node) node-id) (cons 'opening entry)))))
+
 (harness-defmethod agent/withdraw (session-id node-id)
   "Take back the message NODE-ID of SESSION-ID that its turn has not taken yet.
 A message sent while a turn runs waits for the turn's next step, which
@@ -2472,22 +2600,42 @@ user's, to delete or to write again, and the session lists it among the
 messages that wait (`:steering', `session/set-steering').  NODE-ID is
 its id there, the id of the node it becomes.  This removes it from what
 the turn will deliver, so the model never gets it, and from that list.
+So it does a message the turn's gate holds, one sent while a compaction
+held the turn or the one that opened the turn (`agent/show-waiting'):
+it is not recorded when the gate lets the turn go on.  The message that
+opened the turn is what the turn is for, and the turn ends with it:
+taking it back cancels the turn (`agent/cancel'), which has what asks
+the user for the gate -- the cold prompt cache's question -- let go.
 Return the node it would have been, as `harness-queued-message-node'
 reads it.  It signals when the turn does not hold the message: it was
 delivered at a step boundary meanwhile, the turn is over -- a message it
 never took is read by the next turn -- or NODE-ID is no message that
 waits.  Nothing happens then."
   (let* ((turn (gethash session-id harness-agent--turns))
-         (entry (and turn (harness-agent--steering-entry turn node-id))))
+         (found (and turn (harness-agent--waiting-find turn node-id)))
+         (where (car found))
+         (entry (cdr found)))
     (unless entry
       (signal 'harness-error (list "The model has this message already: it cannot be taken back")))
-    (setf (harness-agent-turn-steering turn)
-          (delq entry (copy-sequence (harness-agent-turn-steering turn))))
-    (harness-agent--publish-steering turn)
-    ;; A message a turn held across a reload may be a node already, as an
-    ;; earlier harness recorded it when it was sent.
-    (when (harness-call 'session/node session-id node-id)
-      (harness-call 'session/discard-nodes session-id (list node-id)))
+    (pcase where
+      ('steering
+       (setf (harness-agent-turn-steering turn)
+             (delq entry (copy-sequence (harness-agent-turn-steering turn))))
+       (harness-agent--publish-steering turn)
+       ;; A message a turn held across a reload may be a node already, as an
+       ;; earlier harness recorded it when it was sent.
+       (when (harness-call 'session/node session-id node-id)
+         (harness-call 'session/discard-nodes session-id (list node-id))))
+      ('held
+       (let ((rest (delq entry (copy-sequence (gethash turn harness-agent--held)))))
+         (if rest (puthash turn rest harness-agent--held) (remhash turn harness-agent--held)))
+       (harness-agent--publish-steering turn))
+      ('opening
+       ;; Never recorded, and the turn it opened has nothing to do.
+       (puthash turn t harness-agent--withdrawn)
+       (remhash turn harness-agent--opening)
+       (harness-agent--publish-steering turn)
+       (harness-call 'agent/cancel session-id)))
     (harness-queued-message-node (harness-agent--steering-item entry))))
 
 (harness-defmethod agent/running (&optional session-id)

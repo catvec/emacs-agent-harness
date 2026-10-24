@@ -311,7 +311,7 @@ model, status, kind and permission mode."
        (or harness-ui-sessions--show-inactive
            (not (equal (plist-get s :status) "inactive")))
        (or (not harness-ui-sessions--blocked-only)
-           (equal (plist-get s :status) "blocked"))
+           (harness-session-waiting-on-user-p s))
        (or harness-ui-sessions--show-hidden-kinds
            (not (harness-ui-sessions--hidden-kind-p s)))
        (or (not harness-ui-sessions--tasks-only)
@@ -418,7 +418,7 @@ the last change of any kind stands in (`:updated'), else 0."
   (let ((name (or (harness-ui-sessions--name s) (propertize "unnamed" 'face 'harness-dim-face))))
     (concat (make-string (* 2 depth) ?\s)
             (if (> depth 0) (propertize "↳ " 'face 'harness-dim-face) "")
-            (propertize name 'face (if (equal (plist-get s :status) "blocked")
+            (propertize name 'face (if (harness-session-waiting-on-user-p s)
                                        'harness-status-blocked-face
                                      'default)))))
 

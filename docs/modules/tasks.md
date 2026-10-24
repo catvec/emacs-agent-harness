@@ -254,7 +254,10 @@ Every task a method returns or an event carries also has a derived
                 one (`task/start`), so its column says it is not
                 queued: `:state` stays pending with `:backlog` t
   needs-input   requires user input: its session is blocked on a
-                permission or a question, or it (or its refinement)
+                permission or a question -- also while the task is
+                starting or resumed and the turn has not begun, held
+                by the question a cold prompt cache asks first
+                (harness-cowboy.el) --, or it (or its refinement)
                 stopped part way
   review        finished, waiting for the user to verify it
   merging       its branch holds a place in the merge queue: queued,

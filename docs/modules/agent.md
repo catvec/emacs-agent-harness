@@ -37,7 +37,13 @@ neither steers nor queues: the conversation it would join is about to
 be replaced, so it waits with the turn (`harness-agent--hold-message`)
 and is recorded, an ordinary user message, right after the work is
 done and before the turn's next request (`harness-agent--flush-held`),
-where the model reads it and answers.
+where the model reads it and answers.  Such a message, and the one
+that opened a turn its gate holds for a while -- a question to the user
+(the cold prompt cache's), a compaction under way: the gate says so
+with `agent/show-waiting` -- show as queued messages meanwhile: the
+session lists them with the messages that steer a running turn
+(`:steering`), saying what they wait for, and each leaves the list as
+it is recorded, or when the user takes it back (`agent/withdraw`).
 A model that stops on its own, with nothing steering, is not let go
 at once: the `agent/stop` filters may answer it with a message of the
 harness's and a step more, a few times at most (`harness-agent--stopped`).
@@ -85,6 +91,7 @@ The loop is entirely event driven: nothing here waits.
 - `agent/prompt` (session-id blocks &optional opts) — Send BLOCKS (content blocks, or a string) to SESSION-ID.
 - `agent/running` (&optional session-id) — Return running session ids, or non-nil when SESSION-ID is running.
 - `agent/send-queue` (session-id &optional qids) — Send the queued messages of SESSION-ID as one turn; return its promise.
+- `agent/show-waiting` (session-id &optional why) — Show the messages the turn of SESSION-ID waits with, as queued ones.
 - `agent/stop-outstanding` (session-id &optional reason) — Stop what runs for SESSION-ID outside its own turn; return what it stopped.
 - `agent/withdraw` (session-id node-id) — Take back the message NODE-ID of SESSION-ID that its turn has not taken yet.
 

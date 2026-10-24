@@ -1297,7 +1297,10 @@ requests are not restored: the turn that would read their answers is
 gone.  A message one held back from a turn that had not started (its
 payload's `:waiting-message` `(:text :from)`: the cowboy module's
 question about a cold cache) goes back in the session's queue, with
-its sender, and the hint says so (`harness-session--requeue`).
+its sender, and the hint says so (`harness-session--requeue`), unless
+the session's `:steering` lists it too -- the turn that held it showed it
+queued (`agent/show-waiting`) -- when the settling of that list queues it
+(`harness-session--settle-steering`) and it is not queued twice.
 `session/interrupted` returns what the load settled, oldest first, one
 `(:id :status :pending :calls :text)` per session: the status it was
 saved with, the pending requests it waited on, the tool calls the load
@@ -1641,9 +1644,12 @@ redact).
   is left).
 - `session/set-steering ID ITEMS` replaces the session's `:steering`, the
   messages sent to its running turn that the turn has not taken yet (see
-  `agent/prompt`): `(:id ID :text TEXT :ts TIME)` each, ID the id of the
-  node the message becomes, with `:blocks` when it is more than text
-  (a picture's bytes left out) and `:from` when the user did not send it.
+  `agent/prompt`) and those a gate that holds the turn keeps while it
+  waits (see `agent/show-waiting`): `(:id ID :text TEXT :ts TIME)` each,
+  ID the id of the node the message becomes, with `:blocks` when it is
+  more than text (a picture's bytes left out), `:from` when the user did
+  not send it and `:why` -- what it waits for, a few words -- for a
+  message a gate holds.
   Only the turn calls it.  Event `session/steering-changed ID ITEMS`,
   not sent when the list is as it was.  The list is saved with the
   record; a harness that stops with messages waiting queues them again
@@ -4162,7 +4168,8 @@ decisions.
   replaces the conversation under it -- the filter `agent/hold` below,
   a compaction -- is not steered: the message waits with the turn and
   is recorded as an ordinary user message when it goes on (see
-  `agent/hold`).  OPTS `:queue` true only
+  `agent/hold`), and shows in the same `:steering` list meanwhile, with
+  `:why` (see `agent/show-waiting`).  OPTS `:queue` true only
   queues, even while a turn runs.  OPTS `:from`, when the user is not
   the sender, is the sender plist (see "Node") kept on the message's
   node (and on a queued item).  An empty message is refused, and so is
@@ -4182,6 +4189,28 @@ decisions.
   With RUNNING true a session that reads idle is shown as running too,
   as a turn that waits in a gate is.  The turn sets its own activity
   when it starts and clears it when it ends.
+- `agent/show-waiting SESSION-ID &optional WHY` — for an
+  `agent/before-turn` gate that holds the turn for a while: the question
+  a cold prompt cache asks (cowboy), a compaction under way (compaction,
+  cache-compact).  The message that opened the turn is no node until the
+  gate lets the turn go on, and a message sent meanwhile waits too
+  (`agent/hold`), so the user saw nothing of them.  This has the turn
+  list them in the session's `:steering`, the opening message first, then
+  those sent while the gate held the turn, then the messages the turn
+  holds for its next step: each item as `agent/prompt` describes them,
+  plus `:why`, WHY, the few words that follow "waits for" in the tooltip
+  of its "queued" mark ("the compaction", "your answer about the prompt
+  cache"), by default what `agent/hold` says, else "the turn's gate".  So
+  a UI draws them with the queue, above the compose box, with the buttons
+  that take them back, and needs no second kind of waiting message.  Each
+  leaves the list when the gate lets the turn go on, recorded as a node
+  under the id it was listed with (`harness-agent--flush-held`; the chat
+  finds it in the transcript by that id), and when it is taken back.  A
+  gate that lets the turn go on at once never calls it: a message that
+  waits a moment is no queued message.  Nothing happens for a session
+  with no turn, or whose turn no gate holds (it returns nil); a message
+  sent to a turn held at a boundary shows without the call, with the
+  words `agent/hold` gave.
 - Sync filter `agent/hold` (value nil; arg SID): what holds the turn of
   SID before its next request, `(:text WORDS :phase PHASE)`, the first
   handler to answer winning; nil when nothing does.  The compaction
@@ -4197,13 +4226,17 @@ decisions.
   `:detail` ("1 message waits: “and now the lexer”", or "3 messages
   wait", counting the one that opened the turn too, while its gate holds
   it: `harness-agent-waiting-text`; what they wait for is the phase) with
-  the session running, and emits `agent/steered`.  When the gate lets
+  the session running, and emits `agent/steered`.  The messages the gate
+  holds are listed in the session's `:steering` meanwhile, with `:why`
+  the words of the filter's answer, as `agent/show-waiting` lists them
+  (a UI draws them queued, above the compose box).  When the gate lets
   the turn go on it is recorded, after the message that opened the turn,
-  as an ordinary user message (no `:steering`, `:from` kept), in the
-  order sent, before the turn's next request: the model reads it with
-  the summary and answers.  A turn cancelled meanwhile records them all
-  the same.  A turn in the middle of a step is not held, whatever the
-  filter says, and is steered.
+  as an ordinary user message (no `:steering`, `:from` kept, the id it
+  was listed with), in the order sent, before the turn's next request:
+  the model reads it with the summary and answers, and the list is
+  empty.  A turn cancelled meanwhile records them all the same.  A turn
+  in the middle of a step is not held, whatever the filter says, and is
+  steered.
 - `agent/send-queue SESSION-ID &optional QIDS` — sends the queued items
   as one turn: every item, or with QIDS (a list of item ids) only
   those, which sends one message now and leaves the others queued for
@@ -4214,14 +4247,20 @@ decisions.
   attachment of an item that carries its own `:text` and no `:path` -- a
   task, say -- goes to the model as that text
   (`harness-attachments-to-blocks`).
-- `agent/withdraw SESSION-ID NODE-ID` — takes back a steering message
-  the running turn has not delivered yet: it leaves what the turn will
+- `agent/withdraw SESSION-ID NODE-ID` — takes back a message the
+  running turn has not delivered yet: it leaves what the turn will
   deliver and the session's `:steering` list, so the model never gets
   it, and the node it would have been is returned (NODE-ID is the id the
-  list gave it).  It signals when the turn does not hold the message (it
-  was delivered at a step boundary meanwhile, the turn is over, or
-  NODE-ID is no message that waits) and then changes nothing.  The
-  chat's [delete] and [edit] on a queued message call it.
+  list gave it).  That is a message that steers the turn, one the turn's
+  gate holds (sent while a compaction held it: it is not recorded when
+  the gate lets go), or the message that opened the turn while its gate
+  holds it: that one is what the turn is for, so taking it back cancels
+  the turn (`agent/cancel`), which has what asks the user for the gate --
+  the cold-cache question -- let go, and it is never recorded.  It
+  signals when the turn does not hold the message (it was delivered at a
+  step boundary meanwhile, the turn is over, or NODE-ID is no message
+  that waits) and then changes nothing.  The chat's [delete] and [edit]
+  on a queued message call it.
 - Sync filter `agent/message` (value the message's blocks; args SID
   and `(:from FROM :steering BOOL)`) on every message as it is
   delivered: when it starts a turn or steers one, a queued message when
@@ -5024,9 +5063,14 @@ and tools.
   process and is dropped when the session is.
 
   A message that comes to a session while a compaction of it runs goes
-  on with the compacted conversation: nothing asks about it, nothing
-  queues it, and the model answers it right after.  Three things
-  make it so.  An `agent/before-turn` gate
+  on with the compacted conversation: nothing asks about it, no queue
+  sends it later, and the model answers it right after.  It shows as a
+  queued message while it waits: each gate that holds a turn for the
+  compaction -- the wait gate, the automatic compaction before a turn,
+  the cache-compact gate -- has the turn list its messages
+  (`agent/show-waiting`, `harness-compaction-show-waiting`, `:why`
+  "the compaction"), and one sent to a held turn is listed as it comes.
+  Three things make it so.  An `agent/before-turn` gate
   (`harness-compaction--wait-gate`, priority 11, ahead of the
   cold-cache question at 15 and automatic compaction at 20) holds a
   turn that starts while one runs -- the session compacted by hand is
@@ -5194,6 +5238,14 @@ as it is, all of the conversation uncached, without a decision.
   `harness-cowboy-default` and `harness-cowboy-ask`).  An answer that
   names no choice asks again; a dismissed question holds the message.
   `session_control` refuses to answer it for another session's agent.
+  While the question waits -- and the compaction chosen runs, which the
+  gate says again with the words "the compaction" -- the message that
+  opened the turn is listed in the session's `:steering`, so a UI draws it
+  as a queued message above the compose box (`agent/show-waiting`,
+  `:why` "your answer about the prompt cache"): its [delete], or [edit] to
+  write it again, take it back (`agent/withdraw`), which cancels the turn
+  and so dismisses the question, the message never recorded.  Answered,
+  it is recorded under the id it was listed with, and the list is empty.
 - An "always" answer is a lasting decision of the kind `cowboy` (see
   "decisions"), its record `(:choice C :before SETTINGS :after
   SETTINGS)`, each SETTINGS `(:default C :ask BOOL)`; the hint written
@@ -5211,7 +5263,10 @@ as it is, all of the conversation uncached, without a decision.
   dismisses it; `session/deleted` lets the turn go.  A harness that
   stops while it waits loses the turn, not the message: settling the
   session at the next start (`harness-session--settle`) queues the
-  `:waiting-message` again, with a hint saying so.
+  `:waiting-message` again, with a hint saying so -- once: the message is
+  in the session's `:steering` list too, which the settling queues
+  again (`harness-session--settle-steering`), so one the list holds is not
+  queued a second time from the question.
 - `cowboy/asking SESSION-ID` → the id of the question the session waits
   on, or nil.  Events `cowboy/asked SID PID` and `cowboy/decided SID
   CHOICE BY`, BY one of `user`, `always`, `non-interactive`, `default`
@@ -6097,7 +6152,12 @@ Task mode: one session per task.  TASK =
 `:column` is derived on every read: `backlog` for a backlog task or
 its write-up -- one the scheduler never starts, for the user's
 `task/start` -- `needs-input` when the session is
-blocked on a request or the task stopped part way, `merging` while its
+blocked on a request (`harness-session-waiting-on-user-p`, the question
+the session list's blocked filter, the mode line's count and the slot
+page ask too, and asked of the session before anything else: a task
+being resumed after a restart is `starting`, and the question a cold
+prompt cache asks before its turn begins blocks the session, so it is
+`needs-input`, not `active`) or the task stopped part way, `merging` while its
 branch holds a place in the merge queue (`:merge-status` is queued,
 merging or conflict; `:merge-queued` is when it joined, which orders the
 board's section), `review` while its finished work waits for the user's
@@ -6253,9 +6313,12 @@ priority).
   `:limit` (`harness-tasks-max-running`, nil without one), `:suspended`
   (t or `:false`), `:days` (`harness-tasks-slot-wait-days`, 7),
   `:holders` (every task with `harness-tasks--holds-slot-p`, the longest
-  at work first: `:id :title :session :priority :state` -- "starting",
-  "waiting" on work its session left running, else its session's
-  status -- `:since :sent-back`), `:queue` (the queued tasks in
+  at work first: `:id :title :session :priority :state` -- "blocked"
+  while its session waits for the user, a task resumed after a restart
+  and held by the cold-cache question included, as the board says it
+  needs input; else "starting", "waiting" on work its session left
+  running, else its session's status -- `:since :sent-back`), `:queue`
+  (the queued tasks in
   `harness-tasks--start-order`: `:id :title :priority :since :reason`,
   the return reason as a string or nil) and `:waits` (the `:waits` of
   the project's tasks, archived and done ones too, of the last `:days`
@@ -10859,7 +10922,12 @@ the session's `:steering` list (`harness-chat--steering`; its items hold
 `:blocks` when the message is more than text, and the node reads them):
 the same dim "queued" with `[edit]` and `[delete]` only, its tooltip
 saying the model gets the message at its next step
-(`harness-chat--steering-note`).  These come first in the tail, the
+(`harness-chat--steering-note`).  A message a gate that holds the turn
+keeps -- the one that opened it, those sent while a compaction held it
+-- is drawn the same way from the same list, by the same code: its item
+says `:why`, what it waits for, and the tooltip says it waits for that
+("the compaction", "your answer about the prompt cache").  These come
+first in the tail, the
 steering messages before the queue's because the model gets them first,
 the newest of the conversation, and the activity line goes under them
 (`harness-chat--activity-position`); `harness-chat-send-queue` sends

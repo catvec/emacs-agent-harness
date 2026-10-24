@@ -4642,12 +4642,16 @@ listing it, brings it back no more: it stands in the transcript."
         (should-not (funcall waiting))
         (should (= 1 (harness-ui-chat-test-count buf "change course")))))))
 
-(ert-deftest harness-ui-chat-a-message-sent-while-the-conversation-compacts-is-not-queued ()
-  "A message sent from the box while the conversation is compacted is not queued.
-The chat shows no \"queued\" word, no buttons and no queue: its activity
-line says the session compacts and which message waits.
-Once the compaction is done the message stands after it, as any message
-does, and the model answers it."
+(ert-deftest harness-ui-chat-a-message-sent-while-the-conversation-compacts-shows-as-queued ()
+  "A message sent from the box while the conversation is compacted shows as queued.
+It is held for the compaction and no node of the transcript the
+compaction replaces, so it is drawn as any message that waits is, above
+the compose box: \"queued\", with [edit] and [delete] and the line that
+tells how to press their keys, its mark saying what it waits for.  It is
+no message of the queue, which would be sent later, so it has no [send
+now].  The activity line says the session compacts and which message
+waits.  Once the compaction is done the message stands after it, as any
+message does, the model answers it, and nothing is queued."
   (harness-ui-chat-test-with
     (harness-test-load-module 'compaction)
     (let* ((harness-provider-demo--delay 0.15)
@@ -4658,6 +4662,7 @@ does, and the model answers it."
                 '((:type text :delta "Done.") (:type done :stop-reason end-turn)))))
            (sid (harness-ui-chat-test-session))
            (buf (harness-ui-chat-test-open sid))
+           (waiting (harness-ui-chat-test-state-line 'waiting))
            (waits "Compacting the conversation.*1 message waits: “and now the lexer”"))
       (harness-call 'session/append sid '(:kind user :content "please refactor the parser"))
       (harness-call 'session/append sid '(:kind assistant :content "Done: parser.el rewritten"))
@@ -4667,9 +4672,24 @@ does, and the model answers it."
         ;; The line says what the session does, and what waits for it.
         (harness-test-wait (lambda () (string-match-p waits (or (harness-ui-chat-test-activity-line buf) "")))
                            10 "the activity line to say what waits")
-        (should-not (harness-ui-chat-test-find buf "queued"))
-        (should-not (harness-ui-chat-test-find buf "[delete]"))
-        (should-not (with-current-buffer buf harness-chat--queue))
+        ;; The message waits above the box, as a message a running turn has
+        ;; not taken does: the same mark, the same buttons, the same hint.
+        (harness-test-wait (lambda () (harness-ui-chat-test-find buf (concat waiting "\nand now the lexer\n")))
+                           5 "the message shown as queued")
+        (should (harness-ui-chat-test-find buf harness-ui-chat-test-hint))
+        (should-not (harness-ui-chat-test-find buf "[send now]"))
+        (should (string-match-p "waits for the compaction\\'"
+                                (harness-ui-chat-test-prop buf "queued" 'help-echo)))
+        (with-current-buffer buf
+          (should-not harness-chat--queue)
+          (let ((waiting-texts (harness-ui-chat-test-waiting-texts buf)))
+            (should (= 1 (length waiting-texts)))
+            ;; A panel of the box named by the node it will be, as any
+            ;; message that waits.
+            (should (equal (caar waiting-texts)
+                           (get-text-property (text-property-any harness-chat--transcript-end (point-max)
+                                                                 'harness-chat-steering (caar waiting-texts))
+                                              'harness-compose-panel)))))
         (should-not (member "and now the lexer" (harness-ui-chat-test-user-texts sid)))
         ;; The box is empty: the message was sent.
         (should (equal "" (with-current-buffer buf (harness-compose-text))))
@@ -4688,6 +4708,53 @@ does, and the model answers it."
       (should-not (harness-ui-chat-test-find buf "not delivered"))
       (should (harness-ui-chat-test-find buf "Done."))
       (should (equal '("please refactor the parser" "and now the lexer") (harness-ui-chat-test-user-texts sid))))))
+
+(ert-deftest harness-ui-chat-a-message-held-for-the-compaction-is-edited-and-deleted-like-a-queued-one ()
+  "[edit] and [delete] on a message held for the compaction do what they do
+on any queued message.  [edit] on the one sent while the compaction runs
+puts its text back into the box, and it is never recorded; [delete] on
+the one that opened the turn deletes it, the turn it opened ends
+cancelled, and nothing of either reaches the model."
+  (harness-ui-chat-test-with
+    (harness-test-load-module 'compaction)
+    (let* ((harness-provider-demo--delay 0.3)
+           (requests nil)
+           (harness-provider-demo-script-override
+            (lambda (request)
+              (if (string-match-p "handoff summary" (or (plist-get request :system) ""))
+                  '((:type text :delta "SUMMARY TEXT") (:type done :stop-reason end-turn))
+                (push request requests)
+                '((:type text :delta "Done.") (:type done :stop-reason end-turn)))))
+           (sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid)))
+      (harness-call 'session/append sid '(:kind user :content "please refactor the parser"))
+      (harness-call 'session/append sid '(:kind assistant :content "Done: parser.el rewritten"))
+      (let ((compaction (harness-call 'compaction/compact sid '(:kind "summary" :idle t))))
+        (harness-ui-chat-test-type buf "and now the lexer")
+        (with-current-buffer buf (harness-chat-send))
+        (harness-test-wait (lambda () (harness-ui-chat-test-waiting-texts buf)) 5 "the first message shown")
+        (harness-ui-chat-test-type buf "and the parser")
+        (with-current-buffer buf (harness-chat-send))
+        (harness-test-wait (lambda () (= 2 (length (harness-ui-chat-test-waiting-texts buf)))) 5
+                           "both messages shown")
+        (let ((first (car (nth 0 (harness-ui-chat-test-waiting-texts buf))))
+              (second (car (nth 1 (harness-ui-chat-test-waiting-texts buf)))))
+          ;; [edit] takes the second back into the box.
+          (with-current-buffer buf (harness-chat-edit-queued second))
+          (harness-test-wait (lambda () (string-match-p "and the parser" (with-current-buffer buf (harness-compose-text))))
+                             5 "the message back in the box")
+          (harness-test-wait (lambda () (equal (list first) (mapcar #'car (harness-ui-chat-test-waiting-texts buf))))
+                             5 "the second message to leave the tail")
+          ;; [delete] deletes the first, and the turn it opened has nothing left to do.
+          (with-current-buffer buf (harness-chat-remove-queued first))
+          (harness-test-wait (lambda () (not (harness-ui-chat-test-waiting-texts buf))) 5
+                             "the first message to leave the tail"))
+        (harness-test-await compaction 10)
+        (harness-test-wait (lambda () (not (harness-call 'agent/running sid))) 10 "the turn to end"))
+      (should (equal '("please refactor the parser") (harness-ui-chat-test-user-texts sid)))
+      (should-not requests)
+      (should-not (harness-ui-chat-test-find buf "queued"))
+      (should (string-match-p "and the parser" (with-current-buffer buf (harness-compose-text)))))))
 
 (ert-deftest harness-ui-chat-activity-line-says-what-waits-for-a-compaction ()
   "The activity line of a compacting session says how many messages wait."

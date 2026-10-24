@@ -774,10 +774,15 @@ calls and answers that came before the model read it and before its
 reply, and reads like any other, with nothing beside your name. Nothing
 is said once the turn is over either, unless the model never got the
 message because you cancelled the turn: it is then recorded as the turn
-ends, *not delivered*, and the next turn reads it. A message sent while the
-conversation is being compacted is not queued at all: it waits for the
-compaction and goes to the model right after it, as your next message
-([below](#compacting-a-conversation)).
+ends, *not delivered*, and the next turn reads it. A message that is held
+back shows here too, drawn the same way: one sent while the conversation
+is being compacted, and the one that waits for your answer to the question
+about a cold prompt cache. It says *queued* with `[edit]` and `[delete]`
+(its mark's tooltip says what it waits for), and moves into the
+conversation, after the compaction, when it is delivered
+([below](#compacting-a-conversation)). It is not a message of the queue, which would go with
+the next turn, so it has no `[send now]`; deleting the one that opened the
+turn cancels that turn, and so dismisses the question.
 
 Each button of a queued message shows its key, `s` (send now), `e`
 (edit) and `d` (delete), which acts while point is on the message; from
@@ -1920,12 +1925,15 @@ filling up mid-task.
 
 A compaction can take a while, and you can keep writing meanwhile. A
 message that comes while a conversation is being compacted -- by hand,
-before a turn, or in the middle of one -- is not queued and is not
-asked about: it waits for the compaction, the activity line saying so
+before a turn, or in the middle of one -- is not asked about: it waits
+for the compaction, the activity line saying so
 (*Compacting the conversation… · 1 message waits: “and now the lexer”*,
 or a count when several wait), and goes to the model right after it, as
-your next message, in the order you sent them. The model answers it
-from the compacted conversation. Sent into the conversation at once it
+your next message, in the order you sent them. Until then it shows above
+the compose box as a queued message, *queued* with `[edit]` and
+`[delete]` like any other, so you can take it back; it leaves there as the
+compaction ends and the message joins the conversation. The model answers
+it from the compacted conversation. Sent into the conversation at once it
 would lie before the summary, where the model never reads it, and a
 turn that ran beside the compaction would be buried by it, the
 conversation restarting after the whole exchange. A message to a
@@ -1969,8 +1977,13 @@ whose prompt cache lapsed long ago, and sending it as it is would pay
 for the whole conversation again, uncached. So a message that meets a
 cold cache, whoever sent it, waits while the session asks what goes
 first. This is the `cowboy` module (`:features cowboy`), which brings
-its panel, `ui-cowboy`. The session is blocked on the question, and
-the chat (or its popout) shows it in place of the cache panel:
+its panel, `ui-cowboy`. The session is blocked on the question -- the
+session list, the mode line's count, the task board's *Requires your
+input* column, the task slot page and the phone app all say so alike, also
+for a task a restarted harness resumed, whose message is the one that
+waits -- and the chat (or its popout) shows it in place of the cache panel,
+with the message that waits drawn above the compose box as a queued
+message (*queued*, `[edit]`, `[delete]`):
 
 ```
  ◷ Prompt cache cold  since 09:12 · Claude Opus · ~84.0k tokens
@@ -3615,7 +3628,13 @@ with), `recap` writes the recaps on the cards,
   part way has [Pause], which puts it back in *Pending* to carry on
   where it stopped. *Requires your input* sorts by priority, and a
   message that restarts a stopped task shows it in progress at once,
-  even while the cold-cache compaction holds its turn up.
+  even while the cold-cache compaction holds its turn up. While the
+  question that asks what goes first waits for your answer, the task is
+  in *Requires your input* instead -- one a restarted harness resumed
+  too, whose message is the one that waits -- since its session is
+  blocked, which the board, the session list's blocked filter, the
+  mode line's count, the slot page and the phone app all ask of one
+  place (`harness-session-waiting-on-user-p`).
 - Task sessions run on at most 384k tokens of context
   (`harness-tasks-context-limit`): they compact sooner than interactive
   sessions, so a long task works from a smaller transcript between

@@ -87,10 +87,10 @@ The internal sessions, the records of the harness's own model calls,
 are not counted: a judge at work is no session for you to look at."
   (let ((blocked 0) (running 0) (idle 0))
     (dolist (s (harness-ui-user-sessions))
-      (pcase (plist-get s :status)
-        ("blocked" (cl-incf blocked))
-        ("running" (cl-incf running))
-        ("idle" (cl-incf idle))))
+      (cond ((harness-session-waiting-on-user-p s) (cl-incf blocked))
+            (t (pcase (plist-get s :status)
+                 ("running" (cl-incf running))
+                 ("idle" (cl-incf idle))))))
     (list blocked running idle)))
 
 (defun harness-ui-notify-show-waiting ()

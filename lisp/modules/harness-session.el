@@ -3547,11 +3547,21 @@ cold prompt cache) keeps the message that waits for its answer in its
 payload's `:waiting-message', (:text TEXT :from FROM): the turn that
 would have appended it ended with the process, so the message goes back
 in the queue, to be sent when the user is ready.  Only its text
-survives."
-  (dolist (item pending)
-    (let ((message (plist-get (plist-get item :payload) :waiting-message)))
-      (when (and message (not (harness-string-blank-p (plist-get message :text))))
-        (harness-call 'session/queue id (plist-get message :text) nil (plist-get message :from))))))
+survives.  The session lists that message with the others that wait
+for its turn while the question does (`:steering', `agent/show-waiting'),
+and settling queues those again (`harness-session--settle-steering'):
+a message listed so is queued there, not twice."
+  (let ((listed (harness-session-steering (harness-session--get id))))
+    (dolist (item pending)
+      (let ((message (plist-get (plist-get item :payload) :waiting-message)))
+        (when (and message
+                   (not (harness-string-blank-p (plist-get message :text)))
+                   (not (cl-some (lambda (waiting)
+                                   (and (equal (plist-get waiting :text) (plist-get message :text))
+                                        (eq (harness-sender-kind (plist-get waiting :from))
+                                            (harness-sender-kind (plist-get message :from)))))
+                                 listed)))
+          (harness-call 'session/queue id (plist-get message :text) nil (plist-get message :from)))))))
 
 (defun harness-session--settle-steering (s)
   "Queue again the messages the turn of S never took, saved with it.

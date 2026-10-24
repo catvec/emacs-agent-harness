@@ -701,6 +701,32 @@ have none."
     (should (equal "session s2" (harness-sender-description '(:kind "session" :id "s2"))))
     (should (equal "the user" (harness-sender-description nil)))))
 
+(ert-deftest harness-util-session-waiting-on-user ()
+  "A session waits for the user when a request is pending on it, or it is blocked.
+The server holds a session's status as a symbol and its pending requests
+as a list; a UI holds what came over JSON, a string and perhaps a
+vector.  They read the same, and a session with neither is not waiting.
+The question a cold prompt cache asks is a pending request like any
+other."
+  (let ((question (list :id "p1" :kind 'question
+                        :payload (list :question "Carry on with the cold cache?"))))
+    ;; The server's view.
+    (should (harness-session-waiting-on-user-p (list :status 'blocked :pending (list question))))
+    (should (harness-session-waiting-on-user-p (list :status 'running :pending (list question))))
+    (should (harness-session-waiting-on-user-p (list :status 'blocked)))
+    (dolist (status '(idle running inactive))
+      (should-not (harness-session-waiting-on-user-p (list :status status)))
+      (should-not (harness-session-waiting-on-user-p (list :status status :pending nil))))
+    ;; The UI's, over JSON.
+    (should (harness-session-waiting-on-user-p (list :status "blocked" :pending (vector question))))
+    (should (harness-session-waiting-on-user-p (list :status "running" :pending (vector question))))
+    (should (harness-session-waiting-on-user-p (list :status "blocked" :pending [])))
+    (should-not (harness-session-waiting-on-user-p (list :status "running" :pending [])))
+    (should-not (harness-session-waiting-on-user-p (list :status "idle")))
+    ;; No session, no answer to wait for.
+    (should-not (harness-session-waiting-on-user-p nil))
+    (should (eq t (harness-session-waiting-on-user-p (list :status 'blocked))))))
+
 (ert-deftest harness-util-node-fold ()
   "A hint that folds several lines under a title reads the same after JSON.
 Items without text, and a fold with no title or no item, are no fold."

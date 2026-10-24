@@ -41,6 +41,23 @@ notifier is gone."
       (should (string-search (funcall icon 'harness-icon-running 1) text))
       (should-not (string-search (funcall icon 'harness-icon-idle 2) text)))))
 
+(ert-deftest harness-ui-notify-counts-a-session-waiting-on-a-question-as-blocked ()
+  "A session with a request pending waits for you, whatever else its status says.
+The mode line asks what the session list's blocked filter and the task
+board ask (`harness-session-waiting-on-user-p'), so a session on the
+question a cold prompt cache asks counts as blocked, once, and not as
+running too."
+  (let ((harness-ui-notify--string "")
+        (question [(:id "p1" :kind "question" :payload (:question "What goes first?"))])
+        (icon (lambda (name n) (concat (substring-no-properties (harness-ui-icon name))
+                                       (number-to-string n)))))
+    (let ((text (harness-ui-notify-test--shown
+                 (list (list :id "a" :status "running" :pending question)
+                       (list :id "b" :status "blocked" :pending question)
+                       (list :id "c" :status "running" :pending [])))))
+      (should (string-search (funcall icon 'harness-icon-blocked 2) text))
+      (should (string-search (funcall icon 'harness-icon-running 1) text)))))
+
 (ert-deftest harness-ui-notify-does-not-count-internal-sessions ()
   "A judge at work is no session that works or waits for you.
 The harness records each model call it makes on its own as a session of

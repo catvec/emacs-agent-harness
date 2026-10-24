@@ -709,7 +709,7 @@ icon says whether SESSION waits on a request."
     ('merging (if (equal (harness-ui-tasks--merge-status task) "queued")
                   (propertize (harness-ui-icon 'harness-icon-task-merging) 'face 'harness-task-merging-face)
                 (harness-ui-status-icon "running")))
-    ('needs-input (if (plist-get session :pending)
+    ('needs-input (if (harness-session-waiting-on-user-p session)
                       (harness-ui-status-icon "blocked")
                     (propertize (harness-ui-icon 'harness-icon-task-stopped) 'face 'harness-task-attention-face)))
     (_ (if (plist-get task :session) (harness-ui-status-icon "running")
@@ -2178,7 +2178,7 @@ on a board too narrow for one-line cards
          ;; whatever the marks to their left take.  A terminal's
          ;; one-column pause symbol needs none of this.
          (pause (and (eq column 'needs-input)
-                     (plist-get session :pending)
+                     (harness-session-waiting-on-user-p session)
                      (harness-ui-tasks--wide-icon-p icon)))
          (nudge (and pause (harness-ui-tasks--mark-nudge icon)))
          (left (concat (cond ((not nudge)

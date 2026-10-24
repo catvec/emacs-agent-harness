@@ -80,8 +80,8 @@
 ;; turn ends first.
 ;;
 ;; A message that comes to a session while a compaction of it runs goes
-;; on with the compacted conversation: nothing asks about it, nothing
-;; queues it, and the model answers it right after the compaction.  A
+;; on with the compacted conversation: nothing asks about it, no queue
+;; sends it later, and the model answers it right after the compaction.  A
 ;; turn that starts meanwhile waits at the `agent/before-turn' gate
 ;; (`harness-compaction--wait-gate', ahead of the cold-cache question,
 ;; which the compaction under way answers already -- it leaves nothing
@@ -93,7 +93,11 @@
 ;; meanwhile it would lie before the compaction node, where the model
 ;; never reads it, and a turn that ran beside the compaction would be
 ;; buried by it: the node comes after the whole exchange, and the
-;; conversation restarts there.
+;; conversation restarts there.  Until then such a message is no part
+;; of the transcript, so the session lists it with the messages that
+;; wait (`agent/show-waiting', `harness-compaction-show-waiting'): a UI
+;; draws it as a queued message, above its compose box, with the buttons
+;; that take it back, and it leaves the list as it is recorded.
 ;;
 ;; The summarisation request has no tools.  An API provider gets the
 ;; transcript as ordinary messages.  A hosted-loop provider keeps the
@@ -1483,13 +1487,27 @@ reads it, and meanwhile the turn is compacting."
       (and (gethash session-id harness-compaction--running)
            (list :text harness-compaction--hold-text :phase 'compacting))))
 
+(defun harness-compaction-show-waiting (session-id)
+  "Show the messages SESSION-ID's turn holds for the compaction as queued.
+The message that opened the turn is in no transcript until the
+compaction is done, and a message sent meanwhile waits with it
+\(`agent/show-waiting'): a UI draws them above its compose box, as it
+draws the queue's, instead of leaving them out of sight.  A failure to
+say so is logged, never raised: the turn must not stop for it."
+  (when (harness-method-exists-p 'agent/show-waiting)
+    (condition-case err
+        (harness-call 'agent/show-waiting session-id harness-compaction--hold-text)
+      (error (harness-log 'warn "compaction: could not show the messages waiting in %s: %s"
+                          session-id (harness-error-short-message err))))))
+
 (defun harness-compaction--note-waiting (session-id message)
   "Show SESSION-ID's turn as compacting, naming MESSAGE, which waits for it.
 MESSAGE is the `:message' of the `agent/before-turn' value, (:text TEXT
 :from FROM), the one that opened the turn.  The session reads running
 and its activity line says the conversation is compacted and which
-message waits.  A failure to say so is logged, never raised: the turn
-must not stop for it."
+message waits, which shows as a queued message too
+\(`harness-compaction-show-waiting').  A failure to say so is logged,
+never raised: the turn must not stop for it."
   (condition-case err
       (harness-call 'agent/note-activity session-id
                     (append (list :phase 'compacting)
@@ -1498,7 +1516,8 @@ must not stop for it."
                               (list :detail detail)))
                     t)
     (error (harness-log 'warn "compaction: could not show %s as compacting: %s"
-                        session-id (harness-error-short-message err)))))
+                        session-id (harness-error-short-message err))))
+  (harness-compaction-show-waiting session-id))
 
 (defun harness-compaction--wait-gate (value next session)
   "Hold SESSION's turn while a compaction of it runs, then let it go on.
@@ -1539,6 +1558,8 @@ The compaction is of `harness-compaction-kind'."
             (not (harness-compaction-needed-p session))
             (harness-compaction-hosted-p session))
         (funcall next value)
+      ;; The turn's message waits for the compaction, which takes a while.
+      (harness-compaction-show-waiting (plist-get session :id))
       (harness-then (harness-call 'compaction/compact (plist-get session :id)
                                   (list :kind harness-compaction-kind))
                     (lambda (_node) (funcall next value))

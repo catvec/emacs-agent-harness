@@ -2654,6 +2654,241 @@ at, so a message sent to it steers it, whatever `agent/hold' says."
       (should (= 1 (length (harness-agent-test-steering-nodes id))))
       (should-not (harness-agent-test-waiting id)))))
 
+;;;; Messages held with a turn show as queued
+
+;; A message a gate holds -- the one that opened the turn, those sent to
+;; it meanwhile -- is no node until the gate lets the turn go on, and
+;; nothing showed it.  The session lists it with the messages that wait
+;; for a running turn's next step (`:steering'), so a UI draws it as
+;; queued, and it leaves the list as it is recorded: under the id it was
+;; listed with, so a UI that drew it waiting finds it in the transcript.
+
+(defun harness-agent-test-waiting-ids (id)
+  "Return the ids of the messages session ID lists as waiting, oldest first."
+  (mapcar (lambda (item) (plist-get item :id)) (harness-agent-test-waiting id)))
+
+(defvar harness-agent-test--lists nil
+  "The lists of waiting messages `session/steering-changed' announced, newest first.")
+
+(ert-deftest harness-agent-a-gate-that-lets-the-turn-go-shows-nothing ()
+  "A message that waits a moment for the gates is no queued message.
+The turn's gates ran and let it go on at once: the session never listed
+anything, so a UI never drew a message that was gone as it appeared."
+  (harness-agent-test-with
+    (setq harness-agent-test--lists nil)
+    (harness-on 'session/steering-changed (lambda (_id items) (push items harness-agent-test--lists)))
+    (let* ((id (harness-agent-test-session))
+           (turn (harness-call 'agent/prompt id "go")))
+      (should (eq 'end-turn (plist-get (harness-test-await turn 10) :stop-reason)))
+      (should-not (harness-agent-test-waiting id))
+      (should-not harness-agent-test--lists)
+      (should (equal '("go") (mapcar (lambda (n) (plist-get n :content))
+                                     (harness-agent-test-user-nodes id)))))))
+
+(ert-deftest harness-agent-the-message-a-gate-holds-shows-as-waiting-once-it-says-so ()
+  "A gate that holds the turn for a while says so, and the message that
+opened the turn is listed as waiting, with what it waits for.  It is no
+node meanwhile; the gate letting go records it under the id it was listed
+with, and the list is empty again."
+  (harness-agent-test-with
+    (let* ((id (harness-agent-test-session))
+           (hold (harness-agent-test-hold-turn id))
+           (turn (harness-call 'agent/prompt id "please carry on" (list :from (harness-sender-system "tasks")))))
+      (harness-test-wait (lambda () (car hold)) 5 "the turn to reach the gate")
+      ;; Held, but not said to wait for long: nothing is listed.
+      (should-not (harness-agent-test-waiting id))
+      (should (harness-call 'agent/show-waiting id "the test"))
+      (let ((items (harness-agent-test-waiting id)))
+        (should (= 1 (length items)))
+        (should (equal "please carry on" (plist-get (car items) :text)))
+        (should (equal "the test" (plist-get (car items) :why)))
+        (should (string-prefix-p "n-" (plist-get (car items) :id)))
+        (should (floatp (plist-get (car items) :ts)))
+        (should (eq 'system (harness-sender-kind (plist-get (car items) :from)))))
+      (should-not (harness-call 'session/nodes id))
+      (let ((listed (harness-agent-test-waiting-ids id)))
+        (funcall (car hold))
+        (should (eq 'end-turn (plist-get (harness-test-await turn 10) :stop-reason)))
+        (let ((node (car (harness-agent-test-user-nodes id))))
+          (should (equal listed (list (plist-get node :id))))
+          (should (equal "please carry on" (plist-get node :content)))
+          (should (eq 'system (harness-sender-kind (plist-get (plist-get node :meta) :from))))))
+      (should-not (harness-agent-test-waiting id))
+      (should (zerop (hash-table-count harness-agent--shown)))
+      (should (zerop (hash-table-count harness-agent--opening))))))
+
+(ert-deftest harness-agent-show-waiting-says-nothing-where-no-gate-holds-a-turn ()
+  "There is nothing to show for a session with no turn, or one no gate holds."
+  (harness-agent-test-with
+    (let ((idle (harness-agent-test-session)))
+      (should-not (harness-call 'agent/show-waiting idle "a word"))
+      (should-not (harness-agent-test-waiting idle)))
+    (let* ((harness-provider-demo--delay 0.1)
+           (id (harness-agent-test-session))
+           (turn (harness-call 'agent/prompt id "tour")))
+      (harness-test-wait (lambda () (eq 'running (plist-get (harness-call 'session/get id) :status))))
+      (should-not (gethash (harness-agent-turn-for id) harness-agent--gated))
+      (should-not (harness-call 'agent/show-waiting id "a word"))
+      (should-not (harness-agent-test-waiting id))
+      (harness-test-await turn 20))))
+
+(ert-deftest harness-agent-held-messages-are-listed-in-the-order-the-model-reads-them ()
+  "The message that opened the turn comes first, then those sent while the
+gate held it, each with what the gate says it waits for.  They are
+recorded in that order as the gate lets go, under the ids they were
+listed with, and the model reads all of them in one request."
+  (harness-agent-test-with
+    (let* ((id (harness-agent-test-session))
+           (hold (harness-agent-test-hold-turn id))
+           (requests nil)
+           (harness-provider-demo-script-override
+            (lambda (request)
+              (push request requests)
+              '((:type text :delta "Done.") (:type done :stop-reason end-turn))))
+           (turn (harness-call 'agent/prompt id "first")))
+      (harness-test-wait (lambda () (car hold)) 5 "the turn to reach the gate")
+      (harness-call 'agent/prompt id "second" (list :from (harness-sender-session '(:id "s-other" :name "Other"))))
+      (harness-call 'agent/prompt id "third")
+      ;; Sending to a held turn shows what it holds.
+      (should (equal '("first" "second" "third") (harness-agent-test-waiting-texts id)))
+      (should (equal '("the test" "the test" "the test")
+                     (mapcar (lambda (item) (plist-get item :why)) (harness-agent-test-waiting id))))
+      (should (eq 'session (harness-sender-kind (plist-get (cadr (harness-agent-test-waiting id)) :from))))
+      (should-not (harness-agent-test-steering-nodes id))
+      (should-not (plist-get (harness-call 'session/get id) :queue))
+      (let ((listed (harness-agent-test-waiting-ids id)))
+        (funcall (car hold))
+        (should (eq 'end-turn (plist-get (harness-test-await turn 10) :stop-reason)))
+        (should (equal listed (mapcar (lambda (n) (plist-get n :id)) (harness-agent-test-user-nodes id)))))
+      (should-not (harness-agent-test-waiting id))
+      (should (equal '(("first" "second" "third")) (harness-agent-test-request-texts (car requests)))))))
+
+(ert-deftest harness-agent-held-messages-at-a-step-boundary-show-as-waiting ()
+  "A message sent to a turn held between two steps is listed while the
+boundary holds it, and recorded under its id, then gone from the list,
+when the boundary lets the turn go on."
+  (harness-agent-test-with
+    (let* ((id (harness-agent-test-session))
+           (hold (harness-agent-test-hold-turn id 'agent/step))
+           (harness-provider-demo-script-override
+            (lambda (_request)
+              '((:type tool-call :id "t1" :name "list_dir" :input (:path "/a"))
+                (:type text :delta "Done.")
+                (:type done :stop-reason end-turn))))
+           (turn (harness-call 'agent/prompt id "go")))
+      (harness-test-wait (lambda () (car hold)) 5 "the boundary")
+      (should-not (harness-agent-test-waiting id))
+      (harness-call 'agent/prompt id "and also this")
+      (let ((items (harness-agent-test-waiting id)))
+        (should (equal '("and also this") (mapcar (lambda (item) (plist-get item :text)) items)))
+        (should (equal "the test" (plist-get (car items) :why)))
+        (let ((listed (plist-get (car items) :id)))
+          (funcall (car hold))
+          (should (eq 'end-turn (plist-get (harness-test-await turn 10) :stop-reason)))
+          (should (equal "and also this"
+                         (plist-get (cl-find listed (harness-call 'session/nodes id)
+                                             :key (lambda (n) (plist-get n :id)) :test #'equal)
+                                    :content)))))
+      (should-not (harness-agent-test-waiting id)))))
+
+(ert-deftest harness-agent-a-held-message-can-be-taken-back ()
+  "[delete] on a message a gate holds takes it out of what the turn
+records: the model never gets it, the others go on, and what is taken
+back is returned as the node it would have been, to put into the box."
+  (harness-agent-test-with
+    (let* ((id (harness-agent-test-session))
+           (hold (harness-agent-test-hold-turn id))
+           (requests nil)
+           (harness-provider-demo-script-override
+            (lambda (request)
+              (push request requests)
+              '((:type text :delta "Done.") (:type done :stop-reason end-turn))))
+           (turn (harness-call 'agent/prompt id "first")))
+      (harness-test-wait (lambda () (car hold)) 5 "the turn to reach the gate")
+      (harness-call 'agent/prompt id "second")
+      (harness-call 'agent/prompt id "third")
+      (let* ((second (plist-get (cadr (harness-agent-test-waiting id)) :id))
+             (node (harness-call 'agent/withdraw id second)))
+        (should (equal "second" (plist-get node :content)))
+        (should (equal second (plist-get node :id)))
+        (should (equal '("first" "third") (harness-agent-test-waiting-texts id)))
+        ;; Taken back once: it is gone.
+        (should-error (harness-call 'agent/withdraw id second)))
+      (funcall (car hold))
+      (should (eq 'end-turn (plist-get (harness-test-await turn 10) :stop-reason)))
+      (should (equal '("first" "third")
+                     (mapcar (lambda (n) (plist-get n :content)) (harness-agent-test-user-nodes id))))
+      (should (equal '(("first" "third")) (harness-agent-test-request-texts (car requests))))
+      (should-not (harness-agent-test-waiting id)))))
+
+(ert-deftest harness-agent-taking-back-the-opening-message-cancels-its-turn ()
+  "The message that opened a turn is what the turn is for: taken back, it is
+never recorded, and the turn is cancelled.  What was sent to the turn after
+it is still the user's, and is recorded when the gate lets go; the list of
+messages that wait is empty."
+  (harness-agent-test-with
+    (let* ((id (harness-agent-test-session))
+           (hold (harness-agent-test-hold-turn id))
+           (requests nil)
+           (harness-provider-demo-script-override
+            (lambda (request) (push request requests) '((:type done :stop-reason end-turn))))
+           (turn (harness-call 'agent/prompt id "first")))
+      (harness-test-wait (lambda () (car hold)) 5 "the turn to reach the gate")
+      (harness-call 'agent/prompt id "second")
+      (let* ((first (plist-get (car (harness-agent-test-waiting id)) :id))
+             (node (harness-call 'agent/withdraw id first)))
+        (should (equal "first" (plist-get node :content)))
+        (should (equal '("second") (harness-agent-test-waiting-texts id))))
+      (funcall (car hold))
+      (should (eq 'cancelled (plist-get (harness-test-await turn 10) :stop-reason)))
+      (should (equal '("second")
+                     (mapcar (lambda (n) (plist-get n :content)) (harness-agent-test-user-nodes id))))
+      (should-not requests)
+      (should-not (harness-agent-test-waiting id))
+      (should (zerop (hash-table-count harness-agent--withdrawn)))
+      (should (eq 'idle (plist-get (harness-call 'session/get id) :status))))))
+
+(ert-deftest harness-agent-a-cancelled-turn-records-what-its-gate-held-and-lists-nothing ()
+  "A turn cancelled while its gate holds it keeps its messages, as before:
+the gate letting go records them, in order, and the list that showed them
+waiting is empty."
+  (harness-agent-test-with
+    (let* ((id (harness-agent-test-session))
+           (hold (harness-agent-test-hold-turn id))
+           (turn (harness-call 'agent/prompt id "first")))
+      (harness-test-wait (lambda () (car hold)) 5 "the turn to reach the gate")
+      (harness-call 'agent/prompt id "second")
+      (should (equal '("first" "second") (harness-agent-test-waiting-texts id)))
+      (harness-call 'agent/cancel id)
+      (funcall (car hold))
+      (should (eq 'cancelled (plist-get (harness-test-await turn 10) :stop-reason)))
+      (should (equal '("first" "second")
+                     (mapcar (lambda (n) (plist-get n :content)) (harness-agent-test-user-nodes id))))
+      (should-not (harness-agent-test-waiting id)))))
+
+(ert-deftest harness-agent-held-messages-share-the-list-with-those-steering-the-turn ()
+  "A message the turn holds for its next step and one a gate holds are
+listed together, the gate's first: that is the order the model gets
+them in, the gate recording its own as it lets the turn go on and the
+first step taking the others."
+  (harness-agent-test-with
+    (let* ((id (harness-agent-test-session))
+           (hold (harness-agent-test-hold-turn id))
+           (turn (harness-call 'agent/prompt id "opener")))
+      (harness-test-wait (lambda () (car hold)) 5 "the turn to reach the gate")
+      (harness-call 'agent/show-waiting id "the test")
+      ;; A message that steers the turn, as one sent when no filter says
+      ;; something holds it does, comes after what the gate holds.
+      (harness-agent--record-steering (harness-agent-turn-for id) (list (list :type "text" :text "steer")) nil)
+      (should (equal '("opener" "steer") (harness-agent-test-waiting-texts id)))
+      (should (equal '("the test" nil)
+                     (mapcar (lambda (item) (plist-get item :why)) (harness-agent-test-waiting id))))
+      (funcall (car hold))
+      (harness-test-await turn 10)
+      (should-not (harness-agent-test-waiting id))
+      (should (equal '("opener" "steer")
+                     (mapcar (lambda (n) (plist-get n :content)) (harness-agent-test-user-nodes id)))))))
+
 (ert-deftest harness-agent-note-activity-can-show-the-session-running ()
   "A gate that holds a turn says it works, so a client draws the activity.
 Only an idle session turns running; one with no turn is left alone."
