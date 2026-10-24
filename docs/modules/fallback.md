@@ -43,6 +43,16 @@ failed step, which then runs again.  A session handed to a provider
 that runs its own loop is caught up by the agent (see
 `harness-agent--handoff`).
 
+A session can be left with nowhere to go: its own model and every
+entry of the list are out.  It is then blocked (`harness-fallback-blocked`,
+`fallback/blocked`), and says until when: the end of the first mark.
+The turn that finds this out stops with an error, as it always did;
+what changes is what task mode makes of it: a task whose session is
+blocked waits in its queue, with the reason on its card, instead of
+landing among the failures, and starts again once a mark ends or is
+cleared, or the list gains an entry that works (`fallback/changed` and
+`config/changed` tell it; see harness-tasks.el, Holds).
+
 Nothing here blocks or calls a model: it decides from what the
 providers already said.
 
@@ -50,6 +60,7 @@ providers already said.
 
 ### Methods
 
+- `fallback/blocked` (session-id) — Return why session SESSION-ID can run on no model now, or nil.
 - `fallback/choose` (session-id) — Return the model session SESSION-ID would run on now.
 - `fallback/clear` (key) — Forget the mark KEY, so its provider or model is tried again.
 - `fallback/mark` (key &rest props) — Mark KEY, a provider or model id, as out; return the mark.

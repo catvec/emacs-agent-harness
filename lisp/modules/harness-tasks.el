@@ -25,6 +25,9 @@
 ;;
 ;; In a git project a task owns the whole life of its change: it starts
 ;; in a fresh worktree on a branch of its own (the `worktree' module),
+;; named after its title and its id (`harness-tasks--branch-name': the
+;; short title the cheap naming model gave it, see Titles, else the
+;; first words of its prompt),
 ;; its session is told to commit there, and when the agent finishes the
 ;; branch goes through the merge queue (the `merge' module) into the
 ;; branch checked out at the project root -- a main checkout, which the
@@ -147,6 +150,29 @@
 ;; `task/resume-queue' lets the waiting tasks start again at once.  The
 ;; suspension is per project, like the concurrency limit, kept across
 ;; restarts in `harness-tasks--queue-name', and shown on the board.
+;;
+;; Holds: a queued task can be held back for reasons of its own
+;; (`harness-tasks--hold', the view's `:hold'; see Holds below).  A task
+;; whose turn ended because every model it could run on is out of
+;; quota or money, or because a hard budget stopped it before or
+;; between two steps, is no failure: it goes back to pending
+;; (`harness-tasks--park') with the reason on its card -- which quota or
+;; budget, and when it resets -- and the scheduler holds it, and any task
+;; whose session would stop the same way, until the quota is back
+;; (a mark ends or is cleared, the fallback list gains an entry that
+;; works) or the budget has room (raised, removed, a new period).  Then
+;; the queue starts it like any waiting task and its session carries on
+;; where it stopped.
+;;
+;; Pausing: `task/pause' (the board's Pause) is a return to pending that
+;; sticks -- the task is marked `:paused', a hold the scheduler keeps,
+;; until `task/resume', `task/start' or a turn the user starts in its
+;; session -- and the mark is kept with the record, so a restart leaves
+;; the task paused.  `task/pause-all' and `task/resume-all' do it for
+;; every task of a project or of every project; `task/queues' lists
+;; every project's queue and its state, and `task/suspend-all-queues'
+;; and `task/resume-all-queues' switch them all, which the task slots
+;; page offers in one place (see Queues, all of them below).
 ;;
 ;; Waiting for a slot: a queued task knows since when it waits
 ;; (`:queued-at', stamped whenever a task joins the queue: submitted,
@@ -752,6 +778,23 @@ turn stopped and the work its session left running stopped too
 \(`harness-tasks--reclaim').  When the queue starts it again its own
 session carries on, told so by this message.")
 
+(defconst harness-tasks--quota-message
+  "Resumed: the quota that ran out is back, or another provider can carry you. Your last turn stopped when it ran out and any workers or sub-agents were stopped (see above). Your changes are still there: check where you left off and carry on."
+  "Message that starts a task again after it waited for quota.
+A task whose turn failed because every provider it could run on was out
+of quota or money goes back to the queue (`harness-tasks--park') and
+waits until one of them works again (`harness-tasks--hold'); when the
+queue starts it, its own session carries on, told so by this message.")
+
+(defconst harness-tasks--budget-message
+  "Resumed: the budget that stopped you has room again. Your last turn was stopped by it and any workers or sub-agents were stopped (see above). Your changes are still there: check where you left off and carry on."
+  "Message that starts a task again after it waited for a budget.
+A task a hard budget stopped, between two steps of a turn or before it
+began, goes back to the queue (`harness-tasks--park') and waits until
+the budget has room (`harness-tasks--hold'): its period ended, or it was
+raised or removed.  When the queue starts it, its own session carries
+on, told so by this message.")
+
 (defconst harness-tasks--sent-back-message
   "Sent back from review; it waited for a slot until now. Address the feedback, then finish as before."
   "Message that starts a task sent back from review once it gets a slot.
@@ -936,6 +979,20 @@ Armed while the task's session is blocked on the user
 \(`harness-tasks--arm-lend-timer'), for when it has waited
 `harness-tasks-lend-blocked-slot-after'.")
 
+(defvar harness-tasks--holds (make-hash-table :test 'equal)
+  "Task id -> the quota or budget hold that keeps a queued task from starting.
+Each is (:kind quota|budget :reason TEXT :until TIME :guess BOOL :items
+\(...)), as `harness-tasks--compute-hold' works it out; the scheduler
+refreshes them at the start of each pass (`harness-tasks--refresh-holds'),
+so a hold ends when the quota or budget it waits for does.  A task
+paused by hand has no entry here: its `:paused' is its hold
+\(`harness-tasks--hold').")
+
+(defvar harness-tasks--hold-timer nil
+  "Timer that runs the scheduler when the earliest hold ends.
+Armed by `harness-tasks--refresh-holds' for the soonest `:until' of the
+holds there are.")
+
 ;;;; Records
 
 (defun harness-tasks--get (id)
@@ -1073,9 +1130,11 @@ blocked on the user, which took it back once answered
 \(`harness-tasks--reclaim'; `:preempted-by' names the lender), or
 `sent-back' when the user sent it back from review while no slot could
 take it, so it waits for one with their feedback
-\(`harness-tasks--hold-back').  The reason outlives `:returned' until the
-task's next turn begins: its start tells the session why it stopped
-\(`harness-tasks--start-paused')."
+\(`harness-tasks--hold-back'), or `quota' or `budget' when its turn
+stopped because every provider it could run on was out of quota or
+money, or a hard budget was spent (`harness-tasks--park').  The reason
+outlives `:returned' until the task's next turn begins: its start tells
+the session why it stopped (`harness-tasks--start-paused')."
   (or (plist-get task :return-reason) 'returned))
 
 (defun harness-tasks--sent-back-p (task)
@@ -1494,7 +1553,9 @@ is there, true, while the task's project's pending queue is suspended,
 and `:auto-queue', true, while its project's backlog queues its
 write-ups itself (`harness-tasks--backlog-mode'); `:joining-queue',
 true, from the end of a write-up there until the task is in the queue
-\(`harness-tasks--joining')."
+\(`harness-tasks--joining').  `:hold' is there while something holds a
+queued task back (`harness-tasks--hold'): paused by hand, out of quota
+or over a hard budget, with the reason and when it ends."
   ;; `append' copies TASK, so `plist-put' changes only the view.
   (let ((view (plist-put (append task (list :column (harness-tasks--column task)))
                          :priority (harness-priority-of-task task))))
@@ -1504,6 +1565,8 @@ true, from the end of a write-up there until the task is in the queue
       (setq view (append view (list :auto-queue t))))
     (when (gethash (plist-get task :id) harness-tasks--joining)
       (setq view (append view (list :joining-queue t))))
+    (when-let* ((hold (harness-tasks--hold task)))
+      (setq view (append view (list :hold hold))))
     view))
 
 ;;;; Git
@@ -1517,24 +1580,74 @@ true, from the end of a write-up there until the task is in the queue
        (locate-dominating-file root ".git")
        t))
 
+(defconst harness-tasks--branch-slug-max 40
+  "Most characters of a branch's slug, before the task's id.
+A title's slug stops at the last whole word that fits.")
+
+(defun harness-tasks--branch-title (task)
+  "Return the title TASK's branch is named after, or nil when it has none yet.
+That is the title the naming model gave the task (`:name', see Titles),
+else the name its session took -- the same title, or a name the user
+gave it."
+  (let ((name (plist-get task :name))
+        (session-name (plist-get (harness-tasks--session task) :name)))
+    (cond ((not (harness-string-blank-p name)) name)
+          ((not (harness-string-blank-p session-name)) session-name))))
+
+(defun harness-tasks--title-slug (title)
+  "Return TITLE as a branch slug: its words in lower case, joined by dashes.
+It stops at the last whole word that fits `harness-tasks--branch-slug-max'
+characters, and cuts a first word that is longer than that.  Only letters
+and digits survive, so \"Fix login redirect loop (#42)\" is
+\"fix-login-redirect-loop-42\".  Empty for a title with none."
+  (let ((words (split-string (downcase title) "[^a-z0-9]+" t))
+        (slug ""))
+    (catch 'full
+      (dolist (word words)
+        (let ((next (if (string-empty-p slug) word (concat slug "-" word))))
+          (when (> (length next) harness-tasks--branch-slug-max) (throw 'full nil))
+          (setq slug next))))
+    (if (and (string-empty-p slug) words)
+        (substring (car words) 0 harness-tasks--branch-slug-max)
+      slug)))
+
 (defun harness-tasks--branch-name (task)
-  "Return a branch name for TASK: the prefix, a slug of its prompt, its id."
-  (let* ((words (split-string (downcase (harness-first-line (plist-get task :prompt))) "[^a-z0-9]+" t))
-         (slug (string-join (take 5 words) "-")))
-    (concat harness-tasks-branch-prefix
-            (if (string-empty-p slug) "" (concat (harness-truncate-end slug 40) "-"))
+  "Return a branch name for TASK: the prefix, a slug of its title, its id.
+The title is the short one the naming model gave the task as it was
+submitted (`harness-tasks--branch-title'), so the branch reads like the
+ticket: \"task/fix-login-redirect-loop-ab12cd34\".  A task with no title
+yet -- or none that has a letter or a digit in it -- is named from the
+first five words of its prompt instead, as it always was.  The id keeps
+the branch unique.  The record the table holds now is read, not TASK,
+which a start took before its title came."
+  (let* ((task (or (gethash (plist-get task :id) harness-tasks--table) task))
+         (title (harness-tasks--branch-title task))
+         (slug (if title (harness-tasks--title-slug title) "")))
+    (if (string-empty-p slug)
+        (let ((words (split-string (downcase (harness-first-line (plist-get task :prompt)))
+                                   "[^a-z0-9]+" t)))
+          (setq slug (string-join (take 5 words) "-")
+                slug (if (string-empty-p slug) "" (concat (harness-truncate-end slug 40) "-"))))
+      (setq slug (concat slug "-")))
+    (concat harness-tasks-branch-prefix slug
             ;; A record from an older store may name an id without the prefix.
             (string-remove-prefix "t-" (plist-get task :id)))))
 
 (defun harness-tasks--make-worktree (task)
-  "Return a promise of TASK's worktree plist, with `:base' the root's branch."
+  "Return a promise of TASK's worktree plist, with `:base' the root's branch.
+The branch is named after the task's title.  A title that is on its way
+\(`harness-tasks--title-wait') is waited for a moment before the branch
+is made, so a task that starts as it is submitted gets it too."
   (let ((root (plist-get task :project)))
     (harness-then
      (harness-call-async 'worktree/branch root)
      (lambda (base)
        (harness-then
-        (harness-call-async 'worktree/create root :branch (harness-tasks--branch-name task))
-        (lambda (wt) (append (list :base base) wt)))))))
+        (harness-tasks--title-wait (plist-get task :id))
+        (lambda (_)
+          (harness-then
+           (harness-call-async 'worktree/create root :branch (harness-tasks--branch-name task))
+           (lambda (wt) (append (list :base base) wt)))))))))
 
 (defun harness-tasks--enqueue-merge (id)
   "Queue task ID's branch for the merge queue, or put the task before the user.
@@ -1707,12 +1820,18 @@ SESSION is the session named, or the options of a task's own request
 ;; with `:name'; a written-up task's session as it moves to the work),
 ;; so it is not named again.  A session made while the request is out is
 ;; named by it when it comes back: `harness-tasks--auto-name-p' keeps the
-;; naming of its first turn off meanwhile.  Nothing ever waits for a
-;; title: a task starts with one or without, and when the request fails
-;; its session is named the usual way, from the same message.  A backlog
-;; task is named the same way, from the words it was written up from,
-;; and so is every task of a board found without a title when the
-;; harness starts or reloads.
+;; naming of its first turn off meanwhile.  Nothing waits for a title: a
+;; task starts with one or without, and when the request fails its
+;; session is named the usual way, from the same message.  The one
+;; exception is the making of the task's branch, which is named after
+;; the title (`harness-tasks--branch-name'): a task that starts as it
+;; is submitted would otherwise always have its branch named from its
+;; prompt, the title being a second or two behind.  That wait is
+;; bounded (`harness-tasks--title-wait') and only for a title already
+;; requested; with none, or past it, the branch is named from the
+;; prompt.  A backlog task is named the same way, from the words it was
+;; written up from, and so is every task of a board found without a
+;; title when the harness starts or reloads.
 ;;
 ;; The request is a model call of the harness's own, an internal job:
 ;; it goes straight to the provider (`provider/complete'), under an id
@@ -1787,6 +1906,52 @@ That is when sessions are named automatically (`harness-naming-auto'),
 and the naming module titles a message on its own (`naming/title')."
   (and (bound-and-true-p harness-naming-auto)
        (harness-method-exists-p 'naming/title)))
+
+(defconst harness-tasks--title-wait 8
+  "Seconds the making of a task's branch waits for the title on its way.
+Only the branch waits, and only for a title already requested
+\(`harness-tasks--title-on-its-way-p'): a start that finds none on its
+way, or one that came, goes straight on.  Past this a start goes on
+without it, and the branch is named from the prompt, as it was before
+branches had titles.")
+
+(defvar harness-tasks--title-waiters (make-hash-table :test 'equal)
+  "Task id -> the promises of the starts that wait for its title.
+Resolved when the request that names the task settles
+\(`harness-tasks--title-settled'), or when the wait is over
+\(`harness-tasks--title-wait').")
+
+(defun harness-tasks--title-on-its-way-p (task)
+  "Non-nil when TASK has no title yet but its request for one is out or waits.
+That is a naming request in flight (`harness-tasks--naming') or one
+waiting for a slot of the throttle (`harness-tasks--naming-pool')."
+  (let ((id (plist-get task :id)))
+    (and (not (harness-tasks--titled-p task))
+         (or (gethash id harness-tasks--naming)
+             (member id (harness-slots-waiters harness-tasks--naming-pool)))
+         t)))
+
+(defun harness-tasks--title-wait (id)
+  "Return a promise that settles when task ID's title is not worth waiting for.
+It is resolved at once when the task has a title or none is on its way;
+else when the title comes, or the request fails
+\(`harness-tasks--title-settled'), or `harness-tasks--title-wait'
+seconds have passed.  The value means nothing: the caller names the
+branch from the task as it is then."
+  (let ((task (gethash id harness-tasks--table)))
+    (if (not (and task (harness-tasks--title-on-its-way-p task)))
+        (harness-resolved nil)
+      (let ((promise (harness-make-promise)))
+        (push promise (gethash id harness-tasks--title-waiters))
+        (run-at-time harness-tasks--title-wait nil (lambda () (harness-resolve promise nil)))
+        promise))))
+
+(defun harness-tasks--title-settled (id)
+  "Let the starts that wait for task ID's title go on: it came, or will not."
+  (let ((promises (gethash id harness-tasks--title-waiters)))
+    (remhash id harness-tasks--title-waiters)
+    (dolist (promise promises)
+      (harness-resolve promise nil))))
 
 (defun harness-tasks--naming-text (task)
   "Return the text TASK is named from: the message its session opens with.
@@ -1890,22 +2055,26 @@ is not made again here: the layers below retried it already (see
 Titles), and the task stays untitled until its turn names its session,
 or the harness starts or reloads (`harness-tasks--name-untitled')."
   (remhash id harness-tasks--naming)
-  (condition-case problem
-      (when-let* ((task (gethash id harness-tasks--table)))
-        (let* ((session (harness-tasks--session task))
-               (nameless (and session (harness-string-blank-p (plist-get session :name))))
-               (current (equal text (harness-tasks--naming-text task))))
-          (if (and name current)
-              (progn
-                (harness-tasks--set id :name name)
-                (when nameless (harness-call 'session/update (plist-get session :id) :name name)))
-            (if name
-                (harness-log 'info "task %s: its prompt changed while it was named, so %S is dropped" id name)
-              (harness-log 'warn "naming task %s failed: %s" id (harness-error-message err)))
-            (cond ((and nameless (harness-tasks--turn-p task))
-                   (harness-tasks--name-session (plist-get session :id)))
-                  ((not current) (harness-tasks--name id))))))
-    (error (harness-log 'warn "naming task %s failed: %s" id (harness-error-message problem)))))
+  (unwind-protect
+      (condition-case problem
+          (when-let* ((task (gethash id harness-tasks--table)))
+            (let* ((session (harness-tasks--session task))
+                   (nameless (and session (harness-string-blank-p (plist-get session :name))))
+                   (current (equal text (harness-tasks--naming-text task))))
+              (if (and name current)
+                  (progn
+                    (harness-tasks--set id :name name)
+                    (when nameless (harness-call 'session/update (plist-get session :id) :name name)))
+                (if name
+                    (harness-log 'info "task %s: its prompt changed while it was named, so %S is dropped" id name)
+                  (harness-log 'warn "naming task %s failed: %s" id (harness-error-message err)))
+                (cond ((and nameless (harness-tasks--turn-p task))
+                       (harness-tasks--name-session (plist-get session :id)))
+                      ((not current) (harness-tasks--name id))))))
+        (error (harness-log 'warn "naming task %s failed: %s" id (harness-error-message problem))))
+    ;; Whichever way it went, the branch of a task that waits for its
+    ;; title is named from what there is.
+    (harness-tasks--title-settled id)))
 
 (defun harness-tasks--auto-name-p (verdict session)
   "Keep the naming of SESSION's turn off while its task's title is on its way.
@@ -2012,6 +2181,260 @@ SUSPENDED), which the boards follow."
       (harness-tasks--save-queues)
       (harness-emit 'task/queue key now))
     now))
+
+;;;; Holds
+;;
+;; A queued task can be held: the scheduler leaves it in the queue, with
+;; the reason on its card, until what holds it is over.  A hold is one of
+;;
+;;   paused  the user paused the task (`task/pause'): `:paused' on its
+;;           record says since when, and nothing but `task/resume' (or an
+;;           explicit `task/start', or a turn the user starts in its
+;;           session) ends it.  It is kept with the record, so it
+;;           outlives a restart: the scheduler that starts the waiting
+;;           tasks as the harness comes up leaves it alone.
+;;   quota   everything the task's session could run on has run out of
+;;           quota or money (`fallback/blocked'): its own model, and every
+;;           entry of `harness-fallback-models' it may carry on with.
+;;           `:until' is when the first of them is tried again.
+;;   budget  a hard budget that covers the task's session is spent
+;;           (`usage/budget-hold'); `:until' is when its period ends, nil
+;;           when only changing or deleting the budget lets the task go on.
+;;
+;; Quota and budget holds are worked out, not stored: the scheduler asks
+;; the fallback and the usage module at every pass
+;; (`harness-tasks--refresh-holds'), for tasks that never started as much
+;; as for tasks parked by a stopped turn, so a task is never started
+;; into an outage only to fail at once, and one a restart finds waiting
+;; needs nothing kept to know why.  What makes a hold end is told by
+;; events -- `fallback/changed' (a mark ended or was cleared, a quota
+;; report came), `usage/budgets-changed', `config/changed' for the
+;; fallback list and the Budget setting -- and by a timer at the
+;; earliest `:until' there is (`harness-tasks--arm-hold-timer'), each of
+;; which runs the scheduler.  A hold that ended starts the task like any
+;; queued task: by priority, within the limit, unless its queue is
+;; suspended.
+;;
+;; Parking: a turn that ends `error' or `blocked' while its task is held
+;; for quota or a budget -- every provider ran out, or a hard budget
+;; stopped the turn between two steps or before it began -- is no
+;; failure of the task.  It goes back to pending (`harness-tasks--park')
+;; as a task returned to pending does, keeping its session, branch and
+;; worktree, with `:return-reason' `quota' or `budget'; when the hold
+;; ends it carries on where it stopped, told why by
+;; `harness-tasks--quota-message' or `harness-tasks--budget-message'.
+
+(defun harness-tasks--paused-p (task)
+  "Non-nil when the user paused TASK, which waits to be resumed.
+`:paused' is the time it was paused."
+  (and (plist-get task :paused) t))
+
+(defun harness-tasks--quota-hold (session-id)
+  "Return the quota hold of the session SESSION-ID, or nil when a model works.
+The answer of `fallback/blocked', as a hold: (:kind quota :reason TEXT
+:until TIME :guess BOOL :items MARKS)."
+  (when (harness-method-exists-p 'fallback/blocked)
+    (condition-case err
+        (when-let* ((blocked (harness-call 'fallback/blocked session-id)))
+          (list :kind 'quota
+                :reason (plist-get blocked :reason)
+                :until (plist-get blocked :until)
+                :guess (if (plist-get blocked :guess) t :false)
+                :items (plist-get blocked :marks)))
+      (error (harness-log 'warn "tasks: asking whether %s is out of quota failed: %s"
+                          session-id (harness-error-message err))
+             nil))))
+
+(defun harness-tasks--budget-hold (session-id)
+  "Return the budget hold of the session SESSION-ID, or nil.
+Nil while no hard budget that covers it is spent.  The answer of
+`usage/budget-hold', as a hold: (:kind budget :reason TEXT :until TIME
+:guess :false :items BUDGETS)."
+  (when (harness-method-exists-p 'usage/budget-hold)
+    (condition-case err
+        (when-let* ((hold (harness-call 'usage/budget-hold session-id)))
+          (list :kind 'budget
+                :reason (plist-get hold :reason)
+                :until (plist-get hold :until)
+                :guess :false
+                :items (plist-get hold :budgets)))
+      (error (harness-log 'warn "tasks: asking whether %s is over its budget failed: %s"
+                          session-id (harness-error-message err))
+             nil))))
+
+(defun harness-tasks--compute-hold (task)
+  "Return the quota or budget hold on TASK's work as it is now, or nil.
+Quota first: a task out of both is shown the quota, and its budget once
+that is back.  Nil for a task with no session.  This asks; the
+scheduler's table (`harness-tasks--holds') is what the rest reads."
+  (when-let* ((sid (plist-get task :session)))
+    (or (harness-tasks--quota-hold sid)
+        (harness-tasks--budget-hold sid))))
+
+(defun harness-tasks--hold (task)
+  "Return why queued TASK is held back from starting, a plist, or nil.
+`:kind' is `paused' (the user paused it, `:since' when), `quota' or
+`budget' (`harness-tasks--compute-hold', as the scheduler found it at
+its last pass); `:reason' says what for, `:until' when it ends (nil: not
+by itself), `:guess' whether that is a retry time rather than a reset,
+`:items' the marks or budgets behind it.  Nil for a task that is not in
+the queue (`harness-tasks--queued-p') and for one nothing holds."
+  (when (harness-tasks--queued-p task)
+    (if (harness-tasks--paused-p task)
+        (let ((since (plist-get task :paused)))
+          (list :kind 'paused :since (and (numberp since) since)))
+      (gethash (plist-get task :id) harness-tasks--holds))))
+
+(defun harness-tasks--hold-signature (hold)
+  "Return what makes HOLD the hold it is: its kind, its end and what is behind it.
+The reason's text and a budget's figures change as others spend, which
+makes it no other hold: `harness-tasks--refresh-holds' announces a hold
+when this changes."
+  (and hold
+       (list (plist-get hold :kind)
+             (plist-get hold :until)
+             (mapcar (lambda (item) (or (plist-get item :key) (plist-get item :id)))
+                     (plist-get hold :items)))))
+
+(defun harness-tasks--refresh-holds ()
+  "Work out the holds of the queued tasks again and time the first to end.
+A task whose hold began, changed or ended is announced (`task/changed'),
+so its card says why it waits, or starts.  A paused task needs no
+asking.  Return the ids announced."
+  (let (changed)
+    (dolist (id (hash-table-keys harness-tasks--holds))
+      (let ((task (gethash id harness-tasks--table)))
+        (unless (and task (harness-tasks--queued-p task) (not (harness-tasks--paused-p task)))
+          (remhash id harness-tasks--holds))))
+    (dolist (task (harness-tasks--sorted #'harness-tasks--queued-p))
+      (unless (harness-tasks--paused-p task)
+        (let* ((id (plist-get task :id))
+               (old (gethash id harness-tasks--holds))
+               (new (harness-tasks--compute-hold task)))
+          (unless (equal (harness-tasks--hold-signature old) (harness-tasks--hold-signature new))
+            (if new
+                (puthash id new harness-tasks--holds)
+              (remhash id harness-tasks--holds))
+            (push id changed)))))
+    (dolist (id (nreverse changed))
+      (when-let* ((task (gethash id harness-tasks--table)))
+        (harness-emit 'task/changed (harness-tasks--view task))))
+    (harness-tasks--arm-hold-timer)
+    changed))
+
+(defun harness-tasks--arm-hold-timer ()
+  "Have the scheduler run once the earliest hold ends, if one has an end.
+Re-armed at every pass, so it follows holds that begin, change or go.
+It fires a second late, when a mark or a period has surely ended, and
+never sooner than two seconds on: a hold whose end passed without
+lifting is looked at again then, not in a loop."
+  (when (timerp harness-tasks--hold-timer) (cancel-timer harness-tasks--hold-timer))
+  (setq harness-tasks--hold-timer nil)
+  (let (soonest)
+    (maphash (lambda (_ hold)
+               (let ((until (plist-get hold :until)))
+                 (when (numberp until)
+                   (setq soonest (if soonest (min soonest until) until)))))
+             harness-tasks--holds)
+    (when soonest
+      (setq harness-tasks--hold-timer
+            (run-at-time (max 2 (- (+ soonest 1) (float-time))) nil #'harness-tasks--hold-due)))))
+
+(defun harness-tasks--hold-due ()
+  "Run the scheduler: the earliest hold ended, or may have."
+  (setq harness-tasks--hold-timer nil)
+  (harness-tasks--schedule))
+
+(defun harness-tasks--on-hold-event (&rest _)
+  "Look at the holds again soon: quota or a budget changed.
+On `fallback/changed' (a mark ended or was cleared, a quota report
+came, a session moved) and `usage/budgets-changed'.  The scheduler
+starts the tasks whose hold is over.  Once for a burst of events."
+  (harness-debounce 'harness-tasks-holds 0.1 #'harness-tasks--schedule))
+
+(defun harness-tasks--park-hint (hold)
+  "Return the hint saying in a task's session that HOLD sent it back to the queue."
+  (format "Back in the queue until it can go on: %s" (plist-get hold :reason)))
+
+(defun harness-tasks--park (id hold)
+  "Put task ID back in the queue: its work cannot go on, for HOLD.
+HOLD is a quota or budget hold (`harness-tasks--compute-hold') found as
+the task's turn ended.  The task is returned to pending as
+`task/return-to-pending' returns one -- its session, branch and
+worktree kept, first in line of its priority -- with `:return-reason'
+`quota' or `budget', and the hold is its own at once, so the card that
+announces the change says why it waits.  The turn is over already; what
+its session left running outside it stops (`harness-tasks--stop-outstanding'),
+and the session says why the task waits.  Return the task's view."
+  (let ((sid (plist-get (harness-tasks--get id) :session)))
+    (harness-log 'info "task %s: its work cannot go on, so it waits in the queue: %s"
+                 id (plist-get hold :reason))
+    (puthash id hold harness-tasks--holds)
+    (prog1 (harness-tasks--to-pending id :return-reason (plist-get hold :kind))
+      (when (and sid (harness-call 'session/exists-p sid))
+        (harness-call 'session/hint sid (harness-tasks--park-hint hold)))
+      (harness-tasks--stop-outstanding id)
+      (harness-tasks--arm-hold-timer))))
+
+;;;; Pausing
+;;
+;; `task/pause' is what the board's Pause does, and sticks: a task at
+;; work goes back to pending as `task/return-to-pending' sends it, its
+;; turn stopped and the work it left running with it, and is marked
+;; paused (`:paused'), a hold the scheduler keeps (above).  A task
+;; waiting in the queue is paused where it is.  `task/resume' ends the
+;; hold, and the queue starts the task by priority within the limit as it
+;; starts any, unless its queue is suspended too: pausing tasks and
+;; suspending queues are independent, and each is kept across a restart
+;; -- the paused tasks in their records, the suspended queues in
+;; `harness-tasks--queue-name'.  `task/pause-all' and `task/resume-all'
+;; do it for every task of a project, or of every project.  Pausing
+;; every task includes the waiting ones: the slots the paused tasks free
+;; would otherwise start them.
+
+(defun harness-tasks--at-work-p (task)
+  "Non-nil when TASK is at work: in progress, or waiting on the user mid-work.
+That is an active task that is starting, or not stopped part way (no
+`:outcome') and not in the merge queue: what `task/pause-all' stops."
+  (and (eq (plist-get task :state) 'active)
+       (not (plist-get task :archived))
+       (not (plist-get task :merge-status))
+       (or (gethash (plist-get task :id) harness-tasks--starting)
+           (null (plist-get task :outcome)))))
+
+(defun harness-tasks--pause (id)
+  "Pause task ID: back in the queue, and held there until it is resumed.
+A task at work is returned to pending as `task/return-to-pending' does
+-- its turn stopped, then the work its session left running; one still
+starting gives its slot up as a pre-empted one does -- and marked
+`:paused'.  One that waits for a slot is marked where it is.  A task
+already paused stays as it was.  Return the task's view."
+  (let ((task (harness-tasks--get id)))
+    (cond
+     ((harness-tasks--paused-p task) (harness-tasks--put task))
+     ((harness-tasks--queued-p task)
+      (harness-log 'info "task %s: paused in the queue" id)
+      (harness-tasks--set id :paused (float-time)))
+     ((and (eq (plist-get task :state) 'active) (not (plist-get task :archived)))
+      (harness-log 'info "task %s: paused" id)
+      (remhash id harness-tasks--starting)
+      ;; The queue first, then the turn (see `task/return-to-pending').
+      (prog1 (harness-tasks--to-pending id :paused (float-time))
+        (unless (harness-tasks--stop-turn id)
+          (harness-tasks--stop-outstanding id))
+        (harness-tasks--schedule id)))
+     (t (error "Task %s is %s; only a task at work or waiting for a slot can be paused"
+               id (harness-tasks--column task))))))
+
+(defun harness-tasks--unpause (id)
+  "End the pause of task ID; the queue starts it when its turn comes.
+A task that is not paused stays as it was.  Return the task's view."
+  (let ((task (harness-tasks--get id)))
+    (if (not (harness-tasks--paused-p task))
+        (harness-tasks--put task)
+      (harness-log 'info "task %s: resumed" id)
+      (prog1 (harness-tasks--set id :paused nil)
+        (harness-tasks--schedule)))))
 
 ;;;; Backlog mode
 ;;
@@ -2498,6 +2921,8 @@ returned to pending."
       ('preempted (format "its task was pre-empted by task %s, sent back from review" by))
       ('reclaimed (format "task %s took back the slot its task borrowed" by))
       ('sent-back "its task waits for a slot")
+      ('quota "its task waits for quota")
+      ('budget "its task waits for its budget")
       (_ "its task was paused"))))
 
 (defun harness-tasks--stop-outstanding (id)
@@ -2774,8 +3199,12 @@ because a task blocked on the user lends it is free for it too, which
 it then borrows (`harness-tasks--note-borrow').  Nil means it waits in
 the queue: every task at work outranks it, the limit is 0, or its
 project's queue is suspended, which holds work sent back from review
-back as it holds back any start the harness makes by itself."
+back as it holds back any start the harness makes by itself, or its
+session is out of quota or over a hard budget
+\(`harness-tasks--compute-hold'): a turn started now would stop at once,
+so the feedback waits in the queue until the hold ends."
   (cond ((harness-tasks--task-suspended-p task) nil)
+        ((harness-tasks--compute-hold task) nil)
         ((> (harness-tasks--free-slots (harness-tasks--slot-project task)) 0)
          (harness-tasks--note-borrow task)
          t)
@@ -2809,13 +3238,21 @@ when it was sent back.  No other waiting task pre-empts.
 A slot a task blocked on the user lends (`harness-tasks--lending-p') is
 free like any other, and the task started in it says whose it borrowed
 \(`harness-tasks--note-borrow').  Loans whose borrower or lender moved on
-end first (`harness-tasks--tidy-loans')."
+end first (`harness-tasks--tidy-loans').
+
+A task that is held (`harness-tasks--hold') -- paused by hand, out of
+quota or over a hard budget -- is left in the queue and takes no slot
+from the tasks behind it: the pass works out the holds first
+\(`harness-tasks--refresh-holds'), so what began or ended since the last
+one is seen, and a task whose hold is over starts with the rest."
   (harness-tasks--load-queues)
   (harness-tasks--tidy-loans)
+  (harness-tasks--refresh-holds)
   (let ((free (make-hash-table :test 'equal)))
     (dolist (task (harness-tasks--start-order (harness-tasks--sorted #'harness-tasks--queued-p)))
       (unless (or (equal (plist-get task :id) skip)
-                  (harness-tasks--task-suspended-p task))
+                  (harness-tasks--task-suspended-p task)
+                  (harness-tasks--hold task))
         (let* ((project (harness-tasks--slot-project task))
                (left (or (gethash project free) (harness-tasks--free-slots project))))
           (cond
@@ -2840,11 +3277,18 @@ task at work, and the scheduler then finds no slot free.  The same goes
 for `harness-tasks-lend-blocked-slot-after', how long a task blocked on
 the user waits before it lends its slot: the timers that wait for that
 follow the new value (`harness-tasks--arm-lend-timers'), and a loan the
-new value ends stops no task at work."
-  (when (memq (if (stringp key) (intern-soft key) key)
-              '(harness-tasks-max-running harness-tasks-lend-blocked-slot-after))
-    (harness-run-soon #'harness-tasks--arm-lend-timers)
-    (harness-run-soon #'harness-tasks--schedule)))
+new value ends stops no task at work.  The list of fallbacks
+\(`harness-fallback-models') and the Budget setting (`harness-budget')
+decide whether a queued task is held for quota or a budget
+\(`harness-tasks--hold'): an entry that works, or a budget raised,
+starts the tasks that waited for them, so the holds are looked at
+again."
+  (let ((key (if (stringp key) (intern-soft key) key)))
+    (when (memq key '(harness-tasks-max-running harness-tasks-lend-blocked-slot-after))
+      (harness-run-soon #'harness-tasks--arm-lend-timers)
+      (harness-run-soon #'harness-tasks--schedule))
+    (when (memq key '(harness-fallback-models harness-budget))
+      (harness-tasks--on-hold-event))))
 
 (defun harness-tasks--on-priority-changed (_session-id key &rest _)
   "Let a task waiting with feedback take a slot when a priority changes.
@@ -2927,7 +3371,7 @@ task started by hand was not waiting for a slot and records nothing."
     (remhash id harness-tasks--message-starts)
     (remhash id harness-tasks--superseding)
     (apply #'harness-tasks--set id :state 'active :backlog nil :outcome nil :error nil
-           :duplicate-of nil :returned nil :started started :finished nil :queued-at nil
+           :duplicate-of nil :returned nil :paused nil :started started :finished nil :queued-at nil
            (and waits (list :waits waits)))
     (cond
      ((harness-tasks--main-tree-p task)
@@ -3384,6 +3828,8 @@ in its transcript instead.  Return the task's view."
          (view (harness-tasks--to-pending id :return-reason 'sent-back :sent-back (float-time)
                                           :archived nil
                                           :feedback (harness-tasks--feedback-round task feedback))))
+    ;; A task that waits for quota or a budget says so as it joins the queue.
+    (harness-tasks--refresh-holds)
     (if text
         (harness-tasks--queue-message id text attachments)
       view)))
@@ -3568,12 +4014,16 @@ It says why it waited (`harness-tasks--return-reason'):
 `harness-tasks--preempted-message' for a task pre-empted,
 `harness-tasks--reclaimed-message' for one whose lender took back the
 slot it borrowed, `harness-tasks--sent-back-message' for one sent back
-from review while no slot could take it, `harness-tasks--paused-message'
-for one returned to pending by hand."
+from review while no slot could take it, `harness-tasks--quota-message'
+and `harness-tasks--budget-message' for one that waited for quota or a
+budget, `harness-tasks--paused-message' for one returned to pending by
+hand or paused."
   (pcase (harness-tasks--return-reason task)
     ('preempted harness-tasks--preempted-message)
     ('reclaimed harness-tasks--reclaimed-message)
     ('sent-back harness-tasks--sent-back-message)
+    ('quota harness-tasks--quota-message)
+    ('budget harness-tasks--budget-message)
     (_ harness-tasks--paused-message)))
 
 (defun harness-tasks--start-paused (id cwd worktree)
@@ -3682,6 +4132,8 @@ TASK waits in the queue (`harness-tasks--before-turn')."
             ('sent-back "sent back from review")
             ('preempted (format "pre-empted by task %s" (plist-get task :preempted-by)))
             ('reclaimed (format "slot taken back by task %s" (plist-get task :preempted-by)))
+            ('quota "waiting for quota")
+            ('budget "waiting for its budget")
             (_ "paused"))))
 
 (defun harness-tasks--holds-turns-p (task from)
@@ -4287,7 +4739,8 @@ on a task that was in review or done starts a round that needs a report
 of its own (`:reopened', see `harness-tasks--round-start').  A merged
 task's worktree is locked again for the new work.  A task that waited
 in the queue is no longer waiting: why it did (`:return-reason') is
-forgotten."
+forgotten, and so is a pause (`:paused'): a turn the user starts in a
+paused task's session resumes it, as `task/start' does."
   (remhash session-id harness-tasks--refine-calls)
   (remhash session-id harness-tasks--plans-submitted)
   (remhash session-id harness-tasks--plan-reminders)
@@ -4301,7 +4754,7 @@ forgotten."
      ((and (eq (plist-get task :state) 'merging) (plist-get task :merge-status)) nil)
      (t (harness-tasks--relock-worktree task)
         (apply #'harness-tasks--set (plist-get task :id) :state 'active :outcome nil :error nil :finished nil
-               :merged nil :archived nil :returned nil :return-reason nil :preempted-by nil
+               :merged nil :archived nil :returned nil :return-reason nil :preempted-by nil :paused nil
                (append
                 (unless (eq (plist-get task :state) 'merging) (list :verified nil :verified-at nil))
                 (when (memq (plist-get task :state) '(review done)) (list :reopened (float-time)))))))))
@@ -4358,12 +4811,22 @@ waiting in the queue say anything about it: one its session was
 refused while the task waits (`harness-tasks--before-turn').  A
 returned task is left out of the scheduling pass after such a turn
 too, so that the reports of the work stopped with its return, refused
-while it waits, do not start it again: the return starts nothing."
+while it waits, do not start it again: the return starts nothing.
+
+A turn that ends `error' or `blocked' while its task cannot go on for
+lack of quota or money, or because a hard budget is spent
+\(`harness-tasks--compute-hold'), is no failure of the task: that is
+every provider it could run on being out, and the budget gate stopping
+the turn between two steps or before it began.  The task goes back to
+the queue, with the reason on its card (`harness-tasks--park'), instead
+of waiting for the user with the outcome `error' or `blocked', and
+starts again when the hold ends (`harness-tasks--refresh-holds')."
   (remhash session-id harness-tasks--refine-calls)
   (remhash session-id harness-tasks--plan-reminders)
   (when-let* ((task (harness-tasks--by-session session-id)))
     (let ((id (plist-get task :id))
           (waiting nil)
+          (parked nil)
           (skip nil))
       (remhash id harness-tasks--starting)
       (remhash id harness-tasks--waking)
@@ -4388,6 +4851,14 @@ while it waits, do not start it again: the return starts nothing."
        ((harness-tasks--refinement-p task) (harness-tasks--finish-refinement id reason))
        ((harness-tasks--queued-p task)
         (setq skip (harness-tasks--returned-p task)))
+       ;; Every provider out of quota, or a hard budget spent: no failure
+       ;; of the task's, which waits in the queue for it to end.
+       ((and (memq reason '(error blocked))
+             (eq (plist-get task :state) 'active)
+             (not (plist-get task :merge-status))
+             (setq parked (harness-tasks--compute-hold task)))
+        (harness-tasks--park id parked)
+        (setq skip t))
        ((not (eq reason 'end-turn))
         (unless (plist-get task :merge-status)
           (harness-tasks--set id :state 'active :outcome reason)))
@@ -5040,12 +5511,14 @@ That is the title the board shows: its session's name, else its own
 
 (defun harness-tasks--slot-queued (task)
   "Return the entry of TASK, which waits for a slot, in `task/slots' :queue."
-  (list :id (plist-get task :id)
-        :title (harness-tasks--slot-title task)
-        :priority (symbol-name (harness-priority-of-task task))
-        :since (harness-tasks--queued-since task)
-        :reason (and (harness-tasks--returned-p task)
-                     (symbol-name (harness-tasks--return-reason task)))))
+  (append (list :id (plist-get task :id)
+                :title (harness-tasks--slot-title task)
+                :priority (symbol-name (harness-priority-of-task task))
+                :since (harness-tasks--queued-since task)
+                :reason (and (harness-tasks--returned-p task)
+                             (symbol-name (harness-tasks--return-reason task))))
+          (when-let* ((hold (harness-tasks--hold task)))
+            (list :hold hold))))
 
 (defun harness-tasks--slot-waits (project)
   "Return the recent waits of PROJECT's tasks, newest first, for `task/slots'.
@@ -5094,9 +5567,14 @@ A plist, all of it plain data:
   :queue     the tasks waiting for a slot (`harness-tasks--queued-p'),
              in the order they will start (`harness-tasks--start-order'),
              each a plist of :id, :title, :priority, :since (when it
-             began waiting, `harness-tasks--queued-since') and :reason
+             began waiting, `harness-tasks--queued-since'), :reason
              (why it was put back in the queue after it worked --
-             \"returned\", \"preempted\" or \"sent-back\" -- else nil)
+             \"returned\", \"preempted\", \"sent-back\", \"quota\" or
+             \"budget\" -- else nil) and :hold, when something holds it
+             back (`harness-tasks--hold'): a plist of :kind (\"paused\",
+             \"quota\" or \"budget\"), :reason, :until, :guess and :items
+  :queues    every project's queue and :totals over them, as `task/queues'
+             lists them, for the page's section on queues
   :waits     how long tasks of the project waited for a slot before
              they started, newest first, the last :days days only, at
              most 500: plists of :id, :priority (the level it waited
@@ -5104,8 +5582,9 @@ A plist, all of it plain data:
 No sub-agent, fork or merge-queue work holds a slot, so none is listed."
   (harness-tasks--load)
   (let* ((project (harness-tasks--project (or cwd default-directory)))
-         (mine (lambda (task) (equal (harness-tasks--slot-project task) project))))
-    (harness-tasks--open-project project)
+         (mine (lambda (task) (equal (harness-tasks--slot-project task) project)))
+         (report (progn (harness-tasks--open-project project)
+                        (harness-tasks--queues-report))))
     (list :project project
           :limit harness-tasks-max-running
           :suspended (if (harness-tasks--suspended-p project) t :false)
@@ -5120,7 +5599,9 @@ No sub-agent, fork or merge-queue work holds a slot, so none is listed."
                          (harness-tasks--start-order
                           (harness-tasks--sorted
                            (lambda (task) (and (funcall mine task) (harness-tasks--queued-p task))))))
-          :waits (harness-tasks--slot-waits project))))
+          :waits (harness-tasks--slot-waits project)
+          :queues (plist-get report :queues)
+          :totals (plist-get report :totals))))
 
 (harness-defmethod task/queue-order (&optional cwd)
   "Return the tasks waiting for a slot, in the order they will start.
@@ -5253,6 +5734,133 @@ queue is suspended, :false once it runs again."
     (when (not suspended) (harness-tasks--schedule))
     (list :project project :suspended (if suspended t :false))))
 
+;;;; Queues, all of them
+;;
+;; The slots page lists every project's queue in one place: its state,
+;; who works, who waits, and what holds the waiting tasks back.  The
+;; summary is data (`task/queues'), as `task/slots' is for a project's
+;; slots, and so are the two switches that pause or resume every queue
+;; at once; the queues are paused one by one with `task/suspend-queue'.
+
+(defun harness-tasks--queue-projects ()
+  "Return the projects whose queue is worth listing, sorted.
+Those with a task that works or waits -- active, pending (in the queue
+or the backlog), being written up, in the merge queue -- not archived,
+and those whose queue is suspended, whether a task waits in them or not."
+  (harness-tasks--load-queues)
+  (let ((projects (make-hash-table :test 'equal)))
+    (maphash (lambda (_ task)
+               (when (and (memq (plist-get task :state) '(active pending refining merging))
+                          (not (plist-get task :archived))
+                          (stringp (harness-tasks--slot-project task)))
+                 (puthash (harness-tasks--slot-project task) t projects)))
+             harness-tasks--table)
+    (maphash (lambda (project _) (puthash project t projects)) harness-tasks--queues)
+    (sort (hash-table-keys projects) #'string<)))
+
+(defun harness-tasks--project-name (project)
+  "Return how PROJECT, a root, is named on a page.
+That is the project module's name for it, else its directory's."
+  (or (and (harness-method-exists-p 'project/name)
+           (ignore-errors (harness-call 'project/name project)))
+      (file-name-nondirectory (directory-file-name project))))
+
+(defun harness-tasks--queue-summary (project)
+  "Return the queue of PROJECT as `task/queues' lists it, a plist.
+`:state' is \"paused\" while the queue is suspended, \"held\" while tasks
+wait and none of them can start for quota or a budget (or because the
+user paused it), else \"running\".  `:working' counts the tasks holding a
+slot, `:waiting' those in the queue, `:paused' those of them paused by
+hand and `:held' those waiting for quota or a budget, whose reasons
+`:holds' lists once each, with the number of tasks it holds back and the
+marks or budgets behind it (`:items', as a task's `:hold' has them)."
+  (let ((queued (harness-tasks--sorted
+                 (lambda (task) (and (equal (harness-tasks--slot-project task) project)
+                                     (harness-tasks--queued-p task)))))
+        (working 0) (paused 0) (held 0) holds)
+    (maphash (lambda (_ task)
+               (when (and (equal (harness-tasks--slot-project task) project)
+                          (harness-tasks--holds-slot-p task))
+                 (cl-incf working)))
+             harness-tasks--table)
+    (dolist (task queued)
+      (let* ((hold (harness-tasks--hold task))
+             (kind (plist-get hold :kind)))
+        (cond
+         ((eq kind 'paused) (cl-incf paused))
+         (kind
+          (cl-incf held)
+          (let ((cell (cl-find-if (lambda (h) (and (eq (plist-get h :kind) kind)
+                                                   (equal (plist-get h :reason) (plist-get hold :reason))))
+                                  holds)))
+            (if cell
+                (plist-put cell :count (1+ (plist-get cell :count)))
+              (push (list :kind kind :reason (plist-get hold :reason) :until (plist-get hold :until)
+                          :guess (plist-get hold :guess) :items (plist-get hold :items) :count 1)
+                    holds)))))))
+    (let ((suspended (harness-tasks--suspended-p project))
+          (waiting (length queued)))
+      (list :project project
+            :name (harness-tasks--project-name project)
+            :state (cond (suspended "paused")
+                         ((and (> held 0) (= (+ held paused) waiting)) "held")
+                         (t "running"))
+            :suspended (if suspended t :false)
+            :limit harness-tasks-max-running
+            :working working :waiting waiting :paused paused :held held
+            :holds (nreverse holds)))))
+
+(defun harness-tasks--queues-report ()
+  "Return every listed queue and the totals, as `task/queues' answers."
+  (let* ((queues (mapcar #'harness-tasks--queue-summary (harness-tasks--queue-projects)))
+         (sum (lambda (key) (apply #'+ (mapcar (lambda (queue) (plist-get queue key)) queues)))))
+    (list :queues queues
+          :totals (list :queues (length queues)
+                        :suspended (cl-count-if (lambda (queue) (eq (plist-get queue :suspended) t)) queues)
+                        :working (funcall sum :working) :waiting (funcall sum :waiting)
+                        :paused (funcall sum :paused) :held (funcall sum :held)))))
+
+(harness-defmethod task/queues ()
+  "Return every project's queue, and the totals over them, for a page.
+A plist of `:queues', one for each project with a task that works or
+waits and for each project whose queue is suspended, by project, each a
+plist of `:project' (its root), `:name', `:state' (\"running\",
+\"paused\" -- the queue is suspended --, or \"held\" -- tasks wait and
+none can start, for quota, a budget or a pause), `:suspended', `:limit'
+\(`harness-tasks-max-running'), `:working' (tasks holding a slot),
+`:waiting' (tasks in the queue), `:paused' (of those, paused by hand),
+`:held' (of those, waiting for quota or a budget) and `:holds' (the
+reasons of those, each as `:kind' quota or budget, `:reason', `:until',
+`:guess', `:items' and `:count'), and of `:totals', the same counts over every
+queue, with `:queues' and `:suspended', how many queues are suspended."
+  (harness-tasks--load)
+  (harness-tasks--queues-report))
+
+(harness-defmethod task/suspend-all-queues ()
+  "Suspend the pending queue of every project that has one worth listing.
+`task/queues' lists them: those with a task that works or waits.  Each is
+suspended as `task/suspend-queue' suspends it; a queue made after this is
+not.  Tasks at work go on; none waiting starts on its own.  Return
+\(:projects PROJECTS :suspended t)."
+  (harness-tasks--load)
+  (let ((projects (harness-tasks--queue-projects)))
+    (dolist (project projects)
+      (harness-tasks--set-suspended project t))
+    (list :projects projects :suspended t)))
+
+(harness-defmethod task/resume-all-queues ()
+  "Resume every suspended queue, and start the waiting tasks, by priority.
+Each project's queue is resumed as `task/resume-queue' resumes it.
+Return (:projects PROJECTS :suspended :false), PROJECTS being the ones
+that were suspended."
+  (harness-tasks--load)
+  (harness-tasks--load-queues)
+  (let ((projects (sort (hash-table-keys harness-tasks--queues) #'string<)))
+    (dolist (project projects)
+      (harness-tasks--set-suspended project nil))
+    (harness-tasks--schedule)
+    (list :projects projects :suspended :false)))
+
 (harness-defmethod task/backlog-mode (&optional cwd)
   "Return the backlog mode of CWD's project (the current one by default).
 That is (:project PROJECT :mode MODE).  MODE is `manual', the default --
@@ -5351,6 +5959,91 @@ task's view."
         (harness-tasks--stop-outstanding id))
       (harness-tasks--schedule id))))
 
+(harness-defmethod task/pause (id)
+  "Pause task ID: back in the pending queue, and held there until resumed.
+A task at work is returned to pending as `task/return-to-pending'
+returns it -- its turn stopped, and the work its session left running
+outside it, its session, branch and worktree kept -- and unlike that
+return it stays: the queue does not start a paused task, however many
+slots are free, until `task/resume', an explicit `task/start' or a turn
+the user starts in its session (`:paused' is when; the view's `:hold'
+says `paused').  A task waiting for a slot is paused where it is, and
+one stopped part way (waiting for the user) is paused like one at work.
+The pause is kept with the task, so it outlives a restart: the
+scheduler that starts the waiting tasks as the harness comes up leaves
+a paused task alone.  Pausing is independent of suspending the queue
+\(`task/suspend-queue'); each holds a task back by itself.  A task
+already paused stays so.  Signals for a task that is in review,
+merging, done or in the backlog.  Return the task."
+  (harness-tasks--pause id)
+  ;; Written now, not in a moment: a pause is a decision, and a crash
+  ;; before the save would let the restart carry the task on.
+  (harness-tasks-flush)
+  (harness-call 'task/get id))
+
+(harness-defmethod task/resume (id)
+  "End the pause of task ID, which then waits for its turn in the queue.
+The queue starts it by priority within the limit, unless its project's
+queue is suspended or it is held for quota or a budget meanwhile
+\(`harness-tasks--hold'); it carries on where it stopped, told by the
+harness it was paused.  `task/start' starts it at once instead.  A task
+that is not paused stays as it was.  Return the task."
+  (harness-tasks--unpause id)
+  (harness-call 'task/get id))
+
+(defun harness-tasks--in-project-p (task project)
+  "Non-nil when TASK takes the slots of PROJECT, or PROJECT is nil (any project)."
+  (or (null project) (equal project (harness-tasks--slot-project task))))
+
+(harness-defmethod task/pause-all (&optional cwd)
+  "Pause every task of CWD's project, of every project without CWD.
+Every task at work (`harness-tasks--at-work-p') is paused as `task/pause'
+pauses it, and so is every task waiting for a slot: the slots the first
+free would otherwise start the second.  The waiting ones are paused
+first, so nothing starts into a slot a paused task frees.  Tasks stopped
+part way, in the backlog, in review, in the merge queue and done are
+left alone, and so are those paused already.  Queues are not touched:
+suspending them is `task/suspend-queue' and `task/suspend-all-queues'.
+Return (:ids IDS), the tasks paused."
+  (harness-tasks--load)
+  (let* ((project (and cwd (harness-tasks--project cwd)))
+         (waiting (harness-tasks--sorted
+                   (lambda (task) (and (harness-tasks--in-project-p task project)
+                                       (harness-tasks--queued-p task)
+                                       (not (harness-tasks--paused-p task))))))
+         (working (harness-tasks--sorted
+                   (lambda (task) (and (harness-tasks--in-project-p task project)
+                                       (harness-tasks--at-work-p task)))))
+         (ids nil))
+    (dolist (task (append waiting working))
+      (let ((id (plist-get task :id)))
+        (condition-case err
+            (progn (harness-tasks--pause id)
+                   (push id ids))
+          (error (harness-log 'warn "task %s: pausing it failed: %s" id (harness-error-message err))))))
+    ;; Written now, as `task/pause' does.
+    (harness-tasks-flush)
+    (list :ids (nreverse ids))))
+
+(harness-defmethod task/resume-all (&optional cwd)
+  "End the pause of every paused task of CWD's project (every project without).
+The queue then starts them as slots are free, by priority, as it starts
+any waiting task, and not while their project's queue is suspended.  One
+scheduling pass follows, after every pause is ended.  Return (:ids IDS),
+the tasks resumed."
+  (harness-tasks--load)
+  (let* ((project (and cwd (harness-tasks--project cwd)))
+         (ids nil))
+    (dolist (task (harness-tasks--sorted
+                   (lambda (task) (and (harness-tasks--in-project-p task project)
+                                       (harness-tasks--paused-p task)))))
+      (harness-tasks--set (plist-get task :id) :paused nil)
+      (push (plist-get task :id) ids))
+    (when ids
+      (harness-log 'info "tasks: resumed %d paused task%s" (length ids) (if (cdr ids) "s" ""))
+      (harness-tasks--schedule))
+    (list :ids (nreverse ids))))
+
 (harness-defmethod task/update (id prompt &optional attachments)
   "Replace the prompt of pending task ID with PROMPT and its ATTACHMENTS.
 ATTACHMENTS are as `task/submit' takes them, pictures sent as data
@@ -5393,13 +6086,14 @@ feedback, as `task/reject' does; another session's is no review and
 does not (`harness-tasks--on-message').
 
 A task returned to pending is the message's when it starts: while its
-queue is suspended, or while it waits for a slot with the user's
-feedback from review (`harness-tasks--hold-back'), the message is kept
-on the task and delivered with the start
-\(`harness-tasks--queue-message'), so it does not get around the
-suspension or the limit; otherwise it starts the task now, as an
-explicit `task/start' would, and the message follows the start's own
-carry-on."
+queue is suspended, while it waits for a slot with the user's
+feedback from review (`harness-tasks--hold-back'), or while something
+holds it back -- it is paused, out of quota or over a hard budget
+\(`harness-tasks--hold') --, the message is kept on the task and
+delivered with the start (`harness-tasks--queue-message'), so it does
+not get around the suspension, the limit or the hold; otherwise it
+starts the task now, as an explicit `task/start' would, and the message
+follows the start's own carry-on."
   (let ((task (harness-tasks--get id))
         (from (let ((f (plist-get opts :from))) (and (harness-sender-kind f) f))))
     ;; Every task has its session from submission; one still waiting for a
@@ -5414,7 +6108,8 @@ carry-on."
     (cond
      ((and (harness-tasks--returned-p task)
            (or (harness-tasks--task-suspended-p task)
-               (eq (harness-tasks--return-reason task) 'sent-back)))
+               (eq (harness-tasks--return-reason task) 'sent-back)
+               (harness-tasks--hold task)))
       (harness-log 'info "task %s: keeping the message until it starts again" id)
       (harness-tasks--queue-message id text attachments from))
      ((harness-tasks--returned-p task)
@@ -5883,6 +6578,10 @@ process's own, and goes on."
   (harness-on 'merge/finished #'harness-tasks--on-merge-finished)
   (harness-on 'config/changed #'harness-tasks--on-config-changed)
   (harness-on 'session/ext-changed #'harness-tasks--on-priority-changed)
+  ;; What ends a hold for quota or a budget: a mark that ended or was
+  ;; cleared, a quota report, a budget raised, removed or made soft.
+  (harness-on 'fallback/changed #'harness-tasks--on-hold-event)
+  (harness-on 'usage/budgets-changed #'harness-tasks--on-hold-event)
   (harness-add-filter 'worktree/lock-existing-p #'harness-tasks--lock-existing-p)
   (harness-add-filter 'agent/system-prompt #'harness-tasks--system-prompt 60)
   (harness-add-filter 'agent/system-prompt #'harness-tasks--btw-system-prompt 60)
@@ -5916,6 +6615,8 @@ turn that stopped without a plan back (`harness-tasks--plan-stop')."
   (harness-remove-filter 'agent/stop #'harness-tasks--plan-stop)
   (maphash (lambda (_ timer) (cancel-timer timer)) harness-tasks--lend-timers)
   (clrhash harness-tasks--lend-timers)
+  (when (timerp harness-tasks--hold-timer) (cancel-timer harness-tasks--hold-timer))
+  (setq harness-tasks--hold-timer nil)
   (harness-tasks-flush))
 
 (harness-declare-event 'task/changed "(TASK) after a task is submitted or changes state or column.")

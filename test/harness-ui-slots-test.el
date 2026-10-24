@@ -1457,6 +1457,430 @@ A board without the page's module says what is missing."
     (should (equal "Task slots" (plist-get (funcall plist entry) :description)))
     (should (= 1 (cl-count "Q" keys :test #'equal)))))
 
+;;;; The queues
+
+(defvar harness-ui-slots-test--calls nil
+  "The requests the page made with `harness-ui-call', newest first: (METHOD PARAMS).")
+
+(defvar harness-ui-slots-test--call-answers nil
+  "What the harness answers a request with, an alist of METHOD and answer.")
+
+(defmacro harness-ui-slots-test-with-calls (&rest body)
+  "Run BODY with the page's requests (`harness-ui-call') answered by the test.
+`harness-ui-slots-test--calls' records each, `harness-ui-slots-test--call-answers'
+says what it is answered with; the messages the page shows are in
+`harness-ui-slots-test--messages'."
+  (declare (indent 0))
+  `(let ((harness-ui-slots-test--calls nil)
+         (harness-ui-slots-test--call-answers nil)
+         (harness-ui-slots-test--messages nil))
+     (cl-letf (((symbol-function 'harness-ui-call)
+                (lambda (method params callback &optional _on-error)
+                  (push (list method params) harness-ui-slots-test--calls)
+                  (funcall callback (cdr (assoc method harness-ui-slots-test--call-answers)))))
+               ((symbol-function 'message)
+                (lambda (format-string &rest args)
+                  (when format-string
+                    (push (apply #'format format-string args) harness-ui-slots-test--messages)))))
+       ,@body)))
+
+(defvar harness-ui-slots-test--messages nil
+  "What the page said in the echo area, newest first.")
+
+(defun harness-ui-slots-test--queue (name state &rest props)
+  "A queue of `task/slots' :queues: the project NAME, in STATE, with PROPS.
+Its root is /home/me/src/NAME/; it is suspended when STATE is \"paused\"."
+  (let ((queue (list :project (format "/home/me/src/%s/" name) :name name :state state
+                     :suspended (if (equal state "paused") t :false) :limit 4
+                     :working 0 :waiting 0 :paused 0 :held 0 :holds nil)))
+    (while props (setq queue (plist-put queue (pop props) (pop props))))
+    queue))
+
+(defun harness-ui-slots-test--with-queues (&rest props)
+  "An answer of `task/slots' with three queues: acme (the page's), api and docs.
+acme runs and works, api is paused with a task paused in it, docs is
+held, its two waiting tasks out of quota.  PROPS replace the keys they name."
+  (apply #'harness-ui-slots-test--data
+         (append props
+                 (list :queues
+                       (list (harness-ui-slots-test--queue "acme" "running" :working 3 :waiting 4)
+                             (harness-ui-slots-test--queue "api" "paused" :waiting 2 :paused 1)
+                             (harness-ui-slots-test--queue
+                              "docs" "held" :waiting 2 :held 2
+                              :holds (list (list :kind "quota" :reason "Claude Code is out of quota"
+                                                 :until (+ (float-time) 3600) :guess :false :count 2
+                                                 :items (list (list :key "claude" :label "Claude Code"))))))
+                       :totals (list :queues 3 :suspended 1 :working 3 :waiting 8 :paused 1 :held 2)))))
+
+(defun harness-ui-slots-test--push (regexp)
+  "In the page, push the button REGEXP ends with, as a click does.
+REGEXP says where to look -- the group of buttons, the queue -- and ends
+with the label of the button; point goes inside that label, which RET
+or a click acts from."
+  (goto-char (point-min))
+  (re-search-forward regexp)
+  (goto-char (- (match-end 0) 3))
+  (harness-ui-action-push))
+
+(defun harness-ui-slots-test--calls ()
+  "The requests the page made, oldest first, as (METHOD . PARAMS)."
+  (mapcar (lambda (call) (cons (car call) (cadr call))) (reverse harness-ui-slots-test--calls)))
+
+(ert-deftest harness-ui-slots-queues-section-lists-every-queue ()
+  "The section has its heading, the switches, and a row for each queue.
+The page's own project's row is marked, every row has its counts, with a
+dash for none, and the button that fits its state."
+  (let* ((lines (harness-ui-slots-test--page (harness-ui-slots-test--with-queues)))
+         (queues (member " Queues · 3 · 1 paused" lines)))
+    (should queues)
+    ;; Between the first line and the slots in use, its own section.
+    (should (< (cl-position " Queues · 3 · 1 paused" lines :test #'equal)
+               (cl-position " In use" lines :test #'equal)))
+    (should (string-match-p "\\`   Tasks +\\[Pause all\\] \\[Resume all\\] +3 working · 1 paused\\'" (nth 1 queues)))
+    (should (string-match-p "\\`   Queues +\\[Pause all\\] \\[Resume all\\] +1 paused\\'" (nth 2 queues)))
+    (should (string-match-p "\\`   Queue +State +Working +Waiting +Paused +Held\\'" (nth 4 queues)))
+    (should (equal '("›" "acme" "running" "3" "4" "–" "–" "[Pause]")
+                   (split-string (nth 5 queues) "[ ]+" t)))
+    (should (equal '("api" "paused" "–" "2" "1" "–" "[Resume]")
+                   (split-string (nth 6 queues) "[ ]+" t)))
+    (should (equal '("docs" "held" "–" "2" "–" "2" "[Pause]")
+                   (split-string (nth 7 queues) "[ ]+" t)))
+    ;; What holds docs back, under its row, with the names and how many.
+    (should (string-match-p "\\`     quota · Claude Code · resets [0-9:]+ · 2 tasks\\'" (nth 8 queues)))
+    ;; The counts end where their headings do.
+    (let ((header (nth 4 queues))
+          (row (nth 5 queues)))
+      (dolist (word '("Working" "Waiting" "Paused" "Held"))
+        (let ((end (+ (string-match word header) (length word))))
+          (should (string-match-p "[0-9–]" (string (aref row (1- end)))))
+          (should (eq ?\s (aref (concat row "  ") end))))))))
+
+(ert-deftest harness-ui-slots-queues-section-needs-the-answer-to-list-them ()
+  "A harness that lists no queues has no section; one with none says so."
+  (let ((without (harness-ui-slots-test--page (harness-ui-slots-test--data))))
+    (should-not (harness-ui-slots-test--line-with without "Queues"))
+    (should (string-match-p "\\` Task slots" (car without)))
+    (should (equal " In use" (nth 2 without))))
+  (let ((none (harness-ui-slots-test--page
+               (harness-ui-slots-test--data :queues nil :totals (list :queues 0 :suspended 0 :working 0
+                                                                       :waiting 0 :paused 0 :held 0)))))
+    (should (member " Queues · 0" none))
+    (should (harness-ui-slots-test--line-with none "\\`   no queue\\'"))
+    (should-not (harness-ui-slots-test--line-with none "State +Working"))))
+
+(ert-deftest harness-ui-slots-queues-section-marks-the-pages-project ()
+  "The row of the page's project is marked, whichever way its directory is written."
+  (dolist (project '("/home/me/src/api/" "/home/me/src/api"))
+    (let ((lines (harness-ui-slots-test--lines
+                  (harness-ui-slots--text (harness-ui-slots-test--with-queues :project project)
+                                          100 harness-ui-slots-test--now project))))
+      (should (harness-ui-slots-test--line-with lines "\\` › api +paused"))
+      (should (harness-ui-slots-test--line-with lines "\\`   acme +running"))
+      (should (= 1 (harness-ui-slots-test--count "›" lines))))))
+
+(ert-deftest harness-ui-slots-queues-hold-lines-name-what-holds-a-queue ()
+  "Each hold of a queue has its line: its kind, what it waits for, when it ends.
+A budget names the budget, a retry time is a retry, and a hold that only
+an edit of a budget ends has no time."
+  (let* ((data (harness-ui-slots-test--with-queues))
+         (queue (harness-ui-slots-test--queue
+                 "docs" "held" :waiting 3 :held 3
+                 :holds (list (list :kind "quota" :reason "x" :until (+ (float-time) 600) :guess t :count 1
+                                    :items (list (list :label "DeepSeek")))
+                              (list :kind "budget" :reason "y" :until nil :guess :false :count 2
+                                    :items (list (list :label "daily" :id "b1" :period "day"))))))
+         (lines (harness-ui-slots-test--page
+                 (plist-put (copy-sequence data) :queues (list queue)))))
+    (should (harness-ui-slots-test--line-with lines "\\`     quota · DeepSeek · retry [0-9:]+ · 1 task\\'"))
+    (should (harness-ui-slots-test--line-with lines "\\`     budget · daily · 2 tasks\\'"))
+    ;; A later reset has its day.
+    (let ((far (harness-ui-slots-test--queue
+                "docs" "held" :waiting 1 :held 1
+                :holds (list (list :kind "budget" :reason "z" :guess :false :count 1
+                                   :until (+ (float-time) (* 3 86400))
+                                   :items (list (list :label "weekly")))))))
+      (should (harness-ui-slots-test--line-with
+               (harness-ui-slots-test--page (plist-put (copy-sequence data) :queues (list far)))
+               "\\`     budget · weekly · resets [A-Z][a-z][a-z] [A-Z][a-z][a-z] [0-9]+, [0-9:]+ · 1 task\\'")))))
+
+(ert-deftest harness-ui-slots-queues-table-fits-a-narrow-window ()
+  "The name gives way before the counts and the button do."
+  (let* ((queue (harness-ui-slots-test--queue "a-project-with-a-rather-long-name" "running" :working 1 :waiting 2))
+         (data (plist-put (harness-ui-slots-test--with-queues) :queues (list queue)))
+         (wide (harness-ui-slots-test--page data 100))
+         (narrow (harness-ui-slots-test--page data 64)))
+    (should (harness-ui-slots-test--line-with wide "a-project-with-a-rather-lon… +running"))
+    (let ((row (harness-ui-slots-test--line-with narrow "running")))
+      (should row)
+      (should (string-match-p "…" row))
+      (should (string-match-p "1 +2 +– +– +\\[Pause\\]\\'" row))
+      (should (<= (string-width row) 70)))))
+
+(ert-deftest harness-ui-slots-queues-table-gives-up-counts-before-the-button ()
+  "A window too narrow for every count leaves out Held, then Paused.
+The button stays, and so does every row on one line: nothing wraps, which
+would put a queue's button at the start of the next line."
+  (let ((data (harness-ui-slots-test--with-queues)))
+    ;; A name keeps eight columns at least, so each count has a width
+    ;; under which it goes: 64 for all four, 58 for three, 50 for two.
+    (dolist (case '((100 "State +Working +Waiting +Paused +Held\\'")
+                    (64 "State +Working +Waiting +Paused +Held\\'")
+                    (63 "State +Working +Waiting +Paused\\'")
+                    (58 "State +Working +Waiting +Paused\\'")
+                    (57 "State +Working +Waiting\\'")
+                    (50 "State +Working +Waiting\\'")))
+      (let* ((width (nth 0 case))
+             (lines (harness-ui-slots-test--page data width))
+             (queues (member " Queues · 3 · 1 paused" lines))
+             (table (seq-take-while (lambda (line) (not (string-empty-p line))) (nthcdr 4 queues))))
+        (ert-info ((format "a window %d wide: %S" width table))
+          (should (string-match-p (nth 1 case) (car table)))
+          ;; Header, three rows and the hold line, each within the window.
+          (should (= 5 (length table)))
+          (dolist (line table)
+            (should (<= (string-width line) width)))
+          (dolist (row (cdr (seq-take table 4)))
+            (should (string-match-p "\\[\\(Pause\\|Resume\\)\\]\\'" row)))
+          ;; What the counts gave up the State word and the line under the row still say.
+          (should (string-match-p "docs +held" (nth 3 table)))
+          (should (string-match-p "· 2 tasks\\'" (nth 4 table))))))))
+
+(ert-deftest harness-ui-slots-queues-hold-line-is-cut-before-the-task-count ()
+  "A hold line longer than the window is cut in its words, never in its count."
+  (let* ((queue (harness-ui-slots-test--queue
+                 "docs" "held" :waiting 12 :held 12
+                 :holds (list (list :kind "quota" :reason "x" :until (+ (float-time) 3600) :guess :false :count 12
+                                    :items (list (list :label "A provider with a name that goes on and on and on")
+                                                 (list :label "Another provider")))))))
+    (dolist (width '(40 60 100))
+      (let ((line (car (last (seq-take-while
+                              (lambda (line) (not (string-empty-p line)))
+                              (nthcdr 4 (member " Queues · 1 · 1 paused"
+                                                (harness-ui-slots-test--page
+                                                 (plist-put (harness-ui-slots-test--with-queues) :queues (list queue))
+                                                 width)))))))
+            (long (string-width "quota · A provider with a name that goes on and on and on, Another provider")))
+        (ert-info ((format "a window %d wide: %S" width line))
+          (should (<= (string-width line) width))
+          (should (string-match-p "· 12 tasks\\'" line))
+          (should (string-match-p "\\`     quota · A provider" line))
+          (when (< width (+ 5 long 12))
+            (should (string-match-p "…" line))))))))
+
+(ert-deftest harness-ui-slots-queues-switches-are-dim-when-they-change-nothing ()
+  "A switch that would do nothing is drawn dim, and still works."
+  (let ((face (lambda (text label action)
+                (let ((pos (text-property-any 0 (length text) 'harness-ui-action action text)))
+                  (ignore label)
+                  (and pos (get-text-property pos 'face text))))))
+    ;; Something to pause and resume: nothing is dim but Resume all queues.
+    (let ((text (harness-ui-slots--text (harness-ui-slots-test--with-queues) 100 harness-ui-slots-test--now nil)))
+      (should (eq 'button (funcall face text "" #'harness-ui-slots-pause-tasks)))
+      (should (eq 'button (funcall face text "" #'harness-ui-slots-resume-tasks)))
+      (should (eq 'button (funcall face text "" #'harness-ui-slots-pause-queues)))
+      (should (eq 'button (funcall face text "" #'harness-ui-slots-resume-queues))))
+    ;; Nothing at work or waiting, nothing paused, every queue paused: three are idle.
+    (let* ((data (harness-ui-slots-test--data
+                  :queues (list (harness-ui-slots-test--queue "acme" "paused"))
+                  :totals (list :queues 1 :suspended 1 :working 0 :waiting 0 :paused 0 :held 0)))
+           (text (harness-ui-slots--text data 100 harness-ui-slots-test--now nil)))
+      (should (eq 'harness-dim-face (funcall face text "" #'harness-ui-slots-pause-tasks)))
+      (should (eq 'harness-dim-face (funcall face text "" #'harness-ui-slots-resume-tasks)))
+      (should (eq 'harness-dim-face (funcall face text "" #'harness-ui-slots-pause-queues)))
+      (should (eq 'button (funcall face text "" #'harness-ui-slots-resume-queues))))
+    ;; No queue paused: Resume all queues is idle.
+    (let* ((data (harness-ui-slots-test--data
+                  :queues (list (harness-ui-slots-test--queue "acme" "running" :working 1))
+                  :totals (list :queues 1 :suspended 0 :working 1 :waiting 0 :paused 0 :held 0)))
+           (text (harness-ui-slots--text data 100 harness-ui-slots-test--now nil)))
+      (should (eq 'button (funcall face text "" #'harness-ui-slots-pause-queues)))
+      (should (eq 'harness-dim-face (funcall face text "" #'harness-ui-slots-resume-queues))))))
+
+(ert-deftest harness-ui-slots-queues-next-in-line-names-the-hold ()
+  "A waiting task that something holds back says what, short, in Next in line.
+A return for quota or a budget has its noun when nothing holds it."
+  (let* ((queue (list (list :id "t-q1" :title "Paused one" :priority "medium" :since 1000.0 :reason "returned"
+                            :hold (list :kind "paused"))
+                      (list :id "t-q2" :title "Waits for quota" :priority "medium" :since 1000.0 :reason "quota"
+                            :hold (list :kind "quota" :until (+ (float-time) 600) :guess :false
+                                        :items (list (list :label "Claude Code"))))
+                      (list :id "t-q3" :title "Over the budget" :priority "high" :since 1000.0
+                            :hold (list :kind "budget" :until nil))
+                      (list :id "t-q4" :title "Parked, hold over" :priority "low" :since 1000.0 :reason "budget")
+                      (list :id "t-q5" :title "Parked for quota" :priority "low" :since 1000.0 :reason "quota")))
+         (lines (harness-ui-slots-test--page (harness-ui-slots-test--data :queue queue))))
+    (should (harness-ui-slots-test--line-with lines "Paused one · paused"))
+    ;; Short: the names are on the board's card and the queues' lines.
+    (should (harness-ui-slots-test--line-with lines "Waits for quota · quota · resets [0-9:]+"))
+    (should-not (harness-ui-slots-test--line-with lines "Claude Code"))
+    (should (harness-ui-slots-test--line-with lines "Over the budget · budget +"))
+    (should (harness-ui-slots-test--line-with lines "Parked, hold over · budget"))
+    (should (harness-ui-slots-test--line-with lines "Parked for quota · quota"))
+    ;; A hold is not a return reason too.
+    (should-not (harness-ui-slots-test--line-with lines "Paused one · returned"))))
+
+(ert-deftest harness-ui-slots-queues-rows-carry-their-project ()
+  "A queue's row, its hold lines and its button carry the project and a key.
+A redraw finds the row again by it, and the commands read the project at
+point."
+  (harness-ui-slots-test-with
+    (let ((buffer (harness-ui-slots-test--open (harness-ui-slots-test--with-queues))))
+      (with-current-buffer buffer
+        (harness-ui-slots-test--goto "project:/home/me/src/docs/")
+        (should (equal "/home/me/src/docs/" (get-text-property (point) 'harness-slot-queue)))
+        ;; Its hold line and its button are the queue's too.
+        (forward-line 1)
+        (should (equal "/home/me/src/docs/" (get-text-property (+ (point) 6) 'harness-slot-queue)))
+        (harness-ui-slots-test--goto "project:/home/me/src/api/")
+        (end-of-line)
+        (should (equal "/home/me/src/api/" (get-text-property (1- (point)) 'harness-slot-queue)))
+        (should (equal "[Resume]" (buffer-substring-no-properties (- (point) 8) (point))))))))
+
+(ert-deftest harness-ui-slots-queues-page-is-not-redrawn-for-the-same-answer ()
+  "Buttons are commands, not closures: the same answer draws the same text.
+A page with a queue's button would otherwise be drawn again at every
+tick, and point would be put back each time."
+  (harness-ui-slots-test-with
+    (let ((buffer (harness-ui-slots-test--open (harness-ui-slots-test--with-queues))))
+      (with-current-buffer buffer
+        (should-not (harness-ui-slots--render))
+        (harness-ui-slots-test--goto "project:/home/me/src/api/")
+        (let ((at (point)))
+          (should-not (harness-ui-slots--render))
+          (should (= at (point))))))))
+
+(ert-deftest harness-ui-slots-queues-buttons-ask-the-harness ()
+  "Each of the six buttons asks the harness for what it says, and the page says it did.
+They are pushed as a click pushes them: from inside the label."
+  (harness-ui-slots-test-with
+    (harness-ui-slots-test-with-calls
+      (let ((buffer (harness-ui-slots-test--open (harness-ui-slots-test--with-queues)))
+            (harness-ui-slots--refetch-delay 0.01))
+        (setq harness-ui-slots-test--call-answers
+              (list (cons "_harness/task/pause-all" (list :ids '("t-1" "t-2" "t-3")))
+                    (cons "_harness/task/resume-all" (list :ids '("t-1")))
+                    (cons "_harness/task/suspend-all-queues" (list :projects '("a" "b")))
+                    (cons "_harness/task/resume-all-queues" (list :projects '("a")))
+                    (cons "_harness/task/suspend-queue" (list :project "/home/me/src/acme/" :suspended t))
+                    (cons "_harness/task/resume-queue" (list :project "/home/me/src/api/" :suspended :false))))
+        (with-current-buffer buffer
+          (harness-ui-slots-test--push "Tasks +\\[Pause all\\]")
+          (should (equal "Paused 3 tasks" (car harness-ui-slots-test--messages)))
+          (harness-ui-slots-test--push "Tasks +\\[Pause all\\] \\[Resume all\\]")
+          (should (equal "Resumed 1 task" (car harness-ui-slots-test--messages)))
+          (harness-ui-slots-test--push "Queues +\\[Pause all\\]")
+          (should (equal "Paused 2 queues" (car harness-ui-slots-test--messages)))
+          (harness-ui-slots-test--push "Queues +\\[Pause all\\] \\[Resume all\\]")
+          (should (equal "Resumed 1 queue" (car harness-ui-slots-test--messages)))
+          ;; A queue's own button: acme runs, so Pause; api is paused, so Resume.
+          (harness-ui-slots-test--push "acme .*\\[Pause\\]")
+          (should (equal "Paused queue acme" (car harness-ui-slots-test--messages)))
+          (harness-ui-slots-test--push "api .*\\[Resume\\]")
+          (should (equal "Resumed queue api" (car harness-ui-slots-test--messages))))
+        (should (equal '(("_harness/task/pause-all")
+                         ("_harness/task/resume-all")
+                         ("_harness/task/suspend-all-queues")
+                         ("_harness/task/resume-all-queues")
+                         ("_harness/task/suspend-queue" :cwd "/home/me/src/acme/")
+                         ("_harness/task/resume-queue" :cwd "/home/me/src/api/"))
+                       (harness-ui-slots-test--calls)))
+        ;; The page asks the harness for the slots again, soon, to show it.
+        (let ((requests (length harness-ui-slots-test--requests)))
+          (harness-test-wait (lambda () (> (length harness-ui-slots-test--requests) requests)) 3
+                             "the page to ask again"))))))
+
+(ert-deftest harness-ui-slots-queues-buttons-say-when-there-was-nothing-to-do ()
+  "A switch that found nothing to change says so, in as few words."
+  (harness-ui-slots-test-with
+    (harness-ui-slots-test-with-calls
+      (let ((buffer (harness-ui-slots-test--open (harness-ui-slots-test--with-queues))))
+        (with-current-buffer buffer
+          (dolist (case '(("Tasks +\\[Pause all\\]" "_harness/task/pause-all" "No task to pause")
+                          ("Tasks +\\[Pause all\\] \\[Resume all\\]" "_harness/task/resume-all" "No paused task")
+                          ("Queues +\\[Pause all\\]" "_harness/task/suspend-all-queues" "No queue to pause")
+                          ("Queues +\\[Pause all\\] \\[Resume all\\]" "_harness/task/resume-all-queues" "No paused queue")))
+            (setq harness-ui-slots-test--call-answers (list (cons (nth 1 case) (list :ids nil :projects nil))))
+            (harness-ui-slots-test--push (nth 0 case))
+            (should (equal (nth 2 case) (car harness-ui-slots-test--messages)))))))))
+
+(ert-deftest harness-ui-slots-queues-keys-do-what-the-buttons-do ()
+  "u, U, s and S act on every task and queue, P on the queue at point.
+On a queue's row P is that queue's; anywhere else it is the page's own
+project's.  A queue paused is resumed, and the other way round."
+  (harness-ui-slots-test-with
+    (harness-ui-slots-test-with-calls
+      (let ((buffer (harness-ui-slots-test--open (harness-ui-slots-test--with-queues)))
+            (keys '(("u" . harness-ui-slots-pause-tasks) ("U" . harness-ui-slots-resume-tasks)
+                    ("s" . harness-ui-slots-pause-queues) ("S" . harness-ui-slots-resume-queues)
+                    ("P" . harness-ui-slots-toggle-queue))))
+        (with-current-buffer buffer
+          (dolist (key keys)
+            (should (eq (cdr key) (key-binding (kbd (car key))))))
+          ;; The keys the page already had keep their commands.
+          (should (eq #'harness-ui-slots-next-row (key-binding (kbd "TAB"))))
+          (should (eq #'harness-ui-slots-set-limit (key-binding (kbd "l"))))
+          (dolist (key (butlast keys))
+            (call-interactively (key-binding (kbd (car key)))))
+          ;; On api's row, which is paused: resume it.
+          (harness-ui-slots-test--goto "project:/home/me/src/api/")
+          (call-interactively (key-binding (kbd "P")))
+          ;; On docs's, held but not paused: pause it.
+          (harness-ui-slots-test--goto "project:/home/me/src/docs/" 1 8)
+          (call-interactively (key-binding (kbd "P")))
+          ;; Off the rows, the page's project's: acme runs, so pause it.
+          (goto-char (point-min))
+          (call-interactively (key-binding (kbd "P"))))
+        (should (equal '(("_harness/task/pause-all")
+                         ("_harness/task/resume-all")
+                         ("_harness/task/suspend-all-queues")
+                         ("_harness/task/resume-all-queues")
+                         ("_harness/task/resume-queue" :cwd "/home/me/src/api/")
+                         ("_harness/task/suspend-queue" :cwd "/home/me/src/docs/")
+                         ("_harness/task/suspend-queue" :cwd "/home/me/src/acme/"))
+                       (harness-ui-slots-test--calls)))))))
+
+(ert-deftest harness-ui-slots-queues-failure-says-what-failed ()
+  "A request the harness refuses says so in the echo area, not on the page."
+  (harness-ui-slots-test-with
+    (let ((buffer (harness-ui-slots-test--open (harness-ui-slots-test--with-queues)))
+          (said nil))
+      (cl-letf (((symbol-function 'harness-ui-call)
+                 (lambda (_method _params _callback &optional on-error)
+                   (funcall on-error '(harness-error "no such project"))))
+                ((symbol-function 'message)
+                 (lambda (format-string &rest args) (push (apply #'format format-string args) said))))
+        (with-current-buffer buffer
+          (harness-ui-slots-pause-tasks))
+        (should (string-match-p "\\`Pausing the tasks failed: " (car said)))))))
+
+(ert-deftest harness-ui-slots-queues-name-opens-the-slots-of-its-project ()
+  "RET, or a click, on a queue's name shows that project's slots on the page."
+  (harness-ui-slots-test-with
+    (let ((buffer (harness-ui-slots-test--open (harness-ui-slots-test--with-queues))))
+      (with-current-buffer buffer
+        (harness-ui-slots-test--goto "project:/home/me/src/api/" 0 5)
+        (should (get-text-property (point) 'mouse-face))
+        (should (eq #'harness-ui-slots-open (lookup-key (get-text-property (point) 'keymap) (kbd "RET"))))
+        (setq harness-ui-slots-test--answer
+              (list 'data (harness-ui-slots-test--with-queues :project "/home/me/src/api/")))
+        (call-interactively #'harness-ui-slots-open)
+        (should (equal "/home/me/src/api/" harness-ui-slots--dir))
+        (should (equal "/home/me/src/api/" (car (car harness-ui-slots-test--requests))))
+        (should (harness-ui-slots-test--line-with
+                 (split-string (harness-ui-slots-test--visual (buffer-string)) "\n")
+                 "\\` › api +paused"))))))
+
+(ert-deftest harness-ui-slots-queues-menu-lists-the-commands ()
+  "The page's menu group lists each pause command, and each is a command."
+  (dolist (command '(harness-ui-slots-toggle-queue harness-ui-slots-pause-tasks
+                     harness-ui-slots-resume-tasks harness-ui-slots-pause-queues
+                     harness-ui-slots-resume-queues))
+    (should (commandp command))
+    (should (cl-some (lambda (column)
+                       (cl-some (lambda (item) (and (consp item) (eq command (nth 2 item))))
+                                (append column nil)))
+                     (cdr (get 'harness-ui-slots-mode 'harness-menu-group))))))
+
 ;;;; With the harness
 
 (defvar harness-provider-demo-script-override)
@@ -1615,6 +2039,162 @@ limit] there sets the board's limit, which the page shows too."
       (harness-test-wait (lambda () (equal '((harness-tasks-max-running . 3)) saved)) 5 "the limit to be saved")
       (funcall shows "2 of 3 in use · 1 free · 0 waiting")
       (should (harness-ui-slots-test--line-with (split-string (funcall text) "\n") "\\`   1 free\\'")))))
+
+(defvar harness-fallback--marks)
+(defvar harness-fallback--moved)
+(defvar harness-fallback--quotas)
+(defvar harness-fallback--notified)
+(defvar harness-fallback-models)
+(defvar harness-agent--cancel-grace)
+(declare-function harness-fallback--shutdown "harness-fallback")
+
+(defun harness-ui-slots-test--live-text (page)
+  "The text PAGE shows, as the display draws it."
+  (with-current-buffer page (harness-ui-slots-test--visual (buffer-string))))
+
+(defun harness-ui-slots-test--live-shows (page regexp)
+  "Wait until PAGE shows REGEXP; return its text."
+  (harness-test-wait (lambda () (string-match-p regexp (harness-ui-slots-test--live-text page)))
+                     8 (format "the page to show %s, it shows\n%s" regexp
+                               (harness-ui-slots-test--live-text page)))
+  (harness-ui-slots-test--live-text page))
+
+(defun harness-ui-slots-test--live-state (id)
+  "The state of task ID, as the harness has it."
+  (plist-get (harness-call 'task/get id) :state))
+
+(ert-deftest harness-ui-slots-live-pauses-every-task-and-resumes-them ()
+  "The Tasks buttons of the page pause and resume the tasks of every project.
+Two projects, two slots each: three tasks at work and one waiting.  [Pause
+all] stops the three and holds the fourth, and the slot a paused task
+frees starts nothing; the page counts them paused.  [Resume all] lets the
+queues start them again, the first two by their place in line, and the
+page counts three at work again."
+  (harness-ui-slots-test-with-harness
+    (let* ((harness-agent--cancel-grace 0.05)
+           (other (harness-test-temp-dir))
+           (a1 (plist-get (harness-call 'task/submit dir "Here, one") :id))
+           (a2 (plist-get (harness-call 'task/submit dir "Here, two") :id))
+           (a3 (plist-get (harness-call 'task/submit dir "Here, waiting") :id))
+           (b1 (plist-get (harness-call 'task/submit other "There, one") :id))
+           (ids (list a1 a2 a3 b1))
+           (page (harness-slots dir)))
+      (harness-test-wait (lambda () (and (eq 'active (harness-ui-slots-test--live-state a1))
+                                         (eq 'active (harness-ui-slots-test--live-state a2))
+                                         (eq 'active (harness-ui-slots-test--live-state b1))
+                                         (eq 'pending (harness-ui-slots-test--live-state a3))))
+                         5 "three tasks at work and one waiting")
+      (harness-ui-slots-test--live-shows page "Queues · 2")
+      (harness-ui-slots-test--live-shows page "Tasks +\\[Pause all\\] \\[Resume all\\] +3 working · 0 paused")
+      ;; [Pause all], pushed on the page.
+      (with-current-buffer page (harness-ui-slots-test--push "Tasks +\\[Pause all\\]"))
+      (harness-test-wait (lambda () (cl-every (lambda (id) (eq 'pending (harness-ui-slots-test--live-state id))) ids))
+                         8 "every task to wait")
+      (dolist (id ids)
+        (should (plist-get (harness-call 'task/get id) :paused)))
+      (harness-ui-slots-test--live-shows page "Tasks +\\[Pause all\\] \\[Resume all\\] +0 working · 4 paused")
+      ;; The slots they freed start nothing.
+      (harness-test-wait (lambda () (zerop (length (plist-get (harness-call 'task/slots dir) :holders))))
+                         5 "the slots to be free")
+      (accept-process-output nil 0.3)
+      (dolist (id ids) (should (eq 'pending (harness-ui-slots-test--live-state id))))
+      ;; The queues, which were not touched, run: the tasks wait for you.
+      (should (equal '(:false :false)
+                     (mapcar (lambda (q) (plist-get q :suspended))
+                             (plist-get (harness-call 'task/queues) :queues))))
+      ;; [Resume all]: the queues have them again, two slots a project.
+      (with-current-buffer page (harness-ui-slots-test--push "Tasks +\\[Pause all\\] \\[Resume all\\]"))
+      (harness-test-wait (lambda () (and (eq 'active (harness-ui-slots-test--live-state a1))
+                                         (eq 'active (harness-ui-slots-test--live-state a2))
+                                         (eq 'active (harness-ui-slots-test--live-state b1))))
+                         8 "the tasks to start again")
+      (should (eq 'pending (harness-ui-slots-test--live-state a3)))
+      (dolist (id ids) (should-not (plist-get (harness-call 'task/get id) :paused)))
+      (harness-ui-slots-test--live-shows page "Tasks +\\[Pause all\\] \\[Resume all\\] +3 working · 0 paused"))))
+
+(ert-deftest harness-ui-slots-live-pauses-and-resumes-a-queue ()
+  "A queue's button pauses it, and the row says so; the same button resumes it.
+The tasks at work go on while the queue is paused, and the waiting one
+starts only once it is resumed.  The Queues buttons do it for both."
+  (harness-ui-slots-test-with-harness
+    (let* ((harness-tasks-max-running 1)
+           (other (harness-test-temp-dir))
+           (name (file-name-nondirectory (directory-file-name other)))
+           (a1 (plist-get (harness-call 'task/submit dir "Here, working") :id))
+           (b1 (plist-get (harness-call 'task/submit other "There, working") :id))
+           (b2 (plist-get (harness-call 'task/submit other "There, waiting") :id))
+           (page (harness-slots dir)))
+      (harness-test-wait (lambda () (and (eq 'active (harness-ui-slots-test--live-state a1))
+                                         (eq 'active (harness-ui-slots-test--live-state b1))
+                                         (eq 'pending (harness-ui-slots-test--live-state b2))))
+                         5 "the tasks to be where they should")
+      (harness-ui-slots-test--live-shows page (format "%s +running +1 +1 +– +– +\\[Pause\\]" (regexp-quote name)))
+      ;; The other project's [Pause].
+      (with-current-buffer page (harness-ui-slots-test--push (format "%s +running .*\\[Pause\\]" (regexp-quote name))))
+      (harness-ui-slots-test--live-shows page (format "%s +paused +1 +1 +– +– +\\[Resume\\]" (regexp-quote name)))
+      (harness-ui-slots-test--live-shows page "Queues · 2 · 1 paused")
+      (should (harness-json-true-p (plist-get (harness-call 'task/settings other) :queue-suspended)))
+      (should-not (harness-json-true-p (plist-get (harness-call 'task/settings dir) :queue-suspended)))
+      ;; The task at work goes on, and is done: the slot is free, the queue paused.
+      (harness-call 'task/complete b1)
+      (accept-process-output nil 0.3)
+      (should (eq 'pending (harness-ui-slots-test--live-state b2)))
+      ;; [Resume] on the same row: the waiting task starts.
+      (with-current-buffer page (harness-ui-slots-test--push (format "%s +paused .*\\[Resume\\]" (regexp-quote name))))
+      (harness-test-wait (lambda () (eq 'active (harness-ui-slots-test--live-state b2))) 8 "the waiting task to start")
+      (harness-ui-slots-test--live-shows page (format "%s +running +1 +– +– +– +\\[Pause\\]" (regexp-quote name)))
+      ;; The Queues buttons, for every queue at once.
+      (with-current-buffer page (harness-ui-slots-test--push "Queues +\\[Pause all\\]"))
+      (harness-ui-slots-test--live-shows page "Queues · 2 · 2 paused")
+      (should (cl-every (lambda (q) (eq t (plist-get q :suspended)))
+                        (plist-get (harness-call 'task/queues) :queues)))
+      (with-current-buffer page (harness-ui-slots-test--push "Queues +\\[Pause all\\] \\[Resume all\\]"))
+      (harness-ui-slots-test--live-shows page "Queues · 2\n")
+      (should-not (cl-some (lambda (q) (eq t (plist-get q :suspended)))
+                           (plist-get (harness-call 'task/queues) :queues))))))
+
+(ert-deftest harness-ui-slots-live-shows-a-queue-held-for-quota ()
+  "A project whose waiting tasks are out of quota is held, and says for what.
+The page's row says held and its line names the provider and when it is
+tried again; the task's card on the board says quota and when, and its
+title's tooltip the provider; clearing the mark starts the task, and
+the row is running again."
+  (harness-ui-slots-test-with-harness
+    (harness-test-load-module 'fallback)
+    (clrhash harness-fallback--marks)
+    (clrhash harness-fallback--moved)
+    (clrhash harness-fallback--quotas)
+    (clrhash harness-fallback--notified)
+    (let ((harness-fallback-models nil)
+          (reset (+ (float-time) 7200)))
+      (unwind-protect
+          (progn
+            (harness-call 'fallback/mark "demo" :until reset :reason "5-hour limit")
+            (let* ((id (plist-get (harness-call 'task/submit dir "Fix the parser") :id))
+                   (page (harness-slots dir))
+                   (clock (format-time-string "%H:%M" reset)))
+              (harness-test-wait (lambda () (plist-get (harness-call 'task/get id) :hold)) 5 "the hold")
+              (should (eq 'pending (harness-ui-slots-test--live-state id)))
+              ;; The page: held, with the line under the row, and the task's note.
+              (harness-ui-slots-test--live-shows page " held +– +1 +– +1 +\\[Pause\\]")
+              (let ((text (harness-ui-slots-test--live-shows page "quota · .* · resets [0-9:]+ · 1 task")))
+                (should (string-match-p (format "quota · [^\n]*Demo[^\n]* · resets %s · 1 task" clock) text))
+                (should (string-match-p (format "Fix the parser · quota · resets %s" clock) text)))
+              ;; The board's card, on its first line.  The page took the
+              ;; board's window, and a board nobody sees is not drawn.
+              (set-window-buffer (selected-window) board)
+              (with-current-buffer board (harness-ui-tasks--render t))
+              (harness-test-wait (lambda () (with-current-buffer board
+                                              (string-match-p (format "quota · resets %s" clock) (buffer-string))))
+                                 5 "the card to say it waits for quota")
+              ;; The mark is cleared: the task starts and the row runs.
+              (harness-call 'fallback/clear "demo")
+              (harness-test-wait (lambda () (eq 'active (harness-ui-slots-test--live-state id))) 8 "the task to start")
+              ;; The page comes back to the window, and asks again.
+              (setq page (harness-slots dir))
+              (harness-ui-slots-test--live-shows page " running +1 +– +– +– +\\[Pause\\]")
+              (should-not (string-match-p "quota ·" (harness-ui-slots-test--live-text page)))))
+        (harness-fallback--shutdown)))))
 
 (provide 'harness-ui-slots-test)
 ;;; harness-ui-slots-test.el ends here

@@ -15,15 +15,26 @@ The task slots page: the tasks that hold slots as the session list lists session
 A page for the task slots of a project: how many tasks may work at
 once (`harness-tasks-max-running`), who holds each slot and at which
 priority, who waits for one and for how long, and how long tasks
-waited lately.  `harness-slots` opens it; the harness answers it with
-`task/slots`, which counts the slots the way the scheduler does (a
-task's sub-agents, forks and the merge queue take none).  These are
-the task slots, not the tool slots that give a busy machine's tool
-calls out by priority.
+waited lately -- and, above all that, every project's queue, to pause
+and resume them in one place.  `harness-slots` opens it; the harness
+answers it with `task/slots`, which counts the slots the way the
+scheduler does (a task's sub-agents, forks and the merge queue take
+none) and lists the queues.  These are the task slots, not the tool
+slots that give a busy machine's tool calls out by priority.
 
 The page reads, top to bottom (this one is 100 columns wide):
 
   Task slots  my-project   3 of 4 in use · 1 free · 4 waiting   [Set limit]
+
+  Queues · 3 · 1 paused
+    Tasks   [Pause all] [Resume all]   3 working · 1 paused
+    Queues  [Pause all] [Resume all]   1 paused
+
+    Queue          State     Working  Waiting  Paused  Held
+  › my-project     running         3        4       –     –  [Pause]
+    api            paused          –        2       1     –  [Resume]
+    docs           held            –        2       –     2  [Pause]
+      quota · Claude Code · resets 19:00 · 2 tasks
 
   In use
      Name                          Status    At work  Priority        Context         Cost Last msg
@@ -71,6 +82,22 @@ and n answer a permission request, as in the list.  The
 first line's [Set limit] is the board's "N at a time" button
 (`harness-ui-tasks-set-max-running`).
 
+The queues are the page's own and not a project's: one row for each
+project that has a task at work or waiting, or a queue paused by hand
+(`harness-ui-slots--queues-section`).  A queue runs, is paused --
+suspended by hand, so none of its waiting tasks starts on its own --
+or is held: tasks wait and none can start, for quota, a budget or a
+pause.  The row counts the tasks that work, wait, are paused and are
+held back, and ends with the button that pauses or resumes it; a line
+under it says what holds its tasks back, as the board's cards do
+(`harness-ui-tasks--hold-text`).  Above the table, the buttons of
+Tasks pause and resume every task of every project -- the ones at
+work stop and go back to the queue, the waiting ones are held, until
+resumed -- and those of Queues every queue.  Pausing tasks and pausing
+queues are separate, and both are kept across a restart.  P, u, U, s
+and S are the buttons' keys, and a click or RET on a queue's name shows
+that project's slots.
+
 Where things sit is told with `(space :align-to COLUMN)`, never by
 counting characters: an arrow or an icon is drawn a little wider or
 narrower than the letters around it in some fonts, and would move a
@@ -106,18 +133,30 @@ S on a task board opens the page for the board's project, and C-c h Q
 ### Commands
 
 - `harness-slots` — Show how the task slots of DIR's project are used.
-- `harness-ui-slots-mouse-open` — Open the session of the task in the row EVENT, a click, is on.
+- `harness-ui-slots-mouse-open` — Open the session of the task, or the project of the queue, EVENT clicked.
 - `harness-ui-slots-next-row` — Move to the next task in a slot.
 - `harness-ui-slots-open` — Open the session of the task in the row at point, in POSITION.
+- `harness-ui-slots-open-queue` — Show the slots of the project whose queue is in the row at point.
+- `harness-ui-slots-pause-queues` — Pause every queue: none of their waiting tasks starts on its own.
+- `harness-ui-slots-pause-tasks` — Pause every task of every project: stop the ones at work, hold the waiting ones.
 - `harness-ui-slots-previous-row` — Move to the previous task in a slot.
 - `harness-ui-slots-refresh` — Ask the harness for the slots again.
+- `harness-ui-slots-resume-queues` — Resume every paused queue: their waiting tasks start, by priority.
+- `harness-ui-slots-resume-tasks` — Resume every paused task of every project.
 - `harness-ui-slots-set-limit` — Ask how many tasks of a project may work at once, and set it.
+- `harness-ui-slots-toggle-queue` — Pause the queue at point, or resume it when it is paused.
 
 ## Uses
 
 ### Methods it calls
 
+- `task/pause-all` ([tasks](tasks.md))
+- `task/resume-all` ([tasks](tasks.md))
+- `task/resume-all-queues` ([tasks](tasks.md))
+- `task/resume-queue` ([tasks](tasks.md))
 - `task/slots` ([tasks](tasks.md))
+- `task/suspend-all-queues` ([tasks](tasks.md))
+- `task/suspend-queue` ([tasks](tasks.md))
 
 ### Hooks it adds to
 

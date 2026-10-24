@@ -19,6 +19,17 @@
 (defvar harness-tasks--naming)
 (defvar harness-tasks--blocked-at)
 (defvar harness-tasks--lend-timers)
+(defvar harness-tasks--holds)
+(defvar harness-tasks--hold-timer)
+(defvar harness-tasks--title-wait)
+(defvar harness-fallback--marks)
+(defvar harness-fallback--moved)
+(defvar harness-fallback--quotas)
+(defvar harness-fallback--notified)
+(defvar harness-fallback-models)
+(defvar harness-usage--holds)
+(defvar harness-usage--warned)
+(defvar harness-budget)
 (defvar harness-tasks-lend-blocked-slot-after)
 (defvar harness-tasks--reclaimed-message)
 (defvar harness-tasks--naming-pool)
@@ -36,6 +47,8 @@
 (defvar harness-acp-token)
 (defvar harness-agent--cancel-grace)
 (defvar harness-tasks--paused-message)
+(defvar harness-tasks--quota-message)
+(defvar harness-tasks--budget-message)
 (defvar harness-tasks--preempted-message)
 (defvar harness-tasks--sent-back-message)
 (declare-function harness-tasks--save "harness-tasks")
@@ -74,6 +87,10 @@ turn `harness-tasks-require-verification' on themselves."
      (clrhash harness-tasks--blocked-at)
      (maphash (lambda (_ timer) (cancel-timer timer)) harness-tasks--lend-timers)
      (clrhash harness-tasks--lend-timers)
+     ;; Nor a hold of an earlier test, nor the timer that waits for its end.
+     (clrhash harness-tasks--holds)
+     (when (timerp harness-tasks--hold-timer) (cancel-timer harness-tasks--hold-timer))
+     (setq harness-tasks--hold-timer nil)
      (harness-tasks--forget-stores)
      ;; Nothing of an earlier test waits to be written over this one's files,
      ;; nor for a slot of the title throttle: a request of an earlier test
@@ -1460,6 +1477,7 @@ too; so does `harness-tasks-non-interactive', wherever the task is."
   (clrhash harness-sessions)
   (clrhash harness-tasks--table)
   (clrhash harness-tasks--starting)
+  (clrhash harness-tasks--holds)
   (clrhash harness-provider-demo--continuations)
   (setq harness-tasks--loaded nil)
   (when (boundp 'harness-merge--queues)
@@ -7173,6 +7191,735 @@ change."
           (should (equal lender (harness-tasks-test--borrowed-from next)))
           (harness-call 'task/cancel next)
           (harness-call 'task/cancel lender))))))
+
+;;;; Holds: a task out of quota or over a budget waits in the queue
+
+(defvar harness-usage-budgets)
+(defvar harness-anthropic-admin-api-key)
+(declare-function harness-define-provider "harness-provider")
+(declare-function harness-fallback--shutdown "harness-fallback")
+(declare-function harness-tasks--hold-due "harness-tasks")
+(declare-function harness-tasks--branch-name "harness-tasks")
+(declare-function harness-tasks--title-slug "harness-tasks")
+(declare-function harness-tasks--refresh-holds "harness-tasks")
+(declare-function harness-usage--root "harness-usage")
+(declare-function harness-usage--day-start "harness-usage")
+(declare-function harness-usage-period-bounds "harness-usage")
+
+(defmacro harness-tasks-test-with-holds (&rest body)
+  "Run BODY as `harness-tasks-test-with' does, with the fallback and usage modules.
+Nothing is out, no budget is set and the fallback list is empty."
+  (declare (indent 0))
+  `(harness-tasks-test-with
+     (dolist (m '(fallback usage)) (harness-test-load-module m))
+     (clrhash harness-fallback--marks)
+     (clrhash harness-fallback--moved)
+     (clrhash harness-fallback--quotas)
+     (clrhash harness-fallback--notified)
+     (clrhash harness-usage--holds)
+     (clrhash harness-usage--warned)
+     (setq harness-usage-budgets nil)
+     (let ((harness-fallback-models nil)
+           (harness-budget nil)
+           (harness-anthropic-admin-api-key nil)
+           (auth-sources nil)
+           (process-environment (cons "ANTHROPIC_ADMIN_KEY" process-environment)))
+       (unwind-protect (progn ,@body)
+         (harness-fallback--shutdown)))))
+
+(defconst harness-tasks-test--quick-script
+  '((:type text :delta "Done.\n") (:type done :stop-reason end-turn))
+  "A turn that ends at once.")
+
+(defun harness-tasks-test--out-of-quota (resets)
+  "A script of a provider whose quota is used up until RESETS, a float time."
+  (list (list :type 'done :stop-reason 'error :error "5-hour limit reached"
+              :error-kind 'quota :resets resets)))
+
+(defun harness-tasks-test--hold-of (id)
+  "The hold on task ID's view, or nil."
+  (plist-get (harness-tasks-test-task id) :hold))
+
+(defun harness-tasks-test--hold-kind (id)
+  "The kind of the hold on task ID, as a string, or nil."
+  (when-let* ((hold (harness-tasks-test--hold-of id))) (format "%s" (plist-get hold :kind))))
+
+(defun harness-tasks-test--beta-provider ()
+  "Define the provider `beta', which answers every request and nothing else."
+  (harness-define-provider 'beta
+    :label "Beta"
+    :models (lambda () (harness-resolved '((:name "b-one" :pricing (:input 0.1 :output 0.2)))))
+    :complete (lambda (request)
+                (let ((on-event (plist-get request :on-event))
+                      (cancelled nil))
+                  (funcall on-event '(:type start))
+                  (run-at-time 0.005 nil
+                               (lambda ()
+                                 (unless cancelled
+                                   (funcall on-event '(:type text :delta "Done on beta.\n"))
+                                   (funcall on-event '(:type done :stop-reason end-turn)))))
+                  (list :cancel (lambda ()
+                                  (setq cancelled t)
+                                  (funcall on-event '(:type done :stop-reason cancelled))))))))
+
+(ert-deftest harness-tasks-out-of-quota-waits-in-pending-until-the-mark-ends ()
+  "A task whose turn ran out of quota goes back to pending, not to the failures.
+Its card says why and until when; once the mark ends the queue starts it
+again, in its own session, told that the quota is back."
+  (harness-tasks-test-with-holds
+    (let* ((resets (+ (float-time) 1))
+           (harness-provider-demo-script-override (harness-tasks-test--out-of-quota resets))
+           (id (harness-tasks-test-submit "Fix the parser"))
+           (sid (harness-tasks-test-session-id id)))
+      (harness-tasks-test-wait-state id 'pending)
+      (let ((task (harness-tasks-test-task id)))
+        ;; Waiting in the queue, not among the failures.
+        (should (eq 'pending (plist-get task :column)))
+        (should-not (plist-get task :outcome))
+        (should (eq 'quota (plist-get task :return-reason)))
+        (should (plist-get task :returned))
+        (should (equal "quota" (harness-tasks-test--hold-kind id)))
+        (let ((hold (plist-get task :hold)))
+          (should (= resets (plist-get hold :until)))
+          (should (string-match-p "Demo is out of quota until" (plist-get hold :reason)))
+          (should (equal '("demo") (mapcar (lambda (m) (plist-get m :key)) (plist-get hold :items))))))
+      (should (harness-tasks-test--hint-p sid "Back in the queue until it can go on: Demo is out of quota"))
+      ;; It stays while the quota is out, however often the queue looks.
+      (harness-tasks--schedule)
+      (should (eq 'pending (harness-tasks-test-state id)))
+      ;; The mark ends by itself, and the queue starts the task.
+      (setq harness-provider-demo-script-override harness-tasks-test--quick-script)
+      (harness-tasks-test-wait-state id 'done)
+      (should (harness-tasks-test--said sid harness-tasks--quota-message))
+      (should-not (harness-tasks-test--hold-of id))
+      (should-not (plist-get (harness-tasks-test-task id) :return-reason)))))
+
+(ert-deftest harness-tasks-quota-cleared-by-hand-starts-the-task ()
+  "Clearing the mark starts the task at once, without waiting for it to end."
+  (harness-tasks-test-with-holds
+    (let* ((harness-provider-demo-script-override
+            (harness-tasks-test--out-of-quota (+ (float-time) 3600)))
+           (id (harness-tasks-test-submit "Fix the parser")))
+      (harness-tasks-test-wait-state id 'pending)
+      (should (equal "quota" (harness-tasks-test--hold-kind id)))
+      (setq harness-provider-demo-script-override harness-tasks-test--quick-script)
+      (harness-call 'fallback/clear "demo")
+      (harness-tasks-test-wait-state id 'done))))
+
+(ert-deftest harness-tasks-quota-out-keeps-queued-tasks-from-starting ()
+  "While every provider is out, no waiting task starts into the outage.
+A task that never started waits with the hold on its card, takes no slot
+from the others, and starts when the mark is cleared."
+  (harness-tasks-test-with-holds
+    (let* ((harness-tasks-max-running 1)
+           (requests 0)
+           (harness-provider-demo-script-override
+            (lambda (_request) (cl-incf requests) harness-tasks-test--quick-script)))
+      (harness-call 'fallback/mark "demo" :until (+ (float-time) 3600) :reason "5-hour limit")
+      (let ((a (harness-tasks-test-submit "first"))
+            (b (harness-tasks-test-submit "second")))
+        (harness-tasks-test--settle)
+        (dolist (id (list a b))
+          (should (eq 'pending (harness-tasks-test-state id)))
+          (should (equal "quota" (harness-tasks-test--hold-kind id)))
+          (should-not (plist-get (harness-tasks-test-task id) :started)))
+        (should (= 0 requests))
+        (harness-call 'fallback/clear "demo")
+        (dolist (id (list a b)) (harness-tasks-test-wait-state id 'done))
+        ;; Both worked, one after the other.
+        (should (<= 2 requests))))))
+
+(ert-deftest harness-tasks-another-fallback-entry-restarts-the-task-on-the-new-provider ()
+  "A fallback entry that works ends the wait: the task carries on elsewhere.
+That is the list gaining an entry (`config/changed'), and the session
+moves to it as it does before any turn."
+  (harness-tasks-test-with-holds
+    (harness-tasks-test--beta-provider)
+    (let* ((harness-provider-demo-script-override
+            (harness-tasks-test--out-of-quota (+ (float-time) 3600)))
+           (id (harness-tasks-test-submit "Fix the parser"))
+           (sid (harness-tasks-test-session-id id)))
+      (harness-tasks-test-wait-state id 'pending)
+      (should (equal "quota" (harness-tasks-test--hold-kind id)))
+      (should (equal "demo:scripted" (plist-get (harness-call 'session/get sid) :model)))
+      ;; The list names a provider that works.
+      (setq harness-fallback-models '("beta:b-one"))
+      (harness-emit 'config/changed 'harness-fallback-models harness-fallback-models 'global nil)
+      (harness-tasks-test-wait-state id 'done)
+      (should (equal "beta:b-one" (plist-get (harness-call 'session/get sid) :model)))
+      (should (harness-tasks-test--said sid harness-tasks--quota-message))
+      (should (cl-some (lambda (n) (string-match-p "Done on beta" (or (plist-get n :content) "")))
+                       (harness-call 'session/nodes sid))))))
+
+(ert-deftest harness-tasks-quota-error-of-another-kind-is-still-a-failure ()
+  "A turn that fails for a reason that is not quota stays in needs-input."
+  (harness-tasks-test-with-holds
+    (let* ((harness-provider-demo-script-override
+            '((:type done :stop-reason error :error "API Error: 529 Overloaded")))
+           (id (harness-tasks-test-submit "Fix the parser")))
+      (harness-tasks-test-wait-state id 'active)
+      (harness-test-wait (lambda () (eq 'error (plist-get (harness-tasks-test-task id) :outcome))) 5 "the error")
+      (should (eq 'needs-input (plist-get (harness-tasks-test-task id) :column)))
+      (should-not (harness-tasks-test--hold-of id)))))
+
+(ert-deftest harness-tasks-hard-budget-stops-a-turn-and-the-task-waits-for-the-budget ()
+  "A hard budget that stops a turn between two steps parks the task.
+It waits in pending, with the budget on its card and no end (a project
+budget has no period); raising the budget starts it again, told so."
+  (harness-tasks-test-with-holds
+    (let* ((requests 0)
+           (script '((:type usage :input 400 :output 30 :cost 0.0008 :context 500)
+                     (:type tool-call :id "mid-1" :name "list_dir" :input (:path "."))
+                     (:type text :delta "done")
+                     (:type usage :input 400 :output 30 :cost 0.0008 :context 900)
+                     (:type done :stop-reason end-turn)))
+           (harness-provider-demo-script-override
+            (lambda (_request) (cl-incf requests) script)))
+      (harness-call 'usage/set-budget (list :id "cap" :scope 'project :target (harness-usage--root default-directory)
+                                            :amount 0.0005 :hard t))
+      (let* ((id (harness-tasks-test-submit "Fix the parser"))
+             (sid (harness-tasks-test-session-id id)))
+        (harness-tasks-test-wait-state id 'pending)
+        (should (= 1 requests))
+        (let ((task (harness-tasks-test-task id)))
+          (should (eq 'pending (plist-get task :column)))
+          (should (eq 'budget (plist-get task :return-reason)))
+          (should-not (plist-get task :outcome))
+          (should (equal "budget" (harness-tasks-test--hold-kind id)))
+          (should-not (plist-get (plist-get task :hold) :until))
+          (should (string-match-p "Budget project .* exhausted" (plist-get (plist-get task :hold) :reason)))
+          (should (equal '("cap") (mapcar (lambda (b) (plist-get b :id)) (plist-get (plist-get task :hold) :items)))))
+        (should (harness-tasks-test--hint-p sid "Back in the queue until it can go on: Budget project "))
+        ;; It stays while the budget is spent.
+        (harness-tasks--schedule)
+        (should (eq 'pending (harness-tasks-test-state id)))
+        ;; The budget is raised: the queue sees the change and starts it.
+        (setq harness-provider-demo-script-override harness-tasks-test--quick-script)
+        (harness-call 'usage/set-budget (list :id "cap" :scope 'project :target (harness-usage--root default-directory)
+                                              :amount 5.0 :hard t))
+        (harness-tasks-test-wait-state id 'done)
+        (should (harness-tasks-test--said sid harness-tasks--budget-message))))))
+
+(ert-deftest harness-tasks-spent-budget-keeps-a-new-task-from-starting ()
+  "A task submitted over a hard budget waits, and starts when the budget goes.
+Removing the budget, making it soft and a raised Budget setting all end
+the wait."
+  (harness-tasks-test-with-holds
+    (let ((project (harness-usage--root default-directory)))
+      (harness-call 'usage/set-budget (list :id "cap" :scope 'project :target project :amount 1.0 :hard t))
+      (harness-call 'usage/record (list :session "elsewhere" :project project :model "demo:scripted"
+                                        :input 1 :output 1 :cost 1.5))
+      (let ((a (harness-tasks-test-submit "first")))
+        (harness-tasks-test--settle)
+        (should (eq 'pending (harness-tasks-test-state a)))
+        (should (equal "budget" (harness-tasks-test--hold-kind a)))
+        (should-not (plist-get (harness-tasks-test-task a) :started))
+        (harness-call 'usage/remove-budget "cap")
+        (harness-tasks-test-wait-state a 'done))
+      ;; The Budget setting, which `config/set' changes.
+      (setq harness-budget '(:amount 1.0 :hard t))
+      (harness-emit 'config/changed 'harness-budget harness-budget 'global nil)
+      (let ((b (harness-tasks-test-submit "second")))
+        (harness-tasks-test--settle)
+        (should (equal "budget" (harness-tasks-test--hold-kind b)))
+        (setq harness-budget '(:amount 100.0 :hard t))
+        (harness-emit 'config/changed 'harness-budget harness-budget 'global nil)
+        (harness-tasks-test-wait-state b 'done)))))
+
+(ert-deftest harness-tasks-hold-ends-when-the-timer-says-so ()
+  "A hold with an end arms a timer for it; the timer runs the scheduler.
+A day budget lets go at the end of the day: nothing but the clock tells
+the queue, so the timer is set for that moment, and when it fires the
+holds are looked at again.  Here the budget goes without an event."
+  (harness-tasks-test-with-holds
+    (let ((project (harness-usage--root default-directory)))
+      (harness-call 'usage/set-budget (list :id "daily" :scope 'period :period 'day :amount 1.0 :hard t))
+      (harness-call 'usage/record (list :session "elsewhere" :project project :model "demo:scripted"
+                                        :input 1 :output 1 :cost 1.5))
+      (let* ((id (harness-tasks-test-submit "Fix the parser"))
+             (tomorrow (harness-usage--day-start (cdr (harness-usage-period-bounds 'day (float-time))))))
+        (harness-tasks-test--settle)
+        (should (equal "budget" (harness-tasks-test--hold-kind id)))
+        (should (= tomorrow (plist-get (harness-tasks-test--hold-of id) :until)))
+        ;; The timer is set for the end of the day, a second on.
+        (should (timerp harness-tasks--hold-timer))
+        (should (< (abs (- (float-time (timer--time harness-tasks--hold-timer)) (+ tomorrow 1))) 2))
+        ;; The day ends: the budget has room, with no event to say so.
+        (setq harness-usage-budgets nil)
+        (clrhash harness-usage--holds)
+        (harness-tasks--hold-due)
+        (harness-tasks-test-wait-state id 'done)
+        (should-not (timerp harness-tasks--hold-timer))))))
+
+(ert-deftest harness-tasks-held-task-keeps-a-message-until-it-starts ()
+  "A message to a task that waits for quota is kept for its start."
+  (harness-tasks-test-with-holds
+    (let* ((harness-provider-demo-script-override
+            (harness-tasks-test--out-of-quota (+ (float-time) 3600)))
+           (id (harness-tasks-test-submit "Fix the parser"))
+           (sid (harness-tasks-test-session-id id)))
+      (harness-tasks-test-wait-state id 'pending)
+      (harness-call 'task/prompt id "also the lexer")
+      (let ((task (harness-tasks-test-task id)))
+        (should (eq 'pending (plist-get task :state)))
+        (should (equal "also the lexer" (plist-get (car (plist-get task :queued)) :text))))
+      (setq harness-provider-demo-script-override harness-tasks-test--quick-script)
+      (harness-call 'fallback/clear "demo")
+      (harness-tasks-test-wait-state id 'done)
+      (should (harness-tasks-test--said sid "also the lexer"))
+      (should-not (plist-get (harness-tasks-test-task id) :queued)))))
+
+(ert-deftest harness-tasks-feedback-waits-while-the-quota-is-out ()
+  "A task sent back from review while every provider is out waits with its feedback."
+  (harness-tasks-test-with-holds
+    (let ((harness-tasks-require-verification t))
+      (let* ((id (harness-tasks-test-submit "Fix the parser")))
+        (harness-tasks-test-wait-state id 'review)
+        (harness-call 'fallback/mark "demo" :until (+ (float-time) 3600))
+        (harness-call 'task/reject id "handle tabs too")
+        (let ((task (harness-tasks-test-task id)))
+          (should (eq 'pending (plist-get task :state)))
+          (should (eq 'sent-back (plist-get task :return-reason)))
+          (should (equal "quota" (harness-tasks-test--hold-kind id))))
+        (harness-call 'fallback/clear "demo")
+        (harness-tasks-test-wait-state id 'review)
+        (should (= 1 (length (plist-get (harness-tasks-test-task id) :feedback))))))))
+
+(ert-deftest harness-tasks-hold-view-and-slots-say-why ()
+  "The slot view and the task list say what holds a waiting task."
+  (harness-tasks-test-with-holds
+    (let ((harness-tasks-max-running 1))
+      (harness-call 'fallback/mark "demo" :until (+ (float-time) 3600))
+      (let* ((a (harness-tasks-test-submit "first")))
+        (harness-tasks-test--settle)
+        (let* ((slots (harness-call 'task/slots default-directory))
+               (entry (car (plist-get slots :queue))))
+          (should (equal a (plist-get entry :id)))
+          (should (eq 'quota (plist-get (plist-get entry :hold) :kind)))
+          (should (string-match-p "Demo is out of quota" (plist-get (plist-get entry :hold) :reason)))
+          (let ((queue (car (plist-get slots :queues))))
+            (should (equal "held" (plist-get queue :state)))
+            (should (= 1 (plist-get queue :held)))
+            (should (= 1 (plist-get queue :waiting)))
+            (should (equal 'quota (plist-get (car (plist-get queue :holds)) :kind)))
+            (should (equal '("demo") (mapcar (lambda (m) (plist-get m :key))
+                                             (plist-get (car (plist-get queue :holds)) :items))))
+            (should (= 1 (plist-get (car (plist-get queue :holds)) :count)))))
+        (should (equal "quota" (harness-tasks-test--hold-kind a)))
+        (harness-call 'task/cancel a)))))
+
+;;;; Parking and restarts
+
+(ert-deftest harness-tasks-parked-task-stays-parked-across-a-restart ()
+  "A task that waits for quota is still waiting after the harness starts again.
+The hold is not stored with it: the fallback's marks are, and the
+scheduler that runs as the harness comes up finds the task held by them
+again; the end of the marks starts it."
+  (harness-tasks-test-with-holds
+    (let* ((resets (+ (float-time) 3))
+           (harness-provider-demo-script-override (harness-tasks-test--out-of-quota resets))
+           (id (harness-tasks-test-submit "Fix the parser")))
+      (harness-tasks-test-wait-state id 'pending)
+      (should (equal "quota" (harness-tasks-test--hold-kind id)))
+      (harness-tasks-test--restart)
+      (harness-tasks-test--settle)
+      (let ((task (harness-tasks-test-task id)))
+        (should (eq 'pending (plist-get task :state)))
+        (should (eq 'quota (plist-get task :return-reason)))
+        (should (equal "quota" (harness-tasks-test--hold-kind id)))
+        (should (= resets (plist-get (plist-get task :hold) :until))))
+      (setq harness-provider-demo-script-override harness-tasks-test--quick-script)
+      (harness-tasks-test-wait-state id 'done))))
+
+(ert-deftest harness-tasks-pause-of-a-task-still-starting-keeps-its-worktree ()
+  "A task paused while its worktree is made launches nothing when it is ready.
+Resumed, it starts in that same worktree."
+  (harness-tasks-test-with-git
+    (let ((harness-agent--cancel-grace 0.05))
+      (let* ((id (harness-tasks-test-submit "Change the shared file")))
+        ;; The worktree is being made: the task holds a slot, starting.
+        (should (eq 'active (harness-tasks-test-state id)))
+        (harness-call 'task/pause id)
+        (let ((task (harness-tasks-test-task id)))
+          (should (eq 'pending (plist-get task :state)))
+          (should (plist-get task :paused)))
+        ;; The worktree comes; nothing starts in it.
+        (harness-test-wait (lambda () (plist-get (harness-tasks-test-task id) :worktree)) 10 "its worktree")
+        (harness-tasks-test--settle)
+        (let ((task (harness-tasks-test-task id)))
+          (should (eq 'pending (plist-get task :state)))
+          (should (plist-get task :paused))
+          (should (file-directory-p (plist-get task :worktree)))
+          (should (= 0 harness-tasks-test--calls)))
+        (let ((worktree (plist-get (harness-tasks-test-task id) :worktree)))
+          (harness-call 'task/resume id)
+          (harness-tasks-test-wait-state id 'done)
+          (should (equal worktree (plist-get (harness-tasks-test-task id) :worktree)))
+          (should (= 1 harness-tasks-test--calls)))))))
+
+(declare-function harness-resilience--recover "harness-resilience")
+
+(ert-deftest harness-tasks-paused-task-is-not-carried-on-by-the-restart ()
+  "A harness that dies as a task is paused does not carry the task on.
+The turn it was stopping vanished with the process, so its session comes
+back as one a stop cut short; the resilience module leaves a task's
+session to task mode, and task mode picks up only tasks at work."
+  (harness-tasks-test-with
+    (harness-test-load-module 'resilience)
+    (harness-tasks-test--settle)
+    (let ((harness-agent--cancel-grace 5)
+          (harness-provider-demo-script-override '((:type wait :seconds 30))))
+      (let* ((id (harness-tasks-test-submit "Fix the parser"))
+             (sid (harness-tasks-test-session-id id)))
+        (harness-test-wait (lambda () (harness-tasks-test--running-p sid)) 5 "the turn")
+        (harness-call 'task/pause id)
+        (harness-tasks-flush)
+        (harness-tasks-test--die)
+        (setq harness-provider-demo-script-override harness-tasks-test--quick-script)
+        (harness-tasks-test--restart)
+        (harness-resilience--recover)
+        (harness-tasks-test--settle)
+        (let ((task (harness-tasks-test-task id)))
+          (should (eq 'pending (plist-get task :state)))
+          (should (plist-get task :paused)))
+        ;; Nothing was said to its session: no carrying on, from either module.
+        (should-not (cl-some (lambda (n) (string-match-p "restarted" (or (plist-get n :content) "")))
+                             (cl-remove-if-not (lambda (n) (eq (plist-get n :kind) 'user))
+                                               (harness-call 'session/nodes sid))))
+        (should-not (harness-call 'agent/running sid))
+        ;; A resume starts it, as it would have.
+        (harness-call 'task/resume id)
+        (harness-tasks-test-wait-state id 'done)))))
+
+;;;; Pausing
+
+(ert-deftest harness-tasks-pause-stops-a-task-and-holds-it-until-resumed ()
+  "Pause puts a task at work back in pending and keeps it there.
+Unlike a return to pending, nothing starts it, however many slots are
+free and however often the queue looks; resume lets the queue start it."
+  (harness-tasks-test-with
+    (harness-tasks-test--settle)
+    (let ((harness-agent--cancel-grace 0.05)
+          (harness-provider-demo-script-override '((:type wait :seconds 30))))
+      (let* ((id (harness-tasks-test-submit "Fix the parser"))
+             (sid (harness-tasks-test-session-id id)))
+        (harness-test-wait (lambda () (harness-tasks-test--running-p sid)) 5 "the turn")
+        (let ((task (harness-call 'task/pause id)))
+          (should (eq 'pending (plist-get task :state)))
+          (should (plist-get task :paused))
+          (should (eq 'paused (plist-get (plist-get task :hold) :kind)))
+          (should (plist-get task :returned)))
+        (harness-test-wait (lambda () (harness-tasks-test--idle id)) 5 "its turn to stop")
+        (harness-tasks--schedule)
+        (harness-tasks-test--settle)
+        (should (eq 'pending (harness-tasks-test-state id)))
+        ;; A paused task is held, so the queue's page counts it so.
+        (let ((queue (car (plist-get (harness-call 'task/queues) :queues))))
+          (should (= 1 (plist-get queue :paused)))
+          (should (= 0 (plist-get queue :working))))
+        ;; Resumed, the queue starts it and its session carries on.
+        (setq harness-provider-demo-script-override harness-tasks-test--quick-script)
+        (let ((task (harness-call 'task/resume id)))
+          (should-not (plist-get task :paused)))
+        (harness-tasks-test-wait-state id 'done)
+        (should (harness-tasks-test--said sid harness-tasks--paused-message))))))
+
+(ert-deftest harness-tasks-pause-survives-a-restart ()
+  "A paused task is still paused when the harness starts again.
+The scheduler that starts the waiting tasks as it comes up leaves it
+alone, and so does the recovery of the work a stop interrupted."
+  (harness-tasks-test-with
+    (harness-tasks-test--settle)
+    (let ((harness-agent--cancel-grace 0.05)
+          (harness-tasks-max-running 1)
+          (harness-provider-demo-script-override '((:type wait :seconds 30))))
+      (let* ((id (harness-tasks-test-submit "Fix the parser"))
+             (queued (harness-tasks-test-submit "Waiting for a slot"))
+             (sid (harness-tasks-test-session-id id)))
+        (harness-test-wait (lambda () (harness-tasks-test--running-p sid)) 5 "the turn")
+        ;; The waiting one first: the slot the other frees would start it.
+        (harness-call 'task/pause queued)
+        (harness-call 'task/pause id)
+        (harness-test-wait (lambda () (harness-tasks-test--idle id)) 5 "its turn to stop")
+        (setq harness-provider-demo-script-override harness-tasks-test--quick-script)
+        (harness-tasks-test--restart)
+        (harness-tasks-test--settle)
+        (dolist (task-id (list id queued))
+          (let ((task (harness-tasks-test-task task-id)))
+            (should (eq 'pending (plist-get task :state)))
+            (should (plist-get task :paused))
+            (should (eq 'paused (plist-get (plist-get task :hold) :kind)))))
+        (should-not (plist-get (harness-tasks-test-task queued) :started))
+        (harness-tasks--schedule)
+        (harness-tasks-test--settle)
+        (should (eq 'pending (harness-tasks-test-state id)))
+        (should (eq 'pending (harness-tasks-test-state queued)))
+        ;; Resuming starts them, the one that worked first.
+        (should (equal (list id queued) (plist-get (harness-call 'task/resume-all) :ids)))
+        (dolist (task-id (list id queued)) (harness-tasks-test-wait-state task-id 'done))))))
+
+(ert-deftest harness-tasks-pause-all-and-resume-all ()
+  "Pause all stops every task at work and holds the waiting ones.
+The slots the paused tasks free start none of the waiting ones; resume
+all lets the queue go on, a project's tasks or everybody's."
+  (harness-tasks-test-with
+    (harness-tasks-test--settle)
+    (let ((harness-agent--cancel-grace 0.05)
+          (harness-tasks-max-running 1)
+          (other (harness-test-temp-dir))
+          (harness-provider-demo-script-override '((:type wait :seconds 30))))
+      (let* ((a1 (harness-tasks-test-submit "here, working"))
+             (a2 (harness-tasks-test-submit "here, waiting"))
+             (b1 (harness-tasks-test-submit "there, working" other)))
+        (harness-test-wait (lambda () (and (harness-tasks-test--running-p (harness-tasks-test-session-id a1))
+                                           (harness-tasks-test--running-p (harness-tasks-test-session-id b1))))
+                           5 "the two tasks at work")
+        (should (eq 'pending (harness-tasks-test-state a2)))
+        ;; This project's only.
+        (should (equal (list a2 a1) (plist-get (harness-call 'task/pause-all default-directory) :ids)))
+        (should (eq 'active (harness-tasks-test-state b1)))
+        (dolist (id (list a1 a2))
+          (should (eq 'pending (harness-tasks-test-state id)))
+          (should (plist-get (harness-tasks-test-task id) :paused)))
+        (harness-test-wait (lambda () (harness-tasks-test--idle a1)) 5 "its turn to stop")
+        (harness-tasks--schedule)
+        (harness-tasks-test--settle)
+        (should (eq 'pending (harness-tasks-test-state a2)))
+        (should (eq 'pending (harness-tasks-test-state a1)))
+        ;; Everybody's: the other project's task joins them, and a task
+        ;; already paused is not paused twice.
+        (should (equal (list b1) (plist-get (harness-call 'task/pause-all) :ids)))
+        (should (eq 'pending (harness-tasks-test-state b1)))
+        (should (= 3 (plist-get (plist-get (harness-call 'task/queues) :totals) :paused)))
+        ;; Resume this project's; the other's stays paused.
+        (setq harness-provider-demo-script-override harness-tasks-test--quick-script)
+        (should (equal (list a1 a2) (plist-get (harness-call 'task/resume-all default-directory) :ids)))
+        (dolist (id (list a1 a2)) (harness-tasks-test-wait-state id 'done))
+        (should (eq 'pending (harness-tasks-test-state b1)))
+        (should (equal (list b1) (plist-get (harness-call 'task/resume-all) :ids)))
+        (harness-tasks-test-wait-state b1 'done)
+        (should-not (plist-get (harness-call 'task/resume-all) :ids))))))
+
+(ert-deftest harness-tasks-explicit-start-ends-a-pause ()
+  "`task/start' starts a paused task, whatever holds it, and ends the pause."
+  (harness-tasks-test-with
+    (harness-tasks-test--settle)
+    (let ((harness-tasks-max-running 0))
+      (let ((id (harness-tasks-test-submit "Fix the parser")))
+        (should (eq 'pending (harness-tasks-test-state id)))
+        (harness-call 'task/pause id)
+        (should (plist-get (harness-tasks-test-task id) :paused))
+        (harness-call 'task/start id)
+        (should-not (plist-get (harness-tasks-test-task id) :paused))
+        (harness-tasks-test-wait-state id 'done)))))
+
+(ert-deftest harness-tasks-pause-refuses-what-is-not-a-task-at-work ()
+  "Only a task at work or waiting for a slot can be paused."
+  (harness-tasks-test-with
+    (let ((harness-tasks-require-verification t))
+      (let ((id (harness-tasks-test-submit "Fix the parser")))
+        (harness-tasks-test-wait-state id 'review)
+        (should-error (harness-call 'task/pause id))
+        (should-not (plist-get (harness-tasks-test-task id) :paused))
+        ;; Resuming one that is not paused changes nothing.
+        (should (eq 'review (plist-get (harness-call 'task/resume id) :state)))))))
+
+(ert-deftest harness-tasks-paused-task-keeps-a-message-until-it-starts ()
+  "A message sent to a paused task is delivered with its start, not before."
+  (harness-tasks-test-with
+    (harness-tasks-test--settle)
+    (let ((harness-agent--cancel-grace 0.05)
+          (harness-provider-demo-script-override '((:type wait :seconds 30))))
+      (let* ((id (harness-tasks-test-submit "Fix the parser"))
+             (sid (harness-tasks-test-session-id id)))
+        (harness-test-wait (lambda () (harness-tasks-test--running-p sid)) 5 "the turn")
+        (harness-call 'task/pause id)
+        (harness-test-wait (lambda () (harness-tasks-test--idle id)) 5 "its turn to stop")
+        (harness-call 'task/prompt id "also update the docs")
+        (should (eq 'pending (harness-tasks-test-state id)))
+        (should (equal "also update the docs" (plist-get (car (plist-get (harness-tasks-test-task id) :queued)) :text)))
+        (setq harness-provider-demo-script-override harness-tasks-test--quick-script)
+        (harness-call 'task/resume id)
+        (harness-tasks-test-wait-state id 'done)
+        (should (harness-tasks-test--said sid "also update the docs"))))))
+
+;;;; Every queue
+
+(ert-deftest harness-tasks-queues-list-every-project ()
+  "`task/queues' lists each project that has live tasks or a suspended queue."
+  (harness-tasks-test-with
+    (harness-tasks-test--settle)
+    (let* ((harness-tasks-max-running 0)
+           (other (harness-test-temp-dir))
+           (idle (harness-test-temp-dir))
+           (a (harness-tasks-test-submit "here, waiting"))
+           (b (harness-tasks-test-submit "there, waiting" other)))
+      (ignore a b)
+      (harness-call 'task/suspend-queue idle)
+      (let* ((report (harness-call 'task/queues))
+             (queues (plist-get report :queues))
+             (by-name (lambda (dir) (cl-find (harness-tasks--project dir) queues
+                                             :key (lambda (q) (plist-get q :project)) :test #'equal))))
+        (should (= 3 (length queues)))
+        (should (equal "running" (plist-get (funcall by-name default-directory) :state)))
+        (should (= 1 (plist-get (funcall by-name default-directory) :waiting)))
+        (should (= 0 (plist-get (funcall by-name default-directory) :working)))
+        (should (equal "paused" (plist-get (funcall by-name idle) :state)))
+        (should (eq t (plist-get (funcall by-name idle) :suspended)))
+        (should (= 0 (plist-get (funcall by-name idle) :waiting)))
+        (should (equal (file-name-nondirectory (directory-file-name (harness-tasks--project other)))
+                       (plist-get (funcall by-name other) :name)))
+        (let ((totals (plist-get report :totals)))
+          (should (= 3 (plist-get totals :queues)))
+          (should (= 1 (plist-get totals :suspended)))
+          (should (= 2 (plist-get totals :waiting)))
+          (should (= 0 (plist-get totals :working))))))))
+
+(ert-deftest harness-tasks-suspend-all-queues-and-resume-all-queues ()
+  "Every queue pauses and resumes at once, and a pause outlives a restart."
+  (harness-tasks-test-with
+    (harness-tasks-test--settle)
+    (let* ((harness-tasks-max-running 0)
+           (other (harness-test-temp-dir))
+           (a (harness-tasks-test-submit "here, waiting"))
+           (b (harness-tasks-test-submit "there, waiting" other)))
+      (should (= 2 (length (plist-get (harness-call 'task/suspend-all-queues) :projects))))
+      (should (harness-tasks-test--queue-suspended-p))
+      (should (harness-tasks-test--queue-suspended-p other))
+      (should (equal '("paused" "paused")
+                     (mapcar (lambda (q) (plist-get q :state)) (plist-get (harness-call 'task/queues) :queues))))
+      ;; The tasks are not touched, and the pause is kept across a restart.
+      (should (eq 'pending (harness-tasks-test-state a)))
+      (harness-tasks-test--restart)
+      (should (harness-tasks-test--queue-suspended-p))
+      (should (harness-tasks-test--queue-suspended-p other))
+      (setq harness-tasks-max-running nil)
+      (harness-tasks-test--settle)
+      (should (eq 'pending (harness-tasks-test-state a)))
+      (should (eq 'pending (harness-tasks-test-state b)))
+      ;; Resumed, the waiting tasks start.
+      (should (= 2 (length (plist-get (harness-call 'task/resume-all-queues) :projects))))
+      (should-not (harness-tasks-test--queue-suspended-p))
+      (should-not (harness-tasks-test--queue-suspended-p other))
+      (dolist (id (list a b)) (harness-tasks-test-wait-state id 'done)))))
+
+(ert-deftest harness-tasks-slots-carry-the-queues ()
+  "`task/slots' brings every queue and the totals with it, for the page."
+  (harness-tasks-test-with
+    (harness-tasks-test--settle)
+    (let* ((harness-tasks-max-running 0)
+           (other (harness-test-temp-dir)))
+      (harness-tasks-test-submit "here, waiting")
+      (harness-tasks-test-submit "there, waiting" other)
+      (harness-call 'task/suspend-queue other)
+      (let ((slots (harness-call 'task/slots default-directory)))
+        (should (= 2 (length (plist-get slots :queues))))
+        (should (equal (plist-get (harness-call 'task/queues) :queues) (plist-get slots :queues)))
+        (should (= 2 (plist-get (plist-get slots :totals) :waiting)))
+        (should (= 1 (plist-get (plist-get slots :totals) :suspended)))))))
+
+;;;; Branch names
+
+(ert-deftest harness-tasks-title-slug-is-short-and-safe ()
+  "A title becomes lower-case words joined by dashes, cut at a whole word."
+  (should (equal "fix-login-redirect-loop" (harness-tasks--title-slug "Fix login redirect loop")))
+  (should (equal "fix-login-redirect-loop-42" (harness-tasks--title-slug "Fix login redirect loop (#42)")))
+  (should (equal "queue-control-quota-waits-pause-all" (harness-tasks--title-slug "Queue control: quota waits, pause-all")))
+  ;; Longer than 40 characters: the last word that fits stays, no half word.
+  (should (equal "queue-control-quota-budget-waits-in" (harness-tasks--title-slug "Queue control: quota/budget waits in Pending, pause everything")))
+  (should (<= (length (harness-tasks--title-slug (make-string 90 ?x))) 40))
+  (should (equal (make-string 40 ?x) (harness-tasks--title-slug (make-string 90 ?x))))
+  ;; Nothing a branch could be named from.
+  (should (equal "" (harness-tasks--title-slug "   …  "))))
+
+(ert-deftest harness-tasks-branch-name-comes-from-the-title ()
+  "The branch is named after the task's title, else after its prompt, plus its id."
+  (harness-tasks-test-with
+    (let ((harness-tasks-max-running 0))
+      (let* ((id (harness-tasks-test-submit "Please would you fix the login redirect loop that happens after logout"))
+             (suffix (string-remove-prefix "t-" id)))
+        ;; No title yet: the first five words of the prompt, as before.
+        (should (equal (concat "task/please-would-you-fix-the-" suffix)
+                       (harness-tasks--branch-name (harness-tasks-test-task id))))
+        ;; The task's own title wins.
+        (harness-tasks--set id :name "Fix login redirect loop")
+        (should (equal (concat "task/fix-login-redirect-loop-" suffix)
+                       (harness-tasks--branch-name (harness-tasks-test-task id))))
+        ;; A stale copy of the record names it from what the table holds now.
+        (should (equal (concat "task/fix-login-redirect-loop-" suffix)
+                       (harness-tasks--branch-name (list :id id :prompt "something else"))))
+        ;; The name its session took counts when the task has none.
+        (harness-tasks--set id :name nil)
+        (harness-call 'session/update (harness-tasks-test-session-id id) :name "Fix logout loop")
+        (should (equal (concat "task/fix-logout-loop-" suffix)
+                       (harness-tasks--branch-name (harness-tasks-test-task id))))
+        ;; A title with nothing in it for a branch falls back on the prompt.
+        (harness-tasks--set id :name "…")
+        (harness-call 'session/update (harness-tasks-test-session-id id) :name nil)
+        (should (equal (concat "task/please-would-you-fix-the-" suffix)
+                       (harness-tasks--branch-name (harness-tasks-test-task id))))
+        ;; Other prefixes are honoured, and no prompt and no title is just the id.
+        (let ((harness-tasks-branch-prefix "wip/"))
+          (should (equal (concat "wip/please-would-you-fix-the-" suffix)
+                         (harness-tasks--branch-name (harness-tasks-test-task id)))))
+        (should (equal "task/zzzzzzzz"
+                       (harness-tasks--branch-name (list :id "t-zzzzzzzz" :prompt "…"))))))))
+
+(ert-deftest harness-tasks-worktree-branch-is-named-after-the-title ()
+  "A task that starts as it is submitted waits for its title to name its branch.
+The title comes a moment after the start; the branch carries it all the
+same, and the id."
+  (harness-tasks-test-with-git
+    (harness-test-load-module 'naming)
+    (let ((harness-naming-auto t)
+          (harness-tasks-test--titles nil)
+          (harness-tasks-test--turns nil)
+          (harness-tasks-test--title-answer (lambda (_request) "Fix the login redirect loop")))
+      (cl-letf (((symbol-function 'harness-method/provider/complete) #'harness-tasks-test--complete))
+        (let* ((id (harness-tasks-test-submit "Please would you fix the login redirect loop that happens after logout"))
+               (suffix (string-remove-prefix "t-" id)))
+          (harness-test-wait (lambda () (plist-get (harness-tasks-test-task id) :branch)) 10 "its branch")
+          (should (equal (concat "task/fix-the-login-redirect-loop-" suffix)
+                         (plist-get (harness-tasks-test-task id) :branch)))
+          (should (string-suffix-p (concat "task-fix-the-login-redirect-loop-" suffix)
+                                   (directory-file-name (plist-get (harness-tasks-test-task id) :worktree))))
+          (harness-call 'task/cancel id))))))
+
+(ert-deftest harness-tasks-worktree-branch-does-not-wait-for-a-title-for-ever ()
+  "A title that does not come in time leaves the branch named from the prompt."
+  (harness-tasks-test-with-git
+    (harness-test-load-module 'naming)
+    (let ((harness-naming-auto t)
+          (harness-tasks--title-wait 0.3)
+          (harness-tasks-test--titles nil)
+          (harness-tasks-test--turns nil)
+          (harness-tasks-test--title-answer nil))
+      (cl-letf (((symbol-function 'harness-method/provider/complete) #'harness-tasks-test--complete))
+        (let* ((id (harness-tasks-test-submit "Please would you fix the login redirect loop"))
+               (suffix (string-remove-prefix "t-" id)))
+          (harness-test-wait (lambda () (plist-get (harness-tasks-test-task id) :branch)) 10 "its branch")
+          (should (equal (concat "task/please-would-you-fix-the-" suffix)
+                         (plist-get (harness-tasks-test-task id) :branch)))
+          (harness-call 'task/cancel id))))))
+
+(ert-deftest harness-tasks-worktree-branch-of-a-titled-task-needs-no-wait ()
+  "A task that waited in the queue has its title by the time it starts."
+  (harness-tasks-test-with-git
+    (harness-test-load-module 'naming)
+    (let ((harness-naming-auto t)
+          (harness-tasks-max-running 0)
+          (harness-tasks-test--titles nil)
+          (harness-tasks-test--turns nil)
+          (harness-tasks-test--title-answer (lambda (_request) "Add CSV export to reports")))
+      (cl-letf (((symbol-function 'harness-method/provider/complete) #'harness-tasks-test--complete))
+        (let* ((id (harness-tasks-test-submit "export the reports as csv"))
+               (suffix (string-remove-prefix "t-" id)))
+          (harness-test-wait (lambda () (plist-get (harness-tasks-test-task id) :name)) 10 "its title")
+          (harness-call 'task/start id)
+          (harness-test-wait (lambda () (plist-get (harness-tasks-test-task id) :branch)) 10 "its branch")
+          (should (equal (concat "task/add-csv-export-to-reports-" suffix)
+                         (plist-get (harness-tasks-test-task id) :branch)))
+          (harness-call 'task/cancel id))))))
 
 (provide 'harness-tasks-test)
 ;;; harness-tasks-test.el ends here

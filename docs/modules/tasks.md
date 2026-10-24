@@ -36,6 +36,9 @@ silent.
 
 In a git project a task owns the whole life of its change: it starts
 in a fresh worktree on a branch of its own (the `worktree` module),
+named after its title and its id (`harness-tasks--branch-name`: the
+short title the cheap naming model gave it, see Titles, else the
+first words of its prompt),
 its session is told to commit there, and when the agent finishes the
 branch goes through the merge queue (the `merge` module) into the
 branch checked out at the project root -- a main checkout, which the
@@ -158,6 +161,29 @@ the board is clear for one urgent task, which an explicit
 `task/resume-queue` lets the waiting tasks start again at once.  The
 suspension is per project, like the concurrency limit, kept across
 restarts in `harness-tasks--queue-name`, and shown on the board.
+
+Holds: a queued task can be held back for reasons of its own
+(`harness-tasks--hold`, the view's `:hold`; see Holds below).  A task
+whose turn ended because every model it could run on is out of
+quota or money, or because a hard budget stopped it before or
+between two steps, is no failure: it goes back to pending
+(`harness-tasks--park`) with the reason on its card -- which quota or
+budget, and when it resets -- and the scheduler holds it, and any task
+whose session would stop the same way, until the quota is back
+(a mark ends or is cleared, the fallback list gains an entry that
+works) or the budget has room (raised, removed, a new period).  Then
+the queue starts it like any waiting task and its session carries on
+where it stopped.
+
+Pausing: `task/pause` (the board's Pause) is a return to pending that
+sticks -- the task is marked `:paused`, a hold the scheduler keeps,
+until `task/resume`, `task/start` or a turn the user starts in its
+session -- and the mark is kept with the record, so a restart leaves
+the task paused.  `task/pause-all` and `task/resume-all` do it for
+every task of a project or of every project; `task/queues` lists
+every project's queue and its state, and `task/suspend-all-queues`
+and `task/resume-all-queues` switch them all, which the task slots
+page offers in one place (see Queues, all of them below).
 
 Waiting for a slot: a queued task knows since when it waits
 (`:queued-at`, stamped whenever a task joins the queue: submitted,
@@ -323,12 +349,18 @@ here logs, emits or returns one.
 - `task/hand-in-plan` (session-id title plan) — Hand in PLAN, titled TITLE, for the task SESSION-ID plans; return the task.
 - `task/list` (&optional cwd) — Return the tasks of CWD's project, oldest first; every task without CWD.
 - `task/merge` (id) — Queue task ID's branch for the merge queue again (after a failed merge).
+- `task/pause` (id) — Pause task ID: back in the pending queue, and held there until resumed.
+- `task/pause-all` (&optional cwd) — Pause every task of CWD's project, of every project without CWD.
 - `task/prompt` (id text &optional attachments opts) — Send TEXT and ATTACHMENTS to the session of task ID: a follow-up, or steering.
 - `task/queue` (id) — Put backlog task ID back in the pending queue, where it starts by itself.
 - `task/queue-order` (&optional cwd) — Return the tasks waiting for a slot, in the order they will start.
+- `task/queues` — Return every project's queue, and the totals over them, for a page.
 - `task/redact` (secrets &optional project dry-run) — Take SECRETS out of the task records and the files that keep them.
 - `task/refine` (id &optional text) — Have an agent write task ID up for the backlog; return the task.
 - `task/reject` (id feedback &optional attachments) — Send task ID, which waits in review, back to work with FEEDBACK.
+- `task/resume` (id) — End the pause of task ID, which then waits for its turn in the queue.
+- `task/resume-all` (&optional cwd) — End the pause of every paused task of CWD's project (every project without).
+- `task/resume-all-queues` — Resume every suspended queue, and start the waiting tasks, by priority.
 - `task/resume-queue` (&optional cwd) — Start starting the pending tasks of CWD's project again, at once.
 - `task/retry` (id) — Have task ID, which stopped part way, work on it again; return the task.
 - `task/return-to-pending` (id) — Stop the turn of active task ID and put it back in the pending queue.
@@ -340,6 +372,7 @@ here logs, emits or returns one.
 - `task/slots` (&optional cwd) — Return how the task slots of CWD's project are used, for a slot page.
 - `task/start` (id) — Start pending task ID now, even when every slot of its project is taken.
 - `task/submit` (cwd prompt &optional opts) — Submit PROMPT as a new task in directory CWD; return the task.
+- `task/suspend-all-queues` — Suspend the pending queue of every project that has one worth listing.
 - `task/suspend-queue` (&optional cwd) — Suspend the pending queue of CWD's project (the current one by default).
 - `task/toggle-backlog-mode` (&optional cwd) — Switch the backlog of CWD's project between manual and auto queueing.
 - `task/toggle-queue` (&optional cwd) — Suspend the pending queue of CWD's project if it is running, else resume it.
@@ -404,11 +437,13 @@ here logs, emits or returns one.
 - `agent/running` ([agent](agent.md))
 - `agent/stop-outstanding` ([agent](agent.md))
 - `config/get` ([config](config.md)), when it is loaded
+- `fallback/blocked` ([fallback](fallback.md)), when it is loaded
 - `merge/cancel` ([merge](merge.md)), when it is loaded
 - `merge/enqueue` ([merge](merge.md)), when it is loaded
 - `merge/status` ([merge](merge.md)), when it is loaded
 - `naming/name` ([naming](naming.md)), when it is loaded
 - `naming/title` ([naming](naming.md)), when it is loaded
+- `project/name` ([project](project.md))
 - `project/root` ([project](project.md))
 - `provider/tier-model` ([provider](provider.md)), when it is loaded
 - `provider/tier-thinking` ([provider](provider.md)), when it is loaded
@@ -425,6 +460,7 @@ here logs, emits or returns one.
 - `session/set-provider-state` ([session](session.md))
 - `session/update` ([session](session.md))
 - `supervisor/set` ([supervisor](supervisor.md)), when it is loaded
+- `usage/budget-hold` ([usage](usage.md)), when it is loaded
 - `worktree/branch` ([worktree](worktree.md)), when it is loaded
 - `worktree/create` ([worktree](worktree.md)), when it is loaded
 - `worktree/lock` ([worktree](worktree.md)), when it is loaded
@@ -436,6 +472,7 @@ here logs, emits or returns one.
 - `agent/turn-ended` → `harness-tasks--on-turn-ended`
 - `agent/turn-started` → `harness-tasks--on-turn-started`
 - `config/changed` → `harness-tasks--on-config-changed`
+- `fallback/changed` → `harness-tasks--on-hold-event`
 - `merge/conflict` → `harness-tasks--on-merge-conflict`
 - `merge/finished` → `harness-tasks--on-merge-finished`
 - `merge/started` → `harness-tasks--on-merge-started`
@@ -443,6 +480,7 @@ here logs, emits or returns one.
 - `session/ext-changed` → `harness-tasks--on-priority-changed`
 - `session/pending-changed` → `harness-tasks--on-pending-changed`
 - `session/status` → `harness-tasks--on-session-status`
+- `usage/budgets-changed` → `harness-tasks--on-hold-event`
 
 ### Events it emits
 

@@ -5,15 +5,26 @@
 ;; A page for the task slots of a project: how many tasks may work at
 ;; once (`harness-tasks-max-running'), who holds each slot and at which
 ;; priority, who waits for one and for how long, and how long tasks
-;; waited lately.  `harness-slots' opens it; the harness answers it with
-;; `task/slots', which counts the slots the way the scheduler does (a
-;; task's sub-agents, forks and the merge queue take none).  These are
-;; the task slots, not the tool slots that give a busy machine's tool
-;; calls out by priority.
+;; waited lately -- and, above all that, every project's queue, to pause
+;; and resume them in one place.  `harness-slots' opens it; the harness
+;; answers it with `task/slots', which counts the slots the way the
+;; scheduler does (a task's sub-agents, forks and the merge queue take
+;; none) and lists the queues.  These are the task slots, not the tool
+;; slots that give a busy machine's tool calls out by priority.
 ;;
 ;; The page reads, top to bottom (this one is 100 columns wide):
 ;;
 ;;   Task slots  my-project   3 of 4 in use · 1 free · 4 waiting   [Set limit]
+;;
+;;   Queues · 3 · 1 paused
+;;     Tasks   [Pause all] [Resume all]   3 working · 1 paused
+;;     Queues  [Pause all] [Resume all]   1 paused
+;;
+;;     Queue          State     Working  Waiting  Paused  Held
+;;   › my-project     running         3        4       –     –  [Pause]
+;;     api            paused          –        2       1     –  [Resume]
+;;     docs           held            –        2       –     2  [Pause]
+;;       quota · Claude Code · resets 19:00 · 2 tasks
 ;;
 ;;   In use
 ;;      Name                          Status    At work  Priority        Context         Cost Last msg
@@ -60,6 +71,22 @@
 ;; and n answer a permission request, as in the list.  The
 ;; first line's [Set limit] is the board's "N at a time" button
 ;; (`harness-ui-tasks-set-max-running').
+;;
+;; The queues are the page's own and not a project's: one row for each
+;; project that has a task at work or waiting, or a queue paused by hand
+;; (`harness-ui-slots--queues-section').  A queue runs, is paused --
+;; suspended by hand, so none of its waiting tasks starts on its own --
+;; or is held: tasks wait and none can start, for quota, a budget or a
+;; pause.  The row counts the tasks that work, wait, are paused and are
+;; held back, and ends with the button that pauses or resumes it; a line
+;; under it says what holds its tasks back, as the board's cards do
+;; (`harness-ui-tasks--hold-text').  Above the table, the buttons of
+;; Tasks pause and resume every task of every project -- the ones at
+;; work stop and go back to the queue, the waiting ones are held, until
+;; resumed -- and those of Queues every queue.  Pausing tasks and pausing
+;; queues are separate, and both are kept across a restart.  P, u, U, s
+;; and S are the buttons' keys, and a click or RET on a queue's name shows
+;; that project's slots.
 ;;
 ;; Where things sit is told with `(space :align-to COLUMN)', never by
 ;; counting characters: an arrow or an icon is drawn a little wider or
@@ -528,6 +555,260 @@ columns, then how many slots are free."
          (concat "   " (harness-ui-slots--dim (format "%d free" free)) "\n")
        ""))))
 
+;;;; Queues
+
+;; Every project's queue, in one place: whether it starts its waiting
+;; tasks (running), was paused by hand (paused) or has tasks that wait
+;; and none that can start (held, for quota, a budget or a pause), how
+;; many tasks work, wait, are paused or are held back, and for what.
+;; The harness lists them with the slots (`task/slots' :queues), the
+;; page's project among them, which a marker shows.  Above the table are
+;; the switches for all of them at once -- pause every task, pause every
+;; queue -- and a button on each row pauses or resumes that queue.
+;;
+;; A button's action is a command that finds what it acts on in the text
+;; at point (`harness-slot-queue' names a row's project), not a closure
+;; over it, so a page whose answer did not change draws the same text
+;; and is left alone (`harness-ui-slots--render').
+
+(defconst harness-ui-slots--queue-counts
+  '((:working "Working" 7) (:waiting "Waiting" 7) (:paused "Paused" 6) (:held "Held" 4))
+  "The counts of the table of queues, left to right, each (KEY HEADING WIDTH).
+KEY is the key of the queue's entry the count is read from, and the
+number is right-aligned under its HEADING, WIDTH columns wide.  They
+follow the Queue and State columns, then comes the button.")
+
+(defconst harness-ui-slots--queue-give-up '(:held :paused)
+  "The counts a window too narrow for the table leaves out, the first first.
+What they say is not lost: a queue's State says it is held, its lines
+under the row say what holds it, and the counts are in the heading's.")
+
+(defconst harness-ui-slots--queue-name-max 28
+  "Columns the Queue column is wide at most: a longer name is cut.")
+
+(defconst harness-ui-slots--queue-name-min 8
+  "Columns the Queue column keeps before a narrow window loses counts.")
+
+(defconst harness-ui-slots--queue-state-width 8
+  "Columns the State column is wide: \"running\", \"paused\", \"held\".")
+
+(defconst harness-ui-slots--queue-button-width 8
+  "Columns the button of a queue's row takes, [Resume] being the widest.")
+
+(defvar harness-ui-slots-queue-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map [mouse-1] #'harness-ui-slots-mouse-open)
+    (define-key map [mouse-2] #'harness-ui-slots-mouse-open)
+    (define-key map (kbd "RET") #'harness-ui-slots-open)
+    map)
+  "Keys on the name of a queue: a click or RET shows the slots of its project.
+They are on the name's text itself, as the keys of a task's name are
+\(`harness-ui-slots-row-map').")
+
+(defun harness-ui-slots--queues (data)
+  "Return the queues of DATA, an answer of `task/slots', as a list of plists."
+  (append (plist-get data :queues) nil))
+
+(defun harness-ui-slots--same-project-p (a b)
+  "Non-nil when A and B, project roots, are the same directory."
+  (and (stringp a) (stringp b)
+       (equal (file-name-as-directory (expand-file-name a))
+              (file-name-as-directory (expand-file-name b)))))
+
+(defun harness-ui-slots--queue-count (value face-when-some)
+  "Return the count VALUE as a cell: its number, or a dash for none.
+A number is in FACE-WHEN-SOME when that is non-nil, the dash is dim."
+  (let ((n (harness-ui-slots--number value)))
+    (if (> n 0)
+        (let ((text (format "%d" n)))
+          (if face-when-some (propertize text 'face face-when-some) text))
+      (harness-ui-slots--dim "–"))))
+
+(defun harness-ui-slots--queue-suspended-p (queue)
+  "Non-nil when QUEUE, an entry of `:queues', is paused by hand."
+  (harness-json-true-p (plist-get queue :suspended)))
+
+(defun harness-ui-slots--queue-state (queue)
+  "Return the State cell of QUEUE: running, paused or held, the last two lit."
+  (let ((state (format "%s" (or (plist-get queue :state) "running"))))
+    (pcase state
+      ("paused" (propertize state 'face 'warning))
+      ("held" (propertize state 'face 'harness-task-held-face))
+      (_ state))))
+
+(defun harness-ui-slots--queue-tail (counts)
+  "Return how many columns a row takes after its name, with the COUNTS it shows.
+The State, each count and the gaps between, and the button."
+  (+ 2 harness-ui-slots--queue-state-width
+     (cl-loop for key in counts
+              sum (+ 2 (nth 2 (assq key harness-ui-slots--queue-counts))))
+     2 harness-ui-slots--queue-button-width))
+
+(defun harness-ui-slots--queue-layout (queues width)
+  "Return how the table of QUEUES is laid out in a window WIDTH wide.
+A plist of `:name-width', how wide the Queue column is -- as wide as the
+longest name, `harness-ui-slots--queue-name-max' at most, or as the room
+leaves, never under `harness-ui-slots--queue-name-min' -- and `:counts',
+the counts it shows (`harness-ui-slots--queue-counts'): all, until the
+name has less than its minimum, then the counts of
+`harness-ui-slots--queue-give-up' go one at a time.  `:ends' says where
+each column sits: `:state' where its text starts, each count's key where
+that count ends, and `:button' where the button starts, in columns."
+  (let* ((longest (apply #'max 0 (mapcar (lambda (queue) (string-width (or (plist-get queue :name) "")))
+                                         queues)))
+         (counts (mapcar #'car harness-ui-slots--queue-counts)))
+    (cl-flet ((room () (- width 3 (harness-ui-slots--queue-tail counts) 1)))
+      (while-let ((key (and (< (room) harness-ui-slots--queue-name-min)
+                            (cl-find-if (lambda (key) (memq key counts)) harness-ui-slots--queue-give-up))))
+        (setq counts (delq key (copy-sequence counts))))
+      (let* ((name-width (max harness-ui-slots--queue-name-min
+                              (min longest harness-ui-slots--queue-name-max (room))))
+             (state (+ 3 name-width 2))
+             (edge (+ state harness-ui-slots--queue-state-width))
+             (ends nil))
+        (dolist (key counts)
+          (setq edge (+ edge 2 (nth 2 (assq key harness-ui-slots--queue-counts))))
+          (push (cons key edge) ends))
+        (list :name-width name-width :counts counts
+              :ends (append (list :state state) (apply #'append (mapcar (lambda (c) (list (car c) (cdr c)))
+                                                                        (nreverse ends)))
+                            (list :button (+ edge 2))))))))
+
+(defun harness-ui-slots--queue-header (layout)
+  "Return the header row of the table of queues, laid out as LAYOUT says."
+  (let ((ends (plist-get layout :ends)))
+    (concat "   "
+            (harness-ui-slots--with "Queue" '(face harness-slots-header-face))
+            (harness-ui-slots--to (plist-get ends :state))
+            (harness-ui-slots--with "State" '(face harness-slots-header-face))
+            (mapconcat (lambda (key)
+                         (harness-ui-slots--right (nth 1 (assq key harness-ui-slots--queue-counts))
+                                                  (plist-get ends key) 'harness-slots-header-face))
+                       (plist-get layout :counts) "")
+            "\n")))
+
+(defun harness-ui-slots--queue-hold-line (hold width)
+  "Return the line under a queue's row that says what HOLD holds back.
+HOLD is an entry of the queue's `:holds': what holds its tasks back,
+worded as the board words it (`harness-ui-tasks--hold-text'), and how
+many of them.  It is cut, before the number of tasks, to fit a window
+WIDTH wide."
+  (let* ((count (harness-ui-slots--number (plist-get hold :count)))
+         (tasks (format " · %d task%s" count (if (= count 1) "" "s")))
+         (indent 5))
+    (concat (make-string indent ?\s)
+            (propertize (harness-ui-slots--fit (harness-ui-tasks--hold-text hold)
+                                               (max 12 (- width indent (string-width tasks) 1)))
+                        'face 'harness-task-held-face)
+            (harness-ui-slots--dim tasks)
+            "\n")))
+
+(defun harness-ui-slots--queue-row (queue layout width own)
+  "Return the text of QUEUE's row and the lines under it, laid out as LAYOUT says.
+QUEUE is an entry of `:queues'; WIDTH is the window's.  The page's own
+project's (OWN, non-nil) is marked and bold.  The row ends with the
+button that pauses or resumes the queue; a line for each of what holds
+its tasks back follows.  Every line carries the keys of the queue:
+`harness-slot-key' to be found again after a redraw and
+`harness-slot-queue', the project, which the commands read at point."
+  (let* ((project (plist-get queue :project))
+         (ends (plist-get layout :ends))
+         (name (harness-ui-slots--fit (or (plist-get queue :name) project)
+                                      (plist-get layout :name-width)))
+         (suspended (harness-ui-slots--queue-suspended-p queue))
+         (link (list 'mouse-face 'highlight 'pointer 'hand 'keymap harness-ui-slots-queue-map
+                     'help-echo (harness-ui-one-line
+                                 (format "%s · mouse-1, RET: show its slots"
+                                         (abbreviate-file-name (or project ""))))))
+         (button (harness-ui-action-button
+                  (if suspended "[Resume]" "[Pause]") #'harness-ui-slots-toggle-queue
+                  :help (format "%s the queue of this project (P)" (if suspended "Resume" "Pause"))))
+         (row (concat (if own (propertize " ›" 'face 'harness-slots-heading-face) "  ")
+                      " "
+                      (harness-ui-slots--with (if own (propertize name 'face 'harness-slots-heading-face) name)
+                                              link)
+                      (harness-ui-slots--to (plist-get ends :state))
+                      (harness-ui-slots--queue-state queue)
+                      (mapconcat (lambda (key)
+                                   (harness-ui-slots--right
+                                    (harness-ui-slots--queue-count (plist-get queue key)
+                                                                   (and (eq key :held) 'harness-task-held-face))
+                                    (plist-get ends key)))
+                                 (plist-get layout :counts) "")
+                      (harness-ui-slots--to (plist-get ends :button))
+                      button
+                      "\n")))
+    (harness-ui-slots--with
+     (concat row
+             (mapconcat (lambda (hold) (harness-ui-slots--queue-hold-line hold width))
+                        (append (plist-get queue :holds) nil) ""))
+     (list 'harness-slot-key (concat "project:" (format "%s" project))
+           'harness-slot-queue project))))
+
+(defun harness-ui-slots--queue-switches (totals)
+  "Return the two lines of buttons that act on every task and every queue at once.
+TOTALS is the answer's `:totals'.  Tasks: [Pause all] and [Resume all],
+with how many work and how many are paused; Queues: the same for the
+queues' pauses.  A button that would change nothing -- no task to pause,
+none paused, every queue paused already, none paused -- is dim, and
+works all the same."
+  (let* ((n (lambda (key) (harness-ui-slots--number (plist-get totals key))))
+         (tasks-to-pause (+ (funcall n :working) (max 0 (- (funcall n :waiting) (funcall n :paused)))))
+         (queues (funcall n :queues))
+         (button (lambda (label action idle help)
+                   (harness-ui-action-button label action :help help
+                                             :face (and idle 'harness-dim-face)))))
+    (concat
+     "   " (harness-ui-slots--with "Tasks" '(face harness-slots-header-face))
+     (harness-ui-slots--to 11)
+     (funcall button "[Pause all]" #'harness-ui-slots-pause-tasks (<= tasks-to-pause 0)
+              "Pause every task (u)")
+     " "
+     (funcall button "[Resume all]" #'harness-ui-slots-resume-tasks (<= (funcall n :paused) 0)
+              "Resume every paused task (U)")
+     "   " (harness-ui-slots--dim (format "%d working · %d paused" (funcall n :working) (funcall n :paused)))
+     "\n"
+     "   " (harness-ui-slots--with "Queues" '(face harness-slots-header-face))
+     (harness-ui-slots--to 11)
+     (funcall button "[Pause all]" #'harness-ui-slots-pause-queues (>= (funcall n :suspended) queues)
+              "Pause every queue (s)")
+     " "
+     (funcall button "[Resume all]" #'harness-ui-slots-resume-queues (<= (funcall n :suspended) 0)
+              "Resume every paused queue (S)")
+     "   " (harness-ui-slots--dim (format "%d paused" (funcall n :suspended)))
+     "\n")))
+
+(defun harness-ui-slots--queues-section (data width)
+  "Return the section of every queue in DATA, drawn for a window WIDTH wide.
+Its heading, the switches for all of them, and the table: a row for
+each queue, the page's own project's marked, with what holds its tasks
+back under it.  Nothing without `:queues' in DATA (a harness that does
+not list them)."
+  (when (plist-member data :queues)
+    (let* ((queues (harness-ui-slots--queues data))
+           (totals (plist-get data :totals))
+           (suspended (harness-ui-slots--number (plist-get totals :suspended)))
+           (layout (harness-ui-slots--queue-layout queues width)))
+      (concat
+       " " (propertize "Queues" 'face 'harness-slots-heading-face)
+       (harness-ui-slots--dim (format " · %d" (length queues)))
+       (if (> suspended 0)
+           (concat (harness-ui-slots--dim " · ")
+                   (propertize (format "%d paused" suspended) 'face 'warning))
+         "")
+       "\n"
+       (harness-ui-slots--queue-switches totals)
+       (if (null queues)
+           (concat "   " (harness-ui-slots--dim "no queue") "\n")
+         (concat "\n"
+                 (harness-ui-slots--queue-header layout)
+                 (mapconcat (lambda (queue)
+                              (harness-ui-slots--queue-row
+                               queue layout width
+                               (harness-ui-slots--same-project-p (plist-get queue :project)
+                                                                 (plist-get data :project))))
+                            queues "")))))))
+
 ;;;; Tables
 
 (defun harness-ui-slots--heading (title &rest notes)
@@ -589,12 +870,24 @@ The longest wait so far and the average one, by priority, as of NOW."
       (harness-ui-slots--queue-stats data now)))))
 
 (defun harness-ui-slots--reason (reason)
-  "Return why a queued task leads its line, from REASON as the harness says it."
+  "Return why a queued task leads its line, from REASON as the harness says it.
+A task that waited for quota or a budget names which."
   (pcase (and reason (format "%s" reason))
     ("sent-back" "sent back")
     ("preempted" "pre-empted")
     ("returned" "returned")
+    ("quota" "quota")
+    ("budget" "budget")
     (_ nil)))
+
+(defun harness-ui-slots--note (entry)
+  "Return the note after a queued task's title in \"Next in line\", or nil.
+ENTRY is an entry of `:queue'.  What holds the task back, short
+\(`harness-ui-tasks--hold-text': paused, quota or a budget, and when it
+ends), else why it leads its line (`harness-ui-slots--reason')."
+  (if-let* ((hold (plist-get entry :hold)))
+      (harness-ui-tasks--hold-text hold t)
+    (harness-ui-slots--reason (plist-get entry :reason))))
 
 (defun harness-ui-slots--next-section (data width now)
   "Return the section of the first tasks in DATA's queue, in the order they start.
@@ -613,10 +906,10 @@ titles go."
                  for place from 1
                  concat
                  (let* ((priority (harness-ui-slots--priority (plist-get entry :priority)))
-                        (note (harness-ui-slots--reason (plist-get entry :reason)))
+                        (note (harness-ui-slots--note entry))
                         (room (- end 8 1 wait-room))
                         (title (harness-ui-slots--fit (plist-get entry :title)
-                                                      (if note (max 8 (- room 3 (length note))) room))))
+                                                      (if note (max 8 (- room 3 (string-width note))) room))))
                    ;; A row is found again after a redraw by its task.
                    (concat
                     (harness-ui-slots--with
@@ -624,7 +917,15 @@ titles go."
                              (harness-ui-slots--to 6) (or (harness-ui-slots--plain-arrow priority) "")
                              (harness-ui-slots--to 8)
                              (propertize title 'face 'harness-task-title-face)
-                             (if note (concat (harness-ui-slots--dim " · ") (harness-ui-slots--dim note)) "")
+                             (if note
+                                 (concat (harness-ui-slots--dim " · ")
+                                         ;; Out of quota or over a budget stands out
+                                         ;; from a pause, which you chose.
+                                         (if (and (plist-get entry :hold)
+                                                  (not (equal "paused" (format "%s" (plist-get (plist-get entry :hold) :kind)))))
+                                             (propertize note 'face 'harness-task-held-face)
+                                           (harness-ui-slots--dim note)))
+                               "")
                              (harness-ui-slots--right
                               (harness-ui-slots--duration (harness-ui-slots--waited entry now))
                               end))
@@ -667,6 +968,8 @@ failed, and the page shows the last answer all the same."
    (when error
      (concat " " (propertize (format "Could not refresh: %s" error) 'face 'error) "\n"))
    "\n"
+   (when-let* ((queues (harness-ui-slots--queues-section data width)))
+     (concat queues "\n"))
    (harness-ui-slots--holders-section data width now)
    "\n"
    (harness-ui-slots--queue-section data now)
@@ -949,6 +1252,13 @@ whose text reads the same is left alone (`harness-ui-slots--render')."
     ;; What the task at point waits on, as in the session list.
     (define-key map (kbd "SPC") #'harness-ui-sessions-requests)
     (define-key map (kbd "l") #'harness-ui-slots-set-limit)
+    ;; Pausing: the queue at point, every task, every queue.  u is the
+    ;; board's Pause, P its queue's switch.
+    (define-key map (kbd "P") #'harness-ui-slots-toggle-queue)
+    (define-key map (kbd "u") #'harness-ui-slots-pause-tasks)
+    (define-key map (kbd "U") #'harness-ui-slots-resume-tasks)
+    (define-key map (kbd "s") #'harness-ui-slots-pause-queues)
+    (define-key map (kbd "S") #'harness-ui-slots-resume-queues)
     (define-key map (kbd "?") #'harness-menu)
     map)
   "Keymap of `harness-ui-slots-mode'.")
@@ -960,6 +1270,9 @@ whose text reads the same is left alone (`harness-ui-slots--render')."
 \\[harness-ui-sessions-requests] pops out what the task at point waits on, and y and n
 answer a permission request on its line, as in the session list;
 \\[harness-ui-slots-set-limit] sets how many tasks may work at once;
+\\[harness-ui-slots-toggle-queue] pauses the queue at point, or resumes it, and
+\\[harness-ui-slots-pause-tasks] and \\[harness-ui-slots-resume-tasks] pause and resume every task,
+\\[harness-ui-slots-pause-queues] and \\[harness-ui-slots-resume-queues] every queue;
 \\[harness-ui-slots-refresh] asks the harness again."
   ;; The first line may wrap in a narrow window: at a space, not in a word.
   (setq truncate-lines nil
@@ -981,6 +1294,12 @@ answer a permission request on its line, as in the session list;
         (". RET" "Open its session" harness-ui-slots-open)
         (". SPC" "View what it waits on" harness-ui-sessions-requests)
         (". TAB" "Next task" harness-ui-slots-next-row)]
+       ["Queues"
+        (". P" "Pause or resume the queue at point" harness-ui-slots-toggle-queue)
+        (". s" "Pause every queue" harness-ui-slots-pause-queues)
+        (". S" "Resume every queue" harness-ui-slots-resume-queues)
+        (". u" "Pause every task" harness-ui-slots-pause-tasks)
+        (". U" "Resume every task" harness-ui-slots-resume-tasks)]
        ["Page"
         (". l" "Set how many tasks work at once" harness-ui-slots-set-limit)
         (". g" "Refresh" harness-ui-slots-refresh)]))
@@ -1030,20 +1349,23 @@ run from, else of the current directory.  See
 (defun harness-ui-slots-open (&optional position)
   "Open the session of the task in the row at point, in POSITION.
 By default it takes the page's own position, replacing the page, as the
-session of a card of the task board does."
+session of a card of the task board does.  On the row of a queue it
+shows the slots of that queue's project instead."
   (interactive)
   (let ((session (get-text-property (point) 'harness-slot-session)))
     (cond
      (session (funcall (harness-ui-session-opener position) session))
      ((get-text-property (point) 'harness-slot-task)
       (user-error "This task has not started its session yet"))
+     ((get-text-property (point) 'harness-slot-queue) (harness-ui-slots-open-queue))
      (t (user-error "No task in a slot here")))))
 
 (defun harness-ui-slots-mouse-open (event)
-  "Open the session of the task in the row EVENT, a click, is on."
+  "Open the session of the task, or the project of the queue, EVENT clicked."
   (interactive "e")
   (mouse-set-point event)
-  (when (get-text-property (point) 'harness-slot-index)
+  (when (or (get-text-property (point) 'harness-slot-index)
+            (get-text-property (point) 'harness-slot-queue))
     (harness-ui-slots-open)))
 
 (defun harness-ui-slots--row-starts ()
@@ -1078,6 +1400,126 @@ negative STEP.  It wraps around."
   "Move to the previous task in a slot."
   (interactive)
   (harness-ui-slots--move-row -1))
+
+;;;; Pausing tasks and queues
+
+;; Pausing a task and pausing a queue are two things.  A paused task is
+;; held in the pending queue until it is resumed, however many slots are
+;; free; a paused queue starts none of its waiting tasks on its own,
+;; and the tasks at work go on.  Both are the harness's, and kept across
+;; a restart.  The page offers each for everything at once, and the
+;; queue's for one project.
+
+(defun harness-ui-slots--count-text (n noun)
+  "Return N NOUNs, pluralised: \"1 task\", \"3 tasks\"."
+  (format "%d %s%s" n noun (if (= n 1) "" "s")))
+
+(defun harness-ui-slots--act (what method params done)
+  "Ask the harness METHOD with PARAMS for the page in the current buffer.
+WHAT names the request, for the message of a failure.  DONE is a
+function of the answer that returns what to say once the harness did
+it.  The page asks the harness again soon, which shows the change."
+  (let ((buffer (current-buffer)))
+    (harness-ui-call
+     method params
+     (lambda (answer)
+       (message "%s" (funcall done answer))
+       (when (buffer-live-p buffer) (harness-ui-slots--refetch-soon buffer)))
+     (lambda (err)
+       (unless (harness-ui-connection-replaced-p err)
+         (message "%s failed: %s" what (harness-error-message err)))))))
+
+(defun harness-ui-slots-pause-tasks ()
+  "Pause every task of every project: stop the ones at work, hold the waiting ones.
+A task at work goes back to the pending queue, its session, branch and
+worktree kept, and carries on where it stopped when it is resumed; a
+task waiting for a slot is held where it is, so the slot a paused task
+frees starts none of them.  The queues are not touched
+\(\\<harness-ui-slots-mode-map>\\[harness-ui-slots-pause-queues]).  A pause is kept across a restart, and
+\\[harness-ui-slots-resume-tasks] ends every one."
+  (interactive)
+  (harness-ui-slots--act
+   "Pausing the tasks" "_harness/task/pause-all" nil
+   (lambda (answer)
+     (let ((n (length (plist-get answer :ids))))
+       (if (> n 0)
+           (format "Paused %s" (harness-ui-slots--count-text n "task"))
+         "No task to pause")))))
+
+(defun harness-ui-slots-resume-tasks ()
+  "Resume every paused task of every project.
+The queues start them as slots are free, by priority, as they start any
+waiting task, and not while a queue is paused
+\(\\<harness-ui-slots-mode-map>\\[harness-ui-slots-resume-queues])."
+  (interactive)
+  (harness-ui-slots--act
+   "Resuming the tasks" "_harness/task/resume-all" nil
+   (lambda (answer)
+     (let ((n (length (plist-get answer :ids))))
+       (if (> n 0)
+           (format "Resumed %s" (harness-ui-slots--count-text n "task"))
+         "No paused task")))))
+
+(defun harness-ui-slots-pause-queues ()
+  "Pause every queue: none of their waiting tasks starts on its own.
+The tasks at work go on, and an explicit start still starts one.  Each
+project's queue is paused as the board's \\<harness-ui-tasks-board-map>\\[harness-ui-tasks-toggle-queue] pauses it, and stays so
+across a restart.  \\<harness-ui-slots-mode-map>\\[harness-ui-slots-resume-queues] resumes every one."
+  (interactive)
+  (harness-ui-slots--act
+   "Pausing the queues" "_harness/task/suspend-all-queues" nil
+   (lambda (answer)
+     (let ((n (length (plist-get answer :projects))))
+       (if (> n 0)
+           (format "Paused %s" (harness-ui-slots--count-text n "queue"))
+         "No queue to pause")))))
+
+(defun harness-ui-slots-resume-queues ()
+  "Resume every paused queue: their waiting tasks start, by priority."
+  (interactive)
+  (harness-ui-slots--act
+   "Resuming the queues" "_harness/task/resume-all-queues" nil
+   (lambda (answer)
+     (let ((n (length (plist-get answer :projects))))
+       (if (> n 0)
+           (format "Resumed %s" (harness-ui-slots--count-text n "queue"))
+         "No paused queue")))))
+
+(defun harness-ui-slots--queue-at-point ()
+  "Return the entry of `:queues' for the queue at point, or nil.
+The queue of the row point is on (`harness-slot-queue'), and failing
+that the page's own project's."
+  (let ((project (or (get-text-property (point) 'harness-slot-queue)
+                     (plist-get harness-ui-slots--data :project))))
+    (cl-find-if (lambda (queue) (harness-ui-slots--same-project-p (plist-get queue :project) project))
+                (harness-ui-slots--queues harness-ui-slots--data))))
+
+(defun harness-ui-slots-toggle-queue ()
+  "Pause the queue at point, or resume it when it is paused.
+It is the queue of the row point is on, else the page's own project's.
+A paused queue starts none of its waiting tasks on its own, and the
+tasks at work go on: the board's \\<harness-ui-tasks-board-map>\\[harness-ui-tasks-toggle-queue] does the same for its project."
+  (interactive)
+  (let* ((queue (harness-ui-slots--queue-at-point))
+         (project (or (plist-get queue :project)
+                      (get-text-property (point) 'harness-slot-queue)
+                      (plist-get harness-ui-slots--data :project)
+                      harness-ui-slots--dir
+                      (user-error "No queue here")))
+         (name (or (plist-get queue :name) (file-name-nondirectory (directory-file-name project))))
+         (suspend (not (harness-ui-slots--queue-suspended-p queue))))
+    (harness-ui-slots--act
+     (if suspend "Pausing the queue" "Resuming the queue")
+     (if suspend "_harness/task/suspend-queue" "_harness/task/resume-queue")
+     (list :cwd project)
+     (lambda (_answer) (format "%s queue %s" (if suspend "Paused" "Resumed") name)))))
+
+(defun harness-ui-slots-open-queue ()
+  "Show the slots of the project whose queue is in the row at point."
+  (interactive)
+  (if-let* ((project (get-text-property (point) 'harness-slot-queue)))
+      (harness-slots project)
+    (user-error "No queue here")))
 
 (defun harness-ui-slots-set-limit ()
   "Ask how many tasks of a project may work at once, and set it.

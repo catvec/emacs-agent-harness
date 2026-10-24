@@ -1877,5 +1877,78 @@ The task waits in pending until the queue starts it again."
       ;; Nothing takes the freed slot on its own: the return started nothing.
       (should (eq 'pending (plist-get (harness-call 'task/get id) :state))))))
 
+(ert-deftest harness-tools-sessions-task-pause-and-resume ()
+  "task_control pause stops a task and keeps it in the queue until resume.
+task_list says it is paused, and how to end that."
+  (harness-tools-sessions-test-with
+    (let* ((harness-agent--cancel-grace 0.05)
+           (harness-tasks-max-running 1)
+           (harness-provider-demo-script-override '((:type wait :seconds 30)))
+           (me (harness-tools-sessions-test-session))
+           (id (plist-get (plist-get (harness-tools-sessions-test-run me "task_submit" '(:prompt "Long work"))
+                                     :meta)
+                          :task-id)))
+      (harness-test-wait (lambda () (plist-get (harness-call 'task/get id) :session)) 5 "a session")
+      (let ((text (harness-tools-sessions-test-ok me "task_control" (list :task_id id :action "pause"))))
+        (should (string-match-p "Paused: it waits in the pending queue" text))
+        (should (string-match-p "paused (task_control resume lets the queue start it)" text)))
+      (let ((task (harness-call 'task/get id)))
+        (should (eq 'pending (plist-get task :state)))
+        (should (plist-get task :paused)))
+      (should (string-match-p "paused (task_control resume"
+                              (harness-tools-sessions-test-ok me "task_list" '(:column "pending"))))
+      (setq harness-provider-demo-script-override harness-tools-sessions-test-script)
+      (let ((text (harness-tools-sessions-test-ok me "task_control" (list :task_id id :action "resume"))))
+        (should (string-match-p "Resumed: the queue starts it" text)))
+      (harness-tools-sessions-test-ok me "task_wait" (list :task_id id :until "done"))
+      (should-not (plist-get (harness-call 'task/get id) :paused)))))
+
+(ert-deftest harness-tools-sessions-task-pause-all-and-resume-all ()
+  "pause-all pauses a project's tasks, or every project's; resume-all lets them go."
+  (harness-tools-sessions-test-with
+    (let* ((harness-agent--cancel-grace 0.05)
+           (harness-tasks-max-running 1)
+           (harness-provider-demo-script-override '((:type wait :seconds 30)))
+           (me (harness-tools-sessions-test-session))
+           (a (plist-get (plist-get (harness-tools-sessions-test-run me "task_submit" '(:prompt "Working"))
+                                    :meta)
+                         :task-id))
+           (b (plist-get (plist-get (harness-tools-sessions-test-run me "task_submit" '(:prompt "Waiting"))
+                                    :meta)
+                         :task-id)))
+      (should (eq 'pending (plist-get (harness-call 'task/get b) :state)))
+      (let ((text (harness-tools-sessions-test-ok me "task_control" '(:action "pause-all"))))
+        (should (string-match-p "Paused 2 tasks of " text))
+        (should (string-match-p (regexp-quote a) text))
+        (should (string-match-p (regexp-quote b) text)))
+      (dolist (id (list a b))
+        (should (eq 'pending (plist-get (harness-call 'task/get id) :state)))
+        (should (plist-get (harness-call 'task/get id) :paused)))
+      (setq harness-provider-demo-script-override harness-tools-sessions-test-script)
+      (should (string-match-p "Resumed 2 tasks of every project"
+                              (harness-tools-sessions-test-ok me "task_control" '(:action "resume-all" :all_projects t))))
+      (dolist (id (list a b))
+        (harness-tools-sessions-test-ok me "task_wait" (list :task_id id :until "done")))
+      (should (string-match-p "Paused 0 tasks"
+                              (harness-tools-sessions-test-ok me "task_control" '(:action "pause-all")))))))
+
+(ert-deftest harness-tools-sessions-task-queue-all-projects ()
+  "suspend-queue and resume-queue take every project's queue with all_projects."
+  (harness-tools-sessions-test-with
+    (let* ((harness-tasks-max-running 0)
+           (other (harness-test-temp-dir))
+           (me (harness-tools-sessions-test-session)))
+      (harness-tools-sessions-test-run me "task_submit" '(:prompt "Here"))
+      (harness-tools-sessions-test-run me "task_submit" (list :prompt "There" :cwd other))
+      (let ((text (harness-tools-sessions-test-ok me "task_control" '(:action "suspend-queue" :all_projects t))))
+        (should (string-match-p "Every queue suspended" text))
+        (should (string-match-p (regexp-quote (abbreviate-file-name (directory-file-name other))) text)))
+      (should (harness-json-true-p (plist-get (harness-call 'task/settings default-directory) :queue-suspended)))
+      (should (harness-json-true-p (plist-get (harness-call 'task/settings other) :queue-suspended)))
+      (should (string-match-p "Every suspended queue resumed"
+                              (harness-tools-sessions-test-ok me "task_control" '(:action "resume-queue" :all_projects t))))
+      (should-not (harness-json-true-p (plist-get (harness-call 'task/settings default-directory) :queue-suspended)))
+      (should-not (harness-json-true-p (plist-get (harness-call 'task/settings other) :queue-suspended))))))
+
 (provide 'harness-tools-sessions-test)
 ;;; harness-tools-sessions-test.el ends here

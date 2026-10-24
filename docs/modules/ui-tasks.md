@@ -33,7 +33,9 @@ project, one section per column, most urgent first:
                         (paused or pre-empted), then the oldest.
                         Beside its count, [Queue: running] (P)
                         suspends the queue, so none starts on its own
-                        until resumed
+                        until resumed.  A card says what holds its
+                        task back: paused (u), out of quota or over a
+                        hard budget, and when that ends
   Backlog               jotted down or written up for later: the queue
                         never starts one by itself; Q queues it, so it
                         drains like any pending task, and s starts it
@@ -116,6 +118,18 @@ sets the next task's.  To give many tasks a priority, or any other
 setting, at once, mark their sessions in the session list
 (`harness-sessions`): its keys and the harness's setting commands act
 on every marked session, and on the tasks they work on.
+
+Pausing: u, or a card's [Pause], pauses the task at point.  A task at
+work has its turn stopped and goes back to Pending, a task waiting
+there stays; either is held, however many slots are free, until U, or
+[Resume], lets the queue have it, and s starts it at once.  A pause
+is kept across a restart, and is not the queue's: P suspends every
+waiting task of the project, a pause one.  A task whose turn stopped
+because every provider it could run on was out of quota, or a hard
+budget was spent, waits in Pending too, its card saying which and
+when it ends (the hold, `harness-ui-tasks--hold-text`); the queue
+starts it again once that is over, with nothing for you to do.
+Pausing every task, and every queue, is the task slots page's (S).
 
 Review can be turned off (V, or `harness-tasks-require-verification`
 on the settings page): finished tasks then merge and complete by
@@ -245,6 +259,7 @@ the chevron that folds a card's recap, which only draws the card again.
 - `harness-ui-tasks-next` — Move to the next task.
 - `harness-ui-tasks-open` — Open the session of the task at point in POSITION.
 - `harness-ui-tasks-open-other` — Open the session of the task at point in a position read from the user.
+- `harness-ui-tasks-pause` — Pause the task at point: back in the pending queue, held there until resumed.
 - `harness-ui-tasks-previous` — Move to the previous task.
 - `harness-ui-tasks-queue` — Put the backlog task at point back in the pending queue.
 - `harness-ui-tasks-raise-priority` — Raise the priority of the task at point: low to medium, medium to high.
@@ -253,8 +268,8 @@ the chevron that folds a card's recap, which only draws the card again.
 - `harness-ui-tasks-reject` — Send the task at point back from review with feedback.
 - `harness-ui-tasks-reply` — Write a message to the session of the task at point.
 - `harness-ui-tasks-requests` — Pop out what the task at point needs, to read and act on it.
+- `harness-ui-tasks-resume` — Resume the paused task at point: the queue starts it when its turn comes.
 - `harness-ui-tasks-retry` — Have the task at point, which stopped part way, work on it again.
-- `harness-ui-tasks-return-to-pending` — Stop the turn of the task at point and put it back in the pending queue.
 - `harness-ui-tasks-search` — Find tasks, sessions and commands from the board, or act on tasks, in words.
 - `harness-ui-tasks-session-queue` — Put this session's backlog task in the pending queue.
 - `harness-ui-tasks-session-start` — Start the backlog task of this session now, even with every slot busy.
@@ -295,12 +310,13 @@ the chevron that folds a card's recap, which only draws the card again.
 - `task/for-session` ([tasks](tasks.md))
 - `task/list` ([tasks](tasks.md))
 - `task/merge` ([tasks](tasks.md))
+- `task/pause` ([tasks](tasks.md))
 - `task/prompt` ([tasks](tasks.md))
 - `task/queue` ([tasks](tasks.md))
 - `task/refine` ([tasks](tasks.md))
 - `task/reject` ([tasks](tasks.md))
+- `task/resume` ([tasks](tasks.md))
 - `task/retry` ([tasks](tasks.md))
-- `task/return-to-pending` ([tasks](tasks.md))
 - `task/set-backlog-mode` ([tasks](tasks.md))
 - `task/settings` ([tasks](tasks.md))
 - `task/start` ([tasks](tasks.md))

@@ -1990,7 +1990,8 @@ had the table is empty, and the lines go without their places."
 That is when it was put back in the queue after it worked (`:returned'):
 returned to pending by hand, pre-empted by work sent back from review,
 its borrowed slot taken back, or sent back from review while no slot
-could take it.  \"\" for any other task."
+could take it, or its turn stopped for lack of quota or a hard budget.
+\"\" for any other task."
   (if (not (plist-get task :returned))
       ""
     (let ((by (plist-get task :preempted-by)))
@@ -1998,7 +1999,20 @@ could take it.  \"\" for any other task."
         ("preempted" (format " (pre-empted%s)" (if by (format " by %s" by) "")))
         ("reclaimed" (format " (its borrowed slot taken back%s)" (if by (format " by %s" by) "")))
         ("sent-back" " (sent back from review)")
+        ("quota" " (its turn stopped: out of quota)")
+        ("budget" " (its turn stopped: over a hard budget)")
         (_ " (returned to pending)")))))
+
+(defun harness-tools-sessions--hold-text (task)
+  "Say what holds waiting TASK back, as a clause of its line, or \"\".
+The view's `:hold' (`harness-tasks--hold'): paused by hand, which
+task_control resume ends, or out of quota or over a hard budget, which
+ends by itself when the reason does."
+  (if-let* ((hold (plist-get task :hold)))
+      (pcase (format "%s" (plist-get hold :kind))
+        ("paused" ", paused (task_control resume lets the queue start it)")
+        (_ (format ", held: %s" (plist-get hold :reason))))
+    ""))
 
 (defun harness-tools-sessions--task-line (task &optional self queue)
   "Return the listing of TASK.
@@ -2028,7 +2042,7 @@ a session id, is TASK's session, the line says \"(this task)\"."
              (if (harness-string-blank-p title) "" (format "%S: " title))
              (harness-truncate-end (harness-first-line (or (plist-get task :prompt) "")) 100)
              (if (and self sid (equal sid self)) "  (this task)" ""))
-     (format "\n    state %s%s%s%s%s%s%s%s%s%s%s%s%s"
+     (format "\n    state %s%s%s%s%s%s%s%s%s%s%s%s%s%s"
              (plist-get task :state)
              (cond ((not backlog) "")
                    ((harness-json-true-p (plist-get task :joining-queue))
@@ -2045,6 +2059,7 @@ a session id, is TASK's session, the line says \"(this task)\"."
                  ""))
              ;; Where it stands in the queue, which is not the list's order.
              (if place (format ", #%d in line%s" place (harness-tools-sessions--queue-why task)) "")
+             (harness-tools-sessions--hold-text task)
              (if (plist-get task :duplicate-of) (format ", duplicate of %s" (plist-get task :duplicate-of)) "")
              (harness-tools-sessions--task-times task)
              (if sid (format ", session %s %s" sid (if session (harness-tools-sessions--status sid) "deleted")) "")
@@ -2134,7 +2149,7 @@ INPUT is the tool call's input plist and CTX its context."
 
 (harness-define-tool "task_list"
   :label "List tasks"
-  :description "List the task board: tasks (one session each, usually in its own worktree, or in the project's main tree when submitted with main_tree, done once the user verified the work and it merged) with their title (their session's name, else the one a task is given as soon as it is submitted), prompt, column (pending, backlog, needs-input, active, review, merging, done), state, priority (shown when it is low or high rather than medium), a waiting task's place in its project's line (\"#1 in line\" starts next), when they were created and finished, session, branch, merge status and review status. Pending holds only tasks waiting for a slot: they start on their own as slots free, in the order of their places in line -- highest priority first; within a priority, work sent back from review, then tasks returned to pending (paused or pre-empted, as their line says), then the rest, oldest first. A task in the backlog (task_submit with refine) waits for a person to start it (task_control start) and says so, \"backlog, waits to be started\"; the queue never starts it. A task in review has finished and waits for the user to verify it or send it back; one in merging holds a place in the merge queue (queued, merging, or its session resolving conflicts). A suspended queue (task_control suspend-queue) is named before the tasks, and its queued pending tasks say so: they start only by hand (task_control start) or when the queue is resumed. So is a backlog that queues its tasks itself (task_control auto-queue): a task written up there joins the pending queue by itself. Defaults to this project's unarchived tasks, oldest first, and the pending column alone in the order they start; limit keeps the most recently created ones. The task this session works on says (this task). Inspect a task's work with session_read on its session."
+  :description "List the task board: tasks (one session each, usually in its own worktree, or in the project's main tree when submitted with main_tree, done once the user verified the work and it merged) with their title (their session's name, else the one a task is given as soon as it is submitted), prompt, column (pending, backlog, needs-input, active, review, merging, done), state, priority (shown when it is low or high rather than medium), a waiting task's place in its project's line (\"#1 in line\" starts next), when they were created and finished, session, branch, merge status and review status. Pending holds only tasks waiting for a slot: they start on their own as slots free, in the order of their places in line -- highest priority first; within a priority, work sent back from review, then tasks returned to pending (paused or pre-empted, as their line says), then the rest, oldest first. A task in the backlog (task_submit with refine) waits for a person to start it (task_control start) and says so, \"backlog, waits to be started\"; the queue never starts it. A task in review has finished and waits for the user to verify it or send it back; one in merging holds a place in the merge queue (queued, merging, or its session resolving conflicts). A suspended queue (task_control suspend-queue) is named before the tasks, and its queued pending tasks say so: they start only by hand (task_control start) or when the queue is resumed. A waiting task something holds back says so on its line: paused (task_control pause; resume lets the queue start it), or \"held\" with the reason when every model it could run on is out of quota, or a hard budget that covers it is spent -- it starts by itself once that ends, and a turn that stopped for either goes back to pending instead of failing. So is a backlog that queues its tasks itself (task_control auto-queue): a task written up there joins the pending queue by itself. Defaults to this project's unarchived tasks, oldest first, and the pending column alone in the order they start; limit keeps the most recently created ones. The task this session works on says (this task). Inspect a task's work with session_read on its session."
   :schema '(:type "object"
             :properties (:column (:type "string" :enum ("pending" "backlog" "needs-input" "active" "review" "merging" "done"))
                          :include_archived (:type "boolean" :description "Include archived tasks (default false).")
@@ -2219,24 +2234,64 @@ or plan, is an error that ends nothing."
   :subject (lambda (input) (harness-first-line (or (plist-get input :title) (plist-get input :plan)) 60))
   :handler #'harness-tools-sessions--submit-task-plan)
 
+(defun harness-tools-sessions--task-queue-all (action)
+  "Suspend or resume every project's pending queue, ACTION naming which."
+  (let* ((suspend (equal action "suspend-queue"))
+         (state (harness-call (if suspend 'task/suspend-all-queues 'task/resume-all-queues)))
+         (projects (plist-get state :projects)))
+    (harness-tool-ok
+     (format "%s: %s.\n%s"
+             (if suspend "Every queue suspended" "Every suspended queue resumed")
+             (if projects
+                 (mapconcat (lambda (p) (abbreviate-file-name (directory-file-name p))) projects ", ")
+               "no project")
+             (if suspend
+                 "No pending task of any project starts on its own now; tasks at work go on, and task_control start still starts a task by hand."
+               "Waiting tasks start again now, by priority, up to each project's limit.")))))
+
+(defun harness-tools-sessions--task-pause-all (input ctx action)
+  "Pause or resume every task of a project, ACTION naming which, for task_control.
+INPUT carries the tool's input, CTX its context: the project is the
+calling session's own, or the one INPUT's `:cwd' names, or every
+project's with `:all_projects'."
+  (let* ((all (harness-json-true-p (plist-get input :all_projects)))
+         (cwd (and (not all) (or (plist-get input :cwd) (plist-get ctx :cwd)))))
+    (unless (or all cwd)
+      (signal 'harness-error (list (format "%s needs the project: call it from a session with a directory, give cwd, or all_projects" action))))
+    (let* ((pause (equal action "pause-all"))
+           (ids (plist-get (harness-call (if pause 'task/pause-all 'task/resume-all) cwd) :ids)))
+      (harness-tool-ok
+       (format "%s %d task%s%s.%s"
+               (if pause "Paused" "Resumed") (length ids) (if (= 1 (length ids)) "" "s")
+               (if all " of every project" (format " of %s" (abbreviate-file-name (directory-file-name cwd))))
+               (if ids (concat "\n" (mapconcat #'identity ids ", ")) ""))))))
+
 (defun harness-tools-sessions--task-queue (input ctx action)
   "Suspend or resume the pending queue ACTION names, for task_control.
 INPUT carries the tool's input, CTX its context: the project is the
-calling session's own, or the one INPUT's `:cwd' names."
+calling session's own, or the one INPUT's `:cwd' names, or every
+project's with `:all_projects'."
   (let* ((cwd (or (plist-get input :cwd) (plist-get ctx :cwd)))
          (method (if (equal action "suspend-queue") 'task/suspend-queue 'task/resume-queue)))
-    (unless cwd
-      (signal 'harness-error (list (format "%s needs the project: call it from a session with a directory, or give cwd" action))))
-    (let* ((state (harness-call method cwd))
-           (project (plist-get state :project))
-           (suspended (harness-json-true-p (plist-get state :suspended))))
-      (harness-tool-ok
-       (format "%s of %s.\n%s"
-               (if suspended "Queue suspended" "Queue resumed")
-               (abbreviate-file-name (directory-file-name project))
-               (if suspended
-                   "No pending task of the project starts on its own now; one already at work goes on, and task_control start still starts a task by hand."
-                 "Waiting tasks start again now, by priority, up to the project's limit."))))))
+    (if (harness-json-true-p (plist-get input :all_projects))
+        (harness-tools-sessions--task-queue-all action)
+      (harness-tools-sessions--task-queue-one cwd method action))))
+
+(defun harness-tools-sessions--task-queue-one (cwd method action)
+  "Suspend or resume the pending queue of the project CWD names, for task_control.
+METHOD is the harness method that does it, ACTION the tool's."
+  (unless cwd
+    (signal 'harness-error (list (format "%s needs the project: call it from a session with a directory, or give cwd" action))))
+  (let* ((state (harness-call method cwd))
+         (project (plist-get state :project))
+         (suspended (harness-json-true-p (plist-get state :suspended))))
+    (harness-tool-ok
+     (format "%s of %s.\n%s"
+             (if suspended "Queue suspended" "Queue resumed")
+             (abbreviate-file-name (directory-file-name project))
+             (if suspended
+                 "No pending task of the project starts on its own now; one already at work goes on, and task_control start still starts a task by hand."
+               "Waiting tasks start again now, by priority, up to the project's limit.")))))
 
 (defun harness-tools-sessions--task-backlog-mode (input ctx action)
   "Put a project's backlog in the mode ACTION names, for task_control.
@@ -2270,6 +2325,8 @@ sends work back."
     (cond
      ((member action '("suspend-queue" "resume-queue"))
       (harness-tools-sessions--task-queue input ctx action))
+     ((member action '("pause-all" "resume-all"))
+      (harness-tools-sessions--task-pause-all input ctx action))
      ((member action '("auto-queue" "manual-queue"))
       (harness-tools-sessions--task-backlog-mode input ctx action))
      (t
@@ -2287,6 +2344,8 @@ sends work back."
                              (list :from (harness-tools-sessions--sender ctx))))))
           ("cancel" (harness-call 'task/cancel id))
           ("return-to-pending" (harness-call 'task/return-to-pending id))
+          ("pause" (harness-call 'task/pause id))
+          ("resume" (harness-call 'task/resume id))
           ("merge" (harness-call 'task/merge id))
           ("verify" (harness-call 'task/verify id))
           ("reject"
@@ -2317,6 +2376,8 @@ sends work back."
                      (pcase action
                        ("priority" (format "Priority %s" (harness-priority-of-task task)))
                        ("return-to-pending" "Returned to pending; it starts again where it stopped")
+                       ("pause" "Paused: it waits in the pending queue, held until resumed (task_control resume)")
+                       ("resume" "Resumed: the queue starts it when its turn comes")
                        ("queue" "Queued: it starts as soon as the project has a free slot")
                        (_ (concat action " done")))
                      (harness-tools-sessions--task-line task))
@@ -2324,13 +2385,14 @@ sends work back."
 
 (harness-define-tool "task_control"
   :label "Control task"
-  :description "Act on a task, or on its project's pending queue. start runs a pending task now, whatever the limit or a suspended queue; queue puts a backlog task back in the pending queue, where it starts on its own as soon as a slot frees (or waits there while the queue is suspended); message sends a follow-up to its session, marked as coming from this session (while pending, it appends to the prompt instead -- a task returned to pending that waits with its queue suspended, or that was sent back from review and waits for a slot, keeps the message and gets it when it starts, otherwise it starts now); cancel drops a pending task or stops a working one's turn; return-to-pending stops a working task's turn, and the work its session left running outside it (its supervisor plan's workers and its sub-agents, whose steps it is told were interrupted), and puts it back in its project's pending queue ahead of the tasks of its priority that never started (behind higher priorities, work sent back from review and tasks returned before it), keeping its session, branch and worktree so it carries on where it stopped when it starts again; reject sends a task in review back to its session with the feedback in message, to work on it again within the limit on running tasks: with no slot free it takes the slot of a working task it outranks (a lower priority, or its own unless that task was sent back from review too; one waiting on its supervisor plan's workers or its sub-agents is working), which returns to pending, its workers and sub-agents stopped, and carries on where it stopped when it starts again; when it outranks none it waits at the front of its priority in pending with the feedback kept, and takes a slot as soon as one frees or it outranks a working task (with the queue suspended it waits so until the queue resumes); merge retries the merge queue after a failed merge; verify accepts the work of a task in review (its branch then merges and it is done); complete marks it done by hand; archive hides a done task (removing a merged task's worktree); restore unarchives; delete forgets the task (its session and worktree are kept); priority sets its priority to the given one (low, medium or high), given to the task's session, which is where a task's priority lives (`harness-priority-of-task'), and which reorders the tasks waiting for a slot: high starts before medium, medium before low (a task sent back from review that waits takes the slot of a working task it comes to outrank). suspend-queue stops a project's pending tasks from starting on their own -- the queue waits until resume-queue, while start still starts a task -- and resume-queue starts them again at once, by priority. auto-queue makes a project's backlog queue its tasks itself: each task whose write-up finishes from then on joins the pending queue as queue would put it there; manual-queue (the default) leaves written-up tasks in the backlog until they are queued or started; neither moves a task already waiting. These four act on the project of cwd (default: this session's) and need no task_id."
+  :description "Act on a task, or on its project's pending queue. start runs a pending task now, whatever the limit or a suspended queue; queue puts a backlog task back in the pending queue, where it starts on its own as soon as a slot frees (or waits there while the queue is suspended); message sends a follow-up to its session, marked as coming from this session (while pending, it appends to the prompt instead -- a task returned to pending that waits with its queue suspended, or that was sent back from review and waits for a slot, keeps the message and gets it when it starts, otherwise it starts now); cancel drops a pending task or stops a working one's turn; return-to-pending stops a working task's turn, and the work its session left running outside it (its supervisor plan's workers and its sub-agents, whose steps it is told were interrupted), and puts it back in its project's pending queue ahead of the tasks of its priority that never started (behind higher priorities, work sent back from review and tasks returned before it), keeping its session, branch and worktree so it carries on where it stopped when it starts again; pause does the same and sticks: a paused task (one at work, or one waiting for a slot) stays in the pending queue, whatever the free slots, until resume ends the pause (the queue then starts it by priority, within the limit) or start starts it at once -- the pause is kept across a restart; pause-all and resume-all do it for every task of the project of cwd, or of every project with all_projects (the waiting tasks are paused too, so the slots the working ones free start nothing); reject sends a task in review back to its session with the feedback in message, to work on it again within the limit on running tasks: with no slot free it takes the slot of a working task it outranks (a lower priority, or its own unless that task was sent back from review too; one waiting on its supervisor plan's workers or its sub-agents is working), which returns to pending, its workers and sub-agents stopped, and carries on where it stopped when it starts again; when it outranks none it waits at the front of its priority in pending with the feedback kept, and takes a slot as soon as one frees or it outranks a working task (with the queue suspended it waits so until the queue resumes); merge retries the merge queue after a failed merge; verify accepts the work of a task in review (its branch then merges and it is done); complete marks it done by hand; archive hides a done task (removing a merged task's worktree); restore unarchives; delete forgets the task (its session and worktree are kept); priority sets its priority to the given one (low, medium or high), given to the task's session, which is where a task's priority lives (`harness-priority-of-task'), and which reorders the tasks waiting for a slot: high starts before medium, medium before low (a task sent back from review that waits takes the slot of a working task it comes to outrank). suspend-queue stops a project's pending tasks from starting on their own -- the queue waits until resume-queue, while start still starts a task -- and resume-queue starts them again at once, by priority; both take every project's queue with all_projects. auto-queue makes a project's backlog queue its tasks itself: each task whose write-up finishes from then on joins the pending queue as queue would put it there; manual-queue (the default) leaves written-up tasks in the backlog until they are queued or started; neither moves a task already waiting. These four act on the project of cwd (default: this session's) and need no task_id, as do pause-all and resume-all."
   :schema '(:type "object"
-            :properties (:task_id (:type "string" :description "Task id or unique prefix; not needed by suspend-queue, resume-queue, auto-queue and manual-queue.")
-                         :action (:type "string" :enum ("start" "queue" "message" "cancel" "return-to-pending" "merge" "verify" "reject" "complete" "archive" "restore" "delete" "priority" "suspend-queue" "resume-queue" "auto-queue" "manual-queue"))
+            :properties (:task_id (:type "string" :description "Task id or unique prefix; not needed by suspend-queue, resume-queue, pause-all, resume-all, auto-queue and manual-queue.")
+                         :action (:type "string" :enum ("start" "queue" "message" "cancel" "return-to-pending" "pause" "resume" "merge" "verify" "reject" "complete" "archive" "restore" "delete" "priority" "suspend-queue" "resume-queue" "pause-all" "resume-all" "auto-queue" "manual-queue"))
                          :message (:type "string" :description "Text, for message; the feedback, for reject.")
                          :priority (:type "string" :enum ("low" "medium" "high") :description "The new priority, for priority.")
-                         :cwd (:type "string" :description "Project directory, for suspend-queue, resume-queue, auto-queue and manual-queue (default: this session's)."))
+                         :cwd (:type "string" :description "Project directory, for suspend-queue, resume-queue, pause-all, resume-all, auto-queue and manual-queue (default: this session's).")
+                         :all_projects (:type "boolean" :description "For suspend-queue, resume-queue, pause-all and resume-all: every project, not one."))
             :required ("action"))
   :kind 'meta
   :subject (lambda (input) (string-trim (format "%s %s" (or (plist-get input :action) "") (or (plist-get input :task_id) ""))))

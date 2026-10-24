@@ -22,7 +22,9 @@
 ;;                         (paused or pre-empted), then the oldest.
 ;;                         Beside its count, [Queue: running] (P)
 ;;                         suspends the queue, so none starts on its own
-;;                         until resumed
+;;                         until resumed.  A card says what holds its
+;;                         task back: paused (u), out of quota or over a
+;;                         hard budget, and when that ends
 ;;   Backlog               jotted down or written up for later: the queue
 ;;                         never starts one by itself; Q queues it, so it
 ;;                         drains like any pending task, and s starts it
@@ -105,6 +107,18 @@
 ;; setting, at once, mark their sessions in the session list
 ;; (`harness-sessions'): its keys and the harness's setting commands act
 ;; on every marked session, and on the tasks they work on.
+;;
+;; Pausing: u, or a card's [Pause], pauses the task at point.  A task at
+;; work has its turn stopped and goes back to Pending, a task waiting
+;; there stays; either is held, however many slots are free, until U, or
+;; [Resume], lets the queue have it, and s starts it at once.  A pause
+;; is kept across a restart, and is not the queue's: P suspends every
+;; waiting task of the project, a pause one.  A task whose turn stopped
+;; because every provider it could run on was out of quota, or a hard
+;; budget was spent, waits in Pending too, its card saying which and
+;; when it ends (the hold, `harness-ui-tasks--hold-text'); the queue
+;; starts it again once that is over, with nothing for you to do.
+;; Pausing every task, and every queue, is the task slots page's (S).
 ;;
 ;; Review can be turned off (V, or `harness-tasks-require-verification'
 ;; on the settings page): finished tasks then merge and complete by
@@ -859,8 +873,10 @@ POSITION is its place in line among queued tasks, nil in the backlog,
 which the queue never starts.  TODOS its session's.  A queued task
 NAMED (its name is the card's title) has the first line of its prompt
 after its place in line, else the line after it, as a backlog task's
-write-up has, its first line being a title.  A task returned to
-pending says why it waits (`harness-ui-tasks--returned-why')."
+write-up has, its first line being a title.  A task held back says
+what holds it, in full (`harness-ui-tasks--hold-text'): paused, out of
+quota or over a budget; one returned to pending says why it waits
+\(`harness-ui-tasks--returned-why')."
   (let ((body (harness-ui-tasks--body-line task))
         (sep (concat " " harness-ui-tasks--dot " ")))
     (cond
@@ -874,6 +890,9 @@ pending says why it waits (`harness-ui-tasks--returned-why')."
                     ((harness-ui-tasks--planned-p task) "planned")
                     (t "written up"))
               (if body (concat sep body) "")))
+     ((plist-get task :hold)
+      (format "#%d in line%s" (or position 1)
+              (concat sep (harness-ui-tasks--hold-text (plist-get task :hold)))))
      ((plist-get task :returned)
       (format "#%d in line%s" (or position 1)
               (concat sep (harness-ui-tasks--returned-why task))))
@@ -895,7 +914,8 @@ back from review that took its slot (`:return-reason' preempted), named
 by its title when the board has it; \"slot taken back by\" the task
 waiting on you whose slot it worked in, once you answered (reclaimed);
 \"sent back from review\" for one the user sent back while no slot
-could take it.  Each carries on where it stopped when it starts again."
+could take it; \"quota\" or \"budget\" for one whose turn stopped for
+lack of either.  Each carries on where it stopped when it starts again."
   (pcase (format "%s" (or (plist-get task :return-reason) "returned"))
     ("preempted"
      (format "pre-empted by %s"
@@ -904,7 +924,72 @@ could take it.  Each carries on where it stopped when it starts again."
      (format "slot taken back by %s"
              (harness-ui-tasks--named (plist-get task :preempted-by) "the task that lent it")))
     ("sent-back" "sent back from review")
+    ("quota" "quota")
+    ("budget" "budget")
     (_ "paused")))
+
+;;;; What holds a task back
+
+;; A queued task the scheduler leaves in the queue carries its hold
+;; (`:hold' on the view): paused by hand, out of quota, or over a hard
+;; budget.  The card says it on its first line, short, in a column of its
+;; own; the line under the title and the tooltip say it in full, and the
+;; task slots page words it the same way.
+
+(defun harness-ui-tasks--clock (time)
+  "Describe TIME, a float time, the way a reset reads: 19:00, or a date.
+A time within the next 20 hours is the hour alone, a later one has its
+day, as the harness words it (`harness-fallback--clock')."
+  (if (< (- time (float-time)) 72000)
+      (format-time-string "%H:%M" time)
+    (format-time-string "%a %b %-d, %H:%M" time)))
+
+(defun harness-ui-tasks--hold-names (hold)
+  "Return the names of what HOLD waits for, as one string, or nil.
+The labels of its items -- the providers or models out of quota, the
+budgets spent -- without repeats, in order."
+  (let (names)
+    (dolist (item (append (plist-get hold :items) nil))
+      (let ((name (or (plist-get item :label) (plist-get item :key) (plist-get item :id))))
+        (when (and (stringp name) (not (string-empty-p name)))
+          (cl-pushnew name names :test #'equal))))
+    (and names (string-join (nreverse names) ", "))))
+
+(defun harness-ui-tasks--hold-text (hold &optional short)
+  "Say what HOLD holds a queued task back for: nouns, then when it ends.
+HOLD is a task's `:hold'.  \"paused\"; \"quota · Claude Code · resets
+19:00\" and \"budget · daily · resets Sat Oct 24, 00:00\", the names of
+the providers or budgets between the kind and the end.  A time the
+provider did not give but the harness guessed reads \"retry\" instead
+of \"resets\", and a hold that ends only when you change a budget has no
+end, \"budget · session\".  SHORT leaves the names out, for the first
+line of a card.  See `harness-ui-tasks--clock'."
+  (let ((kind (format "%s" (plist-get hold :kind)))
+        (until (plist-get hold :until)))
+    (if (equal kind "paused")
+        "paused"
+      (string-join
+       (delq nil (list kind
+                       (and (not short) (harness-ui-tasks--hold-names hold))
+                       (and (numberp until)
+                            (format "%s %s"
+                                    (if (harness-json-true-p (plist-get hold :guess)) "retry" "resets")
+                                    (harness-ui-tasks--clock until)))))
+       (concat " " harness-ui-tasks--dot " ")))))
+
+(defun harness-ui-tasks--paused-p (task)
+  "Non-nil when TASK is held in the queue because you paused it."
+  (equal (format "%s" (plist-get (plist-get task :hold) :kind)) "paused"))
+
+(defun harness-ui-tasks--hold-fact (task column)
+  "The fact on TASK's card in COLUMN that says what holds it back, or nil.
+Only a queued task in Pending has one: its hold, short
+\(`harness-ui-tasks--hold-text'), in the held face while it waits for
+quota or a budget, dim while it is only paused."
+  (when-let* (((eq column 'pending))
+              (hold (plist-get task :hold)))
+    (propertize (harness-ui-tasks--hold-text hold t)
+                'face (if (harness-ui-tasks--paused-p task) 'harness-dim-face 'harness-task-held-face))))
 
 (defun harness-ui-tasks--loan-fact (task column)
   "The fact on TASK's card in COLUMN about a slot lent to the queue, or nil.
@@ -986,7 +1071,7 @@ a task kicked back into the queue waits from then, not from the day it
 was written."
   (or (plist-get task :queued-at) (plist-get task :returned) (plist-get task :created)))
 
-(defconst harness-ui-tasks--fact-kinds '(archived main-tree loan merge todos time)
+(defconst harness-ui-tasks--fact-kinds '(archived main-tree loan merge hold todos time)
   "The kinds of fact a card states, in the order of the columns they make.
 `harness-ui-tasks--facts' makes a cell of each kind a task has a fact of,
 and the cards of a section lay their cells out in one column for each
@@ -1004,6 +1089,8 @@ kind TASK has no fact of has no cell.  The kinds:
   loan      \"borrowed slot\" or \"slot lent\" (`harness-ui-tasks--loan-fact')
   merge     where a branch in the merge queue stands past waiting for its
             turn: \"merging now\", or \"conflict\"
+  hold      what holds a waiting task back: \"paused\", \"quota · resets
+            19:00\", \"budget\" (`harness-ui-tasks--hold-fact')
   todos     how many of its todos are done: \"3/7\"
   time      what the column says of when: queued, added, refined, ready,
             done, or for work in progress how long it has run
@@ -1013,7 +1100,8 @@ say -- the context in use, the tokens written, how fast and what they
 cost -- is in the tooltip of the title instead
 \(`harness-ui-tasks--figures').  Its priority is not among them: the
 arrow before the title says that (`harness-ui-tasks--priority-mark').
-A cell is dimmed (`harness-dim-face')."
+A cell is dimmed (`harness-dim-face'), the hold's apart: it stands out
+while a task waits for quota or a budget."
   (let* ((todos (harness-ui-tasks--todos session))
          (started (plist-get task :started))
          (cells
@@ -1028,6 +1116,9 @@ A cell is dimmed (`harness-dim-face')."
                              (pcase (harness-ui-tasks--merge-status task)
                                ("merging" "merging now")
                                ("conflict" "conflict"))))
+           ;; Why a waiting task does not start: state, so it stays on the
+           ;; line while a card gives up the todos and the time for its title.
+           (cons 'hold (harness-ui-tasks--hold-fact task column))
            (cons 'todos (and todos (not (memq column '(done review merging)))
                              (format "%d/%d" (nth 0 todos) (nth 1 todos))))
            (cons 'time
@@ -1057,7 +1148,9 @@ A cell is dimmed (`harness-dim-face')."
                    (_ (and started (harness-ui-tasks--elapsed (- (float-time) started)))))))))
     (cl-loop for (kind . text) in cells
              when (and text (not (string-empty-p text)))
-             collect (cons kind (propertize text 'face 'harness-dim-face)))))
+             ;; The hold has its face already: a task waiting for quota
+             ;; stands out from one that only waits for a slot.
+             collect (cons kind (if (eq kind 'hold) text (propertize text 'face 'harness-dim-face))))))
 
 (defun harness-ui-tasks--session-figures (session)
   "What SESSION says of its work that no row of the board does, as strings.
@@ -1085,7 +1178,9 @@ Its facts first (`harness-ui-tasks--facts'), whether or not its row has
 the room for them, then its session's figures
 \(`harness-ui-tasks--session-figures').  The facts are worded to read
 without a column to say what they are: \"3/7 todos done\", and \"started
-12m ago\" for the time a task has worked."
+12m ago\" for the time a task has worked; what holds a task back is said
+in full, with the names of the providers or budgets
+\(`harness-ui-tasks--hold-text')."
   (let* ((column (harness-ui-tasks--column task))
          (session (harness-ui-tasks--session task)))
     (append
@@ -1094,6 +1189,7 @@ without a column to say what they are: \"3/7 todos done\", and \"started
                        (pcase kind
                          ('todos (format "%s todos done" text))
                          ('time (if (memq column '(active needs-input)) (format "started %s ago" text) text))
+                         ('hold (harness-ui-tasks--hold-text (plist-get task :hold)))
                          (_ text))))
      (and session (harness-ui-tasks--session-figures session)))))
 
@@ -1190,6 +1286,16 @@ A function that fails adds none, and the log says why."
                                         fn (error-message-string err))
                            nil))))
 
+(defun harness-ui-tasks--pause-actions (task actions)
+  "Return ACTIONS, those of the pending TASK, with what pausing adds.
+A paused task (`harness-ui-tasks--paused-p') gets Resume before them
+all, so it is the first button of its card and Start now the second;
+one that waits for a slot gets Pause after them, in its menu, where it
+pushes none of the two buttons its card shows out."
+  (if (harness-ui-tasks--paused-p task)
+      (cons '("Resume" harness-ui-tasks-resume) actions)
+    (append actions '(("Pause" harness-ui-tasks-pause)))))
+
 (defun harness-ui-tasks--actions (task &optional own)
   "Return (LABEL COMMAND) for the actions that apply to TASK, primary first.
 Those of `harness-ui-tasks-action-functions' follow the actions of
@@ -1203,17 +1309,22 @@ come alone, as for the card's buttons."
          ((harness-ui-tasks--refining-p task)
           '(("Open" harness-ui-tasks-open) ("Steer" harness-ui-tasks-reply)
             ("Stop" harness-ui-tasks-cancel)))
+         ;; A paused task is resumed first; a waiting one can be paused,
+         ;; last, so the two buttons its card shows stay what they were.
          ;; Returned to pending: it has a session with the work in it, so
          ;; starting it carries on rather than opens it.
          ((plist-get task :returned)
-          '(("Start now" harness-ui-tasks-start) ("Open" harness-ui-tasks-open)
-            ("Reply" harness-ui-tasks-reply) ("Drop" harness-ui-tasks-cancel)))
+          (harness-ui-tasks--pause-actions
+           task '(("Start now" harness-ui-tasks-start) ("Open" harness-ui-tasks-open)
+                  ("Reply" harness-ui-tasks-reply) ("Drop" harness-ui-tasks-cancel))))
          ((plist-get task :session)
-          '(("Start now" harness-ui-tasks-start) ("Edit" harness-ui-tasks-edit)
-            ("Open" harness-ui-tasks-open) ("Refine" harness-ui-tasks-refine)
-            ("Drop" harness-ui-tasks-cancel)))
-         (t '(("Start now" harness-ui-tasks-start) ("Edit" harness-ui-tasks-edit)
-              ("Refine" harness-ui-tasks-refine) ("Drop" harness-ui-tasks-cancel)))))
+          (harness-ui-tasks--pause-actions
+           task '(("Start now" harness-ui-tasks-start) ("Edit" harness-ui-tasks-edit)
+                  ("Open" harness-ui-tasks-open) ("Refine" harness-ui-tasks-refine)
+                  ("Drop" harness-ui-tasks-cancel))))
+         (t (harness-ui-tasks--pause-actions
+             task '(("Start now" harness-ui-tasks-start) ("Edit" harness-ui-tasks-edit)
+                    ("Refine" harness-ui-tasks-refine) ("Drop" harness-ui-tasks-cancel))))))
        ;; A backlog task waits for you; one being written up is steered
        ;; or stopped, like a refining task in the pending column was.
        ('backlog
@@ -1244,20 +1355,20 @@ come alone, as for the card's buttons."
              ("Drop" harness-ui-tasks-cancel)))
           (_ (cond
               ((equal (plist-get task :outcome) "merge-failed")
-               '(("Retry merge" harness-ui-tasks-merge) ("Pause" harness-ui-tasks-return-to-pending)
+               '(("Retry merge" harness-ui-tasks-merge) ("Pause" harness-ui-tasks-pause)
                  ("Reply" harness-ui-tasks-reply) ("Open" harness-ui-tasks-open)
                  ("Mark done" harness-ui-tasks-complete)))
               ((equal (plist-get task :outcome) "cannot-continue")
-               '(("Reply" harness-ui-tasks-reply) ("Pause" harness-ui-tasks-return-to-pending)
+               '(("Reply" harness-ui-tasks-reply) ("Pause" harness-ui-tasks-pause)
                  ("Mark done" harness-ui-tasks-complete) ("Open" harness-ui-tasks-open)))
               ((member (plist-get task :outcome) '("error" "cancelled" "interrupted" "max-tokens"))
-               '(("Retry" harness-ui-tasks-retry) ("Pause" harness-ui-tasks-return-to-pending)
+               '(("Retry" harness-ui-tasks-retry) ("Pause" harness-ui-tasks-pause)
                  ("Reply" harness-ui-tasks-reply) ("Open" harness-ui-tasks-open)
                  ("Mark done" harness-ui-tasks-complete)))
-              (t '(("Open" harness-ui-tasks-open) ("Pause" harness-ui-tasks-return-to-pending)
+              (t '(("Open" harness-ui-tasks-open) ("Pause" harness-ui-tasks-pause)
                    ("Reply" harness-ui-tasks-reply) ("Mark done" harness-ui-tasks-complete)))))))
        ('active '(("Open" harness-ui-tasks-open) ("Steer" harness-ui-tasks-reply)
-                  ("Pause" harness-ui-tasks-return-to-pending) ("Stop" harness-ui-tasks-cancel)))
+                  ("Pause" harness-ui-tasks-pause) ("Stop" harness-ui-tasks-cancel)))
        ;; In the queue there is nothing to do but watch; a conflict is
        ;; resolved by its own session, which can be stopped, and a task
        ;; waiting for the queue's turn can be steered like a working one.
@@ -1586,7 +1697,7 @@ offers for it, the session list too (`harness-ui-pending-view-actions'):
                  (and (equal (plist-get (harness-ui-pending-first sid) :kind) "question")
                       (list (funcall button '("Reply" harness-ui-tasks-reply))))
                  (and (harness-ui-tasks--pausable-p task)
-                      (list (funcall button '("Pause" harness-ui-tasks-return-to-pending)))))
+                      (list (funcall button '("Pause" harness-ui-tasks-pause)))))
        (mapcar button (take 2 (cl-remove 'harness-ui-tasks-open (harness-ui-tasks--actions task t)
                                          :key #'cadr))))
      " ")))
@@ -4251,7 +4362,8 @@ so they type, into the compose box (`harness-compose-acts-p')."
   (define-key map (kbd "@") #'harness-ui-tasks-attach)
   ;; The task's worktree as the project, to look at its files (worktree-assume).
   (define-key map (kbd "w") #'harness-ui-tasks-assume-worktree)
-  (define-key map (kbd "u") #'harness-ui-tasks-return-to-pending)
+  (define-key map (kbd "u") #'harness-ui-tasks-pause)
+  (define-key map (kbd "U") #'harness-ui-tasks-resume)
   (define-key map (kbd "P") #'harness-ui-tasks-toggle-queue)
   ;; The project's slots: who holds them, who waits (harness-ui-slots.el).
   (define-key map (kbd "S") #'harness-ui-tasks-slots)
@@ -4352,7 +4464,8 @@ act on from there.
         (". n" "Deny request" harness-ui-tasks-deny)]
        ["Finish"
         (". k" "Stop or drop" harness-ui-tasks-cancel)
-        (". u" "Pause (return to pending)" harness-ui-tasks-return-to-pending)
+        (". u" "Pause (hold in the queue)" harness-ui-tasks-pause)
+        (". U" "Resume a paused task" harness-ui-tasks-resume)
         (". v" "Verify (accept)" harness-ui-tasks-verify)
         (". R" "Send back with feedback" harness-ui-tasks-reject)
         (". d" "Mark completed" harness-ui-tasks-complete)
@@ -4785,6 +4898,10 @@ written up or planned for the backlog (`harness-ui-tasks--new-opts')."
                          "Kept for when the task starts (queue suspended)")
                         ((and returned (equal (format "%s" (plist-get task :return-reason)) "sent-back"))
                          "Kept for when the task starts")
+                        ;; Paused, or waiting for quota or a budget: the
+                        ;; harness keeps the message for the start too.
+                        ((and returned (plist-get task :hold))
+                         "Kept for when the task starts")
                         (t "Sent")))))
       (`(refine . ,id)
        (harness-ui-tasks--request-then "_harness/task/prompt" (list :id id :text expanded :attachments atts)
@@ -4854,33 +4971,54 @@ resumed.  \<harness-ui-tasks-board-map>\[harness-ui-tasks-start] starts it at on
                     "Queued"))))
 
 (defun harness-ui-tasks--pausable-p (task)
-  "Non-nil when TASK can be paused back into the pending queue.
-That is a task at work, or one stopped part way waiting for the user
-\(`harness-tasks--return-to-pending' on the harness side); a task in
-review, merging, refining or done cannot be paused."
-  (and (equal (plist-get task :state) "active")
-       (not (harness-ui-tasks--archived-p task))))
+  "Non-nil when TASK can be paused: held in the pending queue until resumed.
+That is a task at work, or one stopped part way waiting on you, which
+goes back to the queue (`task/pause' on the harness side); or one that
+already waits in the queue for a slot and is not paused yet.  A task in
+review, merging, refining, in the backlog or done cannot be paused."
+  (and (not (harness-ui-tasks--archived-p task))
+       (or (equal (plist-get task :state) "active")
+           (and (eq (harness-ui-tasks--column task) 'pending)
+                (not (harness-ui-tasks--backlog-p task))
+                (not (harness-ui-tasks--paused-p task))))))
 
-(defun harness-ui-tasks-return-to-pending ()
-  "Stop the turn of the task at point and put it back in the pending queue.
-The card calls this Pause.  The work its session left running outside
-its turn -- a supervisor's workers, sub-agents -- stops too, and is
-reported to it for when it carries on.  The task keeps its session,
-branch and worktree, so when it starts again it carries on where it
-stopped (\\<harness-ui-tasks-board-map>\\[harness-ui-tasks-start], or the queue starting it).
-It goes to the front of its priority's queue, ahead of the tasks that
-never started, behind only tasks of a higher priority.  Returning it
-frees its slot for the other waiting tasks and starts nothing itself:
-with the queue suspended (\\[harness-ui-tasks-toggle-queue]) nothing
-starts at all until you resume it."
+(defun harness-ui-tasks-pause ()
+  "Pause the task at point: back in the pending queue, held there until resumed.
+The card calls this Pause.  A task at work has its turn stopped, and the
+work its session left running outside its turn -- a supervisor's
+workers, sub-agents -- stops too, and is reported to it for when it
+carries on.  A task waiting for a slot is paused where it is.  The task
+keeps its session, branch and worktree, so when it starts again it
+carries on where it stopped, and unlike a task returned to pending it
+stays where it is: no free slot starts it.  \\<harness-ui-tasks-board-map>\\[harness-ui-tasks-resume] lets the queue have it again,
+\\[harness-ui-tasks-start] starts it at once.  Pausing frees its slot for the
+other waiting tasks, and is not suspending the queue
+\(\\[harness-ui-tasks-toggle-queue]): the queue goes on with the tasks
+that are not paused.  A pause is kept across a restart."
   (interactive)
   (let ((task (harness-ui-tasks--task)))
     (unless (harness-ui-tasks--pausable-p task)
-      (user-error "Only a task at work or waiting on you can be paused; this one is %s"
-                  (harness-ui-tasks--column task)))
-    (harness-ui-tasks--request-then "_harness/task/return-to-pending" (list :id (plist-get task :id))
-                                    "Returning the task to pending")
+      (user-error "Only a task at work or waiting for a slot can be paused; this one is %s"
+                  (if (harness-ui-tasks--paused-p task) "paused" (harness-ui-tasks--column task))))
+    (harness-ui-tasks--request-then "_harness/task/pause" (list :id (plist-get task :id))
+                                    "Pausing the task")
     (message "Paused")))
+
+;; What the board's Pause was called when it returned a task to pending.
+(defalias 'harness-ui-tasks-return-to-pending #'harness-ui-tasks-pause)
+
+(defun harness-ui-tasks-resume ()
+  "Resume the paused task at point: the queue starts it when its turn comes.
+It goes by priority within the limit, as any waiting task does, and not
+while the queue is suspended (\\<harness-ui-tasks-board-map>\\[harness-ui-tasks-toggle-queue]) or the task waits for quota or a
+budget; it carries on where it stopped.  \\[harness-ui-tasks-start] starts it at once instead."
+  (interactive)
+  (let ((task (harness-ui-tasks--task)))
+    (unless (harness-ui-tasks--paused-p task)
+      (user-error "Only a paused task can be resumed; this one is %s" (harness-ui-tasks--column task)))
+    (harness-ui-tasks--request-then "_harness/task/resume" (list :id (plist-get task :id))
+                                    "Resuming the task")
+    (message "Resumed")))
 
 (defun harness-ui-tasks--priority-shown (id priority)
   "Show task ID at PRIORITY at once, the reload behind it confirming.
@@ -5145,8 +5283,8 @@ this one does not wait for them."
 While the queue is suspended, no waiting task of the project starts on
 its own: the board is clear for one urgent task, which [Start now]
 \(\\<harness-ui-tasks-board-map>\\[harness-ui-tasks-start]) still starts, as task_control start
-does.  A task at work goes on; returning one to pending
-\(\\[harness-ui-tasks-return-to-pending]) frees its slot, and no waiting task takes it
+does.  A task at work goes on; pausing one
+\(\\[harness-ui-tasks-pause]) frees its slot, and no waiting task takes it
 while the queue is suspended.  Resuming lets the waiting tasks start
 again at once, by priority, the tasks returned to pending first.
 

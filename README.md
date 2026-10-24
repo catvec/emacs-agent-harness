@@ -188,14 +188,14 @@ OpenAI-compatible APIs and AWS Bedrock.
 | A BTW side conversation under its session | Messaging a task's session: the box says so, in its colours |
 | ![The harness menu opened from a chat](docs/media/menu.png) | ![The quick search opened from a chat: a popout under the code and the chat lists the command that attaches a file, with Run and Describe, and the session that wrote the API guide, with Open and the passage found in it, under a Sessions heading with All matches](docs/media/quick-search.png) |
 | The menu, with the chat's own commands | Quick search from a chat: a command to run, and a session found by what was said in it, to open |
-| ![The task board filtered by a search typed in its compose box: the query, one task matches, the archive it did and [Undo], and the box, blue, ready for the next search](docs/media/tasks-search.png) | |
-| A search in words, typed in the board's own box: the board shows what it is about, and acts | |
+| ![The task board filtered by a search typed in its compose box: the query, one task matches, the archive it did and [Undo], and the box, blue, ready for the next search](docs/media/tasks-search.png) | ![The task board's Pending section with three tasks held back: one paused, with [Resume] before [Start now], one out of quota, with when it resets, and one over a budget](docs/media/tasks-held.png) |
+| A search in words, typed in the board's own box: the board shows what it is about, and acts | What holds a waiting task back, on its card: paused, out of quota, over a budget |
 | ![The Insights report over 30 days: the totals, the summary the model wrote, and the messages by hour of day and by weekday](docs/media/insights.png) | ![The Insights report further down: the busiest sessions, each tool's calls and failures, the permission decisions and the tasks](docs/media/insights-activity.png) |
 | Insights: a month of work, summed up by your model | The sessions, tools, permissions and tasks behind it |
 | ![Two chats: an Always deny answer in the left one, a call the rule denied in the right one, both struck through and offering [Redo] after [Undo] was clicked on the right](docs/media/chat-decisions.png) | ![Two chats: an always answer to the cold-cache question in the left one, a default taken unasked in the right one, which names that answer, both offering [Undo]](docs/media/chat-decisions-cold.png) |
 | A lasting answer, undone from another session: both offer [Redo] | An "always" cold-cache answer, and a chat it decided for |
-| ![The task slots page: the four tasks in slots as rows of the session list's columns -- status, priority, context, cost, time at work -- the blocked one with its question and [Answer…] under it; the queue by priority, the next four in line, and how long tasks waited for a slot this week](docs/media/slots.png) | |
-| A project's task slots: who holds them, who waits, for how long | |
+| ![The task slots page: the Queues section -- every project's queue, with its state, counts and a [Pause] button, and [Pause all] and [Resume all] for the tasks and the queues -- then the four tasks in slots as rows of the session list's columns -- status, priority, context, cost, time at work -- the blocked one with its question and [Answer…] under it; the queue by priority, the next four in line, and how long tasks waited for a slot this week](docs/media/slots.png) | |
+| Every project's queue, and a project's task slots: who holds them, who waits, for how long | |
 | ![A chat whose agent replied in three paragraphs, the reply quoted in the compose box with C-c > and answered inline: the middle of the long paragraph elided as [...], the quote split in two with an answer under each part](docs/media/quote-reply.png) | ![A chat whose agent answered a reply that quoted it: the agent's answer quoted in the compose box with the thread under it one level deeper, the user's answers and the agent's message they quoted, and an answer typed under the agent's line](docs/media/quote-thread.png) |
 | Answering a reply inline: `C-c >` quotes it, `C-c [` elides what you skip as `[...]`, `M-RET` splits the quote to answer a part | The thread kept: the message the reply answers, and what that answered, nested under the quote |
 | ![A task's chat: the agent's two paragraphs, a reply of the user's in two threads -- each a card that says it replies to the agent's message and quotes the part, the words under it as far in as the card, and a link to the thread -- the agent's answers in those threads drawn as its own messages under the thread's name, one thread open, one closed, and the compose box with a card for the agent's answer in the first thread and a reply typed under it](docs/media/thread-reply.png) | ![The review of a task, its report at the threads: the first is a reply made in the chat, a comment of the user's with the agent's words quoted above the question, and the agent's answer under it, which links to the call that wrote it](docs/media/thread-reply-review.png) |
@@ -577,7 +577,7 @@ nil for nowhere.
 | `C-c h B` | `harness-delete-budget` | Delete a budget, chosen by name |
 | `C-c h w` | `harness-worktrees` | List the git worktrees of the project (`a` assumes the one at point as the project, `r` resets; see [Looking at a task's worktree](#looking-at-a-tasks-worktree)) |
 | `w` | `harness-ui-tasks-assume-worktree` | On the task board, assume the worktree of the task at point as the project, or reset it if it is assumed already (see [Looking at a task's worktree](#looking-at-a-tasks-worktree)) |
-| `C-c h Q` | `harness-slots` | Show the project's task slots: who holds each one and at which priority, who waits for one and for how long (`S` on the task board) |
+| `C-c h Q` | `harness-slots` | Show every project's queue -- pause and resume it, or every task and every queue at once (`P`, `u`, `U`, `s`, `S`) -- and the project's task slots: who holds each one and at which priority, who waits for one and for how long (`S` on the task board) |
 | `C-c h S` | `harness-settings` | Show the settings page |
 | `C-c h z` | `harness-pet` | Show your companion pet, or the egg it hatches from |
 | `C-c h r` | `harness-record-audio` | Start or stop recording from the microphone |
@@ -3178,7 +3178,7 @@ call to one anyway, in every permission mode.
   that writes a backlog task up only reads, and takes the setting when
   the task starts.
 - **When a task goes back to the queue.** A task pre-empted by work you
-  sent back from review, or returned to *Pending* with `u`, stops its
+  sent back from review, or paused with `u`, stops its
   plan's workers with it. Each running step is marked interrupted, with
   why, and its worker's turn is cancelled together with the sub-agents
   the worker started; a worker still being made never gets its step. The
@@ -3378,6 +3378,15 @@ branch, so several tasks can work in parallel; a task that has to touch
 your checkout itself can be submitted to the **main tree** instead (the
 `own worktree` / `main tree` switch below).
 
+A task's branch is named after its title and its id, as in
+`task/fix-login-redirect-loop-ab12cd34`: the title is the short one the
+cheap naming model gives the task as it is submitted, as many of its
+words as fit in forty characters, with the id so that no two branches
+meet. A task submitted into a free slot starts a moment after its title
+is asked for, and its branch waits for the title for a few seconds at
+most; a task whose title did not come, or has no letters in it, gets the
+first five words of its prompt in the branch instead.
+
 The task board is the `tasks` module, which brings the board itself,
 `ui-tasks`. The rest of what this section describes is modules of its
 own, enabled beside it: `merge` gives each task a worktree (from the
@@ -3508,6 +3517,46 @@ with), `recap` writes the recaps on the cards,
   lost, as any request is; a title that still fails is not asked for
   again while its task waits, and its session is named from its first
   message once the task starts.
+- A task that runs out of quota or money, or that a hard budget stops,
+  **waits in *Pending*** instead of failing. When its turn ends because
+  every model it could run on is out -- its own and each entry of the
+  [fallback list](#usage-and-budgets) that it may carry on with -- or
+  because a hard budget that covers its session is spent (the gate
+  refuses a turn before it begins, or the next step of a running one),
+  the task goes back to the front of its priority's queue, keeping its
+  session, branch and worktree, and its card says what it waits for and
+  until when: `quota · Claude Code · resets 19:00` (`retry` where the
+  provider gave no time and the harness tries again an hour on), or
+  `budget · daily · resets Sat 00:00` (a budget with no period gives no
+  time: only changing it lets the task go). The queue also holds back
+  a task that has not started yet whose session would stop the same
+  way, so an outage does not start the whole queue only to fail it, and
+  a message to a waiting task is kept for its start. The wait ends by
+  itself: when a mark ends, `c` clears it on the usage dashboard's
+  Fallback list, the list gains an entry that works, a quota report
+  says the window is back, a budget is raised, made soft or removed,
+  the Budget setting changes, or the budget's period ends. The queue
+  then starts the task like any waiting one -- by priority, within the
+  limit, not while the queue is suspended -- and its session carries on
+  where it stopped, told why it waited, on whichever model works (it
+  moves to the first entry of the list as before any turn). `s` starts
+  it at once all the same, and `task_list` says why a task waits.
+- **Pause** sticks. A task you pause -- the card's `[Pause]`, `u`, or
+  `task_control`'s `pause` -- goes back to *Pending* as a task returned
+  to pending does, its turn and the work its session left running
+  stopped, and from then on the queue leaves it alone, however many
+  slots are free, until you resume it (`[Resume]`, `task_control`'s
+  `resume`) or start it with `s`. The pause is kept with the task
+  across a restart: a harness that starts again picks up the work it was
+  in the middle of, but not a task you paused, and not a queue you
+  suspended. A task waiting for a slot can be paused where it is.
+  Pausing a task and suspending a queue are separate: **Pause all** and
+  **Resume all** pause and resume every task (`task_control`'s
+  `pause-all` and `resume-all`, for a project or for every project;
+  the waiting ones are paused first, so the slots the working ones free
+  start nothing), while the queues are suspended and resumed one by one
+  with **[Queue: running]** or all at once. The *Task slots* page
+  below lists every project's queue and does all of it in one place.
 - With a limit, a task that has waited on you -- a question, a
   permission request -- for five minutes **lends its slot**
   (`harness-tasks-lend-blocked-slot-after`, in seconds; nil never
@@ -3531,11 +3580,30 @@ with), `recap` writes the recaps on the cards,
   request has, as in the list, the line saying what it waits on under
   its row, with its `[Allow]`, `[Deny]` or `[Answer…]` -- and how many
   slots are free. Then the queue by priority, with how many wait and the
-  longest and average wait so far, the next five in line, and how long
-  tasks waited for a slot over the last `harness-tasks-slot-wait-days`
+  longest and average wait so far, the next five in line (a task held
+  back says what holds it: `paused`, `quota · resets 19:00`), and how
+  long tasks waited for a slot over the last `harness-tasks-slot-wait-days`
   days (7), by priority. `RET` or a click on a task's name opens its
   session, `TAB` goes from row to row, `SPC` pops out what the task
-  waits on, and `[Set limit]` (`l`) is the board's `N at a time`. The page keeps
+  waits on, and `[Set limit]` (`l`) is the board's `N at a time`.
+  The **Queues** section under the first line is the one place where
+  every project's queue is managed. A row for each -- the page's own
+  project's marked -- says whether it runs, is *paused* (suspended by
+  hand) or *held* (tasks wait and none can start, for quota, a budget
+  or a pause), how many tasks work, wait, are paused and are held back,
+  with a line under it for what holds them: `quota · Claude Code ·
+  resets 19:00 · 2 tasks`, `budget · project docs daily · resets 00:00`;
+  a **[Pause]** or **[Resume]** button ends the row (`P` on it, or
+  anywhere on the page for the page's project; `RET` or a click on its
+  name shows that project's slots). Above them, **Tasks** has **[Pause
+  all]** and **[Resume all]** for every task of every project (`u` and
+  `U`: the waiting ones are paused too, so the slots the working ones
+  free start nothing), and **Queues** the same for every queue (`s` and
+  `S`), each with its count; a button that would change nothing is
+  drawn dim and works all the same. Pausing a task and pausing a queue
+  are separate, and both are kept across a restart. In a window too
+  narrow for the table it leaves out *Held*, then *Paused*, before its
+  buttons wrap. The page keeps
   itself current without churn: it asks the harness again once a burst
   of the board's events settles, and only while a window shows it (a
   hidden page asks once when it shows again); its times, and the
@@ -3556,7 +3624,9 @@ with), `recap` writes the recaps on the cards,
   conflict.
 - A card puts its title first. The line says little besides it: the
   arrow of a high or low priority, a flag for state that matters
-  (`main tree`, `archived`, a borrowed slot, a merge in conflict), how
+  (`main tree`, `archived`, a borrowed slot, a merge in conflict, and
+  for a waiting task what holds it back -- `paused`, `quota · resets
+  19:00`, `budget` -- the tooltip naming the provider or budget), how
   long the task has worked or waited, and how many of its todos are
   done. What its session has to say -- the context it holds, the tokens
   it wrote, how fast, what they cost -- is in the tooltip of its title,
@@ -3645,8 +3715,8 @@ with), `recap` writes the recaps on the cards,
   which mode is armed.
   A task that stopped -- its session errored, was cancelled or was
   interrupted -- has [Retry] on its card, and one at work or stopped
-  part way has [Pause], which puts it back in *Pending* to carry on
-  where it stopped. *Requires your input* sorts by priority, and a
+  part way has [Pause], which puts it back in *Pending*, held there
+  until [Resume], to carry on where it stopped. *Requires your input* sorts by priority, and a
   message that restarts a stopped task shows it in progress at once,
   even while the cold-cache compaction holds its turn up. While the
   question that asks what goes first waits for your answer, the task is
@@ -3719,11 +3789,14 @@ with), `recap` writes the recaps on the cards,
   else of the project whose task came to review last, with point on
   the newest card; the board's project becomes current first, as for a
   click on a task's notification.
-- `u` returns a task at work to *Pending*, one that only waits on its
-  supervisor's workers too. Its turn stops and it keeps its session,
-  branch and worktree. It goes to the front of its priority's queue and
-  carries on where it stopped when a slot frees, or at once with `s`;
-  returning it starts nothing itself. `P`, or a click on
+- `u` pauses the task at point. One at work goes back to *Pending*, one
+  that only waits on its supervisor's workers too: its turn stops and it
+  keeps its session, branch and worktree; one already waiting there is
+  held where it is. A paused task stays where it is, however many slots
+  are free: its card says `paused` and offers **[Resume]** (`U`), which
+  lets the queue have it again, at the front of its priority's queue,
+  to carry on where it stopped when a slot frees, and `s` starts it at
+  once. Pausing starts nothing itself. `P`, or a click on
   **[Queue: running]** right after the *Pending* heading's count,
   suspends the project's queue, so that no waiting task starts by
   itself until you resume it; the switch then reads
@@ -5136,7 +5209,11 @@ up the list as entries come back, and returns to its own model as soon
 as its quota does.  To prefer Claude, put the default model on Claude
 and list what comes after it.  There `f` adds an entry, `c` forgets
 that one ran out so it is tried again, `M-<up>` and `M-<down>` move the
-entry at point, and `d` removes it.
+entry at point, and `d` removes it.  A session with nowhere left to go
+-- its own model and every entry out -- stops its turn with the error it
+had; a task in that case waits in the pending queue instead, with what
+is out and until when on its card, and starts again once an entry
+works (see [the task board](#task-board)).
 
 `C` (or the header's `[compare]`, `M-x harness-cost-compare`) answers
 "how much would this have cost using a different provider?": it
@@ -5167,6 +5244,12 @@ outside the harness that no provider reports, such as a project
 budget's spending, which no provider can single out, is a baseline:
 press `s` on the budget's line in the dashboard (or use the add-budget
 wizard) to set it; it counts until the period rolls over.
+
+A hard budget (answer Yes to "Hard budget" in the add-budget wizard,
+or turn Hard on in the Budget setting) refuses a turn before it begins and the next step of one that runs. A
+task it stops is not failed: it waits in *Pending* with the budget and
+its reset on its card, and starts when the budget has room again --
+raised, made soft, deleted, or in a new period.
 
 To delete a budget, click `[delete]` beside its name in the dashboard or
 press `d` on its line; from anywhere, `C-c h B` (Delete budget in the

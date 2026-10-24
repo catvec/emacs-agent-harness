@@ -43,7 +43,12 @@
 ;; spend far past its cap (the step in flight finishes, then the turn
 ;; ends `blocked' with the reason as a hint).  Every budget warns once at
 ;; 80% and soft ones once more at 100%, as an event and as a session
-;; hint.
+;; hint.  A spent hard budget also holds the sessions it covers
+;; (`harness-usage-hold', `usage/budget-hold'): the same question as the
+;; gate's, without its warnings, and with the answer to when it lets go
+;; -- the end of the budget's period, or never by itself.  Task mode
+;; keeps a task a hard budget stopped in its queue, with that on its
+;; card, and starts it again when the budget has room (see Holds below).
 ;;
 ;; Storage is one code path: rows are loaded from whichever backend is
 ;; in use into plists and aggregated in Lisp.  SQLite only narrows the
@@ -118,6 +123,19 @@ start of the one period the baseline counts in.")
 
 (defvar harness-usage--warned (make-hash-table :test 'equal)
   "\"SESSION/BUDGET/PERIOD-START\" -> thresholds already warned about.")
+
+(defvar harness-usage--holds (make-hash-table :test 'equal)
+  "Session id -> the answer `harness-usage-hold' last gave for it, with when.
+Each is (NOW . HOLD).  Dropped by `harness-usage--forget-holds' whenever
+spending or a budget changes, and used no longer than the answer holds
+\(`harness-usage--hold-fresh-p').")
+
+(defvar harness-usage--statuses (make-hash-table :test 'equal)
+  "Budget id -> its status as `harness-usage-hold' last worked it out, with when.
+Each is (NOW . STATUS).  A budget covers many sessions, and pricing it
+reads its whole period's rows, so the holds of a queue's tasks share
+one: dropped with `harness-usage--holds', and used no longer than its
+period (`harness-usage--hold-fresh-p').")
 
 (defvar harness-usage--schema-db nil
   "(DB . SCHEMA-VERSION) for the SQLite handle whose schema was ensured last.")
@@ -478,6 +496,8 @@ ROW: (:ts FLOAT :session ID :project ROOT :model ID :input N :output N
 `:ts' defaults to now, `:list-cost' to the cost.  Event `usage/recorded'
 ROW."
   (let ((row (harness-usage--insert (harness-usage--make-row row))))
+    ;; What a budget has spent moved: the holds kept were worked out before.
+    (harness-usage--forget-holds)
     (harness-emit 'usage/recorded row)
     row))
 
@@ -1469,6 +1489,7 @@ it did.  A failure keeps the amount fetched before.")
   (mapc #'cancel-timer harness-usage--cost-report-timers)
   (setq harness-usage--cost-report-timers nil
         harness-usage--extra-spend nil)
+  (harness-usage--forget-holds)
   (clrhash harness-usage--cost-reports)
   (clrhash harness-usage--cost-report-fetches))
 
@@ -1695,6 +1716,18 @@ Emits `usage/budget-warning' with STATUS and adds TEXT as a hint."
       (when (harness-method-exists-p 'session/hint)
         (harness-call 'session/hint sid text)))))
 
+(defun harness-usage--exhausted-text (budget status)
+  "Say that hard BUDGET, whose STATUS says it is spent, blocks, and how to go on."
+  (let* ((outside (harness-budget-outside-text status))
+         (spent (concat (harness-format-cost (plist-get status :spent))
+                        (if outside (format " (%s)" outside) "")))
+         (amount (harness-format-cost (plist-get status :amount))))
+    (format "Budget %s exhausted: spent %s of %s; %s to go on"
+            (harness-usage-budget-label budget) spent amount
+            (if (equal (plist-get budget :id) harness-usage-settings-budget-id)
+                "change it with M-x harness-settings"
+              "delete it in the usage dashboard"))))
+
 (defun harness-usage--check (session &optional now)
   "Evaluate SESSION's budgets as of NOW; warn on crossings.
 Return the reason a hard budget blocks a new turn or the next step, or nil."
@@ -1710,11 +1743,7 @@ Return the reason a hard budget blocks a new turn or the next step, or nil."
         (cond
          ((and (plist-get st :hard) (>= fraction 1.0))
           (unless reason
-            (setq reason (format "Budget %s exhausted: spent %s of %s; %s to go on"
-                                 label spent amount
-                                 (if (equal (plist-get b :id) harness-usage-settings-budget-id)
-                                     "change it with M-x harness-settings"
-                                   "delete it in the usage dashboard")))))
+            (setq reason (harness-usage--exhausted-text b st))))
          ((>= fraction 1.0)
           (harness-usage--warn sid b st 1.0 (format "Budget %s exceeded: spent %s of %s" label spent amount)))
          ((>= fraction harness-usage-warn-fraction)
@@ -1732,6 +1761,130 @@ looks at them, so a soft one warns when it crosses its threshold and a
 request that is not a turn, such as keeping the session's prompt cache
 warm (harness-cache-warm.el), is held to the same limits."
   (harness-usage--check (harness-call 'session/get session-id)))
+
+;;;; Holds
+;;
+;; Task mode keeps a task whose hard budget is spent in its queue, with
+;; the reason on its card, and starts it again when the budget lets it
+;; go on.  It asks `harness-usage-hold', which looks at the budgets
+;; that apply to a session as the gate does and warns about nothing: the
+;; scheduler asks for every waiting task at every pass.  Pricing a
+;; budget reads its period's rows, so the answer is kept
+;; (`harness-usage--holds') until something that can change it happens:
+;; a call recorded, a report of what a provider billed, a budget added,
+;; changed or removed (or the Budget setting), or the end of the period
+;; the answer was for.
+
+(defconst harness-usage--hold-ttl 60
+  "Seconds an answer of `harness-usage-hold' is used before it is worked out again.
+A call recorded, a report and a changed budget drop it sooner; this only
+bounds what is not seen coming, such as a day budget's day ending.")
+
+(defun harness-usage--forget-holds (&rest _)
+  "Drop the answers `harness-usage-hold' kept: spending or a budget changed.
+Called as a row is recorded, and on `usage/reported-changed',
+`usage/budgets-changed' and `config/changed' for the Budget setting."
+  (clrhash harness-usage--holds)
+  (clrhash harness-usage--statuses))
+
+(defun harness-usage--on-config-changed (key &rest _)
+  "Drop the kept holds when KEY is the Budget setting, `harness-budget'."
+  (when (memq (if (stringp key) (intern-soft key) key) '(harness-budget))
+    (harness-usage--forget-holds)))
+
+(defun harness-usage--hold-fresh-p (entry now)
+  "Non-nil when ENTRY, (WHEN . HOLD), still answers a question asked at NOW."
+  (and (< (- now (car entry)) harness-usage--hold-ttl)
+       (let ((until (plist-get (cdr entry) :until)))
+         (or (null until) (< now until)))))
+
+(defun harness-usage--status-fresh-p (entry budget now)
+  "Non-nil when ENTRY, (WHEN . STATUS), still stands for BUDGET at NOW.
+It does for as long as the answer does (`harness-usage--hold-fresh-p',
+with the end of the status's period) and while BUDGET has the amount it
+was worked out for: a session's own budget can change without a word."
+  (and (equal (plist-get budget :amount) (plist-get (plist-get (cdr entry) :budget) :amount))
+       (harness-usage--hold-fresh-p
+        (cons (car entry) (list :until (plist-get (cdr entry) :period-end))) now)))
+
+(defun harness-usage--hold-status (budget now)
+  "Return the status of hard BUDGET, kept for the sessions it covers.
+As of NOW when that is given, which is never kept; else as the gate asks
+\(`harness-usage--budget-status' without a time), once for as long as
+`harness-usage--statuses' holds it."
+  (let* ((id (plist-get budget :id))
+         (clock (or now (float-time)))
+         (entry (and id (not now) (gethash id harness-usage--statuses))))
+    (if (and entry (harness-usage--status-fresh-p entry budget clock))
+        (cdr entry)
+      (let ((status (harness-usage--budget-status budget now)))
+        (when (and id (not now))
+          (puthash id (cons clock status) harness-usage--statuses))
+        status))))
+
+(defun harness-usage--compute-hold (session now)
+  "Work out what `harness-usage-hold' says of SESSION as of NOW."
+  (let (blocking)
+    (dolist (b (harness-usage--session-budgets session))
+      (when (harness-json-true-p (plist-get b :hard))
+        (let ((st (harness-usage--hold-status b now)))
+          (when (>= (plist-get st :fraction) 1.0)
+            (push (cons b st) blocking)))))
+    (when blocking
+      (setq blocking (nreverse blocking))
+      (let* ((ends (mapcar (lambda (cell) (plist-get (cdr cell) :period-end)) blocking))
+             ;; It goes on only when the last of them lets go, and a
+             ;; budget with no period lets go for an edit alone.
+             (until (and (cl-every #'numberp ends) (apply #'max ends))))
+        (list :until until
+              :reason (harness-usage--exhausted-text (car (car blocking)) (cdr (car blocking)))
+              :budgets (mapcar (lambda (cell)
+                                 (let ((b (car cell)) (st (cdr cell)))
+                                   (list :id (plist-get b :id)
+                                         :label (harness-usage-budget-label b)
+                                         :spent (plist-get st :spent)
+                                         :amount (plist-get st :amount)
+                                         :period (and (plist-get b :period)
+                                                      (symbol-name (plist-get b :period)))
+                                         :until (plist-get st :period-end))))
+                               blocking))))))
+
+(defun harness-usage-hold (session &optional now)
+  "Return why a hard budget forbids another request in SESSION, or nil.
+SESSION is a session plist.  It is the gate's question
+\(`harness-usage--check') without its warnings: a hard budget that
+covers the session -- its own, its project's, one for everything or the
+Budget setting -- is spent.  A plist of `:until' (when the budget
+period that spent it ends and the budget has room again, a float time;
+nil when only changing or deleting a budget lets the session go on),
+`:reason' (the sentence the gate gives) and `:budgets', each of the
+budgets that are spent as (:id :label :spent :amount :period :until).
+It is the last of the periods that ends `:until': a session held by two
+budgets goes on when both let go.  The answer is kept until spending or
+a budget changes, unless NOW, a float time, is given."
+  (let* ((sid (plist-get session :id))
+         (clock (or now (float-time)))
+         (entry (and sid (not now) (gethash sid harness-usage--holds))))
+    (if (and entry (harness-usage--hold-fresh-p entry clock))
+        (cdr entry)
+      (let ((hold (harness-usage--compute-hold session now)))
+        (when (and sid (not now))
+          (puthash sid (cons clock hold) harness-usage--holds))
+        hold))))
+
+(harness-defmethod usage/budget-hold (session-id)
+  "Return why a hard budget forbids another request in SESSION-ID, or nil.
+\(:until TIME :reason TEXT :budgets ((:id :label :spent :amount :period
+:until) ...)), TIME being when the period of the budgets that block it
+ends (a float time), nil when only an edit of a budget lets the session
+go on.  Like `usage/budget-block' it looks at the budgets that apply to
+the session, but warns about none and answers from what it kept while
+nothing changed, so it can be asked of every waiting task at every
+pass.  Task mode keeps a task whose session is held in its queue until
+then (`usage/budgets-changed' and a new period start it again).  Nil for
+a session that does not exist."
+  (and (harness-call 'session/exists-p session-id)
+       (harness-usage-hold (harness-call 'session/get session-id))))
 
 (defun harness-usage--gate (value next session)
   "`agent/before-turn' and `agent/step' handler: stop when a hard budget is spent.
@@ -1758,6 +1911,11 @@ is on disk, and fetches of reports may be scheduled."
     (harness-usage--forget-reports))
   (harness-on 'session/usage #'harness-usage--on-session-usage)
   (harness-on 'provider/quota-updated #'harness-usage--on-quota-updated)
+  ;; What the holds kept was worked out from budgets and spending: a
+  ;; budget changed (or the setting), or a provider reported a bill.
+  (harness-on 'usage/budgets-changed #'harness-usage--forget-holds)
+  (harness-on 'usage/reported-changed #'harness-usage--forget-holds)
+  (harness-on 'config/changed #'harness-usage--on-config-changed)
   (harness-usage--watch-rates)
   (harness-usage--watch-live)
   (harness-add-filter 'agent/before-turn #'harness-usage--gate 30)

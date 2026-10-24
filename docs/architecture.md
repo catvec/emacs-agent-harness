@@ -4508,6 +4508,23 @@ decisions.
   request in the session -- the one the `agent/before-turn` gate gives --
   or nil.  A request that is no turn, such as keeping a prompt cache warm
   (cache-warm), asks it before it spends.
+- `usage/budget-hold SESSION-ID` → nil, or `(:until TIME :reason TEXT
+  :budgets ((:id :label :spent :amount :period :until) …))`: a hard
+  budget that covers the session -- its own, its project's, one for
+  everything or the Budget setting -- is spent.  It is the gate's
+  question (`harness-usage--check`) without the warnings, asked of every
+  waiting task at every pass of the task scheduler, so the answer is
+  kept (`harness-usage--holds`) until a row is recorded
+  (`usage/record`), a report of what a provider billed arrives, a budget
+  changes (`usage/budgets-changed`) or the Budget setting does
+  (`config/changed` for `harness-budget`), and for at most a minute or
+  until the period it was worked out in ends.  `:until` is when the
+  periods that spent the budgets end (the last of them, as the session
+  goes on only when all have room), nil when one has no period (a
+  session or project budget with none) and only an edit lets go.
+  `harness-usage-hold SESSION &optional NOW` is the same for a session
+  plist, uncached with NOW.  Task mode keeps a task whose session is
+  held in its queue until then.
 - `usage/summary &key group-by since until project session model billing` → rows
   `(:key :input :output :cache-read :cache-write :cost :list-cost :calls)`;
   group-by `project|model|day|hour|session|billing` (billing keys "api",
@@ -4823,6 +4840,18 @@ shown and hinted.
   anyone else forgets the session's own; a fork takes over its
   parent's.  With nothing left the turn ends with its error and a hint
   naming every provider that is out and when it resets.
+- Blocked: a session whose own model and every entry it may carry on
+  with are marked out has nowhere to go.  `harness-fallback-blocked
+  SESSION` (method `fallback/blocked SID`) returns nil while
+  `harness-fallback-choose` finds a model, else `(:until F :guess BOOL
+  :reason TEXT :marks (MARK …))` -- `:until` the earliest end of the
+  marks that put those candidates out (when the first of them is tried
+  again), `:guess` when that is a retry time, not a reset the provider
+  gave, the marks as `fallback/status` describes them -- and nil when
+  nothing is marked out (a provider that is not registered is no
+  reason to wait).  The turn that finds this out still ends with its
+  error; task mode makes a waiting task of it (see "tasks", Holds).
+  `harness-fallback--candidates` lists what both ask.
 - Notifications (`notification/send`, source "fallback"): low urgency
   when a provider runs out and sessions move on, normal when nothing is
   left.
@@ -4836,7 +4865,10 @@ shown and hinted.
   `fallback/clear KEY` forgets the mark KEY (a provider's forgets its
   models' marks too); → non-nil when one went.
   `fallback/mark KEY &rest (:kind :until :reason)` marks by hand.
-  Event `fallback/changed` after any mark or session record changes.
+  `fallback/blocked SID` → nil or the plist above.
+  Event `fallback/changed` after any mark or session record changes;
+  a mark that ended is announced the same way, so the task scheduler
+  looks at its holds then.
 
 ### retry
 
@@ -6164,7 +6196,9 @@ Task mode: one session per task.  TASK =
 :error "…" :duplicate-of ID :main-tree BOOL :worktree DIR :branch NAME :base NAME :merge-status nil|queued|merging|conflict
 :merge-queued F :conflicts (FILE…) :merged BOOL :archived BOOL :created F :started F :finished F
 :queued-at F :waits ((:at F :seconds F :priority "low|medium|high") ...)
-:verified BOOL :verified-at F :feedback ((:text "..." :at F) ...))`.
+:paused nil|F :return-reason returned|preempted|reclaimed|sent-back|quota|budget
+:verified BOOL :verified-at F :feedback ((:text "..." :at F) ...))`, and a
+read of a queued task also has `:hold` (below) while something holds it back.
 `:column` is derived on every read: `backlog` for a backlog task or
 its write-up -- one the scheduler never starts, for the user's
 `task/start` -- `needs-input` when the session is
@@ -6336,9 +6370,12 @@ priority).
   running, else its session's status -- `:since :sent-back`), `:queue`
   (the queued tasks in
   `harness-tasks--start-order`: `:id :title :priority :since :reason`,
-  the return reason as a string or nil) and `:waits` (the `:waits` of
+  the return reason as a string or nil, and `:hold` when something holds
+  the task back), `:waits` (the `:waits` of
   the project's tasks, archived and done ones too, of the last `:days`
-  days, newest first, at most 500: `:id :priority :seconds :at`).  It
+  days, newest first, at most 500: `:id :priority :seconds :at`),
+  and `:queues` and `:totals`, as `task/queues` answers, for the page's
+  section on every project's queue.  It
   reads the scheduler's own predicates, so a task's sub-agents, forks
   and the merge queue's resolvers are in none of it.
 - A task's session also runs on `harness-tasks-context-limit' (384000)
@@ -6474,7 +6511,7 @@ priority).
   message is the prompt; a worktree session keeps its worktree and merges
   like any task; an idle one waits in `needs-input` with `:outcome adopted`).
 - Starting: in a git project (`harness-tasks-worktrees`) `worktree/create`
-  on branch `harness-tasks-branch-prefix` + slug + id, then the task's
+  on branch `harness-tasks-branch-prefix` + slug + id (below), then the task's
   session -- the one it has had since submission -- moves into that
   worktree (`session/update :cwd :worktree`, `harness-tasks--continue-session')
   and is prompted with the task, on the settings the work runs with
@@ -6718,14 +6755,131 @@ priority).
   loan just ends (`harness-tasks--tidy-loans`, at each scheduling
   pass).  The board shows `borrowed slot` and `slot lent` on the two
   cards.
+- Branch names.  `harness-tasks--branch-name` is the prefix
+  (`harness-tasks-branch-prefix`, "task/"), a slug of the task's title
+  and the id without its "t-": the title is its `:name`, the short one the
+  cheap naming model gave it as it was submitted (see Titles), else the
+  name its session took.  The slug is the title's words in lower case,
+  letters and digits only, joined by dashes, as many whole words as fit
+  in forty characters (`harness-tasks--title-slug`): "Fix login redirect
+  loop" on t-ab12cd34 is `task/fix-login-redirect-loop-ab12cd34`, and
+  its worktree directory follows the branch.  A task with no title, or one
+  with nothing a branch could be named from, gets what it always had,
+  the first five words of its prompt.  The record read is the table's at
+  the moment the branch is made, not the copy the start took.  A start
+  that finds its title requested and not here yet
+  (`harness-tasks--title-on-its-way-p`: a naming request out, or waiting
+  for a slot of the throttle) waits for it before it makes the branch
+  (`harness-tasks--title-wait`, a promise the request's end resolves,
+  `harness-tasks--title-settled`, at most `harness-tasks--title-wait`
+  seconds), so a task submitted into a free slot -- started before its
+  title can come -- is named after it too; no other part of a start waits.
+- Holds.  A queued task (`harness-tasks--queued-p`) can be held:
+  `harness-tasks--hold TASK` is nil or `(:kind paused|quota|budget
+  :reason TEXT :until F :guess BOOL :items (…) [:since F])`, the view's
+  `:hold`.  The scheduler leaves a held task in the queue, taking no
+  slot from the tasks behind it.
+  - `paused`: `:paused` on the record (when), set by `task/pause`
+    (Pausing, below).  It is part of the record, so it survives a
+    restart.
+  - `quota`: every model the task's session could run on is out
+    (`fallback/blocked`: its own model and the entries of
+    `harness-fallback-models` it may carry on with, all marked).
+    `:until` is when the first mark ends, `:guess` when that is a retry
+    time, `:items` the marks (see fallback, "Blocked").
+  - `budget`: a hard budget covering the session is spent
+    (`usage/budget-hold`); `:until` is when its period ends, nil when only
+    an edit lets go, `:items` the budgets.
+  Quota and budget holds are worked out, not stored: the table
+  `harness-tasks--holds` (id → hold) is refreshed at the start of every
+  scheduling pass (`harness-tasks--refresh-holds`), for tasks that never
+  started as much as for parked ones, so a restart needs nothing kept to
+  find them again; a hold that began, changed or ended is announced as a
+  `task/changed` with the new `:hold`.  A quota hold comes before a
+  budget hold for a task out of both.  The pass is run again
+  when something that decides a hold changes: `fallback/changed` (a mark
+  ended or was cleared, a quota report moved one, a session switched
+  model) and `usage/budgets-changed`, debounced
+  (`harness-tasks--on-hold-event`); `config/changed` for
+  `harness-fallback-models` and `harness-budget`; and a timer set to the
+  earliest `:until` of all holds plus a second, never sooner than two
+  seconds on (`harness-tasks--arm-hold-timer`, `harness-tasks--hold-due`).
+  A hold's end starts the task like any queued task: by priority, within
+  the limit, not while its queue is suspended.  `task/start` ignores holds
+  as it ignores the limit; a message to a held task through `task/prompt`
+  is kept (`:queued`) for its start like one to a task in a suspended
+  queue; work sent back from review into a quota or budget hold waits
+  in the queue with its feedback (`harness-tasks--make-room` finds no
+  room: `harness-tasks--hold-back`).
+- Parking.  A turn that ends `error` or `blocked`
+  (`harness-tasks--on-turn-ended`) while its task is not in the merge queue
+  and a quota or budget hold stands now (`harness-tasks--compute-hold`) is
+  no failure of the task: every provider it could run on ran out, or the
+  budget gate stopped the turn before it began or between two steps of
+  a running one (the `agent/before-turn` and `agent/step` gates of
+  usage).  `harness-tasks--park` returns the task to pending as
+  `task/return-to-pending` does -- session, branch and worktree kept, first
+  of its priority, `:returned` set -- with `:return-reason` `quota` or
+  `budget`, the hold in the table so the `task/changed` that announces
+  it already says why, a hint in its session ("Back in the queue until
+  it can go on: …"), and what its session left running outside its turn
+  stopped (the reason "its task waits for quota" / "for its budget").  The
+  turn is over, so nothing is cancelled and the scheduling pass leaves
+  the task out as a return does.  When the hold ends the start prompts the
+  session with `harness-tasks--quota-message` or
+  `harness-tasks--budget-message`, and `fallback`'s `agent/before-turn`
+  moves it to the first entry of the list that works, as before any turn.
+  A turn that failed for another reason stays an `error` outcome in
+  needs-input, as before.
+- Pausing.  `task/pause ID` is the board's Pause, and it sticks: a task at
+  work is returned to pending as `task/return-to-pending` returns it (a
+  task still starting gives its slot up as a pre-empted one does) and
+  marked `:paused`; a task waiting for a slot is marked where it is.  A
+  paused task is held (`paused`): the scheduler never starts it, however
+  many slots are free, and a message through `task/prompt` is kept for its
+  start.  `task/resume ID` clears the mark and runs the scheduler;
+  `task/start` and a turn the user starts in the task's session
+  (`harness-tasks--on-turn-started`) clear it too.  The pause is written at
+  once (`harness-tasks-flush`), not with the next save, so a restart that
+  follows a crash still finds it.  `harness-resilience` does not touch a
+  task's session (`harness-resilience--owner`: "task mode"), and
+  `harness-tasks--recover` picks up only tasks that are `active` with no
+  outcome, which a paused task is not: after a restart the work that was
+  under way carries on and a paused task does not, nor does the
+  scheduler that runs as the harness comes up start it.  Pausing a task
+  and suspending its queue (`task/suspend-queue`, kept in
+  `harness-tasks--queue-name`) are independent and each outlives a restart.
+  `task/pause-all &optional CWD` pauses every task of a project, of every
+  project without CWD: the waiting ones first, then those at work
+  (`harness-tasks--at-work-p`: active, not stopped part way, not in the
+  merge queue), so the slots the second free start nothing; → `(:ids
+  …)`.  `task/resume-all &optional CWD` ends every pause and runs one
+  scheduling pass; → `(:ids …)`.
+- Every queue.  `task/queues` → `(:queues (QUEUE …) :totals TOTALS)`, one
+  QUEUE for each project that has a task active, pending, being written up
+  or in the merge queue, or whose queue is suspended
+  (`harness-tasks--queue-projects`): `(:project ROOT :name NAME :state
+  "running"|"paused"|"held" :suspended t|:false :limit N :working N
+  :waiting N :paused N :held N :holds ((:kind :reason :until :guess :items
+  :count) …))`.  "paused" is a suspended queue, "held" is a queue whose waiting
+  tasks are all held (some for quota or a budget); `:working` counts
+  the slots in use, `:paused` the waiting tasks paused by hand and
+  `:held` those waiting for quota or a budget, each reason once with
+  how many it holds back and the marks or budgets behind it (`:items`).  TOTALS = `(:queues N :suspended N :working N
+  :waiting N :paused N :held N)`.  `task/suspend-all-queues` suspends
+  every queue that list names and `task/resume-all-queues` resumes
+  every suspended queue and runs the scheduler; both → `(:projects …)`
+  and emit `task/queue` per project, as the single-queue methods do.
 - Stopping the work left running.  A task that goes back to the queue
-  after its work began -- pre-empted (`harness-tasks--preempt`), or
-  returned to pending by hand (`task/return-to-pending`) -- has nothing
+  after its work began -- pre-empted (`harness-tasks--preempt`), returned
+  to pending by hand (`task/return-to-pending`), paused or parked for
+  quota or a budget -- has nothing
   at work, so what its session started that goes on without its turn
   stops with it (`harness-tasks--stop-outstanding`): the tasks module
   asks `agent/stop-outstanding SESSION-ID REASON` (see agent), REASON
   being "its task was pre-empted by task T (TITLE), sent back from
-  review", "task T (TITLE) took back the slot its task borrowed" or
+  review", "task T (TITLE) took back the slot its task borrowed",
+  "its task waits for quota", "its task waits for its budget" or
   "its task was paused".  It asks once no
   turn of the session runs: at once when none did, which is the case of
   a task that only waited on its workers (`:waiting`), else when the
@@ -6781,6 +6935,10 @@ priority).
   queue suspended or not: it waits for the next task the queue starts,
   `task/resume-queue` or an explicit `task/start`, and carries on in its
   session, prompted with `harness-tasks--paused-message`),
+  `task/pause ID`, `task/resume ID`, `task/pause-all &optional CWD`,
+  `task/resume-all &optional CWD` (sticky pauses, see Pausing),
+  `task/queues`, `task/suspend-all-queues`, `task/resume-all-queues`
+  (every queue, see Every queue),
   `task/update ID PROMPT` (not started only; writes a stopped write-up by
   hand; a task named from its prompt is named again), `task/set-all SETTINGS &optional FILTER` (apply `:model',
   `:thinking', `:permission-mode', `:non-interactive' and `:supervisor',
@@ -8827,9 +8985,9 @@ TRAMP prefixes come from the session host):
 | `session_wait` | Wait for sessions | session_id / session_ids, until (stopped/idle/blocked/running/changed), mode (all/any), timeout_seconds (optional: wake anyway after this long) | read (registers a wake-up prompt and returns at once; needs no approval: `harness-perms--inspection-tools`) |
 | `watch_events` | Watch events | events (kinds), prompt, actions (default `["wake"]`), session_id, task_id, all_projects, once (default true), timeout_seconds | read (tools-events; registers a watch and returns at once, never waiting; needs no approval: `harness-perms--inspection-tools`) |
 | `unwatch_events` | Stop watching events | watch_id (default: every watch of the session) | read (tools-events; needs no approval: `harness-perms--inspection-tools`) |
-| `task_list` | List tasks | column (pending/backlog/needs-input/active/review/merging/done), include_archived, all_projects, limit (the most recent); oldest first, each waiting task saying `#N in line` (`task/queue-order`) and why when it was put back, the pending column alone in start order | read (needs no approval: `harness-perms--inspection-tools`) |
+| `task_list` | List tasks | column (pending/backlog/needs-input/active/review/merging/done), include_archived, all_projects, limit (the most recent); oldest first, each waiting task saying `#N in line` (`task/queue-order`) and why when it was put back, and what holds it (paused, or out of quota / over a hard budget, with the reason), the pending column alone in start order | read (needs no approval: `harness-perms--inspection-tools`) |
 | `task_submit` | Submit task | prompt, cwd, model, thinking, refine (for the backlog), main_tree (no worktree: the project's main checkout), priority (low/medium/high: given to the session the task is submitted with, and the order waiting tasks start in) | meta |
-| `task_control` | Control task | task_id, action (start/queue/message/cancel/return-to-pending/merge/verify/reject/complete/archive/restore/delete/priority, and on a project with no task_id: suspend-queue/resume-queue, auto-queue/manual-queue for its backlog mode), message (the feedback, for reject), priority (low/medium/high, for priority: given to the task's session, where a task's priority lives), cwd (the project of the four project actions; default: this session's) | meta |
+| `task_control` | Control task | task_id, action (start/queue/message/cancel/return-to-pending/pause/resume/merge/verify/reject/complete/archive/restore/delete/priority, and on a project with no task_id: suspend-queue/resume-queue, pause-all/resume-all, auto-queue/manual-queue for its backlog mode), message (the feedback, for reject), priority (low/medium/high, for priority: given to the task's session, where a task's priority lives), cwd (the project of the project actions; default: this session's), all_projects (every project, for suspend-queue/resume-queue/pause-all/resume-all) | meta |
 | `task_wait` | Wait for tasks | task_id / task_ids, until (settled/done/needs-input/active/review/merging/changed; settled counts review, and a written-up backlog task unless an auto-queued backlog hands it on to the queue), mode, timeout_seconds | read (needs no approval: `harness-perms--inspection-tools`) |
 | `hand_in` | Hand in the finished work | summary, evidence (image/video/file/code/note/tool_call, each with a caption), cannot_continue (cannot finish: to user input, nothing merges), no_merge (informational: verify completes without the merge queue) | meta (task sessions only; needs no approval: `harness-perms--auto-allow-tools`) |
 | `review_threads` | Review threads | status (open/closed), task (default: the session's own) | meta (tools-review; task sessions only; lists the threads of the task's review with the comments the user sent, by id; needs no approval: `harness-perms--auto-allow-tools`) |
@@ -12801,7 +12959,25 @@ running] or, in the attention face, [Queue: suspended]
 shows the other state at once and sends `_harness/task/toggle-queue`,
 and every board follows its `task/queue` event.  Neither switch is in
 the header line, nor pushed to the right edge, where [Archive all]
-ends the Completed heading.  A task
+ends the Completed heading.  What holds a waiting task back is on its
+card (`:hold` of the view, which the harness works out as
+`harness-tasks--hold`): a fact of its own beside the time, state like
+the archived and main-tree flags, so a card short of room gives up its
+todos and time before it (`harness-ui-tasks--hold-fact`, the `hold` kind
+of `harness-ui-tasks--fact-kinds`): `paused` in the dim face, `quota ·
+resets 19:00` or `budget` in the held face, `retry` for a time the
+harness guessed rather than the provider gave.  The line under the title
+and the tooltip of the title say it in full, with the providers or
+budgets (`harness-ui-tasks--hold-text`; a time within 20 hours is the
+hour, a later one has its day).  `u` and the card's [Pause] send
+`_harness/task/pause` (`harness-ui-tasks-pause`;
+`harness-ui-tasks-return-to-pending` is its old name, an alias): a task at
+work goes back to Pending and stays there, a waiting one is held where it
+is (`harness-ui-tasks--pausable-p`).  The first action of a paused card is
+[Resume] (`U`, `harness-ui-tasks-resume`, `_harness/task/resume`), then
+[Start now]; a waiting card has Pause in its menu, after the actions that
+keep the two buttons it shows.  A reply to a held task says that it is
+kept for its start.  A task
 whose write-up refused it as a duplicate shows it in Requires your
 input, naming the task it duplicates and saying why: `k` drops it, `r`
 writes it up anyway, `m` takes what makes it another task than the one
@@ -13078,9 +13254,11 @@ Context and Priority, in that order, before the names are cut
 (`harness-ui-slots--layout`).  Then the queue's waits by priority (how
 many, the longest and the average so far), the next five in line, and
 the recorded waits of the last `:days` days by priority (how many
-started, their average and longest).  `RET` or a click on a task's name
-opens its session (`harness-ui-session-opener`), `TAB` and `S-TAB` go
-from row to row, `l` or [Set limit] is the board's
+started, their average and longest).  The next five in line each say what
+holds them back, short (`harness-ui-slots--note`: `paused`, `quota ·
+resets 19:00`), else why they lead their line.  `RET` or a click on a
+task's name opens its session (`harness-ui-session-opener`), `TAB` and
+`S-TAB` go from row to row, `l` or [Set limit] is the board's
 `harness-ui-tasks-set-max-running`.  Every column is placed with
 `(space :align-to COLUMN)`.  The page is a function of the answer,
 the width of its widest window and the time
@@ -13097,6 +13275,37 @@ sessions run on the boards' clock (`harness-ui-tasks-tick-hook`), drawn
 from the answer it has, and a request a task waits on that comes or is
 answered draws it again at once (`harness-ui-pending-changed-hook`);
 an answer to an older request than the last is dropped.
+
+The page's Queues section (`harness-ui-slots--queues-section`) is where
+every project's queue is managed.  It sits under the first line, above
+the slots in use, and is drawn from the answer's `:queues` and `:totals`
+(`task/slots` carries `task/queues`' answer, so the page asks once; an
+answer without `:queues`, from a harness that does not list them, draws
+no section).  A table with a row for each queue: its project's name, its
+state (`running`; `paused`, the queue suspended by hand; `held`, tasks wait
+and none can start, for quota, a budget or a pause), how many tasks work,
+wait, are paused and are held back (a dash for none), and its button,
+[Pause] or [Resume] (`harness-ui-slots-toggle-queue`:
+`_harness/task/suspend-queue` or `resume-queue` with the project as
+`:cwd`).  The page's own project's row is marked and bold; a click or `RET`
+on a queue's name shows that project's slots instead
+(`harness-ui-slots-open-queue`).  Under a row, a line for each hold its
+tasks wait for, in the words of the board (`harness-ui-tasks--hold-text`,
+with the names the entry's `:items` give) and how many tasks: cut to fit
+before the count.  Above the table are two groups of buttons: Tasks
+([Pause all], [Resume all]: `_harness/task/pause-all` and `resume-all`
+without a project, so every project's) and Queues (the same for
+`suspend-all-queues` and `resume-all-queues`), each with its count from
+`:totals`; a button that would change nothing is drawn dim and works all
+the same.  The keys `P` (the queue at point, else the page's project's),
+`u`, `U`, `s` and `S` run the same commands; each says what it did in the
+echo area ("Paused 3 tasks") and the page asks again soon, which shows it.
+Every button's action is a command that finds what it acts on in the text
+at point (`harness-slot-queue`, the row's project), not a closure over
+it, so an answer that did not change draws the same text and is not drawn
+again.  A window too narrow for the table leaves out Held, then Paused,
+before the name shrinks under eight columns or a button wraps
+(`harness-ui-slots--queue-layout`).
 
 Companion pet (`harness-ui-pet`, `C-c h z`, `harness-pet`, menu `z`):
 the buffer `*harness pet*`, and a few places besides.  Before it

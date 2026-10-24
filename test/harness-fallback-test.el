@@ -428,6 +428,73 @@ too: every session keeps its own model first, the list behind it."
                      (sort (mapcar (lambda (m) (plist-get m :key)) (plist-get (harness-call 'fallback/status) :marks))
                            #'string<))))))
 
+;;;; A session with nowhere to go
+
+(ert-deftest harness-fallback-blocked-says-when-nothing-can-run ()
+  "A session is blocked only while everything it could run on is out.
+It names the marks and when the first of them ends; another entry that
+works, a cleared mark or a mark that ended unblocks it."
+  (harness-fallback-test-with
+    (let* ((soon (+ (float-time) 600))
+           (later (+ (float-time) 7200))
+           (sid (harness-fallback-test-session "alpha:a-mid")))
+      ;; Nothing is out: nothing blocks it.
+      (should-not (harness-call 'fallback/blocked sid))
+      ;; Its own model is out and no list says where else to go.
+      (harness-call 'fallback/mark "alpha" :until soon :reason "5-hour limit")
+      (let ((blocked (harness-call 'fallback/blocked sid)))
+        (should blocked)
+        (should (= soon (plist-get blocked :until)))
+        (should-not (plist-get blocked :guess))
+        (should (string-match-p "Alpha is out of quota until" (plist-get blocked :reason)))
+        (should (equal '("alpha") (mapcar (lambda (m) (plist-get m :key)) (plist-get blocked :marks)))))
+      ;; An entry that works gives it somewhere to go.
+      (setq harness-fallback-models '("beta"))
+      (should-not (harness-call 'fallback/blocked sid))
+      ;; Out too: it waits for the first of them to end.
+      (harness-call 'fallback/mark "beta" :until later :kind 'billing)
+      (let ((blocked (harness-call 'fallback/blocked sid)))
+        (should (= soon (plist-get blocked :until)))
+        (should (equal '("alpha" "beta") (mapcar (lambda (m) (plist-get m :key)) (plist-get blocked :marks))))
+        (should (string-match-p "Alpha is out of quota.*Beta is out of money" (plist-get blocked :reason))))
+      ;; Clearing the earlier mark frees it; the other still ends later.
+      (harness-call 'fallback/clear "alpha")
+      (should-not (harness-call 'fallback/blocked sid))
+      ;; A provider missing from the registry is no way out, and a list
+      ;; of nothing else leaves the session blocked on its own model.
+      (setq harness-fallback-models '("nowhere"))
+      (harness-call 'fallback/mark "alpha" :until later)
+      (should (= later (plist-get (harness-call 'fallback/blocked sid) :until)))
+      ;; A retry time the provider did not give is said to be a guess.
+      (harness-call 'fallback/clear "alpha")
+      (harness-call 'fallback/mark "alpha")
+      (should (plist-get (harness-call 'fallback/blocked sid) :guess)))))
+
+(ert-deftest harness-fallback-blocked-ends-with-the-mark ()
+  "A mark that ended unblocks the session without anything clearing it."
+  (harness-fallback-test-with
+    (let ((sid (harness-fallback-test-session "alpha:a-mid")))
+      (harness-call 'fallback/mark "alpha" :until (+ (float-time) 0.3))
+      (should (harness-call 'fallback/blocked sid))
+      (harness-test-wait (lambda () (not (harness-call 'fallback/blocked sid))) 5 "the mark to end")
+      (should-not (harness-fallback-out-p "alpha:a-mid")))))
+
+(ert-deftest harness-fallback-blocked-follows-the-session-moved-off-its-model ()
+  "A session carried on elsewhere is judged by its own model first."
+  (harness-fallback-test-with
+    (setq harness-fallback-models '("beta"))
+    (let ((sid (harness-fallback-test-session "alpha:a-mid")))
+      (harness-call 'fallback/mark "alpha" :until (+ (float-time) 600))
+      (harness-fallback-test-prompt sid "go")
+      (should (string-prefix-p "beta:" (plist-get (harness-call 'session/get sid) :model)))
+      ;; It runs on beta now, but still has somewhere to go.
+      (should-not (harness-call 'fallback/blocked sid))
+      (harness-call 'fallback/mark "beta" :until (+ (float-time) 900))
+      (let ((blocked (harness-call 'fallback/blocked sid)))
+        (should blocked)
+        (should (equal '("alpha" "beta") (mapcar (lambda (m) (plist-get m :key)) (plist-get blocked :marks)))))
+      (should-not (harness-call 'fallback/blocked "no-such-session")))))
+
 (ert-deftest harness-fallback-off-still-notices-and-says-where-to-turn-it-on ()
   "Without a fallback list the session stays put, its provider is marked
 and the hint points at the dashboard."

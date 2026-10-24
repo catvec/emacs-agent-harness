@@ -54,7 +54,12 @@ gate refuses the next step of a running one, so a long turn cannot
 spend far past its cap (the step in flight finishes, then the turn
 ends `blocked` with the reason as a hint).  Every budget warns once at
 80% and soft ones once more at 100%, as an event and as a session
-hint.
+hint.  A spent hard budget also holds the sessions it covers
+(`harness-usage-hold`, `usage/budget-hold`): the same question as the
+gate's, without its warnings, and with the answer to when it lets go
+-- the end of the budget's period, or never by itself.  Task mode
+keeps a task a hard budget stopped in its queue, with that on its
+card, and starts it again when the budget has room (see Holds below).
 
 Storage is one code path: rows are loaded from whichever backend is
 in use into plists and aggregated in Lisp.  SQLite only narrows the
@@ -82,6 +87,7 @@ a few times a second at most.
 ### Methods
 
 - `usage/budget-block` (session-id) — Return why a hard budget forbids another request in SESSION-ID, or nil.
+- `usage/budget-hold` (session-id) — Return why a hard budget forbids another request in SESSION-ID, or nil.
 - `usage/budget-status` (id &rest opts) — Return the status of budget ID (or of a BUDGET plist passed as ID).
 - `usage/budgets` — Return every explicit budget plist.
 - `usage/fetch-api-cost` (&rest opts) — Fetch what Anthropic billed the organisation this period, without blocking.
@@ -146,12 +152,15 @@ a few times a second at most.
 - `agent/turn-ended` → `harness-usage--reset-meter`
 - `agent/turn-started` → `harness-usage--live-start`
 - `agent/turn-started` → `harness-usage--reset-meter`
+- `config/changed` → `harness-usage--on-config-changed`
 - `provider/quota-updated` → `harness-usage--on-quota-updated`
 - `session/deleted` → `harness-usage--live-forget`
 - `session/deleted` → `harness-usage--forget-rate`
 - `session/usage` → `harness-usage--on-session-usage`
 - `session/usage` → `harness-usage--live-on-usage`
 - `session/usage` → `harness-usage--on-usage-rate`
+- `usage/budgets-changed` → `harness-usage--forget-holds`
+- `usage/reported-changed` → `harness-usage--forget-holds`
 
 ### Events it emits
 

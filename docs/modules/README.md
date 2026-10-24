@@ -240,11 +240,11 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `cache/warm-changed` | [cache-warm](cache-warm.md) | [cache-warm](cache-warm.md) | [ui-cache-warm](ui-cache-warm.md) | yes |
 | `compaction/done` | [compaction](compaction.md) | [compaction](compaction.md) | [pet](pet.md) |  |
 | `compaction/failed` | [compaction](compaction.md) | [compaction](compaction.md) |  |  |
-| `config/changed` | [config](config.md) | [config](config.md), [perms](perms.md) | [pet](pet.md), [tasks](tasks.md), [ui-config](ui-config.md), [ui-pet](ui-pet.md), [ui-usage](ui-usage.md) | yes |
+| `config/changed` | [config](config.md) | [config](config.md), [perms](perms.md) | [pet](pet.md), [tasks](tasks.md), [ui-config](ui-config.md), [ui-pet](ui-pet.md), [ui-usage](ui-usage.md), [usage](usage.md) | yes |
 | `cowboy/asked` | [cowboy](cowboy.md) | [cowboy](cowboy.md) |  |  |
 | `cowboy/decided` | [cowboy](cowboy.md) | [cowboy](cowboy.md) |  |  |
 | `decision/changed` | [decisions](decisions.md) | [decisions](decisions.md) | [ui-decisions](ui-decisions.md) | yes |
-| `fallback/changed` | [fallback](fallback.md) | [fallback](fallback.md) | [ui-usage](ui-usage.md) | yes |
+| `fallback/changed` | [fallback](fallback.md) | [fallback](fallback.md) | [tasks](tasks.md), [ui-usage](ui-usage.md) | yes |
 | `fallback/switched` | [fallback](fallback.md) | [fallback](fallback.md) | [ui-usage](ui-usage.md) | yes |
 | `handoff/done` | [handoff](handoff.md) | [handoff](handoff.md) |  |  |
 | `harness/reloaded` | `harness.el` | `harness.el` | [session](session.md), [ui-cache-warm](ui-cache-warm.md), [ui-decisions](ui-decisions.md), [ui-tool-slots-load](ui-tool-slots-load.md), [ui-version](ui-version.md), [version](version.md), [worktree](worktree.md) | yes |
@@ -319,11 +319,11 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `tools/progress` | [tools](tools.md) | [tools](tools.md) | [agent](agent.md), [resilience](resilience.md) |  |
 | `tools/started` | [tools](tools.md) | [tools](tools.md) |  |  |
 | `usage/budget-warning` | [usage](usage.md) | [usage](usage.md) | [ui-usage](ui-usage.md) | yes |
-| `usage/budgets-changed` | [usage](usage.md) | [usage](usage.md) | [ui-usage](ui-usage.md) | yes |
+| `usage/budgets-changed` | [usage](usage.md) | [usage](usage.md) | [tasks](tasks.md), [ui-usage](ui-usage.md), [usage](usage.md) | yes |
 | `usage/live-updated` | [usage](usage.md) | [usage](usage.md) |  | yes |
 | `usage/rate-updated` | [usage](usage.md) | [usage](usage.md) |  | yes |
 | `usage/recorded` | [usage](usage.md) | [usage](usage.md) |  |  |
-| `usage/reported-changed` | [usage](usage.md) | [usage](usage.md) | [ui-usage](ui-usage.md) | yes |
+| `usage/reported-changed` | [usage](usage.md) | [usage](usage.md) | [ui-usage](ui-usage.md), [usage](usage.md) | yes |
 | `version/checked` | [version](version.md) | [version](version.md) | [ui-version](ui-version.md) | yes |
 | `worktree/created` | [worktree](worktree.md) | [worktree](worktree.md) | [ui-worktree](ui-worktree.md) | yes |
 | `worktree/locked` | [worktree](worktree.md) | [worktree](worktree.md) | [ui-worktree](ui-worktree.md) | yes |

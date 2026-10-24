@@ -2897,6 +2897,54 @@ Return the chat's buffer."
       (set-window-start window (point-min))))
   (harness-media--capture "tasks"))
 
+(defun harness-media--held-tasks ()
+  "Three pretend waiting tasks of the demo project, each held back differently.
+One paused by hand, one out of quota until two hours on, one over a
+budget that only a change of the budget lets go: the views the harness
+gives a waiting task (`:hold', see `harness-tasks--hold'), drawn by the
+board from its own task list.  A real task would need a provider out of
+quota and a budget spent, which the pictures after this one must not
+see."
+  (let ((now (float-time)))
+    (list (list :id "t-mediaheld1" :project harness-media-project :cwd harness-media-project
+                :prompt "add an /orders/export endpoint that streams CSV"
+                :state "pending" :column "pending" :created (- now 5400)
+                :returned (- now 3000) :paused (- now 3000)
+                :hold (list :kind "paused" :since (- now 3000)))
+          (list :id "t-mediaheld2" :project harness-media-project :cwd harness-media-project
+                :prompt "backfill the order totals in cents"
+                :state "pending" :column "pending" :created (- now 3600)
+                :hold (list :kind "quota" :until (+ now 7200) :guess :false
+                            :reason "Claude Code is out of quota"
+                            :items (list (list :key "claude" :label "Claude Code"))))
+          (list :id "t-mediaheld3" :project harness-media-project :cwd harness-media-project
+                :prompt "index orders by customer and created date"
+                :state "pending" :column "pending" :created (- now 1800)
+                :hold (list :kind "budget" :until nil :guess :false
+                            :reason "Budget daily exhausted"
+                            :items (list (list :id "daily" :label "daily")))))))
+
+(defun harness-media-shot-tasks-held ()
+  "The task board with three waiting tasks held back: paused, out of quota, over a budget.
+Each card says what holds it on its line -- `paused', `quota · resets
+19:00', `budget' -- and the paused one offers [Resume] before [Start
+now].  The three are the board's own, put in and taken out again
+(`harness-media--held-tasks'), as `tasks-long' does for completed ones."
+  (harness-media--view (lambda () (harness-tasks harness-media-project 'full)))
+  (let* ((window (selected-window))
+         (board (window-buffer window))
+         (saved nil))
+    (with-current-buffer board
+      (setq saved harness-ui-tasks--tasks)
+      (setq harness-ui-tasks--tasks (append saved (harness-media--held-tasks)))
+      (harness-ui-tasks--render))
+    (harness-media--settle 1)
+    (set-window-start window (point-min))
+    (harness-media--capture "tasks-held")
+    (with-current-buffer board
+      (setq harness-ui-tasks--tasks saved)
+      (harness-ui-tasks--render))))
+
 (defconst harness-media--done-titles
   '("add a DELETE /orders/{id} endpoint"
     "return 409 when an order already shipped"
@@ -4366,6 +4414,7 @@ names."
     ("tasks-search" . harness-media-shot-tasks-search)
     ("quick-search" . harness-media-shot-quick-search)
     ("tasks-long" . harness-media-shot-tasks-long)
+    ("tasks-held" . harness-media-shot-tasks-held)
     ("tasks-message" . harness-media-shot-tasks-message)
     ("report" . harness-media-shot-report)
     ("report-image" . harness-media-shot-report-image)

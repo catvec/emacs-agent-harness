@@ -34,6 +34,16 @@
 ;; that runs its own loop is caught up by the agent (see
 ;; `harness-agent--handoff').
 ;;
+;; A session can be left with nowhere to go: its own model and every
+;; entry of the list are out.  It is then blocked (`harness-fallback-blocked',
+;; `fallback/blocked'), and says until when: the end of the first mark.
+;; The turn that finds this out stops with an error, as it always did;
+;; what changes is what task mode makes of it: a task whose session is
+;; blocked waits in its queue, with the reason on its card, instead of
+;; landing among the failures, and starts again once a mark ends or is
+;; cleared, or the list gains an entry that works (`fallback/changed' and
+;; `config/changed' tell it; see harness-tasks.el, Holds).
+;;
 ;; Nothing here blocks or calls a model: it decides from what the
 ;; providers already said.
 
@@ -496,10 +506,35 @@ stands for, or nil for OWN."
                               (and model (not (equal model own)) (cons model entry))))
                           harness-fallback-models))))
 
+(defun harness-fallback--own (session)
+  "Return the model SESSION was given: the one it had before the fallback moved it.
+Else its model."
+  (or (plist-get (gethash (plist-get session :id) harness-fallback--moved) :original)
+      (plist-get session :model)))
+
+(defun harness-fallback--candidates (session)
+  "Return the (MODEL . ENTRY) pairs SESSION could run on, most preferred first.
+Those of `harness-fallback--preference' for the session's own model --
+its own first, then the entries of `harness-fallback-models' -- whose
+provider is registered and which the provider's catalogue does not deny.
+The session's own model is always one, whatever its provider says of
+it.  Whether a candidate has run out is another question
+\(`harness-fallback-out-p'): `harness-fallback-choose' asks it of each,
+`harness-fallback-blocked' of all."
+  (let* ((own (harness-fallback--own session))
+         (registered (harness-fallback--registered)))
+    (cl-remove-if-not (lambda (pair)
+                        (let ((model (car pair)))
+                          (and model
+                               (or (equal model own)
+                                   (and (member (harness-fallback--provider-of model) registered)
+                                        (harness-fallback--model-known-p model))))))
+                      (harness-fallback--preference own))))
+
 (defun harness-fallback-choose (session)
   "Return the model SESSION should run on now, as (:model ID :back BOOL :entry E).
 The models to try are, most preferred first, those of
-`harness-fallback--preference' for the session's own model -- the one it
+`harness-fallback--candidates' for the session's own model -- the one it
 had before the fallback moved it, else its model: that model first,
 then the entries of `harness-fallback-models'.  The first model that
 has not run out, whose provider is registered and which its provider's
@@ -507,17 +542,37 @@ catalogue does not deny wins; the session's own model is only judged by
 whether it is out, so a session whose own model works stays on it.
 `:back' is non-nil when that is its own model again.  Nil when
 everything is out."
-  (let* ((sid (plist-get session :id))
-         (current (plist-get session :model))
-         (own (or (plist-get (gethash sid harness-fallback--moved) :original) current))
-         (registered (harness-fallback--registered)))
-    (cl-loop for (model . entry) in (harness-fallback--preference own)
-             when (and model
-                       (not (harness-fallback-out-p model))
-                       (or (equal model own)
-                           (and (member (harness-fallback--provider-of model) registered)
-                                (harness-fallback--model-known-p model))))
+  (let ((own (harness-fallback--own session)))
+    (cl-loop for (model . entry) in (harness-fallback--candidates session)
+             unless (harness-fallback-out-p model)
              return (list :model model :back (equal model own) :entry entry))))
+
+(defun harness-fallback-blocked (session)
+  "Return why SESSION can run on no model now, or nil when one works.
+Everything SESSION could run on (`harness-fallback--candidates') has
+run out: its own model, and every entry of `harness-fallback-models' it
+may carry on with.  A plist of `:until' (when the first of them is
+tried again, a float time: the earliest end of the marks that put them
+out), `:guess' (non-nil when that time is a retry time the provider did
+not give), `:reason' (a sentence naming what is out) and `:marks' (those
+marks as `fallback/status' describes them, the earliest to end first).
+Nil without a model, and nil when nothing is out and yet nothing can
+run (a provider that is not registered): waiting would change nothing.
+This is how task mode learns that a task must wait for quota instead of
+failing, and when to look again."
+  ;; Nothing out, nothing blocked: the common case costs no provider listing.
+  (when (and (plist-get session :model)
+             (harness-fallback--marks)
+             (not (harness-fallback-choose session)))
+    (let ((marks (sort (delete-dups
+                        (delq nil (mapcar (lambda (pair) (harness-fallback-mark-of (car pair)))
+                                          (harness-fallback--candidates session))))
+                       (lambda (a b) (< (plist-get a :until) (plist-get b :until))))))
+      (when marks
+        (list :until (plist-get (car marks) :until)
+              :guess (and (plist-get (car marks) :guess) t)
+              :reason (mapconcat #'harness-fallback--out-text marks "; ")
+              :marks (mapcar #'harness-fallback--describe-mark marks))))))
 
 ;;;; Switching
 
@@ -609,7 +664,7 @@ list is set."
                                                                                  (plist-get m :since)))
                                                            marks ","))
                                   "Every provider has run out"
-                                  (concat text ".  Sessions and tasks stop until one works again.")
+                                  (concat text ".  Sessions stop and tasks wait in their queue until one works again.")
                                   'normal session)))))
 
 ;;;; Hooks
@@ -779,6 +834,19 @@ default an hour on), `:reason' a text."
   "Return the model session SESSION-ID would run on now.
 See `harness-fallback-choose'."
   (harness-fallback-choose (harness-call 'session/get session-id)))
+
+(harness-defmethod fallback/blocked (session-id)
+  "Return why session SESSION-ID can run on no model now, or nil.
+Nil when a model works for it (`fallback/choose' finds one), or the
+session is gone.  Otherwise (:until TIME :guess BOOL :reason TEXT :marks
+\(MARK ...)): everything it could run on has run out, TIME is when the
+first of them is tried again and GUESS says that is a retry time rather
+than a reset the provider gave; MARK is as `fallback/status' describes
+it.  See `harness-fallback-blocked'.  Task mode keeps a task whose
+session is blocked in the queue until then, and starts it when
+`fallback/changed' says a mark ended or the list of fallbacks grew."
+  (and (harness-call 'session/exists-p session-id)
+       (harness-fallback-blocked (harness-call 'session/get session-id))))
 
 ;;;; Module
 

@@ -506,6 +506,116 @@ that keeps a prompt cache warm -- asks it."
 
 (defvar harness-budget)
 
+(defun harness-usage-test-spend (id cost)
+  "Record a call of session ID costing COST, as a model call would (no budget check)."
+  (harness-call 'usage/record
+                (list :session id :project (plist-get (harness-call 'session/get id) :project)
+                      :model "demo:scripted" :input 100 :output 10 :cost cost)))
+
+(ert-deftest harness-usage-budget-hold-says-when-a-hard-budget-lets-go ()
+  "A spent hard budget holds its session; a soft or unspent one does not.
+The hold names the budget, and when its period ends: a budget without a
+period lets go only when it is edited (`:until' nil)."
+  (harness-usage-test-with
+    (let ((id (harness-usage-test-session :budget '(:amount 0.5 :hard t)))
+          (soft (harness-usage-test-session :budget '(:amount 0.5))))
+      (should-not (harness-call 'usage/budget-hold id))
+      (harness-usage-test-spend id 0.4)
+      (should-not (harness-call 'usage/budget-hold id))
+      (harness-usage-test-spend id 0.2)
+      (let ((hold (harness-call 'usage/budget-hold id)))
+        (should hold)
+        (should-not (plist-get hold :until))
+        (should (string-match-p "\\`Budget session exhausted: spent \\$0\\.600 of \\$0\\.500" (plist-get hold :reason)))
+        (should (= 1 (length (plist-get hold :budgets))))
+        (let ((budget (car (plist-get hold :budgets))))
+          (should (equal (concat "session:" id) (plist-get budget :id)))
+          (should (equal "session" (plist-get budget :label)))
+          (should (harness-usage-test-near 0.6 (plist-get budget :spent)))
+          (should (= 0.5 (plist-get budget :amount)))
+          (should-not (plist-get budget :period))))
+      ;; Over a soft budget is not held, and a session that does not exist has none.
+      (harness-usage-test-spend soft 0.9)
+      (should-not (harness-call 'usage/budget-hold soft))
+      (should-not (harness-call 'usage/budget-hold "no-such-session")))))
+
+(ert-deftest harness-usage-budget-hold-warns-about-nothing ()
+  "Asking for the hold is no budget check: no warning, no hint.
+`usage/budget-block' warns, as the gate does; the hold is asked of every
+waiting task at every pass of the scheduler."
+  (harness-usage-test-with
+    (let ((id (harness-usage-test-session :budget '(:amount 1.0))))
+      (harness-usage-test-spend id 0.9)
+      (let ((hints (length (harness-usage-test-hints id))))
+        (should-not (harness-call 'usage/budget-hold id))
+        (should-not (harness-call 'usage/budget-hold id))
+        (should (= hints (length (harness-usage-test-hints id))))
+        (should-not (harness-call 'usage/budget-block id))
+        (should (> (length (harness-usage-test-hints id)) hints))))))
+
+(ert-deftest harness-usage-budget-hold-ends-with-the-period ()
+  "A hard period budget holds until the period that spent it ends.
+A session held by two budgets goes on when the last lets go, and when
+one has no period at all it goes on only when that budget is edited."
+  (harness-usage-test-with
+    (let* ((id (harness-usage-test-session))
+           (now (float-time))
+           (tomorrow (harness-usage--day-start (cdr (harness-usage-period-bounds 'day now))))
+           (next-month (harness-usage--day-start (cdr (harness-usage-period-bounds 'month now)))))
+      (harness-call 'usage/set-budget (list :id "daily" :scope 'period :period 'day :amount 1.0 :hard t))
+      (harness-usage-test-spend id 1.5)
+      (let ((hold (harness-call 'usage/budget-hold id)))
+        (should hold)
+        (should (= tomorrow (plist-get hold :until)))
+        (should (equal "day" (plist-get (car (plist-get hold :budgets)) :period)))
+        (should (= tomorrow (plist-get (car (plist-get hold :budgets)) :until))))
+      ;; Asked about a time after the day, nothing is held: a new day has room.
+      (should-not (harness-usage-hold (harness-call 'session/get id) (+ tomorrow 3600)))
+      ;; A month budget spent too: it goes on when the later of them lets go.
+      (harness-call 'usage/set-budget (list :id "monthly" :scope 'period :period 'month :amount 1.2 :hard t))
+      (let ((hold (harness-call 'usage/budget-hold id)))
+        (should (= (max tomorrow next-month) (plist-get hold :until)))
+        (should (equal '("daily" "monthly") (sort (mapcar (lambda (b) (plist-get b :id)) (plist-get hold :budgets))
+                                                  #'string<))))
+      ;; One that never lets go by itself keeps it for good.
+      (harness-call 'usage/set-budget (list :id "forever" :scope 'session :target id :amount 0.1 :hard t))
+      (should-not (plist-get (harness-call 'usage/budget-hold id) :until))
+      (should (= 3 (length (plist-get (harness-call 'usage/budget-hold id) :budgets)))))))
+
+(ert-deftest harness-usage-budget-hold-follows-changes-to-budgets-and-spending ()
+  "What the hold kept is dropped when a budget or the spending changes.
+Raising a budget, making it soft, removing it, changing the Budget
+setting or recording a call is seen at once, without waiting for the
+kept answer to age."
+  (harness-usage-test-with
+    (let* ((harness-budget nil)
+           (id (harness-usage-test-session)))
+      (harness-call 'usage/set-budget (list :id "cap" :scope 'session :target id :amount 1.0 :hard t))
+      (should-not (harness-call 'usage/budget-hold id))
+      (harness-usage-test-spend id 1.5)
+      (should (harness-call 'usage/budget-hold id))
+      ;; Raised: it has room again.
+      (harness-call 'usage/set-budget (list :id "cap" :scope 'session :target id :amount 5.0 :hard t))
+      (should-not (harness-call 'usage/budget-hold id))
+      ;; Spent again, then made soft, then removed.
+      (harness-usage-test-spend id 4.0)
+      (should (harness-call 'usage/budget-hold id))
+      (harness-call 'usage/set-budget (list :id "cap" :scope 'session :target id :amount 5.0))
+      (should-not (harness-call 'usage/budget-hold id))
+      (harness-call 'usage/set-budget (list :id "cap" :scope 'session :target id :amount 5.0 :hard t))
+      (should (harness-call 'usage/budget-hold id))
+      (harness-call 'usage/remove-budget "cap")
+      (should-not (harness-call 'usage/budget-hold id))
+      ;; The Budget setting, which `config/set' changes.
+      (setq harness-budget '(:amount 1.0 :hard t))
+      (harness-emit 'config/changed 'harness-budget harness-budget 'global nil)
+      (let ((hold (harness-call 'usage/budget-hold id)))
+        (should hold)
+        (should (equal "settings" (plist-get (car (plist-get hold :budgets)) :id))))
+      (setq harness-budget '(:amount 100.0 :hard t))
+      (harness-emit 'config/changed 'harness-budget harness-budget 'global nil)
+      (should-not (harness-call 'usage/budget-hold id)))))
+
 (ert-deftest harness-usage-hard-budget-stops-a-running-turn ()
   "A hard budget crossed by a step stops the turn at the next boundary.
 The step in flight finishes and is recorded; no further step runs; the
