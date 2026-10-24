@@ -745,6 +745,7 @@ so `C-c .` is how you aim a key at a panel from there (see
 | `C-c C-l` | Copy a link to the message or tool call at point -- `harness:session/ID/message/NODE`, `harness:session/ID/call/NODE` -- or to the session where point is on none; with `C-u` the Markdown link `[words](URL)`. Paste it in a message and the agent can write it in what it says (see [Links in what agents write](#links-in-what-agents-write)) |
 | `C-c M-l` | Copy a link to the session (`C-u`: as `[name](URL)`) |
 | `C-c >` | Reply in a thread: to the selected text, or to the message point is on, whole; from the box, or anywhere that is no message, to the agent's last. A card in the compose box says what the reply is to -- who wrote it and the part of it you selected, or each message when the selection runs across several -- and what you write under the card is the reply (see *Replies in threads*, below). `C-u C-c >` quotes it in the box as Markdown instead, to answer inline, as does a selection in the box: the agent's reply, plan or answer in a thread, with a selection's code blocks, inline code and links as Markdown and what a fold hides left out; an answer that quotes nothing comes with the message it answers nested under it, so a thread's replies quote each other. That is the [compose-quote](lisp/vendor/compose-quote/README.md) library's command (see *Answering inline*, below). `C-c h >` quotes the selection of any buffer (see [Prompting with the region](#prompting-with-the-region)), `C-c h <` replies in a thread to it |
+| `C-c <` | Step out of a reply to your own message, and back in. With point in a reply, under a card, it moves point to your message, the line above the first card; in your message, back into the reply you were last in; from outside the box, to where you were writing in it. What is typed with point outside the box goes there too, so a message of yours stays yours whatever you read or click meanwhile (see *Replies in threads*, below) |
 | `M-RET` | In a quote in the compose box: split it where point is, to answer that part: the quote above, an empty line for your answer, the quote below |
 | `C-c [` | In a quote in the compose box: elide the region, or the rest of its paragraph from point (with `C-u`, the rest of the quote), leaving `[...]`, so a bit of front matter stays for context |
 | `C-c C-e` | Jump to the bottom; while the window is scrolled away from it, the header line shows `↓ newer messages`, which does the same |
@@ -855,6 +856,37 @@ image's. `[×]` on the card, or deleting the token, takes the thread away
 and keeps your words. A click on a card shows the message it replies to,
 the part lit (`RET` on a card of the transcript does too); `mouse-3` on a
 card in the box has the rest.
+
+**Your message, and the replies.** A box with a card is not one place to
+write but several. The words before the first card are your own message,
+on a line of its own that the card leaves for them, `Message…` while it is
+empty, as the empty box has it; the words under a card are the reply to
+it, with the rail beside them, `Reply…` while they are empty. `C-c >` puts
+point in the reply it started, so the first thing you type is the reply.
+To write something that is no reply -- a thing to do first, a question of
+your own -- step out: `C-c <` (`harness-compose-toggle-reply`) moves point
+out of the reply to your message, and pressed there, back into the reply
+you were last in. Each half is a command too:
+`harness-compose-leave-reply` and `harness-compose-enter-reply`. The
+ordinary motions work as well, the message being a line of text: `M-<`
+goes to the top of the box, which is that line, `C-p` up from the reply
+to the card, where what you type goes into your message above it rather
+than against the card (and at the card's end into the start of the reply),
+and a click puts point where it lands. To give a reply up from the
+keyboard, `C-p` onto its card and `C-d`: the card is its token, and
+deleting it takes the thread away as `[×]` does, the words under it
+staying.
+
+What is typed with point outside the box -- after reading the transcript,
+after a click in it -- goes to the area you wrote in last: your message,
+or the reply, not always under the last card. The box with several cards
+has them all in the order they are in, each with its own words; `C-c <`
+goes back into the one you left. The card of the reply point is in says
+how to step out (`C-c < your message`), and with point in your message,
+the card of the reply it goes back into says so (`C-c < back to the
+reply`); `harness-compose-reply-hints` turns those words off. Sending is
+the same whichever area is written in: your message, then each reply with
+its own words.
 
 Sent, the message shows the same cards with your words under them, and
 `↳ thread t-3f2a1b09` once the task's review has made it a thread: in the
@@ -1560,7 +1592,9 @@ the hints follow it.
 its bottom, not to the buffer's, which holds the transcript above the box
 and no text to edit. Pressed again at the box's edge, from outside the
 box, or with a prefix argument, they go on to the buffer's top and
-bottom, so the transcript is one more press away.
+bottom, so the transcript is one more press away. With a reply in the box
+the top of the box is the line for your own message above its first card,
+and `C-c <` is the way between that and the reply.
 
 ### Prompting with the region
 

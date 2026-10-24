@@ -178,6 +178,7 @@ a permission's y and n.
         ("C-c C-c" "Send the box" harness-ui-popout-submit)
         ("C-c ." "A key of the panel above, from the box" harness-compose-panel-key)
         ("C-c >" "Quote reply: region or message" compose-quote-reply)
+        ("C-c <" "Out of a reply to your message, and back" harness-compose-toggle-reply)
         ("M-RET" "Split a quote to answer inline" compose-quote-split)
         ("C-c [" "Elide part of a quote: [...]" compose-quote-elide)]))
 

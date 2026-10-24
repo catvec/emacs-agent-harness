@@ -2753,7 +2753,7 @@ after, so no other picture shows them."
       (with-current-buffer buffer
         (harness-media--select-text "retry it from a background thread, waiting 1, 2, 4 and 8 minutes between attempts")
         (harness-media--keys "C-c >")
-        (harness-media--box-expect "\\`\\[reply 1\\]\n\\'")
+        (harness-media--box-expect "\\`\n\\[reply 1\\]\n\\'")
         (harness-media--type "Make it 1, 5 and 30 minutes: our subscribers' endpoints are slow to recover.")
         (harness-media--select-text "Should that be reported to the subscriber, or only logged?")
         (harness-media--keys "C-c >")
@@ -4216,7 +4216,7 @@ feedback it is a thread on those lines (`thread-lines')."
         (unless (use-region-p) (error "The keys selected nothing"))
         (harness-media--keys "C-c >")
         (with-current-buffer popout
-          (harness-media--box-expect "\\`\\[reply 1\\]\n\\'"))
+          (harness-media--box-expect "\\`\n\\[reply 1\\]\n\\'"))
         (harness-media--type "Should a 404 be timed too? A scanner probing unknown paths would fill the log.")
         (harness-media--capture "review-thread-lines")
         ;; Give the reply up, and Ediff, as the other pictures leave them.

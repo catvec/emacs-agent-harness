@@ -684,7 +684,7 @@ reply, as a mail has them.  C-u C-c > quotes the answer in the box as Markdown."
           (harness-compose-set "")
           ;; A thread, without.
           (execute-kbd-macro (kbd "C-c >"))
-          (should (equal "[reply 1]\n" (harness-compose-text)))
+          (should (equal "\n[reply 1]\n" (harness-compose-text)))
           (should (= (point) harness-compose-end))
           (should (equal '("Two tasks are in progress.")
                          (mapcar (lambda (ref) (plist-get ref :text))

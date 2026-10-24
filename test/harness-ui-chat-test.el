@@ -2582,7 +2582,7 @@ from (`harness-thread-ref-functions') instead."
             (let ((chat (harness-chat--buffer-for (cadr ids))))
               (should (eq chat (window-buffer (selected-window))))
               (with-current-buffer chat
-                (should (equal "[reply 1]\n" (harness-compose-text)))
+                (should (equal "\n[reply 1]\n" (harness-compose-text)))
                 (should (= (point) harness-compose-end))
                 (let ((ref (car (harness-thread-refs (plist-get (car harness-compose-attachments) :thread)))))
                   (should (equal "buffer" (plist-get ref :kind)))
@@ -3245,7 +3245,7 @@ words themselves, as Markdown.  Nothing is quoted into the box's text."
         (should (cdr reply))
         (should (= 1 (length (car reply))))
         (with-current-buffer buf
-          (should (equal "[reply 1]\n" (harness-compose-text)))
+          (should (equal "\n[reply 1]\n" (harness-compose-text)))
           (should-not (region-active-p))
           (should (= 1 (length (cl-remove-if-not (lambda (ov) (plist-get (overlay-get ov 'harness-compose-attachment) :thread))
                                                  harness-compose--token-overlays)))))
@@ -3330,6 +3330,62 @@ first card stays the message's own; sending the box splits it at the cards."
             (should (equal '("The build is green" "The deploy is pending")
                            (mapcar (lambda (a) (plist-get (car (harness-thread-refs (plist-get a :thread))) :text))
                                    atts)))))))))
+
+(ert-deftest harness-ui-chat-c-c-<-leaves-the-reply-for-your-own-message ()
+  "C-c > on part of the agent's message starts a reply, point under its card; the
+box has a line for your own message above the card, and C-c < moves point out
+to it and back, through the command loop, in a real chat.  What is typed from
+the transcript goes to the area written in last, the chat's own redraws of the
+box leave all of it as it was, and what is sent is your message, then the
+reply with its own words."
+  (harness-ui-chat-test-with
+    (let ((sid (harness-ui-chat-test-session)))
+      (harness-call 'session/append sid '(:kind assistant :content "The build is green. The deploy is pending."))
+      (let ((buf (harness-ui-chat-test-open sid))
+            (card (lambda ()
+                    (substring-no-properties
+                     (overlay-get (cl-find-if (lambda (ov) (plist-get (overlay-get ov 'harness-compose-attachment) :thread))
+                                              harness-compose--token-overlays)
+                                  'display)))))
+        (harness-ui-chat-test-reply buf (harness-ui-chat-test-start buf "The deploy") (harness-ui-chat-test-find buf "pending"))
+        (save-window-excursion
+          (set-window-buffer nil buf)
+          (with-current-buffer buf
+            (should (eq 'harness-compose-toggle-reply (key-binding (kbd "C-c <"))))
+            (should (equal "\n[reply 1]\n" (harness-compose-text)))
+            (should (= (point) harness-compose-end))
+            (execute-kbd-macro "Since when?")
+            ;; Your message has its line, empty, and the card names the way out of the reply.
+            (should (equal '("Message…")
+                           (mapcar (lambda (ov) (substring-no-properties (overlay-get ov 'before-string)))
+                                   harness-compose--area-hints)))
+            (should (string-search "C-c < your message" (funcall card)))
+            ;; Out of the reply, to your message, and typing there.
+            (execute-kbd-macro (kbd "C-c <"))
+            (should (= (point) harness-compose-start))
+            (should (string-search "C-c < back to the reply" (funcall card)))
+            (execute-kbd-macro "Also, run the tests.")
+            (should (equal "Also, run the tests.\n[reply 1]\nSince when?" (harness-compose-text)))
+            ;; The transcript is read; what is typed from there is your message's.
+            (goto-char (point-min))
+            (execute-kbd-macro "!")
+            (should (equal "Also, run the tests.!\n[reply 1]\nSince when?" (harness-compose-text)))
+            ;; The chat draws the box again, as it does for a pending question or a
+            ;; queued message: point, the card and its hint stay.
+            (let ((at (- (point) harness-compose-start)))
+              (harness-chat--render-tail)
+              (should (equal "Also, run the tests.!\n[reply 1]\nSince when?" (harness-compose-text)))
+              (should (= (point) (+ harness-compose-start at))))
+            (should (string-search "C-c < back to the reply" (funcall card)))
+            ;; Back into the reply, and sent: your message, then the reply's words.
+            (execute-kbd-macro (kbd "C-c <"))
+            (should (= (point) harness-compose-end))
+            (should (string-search "C-c < your message" (funcall card)))
+            (pcase-let ((`(,text . ,atts) (harness-chat--take-message)))
+              (should (equal "Also, run the tests.!" text))
+              (should (equal '("Since when?") (mapcar (lambda (a) (plist-get a :response)) atts)))
+              (should (equal "The deploy is pending"
+                             (plist-get (car (harness-thread-refs (plist-get (car atts) :thread))) :text))))))))))
 
 (ert-deftest harness-ui-chat-draws-your-replies-in-threads-as-cards ()
   "A message of yours that holds replies in threads draws each as a card -- what it

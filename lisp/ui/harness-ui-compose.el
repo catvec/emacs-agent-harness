@@ -16,13 +16,17 @@
 ;;     (a chat's C-c > starts a thread instead, its C-u C-c > quotes);
 ;;   - replies in threads: a card in the box for each region replied to,
 ;;     what it is and the part of it quoted, with the words of the reply
-;;     typed under it, in the same box (see the Threads section);
+;;     typed under it, in the same box (see the Threads section).  Your
+;;     own message has a line above the first card, and C-c < moves
+;;     point out of a reply to it, and back into the reply;
 ;;   - typing anywhere in the buffer goes into the box: a printable
 ;;     character (or a yank) with point outside it moves point to the
-;;     end of the box and types there, unless the key is a command where
-;;     it is typed -- a button's, a panel's, the task board's.  A command
-;;     that acts on what is at point says where that is with a
-;;     `harness-compose-acts-p' property; elsewhere its key types too;
+;;     end of the box and types there -- once the box holds a card, to
+;;     the end of the area written in last, your message or a reply --
+;;     unless the key is a command where it is typed -- a button's, a
+;;     panel's, the task board's.  A command that acts on what is at
+;;     point says where that is with a `harness-compose-acts-p'
+;;     property; elsewhere its key types too;
 ;;   - the keys of the panels above the box from the box: a question's
 ;;     digits, a permission's y and n, the task board's F type when
 ;;     typed in the box, so C-c . reads one key and runs it on the
@@ -159,6 +163,21 @@ brings ATT back, to where it stood (see `harness-compose--sync-tokens').")
   "Overlays showing the tokens of the box's attachments as chips.")
 (defvar-local harness-compose--thread-rails nil
   "Overlays drawing the rail beside the words under the cards of threads.")
+(defvar-local harness-compose--area nil
+  "Where point was last in the box, once the box held a card.
+`own' for your own message, or the number of the reply it was in.  What
+is typed from outside the box goes there (`harness-compose--entry-point').")
+(defvar-local harness-compose--here nil
+  "The area point was in after the last command, nil when it was outside the box.
+Like `harness-compose--area', and what a card's hint goes by
+\(`harness-compose--card-hint'): a host that draws the box again moves
+point meanwhile, which says nothing of where it will be.")
+(defvar-local harness-compose--reply nil
+  "The number of the reply point was last in.
+`harness-compose-enter-reply' goes back into it.")
+(defvar-local harness-compose--area-hints nil
+  "Overlays saying that an empty area of the box is your message or a reply.
+See `harness-compose--area-placeholders'.")
 (defvar-local harness-compose--tasks nil
   "The tasks of the box's project, as `_harness/task/list' gives them.
 For @task: completion and `harness-compose-attach-task'; nil without the
@@ -193,6 +212,9 @@ See `harness-compose--line-up-undo'.")
   ;; `>' is Markdown's quote, and C-c with a punctuation key is a major
   ;; mode's to bind, the box's hosts all being major modes.
   (define-key map (kbd "C-c >") #'compose-quote-reply)
+  ;; `<' is `>''s other half: out of the reply `C-c >' started, to your own
+  ;; message, and back into it.
+  (define-key map (kbd "C-c <") #'harness-compose-toggle-reply)
   ;; A panel's key from the box, where the key itself types.  `.' is free
   ;; after C-c in every host: the harness menu writes a view's plain keys
   ;; behind a dot as well (". F").
@@ -435,10 +457,12 @@ that does something else than compose -- sending a message to a session,
 say.  Point ends after the box's final newline.  The tokens of its
 attachments show as chips (`harness-compose--show-tokens')."
   (dolist (ov (append (list harness-compose-overlay harness-compose--placeholder harness-compose--indent)
-                      harness-compose--token-overlays harness-compose--thread-rails))
+                      harness-compose--token-overlays harness-compose--thread-rails
+                      harness-compose--area-hints))
     (when ov (delete-overlay ov)))
   (setq harness-compose--token-overlays nil
-        harness-compose--thread-rails nil)
+        harness-compose--thread-rails nil
+        harness-compose--area-hints nil)
   (when text
     ;; New text: the attachments whose tokens were deleted go for good.
     (setq harness-compose--text text
@@ -483,7 +507,9 @@ attachments show as chips (`harness-compose--show-tokens')."
     (harness-compose--show-tokens)))
 
 (defun harness-compose-update-placeholder ()
-  "Show the placeholder while the box is empty."
+  "Show the placeholder while the box is empty.
+A box that holds cards says what each of its empty areas is the same
+way (`harness-compose--show-area-hints')."
   (when (and harness-compose--placeholder (overlay-buffer harness-compose--placeholder)
              (harness-compose-live-p))
     (overlay-put harness-compose--placeholder 'before-string
@@ -491,7 +517,11 @@ attachments show as chips (`harness-compose--show-tokens')."
                       ;; Overlay strings miss the compose overlay's face.
                       (propertize (funcall harness-compose-placeholder-function)
                                   'face (list 'harness-dim-face harness-compose--face)
-                                  'cursor t)))))
+                                  'cursor t))))
+  ;; From `post-command-hook': a failure must not take the hook off.
+  (condition-case err
+      (harness-compose--show-area-hints)
+    (error (harness-log 'warn "compose: naming the empty areas failed: %S" err))))
 
 (defun harness-compose-hl-line-range ()
   "Return the `hl-line-mode' range, empty inside the box.
@@ -550,7 +580,11 @@ Any other key is a command where it is typed, not typing: nil."
 Typing (see `harness-compose--typing-command') with point outside the
 box moves point to the end of the box first, so a printable character
 typed anywhere in the buffer goes into the box instead of signalling
-that the text is read-only or doing nothing.  A key bound to a command
+that the text is read-only or doing nothing.  Once the box holds a
+card, the end of the area written in last is where it goes, your own
+message or a reply (`harness-compose--entry-point'): a message
+stepped out of a reply into (\\<harness-compose-map>\\[harness-compose-toggle-reply]) stays the message, whatever is
+read or clicked in between.  A key bound to a command
 where point is -- a button's RET, a panel's digits, the task board's
 letters -- is not typing, and runs as usual, unless the command has
 nothing to act on there.
@@ -558,6 +592,9 @@ nothing to act on there.
 In the box the same keys type, whatever panel is above it.  To press
 one on a panel from the box, \\<harness-compose-map>\\[harness-compose-panel-key] reads the key and runs
 it there, as if point were on the panel (`harness-compose-panel-key').
+At the edge of a card -- where moving up from a reply puts point -- they
+type into the area next to it, not against the card
+\(`harness-compose--card-edge-target').
 
 A region reaching outside the box goes before the typing: with
 `delete-selection-mode' the typing would delete it, read-only text and
@@ -569,8 +606,20 @@ all, and fail."
       (deactivate-mark))
     (unless (harness-compose-in-p)
       ;; The box may be out of sight: its windows follow it again.
-      (cl-incf harness-compose--jumps)
-      (goto-char harness-compose-end))
+      (cl-incf harness-compose--jumps))
+    ;; A hook that signals is taken off the hook: whatever goes wrong
+    ;; with the areas of a box with cards, typing goes where it did.
+    (condition-case err
+        (if (harness-compose-in-p)
+            ;; At the edge of a card, which is no text to type against: the
+            ;; words go into the area next to it (`harness-compose--card-edge-target').
+            (unless (region-active-p)
+              (when-let* ((target (harness-compose--card-edge-target (point))))
+                (goto-char target)))
+          (goto-char (harness-compose--entry-point)))
+      (error
+       (harness-log 'warn "compose: finding where typing goes failed: %S" err)
+       (unless (harness-compose-in-p) (goto-char harness-compose-end))))
     (setq this-command command)))
 
 ;;;; A panel's key, from the box
@@ -938,7 +987,10 @@ commands, rather than scroll."
 The attachments whose tokens were deleted from the old text cannot come
 back."
   (setq harness-compose--text text
-        harness-compose--detached nil)
+        harness-compose--detached nil
+        harness-compose--area nil
+        harness-compose--here nil
+        harness-compose--reply nil)
   (when (harness-compose-live-p)
     (let ((inhibit-read-only t))
       (delete-region harness-compose-start harness-compose-end)
@@ -984,12 +1036,13 @@ its reference, a task."
 
 (defun harness-compose-newline ()
   "Insert a newline in the box, or jump there from elsewhere.
-Jumping drops the region, which would reach outside the box."
+Jumping drops the region, which would reach outside the box.  It goes
+where typing from outside the box does (`harness-compose--entry-point')."
   (interactive)
   (if (harness-compose-in-p)
       (insert "\n")
     (deactivate-mark)
-    (goto-char harness-compose-end)))
+    (goto-char (harness-compose--entry-point))))
 
 ;;;; Quoting
 
@@ -1521,11 +1574,21 @@ That is the space that keeps it apart from the words, or, for the token
 of a card (`harness-compose--thread-token'), the line break under it."
   (or (eq char ?\s) (and (eq char ?\n) (string-prefix-p "[reply " token))))
 
+(defun harness-compose--token-from (token offset text)
+  "Return the offset in TEXT where deleting TOKEN, which stands at OFFSET, starts.
+OFFSET itself, but for the token of the first card of a box that holds
+nothing before it except the line break the card left for your own
+message (`harness-compose--card-break'): that goes too, rather than
+leaving an empty line above the words that stay."
+  (if (and (= offset 1) (string-prefix-p "[reply " token) (eq (aref text 0) ?\n))
+      0
+    offset))
+
 (defun harness-compose--without-token (token text)
   "Return TEXT without TOKEN wherever it stands, a space after each too."
   (dolist (span (reverse (harness-compose--token-spans token text)) text)
     (let ((end (cdr span)))
-      (setq text (concat (substring text 0 (car span))
+      (setq text (concat (substring text 0 (harness-compose--token-from token (car span) text))
                          (substring text (if (and (< end (length text))
                                                   (harness-compose--token-tail-p token (aref text end)))
                                              (1+ end)
@@ -1536,11 +1599,12 @@ of a card (`harness-compose--thread-token'), the line break under it."
 See `harness-compose--token-spans' for where an @ reference stands."
   (if (not (harness-compose-live-p))
       (setq harness-compose--text (harness-compose--without-token token harness-compose--text))
-    (let ((start (marker-position harness-compose-start)))
+    (let ((start (marker-position harness-compose-start))
+          (text (harness-compose--box-string)))
       ;; From the last, so the offsets of the others hold.
-      (dolist (span (reverse (harness-compose--token-spans token (harness-compose--box-string))))
+      (dolist (span (reverse (harness-compose--token-spans token text)))
         (let ((end (+ start (cdr span))))
-          (delete-region (+ start (car span))
+          (delete-region (+ start (harness-compose--token-from token (car span) text))
                          (if (and (< end harness-compose-end)
                                   (harness-compose--token-tail-p token (char-after end)))
                              (1+ end)
@@ -1568,7 +1632,10 @@ It goes back where it stood, as far as the attachments left reach."
   "Delete what is left of a token that a command cut short.
 Deleting the character before point right after a token deletes its
 last character, the one after point before it its first: the rest goes
-too, rather than staying as text naming nothing."
+too, rather than staying as text naming nothing.  The token of a card
+goes with the line break that ends it, and the line the first card left
+for your message when nothing is on it (`harness-compose--token-from'),
+so deleting it by hand leaves the box as removing the thread does."
   (dolist (ov harness-compose--token-overlays)
     (when (overlay-buffer ov)
       (let* ((beg (overlay-start ov))
@@ -1577,7 +1644,15 @@ too, rather than staying as text naming nothing."
              (text (buffer-substring-no-properties beg end)))
         (when (and token (< 0 (length text) (length token)) (string-search text token)
                    (harness-compose-in-p beg) (harness-compose-in-p end))
-          (delete-region beg end))))))
+          (delete-region beg end)
+          ;; A card's token goes as `harness-compose--delete-tokens' has it
+          ;; go: the line break it ends with, and the empty line the first
+          ;; card left for your message, with it.
+          (when (string-prefix-p "[reply " token)
+            (when (and (< beg harness-compose-end) (eq (char-after beg) ?\n))
+              (delete-region beg (1+ beg)))
+            (when (and (= beg (1+ harness-compose-start)) (eq (char-before beg) ?\n))
+              (delete-region (1- beg) beg))))))))
 
 (defun harness-compose--sync-tokens ()
   "Make the tokens of the box and its attachments agree; show the tokens.
@@ -1610,10 +1685,14 @@ when the attachments changed, for the caller to redraw them."
 
 (defun harness-compose--keep-tokens ()
   "Keep the tokens and the attachments in step after a command.
-Runs from `post-command-hook'; see `harness-compose--sync-tokens'."
+Runs from `post-command-hook'; see `harness-compose--sync-tokens'.
+The area of a box with cards that point is in is noted first
+\(`harness-compose--note-area'), which the cards' hints say."
   (condition-case err
-      (when (harness-compose--sync-tokens)
-        (harness-compose-redraw))
+      (progn
+        (harness-compose--note-area)
+        (when (harness-compose--sync-tokens)
+          (harness-compose-redraw)))
     (error (harness-log 'warn "compose: keeping the tokens failed: %S" err))))
 
 (defun harness-compose--show-tokens ()
@@ -1638,16 +1717,29 @@ together."
           (push w kept)
           (setq reach (cadr w))))
       (setq want (nreverse kept))
+      ;; What a card says of the key out of its reply depends on where
+      ;; point is, so it is part of what is shown (`harness-compose--card-hint').
+      (let ((cards (cl-loop for w in want
+                            when (plist-get (nth 2 w) :thread)
+                            collect (cons (nth 2 w) (cons (nth 0 w) (nth 1 w))))))
+        (setq want (mapcar (lambda (w)
+                             (append w (list (and (plist-get (nth 2 w) :thread)
+                                                  (harness-compose--card-hint (nth 2 w) cards)))))
+                           want)))
       (unless (equal want (mapcar (lambda (ov) (list (overlay-start ov) (overlay-end ov)
                                                      (overlay-get ov 'harness-compose-attachment)
-                                                     (overlay-get ov 'harness-compose-room)))
+                                                     (overlay-get ov 'harness-compose-room)
+                                                     (overlay-get ov 'harness-compose-hint)))
                                   harness-compose--token-overlays))
         (mapc #'delete-overlay harness-compose--token-overlays)
         (setq harness-compose--token-overlays
-              (mapcar (lambda (w) (apply #'harness-compose--inline-chip (seq-take w 3))) want)))
+              ;; The hint is for a card: the other chips are made as they were.
+              (mapcar (lambda (w) (apply #'harness-compose--inline-chip (nth 0 w) (nth 1 w) (nth 2 w)
+                                         (and (nth 4 w) (list (nth 4 w)))))
+                      want)))
       (harness-compose--show-thread-rails))))
 
-(defun harness-compose--inline-chip (beg end att)
+(defun harness-compose--inline-chip (beg end att &optional hint)
   "Return the overlay showing the token from BEG to END of attachment ATT.
 Every kind of attachment shows the same way: what it is first -- an
 image's thumbnail a line high, the icon of a file or a task
@@ -1658,7 +1750,8 @@ The cursor shows on what comes first when point is before the token.
 The token's display is a string, so point never rests inside it: the
 command loop moves it to an edge.  A reply in a thread shows as the
 card of the thread instead (`harness-compose--thread-card'), in as many
-columns as the windows have (`harness-compose--thread-chip-room')."
+columns as the windows have (`harness-compose--thread-chip-room'), and
+with HINT, a string, after its [×]."
   (let* ((ov (make-overlay beg end nil t nil))
          (thread (plist-get att :thread))
          (props (list 'help-echo (if thread
@@ -1683,11 +1776,13 @@ columns as the windows have (`harness-compose--thread-chip-room')."
                            (propertize " " 'face harness-compose--face
                                        'display (if (display-graphic-p) '(space :width (3)) '(space :width 1))))))
     (overlay-put ov 'display (if thread
-                                 (harness-compose--thread-card att)
+                                 (harness-compose--card-with-hint (harness-compose--thread-card att) hint props)
                                (apply #'propertize (harness-compose--chip-text att)
                                       'face (list 'harness-compose-token-face harness-compose--face)
                                       props)))
-    (when thread (overlay-put ov 'harness-compose-room (harness-compose--thread-chip-room)))
+    (when thread
+      (overlay-put ov 'harness-compose-room (harness-compose--thread-chip-room))
+      (overlay-put ov 'harness-compose-hint hint))
     (dolist (p (seq-partition props 2)) (overlay-put ov (car p) (cadr p)))
     ov))
 
@@ -2091,27 +2186,44 @@ words under it may name it."
                                 (mapcar (lambda (entry) (plist-get (nth 1 entry) :reply))
                                         harness-compose--detached))))))
 
+(defun harness-compose--card-break (before)
+  "Return the line breaks that go between BEFORE and the token of a card.
+BEFORE is the box's text up to where the token goes.  The token starts
+a line, with a line above it for the words that belong above it: your
+own message above the first card, the reply under the card before.  So
+the box that holds nothing yet gets a line break for your message, text
+that does not end a line gets the one that ends it, and the line break
+a card's token ends with, a reply with no words yet, gets another one,
+where those words go."
+  (cond ((or (string-empty-p before) (not (string-suffix-p "\n" before))) "\n")
+        ((string-match-p "\\(?:\\`\\|\n\\)\\[reply [0-9]+\\]\n\\'" before) "\n")
+        (t "")))
+
 (defun harness-compose--insert-thread-token (token)
   "Put TOKEN, a reply's, into the box on a line of its own; point goes under it.
 At point when point is in the box, else at the end of the box; a line
 break comes before it unless it starts a line, and one after it, where
-the response is written.  A box not drawn gets it at the end of its
-text.  Point ends where the response starts."
+the response is written.  The first card of a box that holds nothing
+else leaves a line above it, for a message of your own, and a card
+that follows another with no words under it leaves one for those
+(`harness-compose--card-break').  A box not drawn gets it at the end of
+its text.  Point ends where the response starts."
   (if (not (harness-compose-live-p))
       (setq harness-compose--text
-            (concat harness-compose--text
-                    (and (string-match-p "[^\n]\\'" harness-compose--text) "\n")
+            (concat harness-compose--text (harness-compose--card-break harness-compose--text)
                     token "\n"))
     (unless (harness-compose-in-p) (goto-char harness-compose-end))
-    (unless (or (= (point) harness-compose-start) (eq (char-before) ?\n))
-      (insert "\n"))
-    (insert token "\n")
+    (insert (harness-compose--card-break
+             (buffer-substring-no-properties harness-compose-start (point)))
+            token "\n")
     (harness-compose-update-placeholder)))
 
 (defun harness-compose-add-thread (refs)
   "Start a reply in a thread to REFS, references to regions, in the box.
 The reply is a card -- what the regions are, and the part of each quoted
--- and the words written under it are the response.  Point goes there.
+-- and the words written under it are the response.  Point goes there,
+and it is the reply that typing from outside the box goes to until
+point is in another area (\\<harness-compose-map>\\[harness-compose-toggle-reply] moves it out to your own message).
 REFS are plists of the shape `harness-thread-block' describes.  Return
 the attachment."
   (unless refs (user-error "Nothing to reply to"))
@@ -2119,6 +2231,9 @@ the attachment."
     (setq harness-compose-attachments (append harness-compose-attachments (list att)))
     (harness-compose--forget-detached (harness-compose--thread-token att))
     (harness-compose--insert-thread-token (harness-compose--thread-token att))
+    (setq harness-compose--area (plist-get att :reply)
+          harness-compose--here (plist-get att :reply)
+          harness-compose--reply (plist-get att :reply))
     (funcall harness-compose-redraw-function)
     ;; Its windows follow point into the box, where the words go.
     (harness-compose--quoted)
@@ -2165,7 +2280,7 @@ them, as the box has it.  Return the attachments."
     (dolist (att atts)
       (if (not (harness-compose--thread-attachment-p att))
           (push att others)
-        (setq box (concat box (if (string-empty-p box) "" "\n")
+        (setq box (concat box (harness-compose--card-break box)
                           (harness-compose--thread-token att) "\n"
                           (or (plist-get att :response) "")))
         (push (cl-loop for (k v) on att by #'cddr unless (eq k :response) append (list k v)) threads)))
@@ -2191,10 +2306,10 @@ what follows it.  Return the box's attachments."
       (setq n (1+ n))
       (let ((att (cons :reply (cons n (cl-loop for (k v) on reply by #'cddr
                                                unless (memq k '(:reply :response)) append (list k v))))))
-        (setq box (concat box (if (string-empty-p box) "" "\n")
+        (setq box (concat box (harness-compose--card-break box)
                           (harness-compose--thread-token att) "\n" (or (plist-get reply :response) ""))
               added (append added (list att)))))
-    (harness-compose-set (concat box (if cards (concat (if (string-empty-p box) "" "\n") cards) "")))
+    (harness-compose-set (concat box (if cards (concat (harness-compose--card-break box) cards) "")))
     (setq harness-compose-attachments (append harness-compose-attachments added))))
 
 (defun harness-compose--thread-chip-room ()
@@ -2280,6 +2395,283 @@ The host does it (`harness-compose-thread-open-function')."
         (cons "Copy the quote" (lambda ()
                                  (kill-new (harness-thread-quote (plist-get att :thread)))
                                  (message "Copied the quote")))))
+
+;;;; Your message, and the replies
+
+;; A box that holds cards is not one place to write but several.  The
+;; words before the first card are your own message, on a line of their
+;; own that the first card leaves for them
+;; (`harness-compose--card-break'); the words under a card are the reply
+;; to it, with the rail beside them.  Each is an AREA, and the rail says
+;; which one point is in: words with it are a reply, words without it
+;; are yours.
+;;
+;; C-c > puts point in the reply it started, so the first thing typed is
+;; the reply.  C-c < (`harness-compose-toggle-reply') moves point out of
+;; it, to your own message, and back into the reply; its two halves are
+;; `harness-compose-leave-reply' and `harness-compose-enter-reply'.  The
+;; ordinary ways out work as well, being text: C-p, M-< (the top of the
+;; box), a click.  Moving up from the reply puts point at the start of
+;; the card, which is no text to type against: a key typed there goes
+;; into your message above it (`harness-compose--card-edge-target'), and
+;; at the card's end into the start of the reply.
+;;
+;; The box remembers which area point was in after each command
+;; (`harness-compose--note-area'), so that what is typed from outside it
+;; -- after reading the transcript, in another window -- goes to the
+;; area written in last (`harness-compose--entry-point'), not always
+;; under the last card.
+;;
+;; The card where point is says how to move out of its reply, and, with
+;; point in your message, the card of the reply to go back into says so
+;; (`harness-compose--card-hint'); an area with no words yet says what it
+;; is, Message… or Reply… (`harness-compose--area-placeholders').
+
+(defcustom harness-compose-reply-hints t
+  "Non-nil: a card says how to move point out of its reply, and back in.
+The card of the reply point is in names \\<harness-compose-map>\\[harness-compose-toggle-reply] as the way to your own
+message; with point in your message, the card of the reply it goes
+back into names it as the way back.  An empty area says what it is
+\(Message…, Reply…) whatever this is set to."
+  :type 'boolean
+  :group 'harness-compose)
+
+(defun harness-compose--cards ()
+  "Return where the cards of the replies stand in the box.
+A list of (ATT START . END), in order, START and END being the buffer
+positions of the token each card shows for; nil when the box is not
+drawn or holds no card."
+  (when (and (harness-compose-live-p)
+             (cl-some #'harness-compose--thread-attachment-p harness-compose-attachments))
+    (let ((base (marker-position harness-compose-start)))
+      (mapcar (lambda (entry) (cons (car entry) (cons (+ base (cadr entry)) (+ base (cddr entry)))))
+              (harness-compose--thread-spans (harness-compose--box-string) harness-compose-attachments)))))
+
+(defun harness-compose--card-with-hint (card hint props)
+  "Return CARD, the string a card shows, with HINT at the end of its first line.
+That is after its [×].  HINT, a string or nil, is part of the card: it
+has PROPS, the properties the rest of the card has (a click shows what
+the reply is to).  See `harness-compose--card-hint'."
+  (if (null hint)
+      card
+    (let ((eol (or (string-search "\n" card) (length card))))
+      (concat (substring card 0 eol)
+              (apply #'propertize (concat "  " hint) props)
+              (substring card eol)))))
+
+(defun harness-compose--card-number (card)
+  "Return the number of the reply CARD, an entry of `harness-compose--cards', is."
+  (plist-get (car card) :reply))
+
+(defun harness-compose--area-of (cards pos)
+  "Return the area of the box POS is in, given its CARDS.
+`own' for your own message, which is what comes before the first card,
+else the number of the reply: the words after a card's token, up to
+the next card's."
+  (let ((area 'own))
+    (dolist (card cards)
+      (when (>= pos (cddr card))
+        (setq area (harness-compose--card-number card))))
+    area))
+
+(defun harness-compose--before-break (pos)
+  "Return POS, or where the line break that ends the line before POS starts.
+The words of an area end before the line break that parts them from
+the next card."
+  (if (and (> pos harness-compose-start) (eq (char-before pos) ?\n))
+      (1- pos)
+    pos))
+
+(defun harness-compose--reply-card (cards)
+  "Return the card of CARDS point goes back into: the reply last in, else the last."
+  (or (and harness-compose--reply
+           (cl-find harness-compose--reply cards :key #'harness-compose--card-number))
+      (car (last cards))))
+
+(defun harness-compose--area-point (cards area)
+  "Return where the words of AREA end in the box, given its CARDS.
+AREA is `own' or a reply's number.  Your own message ends before the
+first card, a reply before the next one, the last at the box's end -- as
+a reply taken away does, which has no end of its own.  Every area has
+a line for its words: one that has none yet -- the box that starts
+with a card, words that run on into a token (\"XY[reply 1]\"), a token
+that is the last thing before the next card or the box's end -- gets
+the line break that makes it, which changes the box, point staying
+where it is."
+  (if (eq area 'own)
+      (let ((token (cadr (car cards))))
+        (cond ((null token) harness-compose-end)
+              ((and (> token harness-compose-start) (eq (char-before token) ?\n)) (1- token))
+              (t (save-excursion (goto-char token) (insert "\n"))
+                 token)))
+    (let* ((rest (cl-member area cards :key #'harness-compose--card-number))
+           (card (car rest))
+           (next (cadr rest))
+           (end (if next (harness-compose--before-break (cadr next)) harness-compose-end)))
+      (cond ((null card) harness-compose-end)
+            ((> end (cddr card)) end)
+            (t (save-excursion (goto-char end) (insert "\n"))
+               (1+ (cddr card)))))))
+
+(defun harness-compose--entry-point ()
+  "Return where text that comes from outside the box goes in it.
+The end of the area written in last (`harness-compose--note-area'), once
+the box holds a card: your own message, or a reply.  Else the box's end,
+which is where it goes when that reply was taken away too."
+  (let ((cards (harness-compose--cards)))
+    (if (and cards
+             (or (eq harness-compose--area 'own)
+                 (cl-find harness-compose--area cards :key #'harness-compose--card-number)))
+        (harness-compose--area-point cards harness-compose--area)
+      harness-compose-end)))
+
+(defun harness-compose--card-edge-target (pos)
+  "Return where text typed with point at POS goes instead, or nil.
+A card is no text to type against: point goes to its start, the start
+of the line it is on, when moving up from the reply under it, and typing
+there would run the words into the card.  So typing at its start goes to
+the end of the area above it, and typing at its end to the start of the
+words of its reply, on the line under it."
+  (let ((cards (harness-compose--cards)) (above 'own))
+    (cl-dolist (card cards)
+      (cond ((= pos (cadr card))
+             (cl-return (harness-compose--area-point cards above)))
+            ((= pos (cddr card))
+             (harness-compose--area-point cards (harness-compose--card-number card))
+             (cl-return (1+ (cddr card)))))
+      (setq above (harness-compose--card-number card)))))
+
+(defun harness-compose--note-area ()
+  "Remember which area of the box point is in, when the box holds a card.
+Runs after every command, from `post-command-hook'
+\(`harness-compose--keep-tokens').
+A command that takes point out of the box -- a key that goes up into the
+transcript, a click, another window -- leaves the area it was in
+remembered, for what is typed next to go to
+\(`harness-compose--entry-point'); `harness-compose--here' is nil then."
+  (condition-case err
+      (let ((cards (and (harness-compose-in-p) (harness-compose--cards))))
+        (if (null cards)
+            (setq harness-compose--here nil)
+          (let ((area (harness-compose--area-of cards (point))))
+            (setq harness-compose--area area
+                  harness-compose--here area)
+            (when (integerp area) (setq harness-compose--reply area)))))
+    (error (harness-log 'warn "compose: noting the area point is in failed: %S" err))))
+
+(defun harness-compose--jump (pos)
+  "Put point at POS in the box, from wherever it is; its windows follow it in.
+From outside the box the region is dropped, which would reach out of it."
+  (unless (harness-compose-in-p)
+    (deactivate-mark)
+    (cl-incf harness-compose--jumps))
+  (goto-char pos)
+  (harness-compose--note-area))
+
+(defun harness-compose--need-cards ()
+  "Return the cards of the box, or say that it holds none."
+  (unless (harness-compose-live-p) (user-error "No compose box here"))
+  (or (harness-compose--cards)
+      (user-error "%s" (substitute-command-keys
+                        "No reply in the box: \\<harness-compose-map>\\[compose-quote-reply] starts one"))))
+
+(defun harness-compose-leave-reply ()
+  "Move point out of the reply, to your own message above the first card.
+The message is the words before the first card, a line of their own,
+which is made if the box has none yet; point goes to its end.  What is
+typed there is the message, whatever the replies say, and the replies
+stay as they are, with their words.  \\<harness-compose-map>\\[harness-compose-toggle-reply] goes back into the reply."
+  (interactive)
+  (harness-compose--jump (harness-compose--area-point (harness-compose--need-cards) 'own)))
+
+(defun harness-compose-enter-reply ()
+  "Move point into a reply: to the end of the words under its card.
+The reply that point was last in, else the last one.  Typing there is
+the reply again, whatever the message above it says.  \\<harness-compose-map>\\[harness-compose-toggle-reply] moves
+out again."
+  (interactive)
+  (let ((cards (harness-compose--need-cards)))
+    (harness-compose--jump
+     (harness-compose--area-point cards (harness-compose--card-number (harness-compose--reply-card cards))))))
+
+(defun harness-compose-toggle-reply ()
+  "Switch between your own message and the reply under a card.
+\\<harness-compose-map>\\[harness-compose-toggle-reply] in a reply moves point out of it, to your message above the first
+card (`harness-compose-leave-reply'); in your message it moves point
+back into the reply (`harness-compose-enter-reply'); from outside the
+box it goes in, to where you were writing last.  A reply is what a card
+starts, the words with its rail beside them; the box keeps the words of
+each, and what is sent is your message and then each reply as its
+own."
+  (interactive)
+  (unless (harness-compose-live-p) (user-error "No compose box here"))
+  (cond ((not (harness-compose-in-p))
+         (harness-compose--jump (harness-compose--entry-point)))
+        ((eq (harness-compose--area-of (harness-compose--need-cards) (point)) 'own)
+         (harness-compose-enter-reply))
+        (t (harness-compose-leave-reply))))
+
+(defun harness-compose--toggle-hint (what)
+  "Return the hint that says \\<harness-compose-map>\\[harness-compose-toggle-reply] goes WHAT: dim, the key in its face."
+  (concat (harness-ui-kbd (substitute-command-keys
+                           "\\<harness-compose-map>\\[harness-compose-toggle-reply]" t))
+          (propertize (concat " " what) 'face 'harness-dim-face)))
+
+(defun harness-compose--card-hint (att cards)
+  "Return what the card of ATT, one of the box's CARDS, says of \\<harness-compose-map>\\[harness-compose-toggle-reply], or nil.
+With point in its reply, that it moves out to your message; with point
+in your message, on the card of the reply that goes in, that it goes
+back.  Nothing for the other cards, nor with point outside the box, nor
+with `harness-compose-reply-hints' off.  Where point is is where it was
+after the last command (`harness-compose--here'), so that a host drawing
+the box again, with point in between wherever it leaves it, shows the
+same."
+  (when (and harness-compose-reply-hints cards harness-compose--here)
+    (let ((number (plist-get att :reply)))
+      (cond ((eql harness-compose--here number) (harness-compose--toggle-hint "your message"))
+            ((and (eq harness-compose--here 'own)
+                  (eql number (harness-compose--card-number (harness-compose--reply-card cards))))
+             (harness-compose--toggle-hint "back to the reply"))))))
+
+(defun harness-compose--area-placeholders ()
+  "Return the empty areas of the box that say what they are.
+A list of (POSITION . TEXT): your own message when it has a line to
+itself above the first card and no words on it -- the box's usual
+placeholder -- and each reply with no words under its card, on the line
+left for them, \"Reply…\".  nil without a card."
+  (when-let* ((cards (harness-compose--cards)))
+    (let* ((start (marker-position harness-compose-start))
+           (end (marker-position harness-compose-end))
+           (face (list 'harness-dim-face harness-compose--face))
+           (said (lambda (text) (propertize text 'face face 'cursor t)))
+           (blank (lambda (from to)
+                    (save-excursion (goto-char from) (skip-chars-forward " \t\n" to) (= (point) to))))
+           found)
+      (when (and (= (cadr (car cards)) (1+ start)) (eq (char-after start) ?\n))
+        (push (cons start (funcall said (funcall harness-compose-placeholder-function))) found))
+      (cl-loop for (card . more) on cards
+               for from = (1+ (cddr card))
+               for to = (if more (cadr (car more)) end)
+               when (and (<= from to)
+                         (or (= from end) (eq (char-after from) ?\n))
+                         (funcall blank from to))
+               do (push (cons from (funcall said "Reply…")) found))
+      (nreverse found))))
+
+(defun harness-compose--show-area-hints ()
+  "Show what the empty areas of the box are, and no longer what has words now.
+Made again only when they changed (`harness-compose--area-placeholders')."
+  (let ((want (harness-compose--area-placeholders)))
+    (unless (equal want (mapcar (lambda (ov) (cons (overlay-start ov) (overlay-get ov 'harness-compose-area-hint)))
+                                harness-compose--area-hints))
+      (mapc #'delete-overlay harness-compose--area-hints)
+      (setq harness-compose--area-hints
+            (mapcar (lambda (w)
+                      (let ((ov (make-overlay (car w) (car w))))
+                        (overlay-put ov 'before-string (cdr w))
+                        (overlay-put ov 'harness-compose-area-hint (cdr w))
+                        ov))
+                    want)))))
 
 ;;;; Undo
 

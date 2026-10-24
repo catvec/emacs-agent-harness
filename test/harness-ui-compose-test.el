@@ -199,7 +199,8 @@ in the box again: the words under each card, and the attachments without them."
       (should (equal "" (harness-compose-text)))
       (harness-compose-restore text atts)
       (harness-compose--keep-tokens)
-      (should (equal "[reply 1]\nWhy?" (harness-compose-text)))
+      ;; A line above the card for a message of your own, as a card made here leaves.
+      (should (equal "\n[reply 1]\nWhy?" (harness-compose-text)))
       (should (= 1 (length harness-compose-attachments)))
       (should-not (plist-get (car harness-compose-attachments) :response))
       (should (= 1 (length (harness-ui-compose-test--cards))))
@@ -223,6 +224,377 @@ leaves the words under it; the token brought back by undo brings it back."
       (harness-compose--keep-tokens)
       (should (= 1 (length harness-compose-attachments)))
       (should (= 1 (length (harness-ui-compose-test--cards)))))))
+
+(ert-deftest harness-ui-compose-thread-deleted-by-hand-leaves-the-box-tidy ()
+  "Deleting a card's token by hand -- C-d at its start, where C-p from the reply puts
+point -- gives the reply up as [×] does: the card, the line break it ends with,
+and the empty line it left for your message go, the words under it stay.  With
+words of your own above it, only the card goes."
+  (harness-ui-compose-test-with
+    (harness-compose-add-thread (list harness-ui-compose-test--ref))
+    (execute-kbd-macro "Why?")
+    (goto-char (cadr (car (harness-compose--cards))))
+    (harness-ui-compose-test--keys "C-d")
+    (should (equal "Why?" (harness-compose-text)))
+    (should-not harness-compose-attachments)
+    (should-not (harness-ui-compose-test--cards)))
+  (harness-ui-compose-test-with
+    (harness-compose-set "Intro.")
+    (harness-compose-add-thread (list harness-ui-compose-test--ref))
+    (execute-kbd-macro "Why?")
+    ;; DEL at the end of the token cuts its last character.
+    (goto-char (cddr (car (harness-compose--cards))))
+    (harness-ui-compose-test--keys "DEL")
+    (should (equal "Intro.\nWhy?" (harness-compose-text)))
+    (should-not harness-compose-attachments)))
+
+(ert-deftest harness-ui-compose-thread-removing-the-first-card-keeps-the-words-in-order ()
+  "Removing the first of two cards takes the line it left for your own message
+with it when nothing is on that line: the words under it are the message's now,
+and the second card keeps its own."
+  (harness-ui-compose-test-with
+    (let ((first (harness-compose-add-thread (list harness-ui-compose-test--ref))))
+      (insert "One.")
+      (harness-compose-add-thread (list '(:kind "chat" :node "n-2" :who "plan" :text "Step two")))
+      (insert "Two.")
+      (harness-compose--keep-tokens)
+      (should (equal "\n[reply 1]\nOne.\n[reply 2]\nTwo." (harness-compose-text)))
+      (harness-compose-remove-attachment first)
+      (should (equal "One.\n[reply 2]\nTwo." (harness-compose-text)))
+      (should (= 1 (length harness-compose-attachments)))
+      (should (= 1 (length (harness-ui-compose-test--cards)))))))
+
+;;;; Your message, and the replies
+
+;; A card in the box leaves a line for your own message above it, and a
+;; line for the words of each reply under it.  C-c < moves point between
+;; your message and the reply it was in, what is typed from outside the
+;; box goes to the area written in last, and the card and the empty
+;; areas say which is which.
+
+(defun harness-ui-compose-test-leave-the-box ()
+  "Leave the box in one command: point goes to the top of the buffer, the transcript."
+  (interactive)
+  (goto-char (point-min)))
+
+(ert-deftest harness-ui-compose-card-break-leaves-a-line-for-the-words-above-a-card ()
+  "A card's token starts a line, with a line above it for the words that belong
+above: your message above the first card, the reply under the card before."
+  (should (equal "\n" (harness-compose--card-break "")))
+  (should (equal "\n" (harness-compose--card-break "Intro")))
+  (should (equal "" (harness-compose--card-break "Intro\n")))
+  ;; The empty line of your message is the line.
+  (should (equal "" (harness-compose--card-break "\n")))
+  ;; A card with no words under it yet: its words need a line.
+  (should (equal "\n" (harness-compose--card-break "\n[reply 1]\n")))
+  (should (equal "\n" (harness-compose--card-break "Intro\n[reply 12]\n")))
+  (should (equal "" (harness-compose--card-break "\n[reply 1]\nWhy?\n"))))
+
+(ert-deftest harness-ui-compose-thread-leaves-a-line-for-each-area ()
+  "The first card of an empty box leaves a line above it, for a message of your
+own; a card after one with nothing under it leaves a line for those words; a
+card after your words or the reply's needs only its line break.  Point is
+where the words of the reply start."
+  (harness-ui-compose-test-with
+    (harness-compose-add-thread (list harness-ui-compose-test--ref))
+    (should (equal "\n[reply 1]\n" (harness-compose-text)))
+    (should (= (point) harness-compose-end))
+    (harness-compose-add-thread (list '(:kind "chat" :node "n-2" :who "plan" :text "Step two")))
+    (should (equal "\n[reply 1]\n\n[reply 2]\n" (harness-compose-text)))
+    (should (= (point) harness-compose-end))
+    (insert "Second.")
+    (harness-compose--keep-tokens)
+    (should (equal "\n[reply 1]\n\n[reply 2]\nSecond." (harness-compose-text)))
+    ;; Both were taken, and nothing of the lines they left reaches the message.
+    (goto-char (+ harness-compose-start (length "\n[reply 1]\n")))
+    (insert "First.")
+    (pcase-let ((`(,text . ,atts) (harness-compose-take)))
+      (should (equal "" text))
+      (should (equal '("First." "Second.") (mapcar (lambda (a) (plist-get a :response)) atts)))))
+  ;; Your own words first: the card follows them, a line break between, as ever.
+  (harness-ui-compose-test-with
+    (harness-compose-set "Intro.")
+    (harness-compose-add-thread (list harness-ui-compose-test--ref))
+    (should (equal "Intro.\n[reply 1]\n" (harness-compose-text)))
+    (insert "Why?")
+    (harness-compose-add-thread (list '(:kind "chat" :node "n-2" :who "plan" :text "Step two")))
+    (should (equal "Intro.\n[reply 1]\nWhy?\n[reply 2]\n" (harness-compose-text)))))
+
+(ert-deftest harness-ui-compose-c-c-<-moves-between-your-message-and-the-reply ()
+  "C-c < moves point out of the reply, to your own message on the line above the
+first card, and back into the reply, at the end of its words.  What is typed in
+each is that area's: sending splits the box at the card, your message and the
+reply with its words.  Typed through the command loop."
+  (harness-ui-compose-test-with
+    (should (eq 'harness-compose-toggle-reply (key-binding (kbd "C-c <"))))
+    (harness-compose-add-thread (list harness-ui-compose-test--ref))
+    (execute-kbd-macro "Why?")
+    (should (equal "\n[reply 1]\nWhy?" (harness-compose-text)))
+    ;; Out of the reply: your message, on a line of its own, nothing on it yet.
+    (harness-ui-compose-test--keys "C-c <")
+    (should (= (point) harness-compose-start))
+    (execute-kbd-macro "Also, run the tests.")
+    (should (equal "Also, run the tests.\n[reply 1]\nWhy?" (harness-compose-text)))
+    ;; Back into the reply: the end of its words.
+    (harness-ui-compose-test--keys "C-c <")
+    (should (= (point) harness-compose-end))
+    (execute-kbd-macro " Thanks.")
+    (should (equal "Also, run the tests.\n[reply 1]\nWhy? Thanks." (harness-compose-text)))
+    ;; And out again, to the end of your message.
+    (harness-ui-compose-test--keys "C-c <")
+    (should (= (point) (+ harness-compose-start (length "Also, run the tests."))))
+    (pcase-let ((`(,text . ,atts) (harness-compose-take)))
+      (should (equal "Also, run the tests." text))
+      (should (equal '("Why? Thanks.") (mapcar (lambda (a) (plist-get a :response)) atts))))
+    ;; Its two halves, and what a box with no card says.
+    (goto-char harness-compose-end)
+    (harness-compose-leave-reply)
+    (should (= (point) (+ harness-compose-start (length "Also, run the tests."))))
+    (harness-compose-enter-reply)
+    (should (= (point) harness-compose-end)))
+  (harness-ui-compose-test-with
+    (harness-compose-set "just words")
+    (goto-char harness-compose-end)
+    (dolist (command '(harness-compose-toggle-reply harness-compose-leave-reply harness-compose-enter-reply))
+      (let ((err (should-error (funcall command) :type 'user-error)))
+        (should (string-search "C-c >" (cadr err)))))
+    (should (equal "just words" (harness-compose-text)))))
+
+(ert-deftest harness-ui-compose-ordinary-motion-leaves-a-reply-too ()
+  "The line of your message is text, so M-< goes to it from a reply, being the top
+of the box, and C-p goes up from the reply to the card, one of its edges."
+  (harness-ui-compose-test-with
+    (harness-compose-add-thread (list harness-ui-compose-test--ref))
+    (execute-kbd-macro "Why?")
+    (harness-ui-compose-test--keys "M-<")
+    (should (= (point) harness-compose-start))
+    (execute-kbd-macro "Intro")
+    (should (equal "Intro\n[reply 1]\nWhy?" (harness-compose-text)))
+    ;; Up from the reply: onto the card, at an edge of it.
+    (goto-char harness-compose-end)
+    (harness-ui-compose-test--keys "C-p")
+    (let ((card (car (harness-compose--cards))))
+      (should (memq (point) (list (cadr card) (cddr card)))))))
+
+(ert-deftest harness-ui-compose-typing-against-a-card-goes-next-to-it ()
+  "A card is no text to type against.  Typed at its start, which is where
+moving up from its reply puts point, a printable key goes to the end of the area
+above the card -- your message, made a line of its own if the box had none --
+and at its end to the start of its reply's words."
+  (harness-ui-compose-test-with
+    (harness-compose-add-thread (list harness-ui-compose-test--ref))
+    (execute-kbd-macro "Why?")
+    ;; At the end of the card: the start of its reply, on the line under it.
+    (goto-char (cddr (car (harness-compose--cards))))
+    (execute-kbd-macro "a")
+    (should (equal "\n[reply 1]\naWhy?" (harness-compose-text)))
+    (should (= (point) (+ harness-compose-start (length "\n[reply 1]\na"))))
+    ;; At its start: your message above, on the line there is for it.
+    (goto-char (cadr (car (harness-compose--cards))))
+    (execute-kbd-macro "b")
+    (should (equal "b\n[reply 1]\naWhy?" (harness-compose-text)))
+    ;; A second card: at its start, the end of the words of the first reply.
+    (goto-char harness-compose-end)
+    (harness-compose-add-thread (list '(:kind "chat" :node "n-2" :who "plan" :text "Step two")))
+    (execute-kbd-macro "Two.")
+    (goto-char (cadr (cadr (harness-compose--cards))))
+    (execute-kbd-macro "c")
+    (should (equal "b\n[reply 1]\naWhy?c\n[reply 2]\nTwo." (harness-compose-text)))
+    (should (= 2 (length (harness-ui-compose-test--cards)))))
+  ;; A box that starts with its card, and two cards with nothing between them.
+  (harness-ui-compose-test-with
+    (harness-compose-add-thread (list harness-ui-compose-test--ref))
+    (harness-compose-set "[reply 1]\n[reply 2]\nTwo.")
+    (setq harness-compose-attachments
+          (list (list :thread (list :refs (list harness-ui-compose-test--ref)) :reply 1)
+                (list :thread (list :refs (list '(:kind "chat" :node "n-2" :who "plan" :text "Step two"))) :reply 2)))
+    (harness-compose--keep-tokens)
+    (should (= 2 (length (harness-ui-compose-test--cards))))
+    (goto-char (cadr (cadr (harness-compose--cards))))
+    (execute-kbd-macro "x")
+    (should (equal "[reply 1]\nx\n[reply 2]\nTwo." (harness-compose-text)))
+    (goto-char (cadr (car (harness-compose--cards))))
+    (execute-kbd-macro "y")
+    (should (equal "y\n[reply 1]\nx\n[reply 2]\nTwo." (harness-compose-text)))))
+
+(ert-deftest harness-ui-compose-typing-from-outside-goes-to-the-area-written-in-last ()
+  "Typing from outside the box, RET and C-c < go to the end of the area point was
+in last: your message, or a reply, whatever was read or clicked between.  A box
+with no card, or whose reply was taken away, takes it at its end."
+  (harness-ui-compose-test-with
+    (harness-compose-add-thread (list harness-ui-compose-test--ref))
+    (execute-kbd-macro "Why?")
+    ;; Written in the reply last: the transcript's typing goes there.
+    (goto-char (point-min))
+    (execute-kbd-macro "!")
+    (should (equal "\n[reply 1]\nWhy?!" (harness-compose-text)))
+    ;; Out of the reply, and out of the box by M-< twice, the second reaching the buffer's top.
+    (harness-ui-compose-test--keys "C-c <")
+    (execute-kbd-macro "Intro")
+    (harness-ui-compose-test--keys "M-< M-<")
+    (should-not (harness-compose-in-p))
+    (execute-kbd-macro ".")
+    (should (equal "Intro.\n[reply 1]\nWhy?!" (harness-compose-text)))
+    (should (= (point) (+ harness-compose-start (length "Intro."))))
+    ;; RET from outside jumps in, to the same place, and types nothing.
+    (goto-char (point-min))
+    (harness-ui-compose-test--keys "RET")
+    (should (= (point) (+ harness-compose-start (length "Intro."))))
+    (should (equal "Intro.\n[reply 1]\nWhy?!" (harness-compose-text)))
+    ;; C-c < from outside goes in the same way, then it is the toggle again: into the reply.
+    (harness-ui-compose-test--keys "M-< M-<")
+    (should-not (harness-compose-in-p))
+    (harness-ui-compose-test--keys "C-c <")
+    (should (= (point) (+ harness-compose-start (length "Intro."))))
+    (harness-ui-compose-test--keys "C-c <")
+    (should (= (point) harness-compose-end))
+    ;; From the reply, out by M->, which from the end of the box goes on to the buffer's: back to the reply.
+    (should (= (point) harness-compose-end))
+    (harness-ui-compose-test--keys "M->")
+    (should-not (harness-compose-in-p))
+    (execute-kbd-macro "?")
+    (should (equal "Intro.\n[reply 1]\nWhy?!?" (harness-compose-text)))
+    ;; The reply taken away: the end of the box.
+    (harness-compose-remove-attachment (car harness-compose-attachments))
+    (goto-char (point-min))
+    (execute-kbd-macro "#")
+    (should (equal "Intro.\nWhy?!?#" (harness-compose-text)))))
+
+(ert-deftest harness-ui-compose-c-c-<-goes-back-into-the-reply-you-left ()
+  "With several replies, C-c < out of one and back goes into that one, and what is
+typed from outside goes to the one written in last."
+  (harness-ui-compose-test-with
+    (harness-compose-add-thread (list harness-ui-compose-test--ref))
+    (execute-kbd-macro "One.")
+    (harness-compose-add-thread (list '(:kind "chat" :node "n-2" :who "plan" :text "Step two")))
+    (execute-kbd-macro "Two.")
+    (should (equal "\n[reply 1]\nOne.\n[reply 2]\nTwo." (harness-compose-text)))
+    ;; In the first reply, then out and back: the first.
+    (goto-char (+ harness-compose-start (length "\n[reply 1]\nOn")))
+    (harness-ui-compose-test--keys "C-f")
+    (harness-ui-compose-test--keys "C-c <")
+    (should (= (point) harness-compose-start))
+    (harness-ui-compose-test--keys "C-c <")
+    (should (= (point) (+ harness-compose-start (length "\n[reply 1]\nOne."))))
+    (execute-kbd-macro "!")
+    (should (equal "\n[reply 1]\nOne.!\n[reply 2]\nTwo." (harness-compose-text)))
+    ;; Left to the transcript from it, in one command, typing goes there, not to the last.
+    (execute-kbd-macro (kbd "M-x harness-ui-compose-test-leave-the-box RET"))
+    (should-not (harness-compose-in-p))
+    (execute-kbd-macro "?")
+    (should (equal "\n[reply 1]\nOne.!?\n[reply 2]\nTwo." (harness-compose-text)))
+    ;; In the second, the second.
+    (goto-char harness-compose-end)
+    (harness-ui-compose-test--keys "C-b C-f C-c < C-c <")
+    (should (= (point) harness-compose-end))
+    ;; Both replies, and your message, are sent with their words.
+    (pcase-let ((`(,text . ,atts) (harness-compose-take)))
+      (should (equal "" text))
+      (should (equal '("One.!?" "Two.") (mapcar (lambda (a) (plist-get a :response)) atts))))))
+
+(ert-deftest harness-ui-compose-leaving-a-reply-makes-the-line-for-your-message ()
+  "A box whose card is its first text, one taken back with nothing before it, or
+whose words run on into the token, gets the line your message needs when point
+leaves the reply: a line break before the token, point on the line above."
+  (harness-ui-compose-test-with
+    (harness-compose-add-thread (list harness-ui-compose-test--ref))
+    (harness-compose-set "[reply 1]\nWhy?")
+    (harness-compose--keep-tokens)
+    (should (= 1 (length (harness-ui-compose-test--cards))))
+    (goto-char harness-compose-end)
+    (harness-ui-compose-test--keys "C-c <")
+    (should (equal "\n[reply 1]\nWhy?" (harness-compose-text)))
+    (should (= (point) harness-compose-start))
+    (should (= 1 (length (harness-ui-compose-test--cards))))
+    ;; Typing from outside into your message makes it too: no text against the card.
+    (harness-compose-set "[reply 1]\nWhy?")
+    (harness-compose--keep-tokens)
+    (goto-char harness-compose-end)
+    (harness-ui-compose-test--keys "C-c <")
+    (harness-ui-compose-test--keys "M-< M-<")
+    (should-not (harness-compose-in-p))
+    (execute-kbd-macro "Hi")
+    (should (equal "Hi\n[reply 1]\nWhy?" (harness-compose-text)))
+    ;; Words that ran on into the token.
+    (harness-compose-set "XY[reply 1]\nWhy?")
+    (harness-compose--keep-tokens)
+    (goto-char harness-compose-end)
+    (harness-ui-compose-test--keys "C-c <")
+    (should (equal "XY\n[reply 1]\nWhy?" (harness-compose-text)))
+    (should (= (point) (+ harness-compose-start 2)))))
+
+(defun harness-ui-compose-test--card-text ()
+  "Return what the first card of the box shows, as text."
+  (substring-no-properties (overlay-get (car (harness-ui-compose-test--cards)) 'display)))
+
+(defun harness-ui-compose-test--area-hints ()
+  "Return the empty areas the box names: (OFFSET . TEXT), OFFSET from the box's start."
+  (mapcar (lambda (ov) (cons (- (overlay-start ov) harness-compose-start)
+                             (substring-no-properties (overlay-get ov 'before-string))))
+          harness-compose--area-hints))
+
+(ert-deftest harness-ui-compose-the-card-says-how-to-leave-its-reply ()
+  "The card of the reply point is in names the key that moves out to your message;
+with point in your message, the card of the reply it goes back into names it;
+outside the box, or with the hints off, nothing.  A host drawing the box
+again, point nowhere in it meanwhile, leaves it as it was."
+  (harness-ui-compose-test-with
+    (harness-compose-add-thread (list harness-ui-compose-test--ref))
+    (execute-kbd-macro "Why?")
+    (should (string-search "[×]  C-c < your message" (harness-ui-compose-test--card-text)))
+    (harness-ui-compose-test--keys "C-c <")
+    (should (string-search "[×]  C-c < back to the reply" (harness-ui-compose-test--card-text)))
+    ;; The host draws the box again: the hint stays.
+    (harness-ui-compose-test--draw)
+    (should (string-search "C-c < back to the reply" (harness-ui-compose-test--card-text)))
+    (harness-ui-compose-test--keys "C-c <")
+    (harness-ui-compose-test--draw)
+    (should (string-search "C-c < your message" (harness-ui-compose-test--card-text)))
+    ;; Out of the box, nothing to say.
+    (harness-ui-compose-test--keys "M-< M-<")
+    (should-not (string-search "C-c <" (harness-ui-compose-test--card-text)))
+    ;; Turned off.
+    (let ((harness-compose-reply-hints nil))
+      (harness-ui-compose-test--keys "C-c <")
+      (should (harness-compose-in-p))
+      (should-not (string-search "C-c <" (harness-ui-compose-test--card-text))))
+    ;; Only the card of the reply that goes in says so, with several.
+    (goto-char harness-compose-end)
+    (harness-compose-add-thread (list '(:kind "chat" :node "n-2" :who "plan" :text "Step two")))
+    (execute-kbd-macro "Two.")
+    (goto-char harness-compose-start)
+    (harness-ui-compose-test--keys "C-f")
+    (let ((cards (harness-ui-compose-test--cards)))
+      (should (= 2 (length cards)))
+      (should-not (string-search "C-c <" (substring-no-properties (overlay-get (car cards) 'display))))
+      (should (string-search "C-c < back to the reply" (substring-no-properties (overlay-get (cadr cards) 'display)))))))
+
+(ert-deftest harness-ui-compose-empty-areas-say-what-they-are ()
+  "Your message, on its line above a card, and a reply with no words yet each say
+what they are, as the empty box does, until words are typed in them."
+  (harness-ui-compose-test-with
+    (harness-compose-add-thread (list harness-ui-compose-test--ref))
+    ;; "\n[reply 1]\n": your message at its start, the reply at its end.
+    (should (equal '((0 . "Message…") (11 . "Reply…")) (harness-ui-compose-test--area-hints)))
+    (execute-kbd-macro "Why?")
+    (should (equal '((0 . "Message…")) (harness-ui-compose-test--area-hints)))
+    (harness-ui-compose-test--keys "C-c <")
+    (execute-kbd-macro "Hi")
+    (should-not (harness-ui-compose-test--area-hints))
+    ;; The words deleted, and the area says so again.
+    (harness-ui-compose-test--keys "DEL DEL")
+    (should (equal '((0 . "Message…")) (harness-ui-compose-test--area-hints)))
+    (harness-compose-set "")
+    (should-not (harness-ui-compose-test--area-hints)))
+  ;; A reply with a line of its own before the next card.
+  (harness-ui-compose-test-with
+    (harness-compose-set "Intro.")
+    (harness-compose-add-thread (list harness-ui-compose-test--ref))
+    (harness-compose-add-thread (list '(:kind "chat" :node "n-2" :who "plan" :text "Step two")))
+    (should (equal "Intro.\n[reply 1]\n\n[reply 2]\n" (harness-compose-text)))
+    (should (equal '((17 . "Reply…") (28 . "Reply…")) (harness-ui-compose-test--area-hints)))
+    (execute-kbd-macro "Second.")
+    (should (equal '((17 . "Reply…")) (harness-ui-compose-test--area-hints)))))
 
 ;;;; Links dropped on the box
 

@@ -2326,7 +2326,7 @@ reply."
             (call-interactively #'harness-ui-patch-review-thread-reply)
             (should-not (region-active-p))
             (with-current-buffer popout
-              (should (equal "[reply 1]\n" (harness-compose-text)))
+              (should (equal "\n[reply 1]\n" (harness-compose-text)))
               (should (= (point) harness-compose-end))
               (let* ((ref (car (harness-thread-refs (plist-get (car harness-compose-attachments) :thread)))))
                 (should (equal "diff" (plist-get ref :kind)))

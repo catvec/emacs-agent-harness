@@ -6442,7 +6442,10 @@ review, which the agent answers with a tool, its answer drawn as the
 message from the agent it is, under the thread's name; in any other
 session the agent reads the quote and your words under it.  Click a card
 to see the message it is to.
-\\[universal-argument] \\[harness-chat-thread-reply] quotes the region or the message in the box instead, as
+The box then has a line for a message of your own above the card, and
+\\<harness-compose-map>\\[harness-compose-toggle-reply] moves point out of the reply to it, and back into the reply;
+what is typed from outside the box goes to the one written in last.
+\\<harness-chat-mode-map>\\[universal-argument] \\[harness-chat-thread-reply] quotes the region or the message in the box instead, as
 Markdown, to answer a quote inline, part by part: in a quote in the box,
 \\<compose-quote-inline-mode-map>\\[compose-quote-split] splits it where point is, to answer that part, and
 \\[compose-quote-elide] elides the region, or the rest of the paragraph, as [...].
@@ -6529,6 +6532,7 @@ the id of a session written in a message is a link to it.
         ("C-c C-a" "Attach file or task" harness-compose-add-attachment)
         ("C-y" "Paste; an image attaches" harness-compose-yank)
         ("C-c >" "Reply in a thread; C-u quotes" harness-chat-thread-reply)
+        ("C-c <" "Out of the reply to your message, and back" harness-compose-toggle-reply)
         ("M-RET" "Split a quote to answer inline" compose-quote-split)
         ("C-c [" "Elide part of a quote: [...]" compose-quote-elide)
         ("M-<" "Top of the box, then the buffer" harness-compose-beginning-of-buffer)

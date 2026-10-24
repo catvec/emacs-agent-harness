@@ -11942,6 +11942,52 @@ message of many replies folds the ones between the first and the last few,
 and long words are cut, as the review's threads are, by the library's
 counts (`harness-chat--earlier-line`, `harness-chat--cut-words`).
 
+The areas of a box with cards (`harness-compose--cards`: where each
+card's token stands, in order).  The words before the first card are
+the message's own, the words under a card its reply; each is an AREA --
+`own`, or the reply's number -- and has a line of its own.  A card is
+made with the line break each needs (`harness-compose--card-break`):
+the first card of an empty box leaves an empty line above it for your
+message (`"\n[reply 1]\n"`), a card after one with nothing under it
+leaves a line for those words, a card after words only the break that
+ends them; `harness-compose-restore` and `harness-compose-prepend` lay
+a message taken back out the same way, and removing the first card
+takes its empty line along (`harness-compose--token-from`; so does
+deleting the token by hand, `harness-compose--finish-cut-tokens`).  A box laid
+out otherwise -- a card first, words run on into its token -- gets the
+line when it is needed (`harness-compose--area-point`).  `C-c <`
+(`harness-compose-toggle-reply`, in `harness-compose-map`: `<` is `>`'s
+other half, and free after `C-c`) moves point from the area it is in to
+the other: out of a reply to your message (`harness-compose-leave-reply`),
+out of your message into the reply last in
+(`harness-compose-enter-reply`), and from outside the box to where
+typing from there goes.  After every command (`harness-compose--keep-tokens`
+runs `harness-compose--note-area`) the box notes which area point is
+in: `harness-compose--here` (nil outside the box) and
+`harness-compose--area`, which stays when point leaves, and
+`harness-compose--reply`, the last reply written in.  Text typed outside
+the box goes to the end of `harness-compose--area`
+(`harness-compose--entry-point`, used by `harness-compose--pre-command`
+and by RET, `harness-compose-newline`), the end of the box when there
+is no card, so what was written last stays the place of the next words
+whatever is read or clicked between.  A card is no text to type
+against, so a typing key with point at its start -- where moving up
+from the reply under it puts point -- goes to the end of the area above
+it, and at its end to the start of its reply
+(`harness-compose--card-edge-target`), not when a region is active.
+The card where point is names the key out of its reply, `C-c < your
+message`, and with point in your message the card of the reply that is
+gone back into names it, `C-c < back to the reply`
+(`harness-compose--card-hint`, a fifth element of what
+`harness-compose--show-tokens` compares, so the card is drawn again
+only when it changes; it goes by `harness-compose--here`, not by point,
+which a host that draws the box again moves meanwhile;
+`harness-compose-reply-hints` turns it off).  An empty message line and
+a reply with no words yet say what they are, `Message…` (the box's usual
+placeholder) and `Reply…`, in overlays of their own
+(`harness-compose--area-placeholders`, shown by
+`harness-compose-update-placeholder` after every command).
+
 The harness's own quoting names are obsolete aliases of the library's:
 `harness-compose-quote-reply`, `harness-compose-quote-string` and
 `harness-compose-quote-function`.  The alias of the variable cannot be

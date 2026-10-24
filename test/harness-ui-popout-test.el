@@ -480,6 +480,36 @@ popout's keys type in the box otherwise.  The box's tooltip names the key."
       (should item)
       (should (eq 'harness-compose-panel-key (nth 2 item))))))
 
+(ert-deftest harness-ui-popout-box-steps-out-of-a-reply-and-back ()
+  "A popout's box -- where the feedback of a review is written, with a card for a
+reply in a thread to lines of a diff -- has a line for the feedback's own words
+above the card, and C-c < moves point between them and the reply, as in a chat.
+The menu lists the key."
+  (harness-ui-popout-test-with
+    (let ((buffer (harness-ui-popout-show '(test thread) "Feedback" (lambda () (insert "Item\n"))
+                                          :compose (lambda () #'ignore))))
+      (with-selected-window (get-buffer-window buffer)
+        (with-current-buffer buffer
+          (should (eq 'harness-compose-toggle-reply (key-binding (kbd "C-c <"))))
+          (goto-char harness-compose-end)
+          (harness-compose-add-thread (list '(:kind "diff" :file "a.el" :side "new" :line 3 :text "(a)")))
+          (execute-kbd-macro "Why a list?")
+          (should (equal "\n[reply 1]\nWhy a list?" (harness-compose-text)))
+          ;; Out of the reply: the feedback's own words.
+          (execute-kbd-macro (kbd "C-c <"))
+          (should (= (point) harness-compose-start))
+          (execute-kbd-macro "Overall: good.")
+          (should (equal "Overall: good.\n[reply 1]\nWhy a list?" (harness-compose-text)))
+          ;; And back into the reply.
+          (execute-kbd-macro (kbd "C-c <"))
+          (should (= (point) harness-compose-end)))))
+    (let* ((entries (cl-loop for column in (cdr (get 'harness-ui-popout-mode 'harness-menu-group))
+                             append (cl-loop for item across column
+                                             when (and (consp item) (stringp (car item))) collect item)))
+           (item (cl-find "C-c <" entries :key #'car :test #'equal)))
+      (should item)
+      (should (eq 'harness-compose-toggle-reply (nth 2 item))))))
+
 (ert-deftest harness-ui-popout-says-short-why-it-could-not-draw ()
   "A popout whose content cannot be drawn says so in one short line, however much
 the error carries: `args-out-of-range' names the record it was about whole, and
