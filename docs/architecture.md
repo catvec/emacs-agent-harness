@@ -11811,7 +11811,24 @@ off so that a remote name never opens a connection.  A completed path
 attaches only a regular file; a directory stays in the box for its
 files to complete.  `C-c C-a` ignores a leading @, and a directory
 chosen there reads again from inside it; `C-u C-c C-a`, or a directory
-that is no project, browses with `read-file-name`.  An @
+that is no project, browses with `read-file-name`.  A box may have
+several roots to find project files in (`harness-compose-roots-function`,
+`:roots` of `harness-compose-setup`): a chat whose session works in a
+git worktree, a task's, has the worktree and the main checkout it was
+made from (`harness-chat--roots`; the main checkout is the one the
+worktree's `.git` file names, `harness-files-main-checkout`).
+`harness-compose-fetch-files` lists each root on its own, never
+waiting, and `harness-compose--files` holds the union of the lists that
+arrived, each name once and the worktree's first
+(`harness-compose--arrived-in`, `harness-compose--union-files`); the
+directories git lists in the main checkout for the worktrees nested
+below it are no file and are left out.  `harness-compose--file-origins`
+says which roots hold a name, the first being the one a file is read
+from (`harness-compose--project-file`: the worktree's copy of a file
+in both, which an @ reference typed out in full means as well), and
+the table annotates each candidate with where it is, `[task]`,
+`[main]` or `[task, main]`.  A path still completes relative to the
+project, and a box with one root lists and reads as it always did.  An @
 reference typed out in full, or pasted, names its file all the same:
 `harness-compose-take` attaches the regular files the references in the
 text name (`@skill:` ones and missing files aside, trailing punctuation

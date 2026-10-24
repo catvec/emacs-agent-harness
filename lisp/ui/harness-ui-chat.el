@@ -378,6 +378,21 @@ use whatever frame happens to be selected."
   (let ((s (harness-chat--session)))
     (or (plist-get s :project) (plist-get s :cwd) default-directory)))
 
+(defun harness-chat--roots ()
+  "Return the directories the box of this chat finds project files in.
+\(DIR . LABEL) each, for `harness-compose-roots-function'.  A session
+working in a git worktree, a task's, has the worktree, labelled \"task\",
+and the main checkout it was made from, \"main\", which holds what the
+worktree does not -- untracked files, work not merged yet -- so the box
+offers the files of both, the worktree's copy of a file in both being
+the one attached (see `harness-compose-read-file').  Any other session
+has its project alone: nil."
+  (let ((worktree (plist-get (harness-chat--session) :worktree)))
+    (when (and (stringp worktree) (not (string-empty-p worktree))
+               (not (file-remote-p worktree)) (file-directory-p worktree))
+      (list (cons worktree "task")
+            (cons (harness-files-main-checkout worktree) "main")))))
+
 (defun harness-chat--project-root (dir)
   "Return the project root of DIR."
   (harness-files-project-root dir))
@@ -6499,6 +6514,7 @@ the id of a session written in a message is a link to it.
               mode-line-format '(" " (:eval (harness-chat--mode-line)) "  " mode-line-misc-info))
   (add-to-invisibility-spec 'harness-chat-fold)
   (harness-compose-setup :project #'harness-chat--project
+                         :roots #'harness-chat--roots
                          :placeholder #'harness-chat--placeholder
                          :redraw #'harness-chat--render-tail
                          :bottom t)

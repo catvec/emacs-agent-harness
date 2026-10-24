@@ -8207,6 +8207,109 @@ into the response where it landed, read-only as the transcript is."
               (should (equal (list other) (mapcar (lambda (a) (plist-get a :path)) harness-compose-attachments)))))
         (delete-file other)))))
 
+(defun harness-ui-chat-test--git (dir &rest args)
+  "Run git with ARGS in DIR, as a user the tests make up; fail unless it succeeds."
+  (let ((default-directory dir))
+    (should (eq 0 (apply #'call-process "git" nil nil nil
+                         "-c" "user.name=Test" "-c" "user.email=test@example.com"
+                         "-c" "commit.gpgsign=false" args)))))
+
+(ert-deftest harness-ui-chat-attach-command-finds-files-of-the-worktree-and-the-main-checkout ()
+  "A session working in a task's worktree attaches files of the worktree and of
+the main checkout, as git lists both, a file in both once.
+The main checkout has files the worktree does not -- untracked ones, or
+not merged yet -- and the worktree has its own; the worktree nested in
+the main checkout is listed there as a directory, which is no file."
+  (harness-ui-chat-test-with
+    (let* ((main (harness-test-temp-dir))
+           (wt (file-name-as-directory (expand-file-name ".worktrees/task-a" main)))
+           (answer nil) (seen nil))
+      (unwind-protect
+          (progn
+            (dolist (file '("shared.txt" "lisp/both.el"))
+              (make-directory (file-name-directory (expand-file-name file main)) t)
+              (with-temp-file (expand-file-name file main) (insert "main " file)))
+            (harness-ui-chat-test--git main "init" "-q")
+            (harness-ui-chat-test--git main "add" ".")
+            (harness-ui-chat-test--git main "commit" "-q" "-m" "Start")
+            (harness-ui-chat-test--git main "worktree" "add" "-q" wt "-b" "task-a")
+            ;; What each has the other has not: untracked in both, as git lists them.
+            (with-temp-file (expand-file-name "docs-untracked.md" main) (insert "main only"))
+            (make-directory (expand-file-name "src" wt) t)
+            (with-temp-file (expand-file-name "src/task-only.el" wt) (insert "task only"))
+            (let* ((sid (plist-get (harness-call 'session/create :cwd wt :worktree wt :model "demo:scripted")
+                                   :id))
+                   (buf (harness-ui-chat-test-open sid)))
+              (with-current-buffer buf
+                ;; The worktree first, then the main checkout it was made from.
+                (should (equal (list (cons wt "task") (cons main "main")) (harness-compose--roots)))
+                (harness-compose-fetch-files)
+                (harness-test-wait (lambda () (member "docs-untracked.md" harness-compose--files))
+                                   10 "both roots listed")
+                (should (equal '("lisp/both.el" "shared.txt")
+                               (sort (cl-remove-if-not (lambda (f) (string-match-p "both\\|shared" f))
+                                                       (copy-sequence harness-compose--files))
+                                     #'string<)))
+                (should (member "src/task-only.el" harness-compose--files))
+                (should (= (length harness-compose--files)
+                           (length (delete-dups (copy-sequence harness-compose--files)))))
+                ;; The main checkout lists the worktree under it as a directory.
+                (should-not (cl-find-if (lambda (f) (string-suffix-p "/" f)) harness-compose--files))
+                (cl-letf (((symbol-function 'completing-read)
+                           (lambda (_prompt table &rest _)
+                             (setq seen (list :all (all-completions "" table)
+                                              :annotate (completion-metadata-get
+                                                         (completion-metadata "" table nil)
+                                                         'annotation-function)))
+                             answer))
+                          ((symbol-function 'read-file-name) (lambda (&rest _) (error "Browsed"))))
+                  ;; Each is attached from the root it is in: a file of both, the worktree's.
+                  (dolist (spec `(("shared.txt" . ,(expand-file-name "shared.txt" wt))
+                                  ("lisp/both.el" . ,(expand-file-name "lisp/both.el" wt))
+                                  ("src/task-only.el" . ,(expand-file-name "src/task-only.el" wt))
+                                  ("docs-untracked.md" . ,(expand-file-name "docs-untracked.md" main))))
+                    (setq answer (car spec) harness-compose-attachments nil)
+                    (call-interactively #'harness-compose-add-attachment)
+                    (should (file-regular-p (cdr spec)))
+                    (should (equal (list (cdr spec))
+                                   (mapcar (lambda (a) (plist-get a :path)) harness-compose-attachments)))))
+                (should (member "docs-untracked.md" (plist-get seen :all)))
+                (should (equal (list "  [main]" "  [task]" "  [task, main]")
+                               (mapcar (plist-get seen :annotate)
+                                       '("docs-untracked.md" "src/task-only.el" "shared.txt")))))
+              ;; Recorded with the main checkout as its project, as the harness has it.
+              (let ((buf (harness-ui-chat-test-open
+                          (plist-get (harness-call 'session/create :cwd wt :worktree wt :project main
+                                                   :model "demo:scripted")
+                                     :id))))
+                (with-current-buffer buf
+                  (should (equal main (harness-compose--root)))
+                  (should (equal (list (cons wt "task") (cons main "main")) (harness-compose--roots)))))))
+        (ignore-errors (delete-directory main t))))))
+
+(ert-deftest harness-ui-chat-box-has-one-root-without-a-worktree ()
+  "A session that works in no worktree finds its project's files alone, and so
+does one whose worktree is gone from disk."
+  (harness-ui-chat-test-with
+    (let* ((cwd (harness-test-temp-dir))
+           (gone (file-name-as-directory (expand-file-name "gone" cwd))))
+      (let ((buf (harness-ui-chat-test-open
+                  (plist-get (harness-call 'session/create :cwd cwd :model "demo:scripted") :id))))
+        (with-current-buffer buf
+          (should-not (harness-chat--roots))
+          (should-not (harness-compose--roots))))
+      (let ((buf (harness-ui-chat-test-open
+                  (plist-get (harness-call 'session/create :cwd cwd :worktree gone :model "demo:scripted") :id))))
+        (with-current-buffer buf
+          (should-not (harness-chat--roots))
+          (should-not (harness-compose--roots))))
+      ;; Its own directory is no linked worktree: the main checkout is itself.
+      (let ((buf (harness-ui-chat-test-open
+                  (plist-get (harness-call 'session/create :cwd cwd :worktree cwd :model "demo:scripted") :id))))
+        (with-current-buffer buf
+          (should (harness-chat--roots))
+          (should-not (harness-compose--roots)))))))
+
 (ert-deftest harness-ui-chat-test-compose-keys ()
   "C-c C-c sends, RET adds a newline, C-c C-k cancels."
   (should (eq (lookup-key harness-chat-mode-map (kbd "C-c C-c")) #'harness-chat-send))

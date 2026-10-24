@@ -1603,6 +1603,237 @@ returned once none was."
       (should (equal (list "@~/doc.txt" (expand-file-name "doc.txt" home))
                      (pcase (harness-compose-take) (`(,sent ,att) (list sent (plist-get att :path)))))))))
 
+;;;; Finding files in a task's worktree and the main checkout
+
+(defmacro harness-ui-compose-test--workspaces (&rest body)
+  "Run BODY in a box with two roots, as a chat in a task's worktree has.
+`main' is the box's project, the main checkout, and `wt' the task's
+worktree, in a directory of its own below it as the harness makes them;
+both are out of the state directory, whose files the chips name alone.
+Both hold shared.txt and lisp/shared.el, their own copies; only `wt'
+holds lisp/task-only.el and lisp/new.el, only `main' main-only.md and
+docs/guide.md.  Listing a root answers with the files it holds, as
+`harness-files-list-limited' does -- the main checkout's with the
+worktree nested in it, as git lists a nested worktree -- through the
+promise or the list `listings' has for it: an alist, root -> files.
+`answer' is what the prompt of the attach command is answered, when
+it is asked, and `asked' the table it was asked with."
+  (declare (indent 0))
+  `(let* ((parent (harness-test-temp-dir))
+          (main (file-name-as-directory (expand-file-name "main" parent)))
+          (wt (file-name-as-directory (expand-file-name ".worktrees/task-1" main)))
+          (answer nil) (asked nil)
+          (listings nil))
+     (unwind-protect
+         (progn
+           (dolist (spec `((,main "shared.txt" "lisp/shared.el" "main-only.md" "docs/guide.md")
+                           (,wt "shared.txt" "lisp/shared.el" "lisp/task-only.el" "lisp/new.el")))
+             (dolist (file (cdr spec))
+               (let ((path (expand-file-name file (car spec))))
+                 (make-directory (file-name-directory path) t)
+                 (with-temp-file path (insert (car spec) file)))))
+           (setq listings
+                 (list (cons wt (list "shared.txt" "lisp/task-only.el" "lisp/shared.el" "lisp/new.el"))
+                       (cons main (list "shared.txt" "main-only.md" "docs/guide.md" "lisp/shared.el"
+                                        ".worktrees/task-1/")))
+                 harness-compose-project-function (lambda () main)
+                 harness-compose-roots-function (lambda () (list (cons wt "task") (cons main "main")))
+                 harness-compose--files nil)
+           (cl-letf (((symbol-function 'harness-files-list-limited)
+                      (lambda (root &rest _)
+                        (let ((files (cdr (assoc (file-name-as-directory root) listings))))
+                          (if (harness-promise-p files) files (harness-resolved files)))))
+                     ((symbol-function 'harness-compose-fetch-tasks) #'ignore)
+                     ((symbol-function 'completing-read)
+                      (lambda (_prompt table &rest _) (setq asked table) answer))
+                     ((symbol-function 'read-file-name) (lambda (&rest _) (error "Browsed"))))
+             ,@body))
+       (ignore-errors (delete-directory parent t)))))
+
+(defun harness-ui-compose-test--annotations (table names)
+  "Return what TABLE, a table of files, annotates each of NAMES with."
+  (let ((annotate (completion-metadata-get (completion-metadata "" table nil) 'annotation-function)))
+    (mapcar (lambda (name) (and annotate (funcall annotate name))) names)))
+
+(ert-deftest harness-ui-compose-attach-lists-the-files-of-both-workspaces ()
+  "The attach command offers the union of the files of the task's worktree
+and of the main checkout, a file in both once, each marked with where it
+is.  A directory the main checkout lists, the nested worktree itself, is
+no file to attach."
+  (harness-ui-compose-test-with
+    (harness-ui-compose-test--workspaces
+      (setq answer "shared.txt")
+      (harness-ui-compose-test--command 'harness-compose-add-attachment)
+      (let* ((all '("shared.txt" "lisp/task-only.el" "lisp/shared.el" "lisp/new.el" "main-only.md" "docs/guide.md"))
+             (offered (all-completions "" asked)))
+        ;; Every file, the worktree's first, each once.
+        (should (equal all harness-compose--files))
+        (should (equal (sort (copy-sequence all) #'string<) (sort (copy-sequence offered) #'string<)))
+        (should (equal (list main wt) (sort (mapcar #'car harness-compose--root-files) #'string<)))
+        (should-not (member ".worktrees/task-1/" offered))
+        (should (eq 'harness-compose-file (harness-ui-compose-test--category "" asked)))
+        ;; A file says where it is: in the worktree, the main checkout, or both.
+        (should (equal '("  [task, main]" "  [task]" "  [task, main]" "  [task]" "  [main]" "  [main]")
+                       (harness-ui-compose-test--annotations asked all)))
+        (should-not (car (harness-ui-compose-test--annotations asked '("nope.txt"))))
+        ;; Part of a name finds a file of either, as it does a project's.
+        (should (equal '("lisp/task-only.el") (harness-ui-compose-test--matches "tonly" asked)))
+        (should (equal '("docs/guide.md") (harness-ui-compose-test--matches "guide" asked)))
+        (should (equal '("lisp/new.el" "lisp/shared.el" "lisp/task-only.el")
+                       (harness-ui-compose-test--matches "lisp/" asked)))
+        ;; Past a leading @, as the box takes it.
+        (should (equal '("main-only.md") (harness-ui-compose-test--matches "@main" asked)))
+        (should (equal '(1 . 0) (completion-boundaries "@main" asked nil ""))))
+      ;; Paths complete as they did, relative to the project.
+      (should (eq 'file (harness-ui-compose-test--category "./" asked)))
+      (should (equal '("main-only.md") (harness-ui-compose-test--matches "./main-o" asked))))))
+
+(ert-deftest harness-ui-compose-attach-reads-a-file-from-the-root-that-has-it ()
+  "The file chosen is attached from the root it was listed in: a file only
+the worktree has from the worktree, one only the main checkout has from
+the main checkout, and one both have, offered once, from the worktree.
+Each is the reference in the text and the chip names it from the root it
+is in, not by the worktree's place below the project."
+  (harness-ui-compose-test-with
+    (harness-ui-compose-test--workspaces
+      (pcase-dolist (`(,typed ,root ,name ,token)
+                     `(("shared.txt" ,wt "shared.txt" "@shared.txt")
+                       ("lisp/shared.el" ,wt "shared.el" "@lisp/shared.el")
+                       ("lisp/task-only.el" ,wt "task-only.el" "@lisp/task-only.el")
+                       ("@lisp/new.el" ,wt "new.el" "@lisp/new.el")
+                       ("main-only.md" ,main "main-only.md" "@main-only.md")
+                       ("docs/guide.md" ,main "guide.md" "@docs/guide.md")))
+        (harness-compose-clear)
+        (setq harness-compose-attachments nil answer typed)
+        (harness-ui-compose-test--command 'harness-compose-add-attachment)
+        (let ((path (expand-file-name (string-remove-prefix "@" typed) root)))
+          (should (equal (list path) (harness-ui-compose-test--paths)))
+          (should (equal name (plist-get (car harness-compose-attachments) :name)))
+          ;; The copy attached is the file of that root.
+          (should (equal (concat root (string-remove-prefix "@" typed))
+                         (with-temp-buffer (insert-file-contents path) (buffer-string))))
+          (should (equal (concat token " ") (harness-compose-text)))
+          (should (equal (string-remove-prefix "@" typed)
+                         (harness-compose--chip-name (car harness-compose-attachments))))))
+      ;; The main checkout's copy of a file the worktree has is no
+      ;; reference's: @shared.txt names the worktree's.
+      (harness-compose-clear)
+      (setq harness-compose-attachments nil)
+      (harness-compose-add-attachment (expand-file-name "shared.txt" main))
+      (should (equal (list (expand-file-name "shared.txt" main)) (harness-ui-compose-test--paths)))
+      (should (equal "" (harness-compose-text)))
+      (should (equal "shared.txt" (harness-compose--chip-name (car harness-compose-attachments))))
+      ;; A file of the worktree attached some other way goes by its name in it.
+      (harness-compose-clear)
+      (setq harness-compose-attachments nil)
+      (harness-compose-add-attachment (expand-file-name "lisp/new.el" wt))
+      (should (equal "@lisp/new.el " (harness-compose-text)))
+      (should (equal "lisp/new.el" (harness-compose--chip-name (car harness-compose-attachments)))))))
+
+(ert-deftest harness-ui-compose-at-completes-files-of-both-workspaces ()
+  "@ completes the same union, labelled, and a file completed is attached
+from the root that holds it.  A reference typed out in full, or pasted,
+names the same file, also one the listing has not reached yet."
+  (harness-ui-compose-test-with
+    (harness-ui-compose-test--workspaces
+      (goto-char harness-compose-end)
+      (insert "compare @main-")
+      (let ((capf (harness-compose-completion-at-point)))
+        (should (equal "main-" (buffer-substring (nth 0 capf) (nth 1 capf))))
+        (should (equal '("main-only.md") (harness-ui-compose-test--matches "main-" (nth 2 capf))))
+        (should (equal '("  [main]") (harness-ui-compose-test--annotations (nth 2 capf) '("main-only.md"))))
+        (harness-ui-compose-test--complete capf "main-only.md" 'finished))
+      (insert "and @shar")
+      (let ((capf (harness-compose-completion-at-point)))
+        (should (equal '("lisp/shared.el" "shared.txt") (harness-ui-compose-test--matches "shar" (nth 2 capf))))
+        (harness-ui-compose-test--complete capf "shared.txt" 'finished))
+      (insert "and @lisp/task")
+      (harness-ui-compose-test--complete (harness-compose-completion-at-point) "lisp/task-only.el" 'finished)
+      (should (equal "compare @main-only.md and @shared.txt and @lisp/task-only.el " (harness-compose-text)))
+      (should (equal (list (expand-file-name "main-only.md" main) (expand-file-name "shared.txt" wt)
+                           (expand-file-name "lisp/task-only.el" wt))
+                     (harness-ui-compose-test--paths)))
+      ;; Typed out in full: the worktree's copy of a file both have.
+      (harness-compose-clear)
+      (setq harness-compose-attachments nil)
+      (harness-compose-set "see @lisp/shared.el, @docs/guide.md and @lisp/new.el.")
+      (pcase-let ((`(,text . ,atts) (harness-compose-take)))
+        (should (equal "see @lisp/shared.el, @docs/guide.md and @lisp/new.el." text))
+        (should (equal (list (expand-file-name "lisp/shared.el" wt) (expand-file-name "docs/guide.md" main)
+                             (expand-file-name "lisp/new.el" wt))
+                       (mapcar (lambda (a) (plist-get a :path)) atts))))
+      ;; Before any listing arrived: the first root with such a file has it.
+      (setq harness-compose--files nil harness-compose--root-files nil harness-compose--file-origins nil)
+      (harness-compose-set "@lisp/shared.el @main-only.md @nope.el")
+      (should (equal (list (expand-file-name "lisp/shared.el" wt) (expand-file-name "main-only.md" main))
+                     (mapcar (lambda (a) (plist-get a :path)) (cdr (harness-compose-take))))))))
+
+(ert-deftest harness-ui-compose-attach-fills-in-the-workspace-that-lists-late ()
+  "A listing still running fills its candidates in when it returns, and the
+other root's, in place, are offered meanwhile.  A root that fails to list
+adds nothing, and what it listed before stays.  When no root lists a
+file, any file is read instead."
+  (harness-ui-compose-test-with
+    (harness-ui-compose-test--workspaces
+      (let ((late (harness-make-promise))
+            (offered nil))
+        (setf (cdr (assoc main listings)) late)
+        (setq harness-compose--files nil)
+        (setq answer nil)
+        (cl-letf (((symbol-function 'completing-read)
+                   (lambda (_prompt table &rest _)
+                     (setq asked table)
+                     (setq offered (list (all-completions "" table)))
+                     (harness-resolve late (list "shared.txt" "main-only.md" "docs/guide.md"))
+                     (push (all-completions "" table) offered)
+                     "docs/guide.md")))
+          (harness-ui-compose-test--command 'harness-compose-add-attachment))
+        ;; Meanwhile the worktree's files, then the main checkout's as well.
+        (should (equal '("shared.txt" "lisp/task-only.el" "lisp/shared.el" "lisp/new.el") (cadr offered)))
+        (should (equal '("shared.txt" "lisp/task-only.el" "lisp/shared.el" "lisp/new.el" "main-only.md" "docs/guide.md")
+                       (car offered)))
+        (should (equal (list (expand-file-name "docs/guide.md" main)) (harness-ui-compose-test--paths)))
+        (should (equal '("  [main]") (harness-ui-compose-test--annotations asked '("docs/guide.md")))))
+      ;; The worktree fails to list: what the main checkout lists is what there is, and what it had stays.
+      (setf (cdr (assoc wt listings)) (harness-rejected '(error "no git")))
+      (harness-compose-fetch-files)
+      (should (equal '("shared.txt" "lisp/task-only.el" "lisp/shared.el" "lisp/new.el" "main-only.md" "docs/guide.md")
+                     harness-compose--files))
+      ;; Neither lists: read any file, as for a project that lists none.
+      (setf (cdr (assoc wt listings)) nil
+            (cdr (assoc main listings)) nil
+            harness-compose--files nil harness-compose--root-files nil)
+      (cl-letf (((symbol-function 'read-file-name) (lambda (&rest _) (expand-file-name "shared.txt" wt))))
+        (setq harness-compose-attachments nil)
+        (harness-ui-compose-test--command 'harness-compose-add-attachment))
+      (should (equal (list (expand-file-name "shared.txt" wt)) (harness-ui-compose-test--paths))))))
+
+(ert-deftest harness-ui-compose-attach-with-one-root-lists-as-it-did ()
+  "A box with one root -- the host names none, or no more than the project --
+lists the project's files alone, reads them from it, and marks no candidate."
+  (harness-ui-compose-test-with
+    (harness-ui-compose-test--files
+      (dolist (roots (list nil
+                           (lambda () nil)
+                           (lambda () (list (cons proj "main")))
+                           (lambda () (list (cons proj "task") (cons (directory-file-name proj) "main")))
+                           (lambda () (error "No session"))))
+        (setq harness-compose-roots-function roots
+              harness-compose--files nil harness-compose--file-roots nil)
+        (let ((asked nil))
+          (cl-letf (((symbol-function 'completing-read)
+                     (lambda (_prompt table &rest _) (setq asked table) "lisp/notes-util.el"))
+                    ((symbol-function 'harness-compose-fetch-tasks) #'ignore))
+            (setq harness-compose-attachments nil)
+            (harness-ui-compose-test--command 'harness-compose-add-attachment))
+          (should-not harness-compose--file-roots)
+          (should-not (harness-compose--roots))
+          (should (equal '("notes.txt" "lisp/notes-util.el") harness-compose--files))
+          (should (equal (list (expand-file-name "lisp/notes-util.el" proj)) (harness-ui-compose-test--paths)))
+          (should-not (completion-metadata-get (completion-metadata "" asked nil) 'annotation-function))
+          (should (equal '(metadata (category . harness-compose-file))
+                         (completion-metadata "" asked nil))))))))
+
 ;;;; Quoting
 
 (defun harness-ui-compose-test--quote (&optional from to)

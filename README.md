@@ -723,9 +723,9 @@ so `C-c .` is how you aim a key at a panel from there (see
 | `C-c C-q` | Queue the message for the next turn |
 | `e` / `d` / `s` on a queued message | With point on a message that says `queued`: edit it (it comes back into the box), delete it, or, for a message of the queue, send it now. A message sent while the agent works is queued until the model has it. From the box, `C-c .` and the key |
 | `RET` | Insert a newline |
-| `@` | Complete a file to attach: part of a name finds a project file in any subdirectory, a path (`/`, `~/`, `./`, `../`) any file. The file's `@path` stays in the text as a chip you can click; one typed out in full attaches its file when the message is sent. `@task:` completes a task of the project the same way |
+| `@` | Complete a file to attach: part of a name finds a project file in any subdirectory, a path (`/`, `~/`, `./`, `../`) any file. In a task's worktree the project's files are those of the worktree and of the main checkout, each marked `[task]`, `[main]` or `[task, main]`. The file's `@path` stays in the text as a chip you can click; one typed out in full attaches its file when the message is sent. `@task:` completes a task of the project the same way |
 | `/` | Complete a skill, `/compact`, or `/warm` (`/warm 30m`, `/warm off`) |
-| `C-c C-a` | Attach a file found the same way, by part of a name or by path (`C-u C-c C-a` browses the file system), or a task as `task:ID` |
+| `C-c C-a` | Attach a file found the same way, by part of a name or by path (`C-u C-c C-a` browses the file system), or a task as `task:ID`. In a task's worktree it lists the files of the worktree and of the main checkout together, a file in both once, from the worktree |
 | `C-c .` then a key | Press that key on the panel above the box: a question's digit, a permission's `y` or `n`, a queued message's `e` or `d`. With a numeric argument, on the Nth panel up. `C-g` quits |
 | `M-<` / `M->` | Go to the top or the bottom of the compose box. Pressed again, from outside the box or with a prefix argument, they go to those of the buffer |
 | `C-y` | Attach the image on the clipboard (or the files a file manager copied), keeping `kill-ring` out of it; text yanks as usual |

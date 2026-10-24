@@ -57,6 +57,12 @@ major mode, then `harness-compose-insert` wherever it draws the box
     chosen becoming an attachment; /skill completion at its start; a
     popup that shows as you type (corfu, company) shows for them even
     while the host redraws around the box;
+  - the project's files of a chat working in a task's git worktree
+    are those of the worktree and of the main checkout it was made
+    from, which has what the worktree does not (untracked files, work
+    not merged yet): the union of both, a file in both once, read
+    from the worktree, and each marked with where it is, [task],
+    [main] or [task, main] (`harness-compose-roots-function`);
   - attachments: C-c C-a finds a file the same way, by part of a
     project file's name or by path (C-u C-c C-a: browse the file
     system), or a task as task:ID (M-x harness-compose-attach-task

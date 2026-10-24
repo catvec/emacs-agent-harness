@@ -47,6 +47,12 @@
 ;;     chosen becoming an attachment; /skill completion at its start; a
 ;;     popup that shows as you type (corfu, company) shows for them even
 ;;     while the host redraws around the box;
+;;   - the project's files of a chat working in a task's git worktree
+;;     are those of the worktree and of the main checkout it was made
+;;     from, which has what the worktree does not (untracked files, work
+;;     not merged yet): the union of both, a file in both once, read
+;;     from the worktree, and each marked with where it is, [task],
+;;     [main] or [task, main] (`harness-compose-roots-function');
 ;;   - attachments: C-c C-a finds a file the same way, by part of a
 ;;     project file's name or by path (C-u C-c C-a: browse the file
 ;;     system), or a task as task:ID (M-x harness-compose-attach-task
@@ -125,7 +131,23 @@
 (defvar-local harness-compose--placeholder nil "Overlay showing the placeholder.")
 (defvar-local harness-compose--indent nil "Overlay lining the box's lines up after the prompt.")
 (defvar-local harness-compose--text "" "The box's text, kept across redraws.")
-(defvar-local harness-compose--files nil "Project files for @ completion.")
+(defvar-local harness-compose--files nil
+  "Project files for @ completion, relative to the root they are listed in.
+When the box has several roots (`harness-compose--file-roots') these are
+the files of all of them, each name once.")
+(defvar-local harness-compose--file-roots nil
+  "The roots `harness-compose--files' are listed in, when there are several.
+\(DIR . LABEL) each, the root whose copy of a file wins first, as
+`harness-compose-roots-function' says.  Nil for a box with its project
+alone, which is all that `harness-compose-fetch-files' lists then.")
+(defvar-local harness-compose--root-files nil
+  "Alist: root -> the files listed in it, relative to it.
+Kept for a box with several roots, whose lists arrive one by one and are
+merged into `harness-compose--files' each time (`harness-compose--arrived-in').")
+(defvar-local harness-compose--file-origins nil
+  "Hash table: name of a project file -> the roots that hold it.
+The root a file is read from is the first of them.  Nil for a box with
+its project alone.")
 (defvar-local harness-compose--skills nil "Skill names for / completion.")
 (defvar-local harness-compose-commands nil
   "Names of the commands this box runs as /NAME, for / completion.
@@ -189,6 +211,16 @@ See `harness-compose--line-up-undo'.")
 
 (defvar-local harness-compose-project-function (lambda () default-directory)
   "Function returning the project root files are completed and attached from.")
+(defvar-local harness-compose-roots-function nil
+  "Function returning the directories the box finds project files in, or nil.
+Each is (DIR . LABEL): a directory name, and the short word that marks
+the candidates found in it.  The box lists the files of all of them
+\(`harness-compose-fetch-files') and offers their union: a file in
+several is offered once, labelled with all, and is read from the first,
+so the order is the order of precedence.  A chat working in a git
+worktree names the worktree and the main checkout it was made from
+\(`harness-chat--roots').  Nil, or fewer than two directories, leaves
+the box with its project alone (`harness-compose-project-function').")
 (defvar-local harness-compose-placeholder-function (lambda () "Message…")
   "Function returning the hint shown while the box is empty.")
 (defvar-local harness-compose-redraw-function #'ignore
@@ -239,10 +271,12 @@ See `harness-compose--line-up-undo'.")
   (define-key map (kbd "C-y") '(menu-item "" harness-compose-yank :filter harness-compose--yank-binding))
   (define-key map (kbd "M-y") '(menu-item "" harness-compose-yank-pop :filter harness-compose--yank-binding)))
 
-(cl-defun harness-compose-setup (&key project placeholder redraw bottom)
+(cl-defun harness-compose-setup (&key project placeholder redraw bottom roots)
   "Make this buffer host a compose box.
 PROJECT returns the project root, PLACEHOLDER the hint for the empty
 box, REDRAW redraws the box (it must call `harness-compose-insert').
+ROOTS, when given, returns the directories the box finds project files
+in, when it has more than the project (`harness-compose-roots-function').
 With BOTTOM the box sits at the bottom of every window showing the
 buffer, the way a chat app keeps its input there: t pads the top of a
 short buffer, a function returning a position pads there instead (a
@@ -257,6 +291,7 @@ window the ones that must stay on one line."
     (add-hook 'before-change-functions #'harness-compose--before-change nil t)
     (add-hook 'after-change-functions #'harness-compose--after-change nil t))
   (when project (setq harness-compose-project-function project))
+  (when roots (setq harness-compose-roots-function roots))
   (when placeholder (setq harness-compose-placeholder-function placeholder))
   (when redraw (setq harness-compose-redraw-function redraw))
   ;; The last one keeps windows narrower than the frame (side windows)
@@ -1159,12 +1194,72 @@ a thread is the words under its card, with the thread's data as
 ;; README next door.  Paths complete directory by directory, the way
 ;; `read-file-name' does, but only on this machine: completing as you
 ;; type must never open a connection to a remote host.
+;;
+;; A session working in a git worktree, a task's, has two places its
+;; files are: the worktree, where the work goes on, and the main
+;; checkout it was made from, which holds what the worktree has not
+;; merged yet, untracked files and all (`harness-compose-roots-function').
+;; Its project files are the union of both.  A file that is in both is
+;; offered once and is read from the worktree, the first root; each
+;; candidate says where it is (`harness-compose--file-annotator'), and
+;; a name is read from the root that holds it (`harness-compose--project-file').
+;; A box with its project alone lists and reads as it always did.
 
 (defun harness-compose--root ()
   "Return the directory the box's file names are relative to.
 That is the project's root (`harness-compose-project-function'), as a
 directory name."
   (file-name-as-directory (expand-file-name (or (harness-compose--project) default-directory))))
+
+(defun harness-compose--roots ()
+  "Return the roots the box finds project files in, or nil for its project alone.
+\(DIR . LABEL) each, DIR a directory name, the root whose copy of a file
+wins first (`harness-compose-roots-function').  A root named twice
+counts once, and there must be two for the box to have several: the
+host's failing to say leaves the box with its project."
+  (when harness-compose-roots-function
+    (let ((roots nil))
+      (condition-case err
+          (dolist (entry (funcall harness-compose-roots-function))
+            (when (and (consp entry) (stringp (car entry)))
+              (let ((dir (file-name-as-directory (expand-file-name (car entry)))))
+                (unless (assoc dir roots)
+                  (push (cons dir (cdr entry)) roots)))))
+        (error (harness-log 'warn "compose: finding the roots of the box failed: %s"
+                            (harness-error-message err))
+               (setq roots nil)))
+      (and (cdr roots) (nreverse roots)))))
+
+(defun harness-compose--project-file (name root)
+  "Return the absolute name of the project file NAME, as the box lists it.
+That is NAME in the first of the box's roots that holds it
+\(`harness-compose--file-origins'), else relative to ROOT, the project."
+  (expand-file-name name (or (and harness-compose--file-roots harness-compose--file-origins
+                                  (car (gethash name harness-compose--file-origins)))
+                             root)))
+
+(defun harness-compose--named-file (name root)
+  "Return the absolute name of the file NAME, as the box reads it.
+A path (`harness-compose--path-p') is relative to ROOT, the project; any
+other name is a project file (`harness-compose--project-file')."
+  (if (harness-compose--path-p name)
+      (expand-file-name name root)
+    (harness-compose--project-file name root)))
+
+(defun harness-compose--relative-name (path root)
+  "Return the name PATH goes by in the box.
+That is its path in the project ROOT, else abbreviated
+\(`harness-relative-path').  With several roots
+\(`harness-compose--file-roots') it is its path in the first of them
+that holds it instead, so that a file of a task's worktree, which lies
+under the project it was made from, goes by its name in the worktree,
+not by .worktrees/ and the worktree's name."
+  (harness-relative-path
+   (or (and harness-compose--file-roots
+            (car (cl-find-if (lambda (entry) (harness-path-within-p (car entry) path))
+                             harness-compose--file-roots)))
+       root)
+   path))
 
 (defun harness-compose--path-p (name)
   "Non-nil when NAME is a path rather than part of a project file's name.
@@ -1192,13 +1287,35 @@ Part of a name completes over the project's files, in the
 configured otherwise.  A path (`harness-compose--path-p') completes
 over the file system, relative to the box's root, directory by
 directory, in the `file' category: the styles and the UI (vertico,
-marginalia) of file names apply to it."
-  (let ((files (harness-compose--table 'harness-compose--files 'harness-compose-file))
+marginalia) of file names apply to it.  With several roots
+\(`harness-compose-roots-function') the project's files are those of
+all of them, each once, annotated with where it is
+\(`harness-compose--file-annotator')."
+  (let ((files (harness-compose--table 'harness-compose--files 'harness-compose-file
+                                       (harness-compose--file-annotator)))
         (root (harness-compose--root)))
     (lambda (string pred action)
       (if (harness-compose--path-p string)
           (harness-compose--complete-path root string pred action)
         (funcall files string pred action)))))
+
+(defun harness-compose--file-annotator ()
+  "Return the annotation function of the project's files, or nil with one root.
+It says which of the box's roots hold the file, by their labels:
+\"  [task, main]\" for a file in the worktree and the main checkout,
+\"  [main]\" for one only the main checkout has."
+  (when harness-compose--file-roots
+    (let ((buf (current-buffer)))
+      (lambda (name)
+        (when (buffer-live-p buf)
+          (with-current-buffer buf
+            (when-let* ((held (and harness-compose--file-origins
+                                   (gethash name harness-compose--file-origins))))
+              (format "  [%s]"
+                      (mapconcat (lambda (root)
+                                   (or (cdr (assoc root harness-compose--file-roots))
+                                       (abbreviate-file-name root)))
+                                 held ", ")))))))))
 
 (defun harness-compose--attach-table ()
   "Return the table the attach command reads a file, or a task, with.
@@ -1241,18 +1358,32 @@ A remote name is never looked at, as completing it never is."
   "An @ reference: an @ starting a word, then the name up to a space.
 That is the token @ completes in the box (`harness-compose--capf-bounds').")
 
+(defun harness-compose--local-file-in-roots (name root)
+  "Return NAME, a regular file here, absolute, or nil.
+A path (`harness-compose--path-p') is relative to ROOT, the project.  Any
+other name is relative to the first of the box's roots
+\(`harness-compose--file-roots') that has such a file, as a project file
+is (`harness-compose--project-file'), and to ROOT when the box has one."
+  (if (or (harness-compose--path-p name) (null harness-compose--file-roots))
+      (harness-compose--local-file name root)
+    (cl-some (lambda (entry) (harness-compose--local-file name (car entry)))
+             harness-compose--file-roots)))
+
 (defun harness-compose--reference-file (name root)
   "Return the absolute name of the file the @ reference NAME means, or nil.
 NAME is what follows the @: a file the project lists, or a path
 relative to ROOT, absolute or under ~, of a regular file of this
-machine.  Punctuation ending a sentence or a bracket after it is no
-part of it (\"see @notes.txt.\"), and an @skill: reference names a
-skill, an @task: one a task, not a file."
+machine.  A project file is the one of the first root that holds it,
+when the box has several (`harness-compose-roots-function').
+Punctuation ending a sentence or a bracket after it is no part of it
+\(\"see @notes.txt.\"), and an @skill: reference names a skill, an
+@task: one a task, not a file."
   (unless (or (string-prefix-p "skill:" name) (harness-compose--task-name-p name))
     (cl-some (lambda (candidate)
                (cond ((string-empty-p candidate) nil)
-                     ((member candidate harness-compose--files) (expand-file-name candidate root))
-                     (t (harness-compose--local-file candidate root))))
+                     ((member candidate harness-compose--files)
+                      (harness-compose--project-file candidate root))
+                     (t (harness-compose--local-file-in-roots candidate root))))
              (delete-dups (list name (replace-regexp-in-string "[]),.;:!?'\"`>}]+\\'" "" name))))))
 
 (defun harness-compose--references (text)
@@ -1298,7 +1429,15 @@ as it is, \"task:\" and all.  A directory is no file to attach: choosing
 one reads again, from inside it, and so does an empty answer.  With
 ANY, or when the project lists no files, browse the file system instead.
 The project is never listed while you wait: a listing still running
-fills the candidates in when it returns, and so do the tasks."
+fills the candidates in when it returns, and so do the tasks.
+
+A box with several roots -- a chat working in a task's git worktree
+\(`harness-compose-roots-function') -- offers the union of their files:
+the worktree's and those of the main checkout it was made from, which
+has what the worktree does not.  A file in both is offered once, and
+the worktree's copy is the one attached; each candidate says where it
+is, \"[task]\", \"[main]\" or \"[task, main]\", and the file chosen is
+named in the root it was found in."
   (let ((root (harness-compose--root))
         (listing (harness-compose-fetch-files)))
     (if (or any (and (harness-promise-settled-p listing) (null harness-compose--files)))
@@ -1311,9 +1450,9 @@ fills the candidates in when it returns, and so do the tasks."
                                                   table nil t initial)))
                  (and (not (harness-compose--task-name-p name))
                       (let ((file-name-handler-alist nil))
-                        (file-directory-p (expand-file-name name root)))))
+                        (file-directory-p (harness-compose--named-file name root)))))
           (setq initial (and (not (string-empty-p name)) (file-name-as-directory name))))
-        (if (harness-compose--task-name-p name) name (expand-file-name name root))))))
+        (if (harness-compose--task-name-p name) name (harness-compose--named-file name root))))))
 
 (defun harness-compose-add-attachment (path &optional mime)
   "Attach the file PATH (with MIME) to the next message.
@@ -1324,8 +1463,10 @@ chip a click opens; a file whose name has a space attaches without one.
 Interactively, part of its name finds a project file in any
 subdirectory, and a path (/, ~/, ./, ../) any file; with a prefix
 argument, the file system is browsed instead (see
-`harness-compose-read-file').  PATH task:ID attaches a task of the
-project instead (`harness-compose-attach-task')."
+`harness-compose-read-file').  In a task's git worktree the project's
+files are those of the worktree and of the main checkout both.  PATH
+task:ID attaches a task of the project instead
+\(`harness-compose-attach-task')."
   (interactive (list (harness-compose-read-file current-prefix-arg)))
   (if (harness-compose--task-name-p path)
       (harness-compose-attach-task (substring path 5))
@@ -1501,17 +1642,18 @@ punctuation ending a sentence or a bracket (\"see @notes.txt.\")."
   "Return the @ reference, without its @, that names the file PATH, or nil.
 NAME, when it names PATH -- the name a reference was completed as, a
 path relative to the project, say -- else PATH's own name: its path in
-the project, else under ~ or absolute (`harness-relative-path').  Nil
-when that has a space, which would end the reference, or does not name
-PATH back (`harness-compose--reference-file'): the file has no
-reference then."
+the project, else under ~ or absolute (`harness-relative-path'); a file
+of the box's other roots goes by its path in its root
+\(`harness-compose--relative-name').  Nil when that has a space, which
+would end the reference, or does not name PATH back
+\(`harness-compose--reference-file'): the file has no reference then."
   (let ((root (harness-compose--root))
         (path (expand-file-name path)))
     (cl-find-if (lambda (ref)
                   (and (stringp ref) (not (string-empty-p ref))
                        (not (string-match-p "[ \t\n\r\f]" ref))
                        (equal (harness-compose--reference-file ref root) path)))
-                (list name (harness-relative-path root path)))))
+                (list name (harness-compose--relative-name path root)))))
 
 (defun harness-compose--label (att &optional at-end)
   "Return ATT with its token, the token put into the box.
@@ -2765,13 +2907,64 @@ instead (`harness-compose-attach-from-ring')."
 Listed here, not by the harness process, so it is this Emacs's
 projectile cache (cleared by `projectile-invalidate-cache') that answers;
 a miss lists asynchronously.  On failure the previous list is kept.
-Return a promise settled once the list is in place."
-  (let ((buf (current-buffer)))
-    (harness-then (harness-files-list-limited (harness-compose--project) nil 20000)
-                  (lambda (files)
-                    (when (buffer-live-p buf)
-                      (with-current-buffer buf (harness-compose--arrived 'harness-compose--files files))))
-                  (lambda (err) (harness-log 'warn "compose: listing project files failed: %s" (harness-error-message err))))))
+Return a promise settled once the list is in place.
+
+A box with several roots (`harness-compose-roots-function') lists them
+all, each in its own time, and `harness-compose--files' holds the union
+of the lists that arrived so far (`harness-compose--arrived-in'); the
+promise settles once all of them have."
+  (let ((buf (current-buffer))
+        (roots (setq harness-compose--file-roots (harness-compose--roots))))
+    (if (null roots)
+        (harness-then (harness-files-list-limited (harness-compose--project) nil 20000)
+                      (lambda (files)
+                        (when (buffer-live-p buf)
+                          (with-current-buffer buf (harness-compose--arrived 'harness-compose--files files))))
+                      (lambda (err) (harness-log 'warn "compose: listing project files failed: %s" (harness-error-message err))))
+      (harness-all
+       (mapcar (lambda (entry)
+                 (let ((root (car entry)))
+                   (harness-then (harness-files-list-limited root nil 20000)
+                                 (lambda (files)
+                                   (when (buffer-live-p buf)
+                                     (with-current-buffer buf (harness-compose--arrived-in root files))))
+                                 (lambda (err) (harness-log 'warn "compose: listing the files of %s failed: %s"
+                                                            root (harness-error-message err))))))
+               roots)))))
+
+(defun harness-compose--union-files (roots lists)
+  "Return the union of the files LISTS hold, as (NAMES . ORIGINS).
+ROOTS are (DIR . LABEL) each, LISTS an alist: root -> the files listed
+in it, relative to it.  NAMES is every file once, in the order of
+ROOTS and of their lists, and ORIGINS a hash table: name -> the roots
+that hold it, ROOTS' order.  A name ending in a slash is no file to
+attach, but a repository or a worktree nested in the root -- the main
+checkout lists the worktrees under its .worktrees so -- and is left out."
+  (let ((origins (make-hash-table :test #'equal))
+        (names nil))
+    (dolist (entry roots)
+      (let ((root (car entry)))
+        (dolist (name (cdr (assoc root lists)))
+          (unless (string-suffix-p "/" name)
+            (let ((held (gethash name origins)))
+              (unless held (push name names))
+              (unless (member root held)
+                (puthash name (append held (list root)) origins)))))))
+    (cons (nreverse names) origins)))
+
+(defun harness-compose--arrived-in (root files)
+  "Take FILES, the files listed in ROOT, into those of a box with several roots.
+`harness-compose--files' becomes the union of what arrived for every
+root so far (`harness-compose--union-files'), as `harness-compose--arrived'
+sets it.  A root that failed to list, or has not yet, adds nothing:
+what it listed before stays.  A list that arrives for a root the box
+has no more -- its worktree gone since -- is dropped."
+  (when (assoc root harness-compose--file-roots)
+    (setf (alist-get root harness-compose--root-files nil nil #'equal) files)
+    (pcase-let ((`(,names . ,origins)
+                 (harness-compose--union-files harness-compose--file-roots harness-compose--root-files)))
+      (setq harness-compose--file-origins origins)
+      (harness-compose--arrived 'harness-compose--files names))))
 
 (defun harness-compose-fetch-completions ()
   "Prefetch project files, skill names and the project's tasks for completion."
@@ -2806,16 +2999,18 @@ was empty, the completion UI is asked again."
                        (memq (char-before) '(?\s ?\t ?\n))))
           (cons (1+ (point)) end))))))
 
-(defun harness-compose--table (var category)
+(defun harness-compose--table (var category &optional annotate)
   "Return a completion table over the strings in VAR, with CATEGORY metadata.
 VAR, a variable of the current buffer or a list of them whose strings
 are offered together, is read each time the table is asked: the box's
 sources arrive asynchronously, and a table made before one did offers
-it once it has."
+it once it has.  ANNOTATE, when given, is the function that annotates
+the candidates."
   (let ((buf (current-buffer)))
     (lambda (string pred action)
       (if (eq action 'metadata)
-          (list 'metadata (cons 'category category))
+          `(metadata (category . ,category)
+                     ,@(and annotate `((annotation-function . ,annotate))))
         (complete-with-action action
                               (and (buffer-live-p buf)
                                    (delete-dups
@@ -2837,11 +3032,13 @@ when it names the file back, else the file's own reference
 \(`harness-compose--file-ref').  An image's token gives way to its
 label, [image 1]; so does the token of a file whose name can be no
 reference, which attaches without one.  A project file's name attaches
-its file; a path (relative to ROOT) only a regular file of this
-machine: a directory stays in the box, for its files to complete next."
+its file, the one of the first root that holds it when the box has
+several (`harness-compose--project-file'); a path (relative to ROOT)
+only a regular file of this machine: a directory stays in the box, for
+its files to complete next."
   (when-let* ((path (if (harness-compose--path-p name)
                         (harness-compose--local-file name root)
-                      (expand-file-name name root))))
+                      (harness-compose--project-file name root))))
     (let* ((end (point))
            (start (- end (length name) 1))
            (here (and (harness-compose-in-p start)
@@ -2963,13 +3160,15 @@ I is the media ring entry it was, or -1 for files of a file manager.")
 (defun harness-compose--chip-name (att)
   "Return the name the chip of attachment ATT shows.
 A file of the project goes by its path in the project, a capture or a
-download of the harness by its name, any other file by its path."
+download of the harness by its name, any other file by its path.  With
+several roots (`harness-compose-roots-function') a file goes by its
+path in the root that holds it (`harness-compose--relative-name')."
   (let ((path (plist-get att :path)))
     (cond ((null path) (or (plist-get att :name) "attachment"))
           ((and (boundp 'harness-state-directory)
                 (string-prefix-p (expand-file-name harness-state-directory) path))
            (or (plist-get att :name) (file-name-nondirectory path)))
-          (t (harness-relative-path (harness-compose--project) path)))))
+          (t (harness-compose--relative-name path (harness-compose--project))))))
 
 (defun harness-compose--chip (att &optional room)
   "Return the chip of attachment ATT: its thumbnail, name and size, and ×.
