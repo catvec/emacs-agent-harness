@@ -4,23 +4,48 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../theme/harness_theme.dart';
 
+/// Markdown, drawn: headings, lists, bold, code, quotes, tables and links
+/// (which open outside the app).  What a person or an agent writes for a
+/// person is Markdown, so it is drawn with this wherever it is read.
 class HarnessMarkdown extends StatelessWidget {
-  const HarnessMarkdown({super.key, required this.text, this.compact = false});
+  const HarnessMarkdown({
+    super.key,
+    required this.text,
+    this.compact = false,
+    this.color,
+    this.lineHeight,
+    this.tight = false,
+  });
 
   final String text;
   final bool compact;
+
+  /// The color of the text, when it stands on a color of its own and the
+  /// theme's would not read there: a message in a bubble.  Its links, quotes
+  /// and lists take it too; code keeps its own, on a chip of its own.
+  final Color? color;
+
+  /// The height of a line of text, as a multiple of its size; 1.55 when not
+  /// given.
+  final double? lineHeight;
+
+  /// No room under the last paragraph: the text is all there is of what it is
+  /// in (a bubble with a padding of its own).  The space between the blocks
+  /// stays.
+  final bool tight;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final dark = theme.brightness == Brightness.dark;
+    final ink = color ?? theme.colorScheme.onSurface;
     final base = MarkdownStyleSheet.fromTheme(theme).copyWith(
       p: theme.textTheme.bodyMedium?.copyWith(
         fontSize: compact ? 13.5 : 15,
-        height: 1.55,
-        color: theme.colorScheme.onSurface,
+        height: lineHeight ?? 1.55,
+        color: ink,
       ),
-      pPadding: const EdgeInsets.only(bottom: 8),
+      pPadding: tight ? EdgeInsets.zero : const EdgeInsets.only(bottom: 8),
       h1: theme.textTheme.headlineSmall?.copyWith(
         fontSize: compact ? 20 : 23,
         fontWeight: FontWeight.w700,
@@ -82,7 +107,7 @@ class HarnessMarkdown extends StatelessWidget {
       data: text,
       selectable: true,
       softLineBreak: true,
-      styleSheet: base,
+      styleSheet: color == null ? base : _inked(base, color!),
       onTapLink: (text, href, title) async {
         if (href == null) return;
         final uri = Uri.tryParse(href);
@@ -93,6 +118,37 @@ class HarnessMarkdown extends StatelessWidget {
       },
     );
   }
+}
+
+/// [sheet] with its text in [ink], so that it reads on a color of its own.
+/// A link keeps its underline and is told by that; a quote keeps its bar.
+MarkdownStyleSheet _inked(MarkdownStyleSheet sheet, Color ink) {
+  TextStyle? tint(TextStyle? style) => style?.copyWith(color: ink);
+  return sheet.copyWith(
+    h1: tint(sheet.h1),
+    h2: tint(sheet.h2),
+    h3: tint(sheet.h3),
+    h4: tint(sheet.h4),
+    h5: tint(sheet.h5),
+    h6: tint(sheet.h6),
+    a: tint(sheet.a),
+    blockquote: tint(sheet.blockquote),
+    blockquoteDecoration: BoxDecoration(
+      border: Border(
+        left: BorderSide(color: ink.withValues(alpha: 0.6), width: 3),
+      ),
+    ),
+    listBullet: tint(sheet.listBullet),
+    tableHead: tint(sheet.tableHead),
+    tableBody: tint(sheet.tableBody),
+    tableBorder: TableBorder.all(
+      color: ink.withValues(alpha: 0.35),
+      width: 0.7,
+    ),
+    horizontalRuleDecoration: BoxDecoration(
+      border: Border(top: BorderSide(color: ink.withValues(alpha: 0.35))),
+    ),
+  );
 }
 
 class HarnessInlineMarkdown extends StatelessWidget {

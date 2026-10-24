@@ -236,6 +236,7 @@ class HarnessTask {
 class TaskReport {
   const TaskReport({
     this.summary = '',
+    this.problem = '',
     this.evidence = const [],
     this.reproduction,
     this.noMerge = false,
@@ -246,6 +247,7 @@ class TaskReport {
 
   static TaskReport fromWire(JsonMap wire) => TaskReport(
     summary: asStringOr(wire['summary'], ''),
+    problem: asStringOr(wire['problem'], ''),
     evidence: asMapList(wire['evidence']),
     reproduction: asString(wire['reproduction']),
     noMerge: asBool(wire['noMerge'] ?? wire['no-merge']),
@@ -254,7 +256,14 @@ class TaskReport {
     at: parseTime(wire['at']),
   );
 
+  /// What the summary says, Markdown as the session wrote it.  For a report
+  /// that is [missing] it is the last message the session wrote.
   final String summary;
+
+  /// What must be fixed and how to see it, Markdown: the review shows it at
+  /// the top, where the name of the task alone would not say what the work
+  /// was for.  A report from before the field has none.
+  final String problem;
   final List<JsonMap> evidence;
   final String? reproduction;
   final bool noMerge;
@@ -262,11 +271,26 @@ class TaskReport {
   final bool missing;
   final DateTime? at;
 
-  /// Evidence items rendered as compact lines in the task sheet.  The
-  /// harness writes each with a `kind` (what it resolved the call's item
-  /// to); a report from before that, or a call's own input, has the one
-  /// of `image`, `video`, `file`, `code`, `note`, `tool_call` it was asked
-  /// for: both read the same (`EvidenceItem`).
+  /// The words of the report as the card of the `hand_in` call in the task's
+  /// session draws them (`HandInReportView`), so that a report reads the same
+  /// on the board and in the session.  The flags are left out: the sheet of
+  /// the task says them itself.
+  HandInReport get handIn => HandInReport(
+    problem: problem.trim(),
+    summary: summary.trim(),
+    reproduction: reproduction?.trim(),
+    evidence: [
+      for (final wire in evidence)
+        if (EvidenceItem.fromWire(wire) case final EvidenceItem item) item,
+    ],
+  );
+
+  /// Evidence items as one short line of text each, for a place with room for
+  /// no more (the sheet of a task draws them as they are in the session, from
+  /// [handIn]).  The harness writes each with a `kind` (what it resolved the
+  /// call's item to); a report from before that, or a call's own input, has
+  /// the one of `image`, `video`, `file`, `code`, `note`, `tool_call` it was
+  /// asked for: both read the same (`EvidenceItem`).
   List<String> get evidenceLines => [
     for (final wire in evidence)
       if (EvidenceItem.fromWire(wire) case final EvidenceItem item)

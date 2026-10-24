@@ -35,6 +35,13 @@ time it opens. It asks again only when the harness does.
   the activity of the running turn (waiting, thinking, writing, preparing a
   tool call, running tools, compacting). A conversation opens on its latest
   message.
+- **Draws what is written as Markdown.** The answers of the agent, the
+  messages sent to it (yours, another session's, the harness's), a plan, the
+  summary a compaction leaves (a line, "Context compacted · 37 words", which
+  opens to it) and the report a task was handed in with are headings, lists,
+  bold, code, tables and links, never `##`, `**` and backticks as they were
+  typed. Thoughts and hints are shown as they are, as they are in the Emacs
+  chat. See [Markdown](#markdown).
 - **Reads a tool call, not its JSON.** A call is a line until it is opened;
   opened, it shows the command, the path, the text an edit takes out and puts
   in as what they are, and what the call said, a screenful at a time, with
@@ -93,7 +100,8 @@ time it opens. It asks again only when the harness does.
   that waits.
 - **Shows the rest of the harness.** The task board (all seven columns, queue
   state and slot use, backlog mode, submit/start/queue/verify/reject/retry/
-  complete/archive), spend, tokens, live sessions, daily spend, per-model and
+  complete/archive; a finished task's card has the words of its summary and its
+  sheet the whole report, drawn as Markdown), spend, tokens, live sessions, daily spend, per-model and
   per-project breakdowns, budgets, the plan quota of the providers that report
   one, the model catalogue, harness modules and the full ACP capability report.
 - **Shows who pays, and how much of the plan is left.** As the harness's Emacs
@@ -656,6 +664,23 @@ and one that grew call by call fold the same way.
 | ![A task's session: runs of calls, an edit and a refused write between them, a failed command counted on its line](screenshots/android-tool-calls.png) | ![An edit: the text it took out and the text it put in](screenshots/android-tool-edit.png) | ![A result on a page of its own](screenshots/android-tool-output.png) |
 | ![The same session in the Apple style](screenshots/ios-tool-calls.png) | ![A command that ran, a run of one opened to its call](screenshots/ios-tool-result.png) | |
 
+## Markdown
+
+What a person or an agent writes for a person is Markdown, and the app draws it
+as Markdown wherever it is read, as the Emacs chat does: `HarnessMarkdown`, over
+`flutter_markdown` (headings, lists, bold and italics, code and code blocks,
+quotes, tables, links, which open outside the app; a line break is a line
+break).  The harness sends the text as it was written, so nothing is lost on
+the way.
+
+| Where | What is drawn |
+|---|---|
+| A conversation | What the agent answers, and a plan; the messages sent to it, whoever sends them, in their bubble (the text takes the bubble's colour, and the bubble hugs it); the summary a compaction leaves, which is a page long, under the line "Context compacted · N words" that opens to it (a note of one line stays on its line). Thoughts, hints and nodes the app does not know are shown as they are, as in the Emacs chat. |
+| A tool call | The prose in its input (a summary, a prompt, a question, a body) and, for the hand-in call, the problem, the summary, how to reproduce it and the notes among the evidence. |
+| The task board, the sheet of a task | The report the task was handed in with, by the same `HandInReportView` as the hand-in call's card and from the same record (`TaskReport.handIn`), so that a report reads the same on the board and in the session: the problem, the summary, how to reproduce it and the evidence. A round of work that handed none in says so, and draws the last message of its session. |
+| The task board, a card | The first words of the summary, without its syntax (`markdownPreview` in `lib/src/ui/format.dart`): a heading, a paragraph and an item of a list are told apart by a dot, a link is its text, a code span its code, and words that only look like syntax (`snake_case`, `2 * 3`, `List<String>`) stay. A row of a list has no room for a heading. |
+| A question | The question of the card that asks one. |
+
 ## Testing
 
 ```sh
@@ -701,6 +726,16 @@ The widget tests drive the real `AcpClient` against an in-memory ACP server
 - the new task sheet's project row against a harness that lists worktrees and
   scratch directories as projects
 - transcript replay, streaming, thought blocks and plan
+- Markdown (`test/markdown_preview_test.dart`, `markdown_rendering_test.dart`,
+  `markdown_screenshots_test.dart`): the report a task was handed in with is
+  drawn as Markdown on the board -- its card has the words of the summary
+  without the syntax (`markdownPreview`), its sheet the problem, the summary,
+  how to reproduce it and the evidence, with headings, bold, code, lists and
+  links -- and so are the messages sent to a conversation and the summary a
+  compaction leaves, which is folded under its line; what the agent writes and
+  a plan were drawn already, and are kept so; thoughts and hints stay as they
+  are; pictures of them, in both styles and both themes, are written where
+  `HARNESS_SHOTS` says
 - tool calls (`test/tool_display_test.dart`, `test/tool_card_test.dart`,
   `test/tool_flow_test.dart`): a call is closed and builds nothing of its
   body until it is opened; its input is the text it was, never `\n` in quotes;

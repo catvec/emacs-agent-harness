@@ -386,10 +386,7 @@ class TranscriptEntry extends StatelessWidget {
       case TranscriptKind.hint:
         return _HintLine(text: item.text);
       case TranscriptKind.compaction:
-        return _DividerNote(
-          icon: Icons.compress_rounded,
-          text: item.text.trim().isEmpty ? 'Context compacted' : item.text,
-        );
+        return _CompactionNote(text: item.text);
       case TranscriptKind.plan:
         return _PlanMessage(item: item);
       case TranscriptKind.unknown:
@@ -475,13 +472,13 @@ class _UserBubble extends StatelessWidget {
                   bottomRight: Radius.circular(grouped ? 18 : 6),
                 ),
               ),
-              child: SelectableText(
-                item.text,
-                style: theme.textTheme.bodyMedium?.copyWith(
-                  color: textColor,
-                  height: 1.4,
-                  fontSize: 15,
-                ),
+              // What a person or the harness sends is Markdown, as it is in
+              // the Emacs chat: drawn, in the color of the bubble's text.
+              child: HarnessMarkdown(
+                text: item.text,
+                color: textColor,
+                lineHeight: 1.4,
+                tight: true,
               ),
             ),
           ),
@@ -739,10 +736,75 @@ class _HintLine extends StatelessWidget {
   }
 }
 
+/// The line where the conversation was compacted.  A short note stays on the
+/// line.  What a compaction leaves of the conversation is a summary, Markdown
+/// and a page long: the line says how long, and opens to the summary, drawn.
+class _CompactionNote extends StatefulWidget {
+  const _CompactionNote({required this.text});
+
+  final String text;
+
+  @override
+  State<_CompactionNote> createState() => _CompactionNoteState();
+}
+
+class _CompactionNoteState extends State<_CompactionNote> {
+  bool _open = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final text = widget.text.trim();
+    // A line is the note; more than a line is a summary to open.
+    if (!text.contains('\n') && text.length <= 90) {
+      return _DividerNote(
+        icon: Icons.compress_rounded,
+        text: text.isEmpty ? 'Context compacted' : text,
+      );
+    }
+    final theme = Theme.of(context);
+    final words = text.split(RegExp(r'\s+')).length;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Semantics(
+          button: true,
+          expanded: _open,
+          child: HarnessTap(
+            onTap: () => setState(() => _open = !_open),
+            child: _DividerNote(
+              icon: Icons.compress_rounded,
+              text: 'Context compacted · $words words',
+              open: _open,
+            ),
+          ),
+        ),
+        if (_open)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(18, 0, 18, 10),
+            child: Container(
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(
+                color: theme.colorScheme.surfaceContainerLow.withValues(
+                  alpha: 0.6,
+                ),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: theme.colorScheme.outlineVariant),
+              ),
+              child: HarnessMarkdown(text: text, compact: true),
+            ),
+          ),
+      ],
+    );
+  }
+}
+
 class _DividerNote extends StatelessWidget {
-  const _DividerNote({required this.icon, required this.text});
+  const _DividerNote({required this.icon, required this.text, this.open});
   final IconData icon;
   final String text;
+
+  /// Whether what the line opens to is open; null when it opens to nothing.
+  final bool? open;
 
   @override
   Widget build(BuildContext context) {
@@ -771,6 +833,20 @@ class _DividerNote extends StatelessWidget {
                       ),
                     ),
                     TextSpan(text: text),
+                    if (open != null)
+                      WidgetSpan(
+                        alignment: PlaceholderAlignment.middle,
+                        child: Padding(
+                          padding: const EdgeInsets.only(left: 4),
+                          child: Icon(
+                            open!
+                                ? Icons.expand_less_rounded
+                                : Icons.expand_more_rounded,
+                            size: 16,
+                            color: theme.colorScheme.onSurfaceVariant,
+                          ),
+                        ),
+                      ),
                   ],
                 ),
                 textAlign: TextAlign.center,

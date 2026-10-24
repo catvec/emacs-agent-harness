@@ -14,7 +14,9 @@ import '../format.dart';
 import '../theme/harness_theme.dart';
 import '../widgets/connection_banner.dart';
 import '../widgets/image_attachments.dart';
+import '../widgets/markdown_view.dart';
 import '../widgets/quota_widgets.dart';
+import '../widgets/tool_body.dart';
 
 class TasksScreen extends StatefulWidget {
   const TasksScreen({
@@ -732,8 +734,10 @@ class TaskCard extends StatelessWidget {
                             if (report != null &&
                                 report.summary.isNotEmpty) ...[
                               const SizedBox(height: 8),
+                              // The words of the summary, which is Markdown: a
+                              // card has no room for its syntax.
                               Text(
-                                truncate(report.summary, 140),
+                                markdownPreview(report.summary),
                                 maxLines: 2,
                                 overflow: TextOverflow.ellipsis,
                                 style: HarnessText.subtitle(context),
@@ -1551,70 +1555,11 @@ class _TaskDetail extends StatelessWidget {
                     ),
                   ),
                 ],
-                if (task.report != null) ...[
+                if (task.report case final TaskReport report) ...[
                   const SizedBox(height: HarnessSpace.md),
                   _DetailSection(
                     title: 'Report',
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        if (task.report!.missing)
-                          Padding(
-                            padding: const EdgeInsets.only(bottom: 6),
-                            child: Text(
-                              'No report was handed in; this is the last '
-                              'message.',
-                              style: HarnessText.caption(context)
-                                  .copyWith(color: HarnessColors.amber),
-                            ),
-                          ),
-                        if (task.report!.summary.isNotEmpty)
-                          Text(
-                            task.report!.summary,
-                            style: HarnessText.body(context)
-                                .copyWith(height: 1.5),
-                          ),
-                        if (task.report!.reproduction != null &&
-                            task.report!.reproduction!.isNotEmpty) ...[
-                          const SizedBox(height: HarnessSpace.md),
-                          Text(
-                            'TO REPRODUCE',
-                            style: HarnessText.label(context),
-                          ),
-                          const SizedBox(height: 4),
-                          Text(
-                            task.report!.reproduction!,
-                            style: HarnessText.body(context)
-                                .copyWith(height: 1.5),
-                          ),
-                        ],
-                        for (final line in task.report!.evidenceLines) ...[
-                          const SizedBox(height: 6),
-                          Row(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Padding(
-                                padding: const EdgeInsets.only(top: 2),
-                                child: Icon(
-                                  Icons.check_circle_outline_rounded,
-                                  size: 15,
-                                  color: muted,
-                                ),
-                              ),
-                              const SizedBox(width: 8),
-                              Expanded(
-                                child: Text(
-                                  line,
-                                  style: HarnessText.subtitle(context).copyWith(
-                                    color: theme.colorScheme.onSurface,
-                                  ),
-                                ),
-                              ),
-                            ],
-                          ),
-                        ],
-                      ],
-                    ),
+                    child: _ReportBody(report: report),
                   ),
                 ],
                 if (task.feedback.isNotEmpty) ...[
@@ -1795,6 +1740,40 @@ class _DetailActions extends StatelessWidget {
               ],
             ],
           ),
+      ],
+    );
+  }
+}
+
+/// The report a task was handed in with, drawn as the report it is: the
+/// problem, the summary, how to see it and the evidence, all of it Markdown,
+/// the way the card of the `hand_in` call in the task's session draws it.  A
+/// round of work that handed none in has only the last message of its
+/// session: the report says so, and draws that message.
+class _ReportBody extends StatelessWidget {
+  const _ReportBody({required this.report});
+
+  final TaskReport report;
+
+  @override
+  Widget build(BuildContext context) {
+    final handIn = report.handIn;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (report.missing) ...[
+          Padding(
+            padding: const EdgeInsets.only(bottom: 6),
+            child: Text(
+              'No report was handed in; this is the last message.',
+              style: HarnessText.caption(context)
+                  .copyWith(color: HarnessColors.amber),
+            ),
+          ),
+          if (handIn.summary.isNotEmpty)
+            HarnessMarkdown(text: handIn.summary, compact: true),
+        ] else
+          HandInReportView(report: handIn),
       ],
     );
   }
