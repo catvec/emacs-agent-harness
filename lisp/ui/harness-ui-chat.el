@@ -2311,11 +2311,14 @@ agent's, and under the fold what the call was and what it returned."
 ;; A message of yours may hold replies in threads: text blocks with the
 ;; data of the thread (`harness-thread-block').  They are drawn as the
 ;; cards of the compose box are, what each replies to -- who wrote it, and
-;; the part quoted -- and, under them, the words of the reply, beside the
-;; same rail.  A click on a card shows what it replies to, and the link on
-;; its first line opens the thread in the task's review, once the review
-;; has made it one.  The words of the message that are no reply come
-;; first, as any message's.
+;; the part quoted -- and, under them, the words of the reply, as far in
+;; as the card.  The box has the rail (`harness-thread-rail') down that
+;; side, the only bar there; a message has its own bar down all its
+;; lines (`harness-chat--margin'), so the rail's place is blank here, and
+;; a reply has one bar, not two.  A click on a card shows what it replies
+;; to, and the link on its first line opens the thread in the task's
+;; review, once the review has made it one.  The words of the message
+;; that are no reply come first, as any message's.
 
 (defun harness-chat--thread-blocks (node)
   "Return the replies in threads NODE, a message of yours, holds, in order."
@@ -2324,7 +2327,9 @@ agent's, and under the fold what the call was and what it returned."
 (defun harness-chat--card-lines (data)
   "Return the lines of the card of the thread DATA, drawn in the transcript.
 They are those of the compose box's card (`harness-thread-card-lines'),
-each a button that shows the reference it is of."
+each a button that shows the reference it is of.  They start with blanks,
+not the rail: a message of yours has its bar down every line already
+\(`harness-chat--margin'), and the card has no second."
   (mapcar (lambda (line)
             (let ((ref (get-text-property 0 'harness-thread-ref line)))
               (add-text-properties
@@ -2334,21 +2339,24 @@ each a button that shows the reference it is of."
                      'keymap (harness-chat--mouse-map (lambda () (harness-chat-show-ref ref))))
                line)
               line))
-          (harness-thread-card-lines data (harness-chat--content-width))))
+          (harness-thread-card-lines data (harness-chat--content-width) nil (harness-thread-rail nil t))))
 
 (defun harness-chat--rail (&optional face)
-  "Return the rail beside the words of a reply in a thread.
-The rail is a prefix, which takes no face from the text: it has FACE, the
-message's, so that it is on the message's background."
-  (propertize "▎ " 'face (if face (list 'harness-thread-rail-face face) 'harness-thread-rail-face)))
+  "Return what stands where the rail of a reply in a thread is, beside its words.
+Blank, since the message has its bar down every line
+\(`harness-chat--margin'): a reply has one bar.  A prefix takes no face
+from the text: it has FACE, the message's, so that it is on the message's
+background."
+  (harness-thread-rail face t))
 
 (defun harness-chat--render-reply (reply &optional face block index)
   "Return the card of REPLY, a reply in a thread of yours, and the words under it.
 The first line ends with the thread's link when the review has it
 \(`harness-chat--thread-link'); the words are Markdown, as a message's,
-with its line breaks, beside the rail (`harness-chat--rail'), which has
-FACE.  REPLY is the INDEXth reply of user BLOCK, when they are given: its
-words are cut short if they are long (`harness-chat--cut-words')."
+with its line breaks, as far in as the card's lines, beside the rail
+\(`harness-chat--rail'), which is blank, since the bar down the message is
+the one bar.  REPLY is the INDEXth reply of user BLOCK, when they are
+given: its words are cut short if they are long (`harness-chat--cut-words')."
   (let* ((data (plist-get reply :thread))
          (lines (harness-chat--card-lines data))
          (rail (harness-chat--rail face))

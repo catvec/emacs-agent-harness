@@ -29,6 +29,8 @@
 (defvar harness-media-ring-max)
 (defvar compose-quote-inline-hint)
 (defvar-local harness-ui-compose-test--draws 0 "How many times the test host drew.")
+(defvar-local harness-ui-compose-test--accent nil
+  "The face of the bar down the test host's box (`harness-compose-insert' :accent), or nil.")
 (defvar-local harness-ui-compose-test--panels nil
   "The panels the test host draws under its line: (NAME TEXT KEYMAP) each.
 The first is the farthest from the box.  The text carries the name as
@@ -49,7 +51,7 @@ With undo off, as the hosts draw."
     (let ((start (point)))
       (harness-compose-insert-attachments)
       (put-text-property start (point) 'read-only t))
-    (harness-compose-insert)
+    (harness-compose-insert nil nil :accent harness-ui-compose-test--accent)
     (when offset (goto-char (min (+ harness-compose-start offset) harness-compose-end)))))
 
 (defmacro harness-ui-compose-test-with (&rest body)
@@ -134,14 +136,82 @@ reply is to and quotes it, and a rail goes down beside the words."
         (should (string-search "The deploy is pending." card))
         (should (string-search "[×]" card))
         ;; The whole quote is the tooltip, and a click shows the message.
-        (should (string-search "The deploy is pending." (overlay-get (car cards) 'help-echo))))
+        (should (string-search "The deploy is pending." (overlay-get (car cards) 'help-echo)))
+        ;; The rail is the box's one bar: on every line of the card.
+        (dolist (line (split-string card "\n"))
+          (should (string-prefix-p "▎ " line))
+          (should (= 1 (cl-count ?▎ line)))))
       ;; The words under it have the rail, and the box's last line too.
       (insert "Why?")
       (harness-compose--keep-tokens)
       (should (cl-some (lambda (ov) (string-search "▎" (format "%s" (overlay-get ov 'line-prefix))))
                        harness-compose--thread-rails))
+      (dolist (ov harness-compose--thread-rails)
+        (let ((prefix (format "%s" (overlay-get ov 'line-prefix))))
+          (should (= 1 (cl-count ?▎ prefix)))
+          (should-not (string-search "▌" prefix))))
       ;; Not one of the attachment lines above the box.
       (should-not (string-search "reply" (buffer-substring-no-properties (point-min) harness-compose-start))))))
+
+(ert-deftest harness-ui-compose-thread-rail-gives-way-to-a-bar-of-the-host ()
+  "The rail is two columns, a bar and a space; where the host has a bar down
+its lines already it is two blanks, so the lines have the one bar, and the
+card's words stand where they stood beside the rail."
+  (harness-ui-compose-test-with
+    (should (equal "▎ " (substring-no-properties (harness-thread-rail))))
+    (should (eq 'harness-thread-rail-face (get-text-property 0 'face (harness-thread-rail))))
+    (should (equal '(harness-thread-rail-face harness-user-face)
+                   (get-text-property 0 'face (harness-thread-rail 'harness-user-face))))
+    (should (equal "  " (harness-thread-rail nil t)))
+    (should (eq 'harness-user-face (get-text-property 1 'face (harness-thread-rail 'harness-user-face t))))
+    (let* ((data (list :refs (list harness-ui-compose-test--ref)))
+           (railed (harness-thread-card-lines data 40 "[×]"))
+           (blank (harness-thread-card-lines data 40 "[×]" (harness-thread-rail nil t))))
+      (should (= 3 (length railed)))
+      (should (cl-every (lambda (line) (string-prefix-p "▎ " line)) railed))
+      (should (cl-notany (lambda (line) (string-search "▎" line)) blank))
+      (should (cl-every (lambda (line) (string-prefix-p "  " line)) blank))
+      ;; Nothing but the bar differs: the words, the column they start at, the
+      ;; references a click shows.
+      (should (equal (mapcar (lambda (line) (substring-no-properties line 2)) railed)
+                     (mapcar (lambda (line) (substring-no-properties line 2)) blank)))
+      (should (equal (mapcar (lambda (line) (get-text-property 0 'harness-thread-ref line)) railed)
+                     (mapcar (lambda (line) (get-text-property 0 'harness-thread-ref line)) blank)))
+      (should (string-search "↩ agent's message  [×]" (car blank))))))
+
+(ert-deftest harness-ui-compose-thread-has-one-bar-in-a-box-with-an-accent ()
+  "A box with a bar of its own (`harness-compose-insert' :accent) draws a reply's
+card and the words under it beside that bar, with no rail: one bar, not two,
+the card's words where they stood."
+  (harness-ui-compose-test-with
+    (setq harness-ui-compose-test--accent 'bold)
+    (harness-ui-compose-test--draw)
+    (harness-compose-add-thread (list harness-ui-compose-test--ref))
+    (insert "Why?\nAnd when?")
+    (harness-compose--keep-tokens)
+    (let ((card (overlay-get (car (harness-ui-compose-test--cards)) 'display)))
+      (should (string-search "↩ agent's message" card))
+      (should (string-search "The deploy is pending." card))
+      (should (string-search "[×]" card))
+      (should-not (string-search "▎" card))
+      (dolist (line (split-string card "\n"))
+        (should (string-prefix-p "  " line))))
+    ;; The box's own bar is down every line, in the prefix of the words under
+    ;; the card as in that of the lines after the first.
+    (should harness-compose--thread-rails)
+    (dolist (ov harness-compose--thread-rails)
+      (let ((prefix (format "%s" (overlay-get ov 'line-prefix))))
+        (should (= 1 (cl-count ?▌ prefix)))
+        (should-not (string-search "▎" prefix))
+        (should (string-suffix-p "  " prefix))))
+    (should (= 1 (cl-count ?▌ (format "%s" (overlay-get harness-compose--indent 'line-prefix)))))
+    ;; Back to a box without one, the rail is the bar.
+    (setq harness-ui-compose-test--accent nil)
+    (harness-ui-compose-test--draw)
+    (should (string-search "▎" (overlay-get (car (harness-ui-compose-test--cards)) 'display)))
+    (dolist (ov harness-compose--thread-rails)
+      (should (= 1 (cl-count ?▎ (format "%s" (overlay-get ov 'line-prefix)))))
+      (should-not (string-search "▌" (format "%s" (overlay-get ov 'line-prefix)))))))
 
 (ert-deftest harness-ui-compose-thread-take-splits-the-box-at-the-cards ()
   "The box's own words are the text; each card is an attachment with the words

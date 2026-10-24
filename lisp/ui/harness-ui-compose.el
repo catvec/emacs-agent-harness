@@ -2201,7 +2201,11 @@ the task is read with completion (`harness-compose-read-task')."
 ;; attachment, `(:thread DATA :reply N)', with the token [reply N] that
 ;; the others have: shown as a CARD, what the reply is to -- who wrote
 ;; it, and the part quoted, a few lines -- with a rail down its side that
-;; goes on beside the words written under it.  Those words are the reply:
+;; goes on beside the words written under it (`harness-thread-rail').  It
+;; is the one bar of the reply: a box that has a bar of its own down its
+;; side, the accent of one that does something else than compose, has the
+;; rail's two columns blank, and so has the chat when it draws a message
+;; of yours, which has its bar down every line.  Those words are the reply:
 ;; typed in the box as any, with all it has, the attachments, the @
 ;; references, the completions, the undo.  The text before the first
 ;; card is the message's own; the text after a card, up to the next, is
@@ -2222,8 +2226,25 @@ the task is read with completion (`harness-compose-read-task')."
 ;; back.
 
 (defface harness-thread-rail-face '((t :inherit font-lock-keyword-face :weight bold))
-  "The rail down the side of a thread's card and of the words under it."
+  "The rail down the side of a thread's card and of the words under it.
+It is drawn where nothing else is a bar down the side -- the compose
+box, unless the box has an accent bar -- and left blank where something is
+\(`harness-thread-rail'): a reply has the one bar."
   :group 'harness-compose)
+
+(defun harness-thread-rail (&optional face barred)
+  "Return what starts each line of a thread's card and of the words under it.
+Two columns: a bar in `harness-thread-rail-face', and a space.  Where the
+host draws a bar down the side of its lines already -- the chat's bar
+down a message of yours, the accent bar of a box (`harness-compose-bar')
+-- BARRED is non-nil, and the two columns are blank: the lines have the
+one bar, not two, and the card's words stand where they did beside the
+rail.  FACE is the background the lines are on, for the rail that is a
+line prefix, which takes no face from the text."
+  (cond ((and barred face) (propertize "  " 'face face))
+        ;; A string of its own, not a constant the caller might change.
+        (barred (make-string 2 ?\s))
+        (t (propertize "▎ " 'face (if face (list 'harness-thread-rail-face face) 'harness-thread-rail-face)))))
 
 (defface harness-thread-header-face '((t :inherit (shadow bold)))
   "The line of a thread's card that says what the reply is to."
@@ -2285,16 +2306,19 @@ short and the cut ones ending in an ellipsis."
     (append (mapcar (lambda (line) (truncate-string-to-width line room nil nil "…")) shown)
             (and (> (length lines) (length shown)) (list "…")))))
 
-(defun harness-thread-card-lines (data &optional room close)
+(defun harness-thread-card-lines (data &optional room close rail)
   "Return the lines of the card for the thread DATA, as propertized strings.
 Each reference is a header -- what it is (`harness-thread-ref-label') --
 and the lines of its quote under it, ROOM columns wide at most (by
 default 72), every line after the rail and with the reference it is of
 as `harness-thread-ref', for a click to show.  CLOSE, a string, is put at
 the end of the first header, such as a button that removes the thread.
+RAIL, a string, is what starts every line, as `harness-thread-rail' makes
+it, which is also the default: the host that has a bar down its lines of
+its own gives the blanks that stand for it, not a second bar.
 The card is no text of the buffer; the caller puts it where it goes."
-  (let* ((room (max 16 (- (or room 72) 2)))
-         (rail (propertize "▎ " 'face 'harness-thread-rail-face))
+  (let* ((rail (or rail (harness-thread-rail)))
+         (room (max 16 (- (or room 72) (string-width rail))))
          (refs (harness-thread-refs data))
          (first t) lines)
     (dolist (ref refs)
@@ -2476,7 +2500,11 @@ the thread.  A click on the rest shows what the reply is to."
                                                   (harness-compose--chip-command
                                                    (lambda (_) (harness-compose-remove-attachment att))))
                                       m)))
-         (card (string-join (harness-thread-card-lines data (harness-compose--thread-chip-room) close) "\n"))
+         (card (string-join (harness-thread-card-lines
+                             data (harness-compose--thread-chip-room) close
+                             ;; A box with a bar of its own has no rail.
+                             (and harness-compose--accent (harness-thread-rail harness-compose--face t)))
+                            "\n"))
          (pos 0))
     ;; Everywhere but on the button, which has its own.
     (while (< pos (length card))
@@ -2488,11 +2516,13 @@ the thread.  A click on the rest shows what the reply is to."
 
 (defun harness-compose--thread-rail ()
   "Return the prefix of the lines of the words under a card.
-The box's indentation (`harness-compose--indent'), and the rail."
+The box's indentation (`harness-compose--indent'), and the rail -- blanks,
+where the indentation has the accent bar of the box
+\(`harness-compose-bar'): one bar down the side, not two."
   (concat (or (and harness-compose--indent (overlay-buffer harness-compose--indent)
                    (overlay-get harness-compose--indent 'line-prefix))
               "")
-          (propertize "▎ " 'face (list 'harness-thread-rail-face harness-compose--face))))
+          (harness-thread-rail harness-compose--face (and harness-compose--accent t))))
 
 (defun harness-compose--thread-response-overlays ()
   "Return what covers the words under each card, to draw the rail beside them.

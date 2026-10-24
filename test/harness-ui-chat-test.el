@@ -3621,6 +3621,20 @@ first card stays the message's own; sending the box splits it at the cards."
                            (mapcar (lambda (a) (plist-get (car (harness-thread-refs (plist-get a :thread))) :text))
                                    atts)))))))))
 
+(defun harness-ui-chat-test-bars (pos)
+  "Return the bars drawn down the left of the line at POS, as a string.
+Those of the line's prefix, which the transcript draws beside the text
+\(`harness-chat--margin'), and the ones that are text of the line itself,
+before its words: a rail (`harness-thread-rail') is either."
+  (save-excursion
+    (goto-char pos)
+    (let* ((bol (line-beginning-position))
+           (prefix (format "%s" (or (get-text-property bol 'line-prefix) "")))
+           (line (buffer-substring-no-properties bol (line-end-position))))
+      (string-match "\\`[ ▌▎]*" line)
+      (concat (cl-remove-if-not (lambda (c) (memq c '(?▌ ?▎))) prefix)
+              (cl-remove-if-not (lambda (c) (memq c '(?▌ ?▎))) (match-string 0 line))))))
+
 (ert-deftest harness-ui-chat-c-c-<-leaves-the-reply-for-your-own-message ()
   "C-c > on part of the agent's message starts a reply, point under its card; the
 box has a line for your own message above the card, and C-c < moves point out
@@ -3679,9 +3693,11 @@ reply with its own words."
 
 (ert-deftest harness-ui-chat-draws-your-replies-in-threads-as-cards ()
   "A message of yours that holds replies in threads draws each as a card -- what it
-replies to and the part quoted -- with the words under it beside the same
-rail; the words of the message that are no reply come first.  Once the review
-has made the reply a thread, the first line ends with a link to it."
+replies to and the part quoted -- with the words under it as far in as the
+card; the words of the message that are no reply come first.  The bar down
+the message is the one bar: the card and the words under it have no rail
+of their own beside it.  Once the review has made the reply a thread, the
+first line ends with a link to it."
   (harness-ui-chat-test-with
     (let* ((sid (harness-ui-chat-test-session))
            (buf (harness-ui-chat-test-open sid))
@@ -3699,14 +3715,31 @@ has made the reply a thread, the first line ends with a link to it."
         (let* ((block (car (harness-ui-chat-test-blocks buf "user")))
                (text (harness-ui-chat-test-block-text block)))
           (should (string-match-p "Two things:\n" text))
-          (should (string-match-p "▎ ↩ agent's message  ↳ thread t-3f2a1b09\n▎ The deploy is pending\\.\n▎ Since noon\\.\nSince when\\?\n" text))
-          (should (string-match-p "▎ ↩ lisp/a\\.el:3-4 (after)\n▎ (a)\n▎ (b)\nWhy a list\\?\n" text))
-          ;; The rail beside the words is drawn, not text, so it follows a wrapped line.
+          ;; The card keeps its header, its icon and its quote, two columns in
+          ;; where the rail was; the words under it start at the same column.
+          (should (string-match-p "^  ↩ agent's message  ↳ thread t-3f2a1b09\n  The deploy is pending\\.\n  Since noon\\.\nSince when\\?\n" text))
+          (should (string-match-p "^  ↩ lisp/a\\.el:3-4 (after)\n  (a)\n  (b)\nWhy a list\\?\n" text))
+          ;; One bar, not two: the message's own, down every line of the reply
+          ;; -- the card's and the words under it -- and no rail beside it.
+          (should-not (string-search "▎" text))
+          (dolist (word '("↩ agent's message" "The deploy is pending." "Since noon." "Since when?"
+                          "↩ lisp/a.el" "(a)" "(b)" "Why a list?" "And the second line."))
+            (let ((pos (harness-ui-chat-test-find buf word (harness-chat-block-start block))))
+              (should pos)
+              (should (equal (list word "▌") (list word (harness-ui-chat-test-bars (1- pos)))))))
+          ;; The blank line between two replies carries the bar too, no gap.
+          (let ((pos (harness-ui-chat-test-find buf "Since when?\n" (harness-chat-block-start block))))
+            (should (eq ?\n (char-after pos)))
+            (should (equal "▌" (harness-ui-chat-test-bars pos))))
+          ;; The blanks beside the words are drawn, not text, so they follow a
+          ;; wrapped line.
           (let ((pos (harness-ui-chat-test-find buf "Since when?" (harness-chat-block-start block))))
-            (should (string-match-p "▎" (format "%s" (get-text-property (- pos 3) 'line-prefix))))
-            (should (string-match-p "▎" (format "%s" (get-text-property (- pos 3) 'wrap-prefix))))
-            ;; A prefix takes no face from the text: the rail has the message's,
-            ;; or it would show on the frame's background instead.
+            (should (string-match-p "▌  " (format "%s" (get-text-property (- pos 3) 'line-prefix))))
+            (should (string-match-p "▌  " (format "%s" (get-text-property (- pos 3) 'wrap-prefix))))
+            (should-not (string-match-p "▎" (format "%s" (get-text-property (- pos 3) 'line-prefix))))
+            (should-not (string-match-p "▎" (format "%s" (get-text-property (- pos 3) 'wrap-prefix))))
+            ;; A prefix takes no face from the text: the blanks have the message's,
+            ;; or they would show on the frame's background instead.
             (let ((prefix (get-text-property (- pos 3) 'line-prefix)))
               (should (memq 'harness-user-face
                             (ensure-list (get-text-property (1- (length prefix)) 'face prefix))))))
@@ -3716,10 +3749,12 @@ has made the reply a thread, the first line ends with a link to it."
           ;; The thread's link opens the review at it.
           (let ((link (harness-ui-chat-test-find buf "thread t-3f2a1b09" (harness-chat-block-start block))))
             (should (equal "harness:thread/t-3f2a1b09" (get-text-property (1- link) 'harness-url))))
-          ;; The words under a card are Markdown, with the rail on each line.
+          ;; The words under a card are Markdown, as far in as the card on each
+          ;; line, under the message's bar alone.
           (let ((pos (harness-ui-chat-test-find buf "second" (harness-chat-block-start block))))
             (should (harness-ui-chat-test-face-at (1- pos) 'bold))
-            (should (string-match-p "▎" (format "%s" (get-text-property (1- pos) 'line-prefix))))))))))
+            (should (string-match-p "▌  " (format "%s" (get-text-property (1- pos) 'line-prefix))))
+            (should-not (string-match-p "▎" (format "%s" (get-text-property (1- pos) 'line-prefix))))))))))
 
 (ert-deftest harness-ui-chat-a-click-on-a-card-shows-what-it-replies-to ()
   "A card of a reply in a thread, in the transcript, shows the message it replies

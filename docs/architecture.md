@@ -11018,9 +11018,9 @@ message of the agent's for the jumps (`M-n`, `M-p`: kind `thread` in
 `harness-chat--message-kinds`, not an action), `C-c C-w` and `C-u C-c >`
 (`harness-chat--block-markdown` reads its `:body`).  A message of the
 user's that holds replies in threads draws each as the card it was in
-the box, and the words under it beside the same rail
-(`harness-chat--render-replies`, see Threads), the thread's link
-on the card's first line once the review made it one.  A message with
+the box, and the words under it as far in as the card, under the
+message's own bar alone (`harness-chat--render-replies`, see Threads),
+the thread's link on the card's first line once the review made it one.  A message with
 many replies draws the first, a button line for the ones between
 (`▸ 6 earlier replies`, `change-review-ui-folded-replies`) and the last
 `change-review-ui-tail-replies`; words of a reply, or the agent's words
@@ -12064,8 +12064,15 @@ and `harness-compose-prepend` lay them out again, for a message taken
 back.  The chat draws the cards of a sent message the same way
 (`harness-chat--render-replies`, `harness-thread-card-lines` once more),
 every line of a card a button that shows the reference it is of, and the
-words under it a Markdown rendering beside the rail, which is a prefix
-that has the message's face, since a prefix takes none from the text.  A
+words under it a Markdown rendering beside the rail's place.  A reply has the one bar: the box
+draws the rail (`harness-thread-rail`) down the card and the words, with
+no other bar beside it, but a message of the chat has its own down every
+line (`harness-chat--margin`) and a box can have an accent bar
+(`harness-compose-bar`), so there the rail's two columns are blank
+(`harness-thread-rail` with BARRED, the RAIL argument of
+`harness-thread-card-lines`) and the card and the words stand where they
+stood beside it.  Where the blank is a line prefix, as beside the words, it
+has the message's face, since a prefix takes none from the text.
 message of many replies folds the ones between the first and the last few,
 and long words are cut, as the review's threads are, by the library's
 counts (`harness-chat--earlier-line`, `harness-chat--cut-words`).
