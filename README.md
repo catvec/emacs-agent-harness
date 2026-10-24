@@ -741,6 +741,7 @@ so `C-c .` is how you aim a key at a panel from there (see
 | `C-M-n` / `C-M-p` | Jump to the next or previous tool call or thinking block; a run of tool calls folded under one summary line is one stop. Coming from the box, the first jump lands on the newest one |
 | `C-c C-s` | Search the transcript |
 | `C-c C-t` | Show or hide the session's todo list |
+| `C-c C-j` | Show or hide the recaps before the newest, above the line saying what the agent is doing while a turn runs (a click on the recap does it too) |
 | `C-c C-w` | Copy the last reply |
 | `C-c C-l` | Copy a link to the message or tool call at point -- `harness:session/ID/message/NODE`, `harness:session/ID/call/NODE` -- or to the session where point is on none; with `C-u` the Markdown link `[words](URL)`. Paste it in a message and the agent can write it in what it says (see [Links in what agents write](#links-in-what-agents-write)) |
 | `C-c M-l` | Copy a link to the session (`C-u`: as `[name](URL)`) |
@@ -1064,10 +1065,29 @@ open with `SPC`, and a request shown whole in one shows whole in the
 other.
 
 While the agent works through a todo list (`todo_write`), the list stays
-in view: a panel above the compose box gives the progress and lists
-every item with its state. `C-c C-t`, `TAB` on the panel, or a click on
-its fold button folds it to the progress and the item in hand and
-brings the items back; the list disappears when the agent clears it.
+in view: a panel above the compose box gives the progress and the item
+in hand, and lists every item with its state once you open it. It
+starts folded to that one line, so a long list does not take the screen;
+`C-c C-t`, `TAB` on the panel, or a click on its fold button opens it and
+folds it again, and a chat you opened or folded keeps it so
+(`harness-chat-todos-collapsed` nil starts the lists open instead). The
+list disappears when the agent clears it.
+
+A turn of many tool calls is easy to lose track of, so the line saying
+what the agent is doing has the turn's recap above it: one sentence from
+a cheap model, made now and then as the turn goes on -- every
+`harness-tasks-recap-seconds` seconds or `harness-tasks-recap-tool-calls`
+tool calls, counted from the start of the turn or the last recap, the
+same thresholds a task card's recap has -- under a chevron, with how
+long ago it was made: `› Recap · 2m ago · Rewrote the tokenizer; two of
+the three tests pass`. Click it, or press `C-c C-j`, to see the last few
+(`harness-tasks-recap-history`, five), oldest first, each with its age,
+the newest right above the line, and the same again to fold them. It
+shows while a turn runs and only if there is a recap: the recaps of a
+turn are dropped when the next one begins, and a session that is a
+task's keeps the recaps of its card. `harness-tasks-recap-chats` nil
+makes none for sessions that are no task's (a task still has its
+card's), and `harness-tasks-recap` nil makes no recap at all.
 
 A session that other sessions merge their work into -- the sub-agents it
 started, in worktrees of their own -- shows that queue in the same place,

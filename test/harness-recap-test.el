@@ -30,6 +30,12 @@
 (defvar harness-tasks-recap-model)
 (defvar harness-tasks-recap-interval)
 (defvar harness-tasks-recap-retry)
+(defvar harness-tasks-recap-chats)
+(defvar harness-tasks-recap-history)
+(defvar harness-recap--runs)
+(declare-function make-harness-agent-turn "harness-agent")
+(declare-function harness-recap-history "harness-recap")
+(declare-function harness-recap--chat-maybe "harness-recap")
 (declare-function harness-short-id "harness-util")
 (declare-function harness-recap-sanitise "harness-recap")
 (declare-function harness-recap--maybe "harness-recap")
@@ -56,6 +62,7 @@ recaps: each test asks for one itself."
      (clrhash harness-recap--sessions)
      (clrhash harness-recap--session-running)
      (clrhash harness-recap--session-failed)
+     (clrhash harness-recap--runs)
      (setq harness-tasks--loaded t)
      (let ((harness-provider-demo--delay 0.005)
            (harness-provider-demo-script-override nil)
@@ -68,6 +75,8 @@ recaps: each test asks for one itself."
            (harness-tasks-recap-tool-calls nil)
            (harness-tasks-recap-model "demo:scripted")
            (harness-tasks-recap-retry 60)
+           (harness-tasks-recap-chats t)
+           (harness-tasks-recap-history 5)
            (default-directory dir))
        (harness-add-filter 'permission/decide
                            (lambda (_d next &rest _) (funcall next (list :behavior 'allow))) 10)
@@ -396,3 +405,322 @@ and the tasks module would prompt the session while a test runs."
       (harness-test-wait
        (lambda () (cl-some (lambda (n) (string-match-p "recap: Implemented the widget, tests pass" n)) notes))
        10 "the child's recap in the note"))))
+
+;;;; The recaps a session keeps
+
+(defun harness-recap-test-texts (session-id)
+  "Return the texts of the recaps kept for SESSION-ID, oldest first."
+  (mapcar (lambda (record) (plist-get record :text)) (harness-recap-history session-id)))
+
+(defun harness-recap-test-script-of (&rest texts)
+  "Return a demo script override answering each recap request with the next of TEXTS."
+  (let ((left texts))
+    (lambda (_request)
+      (let ((text (or (pop left) "Ran out of recaps")))
+        (list (list :type 'text :delta text) '(:type done :stop-reason end-turn))))))
+
+(defun harness-recap-test-run-turn (session-id)
+  "Make the turn of SESSION-ID run, as `agent/turn-started' announces it."
+  (puthash session-id (make-harness-agent-turn :session-id session-id :started (float-time))
+           harness-agent--turns)
+  (harness-emit 'agent/turn-started session-id))
+
+(defun harness-recap-test-end-turn (session-id)
+  "End the turn of SESSION-ID, as `agent/turn-ended' announces it."
+  (remhash session-id harness-agent--turns)
+  (harness-emit 'agent/turn-ended session-id 'end-turn))
+
+(defun harness-recap-test-tool-results (session-id n)
+  "Finish N tool calls in the running turn of SESSION-ID."
+  (dotimes (_ n)
+    (harness-recap-test-add-tool-calls session-id 1)
+    (harness-emit 'agent/tool-result session-id nil)))
+
+(ert-deftest harness-recap-task-recaps-are-kept-in-the-sessions-history ()
+  "A card's recap is also added to the history of its session, a few of them."
+  (harness-recap-test-with
+    (let* ((sid (harness-recap-test-session))
+           (id (harness-recap-test-task sid))
+           (harness-provider-demo-script-override
+            (harness-recap-test-script-of "First" "Second" "Third"))
+           (harness-tasks-recap-history 2))
+      (should-not (harness-recap-history sid))
+      (dolist (text '("First" "Second" "Third"))
+        (should (equal text (harness-test-await (harness-recap--maybe sid t)))))
+      ;; The card shows the latest, the history the last two, oldest first.
+      (should (equal "Third" (harness-recap-test-recap id)))
+      (should (equal '("Second" "Third") (harness-recap-test-texts sid)))
+      (should (cl-every (lambda (record) (numberp (plist-get record :at)))
+                        (harness-recap-history sid)))
+      ;; The history is part of the session record, which is what a client is sent.
+      (should (equal '("Second" "Third")
+                     (mapcar (lambda (record) (plist-get record :text))
+                             (plist-get (plist-get (harness-call 'session/get sid) :ext) :recaps)))))))
+
+(ert-deftest harness-recap-history-survives-the-store ()
+  "The history comes back from the JSON store of the session record as it was."
+  (harness-recap-test-with
+    (let ((sid (harness-recap-test-session)))
+      (harness-call 'session/set-ext sid :recaps
+                    (list (list :text "One" :at 1700000000.5) (list :text "Two" :at 1700000100.25)))
+      ;; The record, as JSON writes it and the session reads it back.
+      (let* ((record (harness-session-plist (gethash sid harness-sessions)))
+             (stored (harness-json-parse (harness-json-encode record))))
+        (should (equal (list (list :text "One" :at 1700000000.5) (list :text "Two" :at 1700000100.25))
+                       (plist-get (harness-session-ext (harness-session--from-plist stored)) :recaps))))
+      ;; And from the store itself, after the harness exited and started again.
+      (harness-session-flush)
+      (clrhash harness-sessions)
+      (harness-session--load-all)
+      (should (equal '("One" "Two") (harness-recap-test-texts sid)))
+      (should (equal 1700000100.25 (plist-get (cadr (harness-recap-history sid)) :at)))
+      ;; A record that is no recap, or a blank one, is not one to show.
+      (harness-call 'session/set-ext sid :recaps
+                    (list (list :text "  " :at 1.0) (list :text "Kept" :at 2.0) 17))
+      (should (equal '("Kept") (harness-recap-test-texts sid)))
+      ;; One record alone, as a store may give a list of one back.
+      (harness-call 'session/set-ext sid :recaps (list :text "Alone" :at 3.0))
+      (should (equal '("Alone") (harness-recap-test-texts sid)))
+      (harness-call 'session/set-ext sid :recaps nil)
+      (should-not (harness-recap-history sid)))))
+
+(ert-deftest harness-recap-a-subagents-recap-is-kept-in-its-history ()
+  "A recap made for a sub-agent's session, on demand, joins its history too."
+  (harness-recap-test-with
+    (let* ((sid (harness-recap-test-child))
+           (harness-provider-demo-script-override harness-recap-test-script))
+      (harness-call 'session/append sid '(:kind user :content "do the widget"))
+      (harness-test-await (harness-recap--session-maybe sid (harness-call 'session/get sid) t))
+      (should (equal '("Implemented the widget, tests pass") (harness-recap-test-texts sid))))))
+
+;;;; Recaps of a chat while its turn runs
+
+(ert-deftest harness-recap-chat-is-recapped-as-its-turn-runs ()
+  "A session that is no task's gets a recap of its running turn, and keeps the last few.
+The request carries the message the turn answers and how long the turn
+has run, and counting starts anew with each recap."
+  (harness-recap-test-with
+    (let* ((sid (harness-recap-test-session))
+           (harness-provider-demo-script-override
+            (harness-recap-test-script-of "Read the parser" "Wrote the test" "Fixed the parser"))
+           (harness-tasks-recap-tool-calls 2)
+           (harness-tasks-recap-history 2)
+           (requests nil))
+      (harness-call 'session/append sid '(:kind user :content "an old request"))
+      (harness-call 'session/append sid '(:kind assistant :content "done"))
+      (harness-call 'session/append sid '(:kind user :content "refactor the parser"))
+      (harness-recap-test-run-turn sid)
+      (cl-letf* ((orig (symbol-function 'harness-method/provider/complete))
+                 ((symbol-function 'harness-method/provider/complete)
+                  (lambda (req) (push req requests) (funcall orig req))))
+        ;; One tool call is not enough, the second is.
+        (harness-recap-test-tool-results sid 1)
+        (should-not requests)
+        (harness-recap-test-tool-results sid 1)
+        (harness-test-wait (lambda () (harness-recap-history sid)) 5 "the first recap")
+        (should (equal '("Read the parser") (harness-recap-test-texts sid)))
+        (let* ((req (car requests))
+               (message (car (last (plist-get req :messages))))
+               (text (plist-get (car (plist-get message :content)) :text)))
+          (should (equal "Recap" (plist-get req :job)))
+          (should (string-match-p "Task: refactor the parser" text))
+          (should-not (string-match-p "Task: an old request" text))
+          (should (string-match-p "Progress: the current turn has been running for" text))
+          (should-not (string-match-p "Progress: [0-9]+ turns" text)))
+        ;; Counting began again with it: one more call is not due, two are.
+        (harness-recap-test-tool-results sid 1)
+        (should (= 1 (length requests)))
+        (harness-recap-test-tool-results sid 1)
+        (harness-test-wait (lambda () (= 2 (length (harness-recap-history sid)))) 5 "the second recap")
+        (harness-recap-test-tool-results sid 2)
+        (harness-test-wait (lambda () (equal '("Wrote the test" "Fixed the parser")
+                                             (harness-recap-test-texts sid)))
+                           5 "the third recap, the first one dropped"))
+      (should (= 3 (length requests)))
+      ;; The kept record says when each was made.
+      (should (cl-every (lambda (record) (numberp (plist-get record :at)))
+                        (harness-recap-history sid))))))
+
+(ert-deftest harness-recap-chat-counts-from-its-turn-not-its-session ()
+  "An old conversation is not due a recap the moment its turn starts.
+The card's seconds threshold counts from the start of the session when
+no recap was made; a chat counts from the start of its turn."
+  (harness-recap-test-with
+    (let* ((sid (harness-recap-test-session))
+           (harness-provider-demo-script-override harness-recap-test-script)
+           (harness-tasks-recap-seconds 120)
+           (started nil))
+      (cl-letf* ((orig (symbol-function 'harness-method/provider/complete))
+                 ((symbol-function 'harness-method/provider/complete)
+                  (lambda (req) (setq started t) (funcall orig req))))
+        ;; A session made a day ago: the card's baseline, the session's
+        ;; start, is long past, and it would be due at once.
+        (setf (cl-struct-slot-value 'harness-session 'created (gethash sid harness-sessions))
+              (- (float-time) 86400))
+        (should (harness-recap--due-p (list :started (- (float-time) 86400)) 0 0 (float-time)))
+        (harness-recap-test-run-turn sid)
+        (should-not (harness-recap--chat-maybe sid))
+        (harness-emit 'agent/tool-result sid nil)
+        (should-not started)
+        ;; Two minutes into the turn it is.
+        (puthash sid (list :started (- (float-time) 130) :at (- (float-time) 130) :tools 0)
+                 harness-recap--runs)
+        (should (harness-recap--chat-maybe sid))
+        (harness-test-wait (lambda () (harness-recap-history sid)) 5 "the recap")
+        (should started)))))
+
+(ert-deftest harness-recap-chat-recapped-on-time-by-the-timer-check ()
+  "The check that runs every few seconds recaps a quiet turn that has run long enough."
+  (harness-recap-test-with
+    (let* ((sid (harness-recap-test-session))
+           (harness-provider-demo-script-override harness-recap-test-script)
+           (harness-tasks-recap-seconds 120))
+      (harness-recap-test-run-turn sid)
+      (harness-recap--check-running)
+      (should-not (harness-recap-history sid))
+      (puthash sid (list :started (- (float-time) 300) :at (- (float-time) 300) :tools 0)
+               harness-recap--runs)
+      (harness-recap--check-running)
+      (harness-test-wait (lambda () (harness-recap-history sid)) 5 "the recap on time")
+      (should (equal '("Implemented the widget, tests pass") (harness-recap-test-texts sid))))))
+
+(ert-deftest harness-recap-chat-recaps-nothing-once-its-turn-ended ()
+  "A turn that ended is not recapped, and nothing is counted for it any more."
+  (harness-recap-test-with
+    (let* ((sid (harness-recap-test-session))
+           (harness-provider-demo-script-override harness-recap-test-script)
+           (harness-tasks-recap-tool-calls 1)
+           (started nil))
+      (harness-recap-test-run-turn sid)
+      (should (gethash sid harness-recap--runs))
+      (harness-recap-test-end-turn sid)
+      (should-not (gethash sid harness-recap--runs))
+      (cl-letf* ((orig (symbol-function 'harness-method/provider/complete))
+                 ((symbol-function 'harness-method/provider/complete)
+                  (lambda (req) (setq started t) (funcall orig req))))
+        (harness-recap-test-tool-results sid 3)
+        (harness-recap--check-running)
+        (should-not (harness-recap--maybe sid t))
+        (should-not started)
+        (should-not (gethash sid harness-recap--runs))
+        (should-not (harness-recap-history sid))))))
+
+(ert-deftest harness-recap-chat-can-be-turned-off ()
+  "With `harness-tasks-recap-chats' nil, or recaps off, a chat gets none."
+  (harness-recap-test-with
+    (let* ((sid (harness-recap-test-session))
+           (harness-provider-demo-script-override harness-recap-test-script)
+           (harness-tasks-recap-tool-calls 1)
+           (started nil))
+      (cl-letf* ((orig (symbol-function 'harness-method/provider/complete))
+                 ((symbol-function 'harness-method/provider/complete)
+                  (lambda (req) (setq started t) (funcall orig req))))
+        (let ((harness-tasks-recap-chats nil))
+          (harness-recap-test-run-turn sid)
+          (harness-recap-test-tool-results sid 2))
+        (let ((harness-tasks-recap nil))
+          (harness-recap-test-tool-results sid 2))
+        (should-not started)
+        (should-not (harness-recap-history sid))
+        ;; Back on, the next call is due.
+        (harness-recap-test-tool-results sid 1)
+        (harness-test-wait (lambda () (harness-recap-history sid)) 5 "the recap, with the setting back on")))))
+
+(ert-deftest harness-recap-chat-skips-internal-sessions-and-seeds ()
+  "The record of a model call and a prompt-cache seed have nothing to recap."
+  (harness-recap-test-with
+    (let* ((seed (harness-recap-test-session :ext '(:seed t)))
+           (internal (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)
+                                              :model "demo:scripted" :kind 'internal)
+                                :id))
+           (harness-provider-demo-script-override harness-recap-test-script)
+           (harness-tasks-recap-tool-calls 1)
+           (started nil))
+      (cl-letf* ((orig (symbol-function 'harness-method/provider/complete))
+                 ((symbol-function 'harness-method/provider/complete)
+                  (lambda (req) (setq started t) (funcall orig req))))
+        (dolist (sid (list seed internal))
+          (harness-recap-test-run-turn sid)
+          (harness-recap-test-tool-results sid 2))
+        (should-not started)))))
+
+(ert-deftest harness-recap-chat-drops-the-last-turns-recaps-but-a-task-keeps-its ()
+  "A new turn of a chat starts without the last turn's recaps; a task's stay.
+A task's recap is the work so far, which its card keeps."
+  (harness-recap-test-with
+    (let* ((chat (harness-recap-test-session))
+           (task-session (harness-recap-test-session)))
+      (harness-recap-test-task task-session)
+      (dolist (sid (list chat task-session))
+        (harness-call 'session/set-ext sid :recaps (list (list :text "Last turn's" :at 1.0))))
+      (harness-recap-test-run-turn chat)
+      (harness-recap-test-run-turn task-session)
+      (should-not (harness-recap-history chat))
+      (should (equal '("Last turn's") (harness-recap-test-texts task-session)))
+      ;; Only a session with a history is written to.
+      (let ((changes 0))
+        (harness-on 'session/ext-changed (lambda (&rest _) (cl-incf changes)))
+        (harness-recap-test-run-turn chat)
+        (should (zerop changes))))))
+
+(ert-deftest harness-recap-chat-backs-off-after-a-failure ()
+  "A chat's failed recap waits `harness-tasks-recap-retry' seconds like any other."
+  (harness-recap-test-with
+    (let* ((sid (harness-recap-test-session))
+           (harness-provider-demo-script-override
+            '((:type done :stop-reason error :error "the model is down")))
+           (harness-tasks-recap-tool-calls 1))
+      (harness-recap-test-run-turn sid)
+      (harness-recap-test-add-tool-calls sid 1)
+      (harness-emit 'agent/tool-result sid nil)
+      (harness-test-wait (lambda () (gethash sid harness-recap--session-failed)) 5 "the failure")
+      (should-not (harness-recap-history sid))
+      (harness-recap-test-tool-results sid 3)
+      (should-not (gethash sid harness-recap--session-running)))))
+
+(ert-deftest harness-recap-chat-counting-restarts-with-any-recap ()
+  "A recap of a running chat asked for another way is in its count too.
+The pet and the notes under the calls that show a session ask for one
+\(`harness-recap-session'); the chat's own comes after the seconds and
+tool calls that follow it, not twice in a row."
+  (harness-recap-test-with
+    (let* ((sid (harness-recap-test-session))
+           (harness-provider-demo-script-override harness-recap-test-script)
+           (harness-tasks-recap-tool-calls 3)
+           (requests 0))
+      (harness-recap-test-run-turn sid)
+      (cl-letf* ((orig (symbol-function 'harness-method/provider/complete))
+                 ((symbol-function 'harness-method/provider/complete)
+                  (lambda (req) (cl-incf requests) (funcall orig req))))
+        (harness-recap-test-tool-results sid 2)
+        (should (= 2 (plist-get (gethash sid harness-recap--runs) :tools)))
+        (should (zerop requests))
+        ;; Asked for by force, as the pet does.
+        (should (harness-recap--session-maybe sid (harness-call 'session/get sid) t))
+        (should (= 1 requests))
+        (should (= 0 (plist-get (gethash sid harness-recap--runs) :tools)))
+        (harness-test-wait (lambda () (harness-recap-history sid)) 5 "the recap")
+        ;; One more call is not due, as it would have been (the third).
+        (harness-recap-test-tool-results sid 1)
+        (should (= 1 requests))
+        (should (equal '("Implemented the widget, tests pass") (harness-recap-test-texts sid)))))))
+
+(ert-deftest harness-recap-shutdown-stops-listening-and-init-starts-again ()
+  "A stopped recap module makes no recap and counts nothing; started again, it does."
+  (harness-recap-test-with
+    (let* ((sid (harness-recap-test-session))
+           (harness-provider-demo-script-override harness-recap-test-script)
+           (harness-tasks-recap-tool-calls 2))
+      (harness-recap--shutdown)
+      (harness-recap-test-run-turn sid)
+      (harness-recap-test-tool-results sid 3)
+      (should-not (gethash sid harness-recap--runs))
+      (should-not (harness-recap-history sid))
+      ;; Started again, as a reload starts it: the next turn is counted.
+      (harness-recap--init)
+      (harness-recap-test-end-turn sid)
+      (harness-recap-test-run-turn sid)
+      (should (gethash sid harness-recap--runs))
+      (harness-recap-test-tool-results sid 2)
+      (harness-test-wait (lambda () (harness-recap-history sid)) 5 "the recap, after the module started again")
+      (harness-recap--shutdown))))

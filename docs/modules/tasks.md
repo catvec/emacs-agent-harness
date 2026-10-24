@@ -370,7 +370,9 @@ here logs, emits or returns one.
 - `harness-tasks-non-interactive` — When non-nil, task sessions run non-interactive.
 - `harness-tasks-permission-mode` — Permission mode of task sessions, or nil for the configured default.
 - `harness-tasks-recap` — When non-nil, task cards get a recap subtitle from a short model call.
+- `harness-tasks-recap-chats` — When non-nil, a session that is no task's gets recaps as its turn runs.
 - `harness-tasks-recap-context` — Characters of transcript a recap request may carry.
+- `harness-tasks-recap-history` — How many recaps of a session are kept, and shown when a chat opens its recap.
 - `harness-tasks-recap-interval` — Seconds between checks for a recap due on time while a task works.
 - `harness-tasks-recap-max-length` — Longest recap a card shows, in characters.
 - `harness-tasks-recap-max-tokens` — Most tokens a recap request may write.

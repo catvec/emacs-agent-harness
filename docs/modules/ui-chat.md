@@ -25,12 +25,15 @@ One buffer per session, "*harness: NAME*", laid out top to bottom:
   queue         messages queued for the next turn, each drawn as the
                 user message it will be, "queued" and its buttons on
                 its sender line
-  activity      while a turn runs, what it does and for how long, on a
-                background of its own, then a blank line
+  activity      while a turn runs, the recap of it so far, the newest
+                recap or, opened, the last few, then what the turn does
+                now and for how long, on a background of its own,
+                then a blank line
   pending panel permission requests and questions waiting for the user;
                 a question whose options have diagrams shows one of
                 them at a time, in one place, and switches between them
-  todos         the session's todo items, one per line, or folded
+  todos         the session's todo items, one per line, or folded to
+                the title line, which is how the panel starts
   attachments   chips for files attached to the next message
   notice        the session was deleted, or is inactive (sending resumes it)
   compose       an editable region; C-c C-c sends, RET adds a newline
@@ -131,6 +134,7 @@ this file never touches a session struct.
 - `harness-chat-thread-reply` — Start a reply in a thread to the region, or the message at point.
 - `harness-chat-toggle-block` — Collapse or expand the block ID (default the one at point).
 - `harness-chat-toggle-group` — Show or hide the tool calls of group GID (default the one at point).
+- `harness-chat-toggle-recap` — Show or hide the recaps before the newest, above the activity line.
 - `harness-chat-toggle-todos` — Show or hide the session's todo list above the compose box.
 - `harness-open-latest-session` — Open the newest session of the current project in POSITION.
 - `harness-open-session` — Open session ID in POSITION.
@@ -144,6 +148,7 @@ this file never touches a session struct.
 - `harness-chat-session-label` — Sender name shown above the messages the agent of another session sent.
 - `harness-chat-system-label` — Sender name shown above the messages the harness sent on its own.
 - `harness-chat-thread-quote-limit` — Most characters of a message a reply in a thread quotes.
+- `harness-chat-todos-collapsed` — Whether a chat's todo list starts folded to its title line.
 - `harness-chat-user-label` — Sender name shown above the user's messages.
 
 ## Uses

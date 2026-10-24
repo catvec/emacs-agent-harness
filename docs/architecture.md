@@ -9170,14 +9170,40 @@ most `harness-tasks-recap-max-tokens' tokens, without thinking unless
 `harness-tasks-recap-tool-calls', measured from the session's start
 until the first recap and from the last one after that (FORCE skips
 them).  Only a sub-agent's session (`harness-recap--session-own-p')
-gets one written, never an internal session (`session/internal-start'),
-whatever FORCE says; another session's is its card's business, though a
-recap already kept for it is shown, and the one in hand is returned
-while a new one is made.  The call that writes a recap is recorded as
-an internal session, "Recap", under the session it sums up.
-`recap/session-done' and
+gets one written here on demand, never an internal session
+(`session/internal-start'), whatever FORCE says; another session's is
+its card's business, though a recap already kept for it is shown, and
+the one in hand is returned while a new one is made.  The call that
+writes a recap is recorded as an internal session, "Recap", under the
+session it sums up.  `recap/session-done' and
 `recap/session-failed' announce it, and a failure waits
 `harness-tasks-recap-retry' seconds before the next try.
+
+Every recap made for a session -- a card's, a sub-agent's or a chat's --
+is also added to the session's history: the newest
+`harness-tasks-recap-history' (5) of them, oldest first, in its `ext'
+as `:recaps', a list of `(:text TEXT :at FLOAT)' (`harness-recap-history'
+reads it, `harness-recap--remember' adds to it).  Being in the `ext' it
+is stored with the record, rides every `session/changed' to the
+clients, is cleaned by a redaction with the rest of the record, and is
+not copied to a fork.  A session that is no task's -- a conversation, a
+fork, a sub-agent -- is recapped while its turn runs, for the chat that
+shows it (`harness-tasks-recap-chats', on by default; `session/set-ext'
+announces each recap, which is how the chat hears of it): the card's
+thresholds `harness-tasks-recap-seconds' and
+`harness-tasks-recap-tool-calls', counted from the start of the turn
+or the last recap (`harness-recap--runs', kept from `agent/turn-started'
+to the end of the turn; a conversation that sat for a day is not due a
+recap the moment you write to it), checked after each tool result and by
+the timer every `harness-tasks-recap-interval' seconds.  The request is
+the card's, with the newest user message as its task, since a long turn
+has pushed it out of the transcript's tail, and a progress line saying
+how long the turn has run.  Nothing is made once the turn ended, for an
+internal session or a seed conversation (the `:seed' of its `ext').  A
+session that is no task's starts each turn without the last one's
+recaps (`harness-recap--on-turn-started'), so a chat never shows them
+above the new turn's line; a task's are kept, as its card keeps its
+recap.
 
 A `bash' command still running notes itself under the call from the
 start and then at most every `harness-tools-shell--note-interval'
@@ -11430,8 +11456,22 @@ instead.  The overlay sits, empty, where the line goes
 where `harness-chat-top-functions` drew something (the pet's figure,
 which then stands on the line), the end of that text, which the property
 `harness-chat-top` marks.  A render of the tail takes the overlay off
-its place and `harness-chat--refresh-activity` puts it back.  The mode
-line's spinner gives the phase only in its tooltip:
+its place and `harness-chat--refresh-activity` puts it back.  The
+recap of the turn is the first line of the same overlay string, above
+the activity line: the session's newest recap in a line of its own,
+"Recap · 2m ago · what the turn has done", folded under a chevron, and,
+opened, the last few oldest first, each with its age, the newest right
+above the activity line (`harness-chat--recap-block'; the recaps are in
+the session's `ext', see the recap module).  A click on it, or
+`harness-chat-toggle-recap' (`C-c C-j'), opens and folds it, and what
+the reader chose stays from turn to turn.  Every line is one screen
+line, cut with an ellipsis whose tooltip holds the whole recap, so the
+box below never jumps; opening or folding it changes the height above the
+box, which sizes the box's padding again as the line appearing does
+(`harness-chat--show-activity').  It is drawn over the line's
+background, goes with the line (nothing without a recap or a running
+turn), and a recap that cannot be drawn leaves the activity line as it
+is.  The mode line's spinner gives the phase only in its tooltip:
 this line is where it shows.  It has a background of
 its own (`harness-chat-activity-face`) and a blank line under it, which
 set it apart from the compose box: an overlay string is drawn over the
@@ -11454,7 +11494,10 @@ line has the status: its icon and word, the spinner while a turn runs
 (its tooltip says what the turn does), and the turn's duration while
 the turn runs, not while the session is blocked waiting on the user.
 The todo list is left to its panel above the compose
-box, what the turn does to the activity line, and the output tokens and
+box -- which starts folded to its title line, the progress and the item
+in hand (`harness-chat-todos-collapsed'), until the reader opens it,
+and stays as the reader leaves it -- what the turn does to the activity
+line, and the output tokens and
 rate to the session list and the tooltip of a task card's title.  The output
 rate ("48 tok/s", `harness-ui-format-rate`) is the session's rate as the
 usage module measured it. It is dimmed when the session is not running,

@@ -633,6 +633,28 @@ The tail of the transcript, so the request stays short on a long task."
   "Seconds before a new recap is tried again after one failed."
   :type '(choice (const :tag "No wait" nil) (number :tag "Seconds")) :group 'harness)
 
+(defcustom harness-tasks-recap-chats t
+  "When non-nil, a session that is no task's gets recaps as its turn runs.
+The chat of a running turn shows the newest above the line saying what
+the turn does, and the last `harness-tasks-recap-history' of them when
+the recap is opened: a turn of many tool calls is easy to lose track
+of.  They are made as a task card's are, a short call to the simple
+tier, with the same thresholds -- `harness-tasks-recap-seconds' and
+`harness-tasks-recap-tool-calls', counted from the start of the turn
+or from the last recap -- and only while a turn runs; the recaps of one
+turn are dropped when the next begins.  Nil makes none (a task still
+has its card's).  `harness-tasks-recap' off turns every recap off."
+  :type 'boolean :group 'harness)
+
+(defcustom harness-tasks-recap-history 5
+  "How many recaps of a session are kept, and shown when a chat opens its recap.
+The newest ones: a chat that runs a turn shows the latest above the
+line saying what the turn does, and this many with the recap opened,
+oldest first, so the turn's course can be read at a glance.  They are
+kept in the session's `ext' as `:recaps'.  A task's card shows the
+latest alone.  1 keeps the latest only."
+  :type '(integer :tag "Recaps") :group 'harness)
+
 (defconst harness-tasks--start-message
   "Write-up done; start the work now. You can edit files and run commands. Check on any related tasks it lists before touching the same code."
   "Opening of the message that starts a backlog task's work.

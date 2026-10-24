@@ -2,7 +2,7 @@
 
 # recap
 
-Write the recaps task cards show, with a short model call.
+Write the recaps task cards and running chats show, with a short model call.
 
 - **Runs in:** the harness process
 - **Source:** [lisp/modules/harness-recap.el](../../lisp/modules/harness-recap.el)
@@ -38,6 +38,20 @@ shows the recap, in the needs-input column.  One request per session
 is in flight at a time, and a failed one waits
 `harness-tasks-recap-retry` seconds before the next try.
 
+A chat shows the recap too: while a turn runs, the line above the one
+saying what it does (see `harness-ui-chat`), and, opened, the last few.
+So every recap made for a session -- a card's, a sub-agent's, a
+chat's -- is also added to the session's history, the newest
+`harness-tasks-recap-history` of them in its `ext` as `:recaps`
+(see "The recaps a session keeps").  The `ext` travels with the
+session record, so every client has it and a restart keeps it, and a
+redaction cleans it with the rest of the record.  A session that is
+no task's gets its recaps while its turn runs, with the card's
+thresholds counted from the start of the turn or the last recap
+(`harness-tasks-recap-chats`); the recaps of a turn are dropped when
+the next one begins, so a chat never shows the last turn's above this
+one's.
+
 ## Provides
 
 ### Events
@@ -57,6 +71,7 @@ is in flight at a time, and a failed one waits
 - `session/exists-p` ([session](session.md))
 - `session/get` ([session](session.md))
 - `session/nodes` ([session](session.md))
+- `session/set-ext` ([session](session.md))
 - `session/transcript-text` ([session](session.md))
 - `task/for-session` ([tasks](tasks.md))
 - `task/set-recap` ([tasks](tasks.md))
@@ -65,6 +80,7 @@ is in flight at a time, and a failed one waits
 
 - `agent/tool-result` → `harness-recap--on-tool-result`
 - `agent/turn-ended` → `harness-recap--on-turn-ended` at 40
+- `agent/turn-started` → `harness-recap--on-turn-started`
 
 ### Events it emits
 

@@ -1891,6 +1891,296 @@ there it is at the end of the transcript, as it was before the hook."
           (should (= (end) (place)))
           (should (line)))))))
 
+(defun harness-ui-chat-test-set-session (buf &rest plist)
+  "Change the keys of PLIST in BUF's session, as a `_harness/session' push would."
+  (with-current-buffer buf
+    (let ((session (copy-sequence (harness-chat--session))))
+      (while plist (setq session (plist-put session (pop plist) (pop plist))))
+      (harness-ui-cache-session session)
+      (harness-chat--apply-update (list :sessionUpdate "_harness/session" :session session)))))
+
+(defun harness-ui-chat-test-set-recaps (buf &rest recaps)
+  "Make the session of BUF keep RECAPS, oldest first, each (TEXT SECONDS-AGO)."
+  (harness-ui-chat-test-set-session
+   buf :ext (list :recaps (mapcar (lambda (recap)
+                                    (list :text (car recap) :at (- (float-time) (cadr recap))))
+                                  recaps))))
+
+(defun harness-ui-chat-test-recap-lines (buf)
+  "Return the lines of the activity line of BUF, without their text properties."
+  (let ((line (harness-ui-chat-test-activity-line buf)))
+    (and line (split-string (substring-no-properties line) "\n"))))
+
+(ert-deftest harness-ui-chat-recap-shows-above-the-activity-line ()
+  "The newest recap is a line of its own above the one saying what the turn does.
+It is folded under a ▸ with how long ago it was made, and goes with the
+line: no recap, or no running turn, none."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid)))
+      (cl-flet ((lines () (harness-ui-chat-test-recap-lines buf)))
+        (harness-ui-chat-test-set-status buf "running")
+        ;; Running with no recap: the activity line alone, as before.
+        (should (string-match-p "\\`[^\n]+\n\n\\'" (harness-ui-chat-test-activity-line buf)))
+        (harness-ui-chat-test-set-recaps buf)
+        (should (string-match-p "\\`[^\n]+\n\n\\'" (harness-ui-chat-test-activity-line buf)))
+        ;; Recaps arrive with the session record: the newest shows, above the line.
+        (harness-ui-chat-test-set-recaps buf '("Read the parser" 300) '("Wrote the failing test" 120))
+        (should (string-match-p "\\`[^\n]+\n[^\n]+\n\n\\'" (harness-ui-chat-test-activity-line buf)))
+        (should (string-match-p "\\` *[▸+] Recap · 2m ago · Wrote the failing test\\'" (nth 0 (lines))))
+        (should (string-match-p "Working" (nth 1 (lines))))
+        (should-not (string-match-p "Read the parser" (mapconcat #'identity (lines) "\n")))
+        ;; It is in the line's overlay, not in the buffer: nothing was edited.
+        (with-current-buffer buf
+          (should-not (string-match-p "Wrote the failing test" (buffer-string))))
+        ;; It goes as the turn does, and comes back with the next.
+        (harness-ui-chat-test-set-status buf "blocked")
+        (should-not (harness-ui-chat-test-activity-line buf))
+        (harness-ui-chat-test-set-status buf "idle")
+        (should-not (harness-ui-chat-test-activity-line buf))
+        (harness-ui-chat-test-set-status buf "running")
+        (should (string-match-p "Recap · 2m ago · Wrote the failing test" (nth 0 (lines))))))))
+
+(ert-deftest harness-ui-chat-recap-opens-to-the-last-few ()
+  "Opened, the recap lists the recaps kept, oldest first, each with its age.
+The newest is right above the activity line; the toggle is a command, a
+click and a key, and the choice stays from turn to turn."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid)))
+      (cl-flet ((lines () (harness-ui-chat-test-recap-lines buf)))
+        (harness-ui-chat-test-set-status buf "running")
+        (harness-ui-chat-test-set-recaps buf '("Read the parser" 3900) '("Wrote the failing test" 420)
+                                         '("Fixed the parser" 15))
+        (should (equal 2 (length (cl-remove-if #'string-empty-p (lines)))))
+        (with-current-buffer buf (harness-chat-toggle-recap))
+        (let ((lines (cl-remove-if #'string-empty-p (lines))))
+          ;; The header, the three recaps, the line saying what the turn does.
+          (should (equal 5 (length lines)))
+          (should (string-match-p "\\` *[▾-] Recap\\'" (nth 0 lines)))
+          (should (string-match-p "\\` +1h ago  Read the parser\\'" (nth 1 lines)))
+          (should (string-match-p "\\` +7m ago  Wrote the failing test\\'" (nth 2 lines)))
+          (should (string-match-p "\\` +15s ago  Fixed the parser\\'" (nth 3 lines)))
+          (should (string-match-p "Working" (nth 4 lines)))
+          ;; The ages line up.
+          (should (= (string-match "Read the parser" (nth 1 lines))
+                     (string-match "Wrote the failing test" (nth 2 lines))))
+          (should (= (string-match "Read the parser" (nth 1 lines))
+                     (string-match "Fixed the parser" (nth 3 lines)))))
+        ;; Those before the newest are dim, the newest is not.
+        (let* ((line (harness-ui-chat-test-activity-line buf))
+               (older (string-match "Read the parser" line))
+               (newest (string-match "Fixed the parser" line)))
+          (should (harness-ui-chat-test--face-in (get-text-property older 'face line) 'harness-dim-face))
+          (should-not (harness-ui-chat-test--face-in (get-text-property newest 'face line) 'harness-dim-face)))
+        ;; Folded again.
+        (with-current-buffer buf (harness-chat-toggle-recap))
+        (should (equal 2 (length (cl-remove-if #'string-empty-p (lines)))))
+        ;; A click does it, in the window it was made in.
+        (let* ((window (selected-window))
+               (line (harness-ui-chat-test-activity-line buf))
+               (map (get-text-property 0 'keymap line)))
+          (set-window-buffer window buf)
+          (should (keymapp map))
+          (should (eq #'harness-chat--recap-click (lookup-key map [mouse-1])))
+          (should (eq #'harness-chat--recap-click (lookup-key map [mouse-2])))
+          (funcall #'harness-chat--recap-click (list 'mouse-1 (list window 1 '(0 . 0) 0)))
+          (should (equal 5 (length (cl-remove-if #'string-empty-p (lines)))))
+          ;; The keymap is on every line of an opened recap.
+          (let ((open (harness-ui-chat-test-activity-line buf)))
+            (dolist (word '("Recap" "Read the parser" "Wrote the failing test" "Fixed the parser"))
+              (should (eq map (get-text-property (string-match word open) 'keymap open))))))
+        ;; The choice stays from one turn to the next.
+        (harness-ui-chat-test-set-status buf "idle")
+        (harness-ui-chat-test-set-status buf "running")
+        (should (equal 5 (length (cl-remove-if #'string-empty-p (lines)))))
+        ;; The key and the menu have it.
+        (should (eq #'harness-chat-toggle-recap (lookup-key harness-chat-mode-map (kbd "C-c C-j"))))
+        (should (cl-find #'harness-chat-toggle-recap (harness-ui-chat-test--menu-entries)
+                         :key (lambda (entry) (nth 2 entry))))))))
+
+(defun harness-ui-chat-test--face-in (face wanted)
+  "Non-nil when FACE, a face or a list of them, holds WANTED."
+  (if (listp face) (memq wanted face) (eq wanted face)))
+
+(ert-deftest harness-ui-chat-recap-toggle-says-so-when-no-recap-shows ()
+  "The toggle sets how the recap shows, and says so when there is none to see.
+The choice stays for the turn that has one."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid))
+           (said nil))
+      (cl-letf (((symbol-function 'message)
+                 (lambda (format-string &rest args)
+                   (push (apply #'format-message format-string args) said))))
+        (with-current-buffer buf
+          ;; Idle, and running with no recap: nothing to see, and it says how they will show.
+          (harness-chat-toggle-recap)
+          (should harness-chat--recap-expanded)
+          (should (string-match-p "they show opened" (car said)))
+          (harness-ui-chat-test-set-status buf "running")
+          (harness-chat-toggle-recap)
+          (should-not harness-chat--recap-expanded)
+          (should (string-match-p "they show folded" (car said)))
+          (harness-chat-toggle-recap)
+          (should harness-chat--recap-expanded)
+          ;; A turn that has a recap shows it as they were left, and the
+          ;; toggle then says nothing: it is on screen.
+          (setq said nil)
+          (harness-ui-chat-test-set-recaps buf '("Read the parser" 300) '("Wrote the failing test" 120))
+          (should (equal 4 (length (cl-remove-if #'string-empty-p (harness-ui-chat-test-recap-lines buf)))))
+          (harness-chat-toggle-recap)
+          (should-not harness-chat--recap-expanded)
+          (should (equal 2 (length (cl-remove-if #'string-empty-p (harness-ui-chat-test-recap-lines buf)))))
+          (should-not said)
+          ;; The turn over, it is as it was left.
+          (harness-ui-chat-test-set-status buf "idle")
+          (harness-chat-toggle-recap)
+          (should harness-chat--recap-expanded)
+          (should (string-match-p "they show opened" (car said))))))))
+
+(ert-deftest harness-ui-chat-recap-line-is-one-screen-line-with-the-words-in-its-tooltip ()
+  "A recap too long for the window is cut with an ellipsis, whole in its tooltip.
+Every line of it is one screen line, so the box below does not jump."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid))
+           (long (string-join (make-list 30 "Fixed the failing parser test") " ")))
+      (set-window-buffer (selected-window) buf)
+      (harness-ui-chat-test-set-status buf "running")
+      (harness-ui-chat-test-set-recaps buf (list long 60) (list long 30))
+      (dolist (open '(nil t))
+        (with-current-buffer buf (setq harness-chat--recap-expanded open))
+        (with-current-buffer buf (harness-chat--refresh-activity))
+        (let* ((line (harness-ui-chat-test-activity-line buf))
+               (width (window-body-width (selected-window))))
+          (dolist (text (split-string (substring-no-properties line) "\n" t))
+            (should (< (string-width text) width)))
+          (let ((cut (string-match "…" line)))
+            (should cut)
+            (should (equal long (get-text-property cut 'help-echo line))))
+          ;; The rest of a line says what a click does.
+          (should (string-match-p "mouse-1: \\(show\\|hide\\) the recaps"
+                                  (get-text-property (string-match "Recap" line) 'help-echo line))))))))
+
+(ert-deftest harness-ui-chat-recap-wears-the-activity-lines-background ()
+  "The recap lines are drawn over the activity line's background, to the window's edge."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid)))
+      (harness-ui-chat-test-set-status buf "running")
+      (harness-ui-chat-test-set-recaps buf '("Read the parser" 300) '("Wrote the failing test" 120))
+      (dolist (open '(nil t))
+        (with-current-buffer buf (setq harness-chat--recap-expanded open) (harness-chat--refresh-activity))
+        (let* ((line (harness-ui-chat-test-activity-line buf))
+               (ground '(:inherit default :extend t))
+               (end (1- (length line))))
+          (dotimes (pos end)
+            (let ((faces (ensure-list (get-text-property pos 'face line))))
+              (should (memq 'harness-chat-activity-face faces))
+              (should (equal ground (car (last faces))))
+              ;; A face that sets every attribute would hide the background.
+              (should-not (memq 'default faces))))
+          (should (equal ground (get-text-property end 'face line))))))))
+
+(ert-deftest harness-ui-chat-recap-opening-sizes-the-padding-again ()
+  "Opening or folding the recap changes the height above the box; ticks do not.
+The windows are padded and kept at the end again then, as when the
+activity line appears or goes."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid))
+           (window (selected-window))
+           (repads 0))
+      (set-window-buffer window buf)
+      (harness-ui-chat-test-set-status buf "running")
+      (harness-ui-chat-test-set-recaps buf '("Read the parser" 300) '("Wrote the failing test" 120))
+      (cl-letf* ((orig (symbol-function 'harness-compose-repad))
+                 ((symbol-function 'harness-compose-repad)
+                  (lambda (w) (cl-incf repads) (funcall orig w))))
+        (with-current-buffer buf
+          ;; A tick of the spinner or of the clock: the same height.
+          (harness-chat--spinner-tick)
+          (harness-chat--refresh-activity)
+          (should (zerop repads))
+          ;; A new recap replaces the newest: the same height.
+          (harness-ui-chat-test-set-recaps buf '("Read the parser" 300) '("Wrote the test" 120) '("Fixed it" 5))
+          (should (zerop repads))
+          ;; Opening it adds lines.
+          (harness-chat-toggle-recap)
+          (should (> repads 0))
+          (setq repads 0)
+          (harness-chat--spinner-tick)
+          (harness-chat--refresh-activity)
+          (should (zerop repads))
+          ;; Another recap while open adds a line.
+          (harness-ui-chat-test-set-recaps buf '("Read the parser" 300) '("Wrote the test" 120)
+                                           '("Fixed it" 5) '("Ran the tests" 1))
+          (should (> repads 0))
+          (setq repads 0)
+          ;; Folding takes them away.
+          (harness-chat-toggle-recap)
+          (should (> repads 0)))))))
+
+(ert-deftest harness-ui-chat-recap-reads-what-the-store-gives-back ()
+  "A list of one recap, a vector, and records with no words are all read."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid)))
+      (harness-ui-chat-test-set-status buf "running")
+      (cl-flet ((recaps (value)
+                  (harness-ui-chat-test-set-session buf :ext (list :recaps value))
+                  (with-current-buffer buf (mapcar (lambda (r) (plist-get r :text)) (harness-chat--recaps)))))
+        (should (equal '("Alone") (recaps (list :text "Alone" :at 1.0))))
+        (should (equal '("A" "B") (recaps (vector (list :text "A" :at 1.0) (list :text "B" :at 2.0)))))
+        (should (equal '("Kept") (recaps (list (list :text "  " :at 1.0) (list :text "Kept" :at 2.0) 17 nil))))
+        (should (equal '("One line") (recaps (list (list :text " One\n  line " :at 1.0)))))
+        (should (equal nil (recaps nil)))
+        (should (equal nil (recaps "junk")))
+        (should (equal nil (recaps 17)))
+        ;; A record with no time still shows, with no age.
+        (harness-ui-chat-test-set-session buf :ext (list :recaps (list (list :text "Timeless"))))
+        (should (string-match-p "\\` *[▸+] Recap · Timeless\\'" (nth 0 (harness-ui-chat-test-recap-lines buf))))))))
+
+(ert-deftest harness-ui-chat-recap-failing-leaves-the-activity-line ()
+  "A recap that cannot be drawn must not take the activity line with it."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid)))
+      (harness-ui-chat-test-set-status buf "running")
+      (harness-ui-chat-test-set-recaps buf '("Read the parser" 60))
+      (cl-letf (((symbol-function 'harness-chat--recap-block) (lambda (&rest _) (error "No recap today"))))
+        (with-current-buffer buf (harness-chat--refresh-activity))
+        (should (string-match-p "\\`[^\n]*Working[^\n]*\n\n\\'" (harness-ui-chat-test-activity-line buf)))))))
+
+(ert-deftest harness-ui-chat-recap-arrives-from-the-harness-and-counts-on ()
+  "A recap the harness keeps for the session reaches the running chat, ages and all.
+The harness sets it in the session's `ext'; the record's push brings it
+to the buffer, whose line the spinner redraws."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid)))
+      (harness-call 'session/set-status sid 'running)
+      (harness-test-wait (lambda () (harness-ui-chat-test-activity-line buf)) 5 "the activity line")
+      (should-not (string-match-p "Recap" (harness-ui-chat-test-activity-line buf)))
+      (harness-call 'session/set-ext sid :recaps
+                    (list (list :text "Read the parser" :at (- (float-time) 3700))
+                          (list :text "Wrote the failing test" :at (- (float-time) 90))))
+      (harness-test-wait (lambda () (string-match-p "Wrote the failing test" (harness-ui-chat-test-activity-line buf)))
+                         5 "the recap")
+      (should (string-match-p "Recap · 1m ago · Wrote the failing test" (harness-ui-chat-test-activity-line buf)))
+      ;; A newer recap replaces it in the line.
+      (harness-call 'session/set-ext sid :recaps
+                    (list (list :text "Read the parser" :at (- (float-time) 3700))
+                          (list :text "Wrote the failing test" :at (- (float-time) 90))
+                          (list :text "Fixed the parser" :at (float-time))))
+      (harness-test-wait (lambda () (string-match-p "Fixed the parser" (harness-ui-chat-test-activity-line buf)))
+                         5 "the newer recap")
+      (should (string-match-p "Recap · just now · Fixed the parser" (harness-ui-chat-test-activity-line buf)))
+      ;; Its turn over, the line and the recap go.
+      (harness-call 'session/set-status sid 'idle)
+      (harness-test-wait (lambda () (not (harness-ui-chat-test-activity-line buf))) 5 "the line to go"))))
+
 (ert-deftest harness-ui-chat-note-under-a-running-call ()
   "A running call shows the note the activity carries for it.
 The note goes under the call's own block -- a sub-agent's work, the
@@ -8550,8 +8840,9 @@ arrives meanwhile applies once the transcript is in."
 
 (ert-deftest harness-ui-chat-todos-show-in-the-panel ()
   "A session's todo list is conspicuous without opening its tool block:
-the progress and the items in a panel above the box.  The header line
-leaves the list to the panel, right above the box."
+the progress and the item in hand in a panel above the box, folded to
+its title line until the reader opens it.  The header line leaves the
+list to the panel, right above the box."
   (harness-ui-chat-test-with
     (let* ((sid (harness-ui-chat-test-session "Todos"))
            (buf (harness-ui-chat-test-open sid)))
@@ -8561,31 +8852,49 @@ leaves the list to the panel, right above the box."
                       (:id "3" :text "Check the result" :status "pending")))
       (harness-test-wait (lambda () (with-current-buffer buf
                                       (and harness-chat--todos
-                                           (harness-ui-chat-test-find buf "Check the result"))))
+                                           (harness-ui-chat-test-find buf "Todo list  1/3"))))
                          5 "the todo list to show")
       (with-current-buffer buf
         ;; Not in the header.
         (let ((header (harness-chat--header most-positive-fixnum)))
           (should-not (harness-ui-chat-test-segment header #'harness-chat-toggle-todos))
           (should-not (string-match-p "1/3\\|Make the change" header)))
-        ;; The panel shows the progress and every item; the one in
-        ;; progress is bold.
+        ;; It starts folded: the title line holds the progress and the
+        ;; item in hand, and the other items are not drawn.
+        (let ((title (harness-ui-chat-test-find buf "Todo list  1/3")))
+          (should (string-match-p "Make the change"
+                                  (save-excursion (goto-char title)
+                                                  (buffer-substring (point) (line-end-position))))))
+        (should-not (harness-ui-chat-test-find buf "Survey the project"))
+        (should-not (harness-ui-chat-test-find buf "Check the result"))
+        ;; Opening it lists every item; the one in progress is bold.
+        (harness-chat-toggle-todos)
         (should (harness-ui-chat-test-find buf "Todo list  1/3"))
         (should (harness-ui-chat-test-find buf "Survey the project"))
         (should (harness-ui-chat-test-find buf "Check the result"))
         (should (harness-ui-chat-test-face-at
                  (1- (harness-ui-chat-test-find buf "Make the change")) 'bold))
-        ;; Folding leaves the title line, with the item in hand;
-        ;; unfolding brings the items back.
+        ;; It stays open through a draw of the tail and a change of the list.
+        (harness-chat--render-tail)
+        (should (harness-ui-chat-test-find buf "Check the result"))
+        (harness-call 'session/set-todos sid
+                      '((:id "1" :text "Survey the project" :status "done")
+                        (:id "2" :text "Make the change" :status "done")
+                        (:id "3" :text "Check the result" :status "in-progress")))
+        (harness-test-wait (lambda () (with-current-buffer buf
+                                        (harness-ui-chat-test-find buf "Todo list  2/3")))
+                           5 "the list to change")
+        (should (harness-ui-chat-test-find buf "Survey the project"))
+        ;; Folding leaves the title line, with the item in hand; unfolding
+        ;; brings the items back.
         (harness-chat-toggle-todos)
-        (should-not (harness-ui-chat-test-find buf "Check the result"))
-        (let ((title (harness-ui-chat-test-find buf "Todo list  1/3")))
-          (should title)
-          (should (string-match-p "Make the change"
+        (should-not (harness-ui-chat-test-find buf "Survey the project"))
+        (let ((title (harness-ui-chat-test-find buf "Todo list  2/3")))
+          (should (string-match-p "Check the result"
                                   (save-excursion (goto-char title)
                                                   (buffer-substring (point) (line-end-position))))))
         (harness-chat-toggle-todos)
-        (should (harness-ui-chat-test-find buf "Check the result"))
+        (should (harness-ui-chat-test-find buf "Survey the project"))
         ;; Clearing the list takes the panel away.
         (harness-call 'session/set-todos sid nil)
         (harness-test-wait (lambda () (with-current-buffer buf (null harness-chat--todos)))
@@ -8593,6 +8902,44 @@ leaves the list to the panel, right above the box."
         (with-current-buffer buf
           (should-not (harness-ui-chat-test-find buf "Todo list"))
           (should-not (harness-ui-chat-test-find buf "Check the result")))))))
+
+(ert-deftest harness-ui-chat-todos-start-folded-unless-the-option-says-otherwise ()
+  "A fresh chat folds its todo list; `harness-chat-todos-collapsed' nil opens it.
+What the reader chose stays in that chat whatever the option says later."
+  (harness-ui-chat-test-with
+    (let ((todos '((:id "1" :text "Survey the project" :status "done")
+                   (:id "2" :text "Make the change" :status "in-progress"))))
+      ;; The default is a folded list.
+      (should harness-chat-todos-collapsed)
+      (let* ((sid (harness-ui-chat-test-session "Folded"))
+             (buf (harness-ui-chat-test-open sid)))
+        (with-current-buffer buf (harness-chat--on-plan
+                                  (list :entries (list (list :content "Survey the project" :status "completed")
+                                                       (list :content "Make the change" :status "in_progress")))))
+        (should (harness-ui-chat-test-find buf "Todo list  1/2"))
+        (should-not (harness-ui-chat-test-find buf "Survey the project")))
+      ;; With the option off a new chat shows the items.
+      (let ((harness-chat-todos-collapsed nil))
+        (let* ((sid (harness-ui-chat-test-session "Open"))
+               (buf (harness-ui-chat-test-open sid)))
+          (harness-call 'session/set-todos sid todos)
+          (harness-test-wait (lambda () (with-current-buffer buf harness-chat--todos)) 5 "the list")
+          (should (harness-ui-chat-test-find buf "Survey the project"))
+          ;; The reader folds it: it stays folded when the option goes on,
+          ;; and the other way round.
+          (with-current-buffer buf (harness-chat-toggle-todos))
+          (should-not (harness-ui-chat-test-find buf "Survey the project"))
+          (setq harness-chat-todos-collapsed t)
+          (with-current-buffer buf (harness-chat--render-tail))
+          (should-not (harness-ui-chat-test-find buf "Survey the project"))
+          (with-current-buffer buf (harness-chat-toggle-todos))
+          (should (harness-ui-chat-test-find buf "Survey the project"))
+          (setq harness-chat-todos-collapsed nil)
+          (with-current-buffer buf (harness-chat--render-tail))
+          (should (harness-ui-chat-test-find buf "Survey the project"))
+          ;; A session with no list has nothing to fold.
+          (with-current-buffer (harness-ui-chat-test-open (harness-ui-chat-test-session "None"))
+            (should-error (harness-chat-toggle-todos) :type 'user-error)))))))
 
 (ert-deftest harness-ui-chat-todos-follow-todo-write ()
   "The demo work script's `todo_write' calls keep the view current:
@@ -8633,7 +8980,11 @@ spellings; the chat used to drop it.  A long list is capped."
         (should (equal 25 (length harness-chat--todos)))
         (should (harness-ui-chat-test-find buf "Todo list  1/25"))
         (should-not (string-match-p "1/25" (harness-chat--header most-positive-fixnum)))
-        ;; The panel lists the cap, then counts the rest.
+        ;; Folded, it shows the item in hand alone.
+        (should (harness-ui-chat-test-find buf "item 2"))
+        (should-not (harness-ui-chat-test-find buf "item 20"))
+        (harness-chat-toggle-todos)
+        ;; Open, the panel lists the cap, then counts the rest.
         (should (harness-ui-chat-test-find buf "item 20"))
         (should (harness-ui-chat-test-find buf "… 5 more"))
         (should-not (harness-ui-chat-test-find buf "item 21"))))))

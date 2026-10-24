@@ -14,12 +14,15 @@
 ;;   queue         messages queued for the next turn, each drawn as the
 ;;                 user message it will be, "queued" and its buttons on
 ;;                 its sender line
-;;   activity      while a turn runs, what it does and for how long, on a
-;;                 background of its own, then a blank line
+;;   activity      while a turn runs, the recap of it so far, the newest
+;;                 recap or, opened, the last few, then what the turn does
+;;                 now and for how long, on a background of its own,
+;;                 then a blank line
 ;;   pending panel permission requests and questions waiting for the user;
 ;;                 a question whose options have diagrams shows one of
 ;;                 them at a time, in one place, and switches between them
-;;   todos         the session's todo items, one per line, or folded
+;;   todos         the session's todo items, one per line, or folded to
+;;                 the title line, which is how the panel starts
 ;;   attachments   chips for files attached to the next message
 ;;   notice        the session was deleted, or is inactive (sending resumes it)
 ;;   compose       an editable region; C-c C-c sends, RET adds a newline
@@ -187,6 +190,14 @@ from the harness and does not load that module.")
   "Sender name shown at the start of each agent turn."
   :type 'string :group 'harness-ui-chat)
 
+(defcustom harness-chat-todos-collapsed t
+  "Whether a chat's todo list starts folded to its title line.
+The title line holds the progress and the item in hand; the items are
+a click on the ▸ away, or \\`C-c C-t' (`harness-chat-toggle-todos').  A
+list the reader folded or opened stays so in that chat, whatever the
+setting says."
+  :type 'boolean :group 'harness-ui-chat)
+
 (defcustom harness-chat-system-label "System"
   "Sender name shown above the messages the harness sent on its own.
 A task carrying on after a restart, non-interactive mode after a denied
@@ -335,8 +346,14 @@ depends on it (`harness-chat--insert-queue').")
 (defvar-local harness-chat--inactive nil "Non-nil while the session is inactive; sending resumes it.")
 (defvar-local harness-chat--todos nil
   "The session's todo list as last seen: a list of (:text :status).")
-(defvar-local harness-chat--todos-collapsed nil
-  "Non-nil when the todo panel shows its title line alone.")
+(defvar-local harness-chat--todos-choice nil
+  "What the reader chose for this buffer's todo list: `open', `folded' or nil.
+Nil, until the reader folds or opens the list, follows
+`harness-chat-todos-collapsed'.  Drawing the tail again leaves it be.")
+(defvar-local harness-chat--recap-expanded nil
+  "Non-nil when the recap above the activity line shows the last few recaps.
+Nil shows the newest alone.  The reader's choice for this buffer: it
+stays from one turn to the next (`harness-chat-toggle-recap').")
 (defvar-local harness-chat--activity nil
   "What the running turn does, as `agent/activity' last said (wire shape).")
 (defvar-local harness-chat--notes nil
@@ -3924,8 +3941,11 @@ which wait for the end of the turn, with [send now], [edit] and
 ;; reading a tool block (those fold, and at work the list is the point):
 ;; a panel above the compose box with the progress and one line and a
 ;; status icon per item, which folds away to the progress and the item
-;; in hand, or disappears with the list.  The header line leaves it to
-;; the panel, right above the box.
+;; in hand, or disappears with the list.  It starts folded
+;; (`harness-chat-todos-collapsed'): the title line says how far the
+;; list is and what is in hand, and the items are a click or
+;; C-c C-t away; what the reader chose stays, through every draw of
+;; the tail.  The header line leaves it to the panel, right above the box.
 
 (defconst harness-chat--todos-limit 20
   "Most todo items the panel lists before it counts the rest.")
@@ -3992,17 +4012,30 @@ session plist that repeats it."
     ("in-progress" '(harness-icon-running . harness-status-running-face))
     (_ '(harness-icon-idle . harness-dim-face))))
 
+(defun harness-chat--todos-collapsed-p ()
+  "Non-nil when the todo panel shows its title line alone.
+That is what the reader chose in this buffer, else
+`harness-chat-todos-collapsed': a list starts folded."
+  (pcase harness-chat--todos-choice
+    ('folded t)
+    ('open nil)
+    (_ (and harness-chat-todos-collapsed t))))
+
 (defun harness-chat--insert-todos ()
   "Insert the panel listing the session's todo items.
 A fold button leads its title; every item follows with a status icon,
-the one in progress in bold and the rest dim.  A list longer than
+the one in progress in bold and the rest dim.  The panel starts folded
+to its title line, which holds the progress and the item in hand
+\(`harness-chat-todos-collapsed'); the reader opens it, and it stays as
+left through every draw of the tail.  A list longer than
 `harness-chat--todos-limit' counts the rest instead of showing them."
   (when harness-chat--todos
     (let* ((summary (harness-chat--todo-summary))
            (done (nth 0 summary))
            (total (nth 1 summary))
            (shown (seq-take harness-chat--todos harness-chat--todos-limit))
-           (fold (harness-chat--fold-button harness-chat--todos-collapsed
+           (collapsed (harness-chat--todos-collapsed-p))
+           (fold (harness-chat--fold-button collapsed
                                             #'harness-chat-toggle-todos
                                             "mouse-1, TAB: show or hide the todo list"))
            (start (point)))
@@ -4013,11 +4046,11 @@ the one in progress in bold and the rest dim.  A list longer than
                                   (format " Todo list  %d/%d" done total))
                           'face 'harness-label-face
                           'harness-chat-todos t)
-              (if harness-chat--todos-collapsed
+              (if collapsed
                   (concat "  " (propertize (or (nth 2 summary) "") 'face 'harness-dim-face))
                 "")
               "\n")
-      (unless harness-chat--todos-collapsed
+      (unless collapsed
         (dolist (item shown)
           (let* ((status (plist-get item :status))
                  (mark (harness-chat--todo-mark status)))
@@ -4035,10 +4068,12 @@ the one in progress in bold and the rest dim.  A list longer than
       (add-face-text-property start (point) 'harness-chat-plan-face t))))
 
 (defun harness-chat-toggle-todos ()
-  "Show or hide the session's todo list above the compose box."
+  "Show or hide the session's todo list above the compose box.
+The list starts folded (`harness-chat-todos-collapsed'); what you leave
+it as stays so in this chat, however often the tail is drawn again."
   (interactive)
   (unless harness-chat--todos (user-error "This session has no todo list"))
-  (setq harness-chat--todos-collapsed (not harness-chat--todos-collapsed))
+  (setq harness-chat--todos-choice (if (harness-chat--todos-collapsed-p) 'open 'folded))
   (harness-chat--render-tail))
 
 (defvar harness-chat-top-functions nil
@@ -5077,6 +5112,135 @@ The size of the tool input written so far, the latest line a tool reported."
           ((< s 3600) (format "%dm%02ds" (/ s 60) (% s 60)))
           (t (format "%dh%02dm" (/ s 3600) (/ (% s 3600) 60))))))
 
+;;;; The recap above the activity line
+;;
+;; A turn of many tool calls is easy to lose the thread of: the activity
+;; line says what it does this second, and the transcript above it is a
+;; wall of calls.  The recap module (harness-recap.el) sums the running
+;; turn up in a sentence now and then, and keeps the last few with the
+;; session (`:recaps' in its `ext', which every `_harness/session'
+;; update carries).  They are drawn in the activity line's own overlay
+;; string, above the line: the newest in a line of its own, with how
+;; long ago it was made, folded under a ▸; opened by a click on it, or
+;; `harness-chat-toggle-recap', a ▾ and the last few, oldest first, each
+;; with its age, the newest right above the line.  A line is one screen
+;; line, cut short with an ellipsis whose tooltip holds all of it.  The
+;; string is made again with the line, on every tick of the spinner, so
+;; the ages go on counting.  Nothing shows without a recap or a running
+;; turn.
+
+(defvar harness-chat-recap-map (make-sparse-keymap)
+  "Keymap of the recap above the activity line: a click folds or opens it.")
+
+;; Filled at top level, not in the `defvar', so a reload updates the map.
+(let ((map harness-chat-recap-map))
+  (define-key map [mouse-1] #'harness-chat--recap-click)
+  (define-key map [mouse-2] #'harness-chat--recap-click))
+
+(defun harness-chat--recaps ()
+  "Return the recaps the session keeps, oldest first, each (:text TEXT :at FLOAT).
+They are in the session's `ext' as `:recaps'; a record without words is
+left out, and one alone, as a store may give a list of one back, is a
+list of it."
+  (let ((records (plist-get (plist-get (harness-chat--session) :ext) :recaps)))
+    (when (keywordp (car-safe records)) (setq records (list records)))
+    (when (or (listp records) (vectorp records))
+      (cl-loop for record across (vconcat records)
+               for text = (and (consp record) (plist-get record :text))
+               when (and (stringp text) (not (string-blank-p text)))
+               collect (list :text (string-trim (replace-regexp-in-string "[ \t\n]+" " " text))
+                             :at (plist-get record :at))))))
+
+(defun harness-chat--recap-age (recap)
+  "Return how long ago RECAP was made, such as \"3m ago\", or \"\"."
+  (let ((at (plist-get recap :at)))
+    (if (numberp at) (harness-relative-time at) "")))
+
+(defun harness-chat--recap-chevron (open)
+  "Return the ▸ of a folded recap, or the ▾ of an open one (OPEN)."
+  (let ((icon (harness-ui-icon (if open 'harness-icon-expanded 'harness-icon-collapsed))))
+    (if (string-empty-p icon) (if open "-" "+") icon)))
+
+(defun harness-chat--recap-block (room)
+  "Return the recap above the activity line, ROOM columns wide, or nil.
+Nothing without a recap.  Folded it is the newest alone: the chevron,
+\"Recap\", how long ago it was made and its words.  Open
+\(`harness-chat--recap-expanded') it is a line of the chevron and
+\"Recap\", then each recap kept, oldest first, with its age before it,
+the newest in the usual colour and those before it dim.  Every line is
+one screen line; a click on any of them folds or opens the block, and
+the words, cut short, are whole in their tooltip."
+  (when-let* ((recaps (harness-chat--recaps)))
+    (let* ((open (and harness-chat--recap-expanded t))
+           (newest (car (last recaps)))
+           (toggle (format "mouse-1: %s the recaps before the newest (C-c C-j)"
+                           (if open "hide" "show")))
+           ;; The part of a line that is no recap's words: a click folds or opens.
+           (label (lambda (text)
+                    (propertize text 'face 'harness-dim-face 'help-echo toggle)))
+           (head (concat (propertize " " 'help-echo toggle)
+                         (propertize (harness-chat--recap-chevron open)
+                                     'face 'harness-dim-face 'mouse-face 'highlight 'help-echo toggle)
+                         (funcall label " Recap")))
+           ;; The words, cut to the room there is.  The usual colour is no
+           ;; face: the line's background is put under whatever has none.
+           (words (lambda (recap lead)
+                    (let ((text (plist-get recap :text)))
+                      (propertize (truncate-string-to-width text (max 8 (- room (string-width lead))) nil nil
+                                                            "\N{U+2026}")
+                                  'help-echo text
+                                  'face (if (eq recap newest) nil 'harness-dim-face)))))
+           (lines
+            (if open
+                (let* ((ages (mapcar #'harness-chat--recap-age recaps))
+                       (age-width (apply #'max (mapcar #'string-width ages))))
+                  (cons head
+                        (cl-loop for recap in recaps
+                                 for age in ages
+                                 for lead = (concat (funcall label "     ")
+                                                    (funcall label (concat (make-string (- age-width (string-width age)) ?\s)
+                                                                           age))
+                                                    (funcall label "  "))
+                                 collect (concat lead (funcall words recap lead)))))
+              (let* ((age (harness-chat--recap-age newest))
+                     (lead (concat head (funcall label (concat " \N{U+00B7} "
+                                                               (if (string-empty-p age)
+                                                                   ""
+                                                                 (concat age " \N{U+00B7} ")))))))
+                (list (concat lead (funcall words newest lead)))))))
+      (mapconcat (lambda (line)
+                   (let ((line (copy-sequence line)))
+                     (add-text-properties 0 (length line)
+                                          (list 'keymap harness-chat-recap-map 'follow-link t 'pointer 'hand)
+                                          line)
+                     (concat line "\n")))
+                 lines ""))))
+
+(defun harness-chat--recap-click (event)
+  "Fold or open the recap in the window EVENT, a click, happened in."
+  (interactive "e")
+  (let ((window (posn-window (event-start event))))
+    (when (window-live-p window)
+      (with-current-buffer (window-buffer window)
+        (harness-chat-toggle-recap)))))
+
+(defun harness-chat-toggle-recap ()
+  "Show or hide the recaps before the newest, above the activity line.
+The activity line says what the turn does.  Folded, the newest recap is
+a line of its own there; open, the last few
+\(`harness-tasks-recap-history') are listed, oldest first, each with how
+long ago it was made.  The recap is of the running turn, made as it goes
+\(`harness-tasks-recap-chats'); what you leave it as stays so in this
+chat from one turn to the next.  With no recap showing, nothing changes
+on screen and the echo area says how they will show."
+  (interactive)
+  (setq harness-chat--recap-expanded (not harness-chat--recap-expanded))
+  (harness-chat--refresh-activity)
+  (unless (and (equal (plist-get (harness-chat--session) :status) "running")
+               (harness-chat--recaps))
+    (message "No recap shows now: they show %s while a turn runs, once it has made some"
+             (if harness-chat--recap-expanded "opened" "folded"))))
+
 (defun harness-chat--activity-line ()
   "Return the activity line due now, or nil unless the session runs.
 A blocked session shows its panel instead.  The line wears
@@ -5093,7 +5257,15 @@ apart from what comes below, the compose box or a panel."
            (w (car (harness-chat--windows)))
            ;; One screen line, so the box below never jumps.
            (room (max 12 (- (if w (window-body-width w) 80) 4)))
-           (line (concat " " (propertize (harness-chat--spinner-frame) 'face 'harness-status-running-face) " "
+           ;; The recap goes above it; a recap that cannot be drawn leaves
+           ;; the line as it is.  Drawn from a timer, it takes its icon
+           ;; from the frame that shows the buffer, as the tail's do.
+           (recap (condition-case err
+                      (harness-chat--with-display (harness-chat--recap-block room))
+                    (error (harness-log 'warn "chat: no recap line: %s" (harness-error-short-message err))
+                           nil)))
+           (line (concat recap
+                         " " (propertize (harness-chat--spinner-frame) 'face 'harness-status-running-face) " "
                          (propertize (truncate-string-to-width text room nil nil "\N{U+2026}") 'face 'harness-dim-face)
                          "\n")))
       ;; Emacs draws an overlay string over the face of the text it
@@ -5137,15 +5309,21 @@ off its place, and `harness-chat--refresh-activity' puts it back."
       (overlay-put ov 'harness-chat-activity t))
     ov))
 
+(defun harness-chat--string-lines (string)
+  "Return how many lines STRING ends, nil being none."
+  (cl-count ?\n (or string "")))
+
 (defun harness-chat--show-activity (line)
   "Make LINE, or nothing when nil, the activity line.
-A line appearing or going changes the height of the text above the
-compose box: its padding is sized again and the windows that showed
-the end keep showing it."
+A line appearing or going, or the recap above it opening and folding,
+changes the height of the text above the compose box: its padding is
+sized again and the windows that showed the end keep showing it."
   (let* ((ov (harness-chat--activity-overlay))
          (old (overlay-get ov 'before-string)))
     (cond ((equal old line))
-          ((eq (null old) (null line)) (overlay-put ov 'before-string line))
+          ((and (eq (null old) (null line))
+                (= (harness-chat--string-lines old) (harness-chat--string-lines line)))
+           (overlay-put ov 'before-string line))
           (t (let ((bottom (harness-chat--bottom-windows)))
                (overlay-put ov 'before-string line)
                (dolist (w (harness-chat--windows)) (harness-compose-repad w))
@@ -6423,6 +6601,7 @@ a new one."
   (define-key map (kbd "C-c C-l") #'harness-chat-copy-link)
   (define-key map (kbd "C-c M-l") #'harness-chat-copy-session-link)
   (define-key map (kbd "C-c C-t") #'harness-chat-toggle-todos)
+  (define-key map (kbd "C-c C-j") #'harness-chat-toggle-recap)
   (define-key map (kbd "C-c C-u") #'harness-up-to-parent)
   (define-key map (kbd "C-c C-r") #'harness-chat-redraw)
   (define-key map (kbd "C-c C-e") #'harness-chat-scroll-to-bottom)
@@ -6561,6 +6740,7 @@ the id of a session written in a message is a link to it.
         ("C-c C-f" "Next diagram" harness-chat-next-diagram)
         ("C-c C-b" "Previous diagram" harness-chat-previous-diagram)
         ("C-c C-t" "Show or hide the todo list" harness-chat-toggle-todos)
+        ("C-c C-j" "Show or hide the earlier recaps of the turn" harness-chat-toggle-recap)
         ("C-c C-k" "Cancel turn" harness-chat-cancel)]
        ["Session"
         ("C-c C-u" "Go to the session this one came from" harness-up-to-parent)
